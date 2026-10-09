@@ -612,11 +612,16 @@ listing() {
   timeout --foreground -s KILL "$SMALL_WAIT" "$@" 2>/dev/null
 }
 
-# Ends an apply whose question to that list ended $1: unanswered in its time (137 from GNU's
-# timeout for what it killed, and 124 from Ubuntu 26.04's), or answered that there is no such
-# user, of the number that $2 names.
+# Whether what ended $1 was killed for its bound: 137 from GNU's timeout for what it killed, and
+# 124 from Ubuntu 26.04's.
+outlasted() {
+  [ "$1" -eq 137 ] || [ "$1" -eq 124 ]
+}
+
+# Ends an apply whose question to that list ended $1: unanswered in its time, or answered that
+# there is no such user, of the number that $2 names.
 unlisted() {
-  [ "$1" -ne 137 ] && [ "$1" -ne 124 ] || fail "this computer's list of users and groups did not answer within $SMALL_WAIT seconds: try again"
+  ! outlasted "$1" || fail "this computer's list of users and groups did not answer within $SMALL_WAIT seconds: try again"
   fail "$2 names no user of this computer"
 }
 
@@ -1223,14 +1228,106 @@ login_folders() {
   xdg "${cache:-}" "$home/.cache"
 }
 
+# Takes the entries the app made for the company's CA out of the NSS databases of the user named
+# $1, whose number is $2 and whose group's is $3: the folders that follow. Nothing else takes them
+# back once the app is gone, and that user's Chrome, Edge and Brave would go on trusting the CA for
+# every site. An entry is the app's by its name, to the letter: "Surogate company CA", a space and
+# 16 digits of hex, as the app names one (NICKNAME in src/shell/company-ca.ts). No other entry is
+# touched, a name of the user's own that only begins so least of all.
+#
+# By certutil run as that user, as their own login would run it and never as root: the name is
+# that number's, as asker makes sure of the one it names, and what is changed is a database of
+# that user's own, whatever a link in their home leads to. Each look and each change for SMALL_WAIT
+# at most: a home that another computer serves may never answer, and is then said and passed by.
+# With nothing to ask on, no terminal either (setsid): certutil lists and removes without a
+# database's password, and one that would ask for it fails. A database that is not there is not
+# made. One that certutil cannot read or change is left as it is, and said.
+forget_company_ca() {
+  local user="$1" uid="$2" gid="$3" db number groups listed line name ended
+  local ours='^(Surogate company CA [0-9a-f]{16}) +[^ ,]*,[^ ,]*,[^ ,]* *$'
+  local still="an entry of Surogate's for the company's certificate authority may still be trusted there"
+  number="$(listing id -u -- "$user")" && groups="$(listing id -G -- "$user")" && ended=0 || ended="$?"
+  if outlasted "$ended"; then
+    say "left $(named "$user")'s NSS databases as they are, as this computer's list of users and groups did not answer within $SMALL_WAIT seconds: $still"
+    return 0
+  fi
+  [ "$ended" -eq 0 ] && [ "$number" = "$uid" ] && [[ "$groups" =~ ^[0-9]+(\ [0-9]+)*$ ]] || return 0
+  local READER=("$uid" "$gid" "$user" "${groups// /,}")
+  number="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || number=
+  number+=":$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" || number=
+  [ "$number" = "$uid:$gid" ] || return 0
+  for db in "${@:4}"; do
+    as_reader "$SMALL_WAIT" test -f "$db/cert9.db" && ended=0 || ended="$?"
+    if outlasted "$ended"; then
+      say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still"
+      return 0
+    fi
+    [ "$ended" -eq 0 ] || continue
+    if ! as_reader "$SMALL_WAIT" test -O "$db/cert9.db"; then
+      say "left the NSS database in $(named "$db") as it is, as it is not $(named "$user")'s own: $still"
+      continue
+    fi
+    if ! listed="$(as_reader "$SMALL_WAIT" setsid certutil -L -d "sql:$db" 2>/dev/null)"; then
+      say "left $(named "$user")'s NSS database in $(named "$db") as it is, as certutil could not read it: $still"
+      continue
+    fi
+    # "<name>   <SSL>,<S/MIME>,<code signing>" a line.
+    while IFS= read -r line; do
+      [[ "$line" =~ $ours ]] || continue
+      name="${BASH_REMATCH[1]}"
+      as_reader "$SMALL_WAIT" setsid certutil -D -d "sql:$db" -n "$name" >/dev/null 2>&1 && ended=0 || ended="$?"
+      [ "$ended" -ne 0 ] || continue
+      # A name of the user's that goes on in spaces is listed as the app's is, and is not found by
+      # the app's: it is theirs, and stays with nothing said.
+      outlasted "$ended" || as_reader "$SMALL_WAIT" setsid certutil -L -d "sql:$db" -n "$name" >/dev/null 2>&1 || continue
+      say "could not take $name out of $(named "$user")'s NSS database in $(named "$db"): their browsers go on trusting it"
+    done <<<"$listed"
+  done
+}
+
+# Takes the app's entries for the company's CA out of every user's NSS databases, each as that
+# user (forget_company_ca): from the two folders Chromium keeps a user's database in, ~/.pki/nssdb
+# and the XDG data folder's, which for the invoking user $1 is also the one in $2, the data folder
+# their session names. The users are the system's own list's, asked once and for a bounded while,
+# as asker asks: what it named before its time was up is still gone through. The invoking user is
+# asked for by name too: a company's directory names its users one by one, and lists none. $3:
+# whether this computer kept a company's CA, so that its users' apps may have made entries.
+forget_company_cas() {
+  local user="$1" data="$2" kept="$3" users mine= each uid gid home folders seen=
+  if ! command -v certutil >/dev/null; then
+    [ -z "$kept" ] || say "left the company's certificate authority trusted in the browsers of this computer's users, as certutil is not installed: install libnss3-tools, and run this again"
+    return 0
+  fi
+  if ! users="$(listing getent passwd)"; then
+    say "this computer's list of users did not answer within $SMALL_WAIT seconds: an entry of Surogate's for the company's certificate authority may still be trusted in the browsers of the users it did not name"
+    # Its last line may be half of one.
+    if [[ "$users" == *$'\n'* ]]; then users="${users%$'\n'*}"; else users=; fi
+  fi
+  [ -z "$user" ] || mine="$(listing getent passwd "$user")" || mine=
+  while IFS=: read -r each _ uid gid _ home _; do
+    [[ "$home" == /?* ]] && [[ "$uid" =~ ^[0-9]+$ ]] && [[ "$gid" =~ ^[0-9]+$ ]] || continue
+    folders=("$home/.pki/nssdb" "$home/.local/share/pki/nssdb")
+    if [ -n "$user" ] && [ "$each" = "$user" ]; then
+      [ -z "$seen" ] || continue
+      seen=1
+      [ "$data" = "$home/.local/share" ] || folders+=("$data/pki/nssdb")
+    fi
+    forget_company_ca "$each" "$uid" "$gid" "${folders[@]}"
+  done <<<"$mine"$'\n'"$users"
+}
+
 # Removes the app for every user of the computer, and the invoking user's autostart entry; asks
 # before deleting that user's data, as that user. Other users' data, every chat's folder and the
-# packages stay. $1-$3: the user's XDG config, data and cache folders, when their session gave them.
+# packages stay. The app's entries for the company's CA go from every user's NSS databases, as that
+# user, with nothing asked. $1-$3: the user's XDG config, data and cache folders, when their
+# session gave them.
 uninstall() {
   # One at a time with an apply: one that runs now finishes before the tree goes, and one that
   # starts now waits, and makes the tree again once this has ended.
   lock
   in_use "$ROOT" && fail "Surogate is running: quit it first, for every user of this computer"
+  local kept=
+  [ ! -e "$COMPANY_CA" ] && [ ! -L "$COMPANY_CA" ] || kept=1
   if [ -f "$PROFILE" ]; then
     apparmor_parser -R "$PROFILE" 2>/dev/null || true
     rm -f -- "$PROFILE"
@@ -1255,13 +1352,16 @@ uninstall() {
   say "removed from this computer"
   [ -z "$left" ] || say "left $left itself, now empty: it is a disk of its own (a mount point)"
 
-  local user="${SUDO_USER:-}" config data cache answer=
-  [ -n "$user" ] && [ "$user" != root ] || return 0
-  if [ "$#" -eq 3 ]; then
+  local user="${SUDO_USER:-}" config data= cache answer=
+  [ "$user" != root ] || user=
+  if [ -n "$user" ] && [ "$#" -eq 3 ]; then
     config="$1" data="$2" cache="$3"
-  else
+  elif [ -n "$user" ]; then
     { read -r config; read -r data; read -r cache; } < <(login_folders "$user")
   fi
+  # The company's CA goes from every user's browsers with the app.
+  forget_company_cas "$user" "$data" "$kept"
+  [ -n "$user" ] || return 0
   # As the user: only what they may change goes.
   runuser -u "$user" -- rm -f -- "$config/autostart/surogate.desktop"
   # As the user too, whether they have data: root may not see into a home that another computer serves.

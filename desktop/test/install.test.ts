@@ -3641,4 +3641,166 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(current()).toBe("/opt/surogate/versions/1.0.0");
     expect(leftovers()).toBe("");
   });
+
+  // An entry as the app names one for a company's CA, and what the script says of a database it leaves.
+  const OURS = "Surogate company CA 0123456789abcdef";
+  const STILL = "an entry of Surogate's for the company's certificate authority may still be trusted there";
+  // As *user*, or as root where there is none.
+  const run = (user: string, command: string) => (user === "root" ? root(command) : as(user, command));
+  // An NSS database in *folder*, made as *user* where there is none, with *entries* added: each a
+  // name and the certificate authority of the test's own that it holds. *flags* give certutil its
+  // password. The system's own certutil, whatever stands before it on root's PATH.
+  const database = (user: string, folder: string, entries: Record<string, string>, flags = "") => {
+    const quoted = (name: string) => `$'${name.replaceAll("\n", "\\n")}'`;
+    expect(run(user, [`mkdir -p -m 700 ${folder}`, `{ [ -f ${folder}/cert9.db ] || /usr/bin/certutil -N -d sql:${folder} ${flags || "--empty-password"}; }`,
+      ...Object.entries(entries).map(([name, ca]) => `/usr/bin/certutil -A -d sql:${folder} -n ${quoted(name)} -t C,, -a -i /opt/authorities/${ca}.pem ${flags}`)].join(" && ")).status, `${user} ${folder}`).toBe(0);
+  };
+  // What the database in *folder* holds, a line for each line certutil lists: the name, then its trust.
+  const entries = (user: string, folder: string) => run(user, `/usr/bin/certutil -L -d sql:${folder} | tail -n +5 | sed 's/  */ /g; s/ $//'`).stdout;
+  // The certificate authorities those entries hold, where each user reads them.
+  const authorities = (...extra: string[]) => {
+    for (const name of extra) authority(name);
+    expect(root("mkdir -p /opt/authorities").status).toBe(0);
+    for (const name of ["company", "it", ...extra]) expect(docker(["cp", join(certs, `${name}.pem`), `${box.container}:/opt/authorities/${name}.pem`]).status).toBe(0);
+    expect(root("chmod -R a+rX /opt/authorities").status).toBe(0);
+  };
+  // *lines* in the system's *tool*'s place for the script, which runs the tools of the system's
+  // four folders in their order: before the tool itself, which it then runs.
+  const before = (tool: string, lines: string) => {
+    writeFileSync(join(box.dir, "stand-in"), `#!/bin/sh\n${lines}\nexec /usr/bin/${tool} "$@"\n`, { mode: 0o755 });
+    expect(docker(["cp", join(box.dir, "stand-in"), `${box.container}:/usr/sbin/${tool}`]).status).toBe(0);
+  };
+  // certutil that writes who runs it, in which groups, in which language, and whether it has a
+  // terminal to ask on, into a file of root's that every user may write; and what it wrote.
+  const WATCHED = "echo \"$(id -un) $(id -G) ${LC_ALL-unset} $( (exec </dev/tty) 2>/dev/null && echo terminal || echo none)\" >>/tmp/certutil-as";
+  const watch = (lines = "") => {
+    expect(root("rm -f /tmp/certutil-as && touch /tmp/certutil-as && chmod 666 /tmp/certutil-as").status).toBe(0);
+    before("certutil", `${WATCHED}\n${lines}`);
+  };
+  const watched = () => root("sort -u /tmp/certutil-as").stdout;
+  const groupsOf = (user: string) => root(`id -G ${user}`).stdout.trim();
+
+  it("takes the app's entries out of each user's own NSS database as that user alone, whatever their home is or leads to, and names a home or a list that does not answer in its time, then goes on", () => {
+    authorities();
+    const held = { [OURS]: "company", "IT Root": "it" };
+    const kept = `${OURS} C,,\nIT Root C,,\n`;
+    try {
+      expect(root("useradd -m third && useradd -M -d /home/mover mover && useradd -m linker && useradd -m keeper && useradd -m closed && useradd -m stuck && useradd -m hung && useradd -m slow"
+        + " && mkdir -p /srv/homes/mover /srv/shared /srv/linkers /srv/half /srv/ghost && chown mover: /srv/homes/mover && ln -s /srv/homes/mover /home/mover"
+        + " && chown keeper:linker /srv/shared && chmod 2770 /srv/shared && chown linker: /srv/linkers /srv/half").status).toBe(0);
+      // The invoking user's, in the data folder their session names.
+      database("tester", "/home/tester/dat/pki/nssdb", held);
+      // A home that is a link to a folder of the user's own.
+      database("mover", "/home/mover/.pki/nssdb", held);
+      // ~/.pki/nssdb as a link out of the home: to another user's database, which this one may
+      // change as a member of its group; and the XDG folder's as a link to one of their own.
+      database("keeper", "/srv/shared/nssdb", held);
+      database("linker", "/srv/linkers/nssdb", held);
+      expect(root("chmod -R g+rwX /srv/shared && runuser -u linker -- sh -c 'mkdir -p ~/.pki ~/.local/share/pki && ln -s /srv/shared/nssdb ~/.pki/nssdb && ln -s /srv/linkers/nssdb ~/.local/share/pki/nssdb'"
+        + " && runuser -u linker -- /usr/bin/certutil -L -d sql:/home/linker/.pki/nssdb >/dev/null").status).toBe(0);
+      // A home its user cannot open, with a database in it that root could read.
+      database("root", "/home/closed/.pki/nssdb", held);
+      expect(root("chown root: /home/closed && chmod 000 /home/closed").status).toBe(0);
+      // Homes that never answer: one at the first look, and one to certutil, as it removes and as it lists.
+      database("stuck", "/home/stuck/.pki/nssdb", held);
+      database("hung", "/home/hung/.pki/nssdb", held);
+      database("hung", "/home/hung/.local/share/pki/nssdb", held);
+      // A second user of another's name: the name's number is the first's, and so are its groups.
+      database("root", "/srv/ghost/.pki/nssdb", held);
+      expect(root("chown -R 1900:1900 /srv/ghost && echo 'mover:x:1900:1900::/srv/ghost:/bin/sh' >>/etc/passwd").status).toBe(0);
+      // The list of users, which names tester only when asked for them, as a directory names its
+      // users; and stops answering in the middle of a line, with half of linker's home said.
+      database("linker", "/srv/half/.pki/nssdb", held);
+      before("getent", '[ "$*" = passwd ] || exec /usr/bin/getent "$@"\n/usr/bin/getent passwd | grep -v "^tester:"\nprintf "linker:x:%s:%s::/srv/half" "$(id -u linker)" "$(id -g linker)"\nexec sleep 30');
+      before("id", '[ "$*" != "-G -- slow" ] || exec sleep 30');
+      before("test", 'case "$2" in /home/stuck/*) exec sleep 30 ;; esac');
+      watch('case "$*" in "-D -d sql:/home/hung/.pki/nssdb "* | "-L -d sql:/home/hung/.local/share/pki/nssdb") exec sleep 30 ;; esac');
+      const began = Date.now();
+      const forgotten = alone('SMALL_WAIT=1; forget_company_cas tester /home/tester/dat ""');
+      // Each wait is one bound long, and there are six: the list, stuck's home, hung's two databases twice over, and slow's groups.
+      expect(Date.now() - began).toBeLessThan(15_000);
+      expect(forgotten).toMatchObject({ status: 0, stderr: "" });
+      expect(forgotten.stdout.split("\n")).toEqual([
+        "Surogate Desktop: this computer's list of users did not answer within 1 seconds: an entry of Surogate's for the company's certificate authority may still be trusted in the browsers of the users it did not name",
+        `Surogate Desktop: left the NSS database in /home/linker/.pki/nssdb as it is, as it is not linker's own: ${STILL}`,
+        `Surogate Desktop: left stuck's NSS databases as they are, as /home/stuck/.pki/nssdb did not answer within 1 seconds: ${STILL}`,
+        `Surogate Desktop: could not take ${OURS} out of hung's NSS database in /home/hung/.pki/nssdb: their browsers go on trusting it`,
+        `Surogate Desktop: left hung's NSS database in /home/hung/.local/share/pki/nssdb as it is, as certutil could not read it: ${STILL}`,
+        `Surogate Desktop: left slow's NSS databases as they are, as this computer's list of users and groups did not answer within 1 seconds: ${STILL}`,
+        "",
+      ]);
+      // certutil ran as each database's own user, in all of that user's groups and in no language, and as no one else: never as root.
+      expect(watched()).toBe(["hung", "linker", "mover", "tester"].map((user) => `${user} ${groupsOf(user)} C none\n`).join(""));
+      expect(groupsOf("tester").split(" ").length).toBeGreaterThan(1);
+      // Gone from each user's own, through a link too; every other entry stays.
+      for (const [user, folder] of [["tester", "/home/tester/dat/pki/nssdb"], ["mover", "/home/mover/.pki/nssdb"], ["linker", "/srv/linkers/nssdb"]] as const) {
+        expect(entries(user, folder), folder).toBe("IT Root C,,\n");
+      }
+      // And from nothing else: another's database behind a link, one in a home its user cannot open, one whose
+      // user's number is not its name's, and one in the half of a home that the list said last.
+      expect(root("chmod 755 /home/closed").status).toBe(0);
+      for (const folder of ["/srv/shared/nssdb", "/home/closed/.pki/nssdb", "/srv/ghost/.pki/nssdb", "/srv/half/.pki/nssdb", "/home/stuck/.pki/nssdb", "/home/hung/.pki/nssdb", "/home/hung/.local/share/pki/nssdb"]) {
+        expect(entries("root", folder), folder).toBe(kept);
+      }
+      // A user who never ran the app has no database after it either, and nothing of their home was made.
+      expect(root("ls -A /home/third /home/slow | grep -c pki; test ! -e /home/third/.pki && test ! -e /home/third/.local && test ! -e /root/.pki").status).toBe(0);
+    } finally {
+      root("rm -f /usr/sbin/getent /usr/sbin/id /usr/sbin/test /usr/sbin/certutil /tmp/certutil-as; sed -i '/^mover:x:1900:/d' /etc/passwd; chmod 755 /home/closed"
+        + "; for user in third mover linker keeper closed stuck hung slow; do userdel -r $user; done; rm -rf /home/mover /srv/homes /srv/shared /srv/linkers /srv/half /srv/ghost /home/tester/dat/pki");
+    }
+  });
+
+  it("uninstalls the app's entries for the company's CA from every user's NSS databases, as each user and with nothing asked, removes the CA it kept, and leaves every other entry", () => {
+    // Names of the user's own that begin as the app's do, go on after it, differ in a letter's case,
+    // end in a space, or stand on a second line: none is the app's.
+    const theirs = { "Surogate company CA of our old proxy": "old", [`${OURS} backup`]: "backup", "Surogate company CA 0123456789ABCDEF": "upper", "Surogate company CA 1123456789abcdef ": "spaced", "mine\nSurogate company CA 2123456789abcdef": "second" };
+    const lookalikes = "Surogate company CA of our old proxy C,,\nSurogate company CA 0123456789abcdef backup C,,\nSurogate company CA 0123456789ABCDEF C,,\nSurogate company CA 1123456789abcdef C,,\nmine\nSurogate company CA 2123456789abcdef C,,\n";
+    authorities(...Object.values(theirs));
+    // The two folders Chromium keeps a user's database in, and the one tester's session names for its data, which tester may not change.
+    database("tester", ".pki/nssdb", { [OURS]: "company", "IT Root": "it", ...theirs });
+    // The company's CA under a name of the user's own, as their IT gave it to their browser.
+    database("tester", ".local/share/pki/nssdb", { "Company Root": "company", [OURS]: "it" });
+    database("tester", "dat/pki/nssdb", { [OURS]: "company", "IT Root": "it" });
+    expect(as("tester", "chmod a-w dat/pki/nssdb dat/pki/nssdb/*").status).toBe(0);
+    // The other user's: one with a password, as a smart card's user has; and one that is no database.
+    expect(as("other", "echo secret >password").status).toBe(0);
+    database("other", ".pki/nssdb", { [OURS]: "company", "IT Root": "it" }, "-f password");
+    expect(as("other", "mkdir -p -m 700 .local/share/pki/nssdb && echo garbage >.local/share/pki/nssdb/cert9.db").status).toBe(0);
+    const before1 = entries("tester", ".pki/nssdb");
+    expect(before1).toBe(`${OURS} C,,\nIT Root C,,\n${lookalikes}`);
+    const uninstall = "curl --cacert company.pem -fsSL " + base + "/desktop/install.sh | XDG_DATA_HOME=/home/tester/dat bash -s -- --uninstall";
+
+    // Without certutil, as with a package that another's removal took along: the app goes, and what stays trusted is said.
+    expect(root("test -e /etc/surogate/ca.pem && mv /usr/bin/certutil /usr/bin/certutil.away").status).toBe(0);
+    expect(as("tester", uninstall)).toMatchObject({ status: 0, stderr: "", stdout: "Surogate Desktop: removing it needs administrator rights: sudo asks for your password once\nSurogate Desktop: removed from this computer\n"
+      + "Surogate Desktop: left the company's certificate authority trusted in the browsers of this computer's users, as certutil is not installed: install libnss3-tools, and run this again\n" });
+    expect(root("mv /usr/bin/certutil.away /usr/bin/certutil && test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
+    expect(entries("tester", ".pki/nssdb")).toBe(before1);
+
+    // Run again, as it says, on a terminal: nothing is asked on it, of a database with a password either.
+    watch();
+    const began = Date.now();
+    const removed = as("tester", `script -qec "${uninstall}" /dev/null </dev/null`);
+    expect(Date.now() - began).toBeLessThan(20_000);
+    expect(removed.status, removed.stdout).toBe(0);
+    expect(removed.stdout.replaceAll("\r", "").split("\n")).toEqual([
+      "Surogate Desktop: removing it needs administrator rights: sudo asks for your password once",
+      "Surogate Desktop: removed from this computer",
+      `Surogate Desktop: could not take ${OURS} out of tester's NSS database in /home/tester/dat/pki/nssdb: their browsers go on trusting it`,
+      `Surogate Desktop: left other's NSS database in /home/other/.local/share/pki/nssdb as it is, as certutil could not read it: ${STILL}`,
+      "",
+    ]);
+    // As each database's own user, in all of their groups, in no language, with no terminal: and for no user who has no database.
+    expect(watched()).toBe(["other", "tester"].map((user) => `${user} ${groupsOf(user)} C none\n`).join(""));
+    expect(root("rm /usr/sbin/certutil /tmp/certutil-as").status).toBe(0);
+    // The app's entries are gone from both of Chromium's folders and from behind a password. Every
+    // entry of a user's own stays, the company's CA under their own name among them.
+    expect(entries("tester", ".pki/nssdb")).toBe(`IT Root C,,\n${lookalikes}`);
+    expect(entries("tester", ".local/share/pki/nssdb")).toBe("Company Root C,,\n");
+    expect(entries("other", ".pki/nssdb")).toBe("IT Root C,,\n");
+    expect(entries("tester", "dat/pki/nssdb")).toBe(`${OURS} C,,\nIT Root C,,\n`);
+    // Each database is its user's as it was, and no user without one was given one.
+    expect(root("stat -c %U /home/tester/.pki/nssdb/cert9.db /home/tester/.local/share/pki/nssdb/cert9.db /home/other/.pki/nssdb/cert9.db && test ! -e /root/.pki && test ! -e /root/.local").stdout).toBe("tester\ntester\nother\n");
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate && test ! -e /usr/local/bin/surogate").status).toBe(0);
+  });
 });

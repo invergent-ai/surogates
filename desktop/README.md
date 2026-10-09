@@ -292,6 +292,9 @@ reach the script first (here with `--cacert`); `sudo rm /etc/surogate/ca.pem` st
 
     curl --cacert company-ca.pem -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --ca-cert company-ca.pem
 
+`--uninstall` takes the app's entries for the CA out of every user's NSS databases, each as that
+user, and leaves every entry of a user's own: with the app gone, nothing else would.
+
 Where the only way out is a proxy that the computer must name (the desktop's proxy settings, a PAC
 file, `HTTPS_PROXY`), the window goes through it and the device link does not: the computer is not
 linked there.
