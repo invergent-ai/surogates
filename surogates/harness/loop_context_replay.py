@@ -434,6 +434,12 @@ class ContextReplayMixin:
                     messages.append(rendered)
 
             elif etype == EventType.LLM_RESPONSE.value:
+                if iteration_open and "answers" in event.data:
+                    # The harness's answer to a command stands in no turn
+                    # under way: one it finds open was ended as it stood.
+                    iteration_open = False
+                    awaiting_tool_ids = set()
+                    _flush_deferred()
                 stored_message = event.data.get("message")
                 if stored_message is not None:
                     messages.append(stored_message)

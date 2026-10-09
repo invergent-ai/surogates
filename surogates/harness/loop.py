@@ -186,6 +186,7 @@ from surogates.harness.loop_pending import (
     _left_behind,
     _plain_message_unread,
     _read_as_words,
+    _shown_before_its_answer,
     NAMES_ANSWERS,
     _turn_cut_off,
 )
@@ -1492,14 +1493,11 @@ class AgentHarness(
 
             # 6. Rebuild the message list from the full event history.
             # A command that waits is the harness's to answer and never the
-            # model's to read: a turn of the model's is not shown it.  The
-            # wake that runs the command keeps it, for /compress to find.
+            # model's to read: a turn of the model's is not shown it.
             waiting = self._waiting_command(session, all_events)
             model_first = waiting is not None and self._model_goes_first(session, all_events, waiting)
-            shown = all_events
-            if waiting is None or model_first:
-                unanswered = {id(event) for event in self._waiting_commands(session, all_events)}
-                shown = [event for event in all_events if id(event) not in unanswered]
+            unanswered = {id(event) for event in self._waiting_commands(session, all_events)}
+            shown = [event for event in all_events if id(event) not in unanswered]
             messages = self._rebuild_messages(
                 shown,
                 workspace_path=(session.config or {}).get("workspace_path"),
@@ -4877,13 +4875,14 @@ class AgentHarness(
     ) -> None:
         """Run the handler of the built-in *command* the user typed as *text*, in the message *typed*."""
         if command == "compress":
-            if typed.id != _latest_user_event_id(all_events):
-                # The conversation as it was when the command was typed:
-                # the handler takes its last user message for the command.
-                messages = self._rebuild_messages(
-                    [event for event in all_events if event.id <= typed.id],
-                    workspace_path=(session.config or {}).get("workspace_path"),
-                )
+            # The conversation the command acts on, by the place its answer
+            # will stand at: the handler takes its last user message for
+            # the command.  A command that waits behind it is not in it.
+            behind = {id(event) for event in self._waiting_commands(session, all_events) if event is not typed}
+            messages = self._rebuild_messages(
+                _shown_before_its_answer([event for event in all_events if id(event) not in behind], typed.id),
+                workspace_path=(session.config or {}).get("workspace_path"),
+            )
             await self._handle_compress_command(session, messages, system_prompt, lease)
         elif command == "clear":
             await self._handle_clear_command(session, lease)

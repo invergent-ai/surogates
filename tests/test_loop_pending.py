@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from surogates.harness.loop_context_replay import ContextReplayMixin
 from surogates.harness.loop_pending import (
     _actionable_pending_events, _command_answered, _cut_off_at, _in_typed_order, _left_behind, _read_as_words,
+    _shown_before_its_answer,
 )
 from surogates.session.events import EventType
 
@@ -128,6 +130,75 @@ def test_what_the_harness_wrote_for_a_command_is_replayed_right_after_the_comman
     # model's own words, stay where they are.
     assert [e.id for e in _in_typed_order(events)] == [1, 5, 6, 2, 3, 7, 4, 9, 8]
     assert _in_typed_order(events[:4]) == events[:4]
+
+
+def test_what_was_written_for_a_command_that_waited_for_a_turn_is_replayed_after_that_turn():
+    events = [
+        event(1, EventType.LLM_REQUEST), event(2, EventType.LLM_RESPONSE), event(3, EventType.TOOL_CALL),
+        event(4, EventType.USER_MESSAGE), event(5, EventType.TOOL_RESULT), event(6, EventType.LLM_REQUEST),
+        event(7, EventType.LLM_RESPONSE), event(8, EventType.SESSION_COMPLETE), event(9, EventType.HARNESS_WAKE),
+        event(10, EventType.CONTEXT_COMPACT, answers=4), event(11, EventType.LLM_RESPONSE, answers=4),
+    ]
+    # Typed between a call and its result: the block stands after the turn's last answer, not inside the turn.
+    assert [e.id for e in _in_typed_order(events)] == [1, 2, 3, 5, 6, 7, 4, 10, 11, 8, 9]
+
+
+def test_what_its_user_typed_behind_a_command_and_the_turn_did_not_read_is_replayed_after_the_commands_block():
+    events = [
+        event(1, EventType.LLM_REQUEST), event(2, EventType.USER_MESSAGE), event(3, EventType.USER_MESSAGE),
+        event(4, EventType.USER_MESSAGE, synthetic="outcome_continuation"), event(5, EventType.LLM_RESPONSE),
+        event(6, EventType.USER_MESSAGE), event(7, EventType.CONTEXT_COMPACT, answers=2),
+        event(8, EventType.LLM_RESPONSE, answers=2),
+    ]
+    # 3 was typed behind the command while the turn's last answer was written: no request read it.
+    assert [e.id for e in _in_typed_order(events)] == [1, 4, 5, 2, 7, 8, 3, 6]
+    # Read by a request of the turn, it is the turn's, and stays in it.
+    read = [*events[:3], event(3.5, EventType.LLM_REQUEST), *events[3:]]
+    assert [e.id for e in _in_typed_order(read)] == [1, 3, 3.5, 4, 5, 2, 7, 8, 6]
+
+
+def test_two_commands_that_waited_for_one_turn_are_replayed_after_it_in_the_order_typed():
+    events = [
+        event(1, EventType.LLM_REQUEST), event(2, EventType.USER_MESSAGE), event(3, EventType.USER_MESSAGE),
+        event(4, EventType.USER_MESSAGE), event(5, EventType.LLM_RESPONSE), event(6, EventType.LLM_RESPONSE, answers=2),
+        event(7, EventType.LLM_RESPONSE, answers=4),
+    ]
+    assert [e.id for e in _in_typed_order(events)] == [1, 5, 2, 6, 3, 4, 7]
+
+
+def test_a_command_is_never_replayed_before_a_compaction_no_command_asked_for_that_was_written_before_its_own():
+    events = [
+        event(1, EventType.USER_MESSAGE), event(2, EventType.HARNESS_WAKE), event(3, EventType.CONTEXT_COMPACT),
+        event(4, EventType.CONTEXT_COMPACT, answers=1), event(5, EventType.LLM_RESPONSE, answers=1),
+    ]
+    # Before it, the wake's own compaction would put back what the command cleared.
+    assert [e.id for e in _in_typed_order(events)] == [2, 3, 1, 4, 5]
+
+
+def test_the_conversation_a_command_acts_on_ends_where_its_answer_will_stand():
+    typed_in_a_turn = [
+        event(1, EventType.USER_MESSAGE), event(2, EventType.LLM_REQUEST), event(3, EventType.USER_MESSAGE),
+        event(4, EventType.USER_MESSAGE), event(5, EventType.LLM_RESPONSE), event(6, EventType.HARNESS_WAKE),
+    ]
+    assert [e.id for e in _shown_before_its_answer(typed_in_a_turn, 3)] == [1, 2, 5, 3]
+    typed_before_any = [event(1, EventType.USER_MESSAGE), event(2, EventType.USER_MESSAGE), event(3, EventType.HARNESS_WAKE)]
+    assert [e.id for e in _shown_before_its_answer(typed_before_any, 1)] == [1]
+
+
+def test_a_commands_answer_after_a_turn_that_was_stopped_in_a_call_is_replayed_behind_its_command():
+    call = {"id": "call_1", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
+    events = [
+        event(1, EventType.USER_MESSAGE, content="Go on."), event(2, EventType.LLM_REQUEST),
+        event(3, EventType.LLM_RESPONSE, message={"role": "assistant", "content": "", "tool_calls": [call]}),
+        event(4, EventType.TOOL_CALL, tool_call_id="call_1"), event(5, EventType.SESSION_PAUSE),
+        event(6, EventType.USER_MESSAGE, content="/goal status"),
+        event(7, EventType.LLM_RESPONSE, answers=6, message={"role": "assistant", "content": "No active outcome."}),
+    ]
+    for each in events:
+        each.type = each.type.value
+    replayed = ContextReplayMixin._rebuild_messages(SimpleNamespace(), events)
+    # The turn's call never got its result: the command is not held back for one, behind its own answer.
+    assert [(m["role"], m["content"]) for m in replayed[-2:]] == [("user", "/goal status"), ("assistant", "No active outcome.")]
 
 
 def test_where_a_turn_was_cut_off():

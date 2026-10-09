@@ -951,6 +951,95 @@ async def test_a_question_asked_before_a_commands_answer_was_written_is_asked_af
     ]]
 
 
+THE_TURN = [
+    {"role": "user", "content": "Go on."}, TODO_CALL[0],
+    {"role": "tool", "tool_call_id": "call_todo", "content": '{"ok": true}'},
+    {"role": "assistant", "content": "Noted.", "tool_calls": None},
+]
+
+
+@pytest.mark.parametrize("moment", MOMENTS)
+async def test_a_command_typed_during_a_turn_is_replayed_after_the_turn_and_not_inside_it(workers, moment):
+    chat = await workers.chat()
+    await in_a_turn(workers, chat, moment, "/goal status")
+    await workers.wake(chat)
+    workers.requests.clear()
+    await workers.says(chat, "And Q1?")
+    await workers.wake(chat)
+
+    # The call and its result stand together, and the command with its answer after the turn it waited for.
+    assert workers.requests == [SAID + THE_TURN + [
+        {"role": "user", "content": "/goal status"},
+        {"role": "assistant", "content": "No active outcome. Set one with /goal <text>."},
+        {"role": "user", "content": "And Q1?"},
+    ]]
+
+
+@pytest.mark.parametrize("moment", MOMENTS)
+async def test_compress_typed_during_a_turn_compresses_the_conversation_with_that_turn_whole(workers, moment):
+    chat = await workers.chat()
+    await in_a_turn(workers, chat, moment, "/compress")
+    await workers.wake(chat)
+    workers.requests.clear()
+    await workers.says(chat, "And Q1?")
+    await workers.wake(chat)
+
+    # The turn went on to its end before the command was run: it is compressed with the rest, once.
+    assert workers.compressed == [SAID + THE_TURN]
+    assert workers.requests == [THE_TURN[-2:] + [
+        {"role": "assistant", "content": "Context compressed: 13 → 2 messages (11 removed). Strategy: summary."},
+        {"role": "user", "content": "And Q1?"},
+    ]]
+
+
+async def test_compress_is_not_given_a_command_that_waits_behind_it(workers):
+    chat = await workers.chat()
+
+    async def the_user_types_both():
+        await workers.says(chat, "/compress")
+        await workers.says(chat, "/loop list")
+
+    workers.replies.append(TODO_CALL)
+    workers.during_the_tool_call = the_user_types_both
+    await workers.says(chat, "Go on.")
+    for _ in range(3):
+        await workers.wake(chat)
+
+    assert (workers.ran, workers.compressed) == (["_handle_compress_command", "_handle_loop_command"], [SAID + THE_TURN])
+
+
+@pytest.mark.parametrize("moment", MOMENTS)
+async def test_clear_typed_during_a_turn_leaves_nothing_of_that_turn(workers, moment):
+    chat = await workers.chat()
+    await in_a_turn(workers, chat, moment, "/clear")
+    await workers.wake(chat)
+    workers.requests.clear()
+    await workers.says(chat, "And Q1?")
+    await workers.wake(chat)
+
+    assert workers.requests == [[
+        {"role": "assistant", "content": "Conversation cleared."}, {"role": "user", "content": "And Q1?"},
+    ]]
+
+
+async def test_the_models_reply_to_a_question_stands_before_the_command_typed_behind_the_question(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "And Q1?")
+    await workers.says(chat, "/goal status")
+    for _ in range(2):
+        await workers.wake(chat)
+    workers.requests.clear()
+    await workers.says(chat, "And Q0?")
+    await workers.wake(chat)
+
+    assert workers.requests == [SAID + [
+        {"role": "user", "content": "And Q1?"}, {"role": "assistant", "content": "Noted.", "tool_calls": None},
+        {"role": "user", "content": "/goal status"},
+        {"role": "assistant", "content": "No active outcome. Set one with /goal <text>."},
+        {"role": "user", "content": "And Q0?"},
+    ]]
+
+
 async def test_clear_typed_during_a_turn_that_was_cut_off_waits_for_the_turn_and_then_clears(workers):
     chat = await workers.chat()
     await a_turn_cut_off(workers, chat, at="in the call", command="/clear")

@@ -234,15 +234,39 @@ def _plain_message_unread(events: list[Any], *, is_plain_message: Any) -> bool:
     return _first_plain_message_unread(events, is_plain_message=is_plain_message) is not None
 
 
-def _in_typed_order(events: list[Any]) -> list[Any]:
-    """Return *events* with each thing the harness wrote for a command right after the command's message.
+#: What a turn of the model's writes.  So does a compaction no command asked for: the conversation as it stood.
+_TURN_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST.value,
+    EventType.LLM_RESPONSE.value,
+    EventType.TOOL_CALL.value,
+    EventType.TOOL_RESULT.value,
+    EventType.CONTEXT_COMPACT.value,
+})
 
-    A command's answer, and the compaction ``/compress`` or ``/clear``
-    writes, name the message they answer.  They are written when the
-    command's wake runs, which can be after its user has said more.  The
-    conversation the model is shown keeps them with their command: what was
-    said after the command is said after its answer, and is not swallowed
-    by its compaction.
+
+def _of_a_turn(event: Any) -> bool:
+    """Whether *event* is a turn's own, and nothing the harness wrote for a command."""
+    return _event_type(event) in _TURN_EVENT_TYPES and "answers" not in (getattr(event, "data", None) or {})
+
+
+def _in_typed_order(events: list[Any]) -> list[Any]:
+    """Return *events* in the order the model is shown them: each command the harness answered
+    as one block, at the place it took effect.
+
+    A command's block is its message and what the harness wrote for it: the
+    compaction of ``/compress`` or ``/clear``, and the answer.  Both name
+    the message.  They are written when the command's wake runs, which can
+    be after its user has said more, and after the turn the command was
+    typed in has gone on to its end.
+
+    With nothing of a turn's between the message and what was written for
+    it, the block stands where the message does: what was said after the
+    command is said after its answer, and is not swallowed by its
+    compaction.  Otherwise the command waited for a turn, and the block
+    stands after the last thing that turn wrote: never inside it, where it
+    would part a call from its result, and where a compaction would leave
+    the turn's end standing.  What its user typed after the command and
+    that turn did not read comes after the block.
     """
     named: dict[Any, list[Any]] = {}
     for event in events:
@@ -251,15 +275,59 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
             named.setdefault(answers, []).append(event)
     if not named:
         return events
-    moved = {id(event) for group in named.values() for event in group}
+    at = {id(event): place for place, event in enumerate(events)}
+    typed = {
+        event.id: event for event in events
+        if _event_type(event) == EventType.USER_MESSAGE.value and event.id in named
+    }
+    moved = {id(event) for group in named.values() for event in group} | {id(event) for event in typed.values()}
+    #: What stands right after each place, each group with the place it was written at.
+    after: dict[int, list[tuple[int, list[Any]]]] = {}
+    for typed_at in sorted(typed):
+        message, block = typed[typed_at], named.pop(typed_at)
+        waited_for = [
+            place for place in range(at[id(message)] + 1, at[id(block[0])]) if _of_a_turn(events[place])
+        ]
+        stands_after = waited_for[-1] if waited_for else at[id(message)]
+        after.setdefault(stands_after, []).append((at[id(message)], [message, *block]))
+        read_to = max(
+            (place for place in waited_for if _event_type(events[place]) == EventType.LLM_REQUEST.value),
+            default=at[id(message)],
+        )
+        for place in range(read_to + 1, stands_after):
+            said = events[place]
+            if (
+                _event_type(said) == EventType.USER_MESSAGE.value
+                and not (getattr(said, "data", None) or {}).get("synthetic")
+                and id(said) not in moved
+            ):
+                moved.add(id(said))
+                after[stands_after].append((place, [said]))
     ordered: list[Any] = []
-    for event in events:
-        if id(event) in moved:
-            continue
-        ordered.append(event)
-        if _event_type(event) == EventType.USER_MESSAGE.value:
-            ordered.extend(named.pop(event.id, ()))
+    for place, event in enumerate(events):
+        if id(event) not in moved:
+            ordered.append(event)
+        for _, group in sorted(after.get(place, ()), key=lambda placed: placed[0]):
+            ordered.extend(group)
     # An answer whose message is not among the events stays where it was written.
     for group in named.values():
         ordered.extend(group)
     return ordered
+
+
+def _shown_before_its_answer(events: list[Any], typed_at: int) -> list[Any]:
+    """Return what the model is shown up to the command typed at event *typed_at*, the command's
+    message last: the conversation the command acts on, by the order its answer will stand in."""
+    to_come = _AnswerToCome(typed_at)
+    ordered = _in_typed_order([*events, to_come])
+    return ordered[:ordered.index(to_come)]
+
+
+class _AnswerToCome:
+    """The answer a command's handler is about to write, for ``_in_typed_order`` to place."""
+
+    id = None
+    type = EventType.LLM_RESPONSE.value
+
+    def __init__(self, typed_at: int) -> None:
+        self.data = {"answers": typed_at}
