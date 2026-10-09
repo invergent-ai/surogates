@@ -49,7 +49,9 @@ def a_pod(tmp_path: Path, project: Path, thread: str = "t1", **more) -> History:
 def land(history: History, saga: str = "saga:1", author=A) -> dict:
     """*history*'s turn landed whole, as the landing saga runs it: your edits picked up first."""
     picked = history.pickup(author=YOURS, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "pickup"]])
-    turn = history.commit_turn(author=author, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "turn"]])
+    turn = history.commit_turn(
+        author=author, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "turn"]], pickup=picked["commit"],
+    )
     applied = [history.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]
     return history.record(
         turn=turn["commit"], applied=applied, author=author,
@@ -1190,6 +1192,9 @@ def test_git_never_runs_in_the_buckets_history(tmp_path, project, monkeypatch):
     monkeypatch.setattr(subprocess, "run", recorded)
     pod = a_pod(tmp_path, project, "t2")
     (pod.copy / "b.md").write_text("b")
+    # A file you saved meanwhile, which the landing leaves out: who changed it is read too.
+    (project / "a.md").write_text("saved by you")
+    (pod.copy / "a.md").write_text("by t2")
     land(pod, "saga:2")
     (slow.copy / "slow.md").write_text("slow")
     land(slow, "saga:slow")  # across the missing parent
@@ -2374,3 +2379,96 @@ def test_a_masters_pod_with_no_history_yet_picks_up_nothing(tmp_path, project):
     out = a_masters_pod(tmp_path, project).pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"]], push=True)
     assert out == {"main": None, "commit": None, "picked_up": [], "packs": 0}
     assert not (project / "_history").exists()
+
+
+B = {"name": "Draft B", "email": "thread:t2@surogate"}
+
+
+def a_history(tmp_path: Path, project: Path) -> None:
+    """The project's history, made by a first landing."""
+    first = a_pod(tmp_path, project, "t0")
+    (first.copy / "start.md").write_text("start")
+    land(first, "saga:0")
+
+
+def held(out: dict) -> dict[str, dict | None]:
+    """Who each file a turn's landing left out was changed by; None for no one."""
+    return {o["path"]: o.get("by") for o in out["overlapped"]}
+
+
+def test_an_overlap_is_by_whoever_last_changed_the_file_on_main_since_the_base(tmp_path, project):
+    a_history(tmp_path, project)
+    mine, theirs = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (theirs.copy / "Report.docx").write_bytes(b"PK\x03\x04 by B")
+    land(theirs, "saga:b", author=B)
+    (mine.copy / "Report.docx").write_bytes(b"PK\x03\x04 by A")
+    (mine.copy / "notes.txt").write_text("by A\n")
+    (project / "notes.txt").write_text("by you meanwhile\n")
+    picked = mine.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    assert held(turn) == {"Report.docx": {"kind": "thread", "id": "t2", "title": "Draft B"}, "notes.txt": {"kind": "you"}}
+
+
+def test_a_shape_overlap_is_by_whoever_made_the_folder(tmp_path, project):
+    a_history(tmp_path, project)
+    mine, theirs = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (theirs.copy / "Plans").mkdir()
+    (theirs.copy / "Plans" / "q1.md").write_text("q1")
+    land(theirs, "saga:b", author=B)
+    (mine.copy / "Plans").write_text("a file where B made a folder")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    [o] = turn["overlapped"]
+    assert (o["path"], o["reason"], o["by"]["kind"], o["by"]["id"]) == ("Plans", "shape", "thread", "t2")
+
+
+def test_an_overlap_with_a_routines_change_is_by_the_routine(tmp_path, project):
+    a_history(tmp_path, project)
+    mine = a_pod(tmp_path, project, "t1")
+    (project / "notes.txt").write_text("checked by the routine\n")
+    a_masters_pod(tmp_path, project).pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"]], push=True)
+    (mine.copy / "notes.txt").write_text("by A\n")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    assert held(turn) == {"notes.txt": {"kind": "routine", "name": "Health check"}}
+
+
+def test_a_folder_you_made_where_a_turn_made_a_file_is_by_you(tmp_path, project):
+    a_history(tmp_path, project)
+    mine = a_pod(tmp_path, project, "t1")
+    (project / "Plans").mkdir()
+    (project / "Plans" / "q1.md").write_text("q1, uploaded by you")
+    (mine.copy / "Plans").write_text("a file where you made a folder")
+    picked = mine.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # Your upload is in no history yet: the landing's own pickup names you.
+    assert [(o["path"], o["reason"], o["by"]) for o in turn["overlapped"]] == [("Plans", "shape", {"kind": "you"})]
+
+
+def test_a_turn_that_makes_its_own_file_a_folder_names_no_one(tmp_path, project):
+    first = a_pod(tmp_path, project, "t0")
+    (first.copy / "Plans").write_text("one plan")
+    (first.copy / "old.md").write_text("old")
+    land(first, "saga:0")
+    pod = a_pod(tmp_path, project, "t1")
+    (pod.copy / "Plans").unlink()
+    (pod.copy / "Plans").mkdir()
+    (pod.copy / "Plans" / "q1.md").write_text("q1")
+    (pod.copy / "old.md").unlink()  # held with them: it may be a move git could not see
+    picked = pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    turn = pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # Nobody else touched them: the change of shape is the turn's own, and what goes with it names no one.
+    assert {o["path"]: (o["reason"], o.get("by")) for o in turn["overlapped"]} == {
+        "Plans": ("shape", None), "Plans/q1.md": ("shape", None), "old.md": ("with", None),
+    }
+
+
+def test_an_overlap_names_whoever_changed_a_file_whatever_its_name_holds(tmp_path, project):
+    a_history(tmp_path, project)
+    mine, theirs = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    odd = ["odd\x01name.md", "\nnotes\n"]
+    for name in odd:
+        (theirs.copy / name).write_text("by B")
+    land(theirs, "saga:b", author=B)
+    for name in odd:
+        (mine.copy / name).write_text("by A")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    assert held(turn) == {name: {"kind": "thread", "id": "t2", "title": "Draft B"} for name in odd}

@@ -460,7 +460,7 @@ class History:
     # Landing: the steps a landing saga runs, one call each
     # ------------------------------------------------------------------
 
-    def commit_turn(self, *, author: dict[str, str], trailers: list[list[str]]) -> dict:
+    def commit_turn(self, *, author: dict[str, str], trailers: list[list[str]], pickup: str | None = None) -> dict:
         """Commit the turn on the branch, and say what a landing would apply.
 
         ``changes`` are the files the turn changed since its base whose real
@@ -468,13 +468,15 @@ class History:
         ``overlapped`` are those whose real file changed otherwise since, or
         that the real files cannot take as a file (a folder is there, or a
         file where its folder would be): a landing leaves them out.  Each
-        says why: ``changed``, ``shape``, or ``with`` for one held with them.  A
-        rename's two sides, and a file and a folder of one name, are left
-        out together.  While any write of the turn is left out, or it wrote
-        into a repository, every deletion git did not pair is too: it may be
-        a move git could not see.  ``commit`` is None when the turn changed
-        nothing since its base.  ``repositories`` are the folders holding a
-        git repository that the turn wrote into: they never land.
+        says why: ``changed``, ``shape``, or ``with`` for one held with them,
+        and ``by`` whom, as :meth:`_changed_by` finds it, with *pickup* this
+        landing's pickup of your edits.  A rename's two sides, and a file and
+        a folder of one name, are left out together.  While any write of the
+        turn is left out, or it wrote into a repository, every deletion git
+        did not pair is too: it may be a move git could not see.  ``commit``
+        is None when the turn changed nothing since its base.
+        ``repositories`` are the folders holding a git repository that the
+        turn wrote into: they never land.
 
         The turn, its base and the branch are pushed before the first apply,
         so whoever puts a file back after a crash can read both its versions.
@@ -546,16 +548,21 @@ class History:
             {"path": path, "before": real[path], "after": versions[path][1]}
             for path in sorted(versions, key=lambda p: (versions[p][1] is None, p)) if path not in held
         ]
-        overlapped = [
+        by = self._changed_by(held, base, pickup)
+        overlapped = []
+        for path in sorted(held):
             # Why each waits: the real file changed since, it is a change of
             # shape, or it goes with one of those.  Its two versions are the
             # history's: the real file's, and the thread's that did not land.
-            {
-                "path": path, "reason": "changed" if path in changed else "shape" if path in shaped else "with",
-                "before": real.get(path), "after": versions[path][1],
-            }
-            for path in sorted(held)
-        ]
+            reason = "changed" if path in changed else "shape" if path in shaped else "with"
+            entry = {"path": path, "reason": reason, "before": real.get(path), "after": versions[path][1]}
+            # Who changed it since the base.  A changed file history names no
+            # one for was saved by you after the pickup; a change of shape it
+            # names no one for is the turn's own; a file held with them has none.
+            who = by.get(path, YOU) if reason == "changed" else by.get(path) if reason == "shape" else None
+            if who is not None:
+                entry["by"] = who
+            overlapped.append(entry)
         return {"commit": turn, "base": base, "changes": changes, "overlapped": overlapped, **left_out}
 
     def apply(self, path: str, before: str | None, after: str | None) -> dict:
@@ -1479,6 +1486,33 @@ class History:
             return None  # not the platform's own, or not whole: nothing is left out for it
         return first[0]
 
+    def _changed_by(self, paths: Iterable[str], base: str, pickup: str | None) -> dict[str, dict]:
+        """Who last changed each of *paths* since *base*: you, by this landing's *pickup*, else whoever ``main`` names.
+
+        ``main`` is the history as this pod takes it again, after the commit
+        step's push: its commits since the base, newest first, each against
+        its first parent, read in the pod's copy of the history, which is
+        whole where the pod's own clone is shallow.  A path counts as changed
+        with a folder above it or a file under it.
+        """
+        wanted = set(paths)
+        if not wanted:
+            return {}
+        log = ["log", "--no-renames", "--raw", "--no-abbrev", "-z", "--format=%x01%an%x00%ae"]
+        commits = []
+        if pickup is not None:
+            commits += _commits(self._git([*log, "-1", pickup], env={"GIT_DIR": str(self.repo)}, cwd=self.repo))
+        if (main := self._take().get(MAIN)) is not None:
+            commits += _commits(self._git(
+                [*log, "--first-parent", main, "--not", base], env={"GIT_DIR": str(self._taken)}, cwd=self.repo,
+            ))
+        found: dict[str, dict] = {}
+        for name, email, touched in commits:
+            for path in wanted - set(found):
+                if any(t == path or t.startswith(f"{path}/") or path.startswith(f"{t}/") for t in touched):
+                    found[path] = _who(name, email)
+        return found
+
     def _in_durable(self, commit: str) -> bool:
         """Whether the durable history held *commit* when last taken."""
         try:
@@ -2073,6 +2107,38 @@ def _checked_ref(value: str, where: str) -> str:
 def _packed(refs: dict[str, str | None]) -> bytes:
     """A ``packed-refs`` file of *refs*, those set."""
     return (_PACKED + "".join(f"{refs[r]} {r}\n" for r in sorted(refs) if refs[r])).encode()
+
+
+#: Who changed a file when history names no one else: the user.
+YOU = {"kind": "you"}
+
+
+def _who(name: str, email: str) -> dict:
+    """Who a commit of ``main`` is by, from its author: a thread, a routine or you."""
+    kind, _, rest = email.partition(":")
+    if kind == "thread":
+        return {"kind": "thread", "id": rest.removesuffix("@surogate"), "title": name}
+    if kind == "routine":
+        return {"kind": "routine", "name": name}
+    return YOU
+
+
+def _commits(out: str) -> list[tuple[str, str, set[str]]]:
+    """``git log --raw -z``'s commits, each ``(name, email, paths it changed)``.
+
+    Read by position, never by what a name holds: each commit is its author's
+    name, marked, and email, then a change's fields and its path for each
+    file, so a path may hold any character git allows.
+    """
+    fields, commits, at = out.split("\0"), [], 0
+    while at + 1 < len(fields) and fields[at].startswith("\x01"):
+        name, email, at = fields[at][1:], fields[at + 1], at + 2
+        touched = set()
+        while at + 1 < len(fields) and fields[at].lstrip("\n").startswith(":"):
+            touched.add(fields[at + 1])
+            at += 2
+        commits.append((name, email, touched))
+    return commits
 
 
 def _objects(index: Path) -> int:
