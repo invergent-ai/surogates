@@ -447,13 +447,14 @@ function makeDirs(dir: string): void {
 
 function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"));
-  return io(key, () => readdirSync(key)).slice(0, MAX_NAMES);
+  return io(key, () => readdirSync(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
 }
 
 // walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
 // its size, depth first. No link is followed, and no folder the tree hides is entered: one named in skip, one directly
 // under the key named in skip_top, and with skip_hidden a dot-folder other than SHOWN_DOT_FOLDERS. A name that is not
 // UTF-8 is left out: read as bytes, it does not survive the round trip, and its decoded twin could be another file.
+// So is a file of the helper's own (OWN_FILE), as it is from list_dir's names.
 // Since a cursor, only the files whose mtime or ctime is at or after it. The cursor is this computer's clock as the
 // walk began, less WALK_MARGIN_NS. It stops after WALK_BUDGET_MS: every other operation on the folder waits for it.
 //
@@ -545,7 +546,7 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
         }
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || OWN_FILE.test(name)) continue;
       let st: BigIntStats;
       try {
         st = lstatSync(at, { bigint: true });

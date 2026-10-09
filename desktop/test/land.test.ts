@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { landable } from "../src/files/land.js";
-import { type Context, perform, revisionOf } from "../src/files/operations.js";
+import { type Context, OWN_FILE, perform, revisionOf } from "../src/files/operations.js";
 
 const SAGA = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f";
 const HELPER = fileURLToPath(new URL("../dist/files/helper.js", import.meta.url));
@@ -570,6 +570,30 @@ describe("a landing cut short by a kill", () => {
     // Once: the next start finds nothing to do, and moves nothing again.
     expect(await restart()).toEqual({ ok: { restored: [], beside: [], lost: [] } });
     expect(readdirSync(join(folder, "docs"))).toHaveLength(3);
+  });
+
+  it("has no reader of the folder take what a cut left for a file of the user's: not the helper's own listing, and not the history's pickup", { timeout: 60_000 }, async () => {
+    writeFileSync(join(folder, "Report.docx"), V1);
+    const data = Buffer.alloc(3 * 1024 * 1024, "t");
+    writeFileSync(join(copy, "Report.docx"), data);
+    const seen = await looked("Report.docx");
+    // Killed with both of its own names in the folder: its staged file, and the user's moved aside.
+    await helper([apply(1, "Report.docx", blob(V1), blob(data), seen["Report.docx"]!)], ["linkSync", 1, "/Report\\.docx$", 1]);
+    const own = readdirSync(folder);
+    expect(own).toHaveLength(2);
+    expect(own.every((name) => OWN_FILE.test(name))).toBe(true);
+    // A chat's own helper on the folder, which puts nothing back: its walk and its listing name neither as a new file.
+    const plain: Context = { folder, home: base, env: {} };
+    const asked = (kind: string, args: Record<string, unknown>) => perform(kind, args, plain, new AbortController().signal);
+    expect(await asked("walk", { key: folder, skip: [], skip_top: [], skip_hidden: false, since: null })).toMatchObject({ ok: { files: [], truncated: false } });
+    expect(await asked("list_dir", { key: folder })).toEqual({ ok: [] });
+    // The pickup is git's, in the guest, by the history's excludes: "*.tmp" there is what keeps both names out of
+    // it, so neither is recorded as a file the user made. That the user's file is not recorded as deleted is the
+    // order's: a landing's helper is started, and so has put the file back, before the landing's pickup is asked.
+    const history = readFileSync(new URL("../../surogates/sandbox/history.py", import.meta.url), "utf8");
+    expect(/^HISTORY_EXCLUDES = [^]*?^\] \+ /m.exec(history)?.[0]).toContain('"*.tmp"');
+    expect(await restart()).toEqual({ ok: { restored: ["Report.docx"], beside: [], lost: [] } });
+    expect(await asked("walk", { key: folder, skip: [], skip_top: [], skip_hidden: false, since: null })).toMatchObject({ ok: { files: [["Report.docx", V1.length]] } });
   });
 
   it("leaves a file the user saved over the landing's before the helper started again, and puts the one it replaced beside it", { timeout: 60_000 }, async () => {
