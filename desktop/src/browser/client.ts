@@ -104,6 +104,8 @@ export class BrowserClient {
   private readonly showing = new Map<string, (shown: boolean) => void>();
   private downloaded: (download: StagedDownload) => void = () => {};
   private stopping: Promise<void> | null = null;
+  // The chat whose user holds the browser, as the last pause left it; null: the agent drives.
+  private holder: string | null = null;
   private tries = 0;
   private addresses = 0;
   private shows = 0;
@@ -160,8 +162,14 @@ export class BrowserClient {
     this.downloaded = listener;
   }
 
-  /** A chat its user took the browser over, or handed back: a running host is told, for an operation waiting there. */
+  /**
+   * A chat its user took the browser over, or handed back: a running host is told, for an operation waiting
+   * there. None is started to hear it; one that starts while the browser is held is told first of all (start).
+   */
   pause(root: string, paused: boolean): void {
+    // As a host keeps it: taken over, that chat holds it; handed back only by the chat that holds it.
+    if (paused) this.holder = root;
+    else if (this.holder === root) this.holder = null;
     this.host?.send({ type: "pause", root, paused });
   }
 
@@ -234,6 +242,9 @@ export class BrowserClient {
   private start(): BrowserProcess {
     const host = this.spawn();
     this.host = host;
+    // A host knows that its browser is held only by being told. One that starts while it is held hears so
+    // before the message that started it, which it then answers as any host does while its user holds the browser.
+    if (this.holder !== null) host.send({ type: "pause", root: this.holder, paused: true });
     host.onMessage((message) => {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);

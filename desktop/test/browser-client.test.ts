@@ -95,11 +95,44 @@ describe("the browser host's client", () => {
       return hosts.at(-1)!;
     });
     client.pause("root", true);
+    client.pause("root", false);
     expect(hosts).toEqual([]);
     void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
     client.pause("root", true);
     client.pause("root", false);
+    expect(hosts[0]!.sent.map(({ type }) => type)).toEqual(["op", "pause", "pause"]);
     expect(hosts[0]!.sent.slice(1)).toEqual([{ type: "pause", root: "root", paused: true }, { type: "pause", root: "root", paused: false }]);
+  });
+
+  it("tells a host that starts while a chat's user holds the browser that it is held, before what started it: an operation, or a try from Settings", () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    const signal = new AbortController().signal;
+    const first = () => hosts.at(-1)!.sent.slice(0, 2).map((message) => (message.type === "pause" ? `${message.root} ${message.paused}` : message.type));
+    // Taken over with no host running: none is started for it, and the one an operation starts then hears of it first.
+    client.pause("chat-1", true);
+    expect(hosts).toEqual([]);
+    void client.perform(LAUNCH, operation("op-1"), signal);
+    expect(first()).toEqual(["chat-1 true", "op"]);
+    // Handed back by another chat than holds it, which hands nothing back: the next host is told the same.
+    client.pause("chat-2", false);
+    hosts.at(-1)!.exit();
+    void client.tryBrowser(LAUNCH.executable);
+    expect(first()).toEqual(["chat-1 true", "try"]);
+    // Taken over from another chat since: that one holds it.
+    client.pause("chat-2", true);
+    hosts.at(-1)!.exit();
+    void client.perform(LAUNCH, operation("op-2"), signal);
+    expect(first()).toEqual(["chat-2 true", "op"]);
+    // Handed back: a host that starts then is told nothing of it.
+    client.pause("chat-2", false);
+    hosts.at(-1)!.exit();
+    void client.perform(LAUNCH, operation("op-3"), signal);
+    expect(first()).toEqual(["op"]);
+    expect(hosts).toHaveLength(4);
   });
 
   it("tells a running host of an upload its user was asked about that is not coming, and starts none to do it", () => {
@@ -409,6 +442,25 @@ describe.skipIf(!run)("the browser host's process", () => {
       client.pause("root", false);
       // Handed back, the chat's operations run again, in a page the waiting one never acted in.
       expect(await client.perform(launch, operation("op-5", "browser.evaluate", { code: "return document.title === 'ran after the pause';" }), signal)).toEqual({ ok: { value: false } });
+    } finally {
+      await client.stop();
+    }
+  }, 30_000);
+
+  it("starts no browser for an operation whose host starts while a chat's user holds the browser: the host has heard that it is held, and answers it paused", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    const client = new BrowserClient();
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    try {
+      // Taken over where no host runs. Nothing but the host itself refuses this operation here: the client sends it on.
+      client.pause("root", true);
+      expect(await client.perform(launch, operation("op-1", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal)).toEqual(PAUSED);
+      expect(browserOf(profile)).toEqual([]);
+      // Handed back, the same host starts its browser for the next.
+      client.pause("root", false);
+      expect(await client.perform(launch, operation("op-2", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal)).toMatchObject({ error: { type: "browser" } });
+      expect(browserOf(profile).length).toBeGreaterThan(0);
     } finally {
       await client.stop();
     }
