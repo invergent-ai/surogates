@@ -65,6 +65,11 @@ _PUT_BACK_BOUND = 300
 #: clone it from the mount, repack it and write it back.
 _PRUNE_BOUND = 300
 _PRUNE_PER_GIB = 180
+#: How long a pruning waits for the project's lock before it gives the day up.  Its pod waits with it,
+#: in no wake and no session's keeping: the next completed landing prunes instead.
+_PRUNE_PATIENCE = 600
+#: How long a pruning's pod is given to go once the pruning is over: a delete never answered ends no task.
+_LET_GO_BOUND = 60
 #: A landing's steps go to its row whole, so not at every step: between its
 #: turning points at most this often, in seconds, and never so often that
 #: writing them takes more than one part in _ROW_SHARE of its time.  A row
@@ -353,9 +358,12 @@ async def _pruned_then_gone(*, sandbox_pool: Any, sandbox_id: str, session_id: s
     try:
         await prune_after(sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, **pruning)
     finally:
-        # Also when the worker stops under it: its pod goes all the same, and that pod alone.
+        # Also when the worker stops under it: its pod goes all the same, and that pod alone.  Within a
+        # bound: a loop that closes cancels this once and then waits for it, with no bound of its own.
         try:
-            await asyncio.shield(sandbox_pool.destroy_released(sandbox_id, session_id, alone=True))
+            await asyncio.wait_for(
+                asyncio.shield(sandbox_pool.destroy_released(sandbox_id, session_id, alone=True)), _LET_GO_BOUND,
+            )
         except BaseException:
             logger.warning("Could not let pod %s go after its pruning", sandbox_id, exc_info=True)
 
@@ -387,11 +395,14 @@ async def prune_after(
     is waited for, then settled.  One left ``escalated``, or settled here
     with a row that could still not be written, holds no pruning back.  A
     settle that fails leaves the pruning to the next landing, the day not
-    marked.  And the pod leaves every pack younger than the fence, for a
-    push no row tells of: a keep's or a hand-off's.
+    marked; so does a lock not had within ``_PRUNE_PATIENCE``.  And the pod
+    leaves every pack younger than the fence, for a push no row tells of:
+    a keep's or a hand-off's.
     """
     try:
-        async with project_lock(session_factory, workstream) as held:
+        async with asyncio.timeout(_PRUNE_PATIENCE) as patience, project_lock(session_factory, workstream) as held:
+            # The lock is had: the settle's waits and the pod's call have bounds of their own.
+            patience.reschedule(None)
             await settle_running(
                 session_factory, _Released(sandbox_pool, sandbox_id), sandbox_id, workstream, saga_settings, held,
             )

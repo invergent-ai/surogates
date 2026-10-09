@@ -96,7 +96,11 @@ async def _prunings_end_with_their_test():
     """Wait for the prunings a test's landings started: each goes on after its turn, in no wake.
 
     The tests share one loop, so one left under way would run into the
-    next test.
+    next test, and one still pending at the session's end would be
+    cancelled only after the database is gone, where the loop's close
+    waits for it with no bound.  Each wait here has one: a minute for a
+    pruning to end, then ten seconds for one cancelled to end, while the
+    database still answers.
     """
     yield
     from surogates.harness import landing
@@ -106,6 +110,8 @@ async def _prunings_end_with_their_test():
         _, late = await asyncio.wait(pending, timeout=60)
         for pruning in late:
             pruning.cancel()
+        if late:
+            await asyncio.wait(late, timeout=10)
 
 
 # ---------------------------------------------------------------------------

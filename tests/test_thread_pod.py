@@ -470,3 +470,61 @@ async def test_a_landings_row_whose_writes_are_quick_is_behind_by_its_interval(m
     await asyncio.sleep(0.3)
     await row.alive()
     assert (len(saves), len(marks)) == (2, 1)
+
+
+class PrunesNever:
+    """A pool whose pod is asked nothing, and records how it is let go."""
+
+    def __init__(self, *, goes: bool = True) -> None:
+        self.goes, self.let_go = goes, []
+
+    async def execute_released(self, *args, **kwargs) -> str:
+        raise AssertionError("the pod is not asked to prune")
+
+    async def destroy_released(self, sandbox_id, session_id, *, alone=False) -> None:
+        self.let_go.append((sandbox_id, session_id, alone))
+        if not self.goes:
+            await asyncio.Event().wait()  # a delete the cluster never answers
+
+
+@contextlib.asynccontextmanager
+async def a_lock_never_free(*_):
+    await asyncio.Event().wait()
+    yield None
+
+
+async def a_pruning(pool) -> asyncio.Future:
+    landing.prune_later(
+        session_factory=None, sandbox_pool=pool, sandbox_id="pod-1", session_id="t1", workstream="w1", packs=0,
+        saga_settings=None,
+    )
+    [pruning] = landing._PRUNINGS
+    return pruning
+
+
+async def test_a_pruning_that_cannot_take_the_projects_lock_gives_the_day_up_and_lets_its_pod_go(monkeypatch, caplog):
+    monkeypatch.setattr(landing, "project_lock", a_lock_never_free)
+    monkeypatch.setattr(landing, "_PRUNE_PATIENCE", 0.2)
+    pool = PrunesNever()
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        # Its pod waits with it, in no wake and no session: a wait for the lock has a bound.
+        await asyncio.wait_for(await a_pruning(pool), 5)
+    assert pool.let_go == [("pod-1", "t1", True)] and "Could not prune the history of project w1" in caplog.text
+    assert not landing._PRUNINGS
+
+
+@pytest.mark.parametrize("ended", ["by its bound", "by a cancel"])
+async def test_a_pruning_whose_pod_never_goes_ends_all_the_same(monkeypatch, caplog, ended):
+    monkeypatch.setattr(landing, "project_lock", a_lock_never_free)
+    monkeypatch.setattr(landing, "_PRUNE_PATIENCE", 0.2 if ended == "by its bound" else 600)
+    monkeypatch.setattr(landing, "_LET_GO_BOUND", 0.2)
+    pool = PrunesNever(goes=False)
+    pruning = await a_pruning(pool)
+    if ended == "by a cancel":
+        # As a loop that closes cancels it, once: nothing then waits on it without end.
+        await asyncio.sleep(0.05)
+        pruning.cancel()
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        done, _ = await asyncio.wait([pruning], timeout=5)
+    assert done and pool.let_go == [("pod-1", "t1", True)] and "Could not let pod pod-1 go" in caplog.text
+    assert pruning.cancelled() is (ended == "by a cancel")
