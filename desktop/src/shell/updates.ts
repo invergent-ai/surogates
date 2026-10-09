@@ -98,6 +98,8 @@ const DISMISSED = 126;
 const NOT_AUTHORIZED = 127;
 const AS_ANOTHER_USER = "Error executing command as another user:";
 const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
+// The most that is kept of what a helper said, its end: its last lines are why it failed.
+const SAID_MAX = 4000;
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
 // The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest
@@ -175,15 +177,17 @@ export function helperRun(command: string[]): (files: Staged) => Promise<Applied
     // Before anything else is asked of it: one that could not be started, as for want of file
     // descriptors, tells its error later, and has no output to read.
     child.once("error", (error) => resolve({ code: null, said: error.message }));
-    // What it says is one stream, read as it comes: a letter may come in two reads.
+    // What it says is one stream, read as it comes: a letter may come in two reads. Its end alone
+    // is kept, cut at each read by the one rule, so that no more than a read of it is ever held.
     const decoder = new StringDecoder("utf8");
+    const kept = (all: string) => all.slice(-SAID_MAX);
     let said = "";
     child.stderr?.on("data", (chunk: Buffer) => {
-      said = (said + decoder.write(chunk)).slice(-4000);
+      said = kept(said + decoder.write(chunk));
     });
     // One a signal ended has no exit code: how it ended is the last of what is said of it.
     child.once("close", (code, signal) => {
-      said = (said + decoder.end()).slice(-4000);
+      said = kept(said + decoder.end());
       resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() });
     });
   });

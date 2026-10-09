@@ -82,6 +82,27 @@ describe("an installed app's root helper", () => {
     expect((await installed().apply(files)).said).toBe("Surogate Desktop: /home/zo\ufffd");
   });
 
+  it("keeps the last 4000 characters of what is said, cut at each read, whatever reads it comes in", { timeout: 60_000 }, async () => {
+    const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
+    // Many small reads, each of seven bytes, which cut lines and letters of two and three bytes where they fall.
+    const whole = Array.from({ length: 2_000 }, (_, at) => `line ${at} of zo\u00eb's \u2713\n`).join("");
+    const bytes = Buffer.from(whole);
+    asked.ends = { code: 1, signal: null, says: Array.from({ length: Math.ceil(bytes.length / 7) }, (_, at) => bytes.subarray(at * 7, at * 7 + 7)), fails: "", throws: "" };
+    expect((await installed().apply(files)).said).toBe(whole.slice(-4000).trim());
+    // The helper's own line in two reads, the first of which is cut before it: the line is whole.
+    const own = "Surogate Desktop: the release's archive could not be unpacked";
+    asked.ends = { code: 1, signal: null, says: [Buffer.from(`${"x".repeat(9_000)}\n${own.slice(0, 13)}`), Buffer.from(`${own.slice(13)}\n`)], fails: "", throws: "" };
+    expect((await installed().apply(files)).said.split("\n").at(-1)).toBe(own);
+    // A letter of three bytes in two reads, where the cut of the first read falls: one letter, the first kept.
+    asked.ends = { code: 1, signal: null, says: [Buffer.concat([Buffer.from("y".repeat(5_000)), Buffer.from("\u2713").subarray(0, 1)]), Buffer.concat([Buffer.from("\u2713").subarray(1), Buffer.from("z".repeat(3_999))])], fails: "", throws: "" };
+    expect((await installed().apply(files)).said).toBe(`\u2713${"z".repeat(3_999)}`);
+    // More than a program can hold as one text, a megabyte a read: it is never held whole while the helper runs.
+    const megabyte = Buffer.alloc(1_048_576, "m");
+    asked.ends = { code: 1, signal: null, says: [...Array.from({ length: 600 }, () => megabyte), Buffer.from(`\n${own}\n`)], fails: "", throws: "" };
+    const { said } = await installed().apply(files);
+    expect([said.length, said.split("\n").at(-1)]).toEqual([3999, own]);
+  });
+
   it("answers why where it cannot be started at all, as for want of file descriptors: with no output to read, and its error told later", async () => {
     const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
     asked.ends = { code: null, signal: null, says: "", fails: "spawn /usr/bin/pkexec EMFILE", throws: "" };
