@@ -88,6 +88,10 @@ _TIMEOUT: ContextVar[int | None] = ContextVar("history_git_timeout", default=Non
 #: files looked at or read alone outlast the pod's ready bound.
 _READERS = 16
 _READ_ALONE = 64
+#: The parents a pushed copy names at most: its base, the hand-offs it last
+#: took up, and one commit that names the older ones.  A thread's failed
+#: turns can each take up one more hand-off before any of them lands.
+_PARENTS = 8
 _ZERO = "0" * 40
 MAIN = "refs/heads/main"
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
@@ -822,10 +826,31 @@ class History:
         hand-off this copy took up, and through those an earlier push of
         the branch named, when that push did not land and this one takes
         its place.
+
+        They are the last taken up first, and with the base ``_PARENTS`` at
+        most.  Past that the older ones go behind one commit that names
+        them, the last of the list: each stays in the history as long as
+        the pushed commit does, as when it was a parent itself, and none of
+        their versions is let go.
         """
         handed, synced = self._ref(self.handed), self._ref(self.synced)
         earlier = self._parents(synced) if synced and synced != onto else []
-        return list(dict.fromkeys([*([handed] if handed else []), *(earlier[1:] if earlier[:1] == [onto] else [])]))
+        behind = list(dict.fromkeys([*([handed] if handed else []), *(earlier[1:] if earlier[:1] == [onto] else [])]))
+        if len(behind) < _PARENTS:
+            return behind
+        return [*behind[:_PARENTS - 2], self._folded(behind[_PARENTS - 2:])]
+
+    def _folded(self, commits: list[str]) -> str:
+        """One commit that names *commits* as its parents, ``_PARENTS`` at most, and changes no file.
+
+        Its files and its dates are its first parent's and its author the
+        pod's own, so every try makes the same commit, and no file's
+        history shows it: it holds nothing its first parent does not.
+        """
+        if len(commits) > _PARENTS:
+            commits = [*commits[:_PARENTS - 1], self._folded(commits[_PARENTS - 1:])]
+        self._fetch(*commits)
+        return self._one(commits[0], *commits, author=_CHECKPOINT, title="Earlier hand-offs", trailers=[["Surogate-Kind", "hand-offs"]])
 
     def _taken_up(self, refs: dict[str, str]) -> dict[str, str | None]:
         """What a push of the branch makes of the hand-off, *refs* the history's as it is now.

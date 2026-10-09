@@ -1400,6 +1400,51 @@ def test_a_helpers_version_the_thread_did_not_take_stays_in_the_history_with_the
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+def test_a_pushed_copy_names_eight_parents_at_most_the_older_hand_offs_folded_behind_one(tmp_path, project):
+    durable = project / "_history"
+    other = a_pod(tmp_path, project, "t0")
+    (other.copy / "other.md").write_text("another thread's")
+    land(other, "saga:0")
+    seed = a_pod(tmp_path, project)
+    (seed.copy / "seed.md").write_text("seed")
+    base = git(seed.repo, "rev-parse", "refs/bases/t1")
+    seed.keep(author=A, trailers=KEPT, base=True)
+    handed, kept = [], ""
+    # Twelve helpers start where the thread is now, so none of their hand-backs has another's behind it.
+    helpers = [a_helper(tmp_path, project, f"h{n}") for n in range(12)]
+    for n, helper in enumerate(helpers):
+        # A helper keeps its work, and the thread's turn takes it up at its open, then fails: kept, unlanded.
+        (helper.copy / f"h{n}.md").write_text(f"helper {n}")
+        handed.append(helper.hand_back(author=A, trailers=KEPT)["commit"])
+        pod = a_pod(tmp_path, project)
+        (pod.copy / f"turn{n}.md").write_text(str(n))
+        kept = pod.keep(author=A, trailers=KEPT, base=True)["commit"]
+        named = parents(durable, kept)
+        if n < 7:
+            # Its base, and each hand-off it has taken up, the last first.
+            assert named == [base, *reversed(handed)]
+        else:
+            # Past eight, the six it last took up stay, and one commit behind them names the older ones.
+            assert len(named) == 8 and named[:7] == [base, *list(reversed(handed))[:6]]
+            assert len(parents(durable, named[7])) <= 8
+        # A second try pushes nothing new: the same commit, fold and all.
+        assert pod.keep(author=A, trailers=KEPT, base=True)["commit"] == kept
+        assert a_pod(tmp_path, project).keep(author=A, trailers=KEPT, base=True)["commit"] == kept
+    # Nothing a hand-off held is let go: each is behind the kept commit still, through the fold.
+    assert set(handed) <= set(git(durable, "rev-list", kept).split())
+    assert a_pod(tmp_path, project, "t2").prune(
+        keep=["refs/heads/threads/t1", "refs/bases/t1"], now=time.time(),
+    )["pruned"] is True
+    assert [git(durable, "show", f"{commit}:h{n}.md") for n, commit in enumerate(handed)] == [f"helper {n}" for n in range(12)]
+    # And the landing keeps them with the turn, its second parent, bounded the same.
+    last = a_pod(tmp_path, project)
+    (last.copy / "done.md").write_text("done")
+    landed = land(last, "saga:9")["commit"]
+    assert len(parents(durable, f"{landed}^2")) == 8
+    assert set(handed) <= set(git(durable, "rev-list", "refs/heads/main").split())
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
 def test_the_commit_step_takes_up_what_a_helper_kept_since_the_copy_last_did(tmp_path, project):
     thread = a_pod(tmp_path, project)
     (thread.copy / "outline.md").write_text("outline")
