@@ -716,16 +716,23 @@ async def test_a_thread_refuses_every_tool_that_starts_a_session():
     assert {"delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments", "cron_create"} <= THREAD_REFUSED_TOOLS
 
 
+async def its_first_turn_was_taken(store, thread) -> None:
+    """The model has read the thread's goal and answered: a command typed now is the next thing in its log."""
+    await store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+    await store.emit_event(thread.id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "On it."}})
+
+
 async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool = api.app.state.session_store, SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/loop 5m Add a line to Report.docx."})
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
     harness = a_waking_harness(store, SlashCommandConfig())
     harness._compressor.prune_stale_browser_states.side_effect = lambda messages: messages
     harness._redis, harness._session_factory, harness._sandbox_pool = api.app.state.redis, api.app.state.session_factory, pool
     await asyncio.wait_for(harness.wake(thread.id), 60)
-    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    *_, answer = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
     assert answer == "A thread can't start /loop yet: do this step in the thread itself."
     async with api.app.state.session_factory() as db:
         runs = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
@@ -936,6 +943,7 @@ async def test_a_turn_after_a_landing_that_rolled_back_is_told_its_copy_lacks_th
 async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_landed(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool = api.app.state.session_store, SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/code claude Add a line to notes.txt."})
     ran: list = []
 
@@ -947,7 +955,7 @@ async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_lande
     harness = a_waking_thread_harness(api, monkeypatch, pool, AsyncMock())
     harness._run_code_agent = a_coding_run
     await asyncio.wait_for(harness.wake(thread.id), 60)
-    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    *_, answer = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
     assert answer == "A thread can't start /code yet: do this step in the thread itself."
     assert (ran, pods.pods) == ([], {})
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
