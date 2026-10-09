@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1015,6 +1016,180 @@ describe("the browser on this computer", () => {
     expect(await approvals.admit(navigate(), never())).toEqual(ACT_DENIED);
   });
 
+  it("asks in Ask every time before files of the chat's folder go to the page, each named whole, and names the file input's own frame", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    // The browser says the page a session acts in, and, for an upload, the frame of the file input that asked.
+    const said: Array<[string, boolean]> = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      address: (session, upload = false) => (said.push([session, upload]), Promise.resolve(upload ? "https://uploads.example/form" : "https://bank.example/account")),
+    });
+    const paths = [`${FOLDER}/report.pdf`, `${FOLDER}/scan.png`];
+    expect(await approvals.admit(op("browser.set_input_files", { paths }, ROOT, CHILD), never())).toBeNull();
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }, ROOT, CHILD), never())).toBeNull();
+    expect(user.asked.map((request) => request.kind === "browser" && [request.action, request.files ?? request.detail, request.page])).toEqual([
+      // The site that gets the files is the input's own, whatever page it is framed in. Each file is an item of its own.
+      ["upload", paths, "https://uploads.example/form"], ["script", "return 1;", "https://bank.example/account"],
+    ]);
+    // A name that holds a line break is one item, whatever follows the break: never two files.
+    const broken = [`${FOLDER}/public.txt\n${FOLDER}/draft.txt`];
+    expect(await approvals.admit(op("browser.set_input_files", { paths: broken }, ROOT, CHILD), never())).toBeNull();
+    expect(user.asked.at(-1)).toMatchObject({ action: "upload", detail: "", files: broken });
+    user.asked.pop();
+    said.pop();
+    expect(said).toEqual([[CHILD, true], [CHILD, false]]);
+    // A chat that works freely gives them once the agent may use the browser.
+    journal.bindings.setMode(ROOT, "free");
+    expect(await approvals.admit(op("browser.set_input_files", { paths }), never())).toBeNull();
+    expect(user.asked).toHaveLength(2);
+  });
+
+  it("tells the browser which upload its prompt is for, so that the input it names is that upload's alone", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    const said: unknown[][] = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      address: (...asked) => (said.push(asked), Promise.resolve("https://uploads.example/form")),
+    });
+    const [first, second] = [op("browser.set_input_files", { paths: [`${FOLDER}/a.pdf`] }, ROOT, CHILD), op("browser.set_input_files", { paths: [`${FOLDER}/b.pdf`] })];
+    expect(first.id).not.toBe(second.id);
+    expect(await approvals.admit(first, never())).toBeNull();
+    expect(await approvals.admit(second, never())).toBeNull();
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
+    // Each upload by its own operation; any other act names no upload. And each with the chat it is of: a
+    // session is asked after only for its own chat.
+    expect(said).toEqual([[CHILD, true, first.id, ROOT], [ROOT, true, second.id, ROOT], [ROOT, false, undefined, ROOT]]);
+  });
+
+  it("asks nobody about an upload whose site the browser does not say in time, and gives it no leave: its prompt would name no site", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", address: () => new Promise(() => {}) });
+    const started = performance.now();
+    expect(await approvals.admit(op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] }), never())).toEqual({
+      error: { type: "denied", message: "The agent's browser on this computer did not say in time which site would get the files, so nobody was asked and the page was given nothing" },
+    });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(user.asked).toEqual([]);
+    // Nor where this computer has no word of the browser's at all, or the browser fails to say.
+    for (const address of [undefined, () => Promise.reject(new Error("gone"))]) {
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", ...(address ? { address } : {}) });
+      expect(await approvals.admit(op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] }), never())).toMatchObject({ error: { type: "denied" } });
+    }
+    expect(user.asked).toEqual([]);
+  });
+
+  it("gives an upload no leave once the browser is taken over while its prompt is open, or while the browser was still saying where its input is: answered as the tools answer then, whatever the prompt settles with", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    const paths = [`${FOLDER}/report.pdf`];
+    for (const [address, prompts] of [[() => Promise.resolve("https://uploads.example/form"), 1], [() => new Promise<string>(() => {}), 0]] as const) {
+      let taken = false;
+      // Its prompt, dismissed, settles with "Allow and stop asking": the answer that would do most.
+      user = new User();
+      approvals = new Approvals({
+        bindings: journal.bindings, prompts: user, agent: "Research assistant", address,
+        refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+      });
+      const upload = approvals.admit(op("browser.set_input_files", { paths }), never());
+      // The first is asked about by now; the second still waits for the browser to say where its input is.
+      await new Promise((done) => setTimeout(done, 50));
+      taken = true;
+      approvals.dismissBrowser();
+      expect(await upload).toEqual(PAUSED);
+      expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+      expect([user.asked.length, user.dismissed]).toEqual([prompts, prompts]);
+    }
+  });
+
+  it("asks nobody about an upload the browser says can be given to nothing, as one for an input in a frame that runs as no site: refused in the browser's words", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    const why = "The file input that asked is in a frame that runs as no site, so it is given no files";
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      address: (_session, upload) => Promise.resolve(upload ? { refused: why } : "https://bank.example/account"),
+    });
+    expect(await approvals.admit(op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] }), never())).toEqual({ error: { type: "browser", message: why } });
+    expect(user.asked).toEqual([]);
+    // Any other act in that page is asked about as ever.
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toBeNull();
+    expect(user.asked).toMatchObject([{ action: "script", page: "https://bank.example/account" }]);
+  });
+
+  it("tells the browser when an upload it was asked about got no leave, however its prompt ended: it is not coming, and the browser keeps nothing for it", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    const unasked: string[] = [];
+    let taken = false;
+    // The browser's word for an upload's input, as the test says: an address, none in time, or that nothing can be given.
+    let said: () => Promise<string | { refused: string }> = () => Promise.resolve("https://uploads.example/form");
+    const asks = (answer: ApprovalAnswer | null) => {
+      user = new User(answer);
+      approvals = new Approvals({
+        bindings: journal.bindings, prompts: user, agent: "Research assistant", address: () => said(),
+        refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+        notComing: (of) => void unasked.push(of),
+      });
+    };
+    const upload = () => op("browser.set_input_files", { paths: [`${FOLDER}/report.pdf`] });
+    // Allowed, once or for good: the upload is coming, and the browser knows it by its operation until it has.
+    for (const answer of ["allow", "stop_asking"] as const) {
+      journal.bindings.setMode(ROOT, "ask");
+      asks(answer);
+      expect(await approvals.admit(upload(), never())).toBeNull();
+    }
+    // In a chat that works freely nobody is asked, and the browser was told of no upload.
+    expect(await approvals.admit(upload(), never())).toBeNull();
+    expect(unasked).toEqual([]);
+    journal.bindings.setMode(ROOT, "ask");
+    // Denied, or run out.
+    for (const answer of ["deny", "timeout"] as const) {
+      asks(answer);
+      const denied = upload();
+      expect(await approvals.admit(denied, never())).toMatchObject({ error: { type: "denied" } });
+      expect(unasked.splice(0)).toEqual([denied.id]);
+    }
+    // Dismissed by a take-over, and stopped by its session, each with its prompt open.
+    for (const ends of ["taken over", "stopped"] as const) {
+      asks(null);
+      taken = false;
+      const stopped = new AbortController();
+      const open = upload();
+      const asking = approvals.admit(open, stopped.signal);
+      await vi.waitFor(() => expect(user.open).toHaveLength(1));
+      if (ends === "stopped") stopped.abort();
+      else {
+        taken = true;
+        approvals.dismissBrowser();
+      }
+      await asking;
+      expect(unasked.splice(0), ends).toEqual([open.id]);
+    }
+    taken = false;
+    // Never asked about at all: the browser said nothing can be given, or did not say where in time.
+    for (const none of [() => Promise.resolve({ refused: "no site" }), () => new Promise<string>(() => {})]) {
+      said = none;
+      asks("allow");
+      const refused = upload();
+      expect(await approvals.admit(refused, never())).toMatchObject({ error: {} });
+      expect([user.asked, unasked.splice(0)]).toEqual([[], [refused.id]]);
+    }
+    // No other act of the agent's is an upload the browser was asked about.
+    said = () => Promise.resolve("https://bank.example/account");
+    asks("deny");
+    expect(await approvals.admit(op("browser.evaluate", { code: "return 1;" }), never())).toMatchObject({ error: { type: "denied" } });
+    expect(unasked).toEqual([]);
+  });
+
   it("names a mouse press and a mouse release for what they are, not a click", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);
@@ -1081,6 +1256,134 @@ describe("the browser on this computer", () => {
     // The chat works freely now: the command waiting is let through unasked.
     expect(await command).toBeNull();
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
+  });
+
+  it("dismisses every chat's open and waiting browser prompts once the browser is taken over, answering them as the tools answer now", async () => {
+    for (const root of [ROOT, OTHER]) {
+      bind(root, "ask");
+      journal.bindings.allowBrowser(root);
+    }
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    user = new User();
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      // The browser is the agent's one browser here: held from one chat, it is refused to every chat.
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const open = approvals.admit(navigate(), never());
+    const waiting = approvals.admit(op("browser.evaluate", { code: "return 1;" }), never());
+    const command = approvals.admit(op("run", RUN), never());
+    const other = approvals.admit(navigate(OTHER), never());
+    await vi.waitFor(() => expect(user.open.map(({ request }) => request.chat.root)).toEqual([ROOT, OTHER]));
+    taken = true;
+    approvals.dismissBrowser();
+    // Dismissed, each prompt settles with the answer that would do most: it is not the user's.
+    expect(await open).toEqual(PAUSED);
+    expect(await waiting).toEqual(PAUSED);
+    // Another chat's too, which never asked for the take-over.
+    expect(await other).toEqual(PAUSED);
+    expect(user.dismissed).toBe(2);
+    // A chat's command asks as before.
+    await vi.waitFor(() => expect(user.open.map(({ request }) => [request.kind, request.chat.root])).toEqual([["command", ROOT]]));
+    user.answer("allow");
+    expect(await command).toBeNull();
+    // Handed back: a chat's next act asks again.
+    taken = false;
+    const again = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    user.answer("allow");
+    expect(await again).toBeNull();
+  });
+
+  it("keeps nothing of a chat's browser prompts once they settle, and leaves no listener on the signal they came with", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    // One signal for many operations, as a link's that lives as long as the app.
+    const lasting = never();
+    for (let n = 0; n < 50; n += 1) expect(await approvals.admit(navigate(), lasting)).toBeNull();
+    expect(user.asked).toHaveLength(50);
+    expect(getEventListeners(lasting, "abort")).toHaveLength(0);
+    expect((approvals as unknown as { browsing: Map<string, unknown> }).browsing.size).toBe(0);
+  });
+
+  it("asks the tools' refusal again when a browser operation's turn comes, and asks its user nothing about one refused meanwhile", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    user = new User();
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const open = approvals.admit(navigate(), never());
+    const waiting = approvals.admit(op("browser.evaluate", { code: "return 1;" }), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    // Refused by the tools from now on, its prompts not dismissed: the one waiting is caught at its turn all the same.
+    taken = true;
+    // Whatever it would be asked, it would be let through.
+    user.auto = "allow";
+    user.answer("allow");
+    expect(await open).toBeNull();
+    expect(await waiting).toEqual(PAUSED);
+    expect(user.asked).toHaveLength(1);
+  });
+
+  it("asks nothing about a browser operation that comes already stopped", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    // Whatever it would be asked, it would be let through.
+    user = new User("allow");
+    approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+    const stopped = new AbortController();
+    stopped.abort();
+    expect(await approvals.admit(navigate(), stopped.signal)).toEqual(ACT_DENIED);
+    expect(user.asked).toEqual([]);
+  });
+
+  it("answers a browser operation waiting behind the chat's open command prompt at the take-over, not once the command is answered", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    user = new User();
+    approvals = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const command = approvals.admit(op("run", RUN), never());
+    const waiting = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(user.open.map(({ request }) => request.kind)).toEqual(["command"]));
+    taken = true;
+    approvals.dismissBrowser();
+    // Answered now, the command's prompt still open before it in the chat's line.
+    expect(await Promise.race([waiting, new Promise((done) => setTimeout(() => done("still waiting its turn"), 1_000))])).toEqual(PAUSED);
+    expect(user.open.map(({ request }) => request.kind)).toEqual(["command"]);
+    expect(user.dismissed).toBe(0);
+    user.answer("allow");
+    expect(await command).toBeNull();
+  });
+
+  it("answers a dismissed browser operation though its prompt never settles", async () => {
+    bind(ROOT, "ask");
+    journal.bindings.allowBrowser(ROOT);
+    const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+    let taken = false;
+    const asked: ApprovalRequest[] = [];
+    approvals = new Approvals({
+      bindings: journal.bindings, agent: "Research assistant",
+      // A prompt that takes no notice of its signal, and never answers.
+      prompts: { approve: (request) => (asked.push(request), new Promise<ApprovalAnswer>(() => {})), confirmFreeMode: () => Promise.resolve(false) },
+      refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+    });
+    const open = approvals.admit(navigate(), never());
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    taken = true;
+    approvals.dismissBrowser();
+    expect(await Promise.race([open, new Promise((done) => setTimeout(() => done("held by its prompt"), 1_000))])).toEqual(PAUSED);
   });
 
   it("tells whoever watches of a chat's first use allowed once, and of nothing for a chat this computer did not bind", () => {

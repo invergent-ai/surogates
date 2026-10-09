@@ -226,6 +226,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
       status: state.status,
       controlOwner: state.control_owner,
       liveViewPath: state.live_view_path,
+      computer: state.computer === true,
     };
   },
 

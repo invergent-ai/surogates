@@ -37,6 +37,40 @@ interface BrowserPaneProps {
   readOnly?: boolean;
 }
 
+/** What the host is told of a browser on the user's computer, to draw its pane. */
+export interface ComputerBrowser {
+  /** False where that computer has no supported browser. */
+  available: boolean;
+  /** A chat the host only reads: its browser is not taken over or handed back from here. */
+  readOnly: boolean;
+}
+
+/**
+ * The pane of a chat whose browser is on the user's computer: its window there is the
+ * live view. *draw* is the host's, which knows where it runs; without it, where the
+ * browser is, said alone.
+ */
+export function ComputerBrowserPane({
+  available,
+  readOnly,
+  draw,
+}: ComputerBrowser & {
+  draw?: (browser: ComputerBrowser) => React.ReactNode;
+}) {
+  return (
+    <div
+      data-testid="browser-pane"
+      className="flex h-full min-h-0 flex-col items-center justify-center gap-3 bg-background p-6 text-center text-sm text-muted-foreground"
+    >
+      {draw
+        ? draw({ available, readOnly })
+        : available
+          ? "The browser is open on the chat's computer."
+          : "The chat's computer has no supported browser."}
+    </div>
+  );
+}
+
 export function BrowserPane({
   sessionId,
   state,

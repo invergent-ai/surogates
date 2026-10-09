@@ -1,6 +1,7 @@
 // Settings → Folders and permissions (spec, Section 4): each folder of this computer its chats
 // work on, in the order a chat first worked on it, and each chat on it, by its title, in its mode,
-// with the hosts its user let it reach past the package hosts, and its background processes alive in the VM.
+// with the hosts its user let it reach past the package hosts, whether it may use the browser on this
+// computer, and its background processes alive in the VM.
 
 import { randomUUID } from "node:crypto";
 
@@ -14,6 +15,7 @@ export interface ChatRow {
   title: string; // the agent's words, shown as text
   mode: Mode;
   hosts: string[]; // in the order allowed, each on every port
+  browser: boolean; // its user let its agent use the browser on this computer
   processes: Array<{ id: string; command: string }>; // the agent's words, shown as text
 }
 
@@ -51,7 +53,7 @@ export function stopOperation(root: string, id: string): Operation {
 
 /** The folders and their chats, from *bindings*; *title* names each chat, and *processes* tells what each runs. */
 export async function listFolders(
-  bindings: Pick<Bindings, "all" | "domains">,
+  bindings: Pick<Bindings, "all" | "domains" | "browsing">,
   title: (root: string) => Promise<string>,
   processes: Pick<LiveProcesses, "of">,
 ): Promise<FolderRow[]> {
@@ -63,7 +65,7 @@ export async function listFolders(
     // A mode it does not know asks, as the approvals take it.
     chats.push({
       root: binding.root, title: titles[at]!, mode: binding.mode === "free" ? "free" : "ask",
-      hosts: bindings.domains(binding.root), processes: processes.of(binding.root),
+      hosts: bindings.domains(binding.root), browser: bindings.browsing(binding.root), processes: processes.of(binding.root),
     });
     folders.set(binding.folder, chats);
   });

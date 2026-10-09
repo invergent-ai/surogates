@@ -44,7 +44,7 @@ import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
-import { desktopPrompts } from "./prompts.js";
+import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools } from "./tools.js";
@@ -97,7 +97,7 @@ let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
 // The desktop's own prompts, over the window, once it is made.
-let prompts: FolderPrompts & ApprovalPrompts;
+let prompts: FolderPrompts & ApprovalPrompts & BrowserPrompts;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
@@ -267,8 +267,10 @@ function utility<To, From>(script: string, serviceName: string, temp?: string): 
 
 const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MANAGER, "Surogate VM");
 // A browser host keeps its own temp files, the browser's and Playwright's, under *profiles*: they go
-// with the profiles, and a host that is killed leaves none in the system's temp folder.
-const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
+// with the profiles, and a host that is killed leaves none in the system's temp folder. What it stages
+// of a download is there too, and is read from nowhere else.
+const browserTemp = (profiles: string): string => join(profiles, "tmp");
+const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", browserTemp(profiles));
 
 // What the VM needs of this computer (spec, Section 11, Requirements): what it lacks, looked for
 // once the app is ready (null until then); its image's download, in a packaged app, or why there
@@ -671,6 +673,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     tools: (bindings, network, changed) => new Browsing({
       tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
+      staging: browserTemp(profilesOf(root, credential)),
       bindingOf: (bound) => bindings.get(bound),
       launch: () => {
         const browser = chosenBrowser(browserSetting.get(), findBrowsers());
@@ -1169,7 +1172,7 @@ async function signIn(agent: Agent): Promise<void> {
   }
 }
 
-// What a window asked for, a folder or Work freely: its prompts go once that window goes or its page is replaced.
+// What a window asked for, a folder, Work freely or a hand back: its prompts go once that window goes or its page is replaced.
 async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const contents = webContents.fromId(Number(window));
   const controller = new AbortController();
@@ -1197,6 +1200,14 @@ function bridge(contents: WebContents, agent: Agent): void {
     if (kept?.token === null) throw new Error(REVOKED);
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
+  };
+  // The browser is one for every chat of the agent's here, held from the chat that took it over until that chat hands it back.
+  const HELD_FROM_ANOTHER_CHAT = "The agent's browser on this computer is taken over from another chat, and is handed back there";
+  // The device, for a call about a chat's browser: refused for a chat with no folder here.
+  const browsing = async (sessionId: string): Promise<DeviceStack> => {
+    const stack = await registered();
+    if (!stack.bindings.get(sessionId)) throw new Error("This chat has no folder on this computer");
+    return stack;
   };
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => {
@@ -1227,9 +1238,67 @@ function bridge(contents: WebContents, agent: Agent): void {
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
     cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
-    getBinding: async (sessionId) => (await registered()).binder.bindingOf(sessionId),
+    getBinding: async (sessionId) => {
+      const stack = await registered();
+      const binding = stack.binder.bindingOf(sessionId);
+      return binding && { ...binding, takenOver: stack.tools.takenOver?.(sessionId) ?? false };
+    },
     // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
     revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
+    showBrowser: async (sessionId) => {
+      const stack = await browsing(sessionId);
+      if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");
+    },
+    // The user drives the agent's browser from now on, held from this chat, and the page hears the change.
+    // Another chat's take-over stands: this one does not end it.
+    takeOver: async (sessionId) => {
+      const stack = await browsing(sessionId);
+      if (!stack.takeOver(sessionId)) throw new Error(HELD_FROM_ANOTHER_CHAT);
+      contents.send("desktop:binding-changed", sessionId);
+    },
+    // Only at the desktop's own confirmation, in a prompt window of its own: its Hand back takes nothing until
+    // the prompts' input protection has passed, so a press its user began for the page answers nothing there.
+    // The page's preload asks for it only at its user's click, before they kept the browser and after: a page
+    // cannot wear its user down.
+    handBack: (sessionId, window) => preparing(window, async (signal) => {
+      const stack = await browsing(sessionId);
+      const held = stack.tools.takenOver?.(sessionId) ?? false;
+      // Nobody holds it: the agent drives it already, and nothing was handed back by anyone.
+      if (held === false) return "released";
+      // Held from another chat that is here: handed back there, and nothing is asked here.
+      if (held === "elsewhere") throw new Error(HELD_FROM_ANOTHER_CHAT);
+      // Held from this chat, which the confirmation names by its title; or from one that is gone, which can
+      // hand nothing back and is named no more: this chat's to hand back.
+      const title = held === true ? await titleSoon(sessionId) : null;
+      // The window first, where it was hidden since the click: the confirmation opens over it.
+      main?.show();
+      const asked = new AbortController();
+      handBacks.add(asked);
+      try {
+        if (!(await prompts.confirmHandBack({ agent: agent.name, gone: held !== true, title }, AbortSignal.any([signal, asked.signal])))) return false;
+        // Who holds it now, and not when the confirmation opened: it can have changed while it was up.
+        const now = stack.tools.takenOver?.(sessionId) ?? false;
+        // Whether anything was handed back: the browser may have been taken over from another chat while the
+        // confirmation was up, and is that chat's to hand back then.
+        if (!stack.handBack(sessionId)) return false;
+        handedBack(asked);
+        contents.send("desktop:binding-changed", sessionId);
+        // Which hand back it was, for the page to tell the server: only of the browser this chat held is it the
+        // one its user confirmed for this chat, which gives its agent a turn. Held from a chat that is gone,
+        // their confirmation handed back nobody's hold.
+        return now === true ? "confirmed" : "released";
+      } finally {
+        handBacks.delete(asked);
+      }
+    }),
+    openSettings: async (section) => {
+      // A project's dialog is over the window: Settings does not open over it.
+      if (projectDialog !== null && main?.settingsContents() === projectDialog) {
+        throw new Error("Surogate has a project's dialog open: close it to open Settings");
+      }
+      main?.show();
+      showSettings(section);
+    },
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -1603,6 +1672,15 @@ const menuActions = {
 
 // Why the last browser picked with Custom… was not kept, until the next choice.
 let browserFailure: string | null = null;
+// Whether Settings is asking to hand the agent's browser back: one confirmation at a time.
+let handingBack = false;
+// The hand back confirmations asked and not answered yet, from a chat's page or from Settings, and what closes
+// each: once the browser is handed back by one, the others ask about a hold that is gone.
+const handBacks = new Set<AbortController>();
+// The browser was handed back through *by*: every other confirmation is closed, and nothing is asked after it.
+const handedBack = (by: AbortController): void => {
+  for (const other of handBacks) if (other !== by) other.abort();
+};
 
 // Settings → Browser's rows: what is found here, each named with the version it says.
 async function browserState() {
@@ -1613,7 +1691,11 @@ async function browserState() {
     const version = await browserVersion(browser.executable);
     if (version) versions.set(browser.executable, version);
   }));
-  return { choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure };
+  return {
+    choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure,
+    // Held from a chat that is gone: handed back here, where no chat's own page may be left to do it in.
+    held: openStack()?.heldFromGone() ?? false,
+  };
 }
 
 /**
@@ -1724,6 +1806,22 @@ function chatTitle(root: string): Promise<string> {
   return read;
 }
 
+// How long a prompt waits to name a chat: its user asked for it with a click, and an agent slow to answer holds it no longer.
+const TITLE_MS = 2_000;
+
+/** Chat *root*'s title for a prompt that names it: null for one the agent names not, or does not name within TITLE_MS. */
+async function titleSoon(root: string): Promise<string | null> {
+  let late: NodeJS.Timeout | undefined;
+  const title = await Promise.race([
+    chatTitle(root),
+    new Promise<string>((resolve) => {
+      late = setTimeout(resolve, TITLE_MS, "A chat");
+    }),
+  ]);
+  clearTimeout(late);
+  return title === "A chat" ? null : title;
+}
+
 // The device's stack while its journal is open: a computer the agent revoked keeps its stack, closed, until it is restored.
 const openStack = (): DeviceStack | null => (kept?.token === null ? null : device?.stack ?? null);
 
@@ -1810,7 +1908,7 @@ async function confirmArchive(name: string): Promise<boolean> {
 // calls are answered on its own view only; each answers why it was refused, or null once done.
 function showProject(editing: Opened | null): void {
   const page = join(PAGES, "project.html");
-  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+  main?.openSettings(page, PAGES_PRELOAD, undefined, (contents) => {
     projectDialog = contents;
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
@@ -1890,10 +1988,13 @@ function showProject(editing: Opened | null): void {
   });
 }
 
-// Settings, over the window: its page's calls are answered on its own view only.
-function showSettings(): void {
+// Settings, over the window, on *section* when one is named: its page's calls are answered on its own view only.
+function showSettings(section?: "browser"): void {
   const page = join(PAGES, "settings.html");
-  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+  // Open already: its page is shown the section. ponytail: one that still loads does not hear it, and opens on its own.
+  const open = main?.settingsContents();
+  if (section && open && open !== projectDialog) open.send("settings:show", section);
+  main?.openSettings(page, PAGES_PRELOAD, section, (contents) => {
     // A chat named not yet is asked about again, once.
     reads.clear();
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -1911,6 +2012,41 @@ function showSettings(): void {
         throw new Error("This chat cannot reach that host");
       }
       bindings.disallowDomain(root, host);
+    });
+    // A chat's browser taken back by its user: its agent's next browser call asks its first use again. Its tabs stay.
+    // The agent's browser held from that chat stays held: taking this back hands nothing back.
+    handle("settings:take-back-browser", (root) => {
+      const bindings = openStack()?.bindings;
+      if (!bindings || typeof root !== "string" || !bindings.browsing(root)) throw new Error("This chat does not use the browser on this computer");
+      bindings.disallowBrowser(root);
+    });
+    // The agent's browser handed back from here, where it is held from a chat that is gone: such a chat has no
+    // page to hand it back in, and another chat has a pane for it only where its own browser is open. Through the
+    // same confirmation as from a chat's page, at its user's click in the desktop's own page; one at a time, and
+    // closed with Settings. Whether it was handed back.
+    handle("settings:hand-back-browser", async () => {
+      const stack = openStack();
+      const agent = agents.get();
+      if (!stack?.heldFromGone() || !agent || handingBack) return false;
+      handingBack = true;
+      const closed = new AbortController();
+      const gone = () => closed.abort();
+      contents.once("destroyed", gone);
+      handBacks.add(closed);
+      try {
+        if (!(await prompts.confirmHandBack({ agent: agent.name, gone: true, title: null }, closed.signal))) return false;
+        // Whether anything was handed back: a chat may have taken the browser over while the confirmation was up.
+        if (!stack.handBackGone()) return false;
+        handedBack(closed);
+        // Every chat's page is told: none of them holds it, and each may use it again.
+        for (const { root } of stack.bindings.all()) main?.webContents()?.send("desktop:binding-changed", root);
+        return true;
+      } finally {
+        handingBack = false;
+        handBacks.delete(closed);
+        contents.off("destroyed", gone);
+        if (!contents.isDestroyed()) contents.send("settings:changed");
+      }
     });
     // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
     // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
@@ -2070,7 +2206,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
-  handle("shell:settings", showSettings);
+  handle("shell:settings", () => showSettings());
   handle("shell:new-project", () => showProject(null));
   handle("shell:project-settings", () => {
     if (view.kind !== "project") throw new Error("No project is open");

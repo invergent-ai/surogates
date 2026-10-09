@@ -1,11 +1,12 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRequest } from "../src/binding/approvals.js";
-import type { FolderGuards } from "../src/binding/folder.js";
+import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
+import type { StagedDownload } from "../src/browser/downloads.js";
 import { Browsing } from "../src/browser/executor.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
@@ -19,7 +20,10 @@ import { FakeLinkServer } from "./fake-server.js";
 const ROOT = "66666666-6666-4666-8666-666666666666";
 // A sub-agent of the chat: its operations run in the chat's folder, as sessions of their own.
 const CHILD = "77777777-7777-4777-8777-777777777777";
+// Another chat of the agent's on this computer.
+const OTHER = "88888888-8888-4888-8888-888888888888";
 const IDENTITY = { deviceId: "d", orgId: "o", agentId: "a", userId: "u" };
+const TAKEN: Outcome = { error: { type: "paused_by_user", message: "taken over" } };
 
 // The tool layer under the binder, as far as the stack sees it.
 class Tools implements ToolLayer {
@@ -32,6 +36,11 @@ class Tools implements ToolLayer {
   changed: () => void = () => {};
   // The page each session's next browser operation acts in, as a browser here would say it.
   address?: (session: string) => Promise<string>;
+  // The chat whose user holds the agent's browser: every chat's browser operations are refused meanwhile.
+  taken: string | null = null;
+  // What an operation answers, where a test says; and what the stack gave it to save its downloads with.
+  answer: ((operation: Operation) => Outcome) | null = null;
+  save: ((download: StagedDownload, stop: AbortSignal) => Promise<string>) | null = null;
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -43,8 +52,28 @@ class Tools implements ToolLayer {
     return this.liveRoots;
   }
 
+  refusal(operation: Operation): Outcome | null {
+    return operation.kind.startsWith("browser.") && this.taken !== null ? TAKEN : null;
+  }
+
+  takeOver(root: string): boolean {
+    this.taken ??= root;
+    return this.taken === root;
+  }
+
+  handBack(root: string): boolean {
+    if (this.taken !== root) return false;
+    this.taken = null;
+    return true;
+  }
+
+  saveDownloadsWith(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void {
+    this.save = save;
+  }
+
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     this.ran.push(operation);
+    if (this.answer) return Promise.resolve(this.answer(operation));
     if (this.hold === "no") return Promise.resolve({ ok: `ran ${operation.kind}` });
     return new Promise((resolve) => {
       if (this.hold === "until-aborted") {
@@ -117,9 +146,9 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
   return device;
 }
 
-function op(id: string, kind: string, args: Record<string, unknown>, own = false, calling = ROOT): Record<string, unknown> {
+function op(id: string, kind: string, args: Record<string, unknown>, own = false, calling = ROOT, root = ROOT): Record<string, unknown> {
   return {
-    type: "op", id, session_id: ROOT, calling_session_id: calling, invocation_id: own ? "bind" : "1:c",
+    type: "op", id, session_id: root, calling_session_id: calling, invocation_id: own ? "bind" : "1:c",
     ordinal: own ? 0 : 1, kind, args, digest: `digest-${id}`,
   };
 }
@@ -160,6 +189,38 @@ describe("one agent's device", () => {
     server.send(op("script-1", "browser.evaluate", { code: "return 1;" }, false, CHILD));
     await server.until(() => results("script-1").length === 1);
     expect(asked).toMatchObject([{ kind: "browser", action: "script", page: `https://bank.example/${CHILD}` }]);
+  });
+
+  it("takes the agent's browser over through its tools, from the chat that asks first: every chat's open browser prompt dismissed and answered as its tools answer now", async () => {
+    const asked: ApprovalRequest[] = [];
+    const device = await start({
+      approvalPrompts: {
+        // Open until dismissed, when it settles with the answer that would let it through.
+        approve: (request, signal) => (asked.push(request), new Promise((resolve) => signal.addEventListener("abort", () => resolve("allow_session")))),
+        confirmFreeMode: () => Promise.resolve(false),
+      },
+    });
+    await server.until(() => statuses.includes("connected"));
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    // Another chat bound here, whose browser prompt is the one open: the browser is the same one.
+    tools.bindings?.add({ root: OTHER, nonce: "nonce-other", folder, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    server.send(op("nav-1", "browser.navigate", { url: "https://example.com/", wait_until: "load" }, false, OTHER, OTHER));
+    await vi.waitFor(() => expect(asked).toMatchObject([{ kind: "browser", action: "use", chat: { root: OTHER } }]));
+    expect(device.takeOver(ROOT)).toBe(true);
+    await server.until(() => results("nav-1").length === 1);
+    expect(results("nav-1")[0]?.outcome).toEqual(TAKEN);
+    expect(tools.ran).toEqual([]);
+    expect(tools.bindings?.browsing(OTHER)).toBe(false);
+    // Another chat's take-over does not steal it, and its hand back ends nothing.
+    expect(device.takeOver(OTHER)).toBe(false);
+    expect(device.handBack(OTHER)).toBe(false);
+    expect(tools.taken).toBe(ROOT);
+    // Handed back by the chat that holds it, and the stack says whether its tools released anything.
+    expect(device.handBack(ROOT)).toBe(true);
+    expect(tools.taken).toBeNull();
+    expect(device.handBack(ROOT)).toBe(false);
   });
 
   it("stops its link when the welcome names another identity, and says why", async () => {
@@ -289,6 +350,45 @@ describe("one agent's device", () => {
     expect(counts).toEqual([1, 0]);
   });
 
+  it("gives its tools what saves a download: through its binder, asked as a write of the chat's that a page downloaded, and made create-only on its tools", async () => {
+    const asked: ApprovalRequest[] = [];
+    const device = await start({
+      prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    await server.until(() => statuses.includes("connected"));
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    // The chat's file host, as far as a save asks it: each path its own, nothing at any, and a write that lands.
+    tools.answer = (operation) => ({ ok: operation.kind === "resolve" ? operation.args.path : null });
+    const staged = join(base, "staged");
+    writeFileSync(staged, "report");
+    const stop = new AbortController();
+    expect(await tools.save?.({ root: ROOT, session: CHILD, name: "report.txt", path: staged, user: false }, stop.signal)).toBe(
+      'The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report.txt.',
+    );
+    const key = join(folder, "Downloads", "report.txt");
+    expect(asked).toMatchObject([{ kind: "change", action: "write", path: key, bytes: 6, download: "page", chat: { root: ROOT, calling: CHILD } }]);
+    expect(tools.ran.map(({ kind, args }) => [kind, args.path ?? args.key, args.create])).toEqual([
+      ["resolve", join(folder, "Downloads"), undefined], ["stat", join(folder, "Downloads"), undefined],
+      ["resolve", key, undefined], ["stat", key, undefined], ["write", key, true],
+    ]);
+    expect(tools.ran.at(-1)?.args.data).toBe(Buffer.from("report").toString("base64"));
+    // Counted as the chat's sub-agent's work while it ran, and gone since; the staged file went too.
+    expect([device.working(), existsSync(staged)]).toEqual([0, false]);
+    // Its user's own, made while they held the browser: asked as theirs.
+    writeFileSync(staged, "theirs");
+    await tools.save?.({ root: ROOT, session: CHILD, name: "statement.pdf", path: staged, user: true }, stop.signal);
+    expect(asked.at(-1)).toMatchObject({ kind: "change", path: join(folder, "Downloads", "statement.pdf"), download: "user" });
+    // Told to stop, as when its chat is deleted: what it asks of its tools is stopped by the same, and nobody is asked.
+    stop.abort();
+    writeFileSync(staged, "late");
+    tools.ran.length = 0;
+    expect(await tools.save?.({ root: ROOT, session: CHILD, name: "late.txt", path: staged, user: false }, stop.signal)).toContain("but it was not saved");
+    expect([asked.length, tools.ran.some((ran) => ran.kind === "write"), existsSync(staged)]).toEqual([2, false, false]);
+  });
+
   it("counts a chat whose background process lives beneath the browser's layer, as the app's own stack wires it", async () => {
     const device = await start({
       tools: (bindings, network, changed) => {
@@ -297,9 +397,11 @@ describe("one agent's device", () => {
           tools,
           browser: {
             perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve(), address: () => Promise.resolve("about:blank"),
+            notComing: () => {}, pause: () => {}, show: () => Promise.resolve(false), onDownload: () => {},
           },
           bindingOf: (root) => bindings.get(root),
           launch: () => null,
+          staging: join(base, "data", "browser-profiles", "tmp"),
         });
       },
     });

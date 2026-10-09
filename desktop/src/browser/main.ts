@@ -3,7 +3,7 @@
 // the tests. The browser it launches dies with it: its pipe closes.
 
 import type { Outcome } from "../link/protocol.js";
-import type { FromBrowser, ToBrowser } from "./client.js";
+import { type FromBrowser, NEW_TAB, type ToBrowser } from "./client.js";
 import { BrowserHost } from "./host.js";
 
 // Electron's, in a utility process.
@@ -25,7 +25,8 @@ const send = (message: FromBrowser): Promise<void> => new Promise((resolve) => {
   }
 });
 
-const host = new BrowserHost();
+// Each download a page finished goes to the parent, which saves it under the chat's folder.
+const host = new BrowserHost({ downloaded: (download) => void send({ type: "download", ...download }) });
 const running = new Map<string, AbortController>();
 const answering = new Set<Promise<void>>();
 
@@ -41,14 +42,25 @@ function received(message: ToBrowser): void {
     if (running.has(message.id)) return;
     const controller = new AbortController();
     running.set(message.id, controller);
-    answer(message.id, host.perform(message.launch, message.root, message.session, message.kind, message.args, controller.signal)
+    answer(message.id, host.perform(message.launch, message.root, message.session, message.kind, message.args, controller.signal, message.id)
       .finally(() => running.delete(message.id)));
   } else if (message.type === "try") {
     answer(message.id, host.tryBrowser(message.executable), "tried");
   } else if (message.type === "address") {
-    void host.address(message.session).then((url) => send({ type: "address", id: message.id, url }));
+    void host.address(message.session, message.upload === true, typeof message.of === "string" ? message.of : undefined, message.root)
+      .then((said) => send(typeof said === "string" ? { type: "address", id: message.id, url: said } : { type: "address", id: message.id, url: NEW_TAB, ...said }));
+  } else if (message.type === "not_coming") {
+    host.notComing(message.of);
+  } else if (message.type === "pause") {
+    host.pause(message.root, message.paused);
+  } else if (message.type === "show") {
+    void host.show(message.root).then((shown) => send({ type: "shown", id: message.id, shown }));
   } else if (message.type === "cancel") {
-    running.get(message.id)?.abort();
+    // Still running: it ends cancelled. Answered already: the answer crossed this on the way, and whoever
+    // waited for it took the cancel's, so what the answer carried of what the page did is kept for the next.
+    const controller = running.get(message.id);
+    if (controller) controller.abort();
+    else host.unanswered(message.id);
   } else if (message.type === "forget") {
     void host.forget(message.root);
   } else if (message.type === "stop") {

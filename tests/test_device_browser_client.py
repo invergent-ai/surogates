@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from surogates.browser.client import KernelBrowserClient
+from surogates.browser.control import paused_by_user_result
 from surogates.devices import browser as device_browser
 from surogates.devices.browser import (
     LOCATE,
@@ -131,6 +132,19 @@ async def test_a_navigation_forgets_the_refs_and_keeps_what_the_page_did_unseen(
     assert runner.asked[-1] == ("browser.navigate", {"url": "https://example.com/next", "wait_until": "load"})
 
 
+async def test_a_navigation_says_whether_it_opened_the_sessions_tab() -> None:
+    runner = ScriptedRunner(
+        {"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}},
+        {"ok": {"url": "https://example.com/next", "title": "Next", "opened": False, "notices": []}},
+    )
+    client = DeviceBrowserClient(runner)
+
+    await client.navigate("https://example.com/")
+    assert client.opened is True
+    await client.navigate("https://example.com/next")
+    assert client.opened is False
+
+
 @pytest.mark.parametrize(("act", "answer", "said"), [
     (lambda client: client.navigate("https://example.com/"), "a page", "The computer returned an invalid navigation"),
     (lambda client: client.navigate("https://example.com/"), {"url": 1, "title": "T"}, "The computer returned an invalid navigation"),
@@ -200,6 +214,9 @@ async def test_what_the_computer_refuses_is_the_tools_result_and_its_failures_ar
          {"error": "denied", "detail": "The user did not let the agent use the browser on this computer"}),
         ({"type": "no_browser", "message": "none here"}, {"error": "no_browser", "detail": NO_BROWSER}),
         ({"type": "unsupported", "message": "unknown kind"}, {"error": "unsupported", "detail": device_browser.OLD_APP}),
+        # Its user took the browser over: the cloud's own answer while a user holds its browser.
+        ({"type": "paused_by_user", "message": "The user took over the agent's browser on this computer"},
+         json.loads(paused_by_user_result())),
     ]
     for error, result in cases:
         with pytest.raises(BrowserRefusal) as refused:
@@ -209,6 +226,17 @@ async def test_what_the_computer_refuses_is_the_tools_result_and_its_failures_ar
         await DeviceBrowserClient(ScriptedRunner(
             {"error": {"type": "browser", "message": "net::ERR_NAME_NOT_RESOLVED"}},
         )).navigate("https://nowhere.example")
+
+
+async def test_files_go_to_the_file_input_the_page_asked_for_as_keys_of_the_folder() -> None:
+    runner = ScriptedRunner({"ok": {"files": 2, "notices": ["The page asked for a file to upload."]}})
+    client = DeviceBrowserClient(runner)
+
+    assert await client.set_input_files(["/home/u/notes/a.pdf", "/home/u/notes/b.png"]) == 2
+    assert runner.asked == [("browser.set_input_files", {"paths": ["/home/u/notes/a.pdf", "/home/u/notes/b.png"]})]
+    assert client.notices == ["The page asked for a file to upload."]
+    with pytest.raises(DeviceOperationError, match="invalid upload"):
+        await DeviceBrowserClient(ScriptedRunner({"ok": {"notices": []}})).set_input_files(["/home/u/notes/a.pdf"])
 
 
 async def test_cloud_profiles_are_not_available_on_the_computer() -> None:

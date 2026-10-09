@@ -369,6 +369,127 @@ describe("applyAgentChatEvent", () => {
     expect(destroyed.messages.at(-1)?.content).toMatch(/browser closed/i);
   });
 
+  it("keeps a local-folder chat's browser as on its computer through a take-over there, and says once when that computer has no browser", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, type: string, eventId: number, data: Record<string, unknown> = {}) =>
+      applyAgentChatEvent(state, { type, eventId, data: { session_id: "s-1", computer: true, ...data } } as Parameters<typeof applyAgentChatEvent>[1]);
+    const opened = at(createInitialAgentChatState(), "browser.provisioned", 31);
+    expect(opened.browser).toEqual({ status: "live", controlOwner: null, computer: true });
+
+    // Taken over on its computer and handed back, as the desktop's pane tells the server: still the computer's.
+    const taken = at(opened, "browser.control_granted", 32, { owner_user_id: "u-1" });
+    expect(taken.browser).toEqual({ status: "user-control", controlOwner: "u-1", computer: true });
+    expect(taken.messages.at(-1)?.content).toMatch(/took control of the browser/i);
+    const returned = at(taken, "browser.control_returned", 33, { released_by: "u-1" });
+    expect(returned.browser).toEqual({ status: "live", controlOwner: null, computer: true });
+
+    const none = at(returned, "browser.unavailable", 34);
+    expect(none.browser).toEqual({ status: "unavailable", controlOwner: null, computer: true });
+    expect(none.messages.at(-1)).toMatchObject({ id: "browser-marker-34", systemKind: "browser_marker_warning" });
+    expect(none.messages.at(-1)?.content).toMatch(/no supported browser/i);
+
+    // An agent that tries the browser again and again is told each time; the chat says it once.
+    const again = at(at(none, "browser.unavailable", 35), "browser.unavailable", 36);
+    expect(again.browser).toEqual(none.browser);
+    expect(again.messages).toHaveLength(none.messages.length);
+    // Said anew once a browser was there between.
+    const gone = at(at(again, "browser.provisioned", 37), "browser.unavailable", 38);
+    expect(gone.messages.at(-1)).toMatchObject({ id: "browser-marker-38", systemKind: "browser_marker_warning" });
+  });
+
+  it("counts the tabs of a chat and of its sub-agents on its computer: one that closes leaves the others' browser showing, and it goes with the last", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, type: string, eventId: number, session: string) =>
+      applyAgentChatEvent(state, { type, eventId, data: { session_id: session, computer: true } } as Parameters<typeof applyAgentChatEvent>[1]);
+    const said = (state: ReturnType<typeof createInitialAgentChatState>) => state.messages.map((message) => message.content);
+    const open = { status: "live", controlOwner: null, computer: true };
+
+    // A sub-agent's tab, as the server writes it to its root chat's log: the chat's browser is open there.
+    const sub = at(createInitialAgentChatState(), "browser.provisioned", 41, "child-1");
+    expect(sub.browser).toEqual(open);
+    expect(said(sub)).toEqual(["Browser ready."]);
+    // The chat's own tab beside it: nothing the chat shows changes.
+    const both = at(sub, "browser.provisioned", 42, "s-1");
+    expect(both.browser).toEqual(open);
+    expect(said(both)).toEqual(["Browser ready."]);
+
+    // The sub-agent's closed: the chat's own is open still, and the chat says nothing closed.
+    const own = at(both, "browser.destroyed", 43, "child-1");
+    expect(own.browser).toEqual(open);
+    expect(said(own)).toEqual(["Browser ready."]);
+    // Told of that close again: still the chat's own tab.
+    expect(at(own, "browser.destroyed", 44, "child-1").browser).toEqual(open);
+    // The last tab closed: the browser goes, and the chat says so.
+    const none = at(own, "browser.destroyed", 45, "s-1");
+    expect(none.browser).toBeNull();
+    expect(said(none)).toEqual(["Browser ready.", "Browser closed."]);
+
+    // The chat's own closed first: the sub-agent's keeps the browser there.
+    const theirs = at(both, "browser.destroyed", 46, "s-1");
+    expect(theirs.browser).toEqual(open);
+    expect(at(theirs, "browser.destroyed", 47, "child-1").browser).toBeNull();
+
+    // No supported browser there, found by a sub-agent's call: its own tab goes, and the chat's own is
+    // the one left, told of again or not.
+    const again = at(at(both, "browser.unavailable", 48, "child-1"), "browser.provisioned", 49, "s-1");
+    expect(again.browser).toEqual(open);
+    expect(at(again, "browser.destroyed", 50, "s-1").browser).toBeNull();
+
+    // The server's state, asked before it had the first tab, left the chat with no browser: the next tab
+    // shows it again, as a tab beside another, with no new line.
+    const shown = at({ ...sub, browser: null }, "browser.provisioned", 51, "s-1");
+    expect(shown.browser).toEqual(open);
+    expect(said(shown)).toEqual(["Browser ready."]);
+  });
+
+  it("takes away only its own session's tab when a call finds no supported browser on the chat's computer, and says so once no tab is left", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, type: string, eventId: number, session: string) =>
+      applyAgentChatEvent(state, { type, eventId, data: { session_id: session, computer: true } } as Parameters<typeof applyAgentChatEvent>[1]);
+    const said = (state: ReturnType<typeof createInitialAgentChatState>) => state.messages.map((message) => message.content);
+    const open = { status: "live", controlOwner: null, computer: true };
+    const none = { status: "unavailable", controlOwner: null, computer: true };
+    const both = at(at(createInitialAgentChatState(), "browser.provisioned", 71, "s-1"), "browser.provisioned", 72, "child-1");
+
+    // A sub-agent's call found none while the chat's own tab is open: the chat's browser is as it was,
+    // as the server's state answers it, and the chat says nothing.
+    const own = at(both, "browser.unavailable", 73, "child-1");
+    expect(own.browser).toEqual(open);
+    expect(own.browserTabs).toEqual(["s-1"]);
+    expect(said(own)).toEqual(["Browser ready."]);
+    // The chat's own call takes its own tab the same way, and leaves the sub-agent's.
+    const theirs = at(both, "browser.unavailable", 74, "s-1");
+    expect(theirs.browser).toEqual(open);
+    expect(theirs.browserTabs).toEqual(["child-1"]);
+    // One with no tab of its own open takes none.
+    const neither = at(both, "browser.unavailable", 75, "child-2");
+    expect(neither.browser).toEqual(open);
+    expect(neither.browserTabs).toEqual(["s-1", "child-1"]);
+    // The last tab's own session finds none: no tab is left, and the chat says there is no browser.
+    const gone = at(own, "browser.unavailable", 76, "s-1");
+    expect(gone.browser).toEqual(none);
+    expect(gone.browserTabs).toEqual([]);
+    expect(said(gone)).toEqual(["Browser ready.", "No supported browser on the chat's computer."]);
+  });
+
+  it("says that a chat's computer has no supported browser though the server's state said so first, and once", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, eventId: number) =>
+      applyAgentChatEvent(state, { type: "browser.unavailable", eventId, data: { session_id: "s-1", computer: true } });
+    const said = (state: ReturnType<typeof createInitialAgentChatState>) => state.messages.map((message) => message.content);
+    const none = { status: "unavailable" as const, controlOwner: null, computer: true };
+
+    // At a reload the server's state can answer before the chat's own event is replayed: the chat has said nothing yet.
+    const first = at({ ...createInitialAgentChatState(), browser: none }, 61);
+    expect(first.browser).toEqual(none);
+    expect(said(first)).toEqual(["No supported browser on the chat's computer."]);
+    // The agent's next tries add nothing: it is what the chat said last of its browser.
+    expect(said(at(at(first, 62), 63))).toEqual(said(first));
+    // Nor after the conversation went on: nothing of its browser was said between.
+    const talked = applyAgentChatEvent(first, { type: "user.message", eventId: 64, data: { content: "Try again" } });
+    expect(said(at(talked, 65))).toEqual(["No supported browser on the chat's computer.", "Try again"]);
+    // A state that lost it is told again, with no second line.
+    const told = at({ ...first, browser: null }, 66);
+    expect(told.browser).toEqual(none);
+    expect(said(told)).toEqual(said(first));
+  });
+
   it("tracks whether the session waits for its computer", () => {
     const initial = createInitialAgentChatState();
     expect(initial.deviceWait).toBeNull();

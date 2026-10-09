@@ -9,6 +9,7 @@ import re
 from uuid import UUID
 
 from surogates.devices.binding import device_of
+from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
     _attachments_note_from_data,
@@ -119,6 +120,20 @@ WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORK
 #: reports, and the threads the user started (``worker.spawned`` with
 #: ``started_by``).  A spawn of its own is its own tool call's result.
 WORKER_NEWS_TYPES = WORKER_REPORT_TYPES | {EventType.WORKER_SPAWNED.value}
+
+
+#: What the agent of a chat on its user's computer reads once they hand back
+#: the browser they had taken over, and confirm it there: the resume that
+#: hand back gave the chat.  The harness's words, the same for every hand
+#: back, so the live loop and replay produce the same bytes; never something
+#: the user typed.
+BROWSER_HANDED_BACK = (
+    "[The user has handed the browser back. The browser tools work again: go on with what you were "
+    "doing when they took it over. They may have changed the page meanwhile, so read it again before "
+    "you act on it.]"
+)
+#: The events a session reads as news at its next model request.
+NEWS_TYPES = WORKER_NEWS_TYPES | {EventType.SESSION_RESUME.value}
 
 
 #: The lines a thread's own words sit between in its report.  Only the
@@ -304,18 +319,42 @@ def worker_news(event_type: str, data: dict) -> dict | None:
     return {"role": "user", "content": f"[Thread {title} ({data.get('worker_id', '?')}) started by the user]"}
 
 
+def news(event) -> dict | None:
+    """The message a session reads an event as at its next model request, or
+    None for an event that is no news: a worker's news to its coordinator,
+    and, in a chat on its user's computer, the resume a hand back of the
+    browser gave it."""
+    if event.type in WORKER_NEWS_TYPES:
+        return worker_news(event.type, event.data)
+    if resumes_the_agent(event):
+        return {"role": "user", "content": BROWSER_HANDED_BACK}
+    return None
+
+
+def held_news(held: list[dict], event) -> list[dict]:
+    """*held*, the news waiting for a session's next model request, once
+    *event* is in its log after it.
+
+    News is added to it.  And where the user of a chat on their computer
+    takes its browser over again, a hand back still waiting is news no
+    more: read then, it would say the browser tools work while they do not.
+    """
+    if (note := news(event)) is not None:
+        return [*held, note]
+    if takes_the_browser_over(event):
+        return [note for note in held if note["content"] != BROWSER_HANDED_BACK]
+    return held
+
+
 def unread_reports(events: list) -> list[dict]:
-    """The worker reports no model request has read: those after the log's
-    last ``llm.request``.  Replay leaves them out, and the wake adds them
-    right before its first request, after its compaction, its command and
-    its board update, which is where replay puts them once that request is
-    in the log."""
+    """The news no model request has read, worker reports and hand backs of
+    the browser alike: those after the log's last ``llm.request``.  Replay
+    leaves them out, and the wake adds them right before its first request,
+    after its compaction, its command and its board update, which is where
+    replay puts them once that request is in the log."""
     held: list[dict] = []
     for event in events:
-        if event.type == EventType.LLM_REQUEST.value:
-            held = []
-        elif event.type in WORKER_NEWS_TYPES and (note := worker_news(event.type, event.data)) is not None:
-            held.append(note)
+        held = [] if event.type == EventType.LLM_REQUEST.value else held_news(held, event)
     return held
 
 
@@ -546,7 +585,16 @@ class ContextReplayMixin:
                 if note is not None:
                     held_reports.append(note)
 
-            elif etype == EventType.BROWSER_DESTROYED.value:
+            # The resume a hand back of the browser gave the chat is read the
+            # same way: at the next request, on its own, unless its user took
+            # the browser over again first.  The hand back's own event, as the
+            # take-over's, is for the pane.
+            elif resumes_the_agent(event) or takes_the_browser_over(event):
+                held_reports = held_news(held_reports, event)
+
+            # A sub-agent's tab on the user's computer is in this log for the
+            # chat's pane alone: this session's own tab is as it was.
+            elif etype == EventType.BROWSER_DESTROYED.value and not of_a_sub_agent(event):
                 # Without this the close is a UI-only event: the model keeps
                 # the screenshots and page text it already has, and its next
                 # browser call quietly provisions a fresh blank one. Nothing

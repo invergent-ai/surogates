@@ -22,6 +22,12 @@ page's own JavaScript (browser.evaluate), which runs in the page:
                        labels [{label, x, y}] drawn over the page       {"transfer": {size, sha256}}
                        for the shot                                     over MAX_PAYLOAD_BYTES
   browser.close                                                        {closed}
+  browser.set_input_files  paths [key, ...]: files of the chat's       {files: how many, notices}
+                       folder, as its own operations name them; given
+                       to the file input the computer's user was asked
+                       about (in a chat that asks every time: the one
+                       its prompt named, or none if the page changed
+                       since), else to the one the page last asked for
 
 The scripts browser.observe takes, each a page function shipped with the app:
 
@@ -33,7 +39,14 @@ The scripts browser.observe takes, each a page function shipped with the app:
                                         or {covered: "<tag#id.class>"}
 
 notices are what the page did that the agent could not see happen, such as a
-download the computer did not keep.  Errors:
+file it asked for.  opened is whether the navigation is the first to
+answer in the session's tab: its first tab, or one after its last closed, whether
+this navigation made the tab or an earlier operation did.  The session's browser pane
+hears of it (browser.provisioned), of a close that closed one (browser.destroyed) and
+of a computer with no supported browser (browser.unavailable), each with
+``computer: true`` and the session whose tab it is.  A sub-agent's are written to its
+root chat's log too: the chat's pane shows its browser while a tab of its own or of
+a sub-agent's is open.  Errors:
 
   {"type": "browser", "message"}     the page or the browser failed: a RuntimeError,
                                      which the handlers report as their own failure
@@ -41,6 +54,9 @@ download the computer did not keep.  Errors:
   {"type": "no_browser", "message"}  no supported browser on this computer
   {"type": "unsupported", ...}       an app that has no browser yet
   {"type": "revoked", "message"}     the computer's access ended
+  {"type": "paused_by_user", ...}    its user took the browser over, from one chat and for
+                                     every chat of the agent's there, until they hand it
+                                     back in the desktop's own confirmation
   any other type                     DeviceOperationError(message), which the handlers
                                      report as their own failure too
 
@@ -55,17 +71,24 @@ from __future__ import annotations
 import base64
 import functools
 import json
+import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Self
+from uuid import UUID
 
 from surogates.browser.client import BrowserClientBase
+from surogates.browser.control import BROWSER_HAND_BACK, paused_by_user_result
+from surogates.devices.binding import is_binding_root
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
     DeviceOperationError,
     OperationRunner,
 )
+from surogates.session.events import EventType
+
+logger = logging.getLogger(__name__)
 
 SNAPSHOT = "snapshot@1"
 LOCATE = "locate@1"
@@ -88,16 +111,88 @@ class BrowserRefusal(Exception):
     def __init__(self, result: str) -> None:
         super().__init__(result)
         self.result = result
+        self.error = json.loads(result).get("error")
+
+
+async def tell_pane(
+    session_store: Any, session_id: Any, event: EventType, session_config: dict[str, Any] | None = None,
+) -> None:
+    """Tell the session's browser pane of its browser on the user's computer.
+
+    A sub-agent's tab is in its chat's browser: its root chat's log is written the same event, which
+    names the sub-agent, as a sub-agent's artifacts reach its parent's thread
+    (surogates.tools.builtin.delegate).  The chat's pane counts a tab for each session it is told of.
+
+    The browser call is answered whether or not a pane hears: what it did on the computer is done.
+    """
+    if session_store is None or session_id is None:
+        return
+    logs = [session_id]
+    if not is_binding_root(session_id, session_config):
+        # As the server stamped it when the session was made under its chat, never from tool input.
+        logs.append((session_config or {})["sandbox_root_session_id"])
+    for log in logs:
+        try:
+            await session_store.emit_event(UUID(str(log)), event, {"session_id": str(session_id), "computer": True})
+        except Exception:
+            logger.warning(
+                "Could not tell the browser pane of session %s of %s of session %s",
+                log, event.value, session_id, exc_info=True,
+            )
+
+
+def of_a_sub_agent(event: Any) -> bool:
+    """Whether a browser event in a session's log names another session: a sub-agent's tab, written to
+    its root chat's log for the chat's pane.  One with no data names none."""
+    named = (event.data or {}).get("session_id")
+    return named is not None and str(named) != str(event.session_id)
+
+
+def _of(event: Any, kind: EventType) -> dict[str, Any] | None:
+    """What *event* says when it is of *kind*; None for any other."""
+    if str(getattr(event.type, "value", event.type)) != kind.value:
+        return None
+    return getattr(event, "data", None) or {}
+
+
+def resumes_the_agent(event: Any) -> bool:
+    """Whether an event is the resume a hand back gives a chat on its user's computer: its user
+    confirmed the hand back there, and the control route gave the chat's agent a turn for it.  The
+    agent reads it as the harness's note that the browser is handed back."""
+    said = _of(event, EventType.SESSION_RESUME)
+    return said is not None and said.get("source") == BROWSER_HAND_BACK
+
+
+def takes_the_browser_over(event: Any) -> bool:
+    """Whether an event tells a chat on its user's computer that its user took its browser over."""
+    said = _of(event, EventType.BROWSER_CONTROL_GRANTED)
+    return said is not None and said.get("computer") is True
+
+
+def for_the_pane_alone(event: Any) -> bool:
+    """Whether an event is a hand back of the browser on the user's computer: told for the chat's
+    pane, as the take-over was, and no work for anyone, whoever made it and whatever it gave.  The
+    cloud's browser handed back names no computer, and is the session's wake as it was."""
+    said = _of(event, EventType.BROWSER_CONTROL_RETURNED)
+    return said is not None and said.get("computer") is True
 
 
 def answering_refusals(handler: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
-    """A browser tool's handler that answers the computer's refusals as its result."""
+    """A browser tool's handler that answers the computer's refusals as its result.
+
+    A computer with no supported browser is said in the session's browser pane too.
+    """
 
     @functools.wraps(handler)
     async def answered(arguments: dict[str, Any], **kwargs: Any) -> str:
         try:
             return await handler(arguments, **kwargs)
         except BrowserRefusal as refusal:
+            if refusal.error == "no_browser":
+                await tell_pane(
+                    kwargs.get("session_store"), kwargs.get("session_id"), EventType.BROWSER_UNAVAILABLE,
+                    kwargs.get("session_config"),
+                )
             return refusal.result
 
     return answered
@@ -149,6 +244,8 @@ class DeviceBrowserClient(BrowserClientBase):
         self._runner = runner
         # What the page did that the agent could not see happen, in the order the computer said.
         self.notices: list[str] = []
+        # Whether the last navigation opened the session's tab on the computer.
+        self.opened = False
 
     async def __aenter__(self) -> Self:
         return self
@@ -164,6 +261,7 @@ class DeviceBrowserClient(BrowserClientBase):
         self._invalidate_snapshot_cache()
         if not isinstance(value, dict) or not all(isinstance(value.get(key, ""), str) for key in ("url", "title")):
             raise DeviceOperationError("The computer returned an invalid navigation")
+        self.opened = value.get("opened") is True
         return {"url": value.get("url", url), "title": value.get("title", "")}
 
     async def evaluate(self, code: str) -> Any:
@@ -259,6 +357,19 @@ class DeviceBrowserClient(BrowserClientBase):
             result["annotations"] = annotations
         return result
 
+    async def set_input_files(self, keys: list[str]) -> int:
+        """Give the files at *keys* of the chat's folder to a file input of the page: how many it took.
+
+        The computer reads each through the chat's file host, as any read of the folder. Which input:
+        in a chat that asks every time, the one the computer's user was asked about, named in the
+        prompt by its own frame's site, and no other, so a page that changed since is given nothing;
+        in a chat that works freely, the one the page last asked for.
+        """
+        value = await self._call("browser.set_input_files", paths=list(keys))
+        if not isinstance(value, dict) or not _whole(value.get("files")):
+            raise DeviceOperationError("The computer returned an invalid upload")
+        return int(value["files"])
+
     async def close_tab(self) -> bool:
         """Close this session's tab and the popups it opened; whether there was one."""
         value = await self._call("browser.close")
@@ -313,6 +424,8 @@ class DeviceBrowserClient(BrowserClientBase):
                 raise BrowserRefusal(json.dumps({"error": "unsupported", "detail": OLD_APP}))
             if refused == "revoked":
                 raise BrowserRefusal(json.dumps({"error": "revoked", "detail": message}))
+            if refused == "paused_by_user":
+                raise BrowserRefusal(paused_by_user_result())
             raise DeviceOperationError(message)
         if "ok" not in outcome:
             raise DeviceOperationError(f"The computer returned no result for {kind}")

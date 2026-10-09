@@ -423,6 +423,46 @@ describe("write", () => {
     expect(readdirSync(join(folder, "new", "deep"))).toEqual(["n.txt"]);
   });
 
+  it("makes a file only where nothing is when told to create, never replacing or writing through what is there, and leaves none it could not write whole", async () => {
+    const key = `${folder}/Downloads/report.txt`;
+    expect(await run("write", { key, data: b64("first"), create: true })).toEqual({ ok: null });
+    // Opened create-only, under its own name: the look and the making are one act, and nothing is renamed over a file made meanwhile.
+    expect(opens.made.at(-1)).toEqual({ path: key, flags: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW });
+    expect(readdirSync(join(folder, "Downloads"))).toEqual(["report.txt"]);
+    // A file there, or a folder: left as it is.
+    const exists = (at: string) => ({ error: { type: "os", code: "EEXIST", message: `File exists: '${at}'` } });
+    expect(await run("write", { key, data: b64("second"), create: true })).toEqual(exists(key));
+    expect(await run("write", { key: `${folder}/sub`, data: b64("x"), create: true })).toEqual(exists(`${folder}/sub`));
+    expect(readFileSync(key, "utf8")).toBe("first");
+    // A link there, to a file of the folder, to one outside it, or to nothing: never written through.
+    symlinkSync(join(base, "outside", "o.txt"), join(folder, "to-outside"));
+    symlinkSync(join(folder, "nowhere"), join(folder, "to-nothing"));
+    for (const link of ["link-in", "to-outside", "to-nothing"]) {
+      expect(await run("write", { key: `${folder}/${link}`, data: b64("x"), create: true }), link).toMatchObject({ error: { type: "sandbox" } });
+    }
+    expect([readFileSync(join(folder, "a.txt"), "utf8"), readFileSync(join(base, "outside", "o.txt"), "utf8"), readdirSync(folder).includes("nowhere")])
+      .toEqual(["alpha\n", "outside\n", false]);
+    // A protected name, as for any write.
+    expect(await run("write", { key: `${folder}/.git/config`, data: b64("x"), create: true })).toMatchObject({ error: { type: "sandbox" } });
+    // Told in any word but true or false, it is refused: none is taken for a write that may replace what is there.
+    for (const word of [1, 0, "true", "yes", "", {}, [], null]) {
+      expect(await run("write", { key, data: b64("replaced"), create: word }), JSON.stringify(word)).toEqual({
+        error: { type: "value", message: "'create' must be true or false" },
+      });
+    }
+    expect(readFileSync(key, "utf8")).toBe("first");
+    // Told false, it is the write any tool makes.
+    expect(await run("write", { key: `${folder}/plain.txt`, data: b64("one"), create: false })).toEqual({ ok: null });
+    expect(await run("write", { key: `${folder}/plain.txt`, data: b64("two"), create: false })).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "plain.txt"), "utf8")).toBe("two");
+    // Out of room part-way: what it made goes, and the name is free again.
+    meanwhile.run = () => {
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", errno: -28, syscall: "write" });
+    };
+    expect(await run("write", { key: `${folder}/Downloads/big.bin`, data: b64("x"), create: true })).toMatchObject({ error: { type: "os", code: "ENOSPC" } });
+    expect(readdirSync(join(folder, "Downloads"))).toEqual(["report.txt"]);
+  });
+
   it("replaces a file and keeps its mode", async () => {
     writeFileSync(join(folder, "run.sh"), "#!/bin/sh\n");
     chmodSync(join(folder, "run.sh"), 0o755);
@@ -558,6 +598,12 @@ describe("write", () => {
     expect(await run("write", { key: `${folder}/x.txt`, data: big })).toEqual({
       error: { type: "os", code: "EFBIG", message: WRITE_TOO_LARGE },
     });
+    expect(readdirSync(folder)).not.toContain("x.txt");
+    // The same for one told to create: nothing is made of data over a write's most, or of what is not base64.
+    expect(await run("write", { key: `${folder}/x.txt`, data: big, create: true })).toEqual({
+      error: { type: "os", code: "EFBIG", message: WRITE_TOO_LARGE },
+    });
+    expect(await run("write", { key: `${folder}/x.txt`, data: "@@", create: true })).toMatchObject({ error: { type: "value" } });
     expect(readdirSync(folder)).not.toContain("x.txt");
   });
 });

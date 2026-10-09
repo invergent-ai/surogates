@@ -200,10 +200,14 @@ async function closed(page: Page): Promise<void> {
   if (!page.isClosed()) await page.waitForEvent("close", { timeout: 5_000 });
 }
 
+/** Whether *page*'s prompt holds its buttons back: within its input protection, of its showing or of the last key or press. */
+export const heldBack = (page: Page): Promise<boolean> =>
+  page.$eval("#prompt-buttons", (row) => row.children.length === 0 || (row as HTMLElement).dataset.held !== "false");
+
 /** Press *button* on *page*'s prompt, once its input protection lets it, and wait for the prompt to close. */
 export async function press(page: Page, button: string): Promise<void> {
   const selector = `#prompt-buttons button[data-id="${button}"]`;
-  await expect.poll(() => page.getAttribute(selector, "aria-disabled")).not.toBe("true");
+  await expect.poll(() => heldBack(page)).toBe(false);
   // The window can close before the click is acknowledged: that it closed is what tells it answered.
   await page.click(selector, { noWaitAfter: true }).catch(() => {});
   await closed(page);
@@ -214,10 +218,12 @@ export const promptsShown = (shell: ElectronApplication) => shell.evaluate(({ Br
   BrowserWindow.getAllWindows().filter((window) => window.isVisible() && window.webContents.getURL().endsWith("/prompt.html")).length);
 
 /**
- * Press *key* on *page*'s prompt, which answers it: its window closes before the key comes up,
- * and can close before the key's press is acknowledged. That it closed is what tells it answered.
+ * Press *key* on *page*'s prompt, once its input protection lets it, which answers it: its window closes
+ * before the key comes up, and can close before the key's press is acknowledged. That it closed is what
+ * tells it answered.
  */
 export async function key(page: Page, name: string): Promise<void> {
+  await expect.poll(() => heldBack(page)).toBe(false);
   await page.keyboard.down(name).catch(() => {});
   await page.keyboard.up(name).catch(() => {});
   await closed(page);

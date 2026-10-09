@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { useProjectThreads } from "./components/chat/use-project-threads";
-import { BrowserPane } from "./components/browser/browser-pane";
+import {
+  BrowserPane,
+  type ComputerBrowser,
+  ComputerBrowserPane,
+} from "./components/browser/browser-pane";
 import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
 import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
@@ -108,6 +112,14 @@ export interface AgentChatProps {
    * folder of the user's computer. Omitted, nothing is shown there.
    */
   composerFooter?: React.ReactNode;
+  /**
+   * The browser pane of a chat whose browser is on the user's computer, as the
+   * host draws it: where it is, and what the host can do with it there.
+   * *available* is false where that computer has no supported browser, and
+   * *readOnly* is true in a chat the host only reads. Omitted, the pane says
+   * where the browser is.
+   */
+  computerBrowser?: (browser: ComputerBrowser) => React.ReactNode;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -153,6 +165,7 @@ export function AgentChat({
   onOpenIntegrations,
   onOpenBilling,
   composerFooter,
+  computerBrowser,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // What the drawer shows — separate from the tree selection above, because
@@ -258,6 +271,8 @@ export function AgentChat({
   const browserAvailable =
     browserState !== null && browserState.status !== "closed" && !!sessionId;
   const browserVisible = browserAvailable && openPane === "browser";
+  // On the user's computer: its window is the live view, and the cloud has nothing to preview.
+  const browserOnComputer = browserState?.computer === true;
   const workspaceAvailable = !!sessionId;
   // The file preview shares the browser pane's slot and geometry: a file is
   // a document to read, not a strip to squint at inside the accordion.
@@ -270,7 +285,7 @@ export function AgentChat({
   const browserPreview = useBrowserPreview({
     adapter,
     sessionId,
-    enabled: browserAvailable,
+    enabled: browserAvailable && !browserOnComputer,
   });
   // Session state says a browser exists; the preview says whether it really
   // does. Waiting for a confirmed yes rather than showing on "not yet known":
@@ -463,9 +478,13 @@ export function AgentChat({
                 // A chat the host only reads offers its browser no card: the card is the way to take it over.
                 browser: browserRunning && !disabled
                   ? {
-                      subtitle: browserState?.controlOwner
-                        ? `${browserState.controlOwner} has control`
-                        : undefined,
+                      subtitle: browserOnComputer
+                        ? browserState?.status === "unavailable"
+                          ? "No supported browser on its computer"
+                          : "On the chat's computer"
+                        : browserState?.controlOwner
+                          ? `${browserState.controlOwner} has control`
+                          : undefined,
                       thumbnail: browserPreview,
                       // Show and hide on the same card, like the Files
                       // accordion header and the composer's Tools item.
@@ -530,13 +549,21 @@ export function AgentChat({
                   data-mobile-view={activeMobilePane}
                   className="min-h-0 h-full w-full overflow-hidden"
                 >
-                  <BrowserPane
-                    sessionId={sessionId}
-                    state={browserState}
-                    adapter={adapter}
-                    onClose={() => setOpenPane(null)}
-                    readOnly={disabled === true}
-                  />
+                  {browserOnComputer ? (
+                    <ComputerBrowserPane
+                      available={browserState.status !== "unavailable"}
+                      readOnly={disabled === true}
+                      draw={computerBrowser}
+                    />
+                  ) : (
+                    <BrowserPane
+                      sessionId={sessionId}
+                      state={browserState}
+                      adapter={adapter}
+                      onClose={() => setOpenPane(null)}
+                      readOnly={disabled === true}
+                    />
+                  )}
                 </div>
               )}
               {filePreviewVisible && sessionId && previewPath && (
