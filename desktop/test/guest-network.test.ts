@@ -197,19 +197,19 @@ describe("the agent's network", () => {
     await vi.waitFor(async () => expect(typeof (await bring(ROOT, MAX_INBOUND)).handed).toBe("object"));
     expect(await network.arrival(ROOT, id(MAX_INBOUND + 1))).toBe("EMFILE");
 
-    // The other way: its commands at their bound, each waiting on its user's answer.
+    // The other way, with the browser's still at their bound: the root's commands have every one of their own, each
+    // waiting on its user's answer.
     answer = () => new Promise(() => {});
     asked = [];
     for (let port = 1; port <= MAX_TUNNELS; port += 1) {
-      const socket = connect(network.path(OTHER));
+      const socket = connect(network.path(ROOT));
       socket.on("error", () => {});
       socket.write(`echo.example:${port}\n`);
     }
     await vi.waitFor(() => expect(asked).toHaveLength(MAX_TUNNELS), { timeout: 5_000 });
-    expect(typeof (await bring(OTHER, 1)).handed).toBe("object");
-    // One more of its commands' is closed unheard, as before.
+    // One more of its commands' is closed unheard, as before; a place the browser's left is still the browser's.
     const heard = await new Promise<string | null>((done) => {
-      const socket = connect(network.path(OTHER));
+      const socket = connect(network.path(ROOT));
       let said = "";
       socket.on("error", () => {});
       socket.on("data", (chunk: Buffer) => {
@@ -220,6 +220,10 @@ describe("the agent's network", () => {
       socket.write("echo.example:257\n");
     });
     expect([heard, asked.length]).toEqual(["", MAX_TUNNELS]);
+    const second = held[1];
+    if (typeof second?.handed !== "object") throw new Error("not handed over");
+    second.handed.destroy();
+    await vi.waitFor(async () => expect(typeof (await bring(ROOT, MAX_INBOUND + 2)).handed).toBe("object"));
   });
 
   it("answers what the host proxy refuses with its status and reason, and ends the connection", async () => {

@@ -498,6 +498,12 @@ describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
     expect(dials.map(({ id }) => id)).toEqual(awaited.map(([, id]) => id));
     expect(awaited.map(([root]) => root)).toEqual(["root-2", "root-2"]);
     expect(dials.every(({ id }) => /^[0-9a-f]{32}$/.test(id)) && dials[0]?.id !== dials[1]?.id).toBe(true);
+    // A root whose runner has gone has no sandbox either: nothing is awaited for it.
+    own.at(-1)?.kill("SIGKILL");
+    await until(async () => {
+      const before = awaited.length;
+      return (await reaching.reach("root-2", 3000)) === "sandbox" && awaited.length === before;
+    });
     // Without the agent's network, as in a test, there is nothing to bring a connection.
     expect(await roots.reach("root-1", 3000)).toBe("sandbox");
   });

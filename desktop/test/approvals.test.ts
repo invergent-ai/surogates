@@ -1075,6 +1075,9 @@ describe("the browser on this computer", () => {
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
       approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
+      // Nor does one whose answer is no yes.
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => Promise.resolve("yes" as unknown as boolean) });
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
       // Not even for the navigation, in a chat that asks every time.
       expect([user.asked, probed]).toEqual([[], [[ROOT, 8000]]]);
     });

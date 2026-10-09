@@ -118,6 +118,13 @@ describe("the agent's door for connections into a root", () => {
     expect(socket.destroyed).toBe(true);
   });
 
+  it("ends the root's connections when the port itself goes, as with the host's end of it", async () => {
+    for (const authority of ["127.0.0.1:3000", "[::1]:3000"]) expect((await into(authority)).status).toBe(200);
+    await vi.waitFor(() => expect(taken).toHaveLength(2));
+    host.destroy();
+    await vi.waitFor(() => expect(taken.every((socket) => socket.destroyed)).toBe(true));
+  });
+
   it("ends the root's connection when the host resets a stream whose answer is still on its way, with a code or with none", async () => {
     // A server that answers without end, as a download does: the stream holds bytes the host has not read.
     const endless = createServer((socket) => {

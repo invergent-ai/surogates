@@ -15,6 +15,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { Inbound } from "../src/guest/inbound.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
+import { Carrier } from "../src/vm/inbound.js";
 import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
   type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
@@ -642,7 +643,8 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     const manager = new VmManager(options(), (...args) => (boots += 1, boot(...args)));
     expect(await manager.listening("root-1", 3000)).toBe(false);
     expect(boots).toBe(0);
-    // Root 2 keeps the guest: root 1, torn down, is in it no more.
+    // Every root listens on 3000 here. Root 2 keeps the guest: root 1, torn down, is in it no more.
+    reach = (root, to) => (reached.push([root, to]), to === 3000 ? dial() : Promise.resolve("ECONNREFUSED"));
     await run(manager);
     await run(manager, "root-2");
     await manager.teardown("root-1");
@@ -650,6 +652,14 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     // Nor one the guest never heard of, whatever it is called.
     expect(await manager.listening("root-3", 3000)).toBe(false);
     expect([reached, boots]).toEqual([[], 1]);
+    // Nor one whose runner the guest lost, until an operation of the chat's sets it up again.
+    expect(await manager.listening("root-2", 3000)).toBe(true);
+    agent?.write(`${JSON.stringify({ type: "lost", root: "root-2" })}\n`);
+    await vi.waitFor(async () => expect(await manager.listening("root-2", 3000)).toBe(false));
+    const before = reached.length;
+    expect([await manager.listening("root-2", 3000), reached.length]).toEqual([false, before]);
+    await run(manager, "root-2");
+    expect([await manager.listening("root-2", 3000), boots]).toEqual([true, 1]);
     await manager.stop();
   });
 
@@ -675,6 +685,22 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     await vi.waitFor(() => expect(taken).toHaveLength(1));
     await gone();
     await manager.stop();
+  });
+
+  it("passes on why the guest took no connection only when it is a reason its agent gives, and that it did not answer in time or is gone", async () => {
+    const [ours, guests] = duplexPair();
+    const answers: Array<Socket | string> = ["ECONNREFUSED", "sandbox", "EMFILE", "403 denied\r\nx", "econnrefused", "A".repeat(17), ""];
+    const stalled = new Promise<string>(() => {});
+    new Inbound(guests, () => Promise.resolve(answers.shift() ?? stalled));
+    const carrier = new Carrier(ours, 200);
+    const said: string[] = [];
+    for (let n = answers.length; n > 0; n -= 1) said.push(String(await carrier.open("root-1", 3000)));
+    expect(said).toEqual(["ECONNREFUSED", "sandbox", "EMFILE", "unreachable", "unreachable", "unreachable", "unreachable"]);
+    // A root that is none, or a port that is none, is the agent's to refuse: asked as they are, and answered in its words.
+    expect([await carrier.open("../root", 3000), await carrier.open("root-1", 0)]).toEqual(["unreachable", "unreachable"]);
+    expect(await carrier.open("root-1", 3000)).toBe("ETIMEDOUT");
+    carrier.close();
+    expect(await carrier.open("root-1", 3000)).toBe("sandbox");
   });
 
   it("answers that nothing listens when the guest goes while it is asked", async () => {
