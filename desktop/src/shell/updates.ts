@@ -335,7 +335,14 @@ export class Updates {
     }
     this.set({ state: "installing", version });
     const { code, said } = await this.options.apply(files);
-    if (code === 0) return this.set({ state: "installed", version });
+    if (code === 0) {
+      // Installed is what the installed version's mark says, where there is one to read. The helper
+      // ends 0 for whichever release it was handed, and the files may have been changed after the
+      // app's look: to the installed release's own, or to another that a trusted key signed.
+      const marked = this.options.installed === null ? version : this.installedVersion();
+      if (marked === version) return this.set({ state: "installed", version });
+      return this.set({ state: "failed", version, files, why: marked ? `the installed version is ${marked}, not ${version}` : "the installed version's mark cannot be read" });
+    }
     // What was said goes to the log whole: the line shows one line of a failure, and of a refusal none.
     this.options.log?.(`Surogate ${version} was not installed${code === null ? "" : ` (exit ${code})`}: ${said}`);
     if (refusal(code, said)) return this.set({ state: "refused", version, files });

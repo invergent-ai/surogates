@@ -157,6 +157,42 @@ describe("what pkexec answers for the helper", () => {
   });
 });
 
+describe("an update the helper says it installed", () => {
+  it("is installed only where the installed version's mark names it: a helper that ends 0 with any other version installed has not installed it", async () => {
+    base.publish("1.2.4");
+    const mark = join(base.dir, "release.json");
+    const marked = (version: string) => writeFileSync(mark, `${JSON.stringify({ version })}\n`);
+    marked("1.2.3");
+    const found = base.updates({ installed: mark });
+    await found.check();
+    const { files } = found.state as { files: Staged };
+    // As where its files were changed, after the app's look, to the installed release's own: the helper applies that one, and ends 0.
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "the installed version is 1.2.3, not 1.2.4" });
+    // Or to another release a trusted key signed.
+    marked("1.2.5");
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "the installed version is 1.2.5, not 1.2.4" });
+    rmSync(mark);
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "the installed version's mark cannot be read" });
+    writeFileSync(mark, "not a mark\n");
+    await found.install();
+    expect(found.state).toMatchObject({ state: "failed", why: "the installed version's mark cannot be read" });
+    marked("1.2.4");
+    await found.install();
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+
+  it("is installed at the helper's word in a development build, which has no installed version to read", async () => {
+    base.publish("1.2.4");
+    const found = base.updates({ installed: null });
+    await found.check();
+    await found.install();
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+});
+
 describe("an install under way", () => {
   it("keeps its line to its helper's end: a check that finds the installed version's mark changed, as the helper's last rename leaves it, says nothing before the helper has ended", async () => {
     base.publish("1.2.4");
