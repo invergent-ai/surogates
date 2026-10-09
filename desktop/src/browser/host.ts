@@ -206,6 +206,8 @@ const unfinished = (failure: string | null): string => (failure === "canceled" ?
 const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
 
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
+// Why a navigation to a port of a chat's own servers that is not allowed did not open.
+const NOT_ALLOWED = (port: number): string => `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${port})`;
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
 const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
 // True of an operation that still runs, and of one that was answered already and still acts in its page: one
@@ -960,6 +962,10 @@ export class BrowserHost {
       if (!isRecord(value) || kind === "browser.observe" || kind === "browser.evaluate") return { ok: value ?? null };
       // Cancelled while it acted: its answer goes to no one, and takes nothing with it of what its pages did.
       if (signal.aborted) return CANCELLED;
+      // At a chat's port that is not allowed its tab shows the proxy's own page, which is no page of the chat's:
+      // the navigation did not open, and its answer says why.
+      const shut = kind === "browser.navigate" ? chatPortOf(page.url()) : null;
+      if (shut !== null && !this.forwarded?.ports.includes(shut)) return failed(NOT_ALLOWED(shut));
       const notices = this.took(session, id);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened: this.untold.delete(session) } : {}), notices } };
     } catch (error) {
@@ -1002,9 +1008,7 @@ export class BrowserHost {
     // nothing takes the connection there now. One that answers failed by itself, and the browser's word stands.
     const chat = chatPortOf(address.href);
     if (chat !== null) {
-      if (!this.forwarded?.ports.includes(chat)) {
-        return `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${chat})`;
-      }
+      if (!this.forwarded?.ports.includes(chat)) return NOT_ALLOWED(chat);
       const reaches = (await this.proxy?.server.reaches(chat)) ?? "unreachable";
       if (reaches === "refused") return `The sandbox has not been told that the agent's browser may open port ${chat} yet. Open it again in a moment.`;
       if (reaches === "busy") {
