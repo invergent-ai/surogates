@@ -441,9 +441,9 @@ def _carries_information(text: str) -> bool:
 
 
 #: What revives a finished session with no message of its user's: a worker's
-#: report to a project's master, and the hand back of the browser that had
-#: stopped the agent of a chat on its user's computer.
-_REVIVED_BY_NEWS = frozenset({"worker_report", "browser_hand_back"})
+#: report to a project's master, and, in a chat on its user's computer, the
+#: resume a hand back of the browser gave it that no turn has read.
+_REVIVED_BY_NEWS = frozenset({"worker_report", "unread_browser_hand_back"})
 
 
 class AgentHarness(
@@ -820,17 +820,17 @@ class AgentHarness(
         )
 
     async def _has_unread_hand_back(self, session_id: UUID) -> bool:
-        """Return True if the session's user handed back the browser that had stopped its agent,
-        after the session's last model request.
+        """Return True if a hand back of the browser gave the session a resume after its last
+        model request.
 
         Read as a worker's report is (``_has_unread_report``): every model
         request reads the hand backs written before it, so one after the last
-        request is one no turn read.  A hand back that stopped nothing, or the
-        cloud's, is none.
+        request is one no turn read.  The control route writes it only for a
+        hand back its user confirmed, to a chat that could take a turn.
         """
         events = await self._store.get_events(
             session_id,
-            types=[EventType.LLM_REQUEST, EventType.BROWSER_CONTROL_RETURNED],
+            types=[EventType.LLM_REQUEST, EventType.SESSION_RESUME],
         )
         return _hand_back_unread(events)
 
@@ -856,8 +856,8 @@ class AgentHarness(
     ) -> tuple[list[dict], int]:
         """The news that reached a session past *after_event_id*, and below
         *before* when given: for a project's master, thread reports and news
-        of threads the user started; for a chat on its user's computer, their
-        handing back the browser that had stopped its agent.
+        of threads the user started; for a chat on its user's computer, the
+        resume their handing back the browser gave it.
 
         Read for each model request, and at the end of a reply, one message
         each, as replay renders them.  Of workers, only a master reads them
@@ -869,7 +869,7 @@ class AgentHarness(
         if is_project_master(session.config):
             types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
         if device_of(session.config) is not None:
-            types.append(EventType.BROWSER_CONTROL_RETURNED)
+            types.append(EventType.SESSION_RESUME)
         if not types:
             return [], after_event_id
         events = await self._store.get_events(session.id, after=after_event_id, types=types)
@@ -1238,11 +1238,12 @@ class AgentHarness(
             # A project's master is also resumed by a thread's report that
             # no turn has read: the master's turn has usually ended long
             # before a thread finishes, and the report is what it waits for.
-            # And a chat on its user's computer by their handing back the
-            # browser whose take-over had stopped its agent: the agent's turn
-            # ended on being told to wait, and the hand back is what it waits
-            # for.  Only one whose turn completed: a failed one is its user's
-            # to retry.
+            # And a chat on its user's computer by the resume their handing
+            # back the browser gave it, where no turn has read it.  The
+            # control route makes the chat active as it writes that resume;
+            # a turn that began just then, and ended without reading it,
+            # left the chat finished again.  Only one whose turn completed: a
+            # failed one is its user's to retry.
             revived_by: str | None = None
             if session.status in ("paused", "completed", "failed", "archived"):
                 if session.status in ("completed", "failed"):
@@ -1255,7 +1256,7 @@ class AgentHarness(
                         and device_of(session.config) is not None
                         and await self._has_unread_hand_back(session_id)
                     ):
-                        revived_by = "browser_hand_back"
+                        revived_by = "unread_browser_hand_back"
                 # A report, or a hand back, has no message of the user's
                 # waiting on it: while their limit refuses the turn, it waits
                 # for their next message, which the message route holds.
@@ -1367,8 +1368,8 @@ class AgentHarness(
             # model's last response that was begun and never answered.  A
             # worker that died after a sibling call's result moved the
             # cursor past that call left nothing else to say so.  Or the
-            # hand back of the browser that had stopped the agent, read by
-            # no request: one that landed while a command's own wake was
+            # resume a hand back of the browser gave the chat, read by no
+            # request: one that landed while a command's own wake was
             # answering it is behind the cursor that wake moved.
             pending = _actionable_pending_events(all_events, cursor)
             if not pending and not unanswered_calls(all_events) and not _hand_back_unread(all_events):
@@ -3022,7 +3023,7 @@ class AgentHarness(
                 # A thread's report that landed meanwhile keeps the wake
                 # going too; the next request reads it.  News alone waits
                 # for the master's next turn, which reads it from the log.
-                # So does a hand back of the browser that had stopped the agent.
+                # So does the resume a hand back of the browser gave the chat.
                 arrived, report_cursor = await self._collect_reports(session, report_cursor)
                 reports.extend(arrived)
                 if followup is not None or (reports and (

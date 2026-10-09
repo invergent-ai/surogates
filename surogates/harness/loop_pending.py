@@ -15,7 +15,8 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
     EventType.DEVICE_RESUMED.value,
     # These tell a chat's browser pane that its browser opened, closed or is not there, and that its
     # user took it over, which is to stop the agent.  The hand back is not among them: the cloud's
-    # wakes the agent, and a computer's does when the take-over had stopped it (for_the_pane_alone).
+    # wakes the agent.  A computer's is for the pane too (for_the_pane_alone): the turn a hand back
+    # its user confirmed gives is the resume written with it.
     EventType.BROWSER_PROVISIONED.value,
     EventType.BROWSER_DESTROYED.value,
     EventType.BROWSER_UNAVAILABLE.value,
@@ -43,12 +44,12 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
 
 
 def _hand_back_unread(events: list[Any]) -> bool:
-    """Whether the hand back of the browser that had stopped the agent waits to be read: none of the
+    """Whether the resume a hand back of the browser gave the chat waits to be read: none of the
     model's requests came after it.
 
-    The cursor cannot tell: a hand back that lands while a turn, or a
-    command's wake, is under way is behind the cursor once that moves.  Every
-    model request reads the hand backs written before it, live and in replay
+    The cursor cannot tell: one that lands while a turn, or a command's
+    wake, is under way is behind the cursor once that moves.  Every model
+    request reads the hand backs written before it, live and in replay
     alike (surogates.harness.loop_context_replay.unread_reports).
     """
     unread = False
@@ -63,17 +64,22 @@ def _hand_back_unread(events: list[Any]) -> bool:
 def _turn_for_a_hand_back(events: list[Any]) -> bool:
     """Whether the turn a wake is about to run is one a hand back of the browser gives the agent.
 
-    No message of the user's waits for its answer, and a hand back of the
-    browser that had stopped the agent has not been answered.  A wake reads
-    the user's last message to run its command; in such a turn that message
-    is not what the wake is for, and its command must not run again.
+    No message of the user's waits to be taken, and the resume a hand back
+    gave has not been answered.  A wake reads the user's last message to
+    run its command; in such a turn that message is not what the wake is
+    for, and its command must not run again.
 
-    A hand back opens a turn when it lands with none under way; one that
-    lands in a turn, a command's own wake included, opens the next unless a
-    model request of that turn read it.  A turn it opened and a dead worker
-    cut off is still its own.
+    A hand back opens a turn when it lands with none under way.  A message a
+    wake took, with no request of the model's since, is a command the
+    harness answered itself, however it answered: done with, so the hand
+    back opens a turn then too.  A message no wake has taken yet keeps its
+    turn, and its command runs once.  A hand back that lands in a turn the
+    model is in opens the next, unless a request of that turn read it.  A
+    turn the hand back opened and a dead worker cut off is still its own.
     """
     opened_by: str | None = None
+    # Whether a wake took the user's message, and whether the model was asked since.
+    taken = asked = False
     # A hand back no model request has read yet.
     unread = False
     for event in events:
@@ -84,14 +90,16 @@ def _turn_for_a_hand_back(events: list[Any]) -> bool:
             and not ((getattr(event, "data", None) or {}).get("message") or {}).get("tool_calls")
         )
         if kind == EventType.USER_MESSAGE.value:
-            opened_by = "message"
+            opened_by, taken, asked = "message", False, False
+        elif kind == EventType.HARNESS_WAKE.value:
+            taken = True
         elif kind == EventType.LLM_REQUEST.value:
-            unread = False
+            unread, asked = False, True
         elif ends_a_turn:
             opened_by = "hand back" if unread else None
         elif resumes_the_agent(event):
             unread = True
-            if opened_by is None:
+            if opened_by is None or (opened_by == "message" and taken and not asked):
                 opened_by = "hand back"
     return opened_by == "hand back"
 

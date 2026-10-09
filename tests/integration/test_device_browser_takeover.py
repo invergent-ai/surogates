@@ -22,6 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import surogates.harness.loop as loop_module
 from surogates.api.app import _install_browser_api_dependencies
 from surogates.api.routes import browser as browser_routes
 from surogates.browser.control import paused_by_user_result
@@ -33,17 +34,21 @@ from surogates.harness.loop_messages import maybe_inject_browser_pause
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_expanded_message
 from surogates.orchestrator.dispatcher import Orchestrator
+from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
 
 from tests.test_steer_loop import _final_response
 
 from .conftest import create_org, create_user, issue_service_account_token
 from .test_devices import AGENT_ID, add_user, api  # noqa: F401  (api is a fixture)
-from .test_workstream_spend import CAPPED, Ops, worker
+from .test_oauth import add_computer, signed_in, window_session
+from .test_workstream_spend import CAPPED, Down, Ops, worker
+from .test_workstream_spend import served as metered
 from .test_workstream_threads import TODO_CALL, harness_of, live_turn, replayed, waking, woken
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -53,28 +58,53 @@ STALE, LEFT = 60, 600
 
 ANSWERED = (EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "It is open."}})
 
+# What the control route answers a release of a chat on a folder: whether its agent goes on by itself.
+GOES_ON = {"outcome": "released", "resumes": True}
+FOR_THE_PANE = {"outcome": "released", "resumes": False}
+
 
 class Computer:
-    """One user's computer in a test: the chats of an agent on its folders, the API they are told
-    through, and the dispatcher's sweeper for that agent."""
+    """One user's computer in a test: the chats of an agent on its folders, Surogate Desktop signed in
+    on it, the API they are told through, and the dispatcher's sweeper for that agent."""
 
-    def __init__(self, session_store, session_factory, redis_client, org_id: UUID, user_id: UUID) -> None:
+    def __init__(self, session_store, session_factory, redis_client, org_id: UUID, user_id: UUID, *, pool=None) -> None:
         self.store, self.factory, self.redis = session_store, session_factory, redis_client
+        # The database the API itself asks: the tests' own, or a pool as narrow as a test makes it.
+        self.pool = pool or session_factory
         self.org_id, self.user_id = org_id, user_id
         self.agent_id = f"takeover-agent-{uuid4()}"
         self.device_id = uuid4()
+        self.desktop: UUID | None = None
         self.wakes: list[str] = []
         self.sweeper = Orchestrator(
             redis_client=redis_client, session_store=session_store, harness_factory=lambda _sid: None,
             agent_id=self.agent_id, queue_key=SHARED_WORK_QUEUE_KEY,
         )
 
-    def served(self, *, session_scope_id: UUID | None = None) -> FastAPI:
+    async def signed_in(self) -> Computer:
+        """Surogate Desktop is signed in on this computer, by its user, and added it."""
+        self.desktop = await self.sign_in(on=self.device_id)
+        return self
+
+    async def sign_in(self, *, on: UUID | None, days_ago: int = 0) -> UUID:
+        """A sign-in of Surogate Desktop by the computer's user, *days_ago*, which added the computer
+        *on*, or none yet: the sign-in whose session the web client in that desktop's window posts with."""
+        tokens = OAuthTokens(self.factory)
+        grant = await tokens.issue(
+            org_id=self.org_id, user_id=self.user_id, agent_id=self.agent_id, client_id="surogate-desktop",
+            auth_time=int(time.time()) - days_ago * 86400,
+        )
+        if on is not None:
+            await tokens.bind(grant.family_id, on)
+        return grant.family_id
+
+    def served(self, *, session_scope_id: UUID | None = None, sign_in: UUID | None = None) -> FastAPI:
         """The browser routes with the API's own emitter and wake, which enqueues on the real queue,
-        for a caller who is the computer's user, or a worker with a token for one session."""
+        for a caller who is the computer's user, under *sign_in* where the desktop's, or a worker with
+        a token for one session."""
         app = FastAPI()
         app.include_router(browser_routes.router, prefix="/v1")
-        app.state.redis, app.state.session_store = self.redis, self.store
+        app.state.redis, app.state.session_store, app.state.session_factory = self.redis, self.store, self.pool
         _install_browser_api_dependencies(app, SimpleNamespace(browser=SimpleNamespace(backend=None)))
         enqueue = app.state.session_wake
 
@@ -88,7 +118,7 @@ class Computer:
             return TenantContext(
                 org_id=self.org_id, user_id=None if session_scope_id else self.user_id, org_config={},
                 user_preferences={}, permissions=frozenset(), asset_root="/tmp/surogates-test",
-                session_scope_id=session_scope_id,
+                session_scope_id=session_scope_id, oauth_family_id=sign_in,
             )
 
         app.dependency_overrides[get_current_tenant] = tenant
@@ -166,6 +196,10 @@ class Computer:
         [*_, told] = await self.store.get_events(chat, types=[EventType.BROWSER_CONTROL_RETURNED])
         return told.data
 
+    async def resumed(self, chat: UUID) -> list[dict]:
+        """What gave the chat a turn with no message of its user's."""
+        return [event.data for event in await self.store.get_events(chat, types=[EventType.SESSION_RESUME])]
+
     async def left(self, *chats: UUID) -> None:
         """Nothing has happened in *chats* for ten minutes, well past the sweeper's threshold."""
         async with self.factory() as db:
@@ -176,18 +210,30 @@ class Computer:
                 )
             await db.commit()
 
-    async def control(self, chat: UUID, action: str, *, token_of: UUID | None = None) -> dict:
-        """Post *action* to the chat's control route: as its user, or with a worker's token, which
-        covers the one session *token_of* and names the user it speaks for."""
-        said = {"action": action, **({"owner_user_id": str(self.user_id)} if token_of else {})}
+    async def control(
+        self, chat: UUID, action: str, *, token_of: UUID | None = None, handed_back: bool | None = None,
+        answered: int = 200, **who,
+    ) -> dict:
+        """Post *action* to the chat's control route, as the web client in the desktop's window on this
+        computer posts it, unless *who* gives another ``sign_in`` (None: a browser's, the desktop's
+        on another computer, one that ended); or with a worker's token, which covers the one session
+        *token_of* and names the user it speaks for. *handed_back* is the pane's word, with a release,
+        that its user confirmed the hand back in the desktop."""
+        said: dict = {"action": action, **({"owner_user_id": str(self.user_id)} if token_of else {})}
+        if handed_back is not None:
+            said["handed_back"] = handed_back
         path = f"/v1{'/api' if token_of else ''}/sessions/{chat}/browser/control"
-        app = self.served(session_scope_id=token_of)
+        app = self.served(session_scope_id=token_of, sign_in=None if token_of else who.get("sign_in", self.desktop))
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(path, json=said)
-        assert response.status_code == 200, response.text
+        assert response.status_code == answered, response.text
         # Its events bumped the chat's clock: it is left alone again since.
         await self.left(chat)
         return response.json()
+
+    async def hands_back(self, chat: UUID, **who) -> dict:
+        """The chat's user hands the browser back, and confirms it in the desktop: its pane posts that."""
+        return await self.control(chat, "release", handed_back=True, **who)
 
     async def orphans(self) -> set[UUID]:
         return {o.id for o in await self.store.find_orphaned_sessions(stale_seconds=STALE, agent_id=self.agent_id)}
@@ -216,7 +262,8 @@ class Computer:
 @pytest_asyncio.fixture(loop_scope="session")
 async def computer(session_store, session_factory, redis_client):
     org_id = await create_org(session_factory)
-    return Computer(session_store, session_factory, redis_client, org_id, await create_user(session_factory, org_id))
+    user_id = await create_user(session_factory, org_id)
+    return await Computer(session_store, session_factory, redis_client, org_id, user_id).signed_in()
 
 
 async def test_a_take_over_leaves_an_idle_chat_to_its_user(computer):
@@ -235,113 +282,197 @@ async def test_a_take_over_leaves_an_idle_chat_to_its_user(computer):
     assert computer.wakes == []
 
 
-async def test_a_hand_back_wakes_the_agent_the_take_over_had_stopped_once(computer):
+async def test_a_hand_back_its_user_confirmed_gives_the_chats_agent_one_turn(computer):
     chat = await computer.idle()
     await computer.control(chat, "acquire")
-    await computer.stopped(chat)
     assert not await computer.queued(chat)
 
-    assert (await computer.control(chat, "release"))["outcome"] == "released"
+    assert await computer.hands_back(chat) == GOES_ON
 
     try:
-        # Handed back, its agent goes on: the hand back says so, queues the chat, and is its wake's work.
+        # The chat's pane is told the agent goes on. The resume written with it is the turn: what queues
+        # the chat, and its wake's work.
         assert await computer.handed_back(chat) == {
             "session_id": str(chat), "released_by": str(computer.user_id), "computer": True, "resumes": True,
         }
+        assert (await computer.log(chat))[-2:] == ["browser.control_returned", "session.resume"]
+        assert await computer.resumed(chat) == [{"source": "browser_hand_back"}]
         assert computer.wakes == [str(chat)]
         assert await computer.queued(chat)
-        assert await computer.work(chat) == ["browser.control_returned"]
-        # Handed back already: a repeat tells the chat nothing more and wakes nobody.
-        await computer.control(chat, "release")
+        assert await computer.work(chat) == ["session.resume"]
+        # Handed back already: a repeat is answered as made, tells the chat nothing more, and gives no second turn.
+        assert await computer.hands_back(chat) == FOR_THE_PANE
         assert computer.wakes == [str(chat)]
-        assert (await computer.log(chat)).count("browser.control_returned") == 1
+        log = await computer.log(chat)
+        assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
     finally:
         await computer.unqueue(chat)
 
 
-async def test_a_hand_back_that_stopped_no_agent_is_for_the_chats_pane_alone(computer):
+QUOTED = json.dumps({"value": json.loads(paused_by_user_result())})
+SINCE_THE_TAKE_OVER = [
+    "nothing", "its agent met the pause", "a sub-agent of its met the pause", "its agent read a page that quotes the pause",
+]
+
+
+async def since_the_take_over(computer, chat: UUID, happened: str) -> None:
+    if happened == "its agent met the pause":
+        await computer.stopped(chat)
+    elif happened == "a sub-agent of its met the pause":
+        await computer.stopped(chat, by=await computer.under(chat))
+    elif happened == "its agent read a page that quotes the pause":
+        await computer.turn(chat, "What does the page say?", "browser_evaluate", QUOTED)
+
+
+@pytest.mark.parametrize("happened", SINCE_THE_TAKE_OVER)
+async def test_a_confirmed_hand_back_gives_the_turn_whatever_the_chats_log_says_of_the_take_over(computer, happened):
     chat = await computer.idle()
     await computer.control(chat, "acquire")
+    await since_the_take_over(computer, chat, happened)
 
-    assert (await computer.control(chat, "release"))["outcome"] == "released"
+    try:
+        # Nothing is read from the log: the agent that asked its user to take the browser, and waited
+        # with no browser call of its own, goes on as the one that met the pause does.
+        assert await computer.hands_back(chat) == GOES_ON
+        assert computer.wakes == [str(chat)]
+    finally:
+        await computer.unqueue(chat)
 
-    # No browser call of the chat's was answered paused while its user held the browser: the chat is
-    # told the hand back, and that is all. Nobody is woken, nothing is pending, nothing is swept.
+
+@pytest.mark.parametrize("happened", SINCE_THE_TAKE_OVER)
+@pytest.mark.parametrize("said", [{}, {"handed_back": False}], ids=["no word of it", "said not to be one"])
+async def test_a_release_that_is_no_confirmed_hand_back_is_for_the_chats_pane_alone(computer, said, happened):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    await since_the_take_over(computer, chat, happened)
+    before = await computer.log(chat)
+
+    # As the pane posts one at a chat's opening, where the app ended while its user held the browser, and
+    # for a chat the browser was not taken over from: nobody handed anything back there.
+    assert await computer.control(chat, "release", **said) == FOR_THE_PANE
+
+    # The chat is told, and that is all: nobody is woken, nothing is pending, nothing is swept, and
+    # nothing is left for a later turn to read.
     assert await computer.handed_back(chat) == {
         "session_id": str(chat), "released_by": str(computer.user_id), "computer": True,
     }
+    assert await computer.log(chat) == [*before, "browser.control_returned"]
     assert computer.wakes == []
     assert not await computer.queued(chat)
     assert await computer.work(chat) == []
     assert await computer.orphans() == set()
     assert await computer.sweep() == 0
-    assert await computer.log(chat) == [
-        "user.message", "llm.response", "browser.control_granted", "browser.control_returned",
-    ]
 
 
-QUOTED = json.dumps({"value": json.loads(paused_by_user_result())})
-
-
-@pytest.mark.parametrize(("met", "resumes"), [
-    ("its own call, since the take-over", True),
-    ("a sub-agent's call, since the take-over", True),
-    ("its own call, before the take-over", False),
-    ("another chat's call", False),
-    ("a call of another user's session that names the chat", False),
-    ("a tool that is no browser's", False),
-    ("a page that quotes the pause", False),
+@pytest.mark.parametrize("posted_from", [
+    "the web client in a browser", "the desktop on another computer of theirs", "a desktop that added no computer",
+    "a desktop whose sign-in ended", "a desktop whose sign-in is past its thirty days",
 ])
-async def test_a_hand_back_resumes_a_chat_only_for_a_browser_call_of_its_own_answered_paused_since_the_take_over(
-    computer, session_factory, met, resumes,
+async def test_a_hand_back_is_taken_as_confirmed_only_from_the_desktops_window_on_the_chats_computer(
+    computer, posted_from,
 ):
-    chat, another = await computer.idle(), await computer.idle()
-    if met == "its own call, before the take-over":
-        # Met while the browser was held from another chat, and handed back there since.
-        await computer.stopped(chat)
-    await computer.control(chat, "acquire")
-    if met == "its own call, since the take-over":
-        await computer.stopped(chat)
-    elif met == "a sub-agent's call, since the take-over":
-        await computer.stopped(chat, by=await computer.under(chat))
-    elif met == "another chat's call":
-        await computer.stopped(another)
-    elif met == "a call of another user's session that names the chat":
-        # As no session is made: one under a chat is its user's. Not found among theirs, it is not the chat's.
-        stranger = await computer.store.create_session(
-            user_id=await create_user(session_factory, computer.org_id), org_id=computer.org_id,
-            agent_id=computer.agent_id, config={"sandbox_root_session_id": str(chat)},
-        )
-        await computer.stopped(chat, by=stranger.id)
-    elif met == "a tool that is no browser's":
-        await computer.turn(chat, "Read the note.", "read_file", paused_by_user_result())
-    elif met == "a page that quotes the pause":
-        await computer.turn(chat, "What does the page say?", "browser_evaluate", QUOTED)
-
-    await computer.control(chat, "release")
-
-    try:
-        assert (await computer.handed_back(chat)).get("resumes", False) is resumes
-        assert computer.wakes == ([str(chat)] if resumes else [])
-    finally:
-        await computer.unqueue(chat)
-
-
-async def test_a_later_take_over_that_stopped_nothing_is_handed_back_for_the_pane_alone(computer):
     chat = await computer.idle()
     await computer.control(chat, "acquire")
     await computer.stopped(chat)
-    await computer.control(chat, "release")
+    if posted_from == "the web client in a browser":
+        sign_in = None
+    elif posted_from == "the desktop on another computer of theirs":
+        sign_in = await computer.sign_in(on=uuid4())
+    elif posted_from == "a desktop that added no computer":
+        sign_in = await computer.sign_in(on=None)
+    elif posted_from == "a desktop whose sign-in is past its thirty days":
+        sign_in = await computer.sign_in(on=computer.device_id, days_ago=31)
+    else:
+        sign_in = await computer.sign_in(on=computer.device_id)
+        assert await OAuthTokens(computer.factory).end(
+            sign_in, org_id=computer.org_id, user_id=computer.user_id, agent_id=computer.agent_id,
+        )
+
+    # The confirmation is drawn by the desktop on the chat's computer: from anywhere else nothing was
+    # confirmed there, whatever the post says.
+    assert await computer.hands_back(chat, sign_in=sign_in) == FOR_THE_PANE
+
+    assert "resumes" not in await computer.handed_back(chat)
+    assert (computer.wakes, await computer.resumed(chat), await computer.work(chat)) == ([], [], [])
+    assert await computer.orphans() == set()
+
+
+async def test_a_hand_back_to_a_chat_with_a_turn_under_way_is_made_and_gives_no_turn(computer):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    lease = await computer.store.try_acquire_lease(chat, "the-turns-worker")
 
     try:
-        # Taken over again, with no browser call of the chat's meanwhile: what the first take-over
-        # stopped was handed back with it, and does not count for this one.
-        await computer.control(chat, "acquire")
-        await computer.control(chat, "release")
-        assert "resumes" not in await computer.handed_back(chat)
-        assert computer.wakes == [str(chat)]
+        # The browser is the agent's again on the computer whatever the server answers: it answers 200,
+        # and that the agent does not go on by itself.
+        assert await computer.hands_back(chat) == FOR_THE_PANE
     finally:
-        await computer.unqueue(chat)
+        await computer.store.release_lease(chat, lease.lease_token)
+    await computer.left(chat)
+
+    # Nothing is kept for when that turn is over.
+    assert "resumes" not in await computer.handed_back(chat)
+    assert (computer.wakes, await computer.resumed(chat), await computer.work(chat)) == ([], [], [])
+    assert await computer.orphans() == set()
+    assert not await computer.queued(chat)
+
+
+@pytest.mark.parametrize("status", ["paused", "failed"])
+async def test_a_hand_back_to_a_chat_its_user_stopped_or_that_failed_is_made_and_gives_no_turn(computer, status):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    await computer.store.update_session_status(chat, status)
+
+    assert await computer.hands_back(chat) == FOR_THE_PANE
+
+    assert (await computer.store.get_session(chat)).status == status
+    assert (computer.wakes, await computer.resumed(chat), await computer.work(chat)) == ([], [], [])
+    assert not await computer.queued(chat)
+
+
+async def test_a_take_over_and_a_hand_back_posted_from_a_sub_agents_view_are_its_chats(computer):
+    chat = await computer.idle()
+    child = await computer.under(chat)
+
+    assert (await computer.control(child, "acquire"))["outcome"] == "granted"
+    # Told to the chat already: a second, from the chat's own view, changes nothing.
+    assert (await computer.control(chat, "acquire"))["outcome"] == "refreshed"
+    assert await computer.hands_back(child) == GOES_ON
+
+    try:
+        # The chat is told both, and its agent is given the turn: the browser is held for the chat and
+        # every session under it. The sub-agent is told nothing, and is not woken.
+        assert (await computer.log(chat))[-3:] == ["browser.control_granted", "browser.control_returned", "session.resume"]
+        assert (await computer.handed_back(chat))["session_id"] == str(chat)
+        assert await computer.log(child) == []
+        assert computer.wakes == [str(chat)]
+        assert not await computer.queued(child)
+    finally:
+        await computer.unqueue(chat, child)
+
+
+async def test_a_session_that_names_another_users_chat_as_the_one_it_works_under_tells_that_chat_nothing(
+    computer, session_factory,
+):
+    # As no session is made: one under a chat is its user's. The chat is another user's, held by them.
+    theirs = await computer.told_taken_over(user_id=await create_user(session_factory, computer.org_id))
+    before = await computer.log(theirs)
+    stranger = await computer.store.create_session(
+        user_id=computer.user_id, org_id=computer.org_id, agent_id=computer.agent_id,
+        config={
+            "execution": {"kind": "device", "device_id": str(computer.device_id)},
+            "sandbox_root_session_id": str(theirs),
+        },
+    )
+
+    # Its own user's posts are answered as for a chat that has no browser: neither told, nor handed back.
+    no_such_chat = {"detail": "No browser for session"}
+    assert await computer.control(stranger.id, "acquire", answered=404) == no_such_chat
+    assert await computer.control(stranger.id, "release", handed_back=True, answered=404) == no_such_chat
+
+    assert await computer.log(theirs) == before
+    assert await computer.log(stranger.id) == []
+    assert computer.wakes == []
 
 
 # As many connections as posts arrive at once, and no long wait for one: a telling that needed a second
@@ -351,15 +482,16 @@ POOL, POOL_WAIT_S = 4, 3.0
 
 @asynccontextmanager
 async def pooled(pg_url, session_factory, redis_client, connections: int):
-    """A computer whose API has a database pool of *connections*, and its own store on it."""
+    """A computer whose API has a database pool of *connections*: its store's, and every other read
+    and write a post makes."""
     engine = create_async_engine(
         pg_url, pool_size=connections, max_overflow=0, pool_timeout=POOL_WAIT_S, connect_args={"statement_cache_size": 0},
     )
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
-    store = SessionStore(async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False))
+    narrow = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
-        yield Computer(store, session_factory, redis_client, org_id, user_id)
+        yield await Computer(SessionStore(narrow), session_factory, redis_client, org_id, user_id, pool=narrow).signed_in()
     finally:
         await engine.dispose()
 
@@ -371,15 +503,14 @@ async def narrow(pg_url, session_factory, redis_client):
 
 
 async def test_a_take_over_and_a_hand_back_are_told_through_one_connection(pg_url, session_factory, redis_client):
-    # A pool of one: anything in the telling that held a connection while it asked for another would wait
+    # A pool of one: anything in a post that held a connection while it asked for another would wait
     # for itself until the pool gave up.
     async with pooled(pg_url, session_factory, redis_client, 1) as single:
         chat, held = await single.idle(), await single.told_taken_over()
         try:
             assert (await single.control(chat, "acquire"))["outcome"] == "granted"
-            await single.stopped(chat)
-            assert await single.control(chat, "release") == {"outcome": "released"}
-            assert (await single.log(chat))[-1] == "browser.control_returned"
+            assert await single.hands_back(chat) == GOES_ON
+            assert (await single.log(chat))[-2:] == ["browser.control_returned", "session.resume"]
             # The other chat that still said its user held the browser was told on that one connection too.
             assert (await single.log(held))[-1] == "browser.control_returned"
         finally:
@@ -404,26 +535,33 @@ async def test_as_many_take_overs_at_once_as_the_pool_is_wide_are_each_told_and_
     assert time.monotonic() - started < POOL_WAIT_S / 2
 
 
-async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_tell_it_one(narrow):
-    chat = await narrow.idle()
+async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_give_it_one_turn_and_leave_a_read_its_connection(
+    narrow,
+):
+    chat, another = await narrow.idle(), await narrow.idle()
     await narrow.control(chat, "acquire")
-    await narrow.stopped(chat)
     started = time.monotonic()
 
+    async def an_unrelated_read() -> float:
+        await narrow.store.get_session(another)
+        return time.monotonic() - started
+
     try:
-        answers = await asyncio.gather(*(narrow.control(chat, "release") for _ in range(POOL)))
-        assert answers == [{"outcome": "released"}] * POOL
+        *answers, read_after = await asyncio.gather(*(narrow.hands_back(chat) for _ in range(POOL)), an_unrelated_read())
+        # Each is answered as made, and one of them as the one the agent goes on for.
+        assert sorted(answers, key=lambda answer: answer["resumes"]) == [FOR_THE_PANE] * (POOL - 1) + [GOES_ON]
+        assert read_after < POOL_WAIT_S / 2
         assert time.monotonic() - started < POOL_WAIT_S / 2
-        assert (await narrow.log(chat)).count("browser.control_returned") == 1
+        log = await narrow.log(chat)
+        assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
         assert narrow.wakes == [str(chat)]
     finally:
         await narrow.unqueue(chat)
 
 
-async def test_two_hand_backs_posted_together_tell_the_chat_one_and_wake_its_agent_once(computer, monkeypatch):
+async def test_two_hand_backs_posted_together_tell_the_chat_one_and_give_its_agent_one_turn(computer, monkeypatch):
     chat = await computer.idle()
     await computer.control(chat, "acquire")
-    await computer.stopped(chat)
     # The chat is open in two windows, and each posts the hand back. The first is slow to be written:
     # time enough for the second to read what the chat was last told.
     emit = computer.store.emit_event
@@ -436,23 +574,24 @@ async def test_two_hand_backs_posted_together_tell_the_chat_one_and_wake_its_age
     monkeypatch.setattr(computer.store, "emit_event", slow_to_tell)
 
     try:
-        answers = await asyncio.gather(computer.control(chat, "release"), computer.control(chat, "release"))
-        assert answers == [{"outcome": "released"}] * 2
-        assert (await computer.log(chat)).count("browser.control_returned") == 1
+        answers = await asyncio.gather(computer.hands_back(chat), computer.hands_back(chat))
+        assert sorted(answers, key=lambda answer: answer["resumes"]) == [FOR_THE_PANE, GOES_ON]
+        log = await computer.log(chat)
+        assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
         assert computer.wakes == [str(chat)]
     finally:
         await computer.unqueue(chat)
 
 
-async def test_a_chat_that_met_the_pause_while_another_held_the_browser_is_not_woken_at_the_hand_back(computer):
-    # The browser is held for every chat of the agent's there: this one's call answered paused too.
+async def test_a_hand_back_gives_its_turn_to_the_chat_it_was_taken_over_from_and_to_no_other(computer):
+    # The browser is held for every chat of the agent's there: this other one's call answered paused too.
     held, other = await computer.idle(), await computer.idle()
     await computer.control(held, "acquire")
     await computer.stopped(held)
     await computer.stopped(other)
     before = await computer.log(other)
 
-    await computer.control(held, "release")
+    await computer.hands_back(held)
 
     try:
         # The chat the browser was taken over from goes on. The other is told nothing, and is left alone.
@@ -484,15 +623,18 @@ async def test_the_clouds_hand_back_is_work_and_is_recovered_as_it_was(computer)
     assert await computer.orphans() == {chat}
 
 
-async def test_a_hand_back_whose_wake_was_lost_is_found_by_the_sweeper(computer):
+@pytest.mark.parametrize("left", ["active", "completed"], ids=["left active by a command", "its turn ended"])
+async def test_a_hand_back_whose_wake_was_lost_is_found_by_the_sweeper(computer, left):
     chat = await computer.idle()
+    await computer.store.update_session_status(chat, left)
     await computer.control(chat, "acquire")
-    await computer.stopped(chat)
-    await computer.control(chat, "release")
+    await computer.hands_back(chat)
     # The wake the hand back queued never ran.
     await computer.unqueue(chat)
 
     try:
+        # The chat is active for its turn, as a typed message leaves one, and looks left half done.
+        assert (await computer.store.get_session(chat)).status == "active"
         assert await computer.orphans() == {chat}
         assert await computer.sweep() == 1
         assert await computer.queued(chat)
@@ -577,16 +719,16 @@ async def test_a_turn_while_the_computers_browser_is_held_is_not_told_that_the_c
     assert await maybe_inject_browser_pause(session=session, browser_control=control) is None
 
 
-async def test_a_hand_back_made_from_another_chat_is_told_to_the_chat_first_taken_over_and_its_agent_is_left_alone(computer):
+async def test_a_release_made_from_another_chat_for_one_that_is_gone_is_told_to_both_and_wakes_nobody(computer):
     first, other = await computer.idle(), await computer.idle()
     await computer.control(first, "acquire")
     # Its agent met the pause, and so did the other chat's, the browser being held for both.
     await computer.stopped(first)
     await computer.stopped(other)
     # The first chat gone from the computer, its user hands the browser back from another: that chat's
-    # pane tells its own route of the take-over, then of the hand back.
+    # pane tells its own route of the take-over, then of a release that is no hand back of its own.
     await computer.control(other, "acquire")
-    await computer.control(other, "release")
+    assert await computer.control(other, "release") == FOR_THE_PANE
     await computer.left(first)
 
     # The first chat no longer says its user holds the browser: it is told the hand back, and where it was made.
@@ -595,10 +737,10 @@ async def test_a_hand_back_made_from_another_chat_is_told_to_the_chat_first_take
         "handed_back_from": str(other),
     }
     assert (await computer.log(first))[-2:] == ["llm.response", "browser.control_returned"]
-    # For its pane: its agent is not woken, has no work, and the chat does not look crashed. Nor is the
-    # other's, whose own take-over, told a moment before its hand back, stopped nothing.
+    # For the panes: neither agent is woken or has work, and neither chat looks crashed.
     assert "resumes" not in await computer.handed_back(other)
     assert computer.wakes == []
+    assert (await computer.resumed(first), await computer.resumed(other)) == ([], [])
     assert (await computer.work(first), await computer.work(other)) == ([], [])
     assert await computer.orphans() == set()
     assert await computer.sweep() == 0
@@ -613,18 +755,17 @@ async def test_a_chat_told_of_a_hand_back_made_elsewhere_is_taken_over_and_hande
     told = len(await computer.log(first))
 
     try:
-        # Nothing stands to hand back in the first chat: its pane's release at its next load is passed over.
-        await computer.control(first, "release")
+        # Nothing stands to hand back in the first chat: its pane's release at its next load is passed over,
+        # and so is a hand back said to be confirmed.
+        assert await computer.control(first, "release") == FOR_THE_PANE
+        assert await computer.hands_back(first) == FOR_THE_PANE
         assert len(await computer.log(first)) == told
-        # Taken over anew, it is told anew; its agent stopped by that, and the browser handed back from
-        # itself, its own agent is woken.
+        # Taken over anew, it is told anew; handed back from itself, its own agent is given the turn.
         assert (await computer.control(first, "acquire"))["outcome"] == "granted"
-        await computer.stopped(first)
-        await computer.control(first, "release")
-        assert (await computer.log(first))[told] == "browser.control_granted"
-        assert (await computer.handed_back(first)).get("resumes") is True
+        assert await computer.hands_back(first) == GOES_ON
+        assert (await computer.log(first))[told:] == ["browser.control_granted", "browser.control_returned", "session.resume"]
         assert computer.wakes == [str(first)]
-        assert await computer.work(first) == ["browser.control_returned"]
+        assert await computer.work(first) == ["session.resume"]
     finally:
         await computer.unqueue(first, other)
 
@@ -633,13 +774,14 @@ async def test_a_hand_back_is_told_to_no_chat_but_the_users_own_with_the_agent_o
     computer, session_factory,
 ):
     here = await computer.idle()
+    # A chat handed back already, before any of the others was taken over.
+    handed_back = await computer.told_taken_over()
+    await computer.control(handed_back, "release")
     # The browser on this computer is one for the agent's chats there: these still say their user holds it.
     standing = [await computer.told_taken_over(), await computer.told_taken_over()]
     # These do not, or are not that browser's: never taken over, handed back already, the agent's on
     # another computer, another agent's here, another user's, and one its user deleted.
     never = await computer.idle()
-    handed_back = await computer.told_taken_over()
-    await computer.control(handed_back, "release")
     deleted = await computer.told_taken_over()
     await computer.store.update_session_status(deleted, "archived")
     untold = [
@@ -651,36 +793,46 @@ async def test_a_hand_back_is_told_to_no_chat_but_the_users_own_with_the_agent_o
     before = {chat: await computer.log(chat) for chat in untold}
 
     await computer.control(here, "acquire")
-    await computer.control(here, "release")
+    await computer.hands_back(here)
 
-    for chat in standing:
-        assert (await computer.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
-    assert {chat: await computer.log(chat) for chat in untold} == before
-    assert computer.wakes == []
+    try:
+        # Each is told for its pane, naming the chat the hand back was made from: only that one's agent goes on.
+        for chat in standing:
+            assert (await computer.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
+            assert await computer.handed_back(chat) == {
+                "session_id": str(chat), "released_by": str(computer.user_id), "computer": True,
+                "handed_back_from": str(here),
+            }
+        assert {chat: await computer.log(chat) for chat in untold} == before
+        assert computer.wakes == [str(here)]
+    finally:
+        await computer.unqueue(here)
 
 
-async def test_a_hand_back_with_no_take_over_standing_in_its_chat_tells_no_other_chat(computer):
+async def test_a_hand_back_with_no_take_over_standing_in_its_chat_tells_no_chat_and_gives_no_turn(computer):
     first, other = await computer.told_taken_over(), await computer.idle()
 
     # As a chat's pane posts at its load, where the computer says nobody holds the browser: passed over.
-    await computer.control(other, "release")
+    # And one said to be confirmed, with nothing to hand back, is passed over as well.
+    assert await computer.control(other, "release") == FOR_THE_PANE
+    assert await computer.hands_back(other) == FOR_THE_PANE
 
     assert (await computer.log(first))[-1] == "browser.control_granted"
+    assert (await computer.log(other))[-1] == "llm.response"
     assert computer.wakes == []
 
 
-async def test_a_token_for_one_chat_hands_back_no_other_chats_take_over(computer):
+async def test_a_token_for_one_chat_hands_back_no_other_chats_take_over_and_gives_no_turn(computer):
     first, other = await computer.told_taken_over(), await computer.idle()
 
     # A worker's token covers its own session: it tells that one, and no other chat of the computer.
+    # It is no desktop's window: nothing it says was confirmed there.
     await computer.control(other, "acquire", token_of=other)
-    await computer.control(other, "release", token_of=other)
+    assert await computer.control(other, "release", token_of=other, handed_back=True) == FOR_THE_PANE
 
-    try:
-        assert (await computer.log(other))[-2:] == ["browser.control_granted", "browser.control_returned"]
-        assert (await computer.log(first))[-1] == "browser.control_granted"
-    finally:
-        await computer.unqueue(other)
+    assert (await computer.log(other))[-2:] == ["browser.control_granted", "browser.control_returned"]
+    assert (await computer.log(first))[-1] == "browser.control_granted"
+    assert computer.wakes == []
 
 
 async def test_the_chats_still_told_taken_over_are_looked_for_in_their_own_organisation(computer, session_factory):
@@ -716,13 +868,15 @@ NO_SUCH_CHAT = (404, {"detail": "No browser for session"})
 
 class Asking:
     """The real app, each caller with a real token: a user's chats on a folder of their computer,
-    their browser routes told through the API's own emitter, and each wake recorded."""
+    Surogate Desktop signed in on it, their browser routes told through the API's own emitter, and
+    each wake recorded."""
 
     def __init__(self, the_api, session_factory) -> None:
         self.api, self.factory = the_api, session_factory
         state = the_api.app.state
         self.store = state.session_store
         self.device_id = uuid4()
+        self.window: tuple[str, dict[str, str]] = ("/v1", {})
         self.wakes: list[str] = []
         _install_browser_api_dependencies(the_api.app, SimpleNamespace(browser=SimpleNamespace(backend=None)))
         enqueue = state.session_wake
@@ -732,6 +886,14 @@ class Asking:
             await enqueue(session_id)
 
         state.session_wake = wake
+
+    async def signed_in(self) -> Asking:
+        """Surogate Desktop signs in as the app's user and adds their computer, and its window is given
+        a session of that sign-in: the one the web client there posts with."""
+        desktop = await signed_in(self.api)
+        self.device_id = UUID(await add_computer(self.api, desktop["access_token"]))
+        self.window = ("/v1", self.api.auth((await window_session(self.api, desktop["access_token"]))["access_token"]))
+        return self
 
     async def chat(self, *, taken_over: bool = False, **config) -> UUID:
         """A chat of the app's user on a folder of their computer, its agent's tab open there."""
@@ -765,6 +927,7 @@ class Asking:
 
         return {
             "its user": ("/v1", self.api.auth()),
+            "its user, in the desktop's window": self.window,
             "its own session's token": ("/v1/api", bearer(create_service_account_session_token(org, service.id, chat))),
             "another user of the organisation": ("/v1", bearer(another_user)),
             "an administrator of the organisation": ("/v1", bearer(administrator)),
@@ -777,10 +940,14 @@ class Asking:
         response = await self.api.client.get(f"{prefix}/sessions/{chat}/browser/state", headers=sign_in)
         return response.status_code, response.json()
 
-    async def control(self, chat: UUID, action: str, caller: tuple[str, dict[str, str]]) -> tuple[int, dict]:
+    async def control(
+        self, chat: UUID, action: str, caller: tuple[str, dict[str, str]], *, handed_back: bool | None = None,
+    ) -> tuple[int, dict]:
         prefix, sign_in = caller
         # On the service path a caller names the user it speaks for: here always the chat's own.
-        said = {"action": action, **({"owner_user_id": str(self.api.user_id)} if prefix == "/v1/api" else {})}
+        said: dict = {"action": action, **({"owner_user_id": str(self.api.user_id)} if prefix == "/v1/api" else {})}
+        if handed_back is not None:
+            said["handed_back"] = handed_back
         response = await self.api.client.post(f"{prefix}/sessions/{chat}/browser/control", json=said, headers=sign_in)
         return response.status_code, response.json()
 
@@ -794,7 +961,7 @@ class Asking:
 
     @property
     def user(self) -> tuple[str, dict[str, str]]:
-        """The chats' own user, as a caller of their routes."""
+        """The chats' own user, as the web client in a browser calls their routes."""
         return "/v1", self.api.auth()
 
     async def says(self, chat: UUID, said: str) -> None:
@@ -826,17 +993,33 @@ class Asking:
         await harness_of(self.api)._complete_session(session, [{"role": "assistant", "content": "Done."}], lease, reason="completed")
         await self.store.release_lease(chat, lease.lease_token)
 
-    async def stopped_while_held(self, **config) -> UUID:
-        """A chat whose agent opened a page, whose user then took the browser over, and whose agent met
-        the pause at its next turn and said so: its turn ended, as every turn does."""
+    async def held(self, **config) -> UUID:
+        """A chat whose agent opened a page and ended its turn, and whose user then took the browser
+        over, in the desktop."""
         chat = await self.chat(**config)
-        await self.turn(chat, "Open the report.", "It is open.", tool="browser_navigate", result='{"title": "Report"}')
-        assert (await self.control(chat, "acquire", self.user))[0] == 200
+        await self.turn(chat, "Open the report.", OPENED, tool="browser_navigate", result='{"title": "Report"}')
+        assert (await self.control(chat, "acquire", self.window))[0] == 200
+        return chat
+
+    async def stopped_while_held(self, **config) -> UUID:
+        """A chat whose user holds the browser, and whose agent met the pause at its next turn and said
+        so: its turn ended, as every turn does."""
+        chat = await self.held(**config)
         await self.turn(chat, "Click Next.", WAITING, tool="browser_click", result=paused_by_user_result())
         return chat
 
-    async def hands_back(self, chat: UUID) -> None:
-        assert await self.control(chat, "release", self.user) == (200, {"outcome": "released"})
+    async def hands_back(self, chat: UUID, *, goes_on: bool = True) -> None:
+        """The chat's user hands the browser back and confirms it in the desktop, whose window's pane
+        posts it. The route answers whether the agent *goes_on* by itself."""
+        answer = await self.control(chat, "release", self.window, handed_back=True)
+        assert answer == (200, GOES_ON if goes_on else FOR_THE_PANE)
+
+    @asynccontextmanager
+    async def no_turn_seen_under_way(self, monkeypatch):
+        """The route looks for a turn under way a moment before a worker takes the chat: it sees none."""
+        with monkeypatch.context() as patch:
+            patch.setattr(self.store, "has_live_lease", AsyncMock(return_value=False))
+            yield
 
     async def session(self, chat: UUID):
         return await self.store.get_session(chat)
@@ -866,10 +1049,10 @@ class Asking:
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def asking(api, session_factory):  # noqa: F811  (the fixture, by its name)
-    return Asking(api, session_factory)
+    return await Asking(api, session_factory).signed_in()
 
 
-THEIRS = ["its user", "its own session's token"]
+THEIRS = ["its user", "its user, in the desktop's window", "its own session's token"]
 NOT_THEIRS = [
     "another user of the organisation", "an administrator of the organisation", "another chat's token",
     "a service of the organisation",
@@ -899,11 +1082,12 @@ async def test_nobody_but_a_chats_own_user_takes_its_browser_over_or_hands_it_ba
     async with asking.a_clouds_browser_under(chat, held):
         answers = [
             await asking.control(chat, "acquire", caller), await asking.control(chat, "release", caller),
-            # A chat its user holds the browser from: nobody else hands it back either.
+            # A chat its user holds the browser from: nobody else hands it back either, whatever they say of it.
             await asking.control(held, "acquire", caller), await asking.control(held, "release", caller),
+            await asking.control(held, "release", caller, handed_back=True),
         ]
 
-    assert answers == [NO_SUCH_CHAT] * 4
+    assert answers == [NO_SUCH_CHAT] * 5
     assert await asking.control(uuid4(), "acquire", (await asking.callers(chat, another))["its user"]) == NO_SUCH_CHAT
     # Neither chat is told anything, and nobody is woken.
     assert {of: await asking.log(of) for of in (chat, held)} == before
@@ -911,15 +1095,16 @@ async def test_nobody_but_a_chats_own_user_takes_its_browser_over_or_hands_it_ba
 
 
 async def test_a_chats_own_user_takes_its_browser_over_and_hands_it_back_and_ends_their_other_chats_take_overs(asking):
-    chat, held, another = await asking.chat(), await asking.chat(taken_over=True), await asking.chat()
-    user = (await asking.callers(chat, another))["its user"]
+    chat, held = await asking.chat(), await asking.chat(taken_over=True)
 
     try:
-        assert await asking.control(chat, "acquire", user) == (200, {"outcome": "granted", "owner_user_id": str(asking.api.user_id)})
-        assert await asking.control(chat, "release", user) == (200, {"outcome": "released"})
-        assert (await asking.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
-        # Their other chat on the computer that still said they held the browser is told too.
+        taken_over = (200, {"outcome": "granted", "owner_user_id": str(asking.api.user_id)})
+        assert await asking.control(chat, "acquire", asking.window) == taken_over
+        assert await asking.control(chat, "release", asking.window, handed_back=True) == (200, GOES_ON)
+        assert (await asking.log(chat))[-3:] == ["browser.control_granted", "browser.control_returned", "session.resume"]
+        # Their other chat on the computer that still said they held the browser is told too, for its pane.
         assert (await asking.log(held))[-2:] == ["browser.control_granted", "browser.control_returned"]
+        assert asking.wakes == [str(chat)]
     finally:
         await asking.unqueue(chat)
 
@@ -929,19 +1114,19 @@ async def test_a_chats_own_sessions_token_tells_that_chat_and_no_other_of_its_us
     token = (await asking.callers(chat, another))["its own session's token"]
     before = await asking.log(held)
 
-    try:
-        assert (await asking.control(chat, "acquire", token))[0] == 200
-        assert await asking.control(chat, "release", token) == (200, {"outcome": "released"})
-        assert (await asking.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
-        # The token is for one session: the user's other chat keeps what it said.
-        assert await asking.log(held) == before
-    finally:
-        await asking.unqueue(chat)
+    assert (await asking.control(chat, "acquire", token))[0] == 200
+    assert await asking.control(chat, "release", token) == (200, FOR_THE_PANE)
+    assert (await asking.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
+    # The token is for one session: the user's other chat keeps what it said.
+    assert await asking.log(held) == before
+    assert asking.wakes == []
 
 
-# -- A hand back gives the agent the take-over had stopped a turn: the real wake, replay and loop --
+# -- A hand back its user confirmed gives the chat's agent a turn: the real wake, replay and loop --
 
+OPENED = "It is open."
 WAITING = "You have the browser. Hand it back and I will go on."
+SIGN_IN = "Sign in to the bank, then hand the browser back to me."
 # What the model reads at the hand back, word for word.
 HANDED_BACK = {
     "role": "user",
@@ -953,21 +1138,30 @@ HANDED_BACK = {
 }
 
 
-async def test_a_hand_back_gives_a_finished_chat_whose_agent_was_stopped_a_turn_in_which_it_reads_it_can_go_on(
-    asking, monkeypatch,
+@pytest.mark.parametrize("waited", ["having met the pause", "having asked its user to sign in"])
+async def test_a_hand_back_its_user_confirmed_gives_a_finished_chat_a_turn_in_which_its_agent_reads_it_can_go_on(
+    asking, monkeypatch, waited,
 ):
-    chat = await asking.stopped_while_held()
+    if waited == "having met the pause":
+        chat, last = await asking.stopped_while_held(), WAITING
+    else:
+        # No browser call of the agent's met the pause: it asked its user to take the browser, and its turn ended.
+        chat, last = await asking.chat(), SIGN_IN
+        await asking.turn(chat, "Open my bank.", SIGN_IN, tool="browser_navigate", result='{"title": "Sign in"}')
+        await asking.control(chat, "acquire", asking.window)
     assert (await asking.session(chat)).status == "completed"
 
     await asking.hands_back(chat)
 
     try:
+        # As a typed message leaves a finished chat: active again, and queued.
         assert asking.wakes == [str(chat)]
+        assert (await asking.session(chat)).status == "active"
         sent = await woken(asking.api, monkeypatch, await asking.session(chat))
         # The model reads the conversation as it was, then the harness's note, as a message of its own.
-        assert sent[-2:] == [{"role": "assistant", "content": WAITING}, HANDED_BACK]
+        assert sent[-2:] == [{"role": "assistant", "content": last}, HANDED_BACK]
+        # The route's resume is the turn: its wake writes no other.
         assert await asking.resumes(chat) == [{"source": "browser_hand_back"}]
-        assert (await asking.session(chat)).status == "active"
         # What a later turn rebuilds is what this one was sent, and the model's answer after it.
         *replay, answer = await replayed(asking.api, await asking.session(chat))
         assert (replay, answer["content"]) == (sent, "Noted.")
@@ -975,107 +1169,193 @@ async def test_a_hand_back_gives_a_finished_chat_whose_agent_was_stopped_a_turn_
         await asking.unqueue(chat)
 
 
-async def test_a_hand_back_that_stopped_no_agent_gives_a_finished_chat_no_turn(asking, monkeypatch):
-    chat = await asking.chat()
-    await asking.turn(chat, "Open the report.", "It is open.", tool="browser_navigate", result='{"title": "Report"}')
-    await asking.control(chat, "acquire", asking.user)
+@pytest.mark.parametrize("release", [
+    "the pane's own, at the chat's opening", "its user's, from a browser", "its own session's token's",
+])
+async def test_a_release_that_is_no_confirmed_hand_back_gives_no_turn_and_leaves_nothing_for_a_later_one(
+    asking, monkeypatch, release,
+):
+    # Its agent met the pause while its user held the browser, and waits to hear of the hand back.
+    chat, another = await asking.stopped_while_held(), await asking.chat()
+    callers = await asking.callers(chat, another)
 
-    await asking.hands_back(chat)
+    if release == "the pane's own, at the chat's opening":
+        # The app ended while its user held the browser: started again, nobody holds it there, and the
+        # pane posts that. Nobody handed anything back.
+        answer = await asking.control(chat, "release", asking.window)
+    elif release == "its user's, from a browser":
+        answer = await asking.control(chat, "release", callers["its user"], handed_back=True)
+    else:
+        answer = await asking.control(chat, "release", callers["its own session's token"], handed_back=True)
 
-    # Its user took the browser over and handed it back while the agent did nothing: nobody is woken,
-    # and a wake that came all the same would run nothing, resume nothing, and tell the model nothing.
+    assert answer == (200, FOR_THE_PANE)
+    # Nobody is woken, and a wake that came all the same would run nothing and resume nothing.
     assert asking.wakes == []
     harness, handed = waking(asking.api, monkeypatch)
     await harness.wake(chat)
     assert handed == []
     assert await asking.resumes(chat) == []
     assert (await asking.session(chat)).status == "completed"
-    assert HANDED_BACK not in await replayed(asking.api, await asking.session(chat))
+    # Their next message is read by itself: no note waited for it.
+    await asking.says(chat, "Go on.")
+    sent = await woken(asking.api, monkeypatch, await asking.session(chat))
+    assert sent[-2:] == [{"role": "assistant", "content": WAITING}, {"role": "user", "content": "Go on."}]
+    assert HANDED_BACK not in sent
 
 
-COMMANDS = {
-    "/compress": ("_handle_compress_command", "Context is too small to compress — only 4 messages.", False),
-    "/clear": ("_handle_clear_command", "Conversation cleared.", False),
-    "/goal status": ("_handle_goal_command", "No outcome is active.", True),
-}
+# Every command the harness answers itself in a chat on a folder: by its own handler, or, for one
+# such a chat refuses, at the gate.
+COMMANDS = [
+    "/compress", "/clear", "/goal status", "/mission status", "/auto-research status", "/code status",
+    "/loop", "/loop 5m check the build",
+]
+# One its agent has switched off, which the gate answers too.
+SWITCHED_OFF = "/goal pause"
 
 
-async def command_answered(asking, chat: UUID, command: str, *, meanwhile=None) -> None:
-    """The chat's user types *command*, and its handler answers it, as each leaves the chat: active,
-    its answer the last word, and only an outcome's command moving the cursor past it. *meanwhile*
-    happens while its wake is answering it."""
-    _handler, answer, moves_the_cursor = COMMANDS[command]
-    emit = asking.store.emit_event
+def answering(asking, monkeypatch, command: str = ""):
+    """A harness whose wake runs for real, each command answered by its own handler; and the
+    conversations it handed the model, where a wake came to a turn."""
+    harness, handed = waking(asking.api, monkeypatch)
+    del harness._handle_loop_command  # the real one, not waking's stand-in
+    state = asking.api.app.state
+    harness._redis, harness._session_factory = state.redis, state.session_factory
+    # The chat's own user, who owns what a command of theirs makes; and a window to report on.
+    harness._tenant = harness._acting_principal = SimpleNamespace(
+        org_id=asking.api.org_id, user_id=asking.api.user_id, service_account_id=None, asset_root="/tmp/test",
+    )
+    harness._compressor.context_length = 200_000
+    off = {"goal"} if command == SWITCHED_OFF else set()
+    harness._slash_commands = SlashCommandConfig(commands=frozenset(SLASH_COMMAND_IDS - off))
+    return harness, handed
+
+
+async def command_answered(asking, monkeypatch, chat: UUID, command: str, *, meanwhile=None) -> str:
+    """The chat's user types *command*, and its own wake answers it, as the harness answers each:
+    the model is not asked. *meanwhile* happens while that wake is under way. Returns the answer."""
     await asking.says(chat, command)
-    await emit(chat, EventType.HARNESS_WAKE, {"worker_id": "the-commands-worker", "cursor": 0})
+    harness, handed = answering(asking, monkeypatch, command)
     if meanwhile is not None:
-        await meanwhile()
-    if command == "/clear":
-        await emit(chat, EventType.CONTEXT_COMPACT, {"compacted_messages": [], "strategy": "clear"})
-    answered = await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": answer}})
-    if moves_the_cursor:
-        lease = await asking.store.try_acquire_lease(chat, "the-commands-worker", ttl_seconds=60)
-        await asking.store.advance_harness_cursor(chat, answered, lease.lease_token)
-        await asking.store.release_lease(chat, lease.lease_token)
+        build = harness._build_system_prompt
+
+        async def and_meanwhile(session):
+            await meanwhile()
+            return await build(session)
+
+        harness._build_system_prompt = and_meanwhile
+    before = await asking.log(chat)
+    await harness.wake(chat)
+    written = (await asking.log(chat))[len(before):]
+    assert handed == [] and "llm.request" not in written
+    assert written.count("llm.response") == 1
+    [*_, answer] = await asking.store.get_events(chat, types=[EventType.LLM_RESPONSE])
+    return answer.data["message"]["content"]
 
 
-def commands_of(harness) -> dict[str, AsyncMock]:
-    """The handlers of the commands a wake could run again, each watched."""
-    watched = {command: AsyncMock() for command in COMMANDS}
-    for command, (handler, _answer, _cursor) in COMMANDS.items():
-        setattr(harness, handler, watched[command])
+def watching(harness, monkeypatch) -> dict[str, AsyncMock]:
+    """Everything a wake runs a command of its user's with, each watched in place of being run: every
+    command's handler, the gate's answer, and what expands a skill or consults an expert."""
+    handlers = [name for name in dir(type(harness)) if name.startswith("_handle_") and name.endswith("_command")]
+    assert len(handlers) >= 7
+    watched = {name: AsyncMock() for name in [*handlers, "_emit_loop_response"]}
+    for name, watch in watched.items():
+        setattr(harness, name, watch)
+    watched["expand_slash_skill"] = AsyncMock(return_value=None)
+    monkeypatch.setattr(loop_module, "expand_slash_skill", watched["expand_slash_skill"])
     return watched
 
 
-@pytest.mark.parametrize("command", list(COMMANDS))
-async def test_a_hand_back_never_runs_the_users_last_command_again_and_gives_the_stopped_agent_its_turn(
-    asking, monkeypatch, command,
-):
-    chat = await asking.stopped_while_held()
-    # The user's last message is a command, answered: it left the chat active.
-    await command_answered(asking, chat, command)
+def ran(watched: dict[str, AsyncMock]) -> list[str]:
+    return [name for name, watch in watched.items() if watch.await_count]
+
+
+async def test_a_wake_for_the_users_command_runs_it(asking, monkeypatch):
+    # What the tests below watch for is what runs a command: a wake for the user's own, each time.
+    for command, runs in (("/goal status", "_handle_goal_command"), ("/board-pack Q3", "expand_slash_skill")):
+        chat = await asking.held()
+        await asking.says(chat, command)
+        harness, _handed = answering(asking, monkeypatch)
+        watched = watching(harness, monkeypatch)
+        await harness.wake(chat)
+        assert ran(watched) == [runs]
+
+
+@pytest.mark.parametrize("command", [*COMMANDS, SWITCHED_OFF])
+async def test_a_hand_backs_turn_runs_no_command_of_the_users_again(asking, monkeypatch, command):
+    chat = await asking.held()
+    # The user's last message is a command, answered by the harness: it left the chat active.
+    answer = await command_answered(asking, monkeypatch, chat, command)
+    assert (await asking.session(chat)).status == "active"
 
     await asking.hands_back(chat)
 
     try:
-        harness, handed = waking(asking.api, monkeypatch)
-        ran = commands_of(harness)
+        harness, handed = answering(asking, monkeypatch, command)
+        watched = watching(harness, monkeypatch)
         await harness.wake(chat)
-        assert [name for name, handler in ran.items() if handler.await_count] == []
+        assert ran(watched) == []
         [conversation] = handed
-        assert conversation[-2:] == [{"role": "assistant", "content": COMMANDS[command][1]}, HANDED_BACK]
+        assert conversation[-2:] == [{"role": "assistant", "content": answer}, HANDED_BACK]
         # A worker that dies in that turn, after its request, leaves it to be run again: still no command.
         await asking.store.emit_event(chat, EventType.LLM_REQUEST, {})
-        harness, handed = waking(asking.api, monkeypatch)
-        ran = commands_of(harness)
+        harness, handed = answering(asking, monkeypatch, command)
+        watched = watching(harness, monkeypatch)
         await harness.wake(chat)
-        assert [name for name, handler in ran.items() if handler.await_count] == []
+        assert ran(watched) == []
         assert [conversation.count(HANDED_BACK) for conversation in handed] == [1]
     finally:
         await asking.unqueue(chat)
 
 
-@pytest.mark.parametrize("command", list(COMMANDS))
-async def test_a_hand_back_that_stopped_no_agent_wakes_nobody_in_a_chat_left_active_by_a_command(asking, command):
-    chat = await asking.chat()
-    await asking.turn(chat, "Open the report.", "It is open.", tool="browser_navigate", result='{"title": "Report"}')
-    await command_answered(asking, chat, command)
-    await asking.control(chat, "acquire", asking.user)
+@pytest.mark.parametrize("command", [*COMMANDS, SWITCHED_OFF])
+async def test_a_hand_back_given_its_turn_as_a_commands_wake_began_runs_no_command_again(asking, monkeypatch, command):
+    chat = await asking.held()
 
+    async def user_hands_back():
+        async with asking.no_turn_seen_under_way(monkeypatch):
+            await asking.hands_back(chat)
+
+    # The command's own wake is under way, and moves the cursor past the hand back where it moves it.
+    answer = await command_answered(asking, monkeypatch, chat, command, meanwhile=user_hands_back)
+
+    try:
+        harness, handed = answering(asking, monkeypatch, command)
+        watched = watching(harness, monkeypatch)
+        await harness.wake(chat)
+        assert ran(watched) == []
+        assert [conversation[-2:] for conversation in handed] == [[{"role": "assistant", "content": answer}, HANDED_BACK]]
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_a_hand_back_a_turn_ended_over_without_reading_is_read_at_the_wake_it_queued(asking, monkeypatch):
+    chat = await asking.held()
+    await command_answered(asking, monkeypatch, chat, "/goal status")
+    # Handed back as a turn is ending: the route makes the chat active, and that turn's end is written
+    # over it. The chat is finished again, with the hand back's resume read by no request.
     await asking.hands_back(chat)
+    await asking.ends(chat)
+    assert (await asking.session(chat)).status == "completed"
 
-    # Nothing wakes the chat, so nothing runs its user's command again: not the hand back, and not
-    # the sweeper, to which the chat does not look left half done.
-    assert asking.wakes == []
-    stale = [o.id for o in await asking.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID)]
-    assert chat not in stale
+    try:
+        harness, handed = answering(asking, monkeypatch)
+        watched = watching(harness, monkeypatch)
+        await harness.wake(chat)
+        assert ran(watched) == []
+        assert [conversation[-1] for conversation in handed] == [HANDED_BACK]
+        # Revived for it, the chat's log says why; that is no second hand back, and is read as none.
+        assert await asking.resumes(chat) == [{"source": "browser_hand_back"}, {"source": "unread_browser_hand_back"}]
+        assert handed[0].count(HANDED_BACK) == 1
+        assert (await asking.session(chat)).status == "active"
+    finally:
+        await asking.unqueue(chat)
 
 
-async def test_a_hand_back_gives_one_turn_however_often_the_chat_is_woken(asking, monkeypatch):
+async def test_a_hand_back_gives_one_turn_however_often_it_is_posted_and_the_chat_is_woken(asking, monkeypatch):
     chat = await asking.stopped_while_held()
     await asking.hands_back(chat)
-    # The pane posts the hand back again, as a second window of the chat does at its load.
-    await asking.hands_back(chat)
+    # The pane posts the hand back again, as a second window of the chat does.
+    await asking.hands_back(chat, goes_on=False)
 
     try:
         assert asking.wakes == [str(chat)]
@@ -1097,13 +1377,13 @@ async def test_a_hand_backs_turn_cut_off_by_its_workers_death_is_run_once_more_a
 ):
     chat = await asking.stopped_while_held()
     await asking.hands_back(chat)
-    # The first worker revived the chat, made its request, and died before the model answered.
+    # The first worker took the chat, made its request, and died before the model answered.
     harness, handed = waking(asking.api, monkeypatch)
     await harness.wake(chat)
     await asking.store.emit_event(chat, EventType.LLM_REQUEST, {})
 
     try:
-        # The sweeper's wake runs the turn again: the chat is active now, and its request is in the log.
+        # The sweeper's wake runs the turn again: the chat is active, and its request is in the log.
         sent = await woken(asking.api, monkeypatch, await asking.session(chat))
         assert sent[-2:] == [{"role": "assistant", "content": WAITING}, HANDED_BACK]
         assert sent.count(HANDED_BACK) == 1
@@ -1112,77 +1392,78 @@ async def test_a_hand_backs_turn_cut_off_by_its_workers_death_is_run_once_more_a
         await asking.unqueue(chat)
 
 
-@pytest.mark.parametrize("command", list(COMMANDS))
-async def test_a_hand_back_that_lands_while_a_command_is_being_answered_gives_its_turn_and_runs_no_command_again(
-    asking, monkeypatch, command,
-):
+async def test_a_chat_that_failed_before_its_hand_backs_turn_ran_is_left_for_its_user_to_start_again(asking, monkeypatch):
     chat = await asking.stopped_while_held()
-
-    async def user_hands_back():
-        await asking.hands_back(chat)
-
-    # The command's own wake is under way, and moves the cursor past the hand back where it moves it.
-    await command_answered(asking, chat, command, meanwhile=user_hands_back)
-
-    try:
-        harness, handed = waking(asking.api, monkeypatch)
-        ran = commands_of(harness)
-        await harness.wake(chat)
-        assert [name for name, handler in ran.items() if handler.await_count] == []
-        assert [conversation[-2:] for conversation in handed] == [
-            [{"role": "assistant", "content": COMMANDS[command][1]}, HANDED_BACK],
-        ]
-    finally:
-        await asking.unqueue(chat)
-
-
-async def test_a_hand_back_that_lands_as_a_commands_turn_is_ending_still_runs_no_command(asking, monkeypatch):
-    chat = await asking.stopped_while_held()
-    # The user's last message is a command, answered; the browser is handed back before that turn's
-    # end is written, and the turn then ends as a session's does.
-    await command_answered(asking, chat, "/goal status")
     await asking.hands_back(chat)
-    await asking.ends(chat)
+    # A turn that began as the browser was handed back failed, before the hand back's own wake came.
+    await asking.store.update_session_status(chat, "failed")
 
     try:
         harness, handed = waking(asking.api, monkeypatch)
-        ran = commands_of(harness)
         await harness.wake(chat)
-        assert [name for name, handler in ran.items() if handler.await_count] == []
-        assert [conversation[-1] for conversation in handed] == [HANDED_BACK]
+        # A failed chat is its user's to start again: the hand back revives a finished one alone.
+        assert handed == []
+        assert (await asking.session(chat)).status == "failed"
         assert await asking.resumes(chat) == [{"source": "browser_hand_back"}]
     finally:
         await asking.unqueue(chat)
 
 
 @pytest.mark.parametrize("status", ["paused", "failed"])
-async def test_a_hand_back_leaves_a_chat_its_user_stopped_or_that_failed_for_them_to_start_again(asking, monkeypatch, status):
+async def test_a_hand_back_to_a_chat_its_user_stopped_or_that_failed_gives_no_turn_and_is_not_read_later(
+    asking, monkeypatch, status,
+):
     chat = await asking.stopped_while_held()
     await asking.store.update_session_status(chat, status)
 
-    await asking.hands_back(chat)
+    await asking.hands_back(chat, goes_on=False)
 
-    try:
-        harness, handed = waking(asking.api, monkeypatch)
-        await harness.wake(chat)
-        assert handed == []
-        assert (await asking.session(chat)).status == status
-        # The hand back is still read: at the turn their next message starts.
-        await asking.says(chat, "Go on.")
-        sent = await woken(asking.api, monkeypatch, await asking.session(chat))
-        assert sent[-2:] == [{"role": "user", "content": "Go on."}, HANDED_BACK]
-    finally:
-        await asking.unqueue(chat)
+    harness, handed = waking(asking.api, monkeypatch)
+    await harness.wake(chat)
+    assert (asking.wakes, handed) == ([], [])
+    assert (await asking.session(chat)).status == status
+    # The chat is theirs to start again, and their message is read by itself: no note waited for it.
+    await asking.says(chat, "Go on.")
+    sent = await woken(asking.api, monkeypatch, await asking.session(chat))
+    assert sent[-1] == {"role": "user", "content": "Go on."}
+    assert HANDED_BACK not in sent
 
 
-async def test_a_hand_back_during_a_tool_call_of_a_running_turn_is_read_in_that_turn_and_gives_no_second(
+async def test_a_hand_back_while_a_turn_is_under_way_is_made_and_tells_neither_that_turn_nor_a_later_one(
     asking, monkeypatch,
 ):
     chat = await asking.stopped_while_held()
     await asking.says(chat, "Note down where we are.")
 
     async def user_hands_back():
-        await asking.hands_back(chat)
+        # Answered 200, and that the agent does not go on by itself: the pane tells them to write to it.
+        await asking.hands_back(chat, goes_on=False)
+
+    requests = await live_turn(
+        asking.api, monkeypatch, await asking.session(chat), [TODO_CALL, _final_response("Noted down.")],
+        during_tool=user_hands_back,
+    )
+    assert len(requests) == 2
+    assert HANDED_BACK not in requests[1]
+    # No turn of its own either, then or once that turn ends; and nothing for their next message to bring.
+    assert asking.wakes == []
+    await asking.ends(chat)
+    harness, handed = waking(asking.api, monkeypatch)
+    await harness.wake(chat)
+    assert handed == []
+    assert await asking.resumes(chat) == []
+    assert HANDED_BACK not in await replayed(asking.api, await asking.session(chat))
+
+
+async def test_a_hand_back_given_its_turn_as_another_began_is_read_in_that_turn_and_gives_no_second(
+    asking, monkeypatch,
+):
+    chat = await asking.stopped_while_held()
+    await asking.says(chat, "Note down where we are.")
+
+    async def user_hands_back():
+        async with asking.no_turn_seen_under_way(monkeypatch):
+            await asking.hands_back(chat)
 
     try:
         requests = await live_turn(
@@ -1192,22 +1473,24 @@ async def test_a_hand_back_during_a_tool_call_of_a_running_turn_is_read_in_that_
         *_, called, result, note = requests[1]
         assert [called["role"], result["role"]] == ["assistant", "tool"]
         assert note == HANDED_BACK
-        # Read in its turn, the hand back gives no second one once that turn ends.
+        # Read in that turn, the hand back gives no second one once it ends.
         assert asking.wakes == [str(chat)]
         await asking.ends(chat)
         harness, handed = waking(asking.api, monkeypatch)
         await harness.wake(chat)
         assert handed == []
+        assert await asking.resumes(chat) == [{"source": "browser_hand_back"}]
     finally:
         await asking.unqueue(chat)
 
 
-async def test_a_hand_back_during_the_agents_reply_is_read_before_its_turn_ends(asking, monkeypatch):
+async def test_a_hand_back_given_its_turn_during_the_agents_reply_is_read_before_that_turn_ends(asking, monkeypatch):
     chat = await asking.stopped_while_held()
     await asking.says(chat, "Where are we?")
 
     async def user_hands_back():
-        await asking.hands_back(chat)
+        async with asking.no_turn_seen_under_way(monkeypatch):
+            await asking.hands_back(chat)
 
     try:
         requests = await live_turn(
@@ -1226,20 +1509,12 @@ async def test_a_hand_back_during_the_agents_reply_is_read_before_its_turn_ends(
 BOARD_PACK = "Lay the pack out as the board likes it: one page per figure."
 
 
-async def test_a_hand_backs_turn_reads_the_skill_the_users_last_message_ran(asking, monkeypatch):
-    chat = await asking.chat()
-    await asking.turn(chat, "Open the report.", "It is open.", tool="browser_navigate", result='{"title": "Report"}')
-    await asking.control(chat, "acquire", asking.user)
-    # The user's last message ran a skill, at its own wake, and that turn met the pause.
+async def test_a_hand_backs_turn_reads_the_skill_the_users_last_message_ran_and_runs_it_no_more(asking, monkeypatch):
+    chat = await asking.held()
+    # The user's last message ran a skill, at its own wake, and that turn ended waiting for the browser.
     emit = asking.store.emit_event
     await asking.says(chat, "/board-pack Q3")
     await emit(chat, EventType.SKILL_INVOKED, {"skill": "board-pack", "raw_message": "/board-pack Q3", "staged_at": None})
-    await emit(chat, EventType.LLM_REQUEST, {})
-    call = {"id": "call-click", "type": "function", "function": {"name": "browser_click", "arguments": "{}"}}
-    asked = {"tool_call_id": "call-click", "name": "browser_click"}
-    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}})
-    await emit(chat, EventType.TOOL_CALL, asked)
-    await emit(chat, EventType.TOOL_RESULT, {**asked, "content": paused_by_user_result(), "elapsed_ms": 3})
     await emit(chat, EventType.LLM_REQUEST, {})
     await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": WAITING}})
     await asking.ends(chat)
@@ -1249,6 +1524,9 @@ async def test_a_hand_backs_turn_reads_the_skill_the_users_last_message_ran(aski
     try:
         harness, handed = waking(asking.api, monkeypatch)
         harness._tools.dispatch = AsyncMock(return_value=json.dumps({"success": True, "content": BOARD_PACK}))
+        # What runs a skill at its own wake, and consults an expert: neither again.
+        run_again = AsyncMock(return_value=None)
+        monkeypatch.setattr(loop_module, "expand_slash_skill", run_again)
         await harness.wake(chat)
         [conversation] = handed
         # As its own wake sent it, so the model still has the skill's instructions, and the prompt cache the conversation.
@@ -1257,42 +1535,65 @@ async def test_a_hand_backs_turn_reads_the_skill_the_users_last_message_ran(aski
         assert {"role": "user", "content": "/board-pack Q3"} not in conversation
         assert conversation[-1] == HANDED_BACK
         # Read again, not run again.
+        assert run_again.await_count == 0
         assert len(await asking.store.get_events(chat, types=[EventType.SKILL_INVOKED])) == 1
     finally:
         await asking.unqueue(chat)
 
 
+# -- A hand back's turn is counted as a typed message's is: held where it is given, spent when it ends --
+
 IN_A_PROJECT = {"workspace_boundary": f"{PROJECT_BOUNDARY_PREFIX}{uuid4()}"}
+CHATS = pytest.mark.parametrize("config", [{}, IN_A_PROJECT], ids=["a chat on a folder", "a project's chat on a folder"])
 
 
-async def test_a_hand_backs_turn_in_a_projects_chat_is_held_and_spent_against_the_users_allowance(asking, monkeypatch):
-    # No message route admitted it: as a thread's report, the wake that revives the chat holds its turn.
-    chat = await asking.stopped_while_held(**IN_A_PROJECT)
+@CHATS
+async def test_a_hand_backs_turn_is_held_against_the_users_allowance_where_it_is_given_and_spent_when_it_ends(
+    asking, monkeypatch, config,
+):
+    chat = await asking.stopped_while_held(**config)
+    ops = Ops()
+    metered(asking.api, CAPPED, ops)
+
     await asking.hands_back(chat)
 
     try:
-        ops = Ops()
-        harness, ran = worker(asking.api, monkeypatch, CAPPED, ops)
+        # Held by the route, as the message route holds a typed message's turn.
+        assert ops.held == [("allowance", str(asking.api.user_id), "web")]
+        harness, turns = worker(asking.api, monkeypatch, CAPPED, ops)
         await harness.wake(chat)
-        assert ran == [chat]
+        assert turns == [chat]
+        # The wake holds nothing more, and the turn's end spends what the route held.
         assert (ops.held, ops.spent) == ([("allowance", str(asking.api.user_id), "web")], [("allowance", "hold-1", 1500)])
+        # Posted again, with nothing left to hand back: no turn, so nothing is held for one.
+        await asking.hands_back(chat, goes_on=False)
+        assert len(ops.held) == 1
     finally:
         await asking.unqueue(chat)
 
 
-async def test_a_hand_back_waits_while_the_users_limit_is_spent(asking, monkeypatch):
-    chat = await asking.stopped_while_held(**IN_A_PROJECT)
-    await asking.hands_back(chat)
+@CHATS
+@pytest.mark.parametrize("left", ["finished", "left active by a command"])
+@pytest.mark.parametrize("ops", [lambda: Ops(allowance_left=False), Down], ids=["the limit spent", "ops unreachable"])
+async def test_a_hand_back_whose_turn_the_users_limit_refuses_is_made_and_gives_none(
+    asking, monkeypatch, config, left, ops,
+):
+    chat = await asking.stopped_while_held(**config)
+    if left == "left active by a command":
+        await command_answered(asking, monkeypatch, chat, "/clear")
+    status = (await asking.session(chat)).status
+    metered(asking.api, CAPPED, ops())
 
-    try:
-        harness, ran = worker(asking.api, monkeypatch, CAPPED, Ops(allowance_left=False))
-        await harness.wake(chat)
-        # No turn, and the chat is as it was: not resumed, and not failed for a limit nobody typed into.
-        assert ran == []
-        assert (await asking.session(chat)).status == "completed"
-        assert await asking.resumes(chat) == []
-        assert await asking.store.get_events(chat, types=[EventType.SESSION_FAIL]) == []
-        # The user's next message, once their limit allows it, reads the hand back.
-        assert HANDED_BACK in await replayed(asking.api, await asking.session(chat))
-    finally:
-        await asking.unqueue(chat)
+    # The release does not fail: the browser is the agent's again on the computer, and the pane is
+    # answered that the agent does not go on by itself.
+    await asking.hands_back(chat, goes_on=False)
+
+    # No turn, and the chat is as it was: not resumed, not queued, and not failed for a limit nobody typed into.
+    assert asking.wakes == []
+    assert (await asking.session(chat)).status == status
+    assert await asking.resumes(chat) == []
+    assert await asking.store.get_events(chat, types=[EventType.SESSION_FAIL]) == []
+    stale = [o.id for o in await asking.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID)]
+    assert chat not in stale
+    # And nothing waits for the user's next message, once their limit allows one.
+    assert HANDED_BACK not in await replayed(asking.api, await asking.session(chat))

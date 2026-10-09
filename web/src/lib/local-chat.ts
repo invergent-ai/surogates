@@ -318,7 +318,7 @@ function heldBrowser(
     text:
       takenOver === true
         ? `${open}, and you have it: the agent waits until you hand it back.`
-        : `${open}, and you have it, though the chat it was taken over from is gone: the agent waits until you hand it back here.`,
+        : `${open}, and you have it, though the chat it was taken over from is gone: hand it back here, then write to the agent to go on.`,
     drive: "handBack",
   };
 }
@@ -365,57 +365,97 @@ export function computerBrowser(
 /** What the pane's presses tell the chat's server: that its user took the browser over, and that they handed it back. */
 export interface BrowserTelling {
   taken(): Promise<unknown>;
-  handedBack(): Promise<unknown>;
+  /**
+   * Told once the desktop answered a hand back true. *confirmed* where its user confirmed, in the
+   * desktop's own window, handing back the browser this chat held; not where the chat it was held
+   * from is gone, nor where nobody held it. Resolves whether the agent goes on by itself.
+   */
+  handedBack(confirmed: boolean): Promise<boolean>;
 }
+
+// What the pane says once the browser is handed back. Whether the agent goes on is the server's
+// answer: it gives the chat's agent a turn only for a hand back its user confirmed, and only where
+// the chat can take one then (no turn under way, not stopped, its user's limit not spent).
+export const AGENT_GOES_ON =
+  "The browser is the agent's again, and the agent goes on.";
+export const WRITE_TO_THE_AGENT =
+  "The browser is the agent's again. The agent does not go on by itself: write to it to go on.";
 
 /**
  * What a button of the pane does, when pressed. The desktop's call is made in the same turn as the
  * press, before anything is awaited: the desktop lets one call through for a click of its user's.
  * The pause is the desktop's; the server is told of a take-over, and of a hand back only once the
- * desktop answered true, its user having confirmed it in the desktop's own window, so the chat says
- * each and, handed back, its agent goes on (POST …/browser/control). Rejects in the desktop's
- * words, or with what the server could not be told.
+ * desktop answered true (POST …/browser/control). *held* is who held the browser when the button
+ * was pressed, as the chat's binding read it: only a hand back of the browser this chat held is
+ * its user's confirmed one, for which the server gives the agent a turn where it can. Resolves
+ * with what the pane says of a hand back made, whether the agent goes on or is to be written to;
+ * rejects in the desktop's words, or with what the server could not be told.
  */
 export async function actOnBrowser(
   action: BrowserAction,
   root: string,
   desktop: BrowserCalls,
   server: BrowserTelling,
-): Promise<void> {
+  held?: DesktopBinding["takenOver"],
+): Promise<string | null> {
   if (action === "settings") {
-    return desktop.openSettings?.("browser");
+    await desktop.openSettings?.("browser");
+    return null;
   }
   const calls = desktop.browser;
   if (!calls) {
-    return;
+    return null;
   }
   if (action === "show") {
-    return calls.show(root);
+    await calls.show(root);
+    return null;
   }
   if (action === "takeOver") {
     await calls.takeOver(root);
     await server.taken().catch(() => {
       throw new Error("You have the browser, but the chat could not be told.");
     });
-  } else if (await calls.handBack(root)) {
-    await server.handedBack().catch(() => {
-      throw new Error(
-        "The browser is the agent's again, but the agent could not be told: write to it to go on.",
-      );
-    });
+    return null;
   }
+  if (!(await calls.handBack(root))) {
+    return null;
+  }
+  const goesOn = await server.handedBack(held === true).catch(() => {
+    throw new Error(
+      "The browser is the agent's again, but the agent could not be told: write to it to go on.",
+    );
+  });
+  return goesOn ? AGENT_GOES_ON : WRITE_TO_THE_AGENT;
+}
+
+/**
+ * What a release posts to a chat's control route. A hand back its user confirmed in the desktop
+ * says so; any other release is posted as it always was, and as a cloud chat's is.
+ */
+export function browserRelease(handedBack: boolean): {
+  action: "release";
+  handed_back?: true;
+} {
+  return handedBack
+    ? { action: "release", handed_back: true }
+    : { action: "release" };
 }
 
 /** The chat's control route, as the pane posts to it (POST …/browser/control). */
 export interface BrowserPosts {
   acquire(): Promise<unknown>;
-  release(): Promise<unknown>;
+  /**
+   * *handedBack* says the release is its user's hand back, confirmed in the desktop, of the browser
+   * this chat held. The answer's `resumes` says whether the agent goes on by itself.
+   */
+  release(handedBack: boolean): Promise<unknown>;
 }
 
 /** What a chat's pane shows beside where its browser is. */
 export interface BrowserPaneState {
   asking: boolean; // the desktop is asking its user whether to hand the browser back
   failure: string | null; // what the desktop refused, in its words, or what the server could not be told
+  said: string | null; // once the browser is handed back: whether the agent goes on, or is to be written to
   answers: number; // the take-overs and hand backs the desktop has answered: the binding is read again at each
 }
 
@@ -436,6 +476,7 @@ export interface BrowserPane {
     action: BrowserAction,
     root: string,
     desktop: BrowserCalls,
+    held?: DesktopBinding["takenOver"],
   ): Promise<void>;
   /** What the computer says of who holds the browser, when the chat is opened. Never rejects. */
   loaded(takenOver: DesktopBinding["takenOver"] | undefined): Promise<void>;
@@ -444,19 +485,28 @@ export interface BrowserPane {
 /**
  * The pane of one chat, which posts to that chat's control route (*posts*).
  *
- * The server tells the chat of a take-over once, and of a hand back only after one, when it also
- * wakes the agent. So each is posted in its turn, the next once the last was answered:
+ * The server tells the chat of a take-over once, and of a hand back only after one. So each is
+ * posted in its turn, the next once the last was answered:
  * - a take-over the desktop made (acquire);
  * - a hand back the desktop answered true (release), with the take-over posted again before it
  *   unless this page saw the server answer it: one that never arrived, one made before this page
  *   loaded, or one made from another chat. The server tells a chat no second time of a take-over
- *   it knows, so the chat is told both, in order, and its agent is woken;
+ *   it knows, so the chat is told both, in order. The release says it is a hand back only where
+ *   its user confirmed one of the browser this chat held: the server then gives the agent a turn
+ *   where it can, answers whether it did, and the pane says that. Made for a chat that is gone,
+ *   it is a release like the next, and the agent is to be written to;
  * - at the chat's load, where the computer says nobody holds the browser, a release, once: the app
- *   may have ended while its user held it, and the chat would still say they do. The server passes
- *   over a release with no take-over standing.
+ *   may have ended while its user held it, and the chat would still say they do. Nobody handed
+ *   anything back, so it is no hand back, and wakes nobody. The server passes over a release with
+ *   no take-over standing.
  */
 export function browserPane(posts: BrowserPosts): BrowserPane {
-  let state: BrowserPaneState = { asking: false, failure: null, answers: 0 };
+  let state: BrowserPaneState = {
+    asking: false,
+    failure: null,
+    said: null,
+    answers: 0,
+  };
   const listeners = new Set<() => void>();
   const set = (change: Partial<BrowserPaneState>) => {
     state = { ...state, ...change };
@@ -468,26 +518,32 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
   // What the server was last told, as far as this page knows: a post that failed may have arrived.
   let told: "unknown" | "taken" | "free" = "unknown";
   let line: Promise<unknown> = Promise.resolve();
-  const inTurn = (post: () => Promise<void>): Promise<void> => {
+  const inTurn = <T>(post: () => Promise<T>): Promise<T> => {
     const posted = line.then(post);
     line = posted.catch(() => {
       // Said by whoever posted it: the next is posted all the same.
     });
     return posted;
   };
-  const post = async (action: "acquire" | "release") => {
+  const post = async (action: "acquire" | "release", handedBack = false) => {
     told = "unknown";
-    await posts[action]();
+    const answer =
+      action === "acquire"
+        ? await posts.acquire()
+        : await posts.release(handedBack);
     told = action === "acquire" ? "taken" : "free";
+    return answer;
   };
   const telling: BrowserTelling = {
     taken: () => inTurn(() => post("acquire")),
-    handedBack: () =>
+    handedBack: (confirmed) =>
       inTurn(async () => {
         if (told !== "taken") {
           await post("acquire");
         }
-        await post("release");
+        const answer = await post("release", confirmed);
+        // Only the server's own yes: an answer that says nothing of it is no turn given.
+        return (answer as { resumes?: unknown } | null)?.resumes === true;
       }),
   };
 
@@ -499,7 +555,7 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
         listeners.delete(listener);
       };
     },
-    press: (action, root, desktop) => {
+    press: (action, root, desktop, held) => {
       const handingBack = action === "handBack";
       if (handingBack && state.asking) {
         return Promise.resolve();
@@ -515,21 +571,36 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
           });
         }
       };
-      const acted = actOnBrowser(action, root, desktop, {
-        taken: () => {
-          answered();
-          return telling.taken();
+      const acted = actOnBrowser(
+        action,
+        root,
+        desktop,
+        {
+          taken: () => {
+            answered();
+            return telling.taken();
+          },
+          handedBack: (confirmed) => {
+            answered();
+            return telling.handedBack(confirmed);
+          },
         },
-        handedBack: () => {
+        held,
+      );
+      // What was said of the last press stays until the next, which starts clean.
+      set({ asking: handingBack || state.asking, failure: null, said: null });
+      return acted.then(
+        (said) => {
           answered();
-          return telling.handedBack();
+          if (said !== null) {
+            set({ said });
+          }
         },
-      });
-      set({ asking: handingBack || state.asking, failure: null });
-      return acted.then(answered, (error: unknown) => {
-        answered();
-        set({ failure: saidBy(error) });
-      });
+        (error: unknown) => {
+          answered();
+          set({ failure: saidBy(error) });
+        },
+      );
     },
     loaded: (takenOver) => {
       if (takenOver !== false) {

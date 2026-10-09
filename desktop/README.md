@@ -158,12 +158,19 @@ file input that had asked, in any of its chats, is given a file after; each down
 comes meanwhile is asked about as yours, as one downloaded while you had control, and the
 agent is told nothing of it; and five seconds on, a file input in the agent's pages opens
 the browser's own file chooser at a click. It stays so until you hand the browser back.
-The pane tells the chat of a take-over and of a hand back, and at the hand back that chat's
-agent goes on; if the chat could not be told, its agent waits until you write to it, and
-the pane says so where it can. The agent's other chats are not told of either. A take-over
-lasts until you hand the browser back or quit the app, which closes the browser. A hand
-back gives no page anything a click of yours would: no page can open a window, fill the
-screen or ask for a file on it.
+The pane tells the chat of a take-over and of a hand back. A hand back you confirmed, of
+the browser taken over from that chat, gives that chat's agent a turn, in which it reads
+that the browser is handed back, and the pane says the agent goes on. Where the chat can
+take no turn then (one is under way, you stopped the chat or it failed, your limit is
+spent), the browser is the agent's again all the same, the agent does not go on by itself,
+and the pane says to write to it; so it does where the chat could not be told. A hand back
+made for a chat that is deleted wakes no agent either: write to the agent to go on. Nor
+does the app's end while you had the browser: the chat is told, when it is next opened,
+that nobody holds it, which is no hand back. A take-over is told to the chat it was made
+from alone. A hand back is also told to the agent's other chats on this computer that still
+said you had the browser, and wakes none of them. A take-over lasts until you hand the
+browser back or quit the app, which closes the browser. A hand back gives no page anything
+a click of yours would: no page can open a window, fill the screen or ask for a file on it.
 
 For a minute after a hand back, a download the browser shows no request for (a `download`
 link to its page's own site, a `blob:` or a `data:` address) is still asked about as yours,

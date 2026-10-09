@@ -123,17 +123,17 @@ WORKER_NEWS_TYPES = WORKER_REPORT_TYPES | {EventType.WORKER_SPAWNED.value}
 
 
 #: What the agent of a chat on its user's computer reads once they hand back
-#: the browser they had taken over, when that had stopped it: a browser call
-#: of the chat's was answered ``paused_by_user``.  The harness's words, the
-#: same for every hand back, so the live loop and replay produce the same
-#: bytes; never something the user typed.
+#: the browser they had taken over, and confirm it there: the resume that
+#: hand back gave the chat.  The harness's words, the same for every hand
+#: back, so the live loop and replay produce the same bytes; never something
+#: the user typed.
 BROWSER_HANDED_BACK = (
     "[The user has handed the browser back. The browser tools work again: go on with what you were "
     "doing when they took it over. They may have changed the page meanwhile, so read it again before "
     "you act on it.]"
 )
 #: The events a session reads as news at its next model request.
-NEWS_TYPES = WORKER_NEWS_TYPES | {EventType.BROWSER_CONTROL_RETURNED.value}
+NEWS_TYPES = WORKER_NEWS_TYPES | {EventType.SESSION_RESUME.value}
 
 
 #: The lines a thread's own words sit between in its report.  Only the
@@ -271,8 +271,8 @@ def worker_news(event_type: str, data: dict) -> dict | None:
 def news(event) -> dict | None:
     """The message a session reads an event as at its next model request, or
     None for an event that is no news: a worker's news to its coordinator,
-    and, in a chat on its user's computer, the hand back of the browser whose
-    take-over had stopped its agent."""
+    and, in a chat on its user's computer, the resume a hand back of the
+    browser gave it."""
     if event.type in WORKER_NEWS_TYPES:
         return worker_news(event.type, event.data)
     if resumes_the_agent(event):
@@ -522,9 +522,9 @@ class ContextReplayMixin:
                 if note is not None:
                     held_reports.append(note)
 
-            # The hand back of the browser that had stopped the agent is read
-            # the same way: at the next request, on its own.  One that
-            # stopped nothing, as the take-over itself, is for the pane.
+            # The resume a hand back of the browser gave the chat is read the
+            # same way: at the next request, on its own.  The hand back's own
+            # event, as the take-over's, is for the pane.
             elif resumes_the_agent(event):
                 held_reports.append({"role": "user", "content": BROWSER_HANDED_BACK})
 

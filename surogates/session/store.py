@@ -22,7 +22,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from surogates.browser.control import RESUMES, paused_by_user_result
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -2428,22 +2427,20 @@ class SessionStore:
             # root is idle, and one the reaper found dead), and its user
             # taking it over, from the API, whenever they like.  None shows a
             # turn under way: the event under them says whether a worker
-            # died.  The hand back is not here: it wakes the agent, and one
-            # whose wake was lost is recovered.
+            # died.  The cloud's hand back is not here: it wakes the agent,
+            # and one whose wake was lost is recovered.
             "browser.provisioned",
             "browser.destroyed",
             "browser.unavailable",
             "browser.control_granted",
         )
-        # A hand back of the browser on the user's computer is work only
-        # when the take-over had stopped the chat's agent, which the event
-        # says (``resumes``).  Any other is told for the chat's pane, as the
-        # take-over was.  The cloud's names no computer, and is as it was:
-        # the wake at a release.
+        # A hand back of the browser on the user's computer is told for the
+        # chat's pane, as the take-over was: the turn a confirmed one gives
+        # is the ``session.resume`` written with it.  The cloud's names no
+        # computer, and is as it was: the wake at a release.
         hand_back_for_the_pane = and_(
             EventRow.type == "browser.control_returned",
             EventRow.data["computer"].astext.is_not_distinct_from("true"),
-            EventRow.data[RESUMES].astext.is_distinct_from("true"),
         )
 
         # Correlated scalar subqueries: latest event for the session
@@ -2599,39 +2596,6 @@ class SessionStore:
             return await self.emit_event(session_id, event_type, data, only_if=untold)
         except _NothingToTell:
             return None
-
-    async def browser_call_paused_since(self, session_id: UUID, after_event_id: int) -> bool:
-        """Whether a browser tool of a chat answered that its user holds the browser, after *after_event_id*.
-
-        That is its agent stopped and told to wait.  A call counts when made
-        by the chat's own session or by one working under it, a sub-agent's:
-        the chat's browser is theirs alike.  Its result is the pause's own
-        answer whole, under a browser tool's name: a result that only quotes
-        it, as a page's text can, is none.
-        """
-        owner = select(SessionRow.user_id).where(SessionRow.id == session_id).scalar_subquery()
-        under_the_chat = or_(
-            SessionRow.id == session_id,
-            and_(
-                # Made under a chat, a session is its user's too: found among theirs.
-                SessionRow.user_id == owner,
-                SessionRow.config["sandbox_root_session_id"].astext == str(session_id),
-            ),
-        )
-        stmt = (
-            select(EventRow.id)
-            .join(SessionRow, SessionRow.id == EventRow.session_id)
-            .where(
-                under_the_chat,
-                EventRow.id > after_event_id,
-                EventRow.type == EventType.TOOL_RESULT.value,
-                EventRow.data["name"].astext.startswith("browser_", autoescape=True),
-                EventRow.data["content"].astext == paused_by_user_result(),
-            )
-            .limit(1)
-        )
-        async with self._sf() as db:
-            return (await db.execute(stmt)).first() is not None
 
 
 # ---------------------------------------------------------------------------

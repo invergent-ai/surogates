@@ -79,7 +79,7 @@ from typing import Any, Self
 from uuid import UUID
 
 from surogates.browser.client import BrowserClientBase
-from surogates.browser.control import RESUMES, paused_by_user_result
+from surogates.browser.control import BROWSER_HAND_BACK, paused_by_user_result
 from surogates.devices.binding import is_binding_root
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
@@ -148,28 +148,27 @@ def of_a_sub_agent(event: Any) -> bool:
     return named is not None and str(named) != str(event.session_id)
 
 
-def _handed_back_on_computer(event: Any) -> dict[str, Any] | None:
-    """What an event says when it is a hand back of the browser on the user's computer; None for any
-    other event, the cloud's browser handed back among them, which names no computer."""
-    data = getattr(event, "data", None) or {}
-    kind = str(getattr(event.type, "value", event.type))
-    if kind != EventType.BROWSER_CONTROL_RETURNED.value or data.get("computer") is not True:
+def _of(event: Any, kind: EventType) -> dict[str, Any] | None:
+    """What *event* says when it is of *kind*; None for any other."""
+    if str(getattr(event.type, "value", event.type)) != kind.value:
         return None
-    return data
+    return getattr(event, "data", None) or {}
 
 
 def resumes_the_agent(event: Any) -> bool:
-    """Whether an event is the hand back that gives a chat's agent a turn: the take-over had stopped
-    it, as the control route found when it told the chat (``resumes``)."""
-    said = _handed_back_on_computer(event)
-    return said is not None and said.get(RESUMES) is True
+    """Whether an event is the resume a hand back gives a chat on its user's computer: its user
+    confirmed the hand back there, and the control route gave the chat's agent a turn for it.  The
+    agent reads it as the harness's note that the browser is handed back."""
+    said = _of(event, EventType.SESSION_RESUME)
+    return said is not None and said.get("source") == BROWSER_HAND_BACK
 
 
 def for_the_pane_alone(event: Any) -> bool:
-    """Whether an event is a hand back on the user's computer that stopped no agent of the chat's:
-    told for its pane, as the take-over was, and no work for anyone."""
-    said = _handed_back_on_computer(event)
-    return said is not None and said.get(RESUMES) is not True
+    """Whether an event is a hand back of the browser on the user's computer: told for the chat's
+    pane, as the take-over was, and no work for anyone, whoever made it and whatever it gave.  The
+    cloud's browser handed back names no computer, and is the session's wake as it was."""
+    said = _of(event, EventType.BROWSER_CONTROL_RETURNED)
+    return said is not None and said.get("computer") is True
 
 
 def answering_refusals(handler: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:

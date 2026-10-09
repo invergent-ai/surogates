@@ -14,14 +14,15 @@ if TYPE_CHECKING:
 
 _KEY_PREFIX = "surogates:browser:control:"
 
-# In a ``browser.control_returned`` of a chat on its user's computer (``computer: true``):
+# In a ``browser.control_returned`` of a chat on its user's computer (``computer: true``), which is
+# told for the chat's pane, as the take-over was, and is no work for anyone:
 #
-# ``resumes: true`` says the take-over had stopped the chat's agent: a browser call of the chat's
-# was answered ``paused_by_user`` while its user held the browser.  That hand back gives the agent
-# a turn, in which it reads that it can go on.  A hand back that does not say so is told for the
-# chat's pane alone: its agent is neither woken nor given work (surogates.devices.browser,
-# SessionStore.find_orphaned_sessions).
+# ``resumes: true`` says the hand back gave the chat's agent a turn: its user confirmed it on that
+# computer, and the chat could take a turn then.  The turn itself is the ``session.resume`` written
+# with it, whose source is BROWSER_HAND_BACK: that is what wakes the agent, and what it reads as
+# the harness's note that it can go on (surogates.devices.browser.resumes_the_agent).
 RESUMES = "resumes"
+BROWSER_HAND_BACK = "browser_hand_back"
 # ``handed_back_from`` names the chat the browser was handed back from, when it is not this one.
 # The agent's browser there is one for all its chats, so a hand back made from one is told to each
 # that still said its user held it.  It never resumes the chat it is told to.

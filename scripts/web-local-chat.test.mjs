@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  actOnBrowser, browserPane, browserPanes, computerBrowser, createChat, desktopSessionsOf, folderCalls, localChatOf, NO_FOLDER, newChatPlace,
-  saidBy, switchMode,
+  AGENT_GOES_ON, actOnBrowser, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, localChatOf,
+  NO_FOLDER, newChatPlace, saidBy, switchMode, WRITE_TO_THE_AGENT,
 } from "../web/src/lib/local-chat.ts";
 
 const PREPARED = { folder: "/home/flavius/notes", mode: "ask", nonce: "n".repeat(43), token: "t".repeat(43) };
@@ -296,12 +296,20 @@ const OPEN = { available: true, readOnly: false };
 const ASKING = "The browser is open on this computer, and you have it. Surogate is asking you, in a window of its own, whether to hand it back.";
 const UNTOLD_TAKEN = "You have the browser, but the chat could not be told.";
 const UNTOLD_HANDED_BACK = "The browser is the agent's again, but the agent could not be told: write to it to go on.";
+// What a pane shows before any press, and after one of which there is nothing to say.
+const quiet = (answers = 0) => ({ asking: false, failure: null, said: null, answers });
 
 // The desktop's browser calls and the chat's control route, as the pane reaches each: what each was asked, in
-// order, answered as *answers* says then.
+// order, answered as *answers* says then. A release posted as its user's confirmed hand back is told apart
+// ("hand back"), and the server answers it as one that gave the agent a turn.
 function browserDesk() {
   const did = [];
-  const answers = { takeOver: async () => {}, handBack: async () => true, acquire: async () => {}, release: async () => {} };
+  const answers = {
+    takeOver: async () => {},
+    handBack: async () => true,
+    acquire: async () => {},
+    release: async (handedBack) => ({ outcome: "released", resumes: handedBack }),
+  };
   const desktop = {
     browser: {
       show: async (id) => void did.push(["show", id]),
@@ -321,9 +329,9 @@ function browserDesk() {
       did.push(["post", "acquire"]);
       return answers.acquire();
     },
-    release: () => {
-      did.push(["post", "release"]);
-      return answers.release();
+    release: (handedBack) => {
+      did.push(["post", handedBack ? "hand back" : "release"]);
+      return answers.release(handedBack);
     },
   };
   return { did, answers, desktop, posts };
@@ -351,7 +359,7 @@ test("says who holds the browser on this computer, and offers Take over or Hand 
   assert.deepEqual(computerBrowser(bound(false), OPEN, desktop).actions, ["show", "takeOver"]);
   // Held from a chat that is gone: there is no chat to hand it back from, so this one does.
   assert.deepEqual(computerBrowser(bound("orphaned"), OPEN, desktop), {
-    text: "The browser is open on this computer, and you have it, though the chat it was taken over from is gone: the agent waits until you hand it back here.",
+    text: "The browser is open on this computer, and you have it, though the chat it was taken over from is gone: hand it back here, then write to the agent to go on.",
     actions: ["show", "handBack"],
   });
   // Held from another chat: the desktop refuses both here, so neither is offered.
@@ -374,6 +382,7 @@ test("says who holds the browser on this computer, and offers Take over or Hand 
 test("tells the server of a take-over, and of a hand back only once its user confirmed it in the desktop", async () => {
   const did = [];
   let handed = false;
+  let turn = true;
   const desktop = {
     browser: {
       show: async (id) => void did.push(["show", id]),
@@ -385,28 +394,88 @@ test("tells the server of a take-over, and of a hand back only once its user con
     },
     openSettings: async (section) => void did.push(["settings", section]),
   };
-  const server = { taken: async () => void did.push(["server", "taken"]), handedBack: async () => void did.push(["server", "handed back"]) };
-  await actOnBrowser("takeOver", "root-1", desktop, server);
-  // Kept in the desktop's own box: the server hears nothing, and the agent is not woken.
-  await actOnBrowser("handBack", "root-1", desktop, server);
+  const server = {
+    taken: async () => void did.push(["server", "taken"]),
+    handedBack: async (confirmed) => {
+      did.push(["server", confirmed ? "handed back, confirmed" : "released"]);
+      return confirmed && turn;
+    },
+  };
+  assert.equal(await actOnBrowser("takeOver", "root-1", desktop, server, false), null);
+  // Kept in the desktop's own box: the server hears nothing, and there is nothing to say.
+  assert.equal(await actOnBrowser("handBack", "root-1", desktop, server, true), null);
   handed = true;
-  await actOnBrowser("handBack", "root-1", desktop, server);
-  await actOnBrowser("show", "root-1", desktop, server);
-  await actOnBrowser("settings", "root-1", desktop, server);
+  // Handed back from the chat that held it: the server is told so, and the pane says what it answers.
+  assert.equal(await actOnBrowser("handBack", "root-1", desktop, server, true), AGENT_GOES_ON);
+  assert.equal(await actOnBrowser("show", "root-1", desktop, server, false), null);
+  assert.equal(await actOnBrowser("settings", "root-1", desktop, server, false), null);
   assert.deepEqual(did, [
-    ["takeOver", "root-1"], ["server", "taken"], ["handBack", "root-1"], ["handBack", "root-1"], ["server", "handed back"],
+    ["takeOver", "root-1"], ["server", "taken"], ["handBack", "root-1"], ["handBack", "root-1"], ["server", "handed back, confirmed"],
     ["show", "root-1"], ["settings", "browser"],
   ]);
+  // The server gave the agent no turn: a turn is under way, or its user's limit is spent.
+  turn = false;
+  assert.equal(await actOnBrowser("handBack", "root-1", desktop, server, true), WRITE_TO_THE_AGENT);
+  assert.deepEqual(did.slice(7), [["handBack", "root-1"], ["server", "handed back, confirmed"]]);
+  // Only of the browser this chat held: handed back for a chat that is gone, or with nobody holding it, which the
+  // desktop answers true with nothing asked, or by a desktop that says nothing of who does, it is a release.
+  turn = true;
+  for (const held of ["orphaned", false, undefined]) {
+    did.length = 0;
+    assert.equal(await actOnBrowser("handBack", "root-1", desktop, server, held), WRITE_TO_THE_AGENT);
+    assert.deepEqual(did, [["handBack", "root-1"], ["server", "released"]]);
+  }
   // A take-over the desktop refused is not told.
   const refusing = { browser: { ...desktop.browser, takeOver: async () => Promise.reject(new Error("This chat has no folder on this computer")) } };
   await assert.rejects(actOnBrowser("takeOver", "root-1", refusing, server), /This chat has no folder on this computer/);
-  assert.equal(did.length, 7);
+  assert.equal(did.length, 2);
   // A server that cannot be told: the browser is whose the desktop made it, and the pane says what is missing.
   const away = { taken: async () => Promise.reject(new Error("offline")), handedBack: async () => Promise.reject(new Error("offline")) };
   await assert.rejects(actOnBrowser("takeOver", "root-1", desktop, away), { message: "You have the browser, but the chat could not be told." });
-  await assert.rejects(actOnBrowser("handBack", "root-1", desktop, away), {
+  await assert.rejects(actOnBrowser("handBack", "root-1", desktop, away, true), {
     message: "The browser is the agent's again, but the agent could not be told: write to it to go on.",
   });
+});
+
+test("posts a hand back as its user's confirmed one only of the browser this chat held, and says what the server answers", async () => {
+  // Held from this chat and confirmed in the desktop: posted as a hand back, and the agent goes on.
+  const own = browserDesk();
+  const pane = browserPane(own.posts);
+  await pane.press("takeOver", "root-1", own.desktop, false);
+  await pane.press("handBack", "root-1", own.desktop, true);
+  assert.deepEqual(own.did.slice(2), [["handBack", "root-1"], ["post", "hand back"]]);
+  assert.deepEqual(pane.state(), { ...quiet(2), said: AGENT_GOES_ON });
+  // What was said stays until the next press, which starts clean.
+  await pane.press("show", "root-1", own.desktop, false);
+  assert.deepEqual(pane.state(), quiet(2));
+  // The server made the release and gave no turn (the chat has one under way, it is stopped, its user's limit
+  // is spent), or says nothing of it, or answers nothing: the agent does not go on, and the pane says to write.
+  for (const answer of [{ outcome: "released", resumes: false }, { outcome: "released" }, { outcome: "released", resumes: "yes" }, undefined]) {
+    const none = browserDesk();
+    none.answers.release = async () => answer;
+    const told = browserPane(none.posts);
+    await told.press("takeOver", "root-1", none.desktop, false);
+    await told.press("handBack", "root-1", none.desktop, true);
+    assert.deepEqual(none.did.slice(3), [["post", "hand back"]]);
+    assert.deepEqual(told.state(), { ...quiet(2), said: WRITE_TO_THE_AGENT });
+  }
+  // Held from a chat that is gone: its user confirmed that, and no hand back of this chat's. Nobody held it, and
+  // the desktop answers true with nothing asked. Each is a release, which wakes nobody, and the pane says to write.
+  for (const held of ["orphaned", false, undefined]) {
+    const other = browserDesk();
+    const gone = browserPane(other.posts);
+    await gone.press("handBack", "root-1", other.desktop, held);
+    assert.deepEqual(other.did, [["handBack", "root-1"], ["post", "acquire"], ["post", "release"]]);
+    assert.deepEqual(gone.state(), { ...quiet(1), said: WRITE_TO_THE_AGENT });
+  }
+  // On the wire, only the confirmed hand back says it is one: any other release is posted as it always was.
+  assert.deepEqual([browserRelease(true), browserRelease(false)], [{ action: "release", handed_back: true }, { action: "release" }]);
+  // Kept in the desktop's own box: nothing is posted, and nothing said.
+  const kept = browserDesk();
+  kept.answers.handBack = async () => false;
+  const keeping = browserPane(kept.posts);
+  await keeping.press("handBack", "root-1", kept.desktop, true);
+  assert.deepEqual([kept.did, keeping.state()], [[["handBack", "root-1"]], quiet(1)]);
 });
 
 test("asks the desktop once for each press, the first thing the press does", async () => {
@@ -424,7 +493,7 @@ test("asks the desktop once for each press, the first thing the press does", asy
   assert.deepEqual(did.filter(([what]) => what !== "post"), Object.values(asked));
   // And as the pane's button calls it, with no pane between.
   const alone = browserDesk();
-  const acted = actOnBrowser("handBack", "root-1", alone.desktop, { taken: async () => {}, handedBack: async () => {} });
+  const acted = actOnBrowser("handBack", "root-1", alone.desktop, { taken: async () => {}, handedBack: async () => false });
   assert.deepEqual(alone.did, [["handBack", "root-1"]]);
   await acted;
 });
@@ -438,15 +507,15 @@ test("shows that the desktop is asking while a hand back waits for its user, and
   const stop = pane.subscribe(() => {
     drawn += 1;
   });
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 0 });
-  const pressed = pane.press("handBack", "root-1", desktop);
+  assert.deepEqual(pane.state(), quiet());
+  const pressed = pane.press("handBack", "root-1", desktop, true);
   // At once, for the pane to draw: the desktop's own window can take two seconds to show, and its user minutes to answer.
-  assert.deepEqual([pane.state(), drawn], [{ asking: true, failure: null, answers: 0 }, 1]);
+  assert.deepEqual([pane.state(), drawn], [{ ...quiet(), asking: true }, 1]);
   for (const takenOver of [true, "orphaned"]) {
     assert.deepEqual(computerBrowser(bound(takenOver), OPEN, desktop, pane.state().asking), { text: ASKING, actions: ["show"] });
   }
   // A press that reached it all the same asks the desktop nothing: it would be refused, "Surogate is already asking".
-  await pane.press("handBack", "root-1", desktop);
+  await pane.press("handBack", "root-1", desktop, true);
   assert.deepEqual(did, [["handBack", "root-1"]]);
   // The browser is shown meanwhile, and the pane goes on waiting.
   await pane.press("show", "root-1", desktop);
@@ -454,7 +523,7 @@ test("shows that the desktop is asking while a hand back waits for its user, and
   answer.resolve(false);
   await pressed;
   // Kept: Hand back is offered again, and the server was told nothing.
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 1 });
+  assert.deepEqual(pane.state(), quiet(1));
   assert.deepEqual(computerBrowser(bound(true), OPEN, desktop, pane.state().asking).actions, ["show", "handBack"]);
   assert.deepEqual(did, [["handBack", "root-1"], ["show", "root-1"]]);
   // A pane that is drawn no more hears no more.
@@ -468,7 +537,7 @@ test("tells the server of a hand back only when the desktop answers true, and ha
   const { did, answers, desktop, posts } = browserDesk();
   const pane = browserPane(posts);
   await pane.press("takeOver", "root-1", desktop);
-  assert.deepEqual([did, pane.state()], [[["takeOver", "root-1"], ["post", "acquire"]], { asking: false, failure: null, answers: 1 }]);
+  assert.deepEqual([did, pane.state()], [[["takeOver", "root-1"], ["post", "acquire"]], quiet(1)]);
   // Each a hand back that released nothing: its user kept the browser, or closed the window, or nobody answered in
   // time, or it was taken over from another chat meanwhile; the desktop was asking already; it is another chat's.
   const kept = [
@@ -481,16 +550,16 @@ test("tells the server of a hand back only when the desktop answers true, and ha
   ];
   for (const [index, [answer, failure]] of kept.entries()) {
     answers.handBack = answer;
-    await pane.press("handBack", "root-1", desktop);
+    await pane.press("handBack", "root-1", desktop, true);
     // The pane reads the binding again at each answer, and draws what it says.
-    assert.deepEqual(pane.state(), { asking: false, failure, answers: index + 2 });
+    assert.deepEqual(pane.state(), { ...quiet(index + 2), failure });
   }
   assert.deepEqual(did.filter(([what]) => what === "post"), [["post", "acquire"]]);
-  // Handed back: only now is the chat told, and its agent woken.
+  // Handed back: only now is the chat told, and its agent given its turn.
   answers.handBack = async () => true;
-  await pane.press("handBack", "root-1", desktop);
-  assert.deepEqual(did.filter(([what]) => what === "post"), [["post", "acquire"], ["post", "release"]]);
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 5 });
+  await pane.press("handBack", "root-1", desktop, true);
+  assert.deepEqual(did.filter(([what]) => what === "post"), [["post", "acquire"], ["post", "hand back"]]);
+  assert.deepEqual(pane.state(), { ...quiet(5), said: AGENT_GOES_ON });
   // Showing the browser, or opening Settings, changes nothing the binding says.
   await pane.press("show", "root-1", desktop);
   await pane.press("settings", "root-1", desktop);
@@ -507,17 +576,18 @@ test("has the binding read again as soon as the desktop has answered, before the
   const took = pane.press("takeOver", "root-1", desktop);
   await new Promise((resolve) => setImmediate(resolve));
   // Taken over in the desktop, and the server still being told: the pane draws who holds the browser now.
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 1 });
+  assert.deepEqual(pane.state(), quiet(1));
   heard.resolve();
   await took;
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 1 });
-  const pressed = pane.press("handBack", "root-1", desktop);
+  assert.deepEqual(pane.state(), quiet(1));
+  const pressed = pane.press("handBack", "root-1", desktop, true);
   await new Promise((resolve) => setImmediate(resolve));
-  // Handed back in the desktop, and the server still being told: the pane waits for its user no more.
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 2 });
-  told.resolve();
+  // Handed back in the desktop, and the server still being told: the pane waits for its user no more, and says
+  // nothing yet of whether the agent goes on.
+  assert.deepEqual(pane.state(), quiet(2));
+  told.resolve({ outcome: "released", resumes: true });
   await pressed;
-  assert.deepEqual(pane.state(), { asking: false, failure: null, answers: 2 });
+  assert.deepEqual(pane.state(), { ...quiet(2), said: AGENT_GOES_ON });
 });
 
 test("sends a take-over the server never heard of again before its hand back, so the chat is told both, in order", async () => {
@@ -527,20 +597,20 @@ test("sends a take-over the server never heard of again before its hand back, so
   await pane.press("takeOver", "root-1", desktop);
   assert.deepEqual([did, pane.state().failure], [[["takeOver", "root-1"], ["post", "acquire"]], UNTOLD_TAKEN]);
   answers.acquire = async () => {};
-  await pane.press("handBack", "root-1", desktop);
-  assert.deepEqual(did.slice(2), [["handBack", "root-1"], ["post", "acquire"], ["post", "release"]]);
+  await pane.press("handBack", "root-1", desktop, true);
+  assert.deepEqual(did.slice(2), [["handBack", "root-1"], ["post", "acquire"], ["post", "hand back"]]);
   assert.equal(pane.state().failure, null);
   // One the server did hear of is not sent again.
   const heard = browserDesk();
   const told = browserPane(heard.posts);
   await told.press("takeOver", "root-1", heard.desktop);
-  await told.press("handBack", "root-1", heard.desktop);
-  assert.deepEqual(heard.did, [["takeOver", "root-1"], ["post", "acquire"], ["handBack", "root-1"], ["post", "release"]]);
+  await told.press("handBack", "root-1", heard.desktop, true);
+  assert.deepEqual(heard.did, [["takeOver", "root-1"], ["post", "acquire"], ["handBack", "root-1"], ["post", "hand back"]]);
   // A page loaded again while its user held the browser does not know what the server heard: it sends both, and
   // the server tells the chat of a take-over only once.
   const reloaded = browserDesk();
-  await browserPane(reloaded.posts).press("handBack", "root-1", reloaded.desktop);
-  assert.deepEqual(reloaded.did, [["handBack", "root-1"], ["post", "acquire"], ["post", "release"]]);
+  await browserPane(reloaded.posts).press("handBack", "root-1", reloaded.desktop, true);
+  assert.deepEqual(reloaded.did, [["handBack", "root-1"], ["post", "acquire"], ["post", "hand back"]]);
 });
 
 test("says what the server could not be told of a take-over and of a hand back", async () => {
@@ -550,17 +620,18 @@ test("says what the server could not be told of a take-over and of a hand back",
   const first = browserPane(unsent.posts);
   await first.press("takeOver", "root-1", unsent.desktop);
   assert.equal(first.state().failure, UNTOLD_TAKEN);
-  await first.press("handBack", "root-1", unsent.desktop);
+  await first.press("handBack", "root-1", unsent.desktop, true);
   assert.deepEqual(unsent.did, [["takeOver", "root-1"], ["post", "acquire"], ["handBack", "root-1"], ["post", "acquire"]]);
-  assert.equal(first.state().failure, UNTOLD_HANDED_BACK);
+  assert.deepEqual(first.state(), { ...quiet(2), failure: UNTOLD_HANDED_BACK });
   // The hand back itself that could not be told.
   const untold = browserDesk();
   untold.answers.release = offline;
   const second = browserPane(untold.posts);
   await second.press("takeOver", "root-1", untold.desktop);
-  await second.press("handBack", "root-1", untold.desktop);
-  assert.deepEqual(untold.did.slice(2), [["handBack", "root-1"], ["post", "release"]]);
-  assert.equal(second.state().failure, UNTOLD_HANDED_BACK);
+  await second.press("handBack", "root-1", untold.desktop, true);
+  assert.deepEqual(untold.did.slice(2), [["handBack", "root-1"], ["post", "hand back"]]);
+  // Whether the agent goes on is not known, and not said: it is to be written to.
+  assert.deepEqual(second.state(), { ...quiet(2), failure: UNTOLD_HANDED_BACK });
   // What was said stays until the next press, which starts clean.
   untold.answers.release = async () => {};
   await second.press("show", "root-1", untold.desktop);
@@ -582,10 +653,11 @@ test("tells the server once at a chat's load that nobody holds its browser, wher
   }
   assert.deepEqual(did, []);
   // Nobody holds it: the app may have ended while its user did, and the chat still says they do. Once, though the
-  // chat's bar and its pane each read the binding.
+  // chat's bar and its pane each read the binding. Nobody handed anything back: a release, never a hand back,
+  // so it wakes no agent, and the pane says nothing of one going on.
   await Promise.all([pane.loaded(false), pane.loaded(false)]);
   await pane.loaded(false);
-  assert.deepEqual(did, [["post", "release"]]);
+  assert.deepEqual([did, pane.state()], [[["post", "release"]], quiet()]);
   // A take-over told from here, and handed back from another chat of the same folder: told at this one's next load.
   await pane.press("takeOver", "root-1", desktop);
   await pane.loaded(false);
@@ -596,7 +668,7 @@ test("tells the server once at a chat's load that nobody holds its browser, wher
   away.answers.release = offline;
   const unheard = browserPane(away.posts);
   await unheard.loaded(false);
-  assert.deepEqual([away.did, unheard.state()], [[["post", "release"]], { asking: false, failure: null, answers: 0 }]);
+  assert.deepEqual([away.did, unheard.state()], [[["post", "release"]], quiet()]);
   away.answers.release = async () => {};
   await unheard.loaded(false);
   await unheard.loaded(false);
@@ -610,12 +682,13 @@ test("tells the server once at a chat's load that nobody holds its browser, wher
   await unsure.press("takeOver", "root-1", lost.desktop);
   await unsure.loaded(false);
   assert.deepEqual(lost.did, [["post", "release"], ["takeOver", "root-1"], ["post", "acquire"], ["post", "release"]]);
-  // Nor is a hand back whose own telling failed left there: the next load tells it.
+  // Nor is a hand back whose own telling failed left there: the next load tells it, as the release it is by then.
+  // Its user was told to write to the agent, and nothing wakes it behind their back.
   answers.release = offline;
   await pane.press("takeOver", "root-1", desktop);
-  await pane.press("handBack", "root-1", desktop);
+  await pane.press("handBack", "root-1", desktop, true);
   assert.equal(pane.state().failure, UNTOLD_HANDED_BACK);
-  answers.release = async () => {};
+  answers.release = async (handedBack) => ({ outcome: "released", resumes: handedBack });
   const before = did.length;
   await pane.loaded(false);
   assert.deepEqual(did.slice(before), [["post", "release"]]);
@@ -643,32 +716,39 @@ test("tells the server of a take-over only after what it was told at load, each 
   slow.answers.acquire = () => taken.promise;
   const other = browserPane(slow.posts);
   const took = other.press("takeOver", "root-1", slow.desktop);
-  const handed = other.press("handBack", "root-1", slow.desktop);
+  const handed = other.press("handBack", "root-1", slow.desktop, true);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(slow.did, [["takeOver", "root-1"], ["handBack", "root-1"], ["post", "acquire"]]);
   taken.resolve();
   await Promise.all([took, handed]);
-  assert.deepEqual(slow.did.slice(3), [["post", "release"]]);
+  assert.deepEqual(slow.did.slice(3), [["post", "hand back"]]);
 });
 
-test("asks the desktop about a sub-agent's chat by its root, and tells the server of the chat its pane is drawn in", async () => {
+test("asks the desktop about a sub-agent's chat by its root, and posts to the route of the chat its pane is drawn in", async () => {
   const asked = [];
   const told = [];
   const desktop = { browser: { show: async () => {}, takeOver: async (id) => void asked.push(id), handBack: async () => true } };
   const paneOf = browserPanes((sessionId) => ({
     acquire: async () => void told.push([sessionId, "acquire"]),
-    release: async () => void told.push([sessionId, "release"]),
+    release: async (handedBack) => {
+      told.push([sessionId, handedBack ? "hand back" : "release"]);
+      return { outcome: "released", resumes: handedBack };
+    },
   }));
   // A sub-agent's chat works in its root's folder: the desktop's binding, and its browser calls, name the root.
   const helper = localChatOf("helper", { ...NOTES, sandbox_root_session_id: "s-1" }, DEVICES, { folder: "/home/flavius/notes", mode: "ask", takenOver: false });
   assert.deepEqual(computerBrowser(helper, OPEN, desktop).actions, ["show", "takeOver"]);
   await paneOf("helper").loaded(helper.here.takenOver);
-  await paneOf("helper").press("takeOver", helper.root, desktop);
-  // The chat that says it, and whose agent a hand back wakes, is the one its user is in.
+  await paneOf("helper").press("takeOver", helper.root, desktop, helper.here.takenOver);
+  // Posted to the route of the view its user is in: the server tells the chat that view works under, and at a
+  // hand back gives that chat's agent the turn.
   assert.deepEqual([asked, told], [["s-1"], [["helper", "release"], ["helper", "acquire"]]]);
+  await paneOf("helper").press("handBack", helper.root, desktop, true);
+  assert.deepEqual(told.slice(2), [["helper", "hand back"]]);
+  assert.equal(paneOf("helper").state().said, AGENT_GOES_ON);
   // One pane for a chat while the page lives, so what it was told outlasts each drawing of it; and one for each chat.
   assert.equal(paneOf("helper"), paneOf("helper"));
   assert.notEqual(paneOf("helper"), paneOf("s-1"));
-  await paneOf("s-1").press("handBack", "s-1", desktop);
-  assert.deepEqual(told.slice(2), [["s-1", "acquire"], ["s-1", "release"]]);
+  await paneOf("s-1").press("handBack", "s-1", desktop, true);
+  assert.deepEqual(told.slice(3), [["s-1", "acquire"], ["s-1", "hand back"]]);
 });

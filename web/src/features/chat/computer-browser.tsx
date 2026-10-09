@@ -26,7 +26,7 @@ export function ComputerBrowser({
 }: { sessionId: string; available: boolean; readOnly: boolean }) {
   const { chat, desktop, reread } = useLocalChat(sessionId);
   const pane = browserPaneOf(sessionId);
-  const { asking, failure, answers } = useSyncExternalStore(
+  const { asking, failure, said, answers } = useSyncExternalStore(
     pane.subscribe,
     pane.state,
   );
@@ -66,7 +66,7 @@ export function ComputerBrowser({
               // lets one call through for a click of its user's, and asks one of a hand back.
               onClick={() => {
                 if (desktop) {
-                  pane.press(action, chat.root, desktop);
+                  pane.press(action, chat.root, desktop, chat.here?.takenOver);
                 }
               }}
             >
@@ -75,6 +75,8 @@ export function ComputerBrowser({
           ))}
         </div>
       )}
+      {/* Whether the agent goes on once the browser is handed back, as the server answered. */}
+      <output>{said}</output>
       <span role="alert" className="text-destructive">
         {failure}
       </span>

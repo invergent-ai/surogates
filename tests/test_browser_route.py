@@ -91,9 +91,8 @@ class StubSessions:
     def __init__(self) -> None:
         self.sessions: dict[UUID, Any] = {}
         self.events: dict[UUID, list[str | tuple[str, UUID]]] = {}
-        # The chats whose agent was stopped: a browser call of theirs answered paused since their take-over.
-        self.stopped: set[UUID] = set()
-        self.asked_since: list[tuple[UUID, int]] = []
+        # The chats with a turn under way: a worker holds their lease.
+        self.busy: set[UUID] = set()
         # What the chats were told, as (session, type, data): the list a test's emitter records in.
         self.told: list[tuple[str, str, dict]] = []
 
@@ -108,16 +107,23 @@ class StubSessions:
         self.told.append((str(session_id), event_type.value, data))
         return len(log)
 
-    async def browser_call_paused_since(self, session_id: UUID, after_event_id: int) -> bool:
-        self.asked_since.append((session_id, after_event_id))
-        return session_id in self.stopped
+    async def has_live_lease(self, session_id: UUID) -> bool:
+        return session_id in self.busy
+
+    async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
+        """As the store resumes one: active again, and its log says why."""
+        self.sessions[session_id].status = "active"
+        self.events.setdefault(session_id, []).append("session.resume")
+        self.told.append((str(session_id), "session.resume", {"source": source}))
 
     async def get_session(self, session_id: UUID) -> Any:
         if session_id not in self.sessions:
             raise LookupError(session_id)
         session = self.sessions[session_id]
-        # A chat's row names its user: the one the tests' tokens are for, where a test names none.
+        # A chat's row names itself and its user: the one the tests' tokens are for, where a test names none.
+        session.id = session_id
         session.user_id = getattr(session, "user_id", USER_1)
+        session.status = getattr(session, "status", "completed")
         return session
 
     async def chats_told_taken_over(
@@ -166,6 +172,7 @@ def app_factory():
 
     def build(
         *, org_id: UUID = ORG_1, user_id: UUID | None = USER_1, session_scope_id: UUID | None = None,
+        sign_in: UUID | None = None,
     ) -> FastAPI:
         app = FastAPI()
         app.include_router(browser_routes.router, prefix="/v1")
@@ -181,12 +188,78 @@ def app_factory():
                 permissions=frozenset(),
                 asset_root="/tmp/surogates-test",
                 session_scope_id=session_scope_id,
+                oauth_family_id=sign_in,
             )
 
         app.dependency_overrides[get_current_tenant] = fake_tenant
         return app
 
     return build, resolver, control
+
+
+# A user's computer, and the sign-in of Surogate Desktop on it, whose window's web client posts with it.
+COMPUTER = UUID("30000000-0000-0000-0000-000000000001")
+DESKTOP = UUID("20000000-0000-0000-0000-000000000001")
+# The same user's sign-in of the desktop on another computer of theirs.
+ANOTHER_DESKTOP = UUID("20000000-0000-0000-0000-000000000002")
+
+
+@pytest.fixture()
+def desk(app_factory, monkeypatch):
+    """The control route of chats on a folder of a user's computer: each post made as the web client
+    in that computer's desktop window makes it, unless a test says who else posts."""
+    from surogates.api.routes import browser as browser_routes
+
+    build, _resolver, _control = app_factory
+    store = StubSessions()
+    events: list[tuple[str, str, dict]] = []
+    wakes: list[str] = []
+    computers = {DESKTOP: COMPUTER, ANOTHER_DESKTOP: uuid4()}
+
+    class SignIns:
+        """The sign-ins' store in a test: the computer each is bound to."""
+
+        def __init__(self, _session_factory: Any) -> None:
+            pass
+
+        async def computer(self, family_id: UUID) -> UUID | None:
+            return computers.get(family_id)
+
+    monkeypatch.setattr(browser_routes, "OAuthTokens", SignIns)
+
+    def chat(**row: Any) -> UUID:
+        sid = uuid4()
+        config = {"execution": {"kind": "device", "device_id": str(COMPUTER)}, **row.pop("config", {})}
+        store.sessions[sid] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config=config, **row)
+        return sid
+
+    async def control(sid: UUID, action: str, *, handed_back: bool | None = None, **who: Any) -> tuple[int, dict]:
+        app = build(**{"sign_in": DESKTOP, **who})
+        app.state.session_store = store
+        app.state.session_factory = object()
+        app.state.session_event_emitter = store.emitter(events)
+        app.state.session_wake = _wake_recorder(wakes)
+        said = {"action": action, **({} if handed_back is None else {"handed_back": handed_back})}
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(f"/v1/sessions/{sid}/browser/control", json=said)
+        return response.status_code, response.json()
+
+    return SimpleNamespace(store=store, events=events, wakes=wakes, chat=chat, control=control)
+
+
+def _taken_over(sid: UUID) -> tuple[str, str, dict]:
+    return str(sid), "browser.control_granted", {"session_id": str(sid), "owner_user_id": str(USER_1), "computer": True}
+
+
+def _handed_back(sid: UUID, **said: Any) -> tuple[str, str, dict]:
+    return str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True, **said}
+
+
+def _resumed(sid: UUID) -> tuple[str, str, dict]:
+    return str(sid), "session.resume", {"source": "browser_hand_back"}
+
+
+RELEASED = {"outcome": "released"}
 
 
 def _resolved(session_id: str, *, org_id: UUID = ORG_1) -> ResolvedBrowser:
@@ -583,79 +656,96 @@ class TestControlEndpoint:
 
         assert response.status_code == 400
 
-    async def test_a_local_folder_chats_take_over_and_hand_back_are_told_to_the_chat_and_the_hand_back_wakes_it(
-        self, app_factory,
+    async def test_a_local_folder_chats_take_over_is_told_to_it_and_a_hand_back_its_user_confirmed_gives_its_agent_a_turn(
+        self, desk,
     ) -> None:
-        build, _resolver, _control = app_factory
-        sid = uuid4()
-        store = StubSessions()
-        store.sessions[sid] = SimpleNamespace(
-            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
-        )
-        # Its agent met the pause: a browser call of the chat's answered paused since the take-over.
-        store.stopped.add(sid)
-        events: list[tuple[str, str, dict]] = []
-        wakes: list[str] = []
+        sid = desk.chat()
 
-        def built(org_id: UUID = ORG_1) -> FastAPI:
-            app = build(org_id=org_id)
-            app.state.session_store = store
-            app.state.session_event_emitter = store.emitter(events)
-            app.state.session_wake = _wake_recorder(wakes)
-            return app
+        # The pause is the user's computer's: no browser here and no lease, so each is told as it comes.
+        assert await desk.control(sid, "acquire") == (200, {"outcome": "granted", "owner_user_id": str(USER_1)})
+        assert desk.wakes == []
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
 
-        async with AsyncClient(transport=ASGITransport(app=built()), base_url="http://test") as client:
-            async def control(action: str) -> httpx.Response:
-                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
-
-            # The pause is the user's computer's: no browser here and no lease, so each is told as it comes.
-            assert (await control("acquire")).json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
-            assert wakes == []
-            assert (await control("release")).json() == {"outcome": "released"}
-
-        assert events == [
-            (str(sid), "browser.control_granted", {"session_id": str(sid), "owner_user_id": str(USER_1), "computer": True}),
-            (str(sid), "browser.control_returned", {
-                "session_id": str(sid), "released_by": str(USER_1), "computer": True, "resumes": True,
-            }),
-        ]
-        # Asked of what the chat's browser calls answered since that take-over, the first event of its log.
-        assert store.asked_since == [(sid, 1)]
-        # Handed back: its agent, which was stopped, goes on.
-        assert wakes == [str(sid)]
+        # Handed back: the chat is told, made active again as by a message, and queued. Its resume is the
+        # turn, and what its agent reads the hand back from.
+        assert desk.events == [_taken_over(sid), _handed_back(sid, resumes=True), _resumed(sid)]
+        assert desk.wakes == [str(sid)]
+        assert desk.store.sessions[sid].status == "active"
 
         # Another organisation's chat is not known here.
-        async with AsyncClient(transport=ASGITransport(app=built(ORG_2)), base_url="http://test") as client:
-            response = await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": "release"})
-        assert response.status_code == 404
-        assert len(events) == 2
+        assert (await desk.control(sid, "release", org_id=ORG_2))[0] == 404
+        assert len(desk.events) == 3
 
-    async def test_a_local_folder_chats_hand_back_is_for_its_pane_alone_when_its_agent_was_not_stopped(
-        self, app_factory,
+    async def test_a_release_that_is_no_confirmed_hand_back_is_told_for_the_chats_pane_alone(self, desk) -> None:
+        # As the pane posts one at a chat's opening, where the app ended while its user held the browser,
+        # and for a chat the browser is not held from: nobody handed anything back.
+        for said in ({}, {"handed_back": False}):
+            sid = desk.chat()
+            await desk.control(sid, "acquire")
+
+            assert await desk.control(sid, "release", **said) == (200, {**RELEASED, "resumes": False})
+
+            assert desk.events[-2:] == [_taken_over(sid), _handed_back(sid)]
+            assert desk.store.sessions[sid].status == "completed"
+        assert desk.wakes == []
+
+    @pytest.mark.parametrize("who", [
+        {"sign_in": None}, {"sign_in": ANOTHER_DESKTOP}, {"sign_in": UUID(int=7)},
+    ], ids=["the-web-client-in-a-browser", "the-desktop-on-another-computer", "a-sign-in-that-ended"])
+    async def test_a_hand_back_is_taken_as_confirmed_only_from_the_desktops_window_on_the_chats_computer(
+        self, desk, who,
     ) -> None:
-        build, _resolver, _control = app_factory
-        sid = uuid4()
-        store = StubSessions()
-        store.sessions[sid] = SimpleNamespace(
-            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
-        )
-        events: list[tuple[str, str, dict]] = []
-        wakes: list[str] = []
-        app = build()
-        app.state.session_store = store
-        app.state.session_event_emitter = store.emitter(events)
-        app.state.session_wake = _wake_recorder(wakes)
+        sid = desk.chat()
+        await desk.control(sid, "acquire")
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            for action in ("acquire", "release"):
-                await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+        # The confirmation is drawn on the chat's computer: from anywhere else nothing was confirmed there.
+        assert await desk.control(sid, "release", handed_back=True, **who) == (200, {**RELEASED, "resumes": False})
 
-        # No browser call of the chat's answered paused while its user held the browser: nothing was
-        # stopped, so the hand back says so to nobody but the pane, and nobody is woken.
-        assert events[1] == (
-            str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True},
-        )
-        assert wakes == []
+        assert desk.events == [_taken_over(sid), _handed_back(sid)]
+        assert desk.wakes == []
+
+    @pytest.mark.parametrize("chat", [
+        {"busy": True}, {"status": "paused"}, {"status": "failed"}, {"status": "archived"},
+    ], ids=["a-turn-under-way", "stopped-by-its-user", "failed", "deleted"])
+    async def test_a_hand_back_to_a_chat_that_cannot_take_a_turn_is_made_and_gives_none(self, desk, chat) -> None:
+        busy = chat.pop("busy", False)
+        sid = desk.chat(**chat)
+        if busy:
+            desk.store.busy.add(sid)
+        await desk.control(sid, "acquire")
+
+        # The browser is the agent's again on the computer whatever the server answers: it answers 200,
+        # says the agent does not go on by itself, and keeps nothing for a later turn to read.
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": False})
+
+        assert desk.events == [_taken_over(sid), _handed_back(sid)]
+        assert desk.wakes == []
+        assert desk.store.sessions[sid].status == chat.get("status", "completed")
+
+    async def test_a_take_over_and_a_hand_back_made_from_a_sub_agents_view_are_its_chats(self, desk) -> None:
+        root = desk.chat()
+        child = desk.chat(config={"sandbox_root_session_id": str(root)})
+
+        assert (await desk.control(child, "acquire"))[1]["outcome"] == "granted"
+        assert await desk.control(child, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
+
+        # Told to the chat, and its agent given the turn: the sub-agent's own log says nothing of either.
+        assert desk.events == [_taken_over(root), _handed_back(root, resumes=True), _resumed(root)]
+        assert desk.wakes == [str(root)]
+        assert desk.store.events.get(child, []) == []
+
+    @pytest.mark.parametrize("under", ["a chat that is not there", "another user's chat", "no chat's id"])
+    async def test_a_session_under_a_chat_its_caller_may_not_ask_of_has_no_browser_to_take_over(self, desk, under) -> None:
+        theirs = desk.chat(user_id=uuid4())
+        named = {"a chat that is not there": str(uuid4()), "another user's chat": str(theirs), "no chat's id": "the-chat"}
+        child = desk.chat(config={"sandbox_root_session_id": named[under]})
+
+        for action in ("acquire", "release"):
+            assert await desk.control(child, action, handed_back=action == "release") == (
+                404, {"detail": "No browser for session"},
+            )
+
+        assert (desk.events, desk.wakes) == ([], [])
 
     async def test_a_token_for_another_session_tells_a_local_folder_chat_nothing(self, app_factory) -> None:
         build, _resolver, _control = app_factory
@@ -688,138 +778,74 @@ class TestControlEndpoint:
         assert events == []
         assert wakes == []
 
-    async def test_a_local_folder_chats_hand_back_is_told_once_and_only_after_a_take_over(self, app_factory) -> None:
-        build, _resolver, _control = app_factory
-        sid = uuid4()
-        store = StubSessions()
-        store.sessions[sid] = SimpleNamespace(
-            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
-        )
-        store.stopped.add(sid)
-        events: list[tuple[str, str, dict]] = []
-        wakes: list[str] = []
-        app = build()
-        app.state.session_store = store
-        app.state.session_event_emitter = store.emitter(events)
-        app.state.session_wake = _wake_recorder(wakes)
+    async def test_a_local_folder_chats_hand_back_is_told_once_and_only_after_a_take_over(self, desk) -> None:
+        sid = desk.chat()
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            async def control(action: str) -> httpx.Response:
-                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+        # Never taken over: nothing to hand back, so the chat is told nothing and its agent is not woken.
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": False})
+        assert (desk.events, desk.wakes) == ([], [])
 
-            # Never taken over: nothing to hand back, so the chat is told nothing and its agent is not woken.
-            unheld = await control("release")
-            assert (unheld.status_code, unheld.json()) == (200, {"outcome": "released"})
-            assert (events, wakes) == ([], [])
+        await desk.control(sid, "acquire")
+        await desk.control(sid, "release", handed_back=True)
+        told = [_taken_over(sid), _handed_back(sid, resumes=True), _resumed(sid)]
+        assert (desk.events, desk.wakes) == (told, [str(sid)])
 
-            await control("acquire")
-            await control("release")
-            assert [kind for _, kind, _ in events] == ["browser.control_granted", "browser.control_returned"]
-            assert wakes == [str(sid)]
+        # Handed back already: a repeat is answered as done, gives no second turn, and tells and wakes no more.
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": False})
+        assert (desk.events, desk.wakes) == (told, [str(sid)])
 
-            # Handed back already: a repeat answers the same, and tells and wakes no more.
-            again = await control("release")
-            assert (again.status_code, again.json()) == (200, {"outcome": "released"})
+    async def test_a_local_folder_chats_take_over_is_told_once_while_it_stands(self, desk) -> None:
+        sid = desk.chat()
 
-        assert [kind for _, kind, _ in events] == ["browser.control_granted", "browser.control_returned"]
-        assert wakes == [str(sid)]
+        assert await desk.control(sid, "acquire") == (200, {"outcome": "granted", "owner_user_id": str(USER_1)})
+        # Told already: the cloud's own answer to an acquire that changes nothing.
+        assert await desk.control(sid, "acquire") == (200, {"outcome": "refreshed", "owner_user_id": str(USER_1)})
+        assert desk.events == [_taken_over(sid)]
 
-    async def test_a_local_folder_chats_take_over_is_told_once_while_it_stands(self, app_factory) -> None:
-        build, _resolver, _control = app_factory
-        sid = uuid4()
-        store = StubSessions()
-        store.sessions[sid] = SimpleNamespace(
-            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
-        )
-        store.stopped.add(sid)
-        events: list[tuple[str, str, dict]] = []
-        wakes: list[str] = []
-        app = build()
-        app.state.session_store = store
-        app.state.session_event_emitter = store.emitter(events)
-        app.state.session_wake = _wake_recorder(wakes)
+        # Handed back, a new take-over is told anew.
+        await desk.control(sid, "release", handed_back=True)
+        assert await desk.control(sid, "acquire") == (200, {"outcome": "granted", "owner_user_id": str(USER_1)})
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            async def control(action: str) -> httpx.Response:
-                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
-
-            assert (await control("acquire")).json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
-            # Told already: the cloud's own answer to an acquire that changes nothing.
-            again = await control("acquire")
-            assert (again.status_code, again.json()) == (200, {"outcome": "refreshed", "owner_user_id": str(USER_1)})
-            assert [kind for _, kind, _ in events] == ["browser.control_granted"]
-
-            # Handed back, a new take-over is told anew.
-            await control("release")
-            assert (await control("acquire")).json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
-
-        assert [kind for _, kind, _ in events] == [
-            "browser.control_granted", "browser.control_returned", "browser.control_granted",
+        assert [kind for _, kind, _ in desk.events] == [
+            "browser.control_granted", "browser.control_returned", "session.resume", "browser.control_granted",
         ]
-        assert wakes == [str(sid)]
-
+        assert desk.wakes == [str(sid)]
 
     async def test_a_local_folder_chats_hand_back_is_made_whether_or_not_the_agents_other_chats_can_be_told(
-        self, app_factory,
+        self, desk,
     ) -> None:
-        build, _resolver, _control = app_factory
-        sid, away, told = uuid4(), uuid4(), uuid4()
-        on_computer = {"execution": {"kind": "device", "device_id": str(uuid4())}}
-        store = StubSessions()
-        for chat in (sid, away, told):
-            store.sessions[chat] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config=on_computer)
+        sid, away, told = desk.chat(), desk.chat(), desk.chat()
         # Two more chats of the agent on the computer still say their user holds its browser.
-        store.events[away] = ["browser.control_granted"]
-        store.events[told] = ["browser.control_granted"]
-        # All three met the pause. Only the chat the browser is handed back from goes on.
-        store.stopped.update((sid, away, told))
-        events: list[tuple[str, str, dict]] = []
-        wakes: list[str] = []
-        emit = store.emitter(events)
+        desk.store.events[away] = ["browser.control_granted"]
+        desk.store.events[told] = ["browser.control_granted"]
+        emit = desk.store.emitter(desk.events)
 
         async def one_log_away(session_id: str, event_type: Any, data: dict) -> None:
             if session_id == str(away):
                 raise RuntimeError("the chat's log is away")
             await emit(session_id, event_type, data)
 
-        app = build()
-        app.state.session_store = store
-        app.state.session_event_emitter = one_log_away
-        app.state.session_wake = _wake_recorder(wakes)
+        desk.store.emitter = lambda _events: one_log_away
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            async def control(action: str) -> httpx.Response:
-                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
-
-            await control("acquire")
-            handed_back = await control("release")
-
-            # One could not be told: the hand back is made all the same, and the next chat is told.
-            assert (handed_back.status_code, handed_back.json()) == (200, {"outcome": "released"})
-            assert events[1:] == [
-                (str(sid), "browser.control_returned", {
-                    "session_id": str(sid), "released_by": str(USER_1), "computer": True, "resumes": True,
-                }),
-                (str(told), "browser.control_returned", {
-                    "session_id": str(told), "released_by": str(USER_1), "computer": True, "handed_back_from": str(sid),
-                }),
-            ]
-            # Only the chat it was handed back from is woken.
-            assert wakes == [str(sid)]
-
-            async def no_answer(**_: Any) -> list[UUID]:
-                raise RuntimeError("the database is away")
-
-            # The other chats cannot even be looked for: the hand back is made, told to its own chat, and its agent woken.
-            store.chats_told_taken_over = no_answer
-            await control("acquire")
-            handed_back = await control("release")
-
-        assert (handed_back.status_code, handed_back.json()) == (200, {"outcome": "released"})
-        assert [(of, kind) for of, kind, _ in events[3:]] == [
-            (str(sid), "browser.control_granted"), (str(sid), "browser.control_returned"),
+        await desk.control(sid, "acquire")
+        # One could not be told: the hand back is made all the same, and the next chat is told.
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
+        assert desk.events[1:] == [
+            _handed_back(sid, resumes=True), _resumed(sid), _handed_back(told, handed_back_from=str(sid)),
         ]
-        assert wakes == [str(sid), str(sid)]
+        # Only the chat it was handed back from is woken.
+        assert desk.wakes == [str(sid)]
+
+        async def no_answer(**_: Any) -> list[UUID]:
+            raise RuntimeError("the database is away")
+
+        # The other chats cannot even be looked for: the hand back is made, told to its own chat, and its agent woken.
+        desk.store.chats_told_taken_over = no_answer
+        desk.store.sessions[sid].status = "completed"
+        await desk.control(sid, "acquire")
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
+        assert desk.events[4:] == [_taken_over(sid), _handed_back(sid, resumes=True), _resumed(sid)]
+        assert desk.wakes == [str(sid), str(sid)]
 
 
 class _StubBrowserPool:

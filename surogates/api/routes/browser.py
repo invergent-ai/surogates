@@ -17,15 +17,18 @@ from pydantic import BaseModel
 
 from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
-from surogates.browser.control import HANDED_BACK_FROM, RESUMES, AcquireOutcome
+from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
+from surogates.browser.control import BROWSER_HAND_BACK, HANDED_BACK_FROM, RESUMES, AcquireOutcome
 from surogates.browser.shell import ShellSession
-from surogates.devices.binding import device_of
+from surogates.devices.binding import device_of, is_binding_root
 from surogates.session.events import EventType
+from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.auth.middleware import (
     authenticate_websocket_tenant,
     get_current_tenant,
 )
 from surogates.tenant.context import TenantContext
+from surogates.workstreams.spend import admit_turn
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,11 @@ class BrowserStateResponse(BaseModel):
 class BrowserControlRequest(BaseModel):
     action: str
     owner_user_id: str | None = None
+    # With a release of a local-folder chat's browser: its user confirmed, in the desktop's own window
+    # on the chat's computer, handing back the browser this chat holds.  The pane's word: a release
+    # without it (the pane's own at a chat's opening, or one made for a chat that is gone) is told
+    # for the pane alone.
+    handed_back: bool = False
 
 
 def _route_prefix(request: Request) -> str:
@@ -185,24 +193,78 @@ def _its_own(tenant: TenantContext, org_id: UUID, user_id: UUID | None, session_
     return tenant.user_id is not None and tenant.user_id == user_id
 
 
-async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) -> bool:
-    """Whether the session is a local-folder chat, whose browser is on the user's computer.
+async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) -> Any | None:
+    """The session, when it is a local-folder chat's, whose browser is on the user's computer; None
+    for one in the cloud.
 
     404, as for a chat that does not exist, for anyone but its own user and its own session's
     token.  The server keeps no browser, no live view and no lease for it: the desktop holds it.
     """
     store = getattr(app_state, "session_store", None)
     if store is None:
-        return False
+        return None
     try:
         session = await store.get_session(session_id)
     except Exception:
-        return False
+        return None
     if device_of(session.config) is None:
-        return False
+        return None
     if not _its_own(tenant, session.org_id, session.user_id, session_id):
         raise HTTPException(status_code=404, detail="No browser for session")
-    return True
+    return session
+
+
+async def _chat_of(app_state: Any, session: Any, tenant: TenantContext) -> Any:
+    """The chat a session on a computer belongs to: itself, or the chat it works under.
+
+    The browser is taken over from a chat and handed back to it.  From a sub-agent's own view the
+    take-over, the hand back and the turn a hand back gives are still its chat's: the sub-agent has
+    no user to wait for, and its chat's agent is the one that goes on.
+    """
+    if is_binding_root(session.id, session.config):
+        return session
+    try:
+        chat = await app_state.session_store.get_session(UUID(str(session.config["sandbox_root_session_id"])))
+    except Exception:
+        chat = None
+    # One the caller may not ask of themselves, or that is not there, is answered as no chat is.
+    if chat is None or not _its_own(tenant, chat.org_id, chat.user_id, chat.id):
+        raise HTTPException(status_code=404, detail="No browser for session")
+    return chat
+
+
+async def _goes_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
+    """Whether a hand back its user confirmed gives the chat's agent a turn now.
+
+    The confirmation is the desktop's own window, and it leaves the page nothing but a yes: the
+    pane's word is all the server has of it.  It is taken only from the web client in the window of
+    Surogate Desktop signed in on the chat's own computer, whose session is that sign-in's, bound to
+    that computer: from anywhere else nothing was confirmed there.  That page's own code can still
+    say so with nobody asked, as it can send a message.
+
+    Then the chat must be able to take a turn: not stopped by its user or failed, with no turn
+    under way, and within its user's limit, held as a typed message's turn is.  Where it cannot,
+    the hand back is told for the pane alone: nothing is kept to be read with some later message.
+    """
+    sign_in = tenant.oauth_family_id
+    factory = getattr(app_state, "session_factory", None)
+    if sign_in is None or factory is None:
+        return False
+    if await OAuthTokens(factory).computer(sign_in) != device_of(chat.config):
+        return False
+    if chat.status not in ("active", "completed") or await app_state.session_store.has_live_lease(chat.id):
+        return False
+    try:
+        refused = await admit_turn(
+            chat, "",
+            platform_client=getattr(app_state, "platform_client", None),
+            runtime_config_cache=getattr(app_state, "runtime_config_cache", None),
+            session_store=app_state.session_store, session_factory=factory,
+        )
+    except (AllowanceReserveError, CommerceReserveError):
+        logger.warning("Session %s: a hand back gives no turn while ops is unreachable", chat.id, exc_info=True)
+        return False
+    return refused is None
 
 
 async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserStateResponse:
@@ -237,16 +299,13 @@ async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserSt
 _COMPUTER_CONTROL = [EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED]
 
 
-async def _taken_over_at(app_state: Any, session_id: UUID) -> int | None:
-    """The event that told a local-folder chat its user took its browser over, while that stands:
-    None for a chat never taken over, or handed back since.
+async def _told_taken_over(app_state: Any, session_id: UUID) -> bool:
+    """Whether a local-folder chat was last told that its user took its browser over.
 
     There is no lease to ask: the chat's own events say, as they say its browser's state.
     """
     events = await app_state.session_store.get_events(session_id, types=_COMPUTER_CONTROL)
-    if not events or events[-1].type != EventType.BROWSER_CONTROL_GRANTED.value:
-        return None
-    return events[-1].id
+    return bool(events) and events[-1].type == EventType.BROWSER_CONTROL_GRANTED.value
 
 
 async def _tell_the_agents_other_chats_handed_back(
@@ -258,7 +317,7 @@ async def _tell_the_agents_other_chats_handed_back(
     told, and hands it back from that one or, once that chat is gone from the computer, from
     another: the first would say they hold it for good.  So a hand back ends every take-over those
     chats were told of.  Each is told once, naming the chat it was made from, for its pane: its agent
-    is not woken there, whatever it met while the browser was held.
+    is not woken there.
 
     Only chats the caller may ask of themselves: a token for one session tells that one alone.  A
     chat that cannot be told leaves the hand back made.
@@ -307,7 +366,7 @@ async def get_browser_state(
     control = request.app.state.browser_control
 
     await _require_session_agent(request.app.state, session_id, tenant)
-    if await _on_computer(request.app.state, session_id, tenant):
+    if await _on_computer(request.app.state, session_id, tenant) is not None:
         return await _computer_browser_state(request.app.state, session_id)
     resolved = await resolver.resolve(
         str(session_id),
@@ -333,7 +392,7 @@ async def post_browser_control(
     body: BrowserControlRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
-) -> dict[str, str]:
+) -> dict[str, str | bool]:
     if body.action not in {"acquire", "release"}:
         raise HTTPException(
             status_code=400,
@@ -353,7 +412,7 @@ async def post_browser_control(
     await _require_session_agent(request.app.state, session_id, tenant)
     # A local-folder chat's browser is on the user's computer, which holds its pause.
     computer = await _on_computer(request.app.state, session_id, tenant)
-    if not computer and await resolver.resolve(str(session_id), expected_org_id=str(tenant.org_id)) is None:
+    if computer is None and await resolver.resolve(str(session_id), expected_org_id=str(tenant.org_id)) is None:
         raise HTTPException(status_code=404, detail="No browser for session")
 
     owner_user_id = body.owner_user_id if _route_prefix(request) == "/v1/api" else None
@@ -365,34 +424,38 @@ async def post_browser_control(
             detail="Browser control requires a user identity.",
         )
 
-    if computer:
+    if computer is not None:
         # Told to the chat as the cloud's are, its user having taken it over or handed it back in the
         # desktop: there is no lease here. Each is told once: a take-over while one stands, and a
         # hand back with none standing, answer as done and tell the chat nothing. Two posts at once
         # tell it one: the store takes them in turn, on one connection each.
-        sid = str(session_id)
         store = request.app.state.session_store
+        chat = await _chat_of(request.app.state, computer, tenant)
+        sid = str(chat.id)
         if body.action == "acquire":
             taken_over = {"session_id": sid, "owner_user_id": owner_user_id, "computer": True}
-            if await store.tell_browser_control(session_id, EventType.BROWSER_CONTROL_GRANTED, taken_over) is None:
+            if await store.tell_browser_control(chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over) is None:
                 return {"outcome": "refreshed", "owner_user_id": owner_user_id}
             return {"outcome": "granted", "owner_user_id": owner_user_id}
-        taken_over_at = await _taken_over_at(request.app.state, session_id)
-        if taken_over_at is not None:
-            # The take-over stopped the chat's agent when a browser call of the chat's answered
-            # paused since. Then the hand back says so, and its agent is woken to go on. With
-            # nothing stopped it is for the pane alone: nobody is woken, and no turn is run.
-            told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
-            stopped = await store.browser_call_paused_since(session_id, taken_over_at)
-            if stopped:
-                told[RESUMES] = True
-            # None when another post handed it back meanwhile: that one told the chat, and woke it.
-            if await store.tell_browser_control(session_id, EventType.BROWSER_CONTROL_RETURNED, told) is not None:
-                if stopped:
-                    await wake(sid)
-                # The agent's other chats there that still said their user held the browser are told too.
-                await _tell_the_agents_other_chats_handed_back(request.app.state, session_id, tenant, emit, owner_user_id)
-        return {"outcome": "released"}
+        # A release answers whether the agent goes on by itself: only at a hand back its user
+        # confirmed, of a take-over that stands, to a chat that can take a turn now.
+        if not await _told_taken_over(request.app.state, chat.id):
+            return {"outcome": "released", RESUMES: False}
+        goes_on = body.handed_back and await _goes_on(request.app.state, chat, tenant)
+        told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
+        if goes_on:
+            told[RESUMES] = True
+        # None when another post handed it back meanwhile: that one told the chat, and gave what it gave.
+        if await store.tell_browser_control(chat.id, EventType.BROWSER_CONTROL_RETURNED, told) is None:
+            return {"outcome": "released", RESUMES: False}
+        if goes_on:
+            # As a typed message does to a chat whose turn had ended: active again, and queued.
+            # The resume is the turn, and what the agent reads the hand back from.
+            await store.resume_session(chat.id, source=BROWSER_HAND_BACK)
+            await wake(sid)
+        # The agent's other chats there that still said their user held the browser are told too.
+        await _tell_the_agents_other_chats_handed_back(request.app.state, chat.id, tenant, emit, owner_user_id)
+        return {"outcome": "released", RESUMES: goes_on}
 
     if body.action == "acquire":
         outcome, entry = await control.acquire(str(session_id), owner_user_id)
