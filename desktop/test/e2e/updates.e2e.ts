@@ -4,7 +4,7 @@
 // base is a local HTTP server; the release key is the test's own.
 
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -134,6 +134,24 @@ describe("updates, through the app", () => {
     // Started again as Start at login starts a development build: its Electron on this main, the update's.
     await expect.poll(() => relaunched().filter(({ pid, argv }) => pid !== first && !argv.some((arg) => arg.startsWith("--type=")))
       .map(({ argv }) => argv), { timeout: 30_000 }).toEqual([[ELECTRON, MAIN]]);
+  });
+
+  it("runs no helper at a click once a downloaded file is no longer its own: it downloads the release again, and offers it for another click", async () => {
+    const tarball = publish("0.0.1");
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    // As a program of the user's could leave it, long after the check: a link where the tarball was.
+    const updates = join(home, "k", "surogate", "updates", "0.0.1");
+    writeFileSync(join(home, "elsewhere"), tarball);
+    rmSync(join(updates, "release.tar.gz"));
+    symlinkSync(join(home, "elsewhere"), join(updates, "release.tar.gz"));
+    await page.click("#update-button");
+    // The release is here again, in a file of the app's own, and nothing was run on the link.
+    await expect.poll(() => (existsSync(join(updates, "release.tar.gz")) ? readFileSync(join(updates, "release.tar.gz")).equals(tarball) : false), { timeout: 10_000 }).toBe(true);
+    await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Restart to update");
+    expect(existsSync(join(home, "applied"))).toBe(false);
+    // Still the running app, its window up.
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible())), { timeout: 10_000 }).toBe(true);
   });
 
   it("keeps running when no administrator approves, and says so; and says why when the helper fails, with Try again", async () => {

@@ -350,7 +350,9 @@ function startUpdates(): void {
 // into it; or, installed already, the restart alone. Only while the line shows a button.
 async function updateAction(): Promise<void> {
   if (!updates || !updateLine(updates.state)?.button) return;
-  await updates.install();
+  // Where the downloaded files were no longer the app's own, the release is looked for again: one
+  // that cannot be found is said in the log, as a check's is.
+  await updates.install().catch(report);
   if (updates.state.state === "installed") restart();
 }
 

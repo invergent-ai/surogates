@@ -258,6 +258,14 @@ function keep(path: string, data: Buffer): void {
   }
 }
 
+// Whether *files* are still as a check left them: each a regular file of one name, in the app's own
+// folders, with no link where a folder or a file was.
+function staged(files: Staged): boolean {
+  const folder = dirname(files.tarball);
+  return [dirname(dirname(folder)), dirname(folder), folder].every((path) => ownFolder(path, false))
+    && [files.manifest, files.signature, files.tarball].every(regular);
+}
+
 export interface UpdatesOptions {
   version: string; // the running app's
   record: string; // the install script's record: the base, and the channel
@@ -296,12 +304,22 @@ export class Updates {
 
   /**
    * Installs the release downloaded: the root helper applies it for every user of this computer.
-   * Refused by polkit, or failed, it can be asked again; the files stay.
+   * Refused by polkit, or failed, it can be asked again; the files stay. Rejects where the files
+   * were no longer the app's own and the release could not be downloaded again, with why.
    */
   async install(): Promise<void> {
     const shown = this.state;
     if (shown.state !== "available" && shown.state !== "refused" && shown.state !== "failed") return;
     const { version, files } = shown;
+    // A check left the files hours ago, perhaps, and root's helper is handed their paths: they are
+    // looked at once more, and nothing runs between this look and the helper's start. Where one is
+    // no longer the app's own file, no helper is run: the offer goes, and the release is looked
+    // for again, for another click. From here on the helper alone decides: it reads each file
+    // once, as this user and through no link, and checks its own copies.
+    if (!staged(files)) {
+      this.set({ state: "none" });
+      return this.check();
+    }
     this.set({ state: "installing", version });
     const { code, said } = await this.options.apply(files);
     if (code === 0) return this.set({ state: "installed", version });
