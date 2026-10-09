@@ -778,6 +778,10 @@ describe("a chat's own servers, through the browser's proxy", () => {
       expect(knocks.at(-1)).toBe(knock);
       opened.socket.destroy();
     }
+    // The handshake's own names and values are read as HTTP's are, in any case.
+    const shouted = await connect("localhost:3006");
+    expect(await upgraded(shouted.socket, null, "GET /live HTTP/1.1\r\nHOST: localhost:3006\r\nUPGRADE: WebSocket\r\nORIGIN:http://LOCALHOST:3000\r\n")).toMatch(/^echo GET \/live/);
+    shouted.socket.destroy();
     // Bytes sent with the handshake, before its answer, follow it.
     const early = await connect("localhost:3006");
     let heard = "";
@@ -812,10 +816,11 @@ describe("a chat's own servers, through the browser's proxy", () => {
       expect(tunnel.status, what).toBe(200);
       expect(await upgraded(tunnel.socket, origin, first), what).toBe("closed ");
     }
-    // A port taken back is no chat's page from then on.
+    // A port taken back is no chat's page from then on, for a tunnel taken before it too.
+    const taken = await connect("localhost:3006");
     proxy.forwards([3006], path(), KEY);
     const stale = await connect("localhost:3006");
-    expect(await upgraded(stale.socket, "http://localhost:3000")).toBe("closed ");
+    expect([await upgraded(stale.socket, "http://localhost:3000"), await upgraded(taken.socket, "http://localhost:3000")]).toEqual(["closed ", "closed "]);
     proxy.forwards([3000, 3001, 3002, 3006], path(), KEY);
     const closes = (socket: Socket, written: string | Buffer) => new Promise<string>((done) => {
       socket.on("close", () => done("closed"));
@@ -894,6 +899,13 @@ describe("a chat's own servers, through the browser's proxy", () => {
     last.socket.resume();
     expect(await whole).toBe(4 * 1024 * 1024);
     await vi.waitFor(() => expect(behind.size).toBe(0));
+    // And whole though the browser's end stays open: nothing is kept behind the door for a tunnel half closed.
+    const half = connectTcp({ host: "127.0.0.1", port, allowHalfOpen: true });
+    let ended = false;
+    half.on("error", () => {}).on("end", () => (ended = true)).resume();
+    half.write(`CONNECT localhost:3007 HTTP/1.1\r\nHost: localhost:3007\r\nProxy-Authorization: ${signed}\r\n\r\n${HANDSHAKE}Origin: http://localhost:3006\r\n\r\n`);
+    await vi.waitFor(() => expect([ended, behind.size]).toEqual([true, 0]));
+    half.destroy();
     expect((await connect("localhost:3000")).status).toBe(403);
     expect(dialed).toEqual([]);
   });
