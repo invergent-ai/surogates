@@ -1690,3 +1690,27 @@ async def test_only_a_masters_scheduled_run_is_a_routine_run_over_the_real_files
     assert landing_module.routine_project(run(workspace_boundary=boundary)) is None
     assert landing_module.routine_project(run(scheduled_session_id="r1")) is None
 
+
+async def test_a_routine_runs_pickup_neither_answers_nor_ends_a_threads_wait_over_the_file_it_rewrote(api, monkeypatch, pods):
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v3 by you")
+    [wait] = await waits_of(api, thread)
+    assert (wait.status, wait.payload["files"]) == ("pending", ["Report.docx"])
+    before = len(await pickups_of(api, master))
+    run, schedule = await a_routine_run(api, master, "Health check")
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "printf ' checked' >> Report.docx"})), _final_response("Checked."),
+    ], pool=pool)
+    # The file is the routine's in the history, and the thread waits on you over it all the same.
+    its = (await pickups_of(api, master))[before:][-1]
+    assert (changed(its), its.commit) == (["Report.docx"], main_of(pods))
+    assert git(pods.project / "_history", "log", "-1", "--format=%ae", its.commit) == f"routine:{schedule.id}@surogate"
+    [wait] = await waits_of(api, thread)
+    assert (wait.status, wait.payload["files"]) == ("pending", ["Report.docx"])
+    assert (await row_of(api, project, thread))["reason"] == "files"
+    assert await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_RESUME]) == []
+
