@@ -608,17 +608,22 @@ class History:
         """Put the thread's copy on its hand-off, for a helper about to start from it; the branch stays as it was.
 
         What helpers kept there comes into the copy first.  Only the turn's
-        end moves the branch: a turn stopped after this lands none of it.
-        The hand-off is one commit, the copy's files on its base, the
-        hand-off it took up behind it.
+        end moves the branch: a turn stopped after this lands none of its
+        own files, once the stop has dropped the hand-off.  The hand-off is
+        one commit, the copy's files on its base, the hand-off it took up
+        behind it.
         """
         not_taken = self.take_up()["not_taken"]
+        own = self._commit_copy(author, "Handed on", trailers)
+        refs = self._durable_refs()
+        there = refs.get(self.handoff)
+        if there and there == self._ref(self.gave) and self._tree(there) == self._tree(own):
+            # Handed on again as it was, for the next helper of one step: the hand-off this pod made,
+            # which no helper has kept onto since, holds the copy already.
+            return {"commit": there, "not_taken": not_taken}
         onto = self._main("rev-parse", self.base)
-        tip = self._one(
-            self._commit_copy(author, "Handed on", trailers), onto, *self._behind(onto),
-            author=author, title="Handed on", trailers=trailers,
-        )
-        self._push({self.handoff: tip, self.handoff_from: tip}, expect={self.handoff: self._durable_refs().get(self.handoff)})
+        tip = self._one(own, onto, *self._behind(onto), author=author, title="Handed on", trailers=trailers)
+        self._push({self.handoff: tip, self.handoff_from: tip}, expect={self.handoff: there})
         for ref in (self.handed, self.gave):
             self._main("update-ref", ref, tip)
         return {"commit": tip, "not_taken": not_taken}
@@ -691,12 +696,25 @@ class History:
             _replace(self.repo / "not-taken", json.dumps(sorted({*self._not_taken(), *not_taken})).encode())
         return {"not_taken": not_taken}
 
-    def drop_hand_off(self) -> dict:
-        """Delete the hand-off this pod made, as its turn is stopped, so none of that turn's work lands later."""
-        if self._ref(self.gave) is None:
+    def drop_hand_off(self, gave: Iterable[str] = ()) -> dict:
+        """Delete the hand-off the stopped turn made, so the turn's own files do not land later.
+
+        A pod knows the hand-off it made itself.  One made again since the
+        turn handed on does not: *gave*, the commits the turn handed on as
+        its worker has them, says whether the history's hand-off is the
+        turn's.  A hand-off of an earlier turn, with its helpers' work, stays.
+
+        The hand-off goes whole, with what helpers kept onto it since the
+        turn made it.  A helper still at work then hands back onto none,
+        and makes a new one from where it started: what it changed itself
+        lands with the thread's next turn.
+        """
+        own = self._ref(self.gave)
+        if own is None and self._durable_refs().get(self.handoff_from) not in set(gave):
             return {"dropped": False}
         self._push({self.handoff: None, self.handoff_from: None}, expect={})
-        self._main("update-ref", "-d", self.gave)
+        if own is not None:
+            self._main("update-ref", "-d", self.gave)
         return {"dropped": True}
 
     def prune(self, *, keep: list[str], now: float, spare: float = _SPARE, old: list[str] | None = None) -> dict:

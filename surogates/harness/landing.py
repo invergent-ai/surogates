@@ -27,6 +27,7 @@ does anything else.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -94,6 +95,10 @@ _ROW_EVERY = 5
 _ROW_SHARE = 20
 #: What a landing left running says, on each apply it could not put back, when it is given up.
 _GONE = "The project's history no longer has the versions from before this landing: its files cannot be put back"
+#: The commits each thread's turn now running has handed on, as this worker knows them: what a Stop
+#: of the turn drops, also from a pod made again since.  A thread is here from the moment a step of
+#: its turn sets out to hand its copy on, until the turn's end or its stop.
+_HANDED_ON: dict[str, list[str]] = {}
 #: The day's prunings under way, kept until done: each outlives the wake whose landing left it.
 _PRUNINGS: set[asyncio.Future] = set()
 #: Each thread's put-back still running, kept until done: a cancel never cuts one short.
@@ -286,7 +291,30 @@ async def keep_copy(
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
         return None
+    if action == "hand_off":
+        # Noted before the pod is asked: a Stop that cuts the call off may find the hand-off made.
+        _HANDED_ON.setdefault(owner, [])
     workstream = session.config.get("workstream_id") or session.config["history_project"]
+    async with _guarded(session_factory, sandbox_pool, owner, workstream, saga_settings, settle=settle, waited=waited):
+        kept = await _call(sandbox_pool, owner, action, **_kept_as(session), **({"base": True} if action == "keep" else {}))
+    if action == "hand_off":
+        _HANDED_ON.setdefault(owner, []).append(kept["commit"])
+    return kept
+
+
+@contextlib.asynccontextmanager
+async def _guarded(
+    session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, saga_settings: Any,
+    *, settle: bool = True, waited: set[int] | None = None,
+) -> Any:
+    """The project's lock for a write of the history's refs that is no landing: a keep, a hand-off, a stop's drop.
+
+    The landings a killed worker left running are settled first, as every
+    lock holder does, unless *settle* is false; where that fails, or is
+    not asked for, the fence is waited out.  Then the lock is asked: the
+    pod checks the refs it moves as it reads them just before, which holds
+    only under the lock, so one lost in the wait stops the write.
+    """
     waited = set() if waited is None else waited
     async with project_lock(session_factory, workstream) as held:
         fenced = False
@@ -298,10 +326,44 @@ async def keep_copy(
                 logger.warning("Could not settle the landings left running in project %s", workstream, exc_info=True)
         if not fenced:
             await _fenced(session_factory, workstream, saga_settings, waited)
-        # The pod checks the refs it moves as it reads them just before: that
-        # holds only under the lock, so one lost while it waited stops it.
         await held()
-        return await _call(sandbox_pool, owner, action, **_kept_as(session), **({"base": True} if action == "keep" else {}))
+        yield
+
+
+def handed_on(session: Any) -> bool:
+    """Whether *session*'s turn now running has put its copy on its hand-off, or was doing so, as this worker knows it."""
+    return sandbox_session_key(session) in _HANDED_ON
+
+
+def turn_ended(session: Any) -> None:
+    """*session*'s turn is over: what it handed on lands or is kept with it, and is no later Stop's to drop."""
+    _HANDED_ON.pop(sandbox_session_key(session), None)
+
+
+async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
+    """Drop the hand-off a thread's stopped turn made, so the turn's own files do not land later; whether one was dropped.
+
+    A turn that handed nothing on takes no lock and asks no pod.  One that
+    did goes behind the guard a keep has, since it writes the history's
+    refs as a keep does.  The pod drops the hand-off it made itself; a pod
+    made again since the turn handed on is told which commits those were.
+    With no pod it does nothing: its caller opens one first.
+
+    What the Stop takes back is the hand-off, whole: with the stopped
+    turn's files, whatever a helper had kept on it that the thread's
+    branch had not taken up, an earlier step's helper's finished work
+    included.  It stays in the history, on no ref, until a pruning.  A
+    helper still at work is not stopped by this: when it ends it hands
+    back onto no hand-off and makes a new one from where it started, so
+    what it changed itself lands with the thread's next turn, a file it
+    made from the stopped turn's draft among them.
+    """
+    owner = sandbox_session_key(session)
+    gave = _HANDED_ON.pop(owner, None)
+    if gave is None or not sandbox_pool.holds_copy(owner):
+        return False
+    async with _guarded(session_factory, sandbox_pool, owner, session.config["workstream_id"], saga_settings):
+        return bool((await _call(sandbox_pool, owner, "drop_hand_off", gave=gave))["dropped"])
 
 
 def _kept_as(session: Any) -> dict:

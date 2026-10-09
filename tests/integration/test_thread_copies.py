@@ -657,24 +657,25 @@ async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(ap
     assert note.endswith(", n010.tmp, and 240 more")
 
 
-async def test_a_thread_cannot_hand_work_to_a_helper_yet(api, monkeypatch, pods):
+async def test_a_helper_starting_call_the_allow_list_refuses_takes_no_snapshot_and_hands_nothing_on(api, monkeypatch, pods):
     thread = await a_thread(api)
+    store = api.app.state.session_store
+    await store.update_session_config_key(thread.id, "tool_allow_list", ["terminal"])
     # Bounded: a delegation let through waits on its helper, and would hang the test.
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+    await asyncio.wait_for(a_turn(api, monkeypatch, await store.get_session(thread.id), [
         calling(("delegate_task", {"goal": "Summarise the report."})),
         _final_response("Summarised it myself."),
     ], pool=SandboxPool(pods)), 60)
-    store = api.app.state.session_store
     [answer] = [json.loads(e.data["content"]) for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
                 if e.data["name"] == "delegate_task"]
-    assert answer == {"error": "A thread can't start delegate_task yet: do this step in the thread itself."}
+    assert answer == {"error": "Tool 'delegate_task' is not in this session's allow-list. Allowed: ['terminal']"}
     # A call that never runs takes no snapshot of the copy.
     [call] = await store.get_events(thread.id, types=[EventType.TOOL_CALL])
     assert "checkpoint_hash" not in call.data
-    # No helper started, and no pod was set up for a call that never ran.
+    # No helper started, no pod was set up for a call that never ran, and no copy was handed on.
     async with api.app.state.session_factory() as db:
         helpers = (await db.execute(text("SELECT count(*) FROM sessions WHERE parent_id = :id"), {"id": thread.id})).scalar()
-    assert (helpers, pods.pods) == (0, {})
+    assert (helpers, pods.pods) == (0, {}) and not (pods.project / "_history").exists()
 
 
 @pytest.mark.parametrize("cut", [asyncio.CancelledError, RuntimeError])
@@ -744,12 +745,20 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
     assert first.startswith("[This thread's copy of the project's files was made again"), first
 
 
-async def test_a_thread_refuses_every_tool_that_starts_a_session():
-    from surogates.harness.tool_exec import SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS
+async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_copy_on_or_not():
+    from surogates.harness.tool_exec import HELPER_STARTING_TOOLS, SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS
 
-    # Derived from the harness's own list: a new spawning tool is refused by default.
-    assert THREAD_REFUSED_TOOLS == SESSION_STARTING_TOOLS - {"send_worker_message", "unblock_task", "message_thread"}
-    assert {"delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments", "cron_create"} <= THREAD_REFUSED_TOOLS
+    # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
+    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments"}
+    # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
+    assert THREAD_REFUSED_TOOLS == {"cron_create"}
+    # Every other tool that starts a session is named here, with why it hands nothing on: it reaches a
+    # session that exists already, or a thread may not run it at all.  A new tool that starts a session
+    # fails this until it is put on one side or the other: none hands a copy on, or fails to, unnoticed.
+    assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {
+        "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads",
+    }
+    assert HELPER_STARTING_TOOLS <= SESSION_STARTING_TOOLS and THREAD_REFUSED_TOOLS <= SESSION_STARTING_TOOLS
 
 
 async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, monkeypatch, pods):

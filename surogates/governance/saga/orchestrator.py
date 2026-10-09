@@ -16,6 +16,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -84,6 +85,14 @@ class SagaOrchestrator:
         self._default_step_timeout = default_step_timeout
         self._default_max_retries = default_max_retries
         self._retry_delay = retry_delay
+
+    @property
+    def settings(self) -> SimpleNamespace:
+        """The bounds its steps run with, as the settings it was made from name them: a fence is counted from these."""
+        return SimpleNamespace(
+            default_step_timeout=self._default_step_timeout, default_max_retries=self._default_max_retries,
+            retry_delay=self._retry_delay,
+        )
 
     # ------------------------------------------------------------------
     # Saga lifecycle

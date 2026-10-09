@@ -1789,3 +1789,57 @@ def test_a_pruning_keeps_every_ref_under_a_kept_name_ending_in_a_slash(tmp_path,
     assert refs == ["refs/helpers/t1/h1", "refs/helpers/t1/h2"]
     assert git(durable, "show", "refs/helpers/t1/h2:h2.md") == "half made"
     assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_pod_made_again_drops_the_hand_off_its_stopped_turn_made_and_no_other_turns(tmp_path, project):
+    durable = project / "_history"
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "draft.md").write_text("the stopped turn's draft")
+    gave = thread.hand_off(author=A, trailers=KEPT)["commit"]
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "sources.md").write_text("from the draft")
+    helper.hand_back(author=A, trailers=KEPT)  # onto the hand-off, which moves; where it was taken from stays
+    # The turn's pod went under it.  A pod made in its place handed nothing on itself.
+    again = a_pod(tmp_path, project)
+    # Told of no hand-off, or of some other turn's, it drops nothing.
+    assert again.drop_hand_off() == {"dropped": False}
+    assert again.drop_hand_off(gave=["0" * 40]) == {"dropped": False}
+    assert len([ref for ref in git(durable, "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]) == 2
+    # Told which hand-off the stopped turn made, it drops that one, whole.
+    assert again.drop_hand_off(gave=[gave]) == {"dropped": True}
+    assert not [ref for ref in git(durable, "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+    # And nothing of the turn is left for the next one to land.
+    assert not (a_pod(tmp_path, project).copy / "draft.md").exists()
+
+
+def test_a_copy_handed_on_again_as_it_was_is_pushed_once_and_one_changed_since_again(tmp_path, project, monkeypatch):
+    durable = project / "_history"
+    thread = a_pod(tmp_path, project)
+    (thread.copy / "outline.md").write_text("outline")
+    first = thread.hand_off(author=A, trailers=KEPT)["commit"]
+    pushes: list[dict] = []
+    push = History._push
+
+    def counted(self, updates, **more):
+        if self.helper is None:  # the thread's own
+            pushes.append(updates)
+        return push(self, updates, **more)
+
+    monkeypatch.setattr(History, "_push", counted)
+    # A step that starts a second helper with nothing written since hands on the commit the history has.
+    assert thread.hand_off(author=A, trailers=KEPT) == {"commit": first, "not_taken": []} and pushes == []
+    # What it wrote for the next one since goes on a new hand-off.
+    (thread.copy / "brief.md").write_text("for the second")
+    second = thread.hand_off(author=A, trailers=KEPT)["commit"]
+    assert second != first and [sorted(updates) for updates in pushes] == [["refs/handoff-from/t1", "refs/handoff/t1"]]
+    assert git(durable, "show", "refs/handoff/t1:brief.md") == "for the second"
+    # A hand-off a helper has kept onto since is not the copy as it was: handing on takes that up, and pushes.
+    helper = a_helper(tmp_path, project)
+    (helper.copy / "sources.md").write_text("sources")
+    helper.hand_back(author=A, trailers=KEPT)
+    third = thread.hand_off(author=A, trailers=KEPT)["commit"]
+    assert third != second and len(pushes) == 2
+    assert git(durable, "rev-parse", "refs/handoff/t1", "refs/handoff-from/t1").split() == [third, third]
+    assert git(durable, "show", f"{third}:sources.md") == "sources"
+    # Each is the stopped turn's to drop, whichever the history holds.
+    assert a_pod(tmp_path, project).drop_hand_off(gave=[first, second, third]) == {"dropped": True}

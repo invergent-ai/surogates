@@ -37,7 +37,7 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later
+from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later, turn_ended
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1065,6 +1065,8 @@ class ArtifactCompletionMixin:
         before the turn summary and the report, so both see the landed files.
         """
         landing: dict[str, Any] | None = None
+        # The turn is over: what it handed on lands with it, and is no later Stop's to drop.
+        turn_ended(session)
         if is_project_thread(session.config) and self._sandbox_pool is not None:
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
             try:
@@ -1423,6 +1425,8 @@ class ArtifactCompletionMixin:
         # The helpers' files the turn's take-ups left as its copy had them: named here, as a landing names them.
         not_taken: list[str] = []
         owner = sandbox_session_key(session)
+        # The turn is over, kept or not: what it handed on is no later Stop's to drop.
+        turn_ended(session)
         if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
             helper = bool(session.config.get("history_thread"))
             try:

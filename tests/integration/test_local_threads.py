@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,12 +17,14 @@ from surogates.db.models import WorkstreamHistory
 from surogates.devices.binding import Binding
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
+from surogates.harness import landing as landing_module
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.sandbox.copy_files import writes_to_copy
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
+from surogates.tools.builtin import delegate as delegate_module
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop
 from tests.test_steer_loop import _final_response
@@ -444,3 +446,50 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_f
     assert "history_thread" not in helper.config
     with pytest.raises(ValueError, match="Only a root session is bound to a folder"):
         await journal(api).bind(session_id=helper.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE)
+
+
+@pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker", "spawn_task"])
+async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_folder_and_hands_no_copy_on(api, laptop, monkeypatch, tmp_path, tool):
+    _, _, thread = await begun_local(api, laptop)
+    store = api.app.state.session_store
+    await store.update_session_config_key(thread.id, "coordinator", True)  # offered the tools that start workers and tasks
+    thread = await store.get_session(thread.id)
+    # A helper that is waited for: its outcome, without its turn.
+    monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
+    asked: list = []
+    for name in ("keep_copy", "take_up", "project_lock"):
+        monkeypatch.setattr(landing_module, name, lambda *args, name=name, **more: asked.append(name))
+    pods = ThreadPods(tmp_path / "pods")
+    pool = SandboxPool(pods)
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling((tool, {"goal": "Check the totals."})), _final_response("Started."),
+        _final_response("The helper has it."),  # asked once more for the file its goal names
+    ], pool=pool), 60)
+    [helper] = await children_of(api, thread)
+    # It works in the thread's folder, through the thread's binding: no copy of its own to start from.
+    assert (helper.config["execution"], sandbox_session_key(helper)) == (thread.config["execution"], str(thread.id))
+    assert "history_thread" not in helper.config
+    # So nothing is handed on or taken up: no pod, no copy, and the step asks for neither.
+    assert (pods.pods, pods.copies, asked) == ({}, {}, [])
+    assert not landing_module.handed_on(thread)
+
+
+async def test_a_thread_on_the_users_computer_is_not_offered_a_research_runs_tool_and_starts_nothing_by_it(api, laptop, monkeypatch, tmp_path):
+    _, _, thread = await begun_local(api, laptop)
+    store = api.app.state.session_store
+    await store.update_session_config_key(thread.id, "coordinator", True)
+    thread = await store.get_session(thread.id)
+    asked: list = []
+    for name in ("keep_copy", "take_up", "project_lock"):
+        monkeypatch.setattr(landing_module, name, lambda *args, name=name, **more: asked.append(name))
+    pods = ThreadPods(tmp_path / "pods")
+    harness = await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("dispatch_experiments", {"node_keys": ["1"]})), _final_response("Started."),
+        _final_response("Nothing to dispatch."),  # asked once more for the file its goal names
+    ], pool=SandboxPool(pods)), 60)
+    # A research run needs the cloud's sandbox: on a local folder its command is refused and its tools are
+    # not offered, a thread's as any chat's.  A call of one all the same never runs, and starts nothing.
+    offered = harness._tool_filter_for_session(thread)
+    assert offered is not None and "dispatch_experiments" not in offered and "delegate_task" in offered
+    assert await events_of(api, thread.id, EventType.TOOL_CALL) == []
+    assert (await children_of(api, thread), pods.pods, asked) == ([], {}, [])

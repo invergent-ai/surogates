@@ -34,8 +34,10 @@ def is_project_thread(config: dict[str, Any] | None) -> bool:
 
 def thread_refusal(name: str) -> str:
     """What a project's thread answers to a command (``/name``) or tool *name*
-    it cannot start yet: a helper's, a routine's or a coding agent's edits
-    would stay in a copy the thread never lands."""
+    it cannot start yet.  A routine's runs would work on old files, and
+    their work would land only when someone next speaks to the thread; a
+    coding agent's turn ends outside the thread's landing, so its edits
+    would stay in a copy never landed."""
     return f"A thread can't start {name} yet: do this step in the thread itself."
 
 

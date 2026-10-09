@@ -169,7 +169,7 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     assert _llm_responses(store) == []
 
 
-@pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research", "code"])
+@pytest.mark.parametrize("command", ["loop", "code"])
 def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     harness = _harness(AsyncMock(), _permissive())
     thread = _session()
@@ -177,6 +177,31 @@ def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     assert harness._slash_command_block_reason(f"/{command} Go.", thread) == thread_refusal(f"/{command}")
     # Elsewhere they run as before.
     assert harness._slash_command_block_reason(f"/{command} Go.", _session()) is None
+
+
+@pytest.mark.parametrize("command", ["mission", "auto-research", "deep-research"])
+def test_a_project_thread_runs_a_command_whose_helpers_work_on_copies_of_their_own(command):
+    harness = _harness(AsyncMock(), _permissive())
+    thread = _session()
+    thread.config["workstream_role"] = "thread"
+    # Its helpers keep their work on its hand-off, which lands with it.
+    assert harness._slash_command_block_reason(f"/{command} Go.", thread) is None
+
+
+@pytest.mark.parametrize("command, answer", [
+    ("loop", "A thread can't start /loop yet: do this step in the thread itself."),
+    ("code", "A thread can't start /code yet: do this step in the thread itself."),
+    # The rule of a chat on a folder of the user's computer, which a thread there is too.
+    ("auto-research", "/auto-research is not available for sessions on a local folder"),
+    ("mission", None),
+    ("deep-research", None),
+])
+def test_a_project_thread_on_the_users_computer_runs_the_commands_its_folder_can(command, answer):
+    harness = _harness(AsyncMock(), _permissive())
+    thread = _session()
+    thread.config["workstream_role"] = "thread"
+    thread.config["execution"] = {"kind": "device", "device_id": "00000000-0000-0000-0000-0000000000d1"}
+    assert harness._slash_command_block_reason(f"/{command} Go.", thread) == answer
 
 
 @pytest.mark.asyncio

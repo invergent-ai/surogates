@@ -2199,3 +2199,135 @@ async def test_a_failed_helper_lets_its_own_pod_go_and_never_its_threads(api, mo
     assert (pool.holds_copy(str(helper.id)), pool.holds_copy(str(thread.id))) == (False, True)
     assert (pods.copies[str(thread.id)] / "draft.md").read_text() == "draft\n"
     assert not (pods.copies[str(thread.id)] / "outline.md").exists()
+
+
+async def test_a_stops_drop_of_a_hand_off_settles_first_and_writes_nothing_outside_its_projects_lock(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    await handed_off(api, pool, thread)
+    both = [f"refs/handoff-from/{thread.id}", f"refs/handoff/{thread.id}"]
+    order: list[str] = []
+    settle, call = landing_module.settle_running, landing_module._call
+
+    async def settled_then_the_lock_goes(*args, **kwargs):
+        order.append("settle")
+        done = await settle(*args, **kwargs)
+        if len(order) == 1:
+            await lose_the_lock(api, thread)  # a failover while the first drop waited its turn
+        return done
+
+    async def called(sandbox_pool, owner, action, **arguments):
+        order.append(action)
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "settle_running", settled_then_the_lock_goes)
+    monkeypatch.setattr(landing_module, "_call", called)
+    drop = partial(
+        landing_module.drop_hand_off, session_factory=api.app.state.session_factory, sandbox_pool=pool,
+        session=thread, saga_settings=FENCED,
+    )
+    # The pod checks the refs it moves under the lock alone: with the lock gone, the pod is not asked.
+    with pytest.raises((DBAPIError, InternalClientError)):
+        await drop()
+    assert order == ["settle"]
+    assert [ref for ref in git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref] == both
+    # What the worker knew of the turn's hand-off went with that try: a second drop has nothing to ask for.
+    assert await drop() is False and order == ["settle"]
+    # A turn that hands on again, and is stopped, has it dropped: the landings left running settled first.
+    await handed_off(api, pool, thread)
+    assert await drop() is True
+    assert order == ["settle", "settle", "hand_off", "settle", "drop_hand_off"]
+    assert not [ref for ref in git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+
+
+async def test_a_stops_drop_whose_settle_fails_waits_out_the_fence_before_it_writes(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    await handed_off(api, pool, thread)
+    order: list[str] = []
+    fenced, call = landing_module._fenced, landing_module._call
+
+    async def never_settles(*args, **kwargs):
+        raise RuntimeError("the landing left running could not be looked at")
+
+    async def waited_out(*args, **kwargs):
+        order.append("fence")
+        return await fenced(*args, **kwargs)
+
+    async def called(sandbox_pool, owner, action, **arguments):
+        order.append(action)
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "settle_running", never_settles)
+    monkeypatch.setattr(landing_module, "_fenced", waited_out)
+    monkeypatch.setattr(landing_module, "_call", called)
+    assert await landing_module.drop_hand_off(
+        session_factory=api.app.state.session_factory, sandbox_pool=pool, session=thread, saga_settings=FENCED,
+    ) is True
+    assert order == ["fence", "drop_hand_off"]
+
+
+async def test_a_hand_off_cut_off_after_its_pod_made_it_is_still_a_stops_to_drop(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    call = landing_module._call
+
+    async def the_answer_is_lost(sandbox_pool, owner, action, **arguments):
+        await call(sandbox_pool, owner, action, **arguments)
+        raise asyncio.CancelledError  # the stop reached the step as its pod answered
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_answer_is_lost)
+        with pytest.raises(asyncio.CancelledError):
+            await handed_off(api, pool, thread)
+    assert f"refs/handoff/{thread.id}" in git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines()
+    # The worker never heard which commit it was, but knows the step set out to hand on: the pod is asked.
+    assert landing_module.handed_on(thread)
+    assert await landing_module.drop_hand_off(
+        session_factory=api.app.state.session_factory, sandbox_pool=pool, session=thread, saga_settings=FENCED,
+    ) is True
+    assert not [ref for ref in git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+
+
+@pytest.mark.parametrize("ends_by", ["landing", "failing with its pod gone"])
+async def test_a_turns_end_leaves_no_hand_off_of_its_for_a_later_stop_to_drop(api, monkeypatch, pods, ends_by):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    await handed_off(api, pool, thread)
+    assert landing_module.handed_on(thread)
+    if ends_by == "failing with its pod gone":
+        await pool.destroy_for_session(str(thread.id))
+    await ends(api, pool, thread, failed=ends_by != "landing")
+    assert not landing_module.handed_on(thread)
+    # A stop of a later turn that handed nothing on asks for no lock, and drops no hand-off the history has.
+    left = git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines()
+    monkeypatch.setattr(landing_module, "project_lock", None)
+    await open_pod(pool, thread)
+    assert await landing_module.drop_hand_off(
+        session_factory=api.app.state.session_factory, sandbox_pool=pool, session=thread, saga_settings=FENCED,
+    ) is False
+    assert git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines() == left
+
+
+@pytest.mark.parametrize("pod", ["gone under the turn", "let go by its worker"])
+async def test_a_stop_of_a_turn_whose_pod_is_gone_opens_one_to_drop_what_the_turn_handed_on(api, pods, pod):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    await handed_off(api, pool, thread)
+    if pod == "gone under the turn":
+        await pods.destroy(pool.sandbox_of(str(thread.id)))  # evicted, or past its deadline: its worker still names it
+    else:
+        await pool.destroy_for_session(str(thread.id))
+    harness = harness_of(api)
+    harness._sandbox_pool, harness._saga_settings = pool, FENCED
+    harness._tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    # The stop comes while the step that handed on still runs: no step of the turn is there to put back,
+    # so nothing else has made the pod again.
+    await harness._take_back_what_the_turn_handed_on(thread)
+    assert not [ref for ref in git(pods.project / "_history", "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
+    assert not landing_module.handed_on(thread)

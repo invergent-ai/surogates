@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -9,6 +12,39 @@ from surogates.session.models import Session
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import agent_session_bucket
 from surogates.workstreams import is_project_thread
+
+
+#: What the step now running does right before it starts a session, once it is known to start one.
+_BEFORE_CHILD: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar("before_child", default=None)
+
+
+@contextmanager
+def before_a_child(run: Callable[[], Awaitable[None]]):
+    """Have *run* awaited before each session the enclosed step starts, and before each task it queues.
+
+    A project thread's step hands its copy on there: after the tool's own
+    refusals, so a call that starts nothing hands nothing on.
+    """
+    token = _BEFORE_CHILD.set(run)
+    try:
+        yield
+    finally:
+        _BEFORE_CHILD.reset(token)
+
+
+async def before_child(reading: Any = None) -> None:
+    """Run what the step now running set to happen before it starts a session; nothing outside such a step.
+
+    *reading* is a database session whose read is ended first: what runs
+    may wait for the project's lock, and no transaction is left open
+    through that wait.
+    """
+    run = _BEFORE_CHILD.get()
+    if run is None:
+        return
+    if reading is not None:
+        await reading.rollback()
+    await run()
 
 
 # Fields that pin a child session to its root's workspace.  Callers must
@@ -230,6 +266,9 @@ async def create_child_session(
     if effective_service_account_id is not None:
         merged_config["service_account_id"] = str(effective_service_account_id)
 
+    # Past every refusal, the tool's and this function's: what the step that makes the child set
+    # for this moment runs first.
+    await before_child()
     return await store.create_session(
         session_id=session_id,
         user_id=parent.user_id,

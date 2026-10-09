@@ -74,6 +74,23 @@ async def test_a_threads_image_with_no_copy_to_go_to_is_not_saved(thread):
     assert saved is False and storage.writes == []
 
 
+async def test_a_threads_helpers_image_before_its_pod_is_up_is_not_saved(thread):
+    pool, owner, pods = thread
+    storage, helper = FakeStorage(), str(uuid4())
+    config = {**CONFIG, "history_thread": owner}
+    saved = await _save_media_bytes(
+        PNG, relative_path="images/cover.png", workspace_path=None, storage=storage,
+        session_id=helper, session_config=config, sandbox_pool=pool, owner=helper,
+    )
+    # A helper works on a copy of its own: the image would go around its hand-back, into the real files.
+    assert saved is False and storage.writes == [] and not (pods.project / "images").exists()
+    # Not so in a project too large for history, where it works on the real files as its thread does;
+    # nor for a helper of a thread on the user's computer, which is given no thread to hand back to.
+    assert writes_to_copy(pool, helper, {**config, "history_off": True}) is False
+    assert writes_to_copy(pool, helper, {**config, "execution": {"kind": "device", "device_id": str(uuid4())}}) is False
+    assert writes_to_copy(pool, helper, CONFIG) is False
+
+
 async def test_a_thread_of_a_project_too_large_for_history_saves_its_image_through_storage(tmp_path):
     pods = ThreadPods(tmp_path)
     pool, owner, storage = SandboxPool(pods), str(uuid4()), FakeStorage()

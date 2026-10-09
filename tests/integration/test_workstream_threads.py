@@ -22,7 +22,7 @@ from surogates.db.models import BoardNote, Event, InboxItem, Session, SessionCur
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
-from surogates.harness.tool_exec import SESSION_STARTING_TOOLS, _build_session_sandbox_spec, execute_single_tool
+from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SlashCommandConfig
@@ -1733,8 +1733,17 @@ async def test_a_report_lists_at_most_twenty_files(api):
     )
 
 
-@pytest.mark.parametrize("tool", sorted(SESSION_STARTING_TOOLS - {"send_worker_message", "unblock_task", "message_thread"}))
-async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool):
+@pytest.mark.parametrize("tool, arguments, answer", [
+    # A routine's runs would work on old files, and land only when someone next speaks to the thread.
+    ("cron_create", {}, thread_refusal("cron_create")),
+    # A thread starts and proposes no threads: each tool's own answer, to a call that is well formed.
+    ("start_thread", {"title": "Draft B", "goal": "Draft the B memo."}, "Only a project's coordinator starts threads."),
+    (
+        "propose_threads", {"threads": [{"title": "Draft B", "goal": "Draft the B memo.", "where": "cloud"}]},
+        "Only a project's coordinator proposes threads.",
+    ),
+], ids=["cron_create", "start_thread", "propose_threads"])
+async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool, arguments, answer):
     thread = await start(api, await master_of(api, await create(api)))
     # call_tool also pins that a refused call sets up no pod.
-    assert await call_tool(api, thread, tool) == {"error": thread_refusal(tool)}
+    assert await call_tool(api, thread, tool, **arguments) == {"error": answer}

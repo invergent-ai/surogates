@@ -11,6 +11,7 @@ dependencies as parameters so the harness can delegate without coupling.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -189,6 +190,17 @@ COPY_REMADE = (
     "Changes this thread made since its work was last saved are not in it. "
     "Check the files before making any of those changes again.]"
 )
+
+
+def _noted(content: str, note: str) -> str:
+    """*content* with *note*: a key of its own in a result that is a JSON object, a line after any other."""
+    try:
+        answer = json.loads(content)
+    except ValueError:
+        answer = None
+    if isinstance(answer, dict):
+        return json.dumps({**answer, "note": note})
+    return f"{content}\n\n[{note}]"
 
 
 async def _copy_lost_work(store: Any, session_id: Any, before: int, session_factory: Any = None) -> bool:
@@ -479,13 +491,20 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "propose_threads",
 })
 
-# A project's thread starts no session: whatever a helper or a routine run
-# edits would stay in a copy the thread never lands.  Every session-starting
-# tool is refused, so a new one is too, but those that only reach a child
-# that already exists.
-THREAD_REFUSED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS - {
-    "send_worker_message", "unblock_task", "message_thread",
-}
+# A project's thread schedules no routine: a run would start from old files,
+# and its work would land only when someone next speaks to the thread.
+THREAD_REFUSED_TOOLS: frozenset[str] = frozenset({"cron_create"})
+
+# The tools whose step starts a helper.  In a project's thread the copy goes
+# on the thread's hand-off first, for the helper's own copy to start from, and
+# what helpers kept comes into the copy after.  Named one by one: a tool that
+# only reaches a session that exists, or that a thread may not run, hands
+# nothing on, and a new tool that starts a session is put here on purpose.
+HELPER_STARTING_TOOLS: frozenset[str] = frozenset({
+    "delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments",
+})
+#: What a thread's step says of files it and a helper both changed.
+NOT_TAKEN_UP = "Changed here and by a helper, so this copy keeps its own version (the helper's is in the history)"
 
 MAX_TOOL_WORKERS: int = 8
 
@@ -1343,8 +1362,8 @@ async def _run_single_tool(
     # In a project's thread every saga step starts from a snapshot of its
     # copy, taken right before it runs: a stop puts the copy back however
     # the step changed it.  A call refused below for not being offered or
-    # allowed, for arguments that are not JSON, or for starting a helper, never
-    # runs, so it takes none.
+    # allowed, for arguments that are not JSON, or for scheduling a routine,
+    # never runs, so it takes none.
     allowed = session.config.get("tool_allow_list")
     if (
         saga is not None and replay_of is None and not on_device and sandbox_pool is not None
@@ -1660,6 +1679,10 @@ async def _run_single_tool(
     )
     start = time.monotonic()
     tool_failed = False
+    # Whether this step put the thread's copy on its hand-off, for a helper it started; and the
+    # helpers' files the copy then kept its own version of.
+    handed_on: list[bool] = []
+    not_taken: list[str] = []
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
         from surogates.sandbox.pool import sandbox_session_key
@@ -1765,42 +1788,72 @@ async def _run_single_tool(
                 sandbox_owner, tool_name, args_str,
             )
         else:
-            result_content = await tools.dispatch(
-                tool_name,
-                tool_args,
-                session_id=str(session.id),
-                agent_id=session.agent_id,
-                tenant=tenant,
-                session_store=store,
-                redis=redis,
-                budget=budget,
-                memory_manager=memory_manager,
-                sandbox_pool=device_call if device_call is not None else sandbox_pool,
-                credential_vault=credential_vault,
-                browser_pool=browser_pool,
-                browser_control=browser_control,
-                storage=storage,
-                workspace_path=None if device_call is not None else workspace_path,
-                workspace_io=device_call.workspace_io if device_call is not None else None,
-                api_client=api_client,
-                session_factory=session_factory,
-                llm_client=llm_client,
-                model=model or getattr(session, "model", None),
-                vision_llm_client=vision_llm_client,
-                vision_model=vision_model,
-                summary_llm_client=summary_llm_client,
-                summary_model=summary_model,
-                media_gen=media_gen,
-                tools=tools,
-                tool_call_id=tool_call_id,
-                lease_token=lease.lease_token,
-                session_config=session.config,
-                bundle=bundle,
-                platform_client=platform_client,
-                expert_transcript=expert_transcript,
-                interrupt_check=interrupt_check,
-                task_id=sandbox_session_key(session),
-            )
+            if (
+                tool_name in HELPER_STARTING_TOOLS and is_project_thread(session.config)
+                and device_call is None and sandbox_pool is not None
+            ):
+                # A thread's step that starts a helper puts its copy on its hand-off first, where the
+                # helper's own copy starts from.  Only once the tool is past its own refusals and
+                # about to start one: a call that starts nothing takes no lock, pushes nothing, and
+                # leaves nothing for a Stop to drop.  Before each one it starts: what the tool wrote
+                # for the second since the first goes with it, and a copy as it was is pushed once.
+                # A helper hands nothing on for a helper of its own: its half-done copy stays its own
+                # until its turn's end, and that helper starts from the thread's hand-off as it is.
+                from surogates.harness.landing import keep_copy
+                from surogates.session.provisioning import before_a_child
+
+                async def hand_on() -> None:
+                    handed_on.append(True)
+                    try:
+                        kept = await keep_copy(
+                            session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
+                            # The fence its landings have, from the settings its turn's saga was made with.
+                            saga_settings=saga.settings if saga is not None else None, action="hand_off",
+                        )
+                        not_taken.extend((kept or {}).get("not_taken", []))
+                    except Exception:
+                        logger.warning("Could not put the copy of %s where its helper starts", session.id, exc_info=True)
+
+                starting_a_helper = before_a_child(hand_on)
+            else:
+                starting_a_helper = contextlib.nullcontext()
+            with starting_a_helper:
+                result_content = await tools.dispatch(
+                    tool_name,
+                    tool_args,
+                    session_id=str(session.id),
+                    agent_id=session.agent_id,
+                    tenant=tenant,
+                    session_store=store,
+                    redis=redis,
+                    budget=budget,
+                    memory_manager=memory_manager,
+                    sandbox_pool=device_call if device_call is not None else sandbox_pool,
+                    credential_vault=credential_vault,
+                    browser_pool=browser_pool,
+                    browser_control=browser_control,
+                    storage=storage,
+                    workspace_path=None if device_call is not None else workspace_path,
+                    workspace_io=device_call.workspace_io if device_call is not None else None,
+                    api_client=api_client,
+                    session_factory=session_factory,
+                    llm_client=llm_client,
+                    model=model or getattr(session, "model", None),
+                    vision_llm_client=vision_llm_client,
+                    vision_model=vision_model,
+                    summary_llm_client=summary_llm_client,
+                    summary_model=summary_model,
+                    media_gen=media_gen,
+                    tools=tools,
+                    tool_call_id=tool_call_id,
+                    lease_token=lease.lease_token,
+                    session_config=session.config,
+                    bundle=bundle,
+                    platform_client=platform_client,
+                    expert_transcript=expert_transcript,
+                    interrupt_check=interrupt_check,
+                    task_id=sandbox_session_key(session),
+                )
     except KeyError:
         tool_failed = True
         result_content = json.dumps({
@@ -1872,6 +1925,17 @@ async def _run_single_tool(
         make_sandbox_writer,
         maybe_persist_tool_result,
     )
+
+    # What helpers kept on the hand-off meanwhile comes into the thread's copy: a helper that was
+    # waited for has handed back before its turn's end.  A file both changed keeps the thread's
+    # version, and the step's result says so.
+    if handed_on:
+        from surogates.harness.landing import take_up
+        from surogates.sandbox.pool import sandbox_session_key
+
+        not_taken += await take_up(sandbox_pool, sandbox_session_key(session))
+    if not_taken:
+        result_content = _noted(result_content, f"{NOT_TAKEN_UP}: {', '.join(sorted(set(not_taken)))}")
 
     # A thread on a copy just made is told, by that step's result whatever the
     # tool, when the log says work since its last landing was in a copy now

@@ -362,10 +362,13 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
 
-# The commands a project's thread refuses: a routine's runs, a mission's
-# tasks, a research's experiments and helpers would all edit a copy the
-# thread never lands, and so would a coding agent, whose turn never lands.
-_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research", "code"})
+# The commands a project's thread refuses.  A routine's runs would start from
+# old files, and their work would land only when someone next speaks to the
+# thread.  A coding agent's turn ends outside the thread's landing, so its
+# edits would stay in a copy never landed.  A mission's tasks, a research's
+# experiments and its helpers each work on a copy of their own, handed back
+# to the thread: those run.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "code"})
 
 # The commands a chat on a local folder refuses: a research run's
 # experiments need the cloud's coding sandbox and a /workspace repository.
@@ -913,6 +916,7 @@ class AgentHarness(
                 self._settle_allowance_reservation(session, cost_tracker),
             )
         if self._sandbox_pool is not None:
+            await self._take_back_what_the_turn_handed_on(session)
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
@@ -950,6 +954,38 @@ class AgentHarness(
                 {"reason": "channel_stop", "worker_id": self._worker_id},
             )
         self._clear_interrupt()
+
+    async def _take_back_what_the_turn_handed_on(self, session: Session) -> None:
+        """Drop the hand-off a thread's stopped turn made for its helpers, before its pod goes.
+
+        A stopped turn lands nothing.  Its branch never had its work, but a
+        step that started a helper put its copy on the hand-off, which the
+        thread's next turn would take up and land.  The pod that made the
+        hand-off knows it; where that pod went under the turn, one is opened
+        to drop it.  As best it can: a hand-off left is a stopped turn's
+        work landing at the next turn, and the log says so.  A turn that
+        handed nothing on, as every turn of a session that is no thread
+        with a copy, is done here at once: no pod is asked, and none opened.
+        """
+        from surogates.harness.landing import drop_hand_off, handed_on
+        from surogates.sandbox.pool import sandbox_session_key
+
+        if not handed_on(session):
+            return
+        try:
+            from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+            # The turn's pod, or one in its place where it is gone: a pod made now is told which
+            # hand-offs the turn made.
+            owner = sandbox_session_key(session)
+            spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+            await self._sandbox_pool.ensure(owner, spec)
+            await drop_hand_off(
+                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, session=session,
+                saga_settings=self._saga_settings,
+            )
+        except Exception:
+            logger.warning("Could not drop what the stopped turn of %s handed on: it lands with its next turn", session.id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Lease renewal (background task)

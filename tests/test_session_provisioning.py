@@ -9,6 +9,8 @@ import pytest
 
 from surogates.session.models import Session
 from surogates.session.provisioning import (
+    before_a_child,
+    before_child,
     create_agent_session,
     create_child_session,
 )
@@ -548,3 +550,45 @@ async def test_no_caller_names_a_session_a_threads_helper():
         store=store, parent=_make_session(), channel="delegation", config={"history_thread": "t-1", "history_project": "w-1"},
     )
     assert "history_thread" not in store.create_session.await_args.kwargs["config"]
+
+
+@pytest.mark.asyncio
+async def test_what_a_step_set_for_the_moment_before_it_starts_a_session_runs_once_the_session_is_sure_to_be_made():
+    order: list[str] = []
+
+    async def hands_on() -> None:
+        order.append("handed on")
+
+    async def made(**session):
+        order.append("made")
+        return SimpleNamespace(id=uuid4())
+
+    store = SimpleNamespace(create_session=made)
+    with before_a_child(hands_on):
+        # A parent this function refuses starts no session: nothing runs for it.
+        with pytest.raises(ValueError, match="missing required config fields"):
+            await create_child_session(store=store, parent=_make_session(config={}), channel="delegation")
+        assert order == []
+        # Before each session it does make, and before the session is there to be picked up.
+        await create_child_session(store=store, parent=_make_session(), channel="delegation")
+        await create_child_session(store=store, parent=_make_session(), channel="worker")
+        assert order == ["handed on", "made", "handed on", "made"]
+    # Outside the step nothing is set: a session made by a tick, or by another step, runs none of it.
+    await create_child_session(store=store, parent=_make_session(), channel="task")
+    assert order == ["handed on", "made", "handed on", "made", "made"]
+
+
+@pytest.mark.asyncio
+async def test_a_read_is_ended_before_what_a_step_set_runs_and_left_alone_when_nothing_is_set():
+    order: list[str] = []
+    reading = SimpleNamespace(rollback=AsyncMock(side_effect=lambda: order.append("read ended")))
+
+    async def hands_on() -> None:
+        order.append("handed on")
+
+    # What runs may wait for the project's lock: no transaction is left open through it.
+    with before_a_child(hands_on):
+        await before_child(reading)
+    assert order == ["read ended", "handed on"]
+    await before_child(reading)
+    assert order == ["read ended", "handed on"]
