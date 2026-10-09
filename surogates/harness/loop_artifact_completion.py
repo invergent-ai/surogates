@@ -1350,6 +1350,7 @@ class ArtifactCompletionMixin:
                 await prune_after(
                     session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, sandbox_id=prunes,
                     workstream=session.config["workstream_id"], packs=landing.get("packs", 0),
+                    saga_settings=self._saga_settings,
                 )
             finally:
                 # Also when the wake is cancelled under it: its pod goes all the same.

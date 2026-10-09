@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import time
 from functools import partial
@@ -18,6 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
+from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import not_handed_back, worker_note
 from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.sandbox.history import History
@@ -1218,20 +1220,27 @@ async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands
     await edited(pool, first, "echo a > a.md && echo b > b.md")
     await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
     await edited(pool, second, "echo by B > B.md")
-    call, looks = landing_module._call, []
+    call, looks, sleep, waits = landing_module._call, [], asyncio.sleep, []
 
     async def the_pod_never_answers_the_settle(sandbox_pool, owner, action, **arguments):
         if action == "fetch" and arguments.get("commits"):
-            looks.append(owner)
+            looks.append(len(waits))
             raise landing_module.LandingStepError("the pod's step timed out")
         return await call(sandbox_pool, owner, action, **arguments)
 
+    async def counted(seconds, *args):
+        waits.append(seconds)
+        return await sleep(seconds, *args)
+
     with monkeypatch.context() as patch:
         patch.setattr(landing_module, "_call", the_pod_never_answers_the_settle)
+        patch.setattr(asyncio, "sleep", counted)
         await ends(api, pool, second)
     # B's turn did not land, and is not lost with its pod: it is on B's branch, as a failed turn's is,
-    # kept without waiting on A's landing a second time.
+    # kept without waiting on A's landing a second time: the settle that failed had waited out its fence,
+    # and the mark its look left on A's row is no sign of life.
     assert len(looks) == 1 and "B.md" not in pods.real_names()
+    assert [wait for wait in waits[looks[0]:] if wait > 0.5] == []
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
     assert [done["saved"] for done in await turn_ends(api, second)] == [True]
     [report] = await reports(api, master)
@@ -1459,29 +1468,107 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
             "UPDATE workstream_threads SET resolved_at = now() - interval '100 days' WHERE session_id = :g"
         ), {"g": gone.id})
         await db.commit()
-    bounds = []
+    bounds, spared = [], []
     execute = pool.execute_released
 
     async def watched(sandbox_id, name, input, **kwargs):
         if name == "_history" and json.loads(input)["action"] == "prune":
             bounds.append(kwargs.get("timeout"))
+            spared.append(json.loads(input)["spare"])
         return await execute(sandbox_id, name, input, **kwargs)
 
     monkeypatch.setattr(pool, "execute_released", watched)
+    durable = pods.project / "_history"
+    old = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
+    for name in old:  # the kept turns' packs, written long before the fence
+        os.utime(durable / "objects" / "pack" / name, (time.time() - 3600, time.time() - 3600))
     lander = await a_thread(api, "Lander", master)
     await edited(pool, lander, "echo landed > landed.md")
     await ends(api, pool, lander)
-    # Its own bound, from the size of the history.
+    # Its own bound, from the size of the history; and the packs it is to leave, those younger than the fence.
     assert len(bounds) == 1 and bounds[0] >= landing_module._PRUNE_BOUND
-    durable = pods.project / "_history"
+    assert spared == [landing_module._fence(FENCED)]
     refs = git(durable, "for-each-ref", "--format=%(refname)").splitlines()
     assert f"refs/heads/threads/{live.id}" in refs and f"refs/heads/threads/{resolved.id}" in refs
     assert f"refs/heads/threads/{gone.id}" not in refs
-    assert len(list((durable / "objects" / "pack").glob("*.pack"))) == 1
+    # The old packs went into one; the landing's own two, the turn's and main's, wait for the next pruning
+    # while they are younger than the fence.
+    left = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
+    assert old and not old & left and 1 <= len([name for name in left if name.endswith(".pack")]) <= 3
     pruned = (durable / "pruned").stat().st_mtime
     await edited(pool, lander, "echo again > again.md")
     await ends(api, pool, lander)
     assert (durable / "pruned").stat().st_mtime == pruned  # not again the same day
+
+
+async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_running(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    lander, other = await a_thread(api, "Lander", master), await a_thread(api, "Draft B", master)
+    pool, factory = SandboxPool(pods), api.app.state.session_factory
+    await edited(pool, lander, "echo landed > landed.md")
+    prune, asked = landing_module.prune_after, []
+    execute = pool.execute_released
+
+    async def another_landing_has_begun(**kwargs):
+        # Between this landing's lock and its pruning's, another thread's landing began: it may be writing a pack now.
+        saga = SagaOrchestrator().create_saga(other.id, kind="landing")
+        begun.append(await rows_module.start_landing(
+            factory, saga, workstream_id=other.config["workstream_id"], thread_id=other.id,
+            agent_id=str(other.agent_id), user_id=other.user_id, tool_saga_id=None, events=None,
+        ))
+        return await prune(**kwargs)
+
+    async def watched(sandbox_id, name, input, **kwargs):
+        asked.append(json.loads(input).get("action"))
+        return await execute(sandbox_id, name, input, **kwargs)
+
+    begun: list[int] = []
+    monkeypatch.setattr(landing_module, "prune_after", another_landing_has_begun)
+    monkeypatch.setattr(loop_artifact_completion, "prune_after", another_landing_has_begun)
+    monkeypatch.setattr(pool, "execute_released", watched)
+    await ends(api, pool, lander)
+    # Fenced, as a landing is: the pod is not asked, and the day is not marked pruned.
+    assert begun and asked == [] and not (pods.project / "_history" / "pruned").exists()
+    # That landing done, the next completed landing prunes.
+    async with factory() as db:
+        await db.execute(text("DELETE FROM workstream_history WHERE id = :id"), {"id": begun[0]})
+        await db.commit()
+    monkeypatch.setattr(landing_module, "prune_after", prune)
+    monkeypatch.setattr(loop_artifact_completion, "prune_after", prune)
+    await edited(pool, lander, "echo again > again.md")
+    await ends(api, pool, lander)
+    assert asked == ["prune"] and (pods.project / "_history" / "pruned").exists()
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["a turn whose landing could not start", "a failed turn"])
+async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(api, monkeypatch, pods, failed):
+    slow = SimpleNamespace(default_step_timeout=3, default_max_retries=0, retry_delay=0)  # a fence of four seconds
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool, factory = SandboxPool(pods), api.app.state.session_factory
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")  # its row was marked a moment ago: it may be alive
+    await edited(pool, second, "echo by B > B.md")
+    running, call, unread, quiet_at_the_keep = rows_module.running_landings, landing_module._call, [], []
+
+    async def the_rows_cannot_be_read_once(session_factory, workstream_id):
+        if not unread:
+            unread.append(True)
+            raise ConnectionError("the database did not answer")
+        return await running(session_factory, workstream_id)
+
+    async def watched(sandbox_pool, owner, action, **arguments):
+        if action == "keep":
+            quiet_at_the_keep.extend(quiet for _, quiet in await running(factory, first.config["workstream_id"]))
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "running_landings", the_rows_cannot_be_read_once)
+    monkeypatch.setattr(landing_module, "_call", watched)
+    await ends(api, pool, second, failed=failed, settings=slow)
+    # B's turn is kept, and its push went out only once A's landing had been quiet for the fence:
+    # a landing still alive would have marked its row within it.
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
+    assert len(quiet_at_the_keep) == 1 and quiet_at_the_keep[0] >= landing_module._fence(slow)
 
 
 async def a_helper(api, thread, *, channel="delegation"):

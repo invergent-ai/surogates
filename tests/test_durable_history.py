@@ -831,6 +831,39 @@ def test_a_keep_whose_history_moved_while_its_pack_went_up_writes_over_no_landin
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_under_names_no_commit_it_took(tmp_path, project, monkeypatch):
+    for n in range(3):
+        seed = a_pod(tmp_path, project, "t9")
+        (seed.copy / f"seed{n}.md").write_text("seed")
+        land(seed, f"saga:{n}")
+    durable = project / "_history"
+    old = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
+    for name in old:  # written long ago: no push still at work wrote them
+        os.utime(durable / "objects" / "pack" / name, (time.time() - 3600, time.time() - 3600))
+    pusher, pruner = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (pusher.copy / "a.md").write_text("a turn")
+    put, pruned = History._put_durable, []
+    keep = [f"refs/{kind}/{thread}" for thread in ("t1", "t2", "t9") for kind in ("heads/threads", "bases")]
+
+    def a_pruning_runs_whole(self, name, source):
+        put(self, name, source)
+        if self.thread == "t1" and name.endswith(".idx") and not pruned:
+            # This push lost its lock unseen: its pack is up, its refs are not, and another holder prunes.
+            pruned.append(pruner.prune(keep=keep, now=time.time(), spare=300))
+
+    monkeypatch.setattr(History, "_put_durable", a_pruning_runs_whole)
+    turn = pusher.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    monkeypatch.setattr(History, "_put_durable", put)
+    assert pruned[0]["pruned"] is True
+    # The pruning moved no ref, so the push passed its last look: the commit its ref names is still there.
+    assert git(durable, "rev-parse", "refs/heads/threads/t1") == turn["commit"] and in_history(durable, turn["commit"])
+    # What was older than the fence went into the pruning's one pack; the push's pack stayed beside it.
+    packs = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
+    assert not old & packs and len([name for name in packs if name.endswith(".pack")]) == 2
+    assert git(durable, "fsck", "--no-dangling") == ""
+    assert (a_pod(tmp_path, project, "t1").copy / "a.md").read_text() == "a turn"  # and the thread's next pod opens
+
+
 def a_main_whose_parent_the_history_lacks(durable: Path) -> str:
     """``main`` made a commit whose parent the history lacks, as after a pruning or as a command can make it; in a pack."""
     main = git(durable, "rev-parse", "refs/heads/main")

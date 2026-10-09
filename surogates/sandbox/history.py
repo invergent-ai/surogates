@@ -683,7 +683,7 @@ class History:
         self._main("update-ref", "-d", self.gave)
         return {"dropped": True}
 
-    def prune(self, *, keep: list[str], now: float) -> dict:
+    def prune(self, *, keep: list[str], now: float, spare: float = 0.0) -> dict:
         """Cut the durable history back to its window, at most once a day, under the project's lock.
 
         Kept: ``main``'s commits of the last 90 days and never fewer than its
@@ -696,15 +696,21 @@ class History:
         keep their ids.  The history is pruned in a full copy on the pod's
         disk and goes back as one pack.  It is marked pruned first: one cut
         off by its bound is tried again the next day, not at every landing.
+
+        A pack written in the last *spare* seconds stays beside the new one,
+        to the next pruning: it may be the pack of a push that lost the lock
+        unseen and has not written its refs yet, whose commits no ref here
+        names.  *spare* is the landings' fence, the longest such a push
+        goes on.
         """
         # Its git has no bound of its own: its call's, sized from the history, cuts it off.
         budget = _TIMEOUT.set(THREAD_POD_DEADLINE)
         try:
-            return self._prune(keep=keep, now=now)
+            return self._prune(keep=keep, now=now, spare=spare)
         finally:
             _TIMEOUT.reset(budget)
 
-    def _prune(self, *, keep: list[str], now: float) -> dict:
+    def _prune(self, *, keep: list[str], now: float, spare: float) -> dict:
         # The first look refuses a history whose folder is a link, before anything is written.
         refs = self._durable_refs()
         with self._folder() as history:
@@ -747,8 +753,13 @@ class History:
             self._put_durable("packed-refs", work / "packed-refs")
             # Only now: until packed-refs names the new pack's commits, the old packs hold them.
             with self._folder("objects", "pack") as folder:
+                # A pack and its index go together, and only when neither was written within the fence.
+                young = {
+                    old.rpartition(".")[0] for old in packs
+                    if (seen := _looked(folder, old)) is not None and now - seen.st_mtime < spare
+                }
                 for old in packs:
-                    if old not in (f"{name}.pack", f"{name}.idx"):
+                    if old not in (f"{name}.pack", f"{name}.idx") and old.rpartition(".")[0] not in young:
                         with contextlib.suppress(FileNotFoundError):
                             os.unlink(old, dir_fd=folder)
                 os.fsync(folder)

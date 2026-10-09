@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import time
+from functools import partial
 from typing import Any
 
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
@@ -186,9 +187,10 @@ async def land_turn(
     outcome = None
     settled: list[dict] = []
     began = False
+    waited: set[int] = set()
     try:
         async with project_lock(session_factory, workstream) as held:
-            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited)
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception as exc:
@@ -200,7 +202,7 @@ async def land_turn(
             # copy is kept first: a keep moves only its thread's own refs, and waits
             # on no other thread's landing.
             logger.warning("The landing of %s did not run", session.id, exc_info=True)
-            saved = await _kept(session_factory, sandbox_pool, session, saga_settings)
+            saved = await _kept(session_factory, sandbox_pool, session, saga_settings, waited)
             outcome = {
                 "saga": None, "commit": None, "landed": [], "overlapped": [], "excluded": [], "repositories": [],
                 "not_taken": [], "files": [], "saved": saved, "packs": 0,
@@ -223,7 +225,7 @@ async def land_turn(
 
 async def keep_copy(
     *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, action: str = "keep",
-    settle: bool = True,
+    settle: bool = True, waited: set[int] | None = None,
 ) -> dict | None:
     """Keep *session*'s copy in the project's history, under its lock; None when it holds none.
 
@@ -235,17 +237,26 @@ async def keep_copy(
     killed worker left running are settled first, as every lock holder
     does, unless *settle* is false.  A keep moves only its thread's own
     refs and reads no real file, so a settle that fails does not stop it.
+    It writes the history's refs all the same, so it then waits out the
+    fence first, as the settle would have: no landing that lost the lock
+    unseen is still writing them.  *waited* are the rows a settle before
+    this one already found quiet for the fence.
     """
     owner = sandbox_session_key(session)
     if not sandbox_pool.holds_copy(owner):
         return None
     workstream = session.config.get("workstream_id") or session.config["history_project"]
+    waited = set() if waited is None else waited
     async with project_lock(session_factory, workstream) as held:
+        fenced = False
         if settle:
             try:
-                await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+                await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited)
+                fenced = True
             except Exception:
                 logger.warning("Could not settle the landings left running in project %s", workstream, exc_info=True)
+        if not fenced:
+            await _fenced(session_factory, workstream, saga_settings, waited)
         # The pod checks the refs it moves as it reads them just before: that
         # holds only under the lock, so one lost while it waited stops it.
         await held()
@@ -266,12 +277,12 @@ def _kept_as(session: Any) -> dict:
     }
 
 
-async def _kept(session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
+async def _kept(session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, waited: set[int]) -> bool:
     """Whether a turn whose landing did not run was kept on its thread's branch all the same."""
     try:
         return await keep_copy(
             session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
-            saga_settings=saga_settings, settle=False,
+            saga_settings=saga_settings, settle=False, waited=waited,
         ) is not None
     except Exception:
         logger.warning("Could not keep the copy of %s", session.id, exc_info=True)
@@ -291,7 +302,9 @@ async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
         return []
 
 
-async def prune_after(*, session_factory: Any, sandbox_pool: Any, sandbox_id: str, workstream: Any, packs: int) -> None:
+async def prune_after(
+    *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, workstream: Any, packs: int, saga_settings: Any,
+) -> None:
     """Prune the project's history after a landing, in the landing's pod, under the project's lock again.
 
     The pod, *sandbox_id*, is the turn's, already let go of by its session
@@ -299,16 +312,48 @@ async def prune_after(*, session_factory: Any, sandbox_pool: Any, sandbox_id: st
     this but the pod's end.  The pod prunes at most once a day, and
     refuses when the history's refs moved under it.  It never fails its
     caller: the landing stands, and the history is pruned on a later day.
+
+    It is fenced as a landing is.  A landing of the project still running
+    began after this one, or lost the lock unseen, and may be writing a
+    pack whose commits no ref names yet: the pruning then waits for
+    another completed landing, the day not marked.  And the pod leaves
+    every pack younger than the fence, for a push no row tells of: a keep's
+    or a hand-off's.
     """
     try:
         async with project_lock(session_factory, workstream) as held:
-            request = {"action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time()}
+            if await running_landings(session_factory, workstream):
+                logger.info("Not pruning the history of project %s: a landing of it is still running", workstream)
+                return
+            request = {
+                "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
+                "spare": _fence(saga_settings),
+            }
             await held()
             step_result(await sandbox_pool.execute_released(
                 sandbox_id, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
             ))
     except Exception:
         logger.warning("Could not prune the history of project %s", workstream, exc_info=True)
+
+
+async def _fenced(session_factory: Any, workstream_id: Any, saga_settings: Any, waited: set[int]) -> None:
+    """Wait until no landing of the project can still be alive, settling none: each row quiet for the fence.
+
+    For a lock holder that writes the history's refs without having
+    settled the landings left running.  A row in *waited* was found quiet
+    for the fence before, and is written since only by who settles it.
+    The rows are read as a step is tried; unread, the caller does not go on.
+    """
+    fence = _fence(saga_settings)
+    orchestrator = _orchestrator(saga_settings)
+    while True:
+        rows = await orchestrator.attempt(partial(running_landings, session_factory, workstream_id))
+        waited.update(row.id for row, quiet in rows if quiet >= fence)
+        alive = [quiet for row, quiet in rows if row.id not in waited]
+        if not alive:
+            return
+        await asyncio.sleep(fence - min(alive))
 
 
 def _fence(saga_settings: Any) -> float:
@@ -560,6 +605,7 @@ async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
 
 async def settle_running(
     session_factory: Any, sandbox_pool: Any, owner: str, workstream_id: Any, saga_settings: Any, held: Any,
+    waited: set[int] | None = None,
 ) -> list[dict]:
     """Settle the project's landings left running, through *owner*'s pod; each ``{thread, state, files}``.
 
@@ -567,7 +613,9 @@ async def settle_running(
     in a step, or putting files back past its bound.  A settle that loses
     the lock stops, its row left for the next holder.  A landing whose turn
     or base the history no longer has is given up, ``escalated``: no one
-    can put its files back, and no later landing waits on it.
+    can put its files back, and no later landing waits on it.  *waited*
+    takes the rows found quiet for the fence, whose landings are dead
+    whatever comes of settling them.
     """
     fence = _fence(saga_settings)
     settled: list[dict] = []
@@ -578,6 +626,8 @@ async def settle_running(
         if quiet < fence:
             await asyncio.sleep(fence - quiet)
             continue
+        if waited is not None:
+            waited.add(row.id)
         saga = saga_of(row)
         orchestrator = _orchestrator(saga_settings)
         orchestrator.adopt(saga)
