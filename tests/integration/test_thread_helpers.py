@@ -1299,3 +1299,24 @@ async def test_a_pause_is_its_status_and_its_event_together_or_neither(api, monk
     await store.update_session_status(thread.id, "archived")
     await emit(thread.id, EventType.SESSION_PAUSE, {}, status="paused")
     assert (await store.get_session(thread.id)).status == "archived"
+
+
+async def test_a_stop_kept_to_be_written_is_let_go_once_the_thread_has_a_later_turn_end_and_few_are_kept(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    monkeypatch.setattr(loop_module, "_STOPS_NOT_WRITTEN", {})
+    looping = a_looping_harness(api, monkeypatch, thread, [_final_response("Done.")], pool=SandboxPool(pods))
+    # A stop of the thread's first turn that this worker could not write down.
+    loop_module._STOPS_NOT_WRITTEN[thread.id] = (0, {"reason": "interrupted"})
+    # The thread's turn ends otherwise meanwhile, written by another worker or a route.
+    await store.emit_event(thread.id, EventType.SESSION_FAIL, {"reason": "provider_error"})
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    await the_loop_runs(api, looping, thread)
+    # The thread has a later turn end than the stop: no late pause is added to its log.
+    assert thread.id not in loop_module._STOPS_NOT_WRITTEN
+    assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
+    # And no more than a few are kept: the oldest goes for one more.
+    monkeypatch.setattr(loop_module, "_STOPS_KEPT", 2)
+    for n in range(3):
+        loop_module._keep_to_write(f"thread-{n}", 0, {"reason": "interrupted"})
+    assert list(loop_module._STOPS_NOT_WRITTEN) == ["thread-1", "thread-2"]

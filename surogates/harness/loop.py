@@ -365,9 +365,22 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
 #: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
 #: pod's answer together.  Past it the stop goes on, and the hand-off stays as the turn left it.
 _STOP_HAND_OFF_BOUND = 60.0
-#: The threads whose stopped turn this worker could not write a turn-ending event for, with the event:
-#: written before the thread's next turn starts here.
-_STOPS_NOT_WRITTEN: dict[Any, dict[str, Any]] = {}
+#: The threads whose stopped turn this worker could not write a turn-ending event for, each with the
+#: stopped turn's name and the event: written before the thread's next turn starts here, unless the
+#: thread has a later turn end by then.
+_STOPS_NOT_WRITTEN: dict[Any, tuple[int, dict[str, Any]]] = {}
+#: How many of them a worker keeps: the oldest goes for one more.
+_STOPS_KEPT = 1024
+
+
+def _keep_to_write(session_id: Any, turn: int, said: dict[str, Any]) -> None:
+    """Keep the stop of *session_id*'s turn *turn*, which could not be written, for the thread's next turn here."""
+    _STOPS_NOT_WRITTEN.pop(session_id, None)
+    _STOPS_NOT_WRITTEN[session_id] = (turn, said)
+    while len(_STOPS_NOT_WRITTEN) > _STOPS_KEPT:
+        oldest = next(iter(_STOPS_NOT_WRITTEN))
+        del _STOPS_NOT_WRITTEN[oldest]
+        logger.warning("Let go of the stop of thread %s that could not be written: too many are kept", oldest)
 
 # The commands a project's thread refuses.  A routine's runs would start from
 # old files, and their work would land only when someone next speaks to the
@@ -1034,12 +1047,18 @@ class AgentHarness(
         """Before a thread's turn makes any pod: the name its pods are told (see :func:`landing.name_turn`).
 
         A stop this worker could not write down for the thread is written
-        first: the turn starting now comes after it.
+        first, so the turn starting now comes after it; unless the thread
+        has had a turn end since, when it is only let go.
         """
-        from surogates.harness.landing import name_turn
+        from surogates.harness.landing import TURN_ENDS, name_turn
 
-        if session.id in _STOPS_NOT_WRITTEN:
-            await self._store.emit_event(session.id, EventType.SESSION_PAUSE, _STOPS_NOT_WRITTEN[session.id])
+        kept = _STOPS_NOT_WRITTEN.get(session.id)
+        if kept is not None:
+            stopped, said = kept
+            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            if (ended.id if ended else 0) == stopped:
+                await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            # With a later turn end, written elsewhere since, the stopped turn is over already.
             del _STOPS_NOT_WRITTEN[session.id]
         await name_turn(self._store, session)
 
@@ -1064,7 +1083,7 @@ class AgentHarness(
             await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
             return True
         except Exception:
-            _STOPS_NOT_WRITTEN[session.id] = said
+            _keep_to_write(session.id, session.config.get("turn_after") or 0, said)
             logger.warning(
                 "Could not write that the turn of thread %s was stopped: it is written before the thread's next turn "
                 "here. Until then a turn another worker starts takes this turn's hand-off for its own, where the "
