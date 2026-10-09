@@ -130,6 +130,23 @@ async def saved_through(session_factory: Any, thread_id: UUID) -> int | None:
     return row.events.upper - (0 if row.events.upper_inc else 1)
 
 
+async def record_pickup(
+    session_factory: Any, saga: Saga, *, workstream_id: UUID | str, commit: str, picked_up: list[dict],
+    agent_id: str, user_id: UUID | None,
+) -> int:
+    """The row of a routine run's pickup, recorded: what it changed in the real files; its id.
+
+    Its one step's arguments name the routine, its author.
+    """
+    async with session_factory() as db, db.begin():
+        return (await db.execute(
+            insert(WorkstreamHistory).values(
+                workstream_id=workstream_id, kind="pickup", saga_id=saga.saga_id, saga_state="completed",
+                steps=saga.to_dict()["steps"], commit=commit, picked_up=picked_up, agent_id=agent_id, user_id=user_id,
+            ).returning(WorkstreamHistory.id)
+        )).scalar_one()
+
+
 async def touch_landing(session_factory: Any, row: int) -> None:
     """Mark the row alive, its steps as they were: a try of a step is starting."""
     async with session_factory() as db, db.begin():

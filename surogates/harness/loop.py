@@ -80,6 +80,7 @@ from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
@@ -1377,15 +1378,16 @@ class AgentHarness(
         return True
 
     async def _with_history_cap(self, session: Session) -> Session:
-        """A project's thread, or a thread's helper, marked ``history_off`` while the project has more files than history keeps.
+        """A project's thread, a thread's helper, or a master's routine run, marked ``history_off`` while the project has more files than history keeps.
 
-        Its pod then has the plain layout, the real files at ``/workspace``:
-        it works on them, as before projects had history, and lands nothing.
+        A thread's pod then has the plain layout, the real files at
+        ``/workspace``: it works on them, as before projects had history, and
+        lands nothing.  A routine run's end then records nothing.
         A thread on the user's computer is never counted: it works in the folder there.
         """
         config = session.config or {}
         if self._storage is None or not config.get("storage_bucket") or device_of(config) is not None or not (
-            is_project_thread(config) or config.get("history_thread")
+            is_project_thread(config) or config.get("history_thread") or routine_project(session) is not None
         ):
             return session
         from surogates.workstreams.history import over_history_cap

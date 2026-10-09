@@ -3,25 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 import surogates.harness.loop as loop_module
+import surogates.workstreams.history as rows_module
 from surogates.config import SHARED_WORK_QUEUE_KEY
+from surogates.db.models import WorkstreamHistory
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import unread_reports, worker_note
 from surogates.harness.loop_pending import NAMES_ANSWERS
 from surogates.runtime import SlashCommandConfig
 from surogates.sandbox.history import History
-from surogates.sandbox.pool import SandboxPool
+from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+from surogates.scheduled.schedule import parse_schedule
+from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 from surogates.workstreams.stream import STREAM_TYPES
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
+    a_landing_killed,
     a_short_fence,
     edited,
     ends,
@@ -666,3 +675,138 @@ async def test_a_redo_takes_the_files_held_with_a_clash_and_only_a_landing_that_
 
 async def test_a_projects_stream_carries_a_redo():
     assert EventType.HISTORY_REDO in STREAM_TYPES
+
+
+async def a_routine_run(api, master, name: str):
+    """A run of a routine of *master*'s, due in a year: no other test's claim of due runs finds it."""
+    schedule = await ScheduledSessionStore(api.app.state.session_factory).create(
+        org_id=master.org_id, user_id=master.user_id, agent_id=master.agent_id, name=name,
+        prompt="Check the notes.", schedule=parse_schedule("1h"), source="tool", created_from_session_id=master.id,
+        next_run_at=datetime.now(timezone.utc) + timedelta(days=365),
+    )
+    run = await create_child_session(
+        store=api.app.state.session_store, parent=master, channel="scheduled",
+        config={"scheduled_session_id": str(schedule.id)},
+    )
+    return run, schedule
+
+
+async def in_its_pod(pool, run, command: str) -> None:
+    """*command* run in the master's pod, which its routine runs work in."""
+    await open_pod(pool, run)
+    await pool.execute(sandbox_session_key(run), "terminal", json.dumps({"command": command}))
+
+
+async def a_history(api, pool, master) -> None:
+    """The project's history, made by a first thread's landing."""
+    starter = await a_thread(api, "Starter", master)
+    await edited(pool, starter, "echo s > start.md")
+    await ends(api, pool, starter)
+
+
+async def pickups(api, commit: str) -> list[WorkstreamHistory]:
+    async with api.app.state.session_factory() as db:
+        return list((await db.execute(select(WorkstreamHistory).where(
+            WorkstreamHistory.kind == "pickup", WorkstreamHistory.commit == commit,
+        ))).scalars())
+
+
+async def test_a_routine_runs_changes_are_picked_up_as_the_routines(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await open_pod(pool, thread)  # A's copy, before the routine runs
+    await a_history(api, pool, master)
+    run, schedule = await a_routine_run(api, master, "Health check")
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "printf ' checked' >> notes.txt"})), _final_response("Checked."),
+    ], pool=pool)
+    durable = pods.project / "_history"
+    main = git(durable, "rev-parse", "refs/heads/main")
+    assert git(durable, "log", "-1", "--format=%an <%ae>", main) == f"Health check <routine:{schedule.id}@surogate>"
+    [row] = await pickups(api, main)
+    assert [f["path"] for f in row.picked_up] == ["notes.txt"]
+    assert row.steps[0]["arguments"]["author"]["name"] == "Health check"
+    # A thread whose copy predates it is told the routine changed the file.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "printf ' by A' >> notes.txt"})), _final_response("Edited."),
+    ], pool=pool)
+    [redo] = await store.get_events(thread.id, types=[EventType.HISTORY_REDO])
+    assert redo.data["files"][0]["by"] == {"kind": "routine", "name": "Health check"}
+
+
+async def test_a_failed_routine_runs_changes_are_the_routines_too(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(pool, run, "echo tidied > notes.txt")
+    await ends(api, pool, run, failed=True)
+    assert git(pods.project / "_history", "log", "-1", "--format=%an", "refs/heads/main") == "Tidy up"
+
+
+async def test_a_routine_runs_pickup_first_settles_a_landing_a_killed_worker_left(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    await edited(pool, thread, "for f in a b c; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, thread, after="apply b.md")
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt", "start.md"]
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(pool, run, "echo tidied > notes.txt")
+    await ends(api, pool, run)
+    # Put back through the master's pod, which has no copy: the half landing is no change of the routine's.
+    [killed] = await rows(api, thread)
+    assert killed.saga_state == "compensated"
+    assert pods.real_names() == ["Report.docx", "notes.txt", "start.md"]
+    [row] = await pickups(api, git(pods.project / "_history", "rev-parse", "refs/heads/main"))
+    assert [f["path"] for f in row.picked_up] == ["notes.txt"]
+
+
+async def test_a_routine_run_of_a_project_over_the_cap_records_nothing(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    pods = stored(api, master, tmp_path)
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    before = git(pods.project / "_history", "rev-parse", "refs/heads/main")
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await api.app.state.session_store.emit_event(run.id, EventType.USER_MESSAGE, {"content": "Check the notes."})
+    woken: list = []
+
+    async def its_turn(session, *_, **__):
+        woken.append(session)
+
+    harness = a_waking_thread_harness(api, monkeypatch, pool, its_turn)
+    harness._storage = api.app.state.storage
+    monkeypatch.setattr(rows_module, "HISTORY_CAP", 2)  # Report.docx, notes.txt and start.md are one too many
+    monkeypatch.setattr(rows_module, "_COUNTED", {})
+    await harness.wake(run.id)
+    # Its wake marks it, as a thread's is marked: its end records nothing.
+    [over] = woken
+    assert over.config["history_off"] is True
+    await in_its_pod(pool, over, "echo tidied > notes.txt")
+    assert await landing_module.pick_up_routine(
+        session_factory=api.app.state.session_factory, sandbox_pool=pool, session=over, saga_settings=None,
+    ) is None
+    assert git(pods.project / "_history", "rev-parse", "refs/heads/main") == before
+
+
+async def test_a_cloud_session_that_is_no_projects_wakes_with_its_bucket(api, monkeypatch, pods):
+    created = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert created.status_code == 201, created.text
+    store = api.app.state.session_store
+    session = await store.get_session(created.json()["id"])
+    assert session.config.get("storage_bucket") and "workspace_boundary" not in session.config
+    await store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "Hello."})
+    ran: list = []
+
+    async def its_turn(woken, *_, **__):
+        ran.append(woken.config)
+
+    harness = a_waking_thread_harness(api, monkeypatch, SandboxPool(pods), its_turn)
+    harness._storage = api.app.state.storage  # as a worker has it
+    await harness.wake(session.id)
+    # Its turn runs, unmarked: no project's history is counted for it.
+    assert len(ran) == 1 and "history_off" not in ran[0]
+    assert await store.get_events(session.id, types=[EventType.HARNESS_CRASH]) == []

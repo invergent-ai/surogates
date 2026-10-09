@@ -34,6 +34,7 @@ import re
 import time
 from functools import partial
 from typing import Any
+from uuid import UUID
 
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
 from surogates.governance.saga.compensator import compensate_history
@@ -48,18 +49,21 @@ from surogates.sandbox.history import (
     step_result,
 )
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.workstreams import is_project_thread
 from surogates.workstreams.history import (
     drop_landing,
     kept_refs,
     project_lock,
+    record_pickup,
     running_landings,
     saga_of,
     save_landing,
     start_landing,
     touch_landing,
 )
+from surogates.workstreams.stream import project_of
 
 logger = logging.getLogger(__name__)
 
@@ -1156,3 +1160,60 @@ def _tell(outcome: dict | None) -> None:
         if f["ref"] in redo:
             f["landing"] = "redoing"
     outcome["saved"] = held.keys() <= redo.keys()
+
+
+def routine_project(session: Any) -> str | None:
+    """The project whose master *session* is a routine run of, in the master's pod over the real files; else None.
+
+    A thread's routine runs are its helpers, on copies of their own.
+    """
+    config = session.config or {}
+    if session.channel != "scheduled" or not config.get("scheduled_session_id") or config.get("history_thread"):
+        return None
+    return project_of(config.get("workspace_boundary"))
+
+
+async def pick_up_routine(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> dict | None:
+    """Record what a master's routine run changed in the real files as the routine's: its pickup, or None.
+
+    A pickup alone, pushed under the project's lock in the master's pod the
+    run worked in, once the landings a killed worker left running are
+    settled: what they applied is put back first, so it is no change of
+    the routine's.  One try: a pickup that fails, a run whose pod this
+    worker no longer holds, a project over the cap and one with no history
+    yet record nothing, and the next landing picks the changes up as yours.
+    """
+    workstream = routine_project(session)
+    owner = sandbox_session_key(session)
+    if workstream is None or session.config.get("history_off") or sandbox_pool.sandbox_of(owner) is None:
+        return None
+    schedule = UUID(session.config["scheduled_session_id"])
+    try:
+        name = (await ScheduledSessionStore(session_factory).get(schedule)).name
+    except KeyError:
+        name = "A routine"
+    orchestrator = _orchestrator(saga_settings)
+    saga = orchestrator.create_saga(session.id, kind="landing")
+    pickup = orchestrator.add_step(
+        saga.saga_id, tool_name="history.pickup", tool_call_id="", max_retries=0, arguments={
+            "author": {"name": name, "email": f"routine:{schedule}@surogate"}, "push": True,
+            "trailers": [
+                ["Surogate-Project", workstream], ["Surogate-Agent", str(session.agent_id)],
+                ["Surogate-User", str(session.user_id)], ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", "pickup"],
+            ],
+        },
+    )
+    async with project_lock(session_factory, workstream) as held:
+        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+        await held()
+        picked = await orchestrator.execute_step(
+            saga.saga_id, pickup.step_id, lambda: _call(sandbox_pool, owner, "pickup", **pickup.arguments),
+        )
+    if picked["commit"] is None:
+        return None
+    saga.transition(SagaState.COMPLETED)
+    await record_pickup(
+        session_factory, saga, workstream_id=workstream, commit=picked["commit"], picked_up=picked["picked_up"],
+        agent_id=str(session.agent_id), user_id=session.user_id,
+    )
+    return picked

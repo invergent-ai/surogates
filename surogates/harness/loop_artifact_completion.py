@@ -37,7 +37,15 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later, turn_ended
+from surogates.harness.landing import (
+    _fence,
+    keep_copy,
+    land_turn,
+    pick_up_routine,
+    prune_later,
+    routine_project,
+    turn_ended,
+)
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1101,6 +1109,8 @@ class ArtifactCompletionMixin:
                 logger.exception("Could not hand the copy of %s back to its thread", session.id)
                 unkept = await self._kept_apart(session)
 
+        await self._pick_up_routine(session)
+
         # The turn's tool saga ends with it: a later stop compensates only its own turn.
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
@@ -1405,6 +1415,19 @@ class ArtifactCompletionMixin:
             spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
             await self._sandbox_pool.ensure(owner, spec)
 
+    async def _pick_up_routine(self, session: Session) -> None:
+        """A master's routine run records its changes to the real files as its own, at its turn's end."""
+        if self._sandbox_pool is None or routine_project(session) is None:
+            return
+        try:
+            await pick_up_routine(
+                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                session=session, saga_settings=self._saga_settings,
+            )
+        except Exception:
+            # Its changes are picked up as yours at the next landing.
+            logger.exception("Could not pick up the changes of routine run %s", session.id)
+
     async def _fail_session(
         self,
         session: Session,
@@ -1425,6 +1448,9 @@ class ArtifactCompletionMixin:
         """
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
+
+        # A routine run's writes are in the real files whatever its end: they are the routine's.
+        await self._pick_up_routine(session)
 
         # A failed turn does not land, since its files may be half made, but
         # its copy is kept on its branch, and lands with its next turn.  A
