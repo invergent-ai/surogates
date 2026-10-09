@@ -178,9 +178,10 @@ async def test_a_write_whose_data_cannot_be_kept_is_not_recorded(laptop_rig, eng
     assert await transfers_of(session_factory, rig.device_id) == 0
 
 
-# The smallest write whose chunks, sent as one statement of many rows, the driver writes in parts:
-# asyncpg puts the rows in packets of 32 KiB or more and writes four packets at a time.  Four chunks,
-# the last of them a packet's worth, fill the four, and it waits before it writes what ends the statement.
+# A write whose chunks, sent as one statement of many rows, the driver writes in parts: asyncpg puts
+# the rows in packets of 32 KiB or more and writes four packets at a time.  Four chunks, the last of
+# them a packet's worth, fill the four, and it waits before it writes what ends the statement.  The
+# smallest such write is some 60 bytes less: each row's message has bytes of its own.
 IN_PARTS = os.urandom(CHUNK_BYTES * 3 + 32 * 1024)
 
 
