@@ -18,6 +18,13 @@ A place outlives the guest that wrote it, and nothing one boot's guest left
 there is trusted by the next.  Before its first git, each run puts right
 whatever would lead git out of the place or have it run a program, makes
 again a repository it finds redirected, and overrides the rest.
+
+A copy outlives its turn too, and a request can be cut at any step: by its
+bound, a stop, a lost guest.  The history is safe by itself after one.  No
+request writes a file of the folder; a copy cut short in its making is made
+again before anything is read from it; and a push that counted is caught up
+with, a landing's by making the copy the landing's files, before the copy is
+read as anything's base.
 """
 
 from __future__ import annotations
@@ -225,7 +232,7 @@ class LocalHistory(History):
 
         Before the copy is read as anything's base, a landing of the
         thread's that the history holds and the copy was never made the
-        files of is finished (:meth:`_unrecorded`).  ``finished`` then
+        files of is finished (:meth:`_catch_up`).  ``finished`` then
         names it, once, with what was set aside: by this open, or by an
         act that came before it.
         """
@@ -257,7 +264,7 @@ class LocalHistory(History):
                     env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
                 )
                 (self.copy / ".git").unlink()
-            self._unrecorded()
+            self._catch_up()
             if len(list((self.repo / "objects" / "pack").glob("*.pack"))) > _PACKS:
                 self._git(["repack", "-a", "-d", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
             moved = self._to_main()
@@ -274,25 +281,25 @@ class LocalHistory(History):
         either picked up or found at the apply.  Nothing is committed and
         no ref moves.
         """
-        self._unrecorded()
+        self._catch_up()
         self._add_all(self._copy)
         names = self._copy("diff", "--cached", "--name-only", "--no-renames", "-z", self._main("rev-parse", self.base))
         return {"paths": sorted(n for n in names.split("\0") if n)}
 
     def snapshot(self, reason: str) -> str:
-        self._unrecorded()
+        self._catch_up()
         return super().snapshot(reason)
 
     def restore(self, commit: str) -> None:
-        self._unrecorded()
+        self._catch_up()
         super().restore(commit)
 
     def commit_turn(self, **step: Any) -> dict:
-        self._unrecorded()
+        self._catch_up()
         return super().commit_turn(**step)
 
     def keep(self, **step: Any) -> dict:
-        self._unrecorded()
+        self._catch_up()
         return super().keep(**step)
 
     def record(self, **step: Any) -> dict:
@@ -312,14 +319,14 @@ class LocalHistory(History):
         thread's own branch has it, and the copy of a thread that has worked
         on since is left alone.
         """
-        self._unrecorded()
+        self._catch_up()
         saga = f"Surogate-Saga: {dict(map(tuple, step['trailers']))['Surogate-Saga']}"
         found = self._landing(self._take())
         if found is not None and saga in found[2]:
             commit = found[0]
         else:
             commit = super().record(**step)["commit"]
-            self._unrecorded()
+            self._catch_up()
         aside = self._asides().get(step["turn"], (None, None))[1]
         # Told here, by this answer: the thread's next open has nothing left to say of it.
         self._said(commit)
@@ -336,14 +343,21 @@ class LocalHistory(History):
         landing = refs.get(self.branch)
         if landing is None or refs.get(self.base) != landing:
             return None
-        said = self._git(["cat-file", "commit", landing], env={"GIT_DIR": str(self._taken)}, cwd=self._taken).split("\n")
-        parents = [line[7:] for line in takewhile(lambda line: line.startswith("parent "), said[1:])]
-        message = said[said.index("") + 1:] if "" in said else []
+        parents, message = self._stored(landing)
         if len(parents) != 2 or message[:1] != ["Landing"]:
             return None
-        return landing, _checked_id(parents[1], "a commit"), message
+        return landing, parents[1], message
 
-    def _unrecorded(self) -> None:
+    def _stored(self, commit: str) -> tuple[list[str], list[str]]:
+        """*commit*'s parents and its message line by line, as the history itself has it.
+
+        By the line end alone: a trailer's value may hold any other character, and none of them makes a line of its own.
+        """
+        said = self._git(["cat-file", "commit", commit], env={"GIT_DIR": str(self._taken)}, cwd=self._taken).split("\n")
+        parents = [_checked_id(line[7:], "a commit") for line in takewhile(lambda line: line.startswith("parent "), said[1:])]
+        return parents, said[said.index("") + 1:] if "" in said else []
+
+    def _catch_up(self) -> None:
         """Finish a record of this thread's that was cut after its push, before the copy is read as anything's base.
 
         The push is the moment a landing counts; making the copy the
@@ -473,29 +487,27 @@ class LocalHistory(History):
         self._init()
         refs = self._take()
         if (main := refs.get(MAIN)) is not None:
-            # Each commit of main's, its title and its trailers: a landing's own pickup carries its saga too.
-            log = self._git(
-                ["log", "--first-parent", "--format=%x01%H%x00%B", main], env={"GIT_DIR": str(self._taken)}, cwd=self._taken,
-            )
-            for commit in log.split("\x01")[1:]:
-                landing, _, message = commit.partition("\0")
-                if message.splitlines()[:1] == ["Landing"] and said in message.splitlines():
+            # By its title too: a landing's own pickup is on main with its saga.
+            log = self._git(["log", "--first-parent", "-z", "--format=%H%n%B", main], env={"GIT_DIR": str(self._taken)}, cwd=self._taken)
+            for landing, message in _logged(log):
+                if message[:1] == ["Landing"] and said in message:
                     return {"landing": landing}
-        pushed, base = refs.get(self.branch), refs.get(self.base)
-        self._fetch(pushed, base)
-        if not (pushed and base and self._message(pushed)[:1] == ["Turn"] and said in self._message(pushed)):
-            pushed, base = None, self._ref(self.base)
-            own = self._main("log", "--first-parent", "--format=%x01%H%x00%B", f"{self.base}..{self.branch}") if base and self._ref(self.branch) else ""
-            for commit in own.split("\x01")[1:]:
-                turn, _, message = commit.partition("\0")
-                if message.splitlines()[:1] == ["Turn"] and said in message.splitlines():
-                    pushed = turn
-                    break
+        pushed, base = refs.get(self.branch), None
+        if pushed is not None:
+            parents, message = self._stored(pushed)
+            pushed, base = (pushed, parents[0]) if parents and message[:1] == ["Turn"] and said in message else (None, None)
+        if pushed is None and self._ref(self.base) and self._ref(self.branch):
+            own = self._main("log", "--first-parent", "-z", "--format=%H%n%B", f"{self.base}..{self.branch}")
+            pushed, base = next(
+                ((turn, self._ref(self.base)) for turn, message in _logged(own) if message[:1] == ["Turn"] and said in message),
+                (None, None),
+            )
         if pushed is None:
             raise HistoryError(
                 "refused the request: the history holds neither this landing nor its turn, and cannot tell what it wrote",
                 code=LANDING_UNSETTLED,
             )
+        self._fetch(pushed, base)
         versions, _ = self._diff(base, pushed)
         if any(self._real(path) == after for path, (_, after) in versions.items()):
             raise HistoryError(
@@ -650,6 +662,11 @@ class LocalHistory(History):
                 if os.path.lexists(self._admin / "config.worktree"):
                     _removed(self._admin / "config.worktree")
         self.pinned.append(True)
+
+
+def _logged(log: str) -> list[tuple[str, list[str]]]:
+    """``git log -z --format=%H%n%B``'s commits, each its id and its message line by line, by the line end alone."""
+    return [(lines[0], lines[1:]) for lines in (entry.split("\n") for entry in log.split("\0") if entry)]
 
 
 def _refuse(why: str) -> NoReturn:

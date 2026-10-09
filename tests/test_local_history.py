@@ -1059,6 +1059,20 @@ def test_what_a_landing_kept_is_forgotten_once_it_was_put_back_whole(tmp_path, f
     assert sorted(p.name for p in folder.iterdir()) == ["Report.docx", "notes.txt"]
 
 
+def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_holds(tmp_path, folder):
+    one, _, _ = a_landing_applied_and_not_recorded(tmp_path, folder)
+    two = a_copy(tmp_path, folder, "t2")
+    (two.copy / "B.md").write_text("B's own\n")
+    # Another thread's landing, a value of its trailers holding the first one's saga after a character some read as a line's end.
+    said = [["Surogate-Saga", "saga:2"], ["Surogate-Title", "Draft B\u2028Surogate-Saga: saga:1\x0cSurogate-Saga: saga:1"]]
+    picked = two.pickup(author=YOURS, trailers=said)
+    turn = two.commit_turn(author=B, trailers=said, pickup=picked["commit"])
+    shutil.copyfile(two.copy / "B.md", folder / "B.md")
+    two.record(turn=turn["commit"], applied=turn["changes"], author=B, trailers=said, main=picked["main"], pickup=picked["commit"])
+    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
+        LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1")
+
+
 def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, folder, tree):
     place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
     assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
