@@ -937,6 +937,39 @@ def test_what_a_copy_holds_beyond_its_turn_is_set_aside_before_a_record_makes_it
     assert again.record(turn=turn["commit"], applied=turn["changes"], author=B, trailers=saga, main=picked["main"], pickup=picked["commit"]) == recorded
 
 
+def test_what_was_set_aside_for_a_turn_stays_under_what_a_later_try_sets_aside_for_it(tmp_path, folder):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report")
+    (two.copy / "Report.docx").write_bytes(b"PK\x03\x04 B's report")
+    land(one, "saga:1")
+    saga = [["Surogate-Saga", "saga:2"]]
+    picked = two.pickup(author=YOURS, trailers=saga)
+    turn = two.commit_turn(author=B, trailers=saga, pickup=picked["commit"])
+    (two.copy / "late.md").write_text("written after the turn was committed\n")
+    step = {"turn": turn["commit"], "applied": turn["changes"], "author": B, "trailers": saga, "main": picked["main"], "pickup": picked["commit"]}
+    first = two.record(**step)["set_aside"]
+    # As a try cut part way through the copy's files leaves it, the copy written again since: not noted as
+    # done, its index still the turn's.  The next act finishes it once more.
+    git(two.repo, "update-ref", "-d", "refs/landed/t2")
+    git(two.repo / "worktrees" / "t2", "read-tree", turn["commit"])
+    (two.copy / "later.md").write_text("written since\n")
+    assert two.changed() == {"paths": []}
+    again = two.open()["finished"]["set_aside"]
+    # One ref for the turn, and the first snapshot under the second: neither file is lost.
+    assert git(two.repo, "for-each-ref", "--format=%(objectname)", "refs/set-aside/") == again != first
+    assert git(two.repo, "rev-parse", f"{again}^2") == first
+    assert git(two.repo, "cat-file", "-p", f"{again}:later.md") == "written since"
+    assert git(two.repo, "cat-file", "-p", f"{again}^2:late.md") == "written after the turn was committed"
+
+
+def test_a_note_of_a_finished_record_that_names_no_commit_is_told_to_no_one(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    # What an earlier guest can leave in the thread's repository: its words reach no answer.
+    for planted in ("--upload-pack=/planted x\n", "one\n", f"{'a' * 40} ../../etc\n", ""):
+        (one.repo / "finished").write_text(planted)
+        assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open() == {"copy": "moved"}
+
+
 def test_a_landing_that_left_nothing_out_leaves_the_copy_and_what_was_written_since_as_they_are(tmp_path, folder):
     one = a_copy(tmp_path, folder)
     (one.copy / "notes.txt").write_text("the thread's notes\n")
@@ -1036,7 +1069,7 @@ def test_what_a_landing_kept_is_forgotten_only_once_it_was_recorded(tmp_path, fo
     # A saga the history holds neither a landing nor a turn of: it cannot tell what that one wrote.
     with refused("landing_unsettled", "refused the request: the history holds neither this landing nor its turn"):
         one.forget(saga="saga:none")
-    # The landing's own pickup, which carries its saga on main too, is not its record.
+    # Any thread's landing, by its saga.
     assert one.forget(saga="saga:2") == {"landing": git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/threads/t2")}
 
 
@@ -1072,6 +1105,9 @@ def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_ho
     again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
     with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
         again.forget(saga="saga:1")
+    # Nor is that landing, where its own thread's branch has it, a turn of the first one's saga.
+    with refused("landing_unsettled", "refused the request: the history holds neither this landing nor its turn"):
+        two.forget(saga="saga:1")
     # Nor is main's tip the first one's landing, to its first look or to its record.
     assert again.fetch(saga="saga:1")["has_saga"] is False
     with refused("conflict", "main moved in the project's history since the landing began"):

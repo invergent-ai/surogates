@@ -487,19 +487,19 @@ class LocalHistory(History):
         self._init()
         refs = self._take()
         if (main := refs.get(MAIN)) is not None:
-            # By its title too: a landing's own pickup is on main with its saga.
+            # The newest first: a landing's own pickup, which carries its saga too, lies under it.
             log = self._git(["log", "--first-parent", "-z", "--format=%H%n%B", main], env={"GIT_DIR": str(self._taken)}, cwd=self._taken)
             for landing, message in _logged(log):
-                if message[:1] == ["Landing"] and said in message:
+                if said in message:
                     return {"landing": landing}
         pushed, base = refs.get(self.branch), None
         if pushed is not None:
             parents, message = self._stored(pushed)
-            pushed, base = (pushed, parents[0]) if parents and message[:1] == ["Turn"] and said in message else (None, None)
+            pushed, base = (pushed, parents[0]) if parents and said in message else (None, None)
         if pushed is None and self._ref(self.base) and self._ref(self.branch):
             own = self._main("log", "--first-parent", "-z", "--format=%H%n%B", f"{self.base}..{self.branch}")
             pushed, base = next(
-                ((turn, self._ref(self.base)) for turn, message in _logged(own) if message[:1] == ["Turn"] and said in message),
+                ((turn, self._ref(self.base)) for turn, message in _logged(own) if said in message),
                 (None, None),
             )
         if pushed is None:
@@ -520,11 +520,6 @@ class LocalHistory(History):
         if push:
             _refuse("a folder's history records no routine's run: a pickup is a landing's first step here, pushed with its record")
         return super().pickup(author=author, trailers=trailers)
-
-    def take_up(self) -> dict:
-        """Nothing: no helper has a copy of its own to hand back from, and a history holding a hand-off is refused."""
-        self._take()
-        return {"not_taken": []}
 
     def apply(self, *args: Any, **kwargs: Any) -> dict:
         _refuse(_NO_WRITER)
