@@ -42,9 +42,9 @@ settings() {
   # minute at under 1024 bytes a second. A base that takes the connection and never answers, or
   # stops in the middle of an answer, would otherwise hold an install or a rollback for good.
   TIMELY=(--connect-timeout 30 --speed-limit 1024 --speed-time 60)
-  # Who reads the files an apply is handed, by user and group number, and by name: root, unless the
-  # helper was run for another user (asker).
-  READER=(0 0 root)
+  # Who reads the files an apply is handed, by user and group number, by name, and by the numbers
+  # of all its groups: root, unless the helper was run for another user (asker).
+  READER=(0 0 root 0)
   # Folders of this run's own, which go however it ends.
   OWN=()
   # The release keys' public halves: a release's manifest is signed by the private half of one of
@@ -504,39 +504,57 @@ lock() {
 # caller's environment held. Nothing else is asked who it was. Naming a user only ever lowers the
 # helper's rights to read, from root's to that user's.
 asker() {
-  local name uid gid entry reads_as groups listed
+  local name uid gid entry number groups
   for name in PKEXEC_UID SUDO_UID; do
     uid="${!name:-}"
     [ -n "$uid" ] || continue
     [[ "$uid" =~ ^(0|[1-9][0-9]{0,9})$ ]] || fail "$name is not a user's number"
     # Compared as it is written: what is no number is then never taken for root's.
     [ "$uid" != 0 ] || continue
-    entry="$(getent passwd "$uid")" && gid="$(cut -d: -f4 <<<"$entry")" && [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
-    READER=("$uid" "$gid" "${entry%%:*}")
+    # Root asks the system's own list three things, each once and each for a bounded while: who has
+    # that number, what number that name has, and which groups it is in. A list that another
+    # computer serves may take long to answer, or never answer: that is said as what it is, and
+    # is no part of the bound on what the reader reads.
+    entry="$(listing getent passwd "$uid")" || unlisted "$?" "$name"
+    gid="$(cut -d: -f4 <<<"$entry")"
+    [[ "$gid" =~ ^[0-9]+$ ]] || fail "$name names no user of this computer"
+    # The name is that number's, and no other user's: the groups are looked up by the name, and
+    # where two users have one name, the name's number is the first one's. The second would read
+    # in the first's groups.
+    number="$(listing id -u -- "${entry%%:*}")" || unlisted "$?" "$name"
+    [ "$number" = "$uid" ] || fail "$name names no user of this computer"
+    groups="$(listing id -G -- "${entry%%:*}")" || unlisted "$?" "$name"
+    [[ "$groups" =~ ^[0-9]+(\ [0-9]+)*$ ]] || fail "$name names no user of this computer"
+    READER=("$uid" "$gid" "${entry%%:*}" "${groups// /,}")
     # The reader is that user, and no other: setpriv takes digits for a user's name where one is so
     # named, and counts a number past the last one from 0 again. Asked in two commands, as wherever
     # this script would put two $( ) in one: a signal that comes while the first is answered ends
     # Ubuntu 24.04's bash with an error of its own, before this script's handler has run.
-    reads_as="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || reads_as=
-    reads_as+=":$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" || reads_as=
-    [ "$reads_as" = "$uid:$gid" ] || fail "$name names no user of this computer"
-    # And the reader has no group but those the system's own list gives a user of that name, as
-    # root reads the list: the reader's other groups are looked up by the name its number has, and
-    # a number under another user's name would have that user's. Each group the reader has is
-    # looked for among them: one that is not there is one it gained.
-    groups="$(as_reader "$SMALL_WAIT" id -G 2>/dev/null)" || groups=
-    listed=" $(id -G -- "${READER[2]}" 2>/dev/null) " || listed=
-    [ -n "$groups" ] || fail "$name names no user of this computer"
-    for gid in $groups; do
-      [[ "$listed" == *" $gid "* ]] || fail "$name names no user of this computer"
-    done
+    number="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || number=
+    number+=":$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" || number=
+    [ "$number" = "$uid:$gid" ] || fail "$name names no user of this computer"
     return 0
   done
 }
 
+# Asks the system's own list of users and groups what follows, for SMALL_WAIT seconds at most.
+listing() {
+  timeout --foreground -s KILL "$SMALL_WAIT" "$@" 2>/dev/null
+}
+
+# Ends an apply whose question to that list ended $1: unanswered in its time (137 from GNU's
+# timeout for what it killed, and 124 from Ubuntu 26.04's), or answered that there is no such
+# user, of the number that $2 names.
+unlisted() {
+  [ "$1" -ne 137 ] && [ "$1" -ne 124 ] || fail "this computer's list of users and groups did not answer within $SMALL_WAIT seconds: try again"
+  fail "$2 names no user of this computer"
+}
+
 # Runs what follows $1 as the user who reads an apply's files, as that user's own login would run
-# it: as that user, in their own group, and in the other groups the system's own list gives them
-# (--init-groups), which is root's word and no more than the user's own rights. In their own group
+# it: as that user, in their own group, and in the other groups the system's own list gives them,
+# which is root's word and no more than the user's own rights. Root asked the list for them once
+# (asker), and hands them on: no question to that list is inside this bound, which is on what
+# the reader reads. In their own group
 # alone, a user who reaches their cache home only as a member of another, as under a folder that a
 # department's group alone may enter, could read the update themselves and never have it applied.
 # Never in a group of root's, which the helper's own are, and never in one its caller names. With
@@ -545,7 +563,7 @@ asker() {
 # (--foreground): GNU's timeout otherwise kills itself with it, and bash says so in words of its
 # own.
 as_reader() {
-  timeout --foreground -s KILL "$1" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --init-groups "${@:2}" 9<&- </dev/null
+  timeout --foreground -s KILL "$1" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --groups "${READER[3]}" "${@:2}" 9<&- </dev/null
 }
 
 # Refuses file $1, which the reader could not read as a file. Root never looks at a file it is

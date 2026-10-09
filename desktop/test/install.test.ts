@@ -792,12 +792,15 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const traced = root(`PKEXEC_UID=${user} strace -f -qq -v -s 300 -o /tmp/trace -e trace=execve /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F 'execve("/usr/bin/timeout"' /tmp/trace`);
     expect(traced.status, traced.stderr).toBe(0);
     const asked = traced.stdout.trim().split("\n").map((line) => [...(/\[(.*)\], \[/.exec(line)?.[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).join(" "));
-    const as = `setpriv --reuid ${user} --regid ${user} --init-groups`;
+    const as = `setpriv --reuid ${user} --regid ${user} --groups ${root("id -G tester").stdout.trim().replaceAll(" ", ",")}`;
     const read = "iflag=nofollow,nonblock bs=64K status=none";
     expect(asked).toEqual([
+      // Root's own three questions to the system's list of users and groups, each under the same bound.
+      `timeout --foreground -s KILL 5 getent passwd ${user}`,
+      "timeout --foreground -s KILL 5 id -u -- tester",
+      "timeout --foreground -s KILL 5 id -G -- tester",
       `timeout --foreground -s KILL 5 ${as} id -u`,
       `timeout --foreground -s KILL 5 ${as} id -g`,
-      `timeout --foreground -s KILL 5 ${as} id -G`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json.sig`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/release.tar.gz`,
@@ -855,6 +858,29 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     } finally {
       root("sed -i '$d' /etc/passwd");
     }
+    // Nor is the second user taken where its own group is the first's, or one of the first's
+    // others: the name's number is the first's, whatever its groups.
+    for (const group of ["$(id -g tester)", "$(getent group shared | cut -d: -f3)"]) {
+      expect(root(`echo "tester:x:1700:${group}::/nonexistent:/bin/sh" >>/etc/passwd`).status, group).toBe(0);
+      try {
+        expect(root(`PKEXEC_UID=1700 /opt/surogate-test/install.sh --apply ${shared}`), group).toMatchObject(noUser);
+        expect(reader("PKEXEC_UID=1700"), group).toMatchObject({ ...noUser, stdout: "" });
+      } finally {
+        root("sed -i '$d' /etc/passwd");
+      }
+    }
+    // A list that is slow to say a user's groups is said to be that, within its own bound, and
+    // is no user that does not exist; and it takes nothing from the time a reader has to read.
+    const slow = (asked: string) => `#!/bin/sh\n[ "$1" != ${asked} ] || exec /opt/hold/sleep 8\nexec /opt/hold/id "$@"\n`;
+    expect(root("mkdir -p /opt/hold && cp -L /usr/bin/sleep /opt/hold/sleep").status).toBe(0);
+    const number = root("id -u tester").stdout.trim();
+    for (const asked of ["-G", "-u"]) {
+      const began = Date.now();
+      expect(swapped("id", slow(asked), [`PKEXEC_UID=${number} /opt/surogate-test/install.sh --apply ${shared}; echo "ended $?"`]), asked)
+        .toMatchObject({ stdout: "ended 1\n", stderr: "Surogate Desktop: this computer's list of users and groups did not answer within 5 seconds: try again\n" });
+      expect(Date.now() - began, asked).toBeLessThan(7_500);
+    }
+    expect(root("test ! -e /opt/surogate/current").status).toBe(0);
     // A user and a group whose names have a space in them are a user and a group: read as that
     // user, in that group, and in no other.
     expect(root(`echo "o dd:x:1701:1701::/nonexistent:/bin/sh" >>/etc/passwd && echo "sha red:x:1801:o dd" >>/etc/group && rm -rf /srv/odd && mkdir -m 750 /srv/odd && cp ${files()} /srv/odd/ && chgrp -R 1801 /srv/odd && chmod 640 /srv/odd/*`).status).toBe(0);
