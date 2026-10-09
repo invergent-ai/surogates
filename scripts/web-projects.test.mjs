@@ -437,7 +437,9 @@ test("a project route that refuses says the route's own words", async () => {
 });
 
 const EVENTS = 'event: ready\ndata: {}\n\nevent: change\ndata: {"thread_id": "t-1", "type": "session.complete"}\n\n'
-  + 'event: change\ndata: {"thread_id": null, "type": "worker.spawned"}\n\nevent: change\ndata: not json\n\n';
+  + 'event: change\ndata: {"thread_id": null, "type": "worker.spawned"}\n\nevent: change\ndata: not json\n\n'
+  // A landing another lock holder finished: a change of its thread's row, as any other is.
+  + 'event: change\ndata: {"thread_id": "t-2", "type": "history.landed"}\n\n';
 
 test("a project is followed at its own stream, over the fetch it was given: ready and each change", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -446,7 +448,7 @@ test("a project is followed at its own stream, over the fetch it was given: read
   const stop = routes.subscribe("p-1", (threadId) => heard.push(threadId));
   t.after(stop);
   await settled();
-  assert.deepEqual(heard, [null, "t-1", null, null]);
+  assert.deepEqual(heard, [null, "t-1", null, null, "t-2"]);
   assert.deepEqual(asked, [["GET", "/api/v1/workstreams/p-1/stream", undefined]]);
 });
 
