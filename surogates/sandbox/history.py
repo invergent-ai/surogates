@@ -539,7 +539,7 @@ class History:
                 self._push(taken, expect={})
             return {"commit": None, "base": base, "changes": [], "overlapped": [], **left_out}
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
-        if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").splitlines():
+        if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").split("\n"):
             self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         # Also what a try of this step cut off after its push named, when the ref had gone with that push.
         pushed = refs.get(self.branch)
@@ -1665,8 +1665,8 @@ class History:
         return self._main("rev-parse", f"{commit}^{{tree}}")
 
     def _message(self, commit: str) -> list[str]:
-        """*commit*'s message, line by line."""
-        return self._main("log", "-1", "--format=%B", "--end-of-options", commit).splitlines()
+        """*commit*'s message, line by line: by the line end alone, which is all a trailer's value cannot hold."""
+        return self._main("log", "-1", "--format=%B", "--end-of-options", commit).split("\n")
 
     def _diff(self, base: str, turn: str) -> tuple[dict[str, tuple[str | None, str | None]], list[tuple[str, str]]]:
         """Each file the turn changed since *base*, as ``(before, after)``, and the renames git paired."""

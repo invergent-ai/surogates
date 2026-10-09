@@ -1060,7 +1060,7 @@ def test_what_a_landing_kept_is_forgotten_once_it_was_put_back_whole(tmp_path, f
 
 
 def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_holds(tmp_path, folder):
-    one, _, _ = a_landing_applied_and_not_recorded(tmp_path, folder)
+    _, mine, _ = a_landing_applied_and_not_recorded(tmp_path, folder)
     two = a_copy(tmp_path, folder, "t2")
     (two.copy / "B.md").write_text("B's own\n")
     # Another thread's landing, a value of its trailers holding the first one's saga after a character some read as a line's end.
@@ -1069,8 +1069,13 @@ def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_ho
     turn = two.commit_turn(author=B, trailers=said, pickup=picked["commit"])
     shutil.copyfile(two.copy / "B.md", folder / "B.md")
     two.record(turn=turn["commit"], applied=turn["changes"], author=B, trailers=said, main=picked["main"], pickup=picked["commit"])
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
     with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
-        LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1")
+        again.forget(saga="saga:1")
+    # Nor is main's tip the first one's landing, to its first look or to its record.
+    assert again.fetch(saga="saga:1")["has_saga"] is False
+    with refused("conflict", "main moved in the project's history since the landing began"):
+        again.record(**mine["step"])
 
 
 def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, folder, tree):
