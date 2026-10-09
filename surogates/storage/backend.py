@@ -14,9 +14,11 @@ based on :class:`~surogates.storage.settings.StorageSettings`.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -65,6 +67,16 @@ class StorageBackend(Protocol):
         self, bucket: str, key: str, text: str, encoding: str = "utf-8",
     ) -> None:
         """Write (or overwrite) an object as text."""
+        ...
+
+    async def mark(self, bucket: str, key: str) -> Any:
+        """Write an empty object at *key* and return the date the store gives it, as :meth:`stat` would.
+
+        For a caller that needs the store's own time, and writes where
+        what is stored is not its own to trust: never through a link, at
+        the key or at a folder above it, and over nothing but a plain
+        file.  Raises ``ValueError`` for a key it will not write.
+        """
         ...
 
     async def exists(self, bucket: str, key: str) -> bool:
@@ -198,6 +210,41 @@ class LocalBackend:
         path = self._resolve(bucket, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(path, text, encoding)
+
+    async def mark(self, bucket: str, key: str) -> float:
+        # A bucket has no links; a folder on a disk can hold one, put there by whoever writes
+        # the folder.  So each step is opened by the handle of the one above and never through
+        # a link, and nothing is resolved by name.
+        *folders, name = key.split("/")
+        if not name or any(part in ("", ".", "..") for part in (*folders, name)):
+            raise ValueError(f"No mark at {key!r}: not a key inside the bucket")
+        opened = [os.open(self._bucket_path(bucket), os.O_RDONLY | os.O_DIRECTORY)]
+        try:
+            for folder in folders:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(folder, dir_fd=opened[-1])
+                opened.append(os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=opened[-1]))
+            folder_fd = opened[-1]
+            with contextlib.suppress(FileNotFoundError):
+                if not stat.S_ISREG(os.stat(name, dir_fd=folder_fd, follow_symlinks=False).st_mode):
+                    raise ValueError(f"No mark at {key!r}: what is there is not a plain file")
+            # A new file put in its place, never the old one written: a plain file there can be
+            # another file's second name, and writing it would empty both.
+            staged = f".{name}.{os.urandom(4).hex()}.mark"
+            opened.append(os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=folder_fd))
+            dated = os.fstat(opened[-1]).st_mtime
+            try:
+                os.replace(staged, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.unlink(staged, dir_fd=folder_fd)
+                raise
+            return dated
+        except OSError as exc:
+            raise ValueError(f"No mark at {key!r}: {exc.strerror or exc}") from exc
+        finally:
+            for fd in reversed(opened):
+                os.close(fd)
 
     async def exists(self, bucket: str, key: str) -> bool:
         return self._resolve(bucket, key).is_file()
@@ -377,6 +424,12 @@ class S3Backend:
     async def write(self, bucket: str, key: str, data: bytes) -> None:
         async with self._client() as s3:
             await s3.put_object(Bucket=bucket, Key=key, Body=data)
+
+    async def mark(self, bucket: str, key: str) -> Any:
+        # A bucket has no links and no folders: a key is an object or nothing.
+        async with self._client() as s3:
+            await s3.put_object(Bucket=bucket, Key=key, Body=b"")
+            return (await s3.head_object(Bucket=bucket, Key=key)).get("LastModified")
 
     async def write_text(
         self, bucket: str, key: str, text: str, encoding: str = "utf-8",

@@ -398,7 +398,9 @@ async def _old_packs(storage: Any, bucket: str, prefix: str, fence: float) -> li
     The folder is a pod's to write, so it is read as hostile: ``_PACKS_LISTED``
     files of it at most, and of those only the ones named as git names a
     pack or its index.  None when it holds more: no list is made of a
-    folder of any size, and the pod goes by its own rule.
+    folder of any size, and the pod goes by its own rule.  The mark is the
+    one thing the worker writes there, and the store writes it through no
+    link: a mark it refuses stops the pruning.
     """
     folder = f"{prefix}_history/objects/pack/"
     listed = await storage.list_entries(bucket, folder, limit=_PACKS_LISTED + 1)
@@ -408,9 +410,8 @@ async def _old_packs(storage: Any, bucket: str, prefix: str, fence: float) -> li
             bucket, prefix, _PACKS_LISTED,
         )
         return None
-    mark = f"{prefix}_history/pruning"
-    await storage.write(bucket, mark, b"")
-    now = _epoch((await storage.stat(bucket, mark))["modified"])
+    # Through no link and over nothing but a plain file: the folder is a pod's to write.
+    now = _epoch(await storage.mark(bucket, f"{prefix}_history/pruning"))
     written: dict[str, float] = {}
     for entry in listed:
         name = entry["key"].removeprefix(folder)

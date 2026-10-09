@@ -543,9 +543,10 @@ class Bucket:
         if pruned is not None:
             self.held["proj/_history/pruned"] = pruned
 
-    async def write(self, bucket: str, key: str, data: bytes) -> None:
+    async def mark(self, bucket: str, key: str):
         self.wrote.append((bucket, key))
         self.held[key] = self.now
+        return self.dates(self.now)
 
     async def stat(self, bucket: str, key: str) -> dict:
         return {"size": 0, "modified": self.dates(self.held[key])}
@@ -686,3 +687,42 @@ def test_a_landings_push_can_live_a_look_and_every_try_of_a_step_after_its_lock_
     assert landing._life(one_try) == 3 + 3 + 0 + 1
     four_tries = SimpleNamespace(default_step_timeout=10, default_max_retries=3, retry_delay=2)
     assert landing._life(four_tries) == 10 + 4 * 10 + 2 * (1 + 2 + 3) + 1
+
+
+async def test_a_link_where_the_worker_marks_a_pruning_empties_no_file_and_stops_the_pruning(tmp_path, monkeypatch, caplog):
+    from surogates.storage.backend import LocalBackend
+
+    storage = LocalBackend(base_path=str(tmp_path))
+    await storage.create_bucket("b1")
+    await storage.write("b1", "proj/Report.docx", b"the report")
+    history = tmp_path / "b1" / "proj" / "_history"
+    (history / "objects" / "pack").mkdir(parents=True)
+    (history / "pruning").symlink_to("../Report.docx")  # as a thread's command can leave it, on a disk
+    asked = []
+
+    async def none(*_):
+        return []
+
+    class Pod:
+        async def execute_released(self, *args, **kwargs):
+            asked.append(args)
+            return json.dumps({"pruned": True})
+
+    @contextlib.asynccontextmanager
+    async def the_lock(*_):
+        async def held():
+            return None
+
+        yield held
+
+    monkeypatch.setattr(landing, "kept_refs", none)
+    monkeypatch.setattr(landing, "running_landings", none)
+    monkeypatch.setattr(landing, "project_lock", the_lock)
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        await landing.prune_after(
+            session_factory=None, sandbox_pool=Pod(), sandbox_id="pod-1", workstream="w1", packs=0, saga_settings=None,
+            storage=storage, bucket="b1", prefix="proj/",
+        )
+    # The file the link points to keeps its bytes; the history is hostile input, so the pruning is not run.
+    assert (tmp_path / "b1" / "proj" / "Report.docx").read_bytes() == b"the report"
+    assert asked == [] and "Could not prune the history of project w1" in caplog.text
