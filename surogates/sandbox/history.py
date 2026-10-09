@@ -210,7 +210,7 @@ class History:
     thread: str
     user: str       # who started the thread: main's first commit is theirs
     helper: str | None = None  # a thread's helper's own session: its pod and copy are its own
-    turn: str | None = None    # the thread's turn this pod is opened for, where its worker says: see hand_off
+    turn: str | None = None    # the thread's turn this pod is opened for: required but in a helper's pod
 
     @property
     def branch(self) -> str:
@@ -288,8 +288,11 @@ class History:
         thread's branch, else at ``main``, each as the history has it: never
         at a pickup of the real files of its own, which would bring other
         threads' landings and your uploads in as its work.  A thread's copy
-        takes up what its helpers kept since it last did.
+        takes up what its helpers kept since it last did, by the turn it is
+        told it is opened for.
         """
+        if self.helper is None and not self.turn:
+            raise HistoryError("a thread's pod must be told its turn")
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
             self._open()
@@ -664,7 +667,7 @@ class History:
         onto = self._main("rev-parse", self.base)
         found = [
             [_TOOK, self._ref(self.handed) or "none"], [_GAVE_BEFORE, self._ref(self.gave) or "none"],
-            [_TURN, self.turn or "none"],
+            [_TURN, self.turn],
         ]
         tip = self._one(own, onto, *self._behind(onto), author=author, title="Handed on", trailers=[*trailers, *found])
         self._push(
@@ -760,7 +763,7 @@ class History:
         stop was not carried out among them: its own files are left out,
         as a stop leaves them, and what it found and what helpers kept
         since is taken up.  A hand-off that names no turn is taken for
-        another turn's.  A pod not told its turn leaves nothing out.
+        another turn's.
         """
         refs = self._take()
         durable, handed = refs.get(self.handoff), self._ref(self.handed)
@@ -771,7 +774,7 @@ class History:
         if handed is None:
             followed = self._followed(
                 durable, refs.get(self.handoff_from),
-                gone=lambda commit, said: self.turn is not None and said.get(_TURN) != self.turn,
+                gone=lambda commit, said: said.get(_TURN) != self.turn,
             )
             if followed is not None and followed[0]:
                 _, taken, onto_none, _ = followed
@@ -818,7 +821,7 @@ class History:
         now, own = refs.get(self.handoff), {self._ref(self.gave), *gave} - {None}
 
         def gone(commit: str, said: dict[str, str]) -> bool:
-            if commit not in own and (self.turn is None or said.get(_TURN) != self.turn):
+            if commit not in own and said.get(_TURN) != self.turn:
                 return False
             own.add(said.get(_GAVE_BEFORE, "none"))
             return True

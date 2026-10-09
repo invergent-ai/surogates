@@ -35,6 +35,8 @@ def a_pod(tmp_path: Path, project: Path, thread: str = "t1", **more) -> History:
     """*thread*'s pod, opened on a disk of its own as each turn's pod is."""
     pod = tmp_path / f"pod-{len(list(tmp_path.glob('pod-*')))}"
     (pod / "workspace").mkdir(parents=True)
+    if "helper" not in more:
+        more.setdefault("turn", "turn-1")  # a thread's pod is told its turn; these tests' turns are one unless they say
     history = History(
         repo=_shadow_repo_path(str(project), base=pod / "home"), project=project,
         copy=pod / "workspace", thread=thread, user="u1", **more,
@@ -1834,8 +1836,8 @@ def test_a_pod_made_again_drops_the_hand_off_its_stopped_turn_made_and_no_other_
     helper = a_helper(tmp_path, project)
     (helper.copy / "sources.md").write_text("from the draft")
     helper.hand_back(author=A, trailers=KEPT)  # onto the hand-off, which moves; where it was taken from stays
-    # The turn's pod went under it.  A pod made in its place handed nothing on itself.
-    again = a_pod(tmp_path, project)
+    # A pod that neither made the hand-off nor is its turn's: it knows it only by being told.
+    again = a_pod(tmp_path, project, turn="turn-9")
     # Told of no hand-off, or of some other turn's, it drops nothing.
     assert again.drop_hand_off() == {"dropped": False}
     assert again.drop_hand_off(gave=["0" * 40]) == {"dropped": False}
@@ -2194,3 +2196,15 @@ def test_helpers_that_hand_back_one_after_the_other_onto_a_stopped_turns_hand_of
     assert names_in(later) == sorted(["Report.docx", "notes.txt", "outline.md", "sources.md", *kept])
     land(later, "saga:3")
     assert not (project / "draft.md").exists() and all((project / name).exists() for name in kept)
+
+
+def test_a_threads_pod_must_be_told_its_turn(tmp_path, project):
+    pod = tmp_path / "pod-untold"
+    (pod / "workspace").mkdir(parents=True)
+    untold = History(
+        repo=_shadow_repo_path(str(project), base=pod / "home"), project=project, copy=pod / "workspace", thread="t1", user="u1",
+    )
+    with pytest.raises(HistoryError, match="a thread's pod must be told its turn"):
+        untold.open()
+    # A helper's pod has none: it hands back, and takes up nothing by turn.
+    a_helper(tmp_path, project)

@@ -554,11 +554,14 @@ def main() -> None:
         if not user:
             logger.error("USER_ID is required in a thread's pod: the project's history is made as its user")
             sys.exit(1)
+        helper = os.environ.get("HISTORY_HELPER")
+        if not helper and not os.environ.get("HISTORY_TURN"):
+            logger.error("HISTORY_TURN is required in a thread's pod: its copy is opened for a turn of the thread")
+            sys.exit(1)
         history = History(
             repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
             project=Path(project), copy=Path(workspace),
-            thread=os.environ["HISTORY_THREAD"], user=user, helper=os.environ.get("HISTORY_HELPER"),
-            turn=os.environ.get("HISTORY_TURN"),
+            thread=os.environ["HISTORY_THREAD"], user=user, helper=helper, turn=os.environ.get("HISTORY_TURN"),
         )
 
     logger.info("Loading tool registry...")

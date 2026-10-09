@@ -21,7 +21,7 @@ def opened(tmp_path: Path, project: Path, thread: str = "t1") -> History:
     copy.mkdir()
     history = History(
         repo=_shadow_repo_path(str(project), base=tmp_path / "home" / ".surogates" / "history"),
-        project=project, copy=copy, thread=thread, user="u1",
+        project=project, copy=copy, thread=thread, user="u1", turn="0",
     )
     history.open()
     return history

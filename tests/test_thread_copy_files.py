@@ -46,7 +46,7 @@ async def thread(tmp_path):
     (pods.project / "chart.png").write_bytes(PNG + b"real")
     pool = SandboxPool(pods)
     owner = str(uuid4())
-    await pool.ensure(owner, SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": owner, "USER_ID": "u1"}))
+    await pool.ensure(owner, SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": owner, "USER_ID": "u1", "HISTORY_TURN": "0"}))
     return pool, owner, pods
 
 

@@ -38,7 +38,7 @@ def pods(tmp_path) -> ThreadPods:
 
 
 async def a_pod(pods: ThreadPods) -> str:
-    return await pods.provision(SandboxSpec(env={"HISTORY_THREAD": "t1", "USER_ID": "u1"}))
+    return await pods.provision(SandboxSpec(env={"HISTORY_THREAD": "t1", "USER_ID": "u1", "HISTORY_TURN": "0"}))
 
 
 async def call(pods, pod, name, **args) -> dict:
@@ -53,7 +53,7 @@ async def test_a_thread_pod_is_ready_once_the_real_files_are_mounted_and_its_cop
     mounts = tmp_path / "mounts"
     history = History(
         repo=_shadow_repo_path(str(project), base=tmp_path / "home"),
-        project=project, copy=copy, thread="t1", user="u1",
+        project=project, copy=copy, thread="t1", user="u1", turn="0",
     )
     app = executor_server.create_app(token="t", workspace=str(copy), mounts_path=str(mounts), history=history)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod") as client:
@@ -132,7 +132,7 @@ def a_thread_app(tmp_path, **kwargs):
     (project / "Report.docx").write_bytes(b"report v1")
     history = History(
         repo=_shadow_repo_path(str(project), base=tmp_path / "home"),
-        project=project, copy=copy, thread="t1", user="u1",
+        project=project, copy=copy, thread="t1", user="u1", turn="0",
     )
     app = executor_server.create_app(token="t", workspace=str(copy), require_fuse=False, history=history, **kwargs)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod"), copy
@@ -257,7 +257,7 @@ async def test_a_pod_whose_real_files_came_unmounted_lands_nothing(tmp_path):
     copy.mkdir()
     (project / "Report.docx").write_bytes(b"report v1")
     history = History(
-        repo=_shadow_repo_path(str(project), base=tmp_path / "home"), project=project, copy=copy, thread="t1", user="u1",
+        repo=_shadow_repo_path(str(project), base=tmp_path / "home"), project=project, copy=copy, thread="t1", user="u1", turn="0",
     )
     app = executor_server.create_app(token="t", workspace=str(copy), mounts_path=str(mounts), history=history)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod") as client:
@@ -277,7 +277,7 @@ async def test_a_pod_whose_real_files_came_unmounted_lands_nothing(tmp_path):
 
 async def test_a_pool_says_once_that_it_made_a_copy_and_never_after_the_turn(pods):
     pool = SandboxPool(pods)
-    spec = SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1"})
+    spec = SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1", "HISTORY_TURN": "0"})
     await pool.ensure("t1", spec)
     assert (pool.copy_fresh("t1"), pool.copy_fresh("t1")) == (True, False)
     await pods.destroy(next(iter(pods.pods)))  # its pod stops
@@ -294,7 +294,7 @@ async def test_a_slow_put_back_lets_go_only_the_pod_it_waited_on(pods, monkeypat
 
     monkeypatch.setattr(landing, "_PUT_BACK_BOUND", 0.05)
     pool = SandboxPool(pods)
-    spec = SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1"})
+    spec = SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1", "HISTORY_TURN": "0"})
     await pool.ensure("t1", spec)
     put_back = asyncio.get_running_loop().create_future()
     monkeypatch.setitem(landing._PUTTING_BACK, "t1", put_back)
@@ -321,7 +321,7 @@ async def test_a_slow_put_back_that_found_no_pod_lets_go_of_none(pods, monkeypat
     put_back = asyncio.get_running_loop().create_future()
     monkeypatch.setitem(landing._PUTTING_BACK, "t1", put_back)
     await landing._after_cancel(put_back, pool, "t1")  # deferred with no pod mapped
-    await pool.ensure("t1", SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1"}))
+    await pool.ensure("t1", SandboxSpec(env={"PROJECT_DIR": "/project", "HISTORY_THREAD": "t1", "USER_ID": "u1", "HISTORY_TURN": "0"}))
     later = set(pods.pods)
     put_back.set_result([])
     async with asyncio.timeout(5):
@@ -812,3 +812,18 @@ async def test_a_landings_pod_is_given_a_prunings_life_only_when_a_pruning_runs(
     # at this landing or any other of the day.
     assert len(pool.ends_within) == (0 if pruned else 1)
     assert pool.let_go == [("pod-1", "t1", True)]
+
+
+def test_a_thread_pod_not_told_its_turn_refuses_to_start(tmp_path, monkeypatch, caplog):
+    env = {
+        "TOOL_EXECUTOR_TOKEN": "t", "PROJECT_DIR": str(tmp_path), "HISTORY_THREAD": "t1", "USER_ID": "u1",
+        "WORKSPACE_DIR": str(tmp_path / "w"),
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("HISTORY_TURN", raising=False)
+    monkeypatch.delenv("HISTORY_HELPER", raising=False)
+    monkeypatch.setattr(executor_server, "init_registry", lambda: pytest.fail("started without its turn"))
+    with pytest.raises(SystemExit) as exited:
+        executor_server.main()
+    assert exited.value.code == 1 and "HISTORY_TURN" in caplog.text
