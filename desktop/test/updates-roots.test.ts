@@ -34,21 +34,28 @@ const base = servedBase();
 const NOT_ROOTS = "is not the install script's: only root may write it";
 const NO_FILE = "is not the install script's: it is no file";
 const NOT_RUN = "is not the install script's: it cannot be run";
+const NOT_READ = "is not the install script's: its user cannot read it";
 const own = process.getuid!();
 // The path as root's own, at *mode*; or as *uid*'s.
 const roots = (path: string, mode: number, uid = 0) => void told.paths.set(path, { uid, mode });
 
 describe("what an installed app reads as root's own", () => {
-  it("takes the release keys of a helper that root owns, that no other may write and that can be run, at whatever mode", () => {
+  it("takes the release keys of a helper that root owns, that no other may write, that can be run and that its user can read", () => {
     expect(() => releaseKeys(base.helper, true)).toThrow(`${base.helper} ${NOT_ROOTS}`);
     // Every mode of the list that the install script's own rule is asked with (helper-modes.ts),
     // with each set-id and sticky bit: who may write it and whether it is a program, and no more.
-    expect(HELPER_MODES).toHaveLength(100);
+    expect(HELPER_MODES).toHaveLength(135);
     for (const [mode, answer] of HELPER_MODES) {
       roots(base.helper, mode);
       if (answer === "taken") expect(releaseKeys(base.helper, true), mode.toString(8)).toHaveLength(1);
-      else expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${answer === "written" ? NOT_ROOTS : NOT_RUN}`);
+      else expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${{ written: NOT_ROOTS, "no program": NOT_RUN, closed: NOT_READ }[answer]}`);
     }
+    // What the rule answers is what a read then finds: no mode it takes is one that this user,
+    // who is not root and in no group of root's, could not read the file at; and each it calls
+    // closed is one they could not.
+    const readable = (mode: number) => (mode & 0o004) !== 0;
+    expect(HELPER_MODES.filter(([mode, answer]) => (answer === "taken") !== readable(mode) && answer !== "written" && answer !== "no program")).toEqual([]);
+    expect(HELPER_MODES.filter(([mode, answer]) => answer === "closed" && readable(mode))).toEqual([]);
     // Another's, that none but its owner may write.
     for (const mode of [0o755, 0o700, 0o4755]) {
       roots(base.helper, mode, own);

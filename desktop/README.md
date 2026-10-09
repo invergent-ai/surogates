@@ -163,8 +163,10 @@ of what was measured, and the script may refuse others in the same words. The fi
 - the helper is gone, and a version is installed, as a removal leaves it that was stopped before
   its last step;
 - the helper is a link, or a folder stands in its place;
-- the helper is not root's own program: it is another user's, its group or others may write it,
-  or no one may run it. At any other mode it is taken, read-only or closed to others too;
+- the helper is not root's own program that every user may read: it is another user's, its
+  group or others may write it, no one may run it, or others may not read it. The app reads its
+  release keys from it as its user, so one closed to others is none to the app, and the script
+  takes it for none either. At any other mode it is taken, read-only too;
 - the folder of the release that the mark names has lost its own copy of the helper,
   `bin/surogate-apply-update`, and the install is otherwise whole;
 - a link is where that copy was;

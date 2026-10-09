@@ -169,19 +169,21 @@ roots_alone() {
   (( (mode & 0170000) == 0100000 && (mode & 07022) == 0 ))
 }
 
-# Whether $1 is a program of root's own that no one else may write, at whichever mode: a file and
-# no link, root's, with no write bit for its group or for others, and one that someone may run.
-# The helper pkexec runs is asked so, by this script and by the app (rootsOwn in
-# src/vm/image.ts), which offers an update only by a helper that this takes: an administrator
-# may have closed it to others, and it is root's word no less. A set-id or a sticky bit on it is
-# not looked at, here or there: the kernel runs no script as its file's owner, pkexec runs this
-# one as root whatever its bits, and no one but root may write it.
+# Whether $1 is a program of root's own that no one else may write and that others may read: a
+# file and no link, root's, with no write bit for its group or for others, one that someone may
+# run, and one that others may read. The helper pkexec runs is asked so, by this script and by
+# the app (rootsOwn in src/vm/image.ts), which offers an update only by a helper that this takes.
+# The app runs as its user and reads its release keys from this file: one closed to that user is
+# a helper no app can offer an update by, and is none to this script either, so that the two
+# never answer otherwise; an install puts it back as it leaves one. A set-id or a sticky bit on
+# it is not looked at, here or there: the kernel runs no script as its file's owner, pkexec runs
+# this one as root whatever its bits, and no one but root may write it.
 roots_program() {
   local seen mode
   seen="$(stat -c '%f %u' -- "$1" 2>/dev/null)" || return 1
   [ "${seen#* }" = 0 ] || return 1
   mode=$(( 16#${seen% *} ))
-  (( (mode & 0170000) == 0100000 && (mode & 0022) == 0 && (mode & 0111) != 0 ))
+  (( (mode & 0170000) == 0100000 && (mode & 0022) == 0 && (mode & 0111) != 0 && (mode & 0004) != 0 ))
 }
 
 # The release keys this computer trusts, into the array $1 names. One file says which: the helper

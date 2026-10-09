@@ -54,9 +54,11 @@ export function readManifest(path: string): ImageManifest {
 /**
  * Throws unless *path* is root's own word: root's, with no other who may write it, and a file and
  * no link, wherever one leads. At whatever mode: an administrator may keep one read-only. With
- * *run*, as the helper must be, it is a program too: pkexec could run no other. A set-id or a
- * sticky bit is not looked at, as the install script looks at none on its helper (roots_program in
- * release/install.sh): neither changes who may write the file, and no script is run as its owner.
+ * *run*, as the helper must be, it is a program too, since pkexec could run no other, and one
+ * that others may read, since the app reads its release keys from it as its user: the install
+ * script asks its helper the same (roots_program in release/install.sh), so the two never answer
+ * otherwise. A set-id or a sticky bit is not looked at, there or here: neither changes who may
+ * write the file, and no script is run as its owner.
  */
 export function rootsOwn(path: string, run = false): void {
   const found = lstatSync(path);
@@ -64,6 +66,7 @@ export function rootsOwn(path: string, run = false): void {
   if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not the install script's: only root may write it`);
   if (!found.isFile()) throw new Error(`${path} is not the install script's: it is no file`);
   if (run && (found.mode & 0o111) === 0) throw new Error(`${path} is not the install script's: it cannot be run`);
+  if (run && (found.mode & 0o004) === 0) throw new Error(`${path} is not the install script's: its user cannot read it`);
 }
 
 /**
