@@ -483,9 +483,11 @@ const kept = () => {
 describe.skipIf(!run || process.env.SUROGATE_VM_TESTS !== "1")("a chat's own servers named in the agent's browser, through the app", () => {
   beforeAll(() => isolated());
 
-  it("tells the agent what is so in its chat's sandbox: that nothing listens on a port, until a server it started there does, and never asks this computer's own", async () => {
+  it("opens a server the agent started in its chat's sandbox once the chat's user allows its port, asked in the desktop's own prompt, and never this computer's own on that port", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
+    // The chat's page, which fetches from its own server.
+    writeFileSync(join(folder, "index.html"), `<title>The chat's page</title><script>fetch("/index.html", { cache: "no-store" }).then((answer) => { document.title += " " + answer.status; });</script>`);
     await bound(folder, [], { SUROGATE_VM_IMAGE: IMAGE });
     const NOT_LISTENING = (port: number) => ({
       error: {
@@ -502,20 +504,38 @@ describe.skipIf(!run || process.env.SUROGATE_VM_TESTS !== "1")("a chat's own ser
     expect(await operation("start", background)).toMatchObject({ ok: { session_id: expect.any(String) } });
     const answering = `curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${canaryPort}/`;
     await expect.poll(async () => (await operation("run", { command: answering, workdir: null, timeout: 10 })).ok?.output, { timeout: 30_000 }).toBe("200");
-    // Now the sandbox says the chat listens there, by each of the loopback's names: the navigation goes on to the
-    // browser, whose proxy opens no port of this computer's names yet.
-    for (const name of ["localhost", "127.0.0.1"]) {
-      expect(await operation("browser.navigate", { url: `http://${name}:${canaryPort}/`, wait_until: "load" })).toEqual({
-        error: { type: "browser", message: `The agent's browser does not reach this computer's own services (${name}:${canaryPort})` },
-      });
-    }
+    // Now the sandbox says the chat listens there, and its user is asked for the port: with the keyboard on Deny,
+    // the address, and who else reaches it. Denied, nothing opens, and nothing is kept.
+    const denied = operation("browser.navigate", { url: `http://localhost:${canaryPort}/`, wait_until: "load" });
+    const asked = await prompted();
+    expect(await asked.textContent("#prompt-title")).toMatch(new RegExp(`^Let .+'s browser open port ${canaryPort} of this chat's servers\\?$`));
+    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`]]);
+    expect(await asked.evaluate(() => [
+      (document.activeElement as HTMLElement).dataset.id, [...document.querySelectorAll<HTMLElement>("#prompt-buttons button")].map((button) => button.dataset.id),
+    ])).toEqual(["deny", ["deny", "allow_session"]]);
+    // Each of its notes is drawn whole, inside the window.
+    const notes = await asked.$$eval("#prompt-notes > *", (lines) => lines.map((line) => [line.textContent, line.getBoundingClientRect().bottom <= window.innerHeight]));
+    expect(notes).toEqual([
+      [expect.stringContaining("a page open in any of them can reach this port too"), true],
+      ["A page of another site cannot fetch from it, post to it, frame it or open a socket to it. It can still send a tab there, as a link does.", true],
+      ["It opens this chat's server only, never this computer's own services.", true],
+    ]);
+    await press(asked, "deny");
+    expect(await denied).toEqual({ error: { type: "denied", message: `The user did not let the agent's browser open port ${canaryPort} of this chat's servers` } });
+    // Asked again at the next navigation there, and allowed for the chat: the page opens from the chat's server, its own request too.
+    const allowed = operation("browser.navigate", { url: `http://localhost:${canaryPort}/`, wait_until: "load" });
+    await press(await prompted(), "allow_session");
+    expect(await allowed).toMatchObject({ ok: { url: `http://localhost:${canaryPort}/`, title: expect.stringMatching(/^The chat's page/) } });
+    await expect.poll(async () => (await operation("browser.evaluate", { code: "return document.title;" })).ok?.value, { timeout: 10_000 }).toBe("The chat's page 200");
+    // By the loopback's other name it is the same port of the same chat: nobody is asked again.
+    expect(await operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/?again`, wait_until: "load" })).toMatchObject({ ok: { title: expect.stringMatching(/^The chat's page/) } });
     // A port beside it, where the chat has no server, and the sandbox's own proxy, which is not the browser's to open.
     const beside = canaryPort === 65_535 ? canaryPort - 1 : canaryPort + 1;
     expect(await operation("browser.navigate", { url: `http://localhost:${beside}/`, wait_until: "load" })).toEqual(NOT_LISTENING(beside));
     expect(await operation("browser.navigate", { url: "http://localhost:3128/", wait_until: "load" })).toEqual({
       error: { type: "browser", message: "Port 3128 is the sandbox's own proxy for this chat's commands, which the agent's browser does not open" },
     });
-    // Its user was asked nothing for any of it, and this computer's own service on that port heard nothing.
+    // Its user was asked nothing more, and this computer's own service on that port heard nothing, on either family.
     expect([await promptsShown(app!), hits]).toEqual([0, []]);
   }, 180_000);
 });
