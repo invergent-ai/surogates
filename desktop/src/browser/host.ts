@@ -154,6 +154,12 @@ interface Begun {
 const MAX_NOTICES = 20;
 // How many of the browser's words that a download begins are kept while no download is matched to them.
 const UNMATCHED = 64;
+/**
+ * How long the browser's word that a download begins is kept for the download it is of. Playwright announces a
+ * download from that same word of the browser's, so the two come together: one said this long before is of a
+ * download nobody announced here, and would name a later one of its address and name by a file that is not its own.
+ */
+export const SAID_MS = 10_000;
 // How many answers this host remembers the notices of, for one whose cancel crossed it on the way (unanswered).
 const CARRIED = 32;
 export const FILE_ASKED =
@@ -625,7 +631,7 @@ export class BrowserHost {
   // to the download Playwright announces by its address and its name, in the order both come. *said*: ids
   // no download is matched to yet; *unnamed*: downloads the browser has said no id of yet.
   private readonly ids = new Map<Download, string>();
-  private readonly said: Array<{ id: string; url: string; name: string }> = [];
+  private readonly said: Array<{ id: string; url: string; name: string; at: number }> = [];
   private readonly unnamed: Download[] = [];
   // The agent's files that ended and were handed on to be saved, by where each is staged: counted with the
   // agent's own until it is gone from there.
@@ -1410,8 +1416,11 @@ export class BrowserHost {
 
   // Stopped where it is, and what it had written removed: one that had ended already too. Never rejects.
   private async discard(download: Download): Promise<void> {
+    // The id the browser said for it is its own, and is kept for no later download of its address and name.
+    this.name(download);
     await download.cancel().catch(() => {});
     await download.delete().catch(() => {});
+    this.nameless(download);
   }
 
   // The files the main side read from the chat's folder, given once to the file input an upload's
@@ -1587,6 +1596,7 @@ export class BrowserHost {
       let path: string;
       try {
         path = await download.path();
+        this.endedIn(download, basename(path));
       } catch {
         if (stop?.aborted) tell(interrupted(name));
         else if (this.overfull.has(download)) tell(tooMuch(name, this.options.stagedBytes ?? STAGED_MOST_BYTES));
@@ -1613,8 +1623,7 @@ export class BrowserHost {
     } finally {
       this.arriving.delete(download);
       this.grew.delete(download);
-      this.ids.delete(download);
-      if (this.unnamed.includes(download)) this.unnamed.splice(this.unnamed.indexOf(download), 1);
+      this.nameless(download);
       if (this.arriving.size === 0) this.unwatch();
     }
   }
@@ -1626,16 +1635,43 @@ export class BrowserHost {
   begins(id: string, url: string, name: string): void {
     const at = this.unnamed.findIndex((download) => download.url() === url && download.suggestedFilename() === name);
     if (at !== -1) return void this.ids.set(this.unnamed.splice(at, 1)[0] as Download, id);
-    this.said.push({ id, url, name });
+    this.said.push({ id, url, name, at: this.now() });
     // One Playwright never announces here is matched to nothing: the oldest go.
     if (this.said.length > UNMATCHED) this.said.shift();
   }
 
   // *download* is announced: the id the browser said for it, where it has; else it waits for the browser's word.
+  // The oldest said of its address and name, as the browser says them in the order Playwright announces them:
+  // two of one address and one name, begun together, are each held under the id of its own file. Not one
+  // said SAID_MS before, which is of a download nobody announced.
   private name(download: Download): void {
+    const stale = this.now() - SAID_MS;
+    for (let nth = this.said.length - 1; nth >= 0; nth -= 1) if ((this.said[nth] as { at: number }).at < stale) this.said.splice(nth, 1);
     const at = this.said.findIndex(({ url, name }) => url === download.url() && name === download.suggestedFilename());
     if (at === -1) return void this.unnamed.push(download);
     this.ids.set(download, (this.said.splice(at, 1)[0] as { id: string }).id);
+  }
+
+  // *download* has ended in the file the browser named by *id*, which is its id whatever was held for it till
+  // now. Another download held under that id till now has the one this was held under: the two were taken for
+  // each other, and from here on each is counted by its own file.
+  private endedIn(download: Download, id: string): void {
+    const held = this.ids.get(download);
+    if (held === id) return;
+    const said = this.said.findIndex((one) => one.id === id);
+    if (said !== -1) this.said.splice(said, 1);
+    for (const [other, its] of this.ids) {
+      if (its !== id) continue;
+      if (held === undefined) this.ids.delete(other);
+      else this.ids.set(other, held);
+    }
+    this.ids.set(download, id);
+  }
+
+  // *download* is over: nothing is held for it.
+  private nameless(download: Download): void {
+    this.ids.delete(download);
+    if (this.unnamed.includes(download)) this.unnamed.splice(this.unnamed.indexOf(download), 1);
   }
 
   // What the agent's own downloads have staged now: *own*, all of it but that of *ending*, which is measured

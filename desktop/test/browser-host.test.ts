@@ -16,7 +16,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BrowserContext, FileChooser, Frame, JSHandle, Page } from "playwright-core";
+import type { BrowserContext, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ADDRESS_MS } from "../src/binding/approvals.js";
@@ -24,7 +24,7 @@ import { CANCELLED, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, WEAKENING,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -250,6 +250,9 @@ let said: Array<{ host: string; from: string; what: string }>;
 let gate: ((ms: number, first?: boolean) => void) | null;
 // The answers of the fixture's download that never ends, still open: a test ends one, and each is cut at the test's end.
 let stalling: ServerResponse[];
+// The fixture's download that two ask for together: how many have asked, and which of each two, by the order they
+// asked in, gets a first part and no more.
+let twins: { asked: number; silent: number };
 // The fixture's keeper pages wait for their site's word: each, by its address's query, until a test gives it.
 let words: Map<string, () => void>;
 let profile: string;
@@ -264,6 +267,7 @@ beforeEach(async () => {
   said = [];
   gate = null;
   stalling = [];
+  twins = { asked: 0, silent: 0 };
   words = new Map();
   site = createServer((req, res) => {
     if (req.url === "/said") {
@@ -361,6 +365,22 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
       res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=stalls.bin" });
       res.write("s".repeat(4_096));
       return void stalling.push(res);
+    }
+    // One address that two ask for together, in pairs. One of each pair, by the order the site is asked in, gets
+    // its first part and nothing after; the other comes a little at a time, for 3.2 s, and ends. Each is answered
+    // as it asks: the browser itself asks the second only once the first has begun to answer.
+    if (req.url === "/twin.bin") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=twin.bin" });
+      res.write("w".repeat(4_096));
+      if ((twins.asked += 1) % 2 === twins.silent) return void stalling.push(res);
+      let parts = 1;
+      const more = setInterval(() => {
+        res.write("w".repeat(4_096));
+        if ((parts += 1) < 8) return;
+        clearInterval(more);
+        res.end("end");
+      }, 400);
+      return;
     }
     // One that streams without end, a mebibyte every 100 ms, until whoever asked for it goes.
     if (req.url === "/endless.bin") {
@@ -1010,6 +1030,71 @@ describe("a page's download, as the host stages it", () => {
     writeFileSync(join(folder, "whose.crdownload"), "x".repeat(601));
     await Promise.all([unsaid, said.arrived]);
     expect(did.sort()).toEqual(["cancel said.bin", "cancel unsaid.bin"]);
+  }, 20_000);
+
+  it("leaves no id behind for one it drops in a tab no chat owns: the next download of that address and name is counted by its own file, and stopped once it is more than may be staged", async () => {
+    const { folder, grow, begin } = staging({ stagedBytes: 1_000 });
+    // The agent's own, in a tab that is no session's: dropped at once. The browser had said its id.
+    const url = "http://fixture.test/same.bin";
+    asks(url, null, true, TAB);
+    host.begins("dropped", url, "same.bin");
+    await arrives(downloadOf("same.bin", join(folder, "dropped"), new Promise<string>(() => {}), url), TAB);
+    expect(did).toEqual(["cancel", "delete"]);
+    did.length = 0;
+    // The next of that address and name, in the session's page: its own file is the one that counts for it.
+    const next = begin("next", "same.bin");
+    grow("next", 1_001);
+    await next.arrived;
+    expect([did, state().unseen.get(SESSION)]).toEqual([["cancel same.bin"], [tooMuch("same.bin", 1_000)]]);
+  }, 20_000);
+
+  it("takes no id the browser said long before for a download announced now: one of a download nobody announced is no later one's", async () => {
+    const { grow, begin } = staging({ stagedBytes: 1_000 });
+    // Said, and never announced: a download in no page this host has.
+    host.begins("nobody's", "http://fixture.test/same.bin", "same.bin");
+    clock += SAID_MS + 1;
+    const next = begin("next", "same.bin");
+    grow("next", 1_001);
+    await next.arrived;
+    expect(did).toEqual(["cancel same.bin"]);
+  }, 20_000);
+
+  it("counts two downloads of one address and one name each by its own file from the moment one ends, though they were announced in the other order than the browser said their ids in: the one still on its way is not dropped for the other's bytes standing still", async () => {
+    const { folder, grow } = staging({ stalledMs: 1_000 });
+    const url = "http://fixture.test/same.bin";
+    const one = (id: string) => {
+      const ends = Promise.withResolvers<string>();
+      const download = {
+        ...downloadOf("same.bin", join(folder, id), ends.promise, url),
+        cancel: () => (did.push(`cancel ${id}`), rmSync(join(folder, `${id}.crdownload`), { force: true }), ends.reject(new Error("canceled")), Promise.resolve()),
+      };
+      return { download, ends: (bytes: number) => (grow(id, bytes, true), ends.resolve(join(folder, id))) };
+    };
+    const [first, second] = [one("first"), one("second")];
+    asks(url);
+    asks(url);
+    host.begins("first", url, "same.bin");
+    host.begins("second", url, "same.bin");
+    // Announced the other way round, which no browser was seen to do: each is held for the other's file.
+    const arrived = [arrives(second.download), arrives(first.download)];
+    grow("first", 100);
+    grow("second", 100);
+    await look();
+    // The first ends, in the file the browser named by its own id: from then on each is known by its own.
+    const began = clock;
+    first.ends(150);
+    await arrived[1];
+    expect(staged.map(({ path }) => basename(path))).toEqual(["first"]);
+    // The second comes on for longer than a download may stand still: it is not dropped, and ends.
+    for (const [after, bytes] of [[600, 200], [1_200, 300], [1_800, 400]] as const) {
+      clock = began + after;
+      grow("second", bytes);
+      await look();
+    }
+    expect(did).toEqual([]);
+    second.ends(500);
+    await arrived[0];
+    expect([did, staged.map(({ path }) => basename(path))]).toEqual([[], ["first", "second"]]);
   }, 20_000);
 
   it("hands on one of exactly what a write may carry, and none a byte over, which it removes and says", async () => {
@@ -2988,6 +3073,31 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     const size = () => readdirSync(folder).map((name) => statSync(join(folder, name)).size);
     const [before] = size();
     await expect.poll(() => size().length === 1 && size()[0]! > before!, { timeout: 5_000 }).toBe(true);
+  }, 90_000);
+
+  it("times each of two downloads of one address and one name, begun together in two tabs, by its own bytes: the one whose bytes stop is dropped and its agent told, the one that comes on is saved whole, whichever of the two asked first, and each is held under the id of its own file", async () => {
+    const staged: StagedDownload[] = [];
+    host = hostWith({ downloaded: (download) => staged.push(download), stalledMs: 2_000 });
+    const [a, b] = [session(), session()];
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    await op(b, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
+    const { arriving, ids } = host as unknown as { arriving: Set<unknown>; ids: Map<Download, string> };
+    const told = async (of: string) => (await op(of, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices as string[];
+    for (const silent of [0, 1]) {
+      twins.silent = silent;
+      await Promise.all([a, b].map((of) => script(of, "location.href = '/twin.bin'; return 1;", "chat-1")));
+      await expect.poll(() => [arriving.size, ids.size], { timeout: 10_000 }).toEqual([2, 2]);
+      // The id each is held under, by the session whose page it is in.
+      const held = new Map([...ids].map(([download, id]) => [tabs().get(a)!.includes(download.page()) ? a : b, id]));
+      expect(new Set(held.values()).size).toBe(2);
+      await expect.poll(() => arriving.size, { timeout: 15_000 }).toBe(0);
+      // One is saved, whole, from the file named by the id it was held under; the other's agent is told its own stood still.
+      expect(staged.map(({ name }) => name)).toEqual(["twin.bin"]);
+      const kept = staged.pop()!;
+      expect([(await stat(kept.path)).size, basename(kept.path)]).toEqual([8 * 4_096 + 3, held.get(kept.session)]);
+      expect([await told(kept.session), await told(kept.session === a ? b : a)]).toEqual([[], [notFinished("twin.bin", "no more of it came for 2 s")]]);
+      rmSync(kept.path);
+    }
   }, 90_000);
 
   it("stops the agent's own downloads on their way once they are, together, more than may be staged: one that streams without end and one beside it that is not the large one, each told in words of the agent's own; and not for a download of its user's own that is far past that, which is never stopped and of which the agent is told nothing", async () => {
