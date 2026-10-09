@@ -1,9 +1,12 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { Agent, createServer as createHttp, type IncomingHttpHeaders, request, type Server as HttpServer } from "node:http";
 import { connect as connectTcp, createServer, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { BrowserProxy, SITE_SIGN_IN, unsigned } from "../src/browser/proxy.js";
+import { BrowserProxy, ownRequest, SITE_SIGN_IN, unsigned } from "../src/browser/proxy.js";
 
 // What a name leads to, and how often it was looked up: rebinding.example leads elsewhere, then here.
 let lookups: Record<string, number>;
@@ -28,6 +31,8 @@ const names: Record<string, string[][]> = {
   "holding.example": [["192.0.2.9"]],
   // A site whose name takes SLOW_MS to look up.
   "slow.example": [["93.184.215.14"]],
+  // A public name that leads to this computer's loopback, as a rebinding site's does.
+  "loop.example": [["127.0.0.1"]],
 };
 const SLOW_MS = 200;
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
@@ -504,5 +509,273 @@ describe("the browser's proxy", () => {
     expect((await get("/index.html", "example.com")).status).toBe(400);
     expect((await get("https://example.com/", "example.com")).status).toBe(400);
     expect(dialed).toEqual([]);
+  });
+});
+
+describe("a chat's own servers, through the browser's proxy", () => {
+  const KEY = "ab".repeat(32);
+  // The VM manager's door (vm/inbound.ts), standing here: each knock, and behind it ports 3000 and 3001 the web
+  // server above, nothing on 3002, and every connection made behind it.
+  let folder: string;
+  let door: Server;
+  let knocks: string[];
+  let behind: Set<Socket>;
+  // How long the door takes to answer a knock it carries.
+  let slow: number;
+  const path = () => join(folder, "browser.sock");
+  // What the browser itself says of its own navigation, and its user's.
+  const own = { "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
+  // A plain request as the browser sends one, with the headers it adds itself, signed in as *as*.
+  const fetched = (target: string, headers: Record<string, string> = own, method = "GET", as: string | null = signed) => new Promise<{ status: number; body: string }>((done, fail) => {
+    const asked = request({ host: "127.0.0.1", port, method, path: target, headers: { host: new URL(target).host, ...headers, ...signing(as) } }, (answer) => {
+      let body = "";
+      answer.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      answer.on("end", () => done({ status: answer.statusCode ?? 0, body }));
+    });
+    asked.on("error", fail);
+    asked.end();
+  });
+  // This computer's own service on a port, on both of its loopback's families: what it heard.
+  const ownService = async () => {
+    const heard = { hits: 0, port: 0, close: async () => {} };
+    for (;;) {
+      const [six, four] = [0, 1].map(() => createServer((socket) => {
+        heard.hits += 1;
+        socket.destroy();
+      })) as [Server, Server];
+      await new Promise<void>((done) => six.listen(0, "::1", done));
+      heard.port = (six.address() as { port: number }).port;
+      heard.close = async () => void (await Promise.all([six, four].map((server) => new Promise<void>((done) => server.close(() => done())))));
+      if (await new Promise<boolean>((done) => four.once("error", () => done(false)).listen(heard.port, "127.0.0.1", () => done(true)))) return heard;
+      await new Promise<void>((done) => six.close(() => done()));
+    }
+  };
+
+  beforeEach(async () => {
+    folder = mkdtempSync(join(tmpdir(), "browser-door-"));
+    knocks = [];
+    behind = new Set();
+    slow = 0;
+    door = createServer((socket) => {
+      socket.on("error", () => {});
+      socket.once("data", (chunk: Buffer) => {
+        const line = chunk.toString().trimEnd();
+        knocks.push(line);
+        if (!line.startsWith(`${KEY} `)) return void socket.end("403 refused\n");
+        if (!/^[0-9a-f]{64} 300[01]( 6)?$/.test(line)) return void socket.end("502 ECONNREFUSED\n");
+        const upstream = connectTcp({ host: "127.0.0.1", port: ports.web });
+        behind.add(upstream.once("close", () => behind.delete(upstream)));
+        upstream.on("error", () => socket.destroy());
+        upstream.once("connect", async () => {
+          await sleep(slow);
+          socket.write("200\n");
+          socket.pipe(upstream);
+          upstream.pipe(socket);
+        });
+        socket.once("close", () => upstream.destroy());
+        upstream.once("close", () => socket.destroy());
+      });
+    });
+    await new Promise<void>((done) => door.listen(path(), done));
+    proxy.forwards([3000, 3001, 3002], path(), KEY);
+  });
+
+  afterEach(async () => {
+    for (const socket of behind) socket.destroy();
+    await new Promise<void>((done) => door.close(() => done()));
+    rmSync(folder, { recursive: true, force: true });
+  });
+
+  it("carries a request for an allowed port only when it carries its launch's sign-in: whatever another program writes is challenged, with no knock at the door", async () => {
+    const service = await ownService();
+    try {
+      proxy.forwards([3000, service.port], path(), KEY);
+      for (const at of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "LOCALHOST:3000", "localhost.:3000", `localhost:${service.port}`, `127.0.0.1:${service.port}`, `[::1]:${service.port}`]) {
+        for (const written of [
+          `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\r\n`,
+          // A browser's own headers, written by hand: a page's own request, forged.
+          `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n\r\n`,
+          // A WebSocket's handshake, written by hand: as a plain request, and into a tunnel before any answer.
+          `GET http://${at}/ws HTTP/1.1\r\nHost: ${at}\r\nOrigin: http://${at}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+          `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\nGET /ws HTTP/1.1\r\nHost: ${at}\r\nOrigin: http://${at}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+          // A sign-in that is not the launch's, and the launch's own said twice.
+          `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: none\r\nProxy-Authorization: Basic c3Vyb2dhdGU6Z3Vlc3M=\r\n\r\n`,
+          `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: none\r\nProxy-Authorization: ${signed}\r\nProxy-Authorization: ${signed}\r\n\r\n`,
+        ]) {
+          expect(await raw(written), written).toMatch(CHALLENGED);
+        }
+      }
+      // Nor is a name of a chat's server looked up for it.
+      expect([knocks, seen, dialed, service.hits, lookups]).toEqual([[], [], [], 0, {}]);
+      // The same request, from the launch's own browser: carried through the door, and nowhere on this computer.
+      expect(await fetched("http://localhost:3000/a?b=c")).toEqual({ status: 201, body: "hello from the site" });
+      expect((await fetched(`http://localhost:${service.port}/`)).status).toBe(502);
+      expect([knocks, dialed, service.hits]).toEqual([[`${KEY} 3000`, `${KEY} ${service.port}`], [], 0]);
+      // The sign-in goes no further than the proxy.
+      expect(seen).toEqual([{ method: "GET", url: "/a?b=c", host: "localhost:3000", headers: expect.not.arrayContaining(["proxy-authorization"]) }]);
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("carries a request for an allowed port to the manager's door under its device's key, by each name of this computer's loopback, the family its name says first, and dials nothing here", async () => {
+    const hosts = ["localhost", "127.0.0.1", "[::1]", "2130706433", "0x7f.1", "0177.0.0.1", "127.1", "LOCALHOST", "localhost."];
+    for (const host of hosts) expect(await fetched(`http://${host}:3000/a?b=c`), host).toEqual({ status: 201, body: "hello from the site" });
+    // Only the address that names IPv6's loopback has the door try that family first.
+    expect(knocks).toEqual(hosts.map((host) => (host === "[::1]" ? `${KEY} 3000 6` : `${KEY} 3000`)));
+    // The chat's server sees the name its page was opened by.
+    expect(seen.map(({ host }) => host)).toEqual([
+      "localhost:3000", "127.0.0.1:3000", "[::1]:3000", "127.0.0.1:3000", "127.0.0.1:3000", "127.0.0.1:3000", "127.0.0.1:3000", "localhost:3000", "localhost.:3000",
+    ]);
+    expect(dialed).toEqual([]);
+  });
+
+  it("refuses a port not allowed, either of the sandbox's own proxies' ports, every other spelling of this computer on an allowed one, and every tunnel, without a knock or a dial", async () => {
+    proxy.forwards([3000, 3128, 1080], path(), KEY);
+    for (const target of [
+      "http://localhost:3003/", "http://127.0.0.1:80/", "http://[::1]:8080/",
+      // The sandbox's own proxies for its commands, though the app named them.
+      "http://localhost:3128/", "http://127.0.0.1:1080/",
+      // On a port that is allowed: only the loopback's three names are a chat's servers.
+      "http://0.0.0.0:3000/", "http://127.0.0.2:3000/", "http://app.localhost:3000/", "http://localhost.localdomain:3000/",
+      "http://[::ffff:127.0.0.1]:3000/", "http://[::]:3000/", "http://[::ffff:7f00:1]:3000/", "http://[64:ff9b::7f00:1]:3000/",
+      // A public name that leads here, as a rebinding site's does, and this computer's own address on its network.
+      "http://loop.example:3000/", "http://rebinding.example:3000/", "http://198.51.100.5:3000/", "http://lan.example:3000/",
+    ]) {
+      expect((await fetched(target)).status, target).toBe(target.includes("rebinding") ? 201 : 403);
+    }
+    // The rebinding name led elsewhere at its first lookup, and is refused once it leads here.
+    expect((await fetched("http://rebinding.example:3000/")).status).toBe(403);
+    // A tunnel to a chat's port is carried for nobody, allowed or not: https, and a page's socket.
+    for (const authority of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "localhost:3003", "0.0.0.0:3000", "127.0.0.2:3000", "app.localhost:3000", "[::ffff:127.0.0.1]:3000", "loop.example:3000"]) {
+      expect((await connect(authority)).status, authority).toBe(403);
+    }
+    expect(knocks).toEqual([]);
+    expect(dialed).toEqual(["93.184.215.14:3000"]);
+  });
+
+  it("carries only what the browser says comes from a page of a port allowed now, its user or its agent, and a link followed there", async () => {
+    const fromSite = { origin: "http://evil.example", referer: "http://evil.example/" };
+    const cors = { "sec-fetch-site": "cross-site", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty" };
+    const refused: Array<[string, Record<string, string>, string?]> = [
+      ["a page of another site fetching it", { ...cors, ...fromSite }],
+      ["its image, with no origin said", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image", referer: "http://evil.example/" }],
+      ["its script", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "script", referer: "http://evil.example/" }],
+      ["its frame", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe", referer: "http://evil.example/" }],
+      ["its form posted there", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", ...fromSite }, "POST"],
+      ["its beacon", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "empty", ...fromSite }, "POST"],
+      ["its service worker's script", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "same-origin", "sec-fetch-dest": "serviceworker", referer: "http://evil.example/" }],
+      ["a page it has the browser load ahead of any visit", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", "sec-purpose": "prefetch;prerender" }],
+      ["a link followed by another method", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", referer: "http://evil.example/" }, "HEAD"],
+      ["a page that says no referrer", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image" }],
+      ["an opaque origin's", { ...cors, origin: "null" }],
+      ["a name that only looks like this computer's", { ...cors, origin: "http://localhost.evil.example:3000" }],
+      ["an https page of this computer's name, which no chat's server is", { ...cors, origin: "https://localhost:3000" }],
+      ["a page of this computer's name on a port not allowed", { ...cors, origin: "http://localhost:1" }],
+      ["one on a port not allowed, by its referrer", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image", referer: "http://127.0.0.1:5173/" }],
+      ["a page of another site whose referrer is put forward as a chat's", { ...cors, origin: "http://evil.example", referer: "http://localhost:3000/" }],
+      ["a request that says nothing of where it comes from, as no browser's does", {}],
+      ["one that says something else", { "sec-fetch-site": "cross-origin" }],
+      ["one that says something else, as a link followed", { "sec-fetch-site": "cross-origin", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" }],
+      ["a document asked for by no navigation", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "document", referer: "http://evil.example/" }],
+    ];
+    for (const [what, headers, method] of refused) expect((await fetched("http://localhost:3000/", headers, method)).status, what).toBe(403);
+    // A port taken back is no chat's page from then on.
+    proxy.forwards([3000], path(), KEY);
+    expect((await fetched("http://localhost:3000/", { ...cors, origin: "http://127.0.0.1:3001" })).status).toBe(403);
+    proxy.forwards([3000, 3001, 3002], path(), KEY);
+    expect(knocks).toEqual([]);
+    const carried: Array<[string, Record<string, string>, string?]> = [
+      ["the agent's own navigation, or its user's", own],
+      ["the page's own request", { "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty" }, "POST"],
+      ["a page on another port of the same name", { "sec-fetch-site": "same-site", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", origin: "http://localhost:3001" }, "POST"],
+      ["a chat's page under the loopback's other name", { ...cors, origin: "http://127.0.0.1:3001" }, "POST"],
+      ["its image, by its referrer", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image", referer: "http://[::1]:3002/" }],
+      ["a link followed from another site", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", referer: "http://evil.example/" }],
+    ];
+    for (const [what, headers, method] of carried) expect((await fetched("http://localhost:3000/", headers, method)).status, what).toBe(201);
+    expect(knocks).toHaveLength(carried.length);
+    // The rule alone, as the proxy applies it.
+    const allowed = new Set([3000]);
+    expect([
+      ownRequest("GET", own, allowed), ownRequest("POST", { ...own, "sec-fetch-site": "cross-site" }, allowed), ownRequest("GET", {}, allowed),
+      ownRequest("GET", { ...cors, origin: "http://localhost:3000" }, allowed), ownRequest("GET", { ...cors, origin: "http://localhost:3001" }, allowed),
+    ]).toEqual([true, false, false, true, false]);
+    expect(dialed).toEqual([]);
+  });
+
+  it("gives the browser none of a chat's server's own 407: 502 in its place, in the proxy's words, and the server let go", async () => {
+    expect(await fetched("http://localhost:3000/sign-in")).toEqual({ status: 502, body: SITE_SIGN_IN });
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+  });
+
+  it("answers 502 for a port nothing takes a connection on, and a door that is not there; 403 for one the door refuses; and says which when asked", async () => {
+    expect([(await fetched("http://localhost:3002/")).status, await proxy.reaches(3002), await proxy.reaches(3000)]).toEqual([502, "unreachable", "open"]);
+    // Asked by a knock that says nothing, and is let go.
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    expect(seen).toEqual([]);
+    // A port not allowed is asked of nobody.
+    const before = knocks.length;
+    expect([await proxy.reaches(3003), knocks.length]).toEqual(["refused", before]);
+    // Another device's key at the door: refused there.
+    proxy.forwards([3000], path(), "cd".repeat(32));
+    expect([(await fetched("http://localhost:3000/")).status, await proxy.reaches(3000)]).toEqual([403, "refused"]);
+    // No guest runs: its door is not there.
+    proxy.forwards([3000], join(folder, "gone.sock"), KEY);
+    expect([(await fetched("http://localhost:3000/")).status, await proxy.reaches(3000)]).toEqual([502, "unreachable"]);
+    // Told nothing yet, as a proxy just launched: nothing is a chat's.
+    const fresh = new BrowserProxy({ resolve });
+    expect(await fresh.reaches(3000)).toBe("refused");
+    await fresh.close();
+    expect(dialed).toEqual([]);
+  });
+
+  it("ends what it carries to a port taken back, at once, carries nothing more to it, and leaves another port's alone", async () => {
+    const streaming = (to: number) => {
+      const asked = request({ host: "127.0.0.1", port, path: `http://localhost:${to}/stream`, headers: { host: `localhost:${to}`, ...own, ...signing(signed) } });
+      const state = { cut: false };
+      asked.on("response", (answer) => answer.on("data", () => {}).on("close", () => (state.cut = true)).on("error", () => (state.cut = true)));
+      asked.on("error", () => (state.cut = true));
+      asked.end();
+      return state;
+    };
+    const taken = streaming(3000);
+    const kept = streaming(3001);
+    await vi.waitFor(() => expect(seen.filter(({ url }) => url === "/stream")).toHaveLength(2));
+    expect(behind.size).toBe(2);
+    // Port 3001 stays; 3000 is taken back.
+    proxy.forwards([3001], path(), KEY);
+    await vi.waitFor(() => expect(taken.cut).toBe(true));
+    await vi.waitFor(() => expect(behind.size).toBe(1));
+    expect(kept.cut).toBe(false);
+    expect((await fetched("http://localhost:3000/")).status).toBe(403);
+    proxy.forwards([], path(), KEY);
+    await vi.waitFor(() => expect(kept.cut).toBe(true));
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    expect((await fetched("http://localhost:3001/")).status).toBe(403);
+  });
+
+  it("carries nothing to a port taken back while the door answered its knock: the connection is let go, and the chat's server asked nothing", async () => {
+    slow = 200;
+    const asking = fetched("http://localhost:3000/late");
+    await vi.waitFor(() => expect(knocks).toEqual([`${KEY} 3000`]));
+    proxy.forwards([3001], path(), KEY);
+    expect((await asking).status).toBe(403);
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    expect(seen).toEqual([]);
+  });
+
+  it("leaves nothing open behind the door when the browser leaves an answer partway through, or gives up before any", async () => {
+    for (const target of ["/stream", "/never"]) {
+      const asked = request({ host: "127.0.0.1", port, path: `http://localhost:3000${target}`, headers: { host: "localhost:3000", ...own, ...signing(signed) } });
+      asked.on("error", () => {});
+      asked.end();
+      await vi.waitFor(() => expect(seen.some(({ url }) => url === target)).toBe(true));
+      expect(behind.size).toBe(1);
+      asked.destroy();
+      await vi.waitFor(() => expect(behind.size).toBe(0));
+    }
   });
 });

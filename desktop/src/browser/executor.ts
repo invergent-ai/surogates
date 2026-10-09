@@ -1,6 +1,7 @@
 // The tool layer under a device's binder once the agent has a browser here (spec, Section 5):
 // the browser's kinds go to the identity's browser host, every other kind to the tools beneath.
 
+import { randomBytes } from "node:crypto";
 import { realpath, rm } from "node:fs/promises";
 import { basename, extname, sep } from "node:path";
 
@@ -66,7 +67,7 @@ function unfit(paths: unknown): string | null {
 
 export interface BrowsingOptions {
   tools: ToolLayer;
-  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "notComing" | "pause" | "show" | "onDownload">;
+  browser: Pick<BrowserClient, "perform" | "forget" | "stop" | "end" | "address" | "notComing" | "pause" | "show" | "onDownload" | "forwards">;
   // A browser operation runs only for a chat this computer bound: its binding, or undefined.
   bindingOf(root: string): unknown;
   // The browser Settings chose and the identity's profile for it, read at each operation; null: none here.
@@ -74,8 +75,10 @@ export interface BrowsingOptions {
   // Where its browser host stages downloads: the host's own temporary folder, under the identity's profiles.
   // A staged file is read, and removed, only there.
   staging: string;
-  // The sandbox, asked whether a chat listens on a port of its own loopback.
-  vm: Pick<VmClient, "listening">;
+  // The ports of chats' own servers their users let the browser open, each with its chat's root, as the journal holds them now.
+  ports(): Array<{ port: number; root: string }>;
+  // The sandbox's side of them: told each port's root, asked whether a root listens on one, and where the browser's proxy knocks.
+  vm: Pick<VmClient, "forwards" | "listening" | "door">;
 }
 
 export class Browsing implements ToolLayer {
@@ -97,6 +100,13 @@ export class Browsing implements ToolLayer {
   private readonly saving = new Map<string, AbortController>();
   // The look at where each staged file is, one after another: downloads are saved in the order they were staged.
   private looking: Promise<unknown> = Promise.resolve();
+  // What this device's browser knocks with at the sandbox's door, for this run of the app: 256 bits no other
+  // process is given but the browser host and the VM manager, so nothing else on this computer opens that door.
+  private readonly key = randomBytes(32).toString("hex");
+  // The ports told last, so a change of the bindings that changes none of them tells nobody.
+  private toldPorts: string | null = null;
+  // Stopped, or its computer's access ended: nothing is forwarded again in this run, whatever the journal holds.
+  private over = false;
 
   constructor(private readonly options: BrowsingOptions) {
     options.browser.onDownload((download) => {
@@ -255,8 +265,33 @@ export class Browsing implements ToolLayer {
     this.options.browser.notComing(of);
   }
 
-  /** Whether something in *root*'s sandbox listens on *port* of its own loopback now: no sandbox is started to ask. */
-  listening(root: string, port: number): Promise<boolean> {
+  /**
+   * What the browser may open of its chats' own servers (spec, Section 5), told to the two that enforce it:
+   * the sandbox, each port with its chat's root, and the browser's proxy, the ports alone. Called at the
+   * start and at each change of the bindings: a port allowed, taken back, moved to another chat, or gone
+   * with a deleted chat. A journal that cannot be read forwards nothing; nor does a run that has stopped.
+   */
+  forwarded(): void {
+    if (this.over) return;
+    let ports: Array<{ port: number; root: string }> = [];
+    try {
+      ports = this.options.ports();
+    } catch {
+      // Nothing is forwarded.
+    }
+    this.forward(ports);
+  }
+
+  private forward(ports: Array<{ port: number; root: string }>): void {
+    const telling = JSON.stringify(ports.map(({ port, root }) => [port, root]));
+    if (telling === this.toldPorts) return;
+    this.toldPorts = telling;
+    this.options.vm.forwards(this.key, ports.map(({ port, root }) => [port, root]));
+    this.options.browser.forwards(ports.map(({ port }) => port), this.options.vm.door, this.key);
+  }
+
+  /** Whether something in *root*'s sandbox listens on *port* of its own loopback now, or "busy" where it could not be asked: no sandbox is started to ask. */
+  listening(root: string, port: number): Promise<boolean | "busy"> {
     return this.options.vm.listening(root, port);
   }
 
@@ -354,13 +389,18 @@ export class Browsing implements ToolLayer {
     return this.options.tools.live();
   }
 
-  // The app's quit, a log out: the browser closes, and the tools stop.
+  // The app's quit, a log out: nothing is forwarded any more, the browser closes, and the tools stop. The
+  // journal keeps the ports, as it keeps the bindings: the next start forwards them under another key.
   async stop(): Promise<void> {
+    this.over = true;
+    this.forward([]);
     await Promise.all([this.options.browser.stop(), this.options.tools.stop()]);
   }
 
-  // The computer's access ended: the browser closes with every tab, and what runs in the tools ends.
+  // The computer's access ended: nothing is forwarded any more, the browser closes with every tab, and what runs in the tools ends.
   async end(): Promise<void> {
+    this.over = true;
+    this.forward([]);
     await Promise.all([this.options.browser.end(), this.options.tools.end?.()]);
   }
 }

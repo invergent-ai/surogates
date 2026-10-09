@@ -18,6 +18,7 @@ import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
+import { chatPort, chatPortOf } from "./ports.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
@@ -661,6 +662,8 @@ export class BrowserHost {
   private readonly begun = new WeakMap<Request, Begun>();
   // The navigations not known to have ended as a page, oldest first: a download may be the end of one.
   private readonly open = new Map<Request, Begun>();
+  // The ports of chats' own servers the browser may open, as the app told them: its proxy's, whenever one runs.
+  private forwarded: { ports: number[]; door: string; key: string } | null = null;
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -772,6 +775,15 @@ export class BrowserHost {
       this.named.delete(session);
       this.release(kept.input?.chooser);
     }
+  }
+
+  /**
+   * The ports of chats' own servers the browser may open from now on, the VM manager's *door* and the *key* this
+   * device knocks with there (BrowserProxy.forwards): what it carries to a port no longer among them ends now.
+   */
+  forwards(ports: readonly number[], door: string, key: string): void {
+    this.forwarded = { ports: [...ports], door, key };
+    this.proxy?.server.forwards(ports, door, key);
   }
 
   /**
@@ -918,6 +930,7 @@ export class BrowserHost {
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
     let page: Page | undefined;
+    let stale = false;
     try {
       const found = await this.pageFor(launch, session, stop);
       // Its user took the browser over while it launched, or while its tab opened: it has no page, and does
@@ -938,6 +951,8 @@ export class BrowserHost {
         if ((await until(settled, stop, HELD)) === HELD) return PAUSED;
         if (signal.aborted) return CANCELLED;
       }
+      // A tab still at the error page of a navigation refused before: this one's own is told from it below.
+      stale = kind === "browser.navigate" && page.url().startsWith("chrome-error:");
       const work = this.doing(page, operation(page, args, stop));
       const value = BOUNDED.has(kind) ? await this.bounded(page, work, stop) : await work;
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
@@ -955,9 +970,20 @@ export class BrowserHost {
       // later still: the next operation would meet it arriving, a script or a shot (Edge). So it
       // is waited for, a moment, until it has drawn a frame, before the answer.
       if (page && said(error).includes("net::ERR_")) {
-        const drawn = page.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 })
-          .then(() => page?.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"));
+        const shown = page;
+        // In a tab that showed an error page already, the address says nothing: its next one is waited for as it comes.
+        let next = (_frame: Frame) => {};
+        const committed = stale
+          ? new Promise<void>((done) => {
+              next = (frame) => {
+                if (frame === shown.mainFrame() && frame.url().startsWith("chrome-error:")) done();
+              };
+              shown.on("framenavigated", next);
+            })
+          : shown.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 });
+        const drawn = committed.then(() => shown.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"));
         await Promise.race([drawn, new Promise((done) => setTimeout(done, 2_000))]).catch(() => {});
+        shown.off("framenavigated", next);
       }
       // The browser says only net::ERR_* of what its proxy refused: a navigation's answer says why.
       return failed((await this.refused(args.url)) ?? said(error));
@@ -972,6 +998,20 @@ export class BrowserHost {
     } catch {
       return null;
     }
+    // A chat's own server: not allowed; or allowed, and the door does not open for it yet, or nothing takes the
+    // connection there now. One that answers failed by itself, and the browser's word stands.
+    const chat = chatPortOf(address.href);
+    if (chat !== null) {
+      if (!this.forwarded?.ports.includes(chat)) {
+        return `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${chat})`;
+      }
+      const reaches = (await this.proxy?.server.reaches(chat)) ?? "unreachable";
+      if (reaches === "refused") return `The sandbox has not been told that the agent's browser may open port ${chat} yet. Open it again in a moment.`;
+      return reaches === "open" ? null : `Nothing answers on port ${chat} of the chat's servers now: its server is not running in the chat's sandbox`;
+    }
+    // An allowed port over https: carried for nobody, and no service of this computer's either.
+    const secure = address.protocol === "https:" && address.username === "" && address.password === "" ? chatPort(address.hostname, Number(address.port || 443)) : null;
+    if (secure !== null && this.forwarded?.ports.includes(secure)) return `A chat's server opens over http:// only: open http://localhost:${secure}/ instead`;
     const found = destination(address.hostname, Number(address.port || (address.protocol === "https:" ? 443 : 80)));
     if (!found) return null;
     const key = `${found.host}:${found.port}`;
@@ -1978,6 +2018,8 @@ export class BrowserHost {
       const server = new BrowserProxy(this.options.proxy);
       return { server, port: await server.listen() };
     })();
+    // What was told before any proxy ran.
+    if (this.forwarded) this.proxy.server.forwards(this.forwarded.ports, this.forwarded.door, this.forwarded.key);
     keepWebRtcProxied(launch.profile);
     // Its first launch: what a host that was killed left staged here goes, and this host's own folder is made.
     let staging = this.staging;
