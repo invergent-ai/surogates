@@ -112,6 +112,8 @@ beforeEach(async () => {
       open.add(socket.once("close", () => open.delete(socket)));
       return socket;
     },
+    // A tunnel to a chat's port has half a second here to say what it is.
+    handshakeMs: 500,
   });
   port = await proxy.listen();
   signed = signIn(proxy.signIn());
@@ -515,11 +517,13 @@ describe("the browser's proxy", () => {
 describe("a chat's own servers, through the browser's proxy", () => {
   const KEY = "ab".repeat(32);
   // The VM manager's door (vm/inbound.ts), standing here: each knock, and behind it ports 3000 and 3001 the web
-  // server above, nothing on 3002, and every connection made behind it.
+  // server above, 3006 the echo server, 3007 one that says its last, nothing on 3002, and every connection made behind it.
   let folder: string;
   let door: Server;
   let knocks: string[];
   let behind: Set<Socket>;
+  let last: Server;
+  let lastWords: number;
   // How long the door takes to answer a knock it carries.
   let slow: number;
   // What the door answers a knock for a port nothing takes a connection on.
@@ -538,6 +542,19 @@ describe("a chat's own servers, through the browser's proxy", () => {
     });
     asked.on("error", fail);
     asked.end();
+  });
+  // A WebSocket's handshake sent down a tunnel, as the browser sends it, from a page of *origin*: what came back,
+  // "closed" and what had come once the proxy ends the tunnel.
+  const HANDSHAKE = "GET /live HTTP/1.1\r\nHost: localhost:3006\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n";
+  const upgraded = (socket: Socket, origin: string | null, first = HANDSHAKE) => new Promise<string>((done) => {
+    let heard = "";
+    socket.on("data", (chunk: Buffer) => {
+      heard += chunk.toString();
+      if (heard.includes("\r\n\r\n")) done(heard);
+    });
+    socket.on("close", () => done(`closed ${heard}`));
+    socket.on("error", () => {});
+    socket.write(`${first}${origin === null ? "" : `Origin: ${origin}\r\n`}\r\n`);
   });
   // This computer's own service on a port, on both of its loopback's families: what it heard.
   const ownService = async () => {
@@ -567,8 +584,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
         const line = chunk.toString().trimEnd();
         knocks.push(line);
         if (!line.startsWith(`${KEY} `)) return void socket.end("403 refused\n");
-        if (!/^[0-9a-f]{64} 300[01]( 6)?$/.test(line)) return void socket.end(`${closed}\n`);
-        const upstream = connectTcp({ host: "127.0.0.1", port: ports.web });
+        if (!/^[0-9a-f]{64} 300[0167]( 6)?$/.test(line)) return void socket.end(`${closed}\n`);
+        const upstream = connectTcp({ host: "127.0.0.1", port: line.includes(" 3006") ? ports.echo : line.includes(" 3007") ? lastWords : ports.web, allowHalfOpen: true });
         behind.add(upstream.once("close", () => behind.delete(upstream)));
         upstream.on("error", () => socket.destroy());
         upstream.once("connect", async () => {
@@ -582,11 +599,16 @@ describe("a chat's own servers, through the browser's proxy", () => {
       });
     });
     await new Promise<void>((done) => door.listen(path(), done));
-    proxy.forwards([3000, 3001, 3002], path(), KEY);
+    // A server that answers whatever it is sent with 4 MiB, and ends its half.
+    last = createServer({ allowHalfOpen: true }, (socket) => socket.on("error", () => {}).once("data", () => socket.end(Buffer.alloc(4 * 1024 * 1024, 97))));
+    await new Promise<void>((done) => last.listen(0, "127.0.0.1", done));
+    lastWords = (last.address() as { port: number }).port;
+    proxy.forwards([3000, 3001, 3002, 3006, 3007], path(), KEY);
   });
 
   afterEach(async () => {
     for (const socket of behind) socket.destroy();
+    await new Promise<void>((done) => last.close(() => done()));
     await new Promise<void>((done) => door.close(() => done()));
     rmSync(folder, { recursive: true, force: true });
   });
@@ -635,7 +657,7 @@ describe("a chat's own servers, through the browser's proxy", () => {
     expect(dialed).toEqual([]);
   });
 
-  it("refuses a port not allowed, either of the sandbox's own proxies' ports, every other spelling of this computer on an allowed one, and every tunnel, without a knock or a dial", async () => {
+  it("refuses a port not allowed, either of the sandbox's own proxies' ports, and every other spelling of this computer on an allowed one, to a request and to a tunnel, without a knock or a dial", async () => {
     proxy.forwards([3000, 3128, 1080], path(), KEY);
     for (const target of [
       "http://localhost:3003/", "http://127.0.0.1:80/", "http://[::1]:8080/",
@@ -653,8 +675,11 @@ describe("a chat's own servers, through the browser's proxy", () => {
     }
     // The rebinding name led elsewhere at its first lookup, and is refused once it leads here.
     expect((await fetched("http://rebinding.example:3000/")).status).toBe(403);
-    // A tunnel to a chat's port is carried for nobody, allowed or not: https, and a page's socket.
-    for (const authority of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "localhost:3003", "localhost.:3000", "0.0.0.0:3000", "127.0.0.2:3000", "app.localhost:3000", "[::ffff:127.0.0.1]:3000", "loop.example:3000"]) {
+    // A tunnel is refused as a plain request is: at its CONNECT, before a byte of what it would carry.
+    for (const authority of [
+      "localhost:3003", "127.0.0.1:443", "[::1]:8080", "localhost:3128", "127.0.0.1:1080",
+      "localhost.:3000", "0.0.0.0:3000", "127.0.0.2:3000", "app.localhost:3000", "[::ffff:127.0.0.1]:3000", "loop.example:3000",
+    ]) {
       expect((await connect(authority)).status, authority).toBe(403);
     }
     expect(knocks).toEqual([]);
@@ -690,7 +715,7 @@ describe("a chat's own servers, through the browser's proxy", () => {
     // A port taken back is no chat's page from then on.
     proxy.forwards([3000], path(), KEY);
     expect((await fetched("http://localhost:3000/", { ...cors, origin: "http://127.0.0.1:3001" })).status).toBe(403);
-    proxy.forwards([3000, 3001, 3002], path(), KEY);
+    proxy.forwards([3000, 3001, 3002, 3006], path(), KEY);
     expect(knocks).toEqual([]);
     const carried: Array<[string, Record<string, string>, string?]> = [
       ["the agent's own navigation, or its user's", own],
@@ -709,6 +734,186 @@ describe("a chat's own servers, through the browser's proxy", () => {
       ownRequest("GET", { ...cors, origin: "http://localhost:3000" }, allowed), ownRequest("GET", { ...cors, origin: "http://localhost:3001" }, allowed),
     ]).toEqual([true, false, false, true, false]);
     expect(dialed).toEqual([]);
+  });
+
+  it("carries a tunnel to an allowed port only when it carries its launch's sign-in: another program's socket is challenged at its CONNECT, with no knock at the door", async () => {
+    const service = await ownService();
+    try {
+      proxy.forwards([3006, service.port], path(), KEY);
+      const socket = (at: string) => `GET /live HTTP/1.1\r\nHost: ${at}\r\nOrigin: http://${at}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`;
+      for (const at of ["localhost:3006", "127.0.0.1:3006", "[::1]:3006", `localhost:${service.port}`, `127.0.0.1:${service.port}`, `[::1]:${service.port}`]) {
+        for (const written of [
+          // The handshake written by hand, behind its CONNECT and with none; a CONNECT that waits for its answer.
+          `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\n${socket(at)}`,
+          `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\n`,
+          // A sign-in that is not the launch's, the launch's own said twice, and one for a site, which is no proxy's.
+          `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\nProxy-Authorization: Basic c3Vyb2dhdGU6Z3Vlc3M=\r\n\r\n${socket(at)}`,
+          `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\nProxy-Authorization: ${signed}\r\nProxy-Authorization: ${signed}\r\n\r\n${socket(at)}`,
+          `CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\nAuthorization: ${signed}\r\n\r\n${socket(at)}`,
+        ]) {
+          expect(await raw(written), written).toMatch(CHALLENGED);
+        }
+      }
+      expect([knocks, dialed, service.hits, lookups, behind.size]).toEqual([[], [], 0, {}, 0]);
+      // The same tunnel, from the launch's own browser: carried through the door, and nowhere on this computer.
+      const own = await connect("localhost:3006");
+      expect(own.status).toBe(200);
+      expect(await upgraded(own.socket, "http://localhost:3006")).toMatch(/^echo GET \/live HTTP\/1\.1\r\n/);
+      own.socket.destroy();
+      const stray = await connect(`localhost:${service.port}`);
+      expect([stray.status, await upgraded(stray.socket, "http://localhost:3006")]).toEqual([200, "closed "]);
+      expect([knocks, dialed, service.hits]).toEqual([[`${KEY} 3006`, `${KEY} ${service.port}`], [], 0]);
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("carries a WebSocket a page of a port allowed now opens, whole and both ways, by each of the loopback's names, and nothing of the proxy's sign-in with it", async () => {
+    for (const [authority, knock] of [["localhost:3006", `${KEY} 3006`], ["127.0.0.1:3006", `${KEY} 3006`], ["[::1]:3006", `${KEY} 3006 6`], ["LOCALHOST:3006", `${KEY} 3006`]] as const) {
+      const opened = await connect(authority);
+      expect(opened.status, authority).toBe(200);
+      // The echo server answers what it was sent: the handshake reached it whole, as the browser wrote it.
+      expect(await upgraded(opened.socket, "http://127.0.0.1:3000"), authority).toBe(`echo ${HANDSHAKE}Origin: http://127.0.0.1:3000\r\n\r\n`);
+      expect(await said(opened.socket, "frame")).toBe("echo frame");
+      expect(knocks.at(-1)).toBe(knock);
+      opened.socket.destroy();
+    }
+    // Bytes sent with the handshake, before its answer, follow it.
+    const early = await connect("localhost:3006");
+    let heard = "";
+    early.socket.on("data", (chunk: Buffer) => (heard += chunk.toString())).write(`${HANDSHAKE}Origin: http://localhost:3006\r\n\r\nfirst frame`);
+    await vi.waitFor(() => expect(heard.replaceAll("echo ", "")).toBe(`${HANDSHAKE}Origin: http://localhost:3006\r\n\r\nfirst frame`));
+    early.socket.destroy();
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    expect(dialed).toEqual([]);
+  });
+
+  it("carries no other tunnel to an allowed port: another site's socket, one from a port not allowed, https, or bytes that are no handshake, each closed with no knock", async () => {
+    for (const [what, origin, first] of [
+      ["another site's page", "http://evil.example", undefined],
+      ["no origin said", null, undefined],
+      ["an opaque origin", "null", undefined],
+      ["a name that only looks like this computer's", "http://localhost.evil.example:3000", undefined],
+      ["a name with a dot after it", "http://localhost.:3000", undefined],
+      ["an https page of this computer's name", "https://localhost:3000", undefined],
+      ["a page of a port not allowed", "http://localhost:5173", undefined],
+      ["a page of one of the sandbox's own proxies' ports", "http://localhost:3128", undefined],
+      ["no upgrade", "http://localhost:3000", "GET /live HTTP/1.1\r\nHost: localhost:3006\r\n"],
+      ["an upgrade to something else", "http://localhost:3000", "GET /live HTTP/1.1\r\nHost: localhost:3006\r\nUpgrade: h2c\r\n"],
+      ["another method", "http://localhost:3000", "POST /live HTTP/1.1\r\nHost: localhost:3006\r\nUpgrade: websocket\r\n"],
+      ["another version", "http://localhost:3000", "GET /live HTTP/1.0\r\nHost: localhost:3006\r\nUpgrade: websocket\r\n"],
+      ["two origins, the chat's last", "http://localhost:3000", "GET /live HTTP/1.1\r\nUpgrade: websocket\r\nOrigin: http://evil.example\r\n"],
+      ["two origins, the chat's first", "http://evil.example", "GET /live HTTP/1.1\r\nUpgrade: websocket\r\nOrigin: http://localhost:3000\r\n"],
+      ["an origin on a line folded into the one before", null, "GET /live HTTP/1.1\r\nUpgrade: websocket\r\nOrigin: http://localhost:3000\r\n ,http://evil.example\r\n"],
+      ["an origin after a line that is no header", null, "GET /live HTTP/1.1\r\nUpgrade: websocket\r\nnot a header\r\nOrigin: http://localhost:3000\r\n"],
+      ["lines ended otherwise", null, "GET /live HTTP/1.1\nUpgrade: websocket\nOrigin: http://localhost:3000\n\n"],
+    ] as const) {
+      const tunnel = await connect("127.0.0.1:3006");
+      expect(tunnel.status, what).toBe(200);
+      expect(await upgraded(tunnel.socket, origin, first), what).toBe("closed ");
+    }
+    // A port taken back is no chat's page from then on.
+    proxy.forwards([3006], path(), KEY);
+    const stale = await connect("localhost:3006");
+    expect(await upgraded(stale.socket, "http://localhost:3000")).toBe("closed ");
+    proxy.forwards([3000, 3001, 3002, 3006], path(), KEY);
+    const closes = (socket: Socket, written: string | Buffer) => new Promise<string>((done) => {
+      socket.on("close", () => done("closed"));
+      socket.on("error", () => {});
+      socket.write(written);
+    });
+    // A TLS hello, as https to a chat's port begins: the proxy cannot see who asks inside it. Ended at its first bytes.
+    const tls = await connect("localhost:3006");
+    let started = performance.now();
+    expect(await closes(tls.socket, Buffer.from([0x16, 0x03, 0x01, 0x02, 0x00, 0x01]))).toBe("closed");
+    expect(performance.now() - started).toBeLessThan(400);
+    // A handshake that never ends, in its time; one that never begins; and one past what a handshake holds.
+    for (const written of ["GET /live HTTP/1.1\r\nUpgrade: websocket\r\n", ""]) {
+      const slow = await connect("localhost:3006");
+      started = performance.now();
+      expect(await closes(slow.socket, written)).toBe("closed");
+      expect(performance.now() - started).toBeGreaterThan(400);
+      expect(performance.now() - started).toBeLessThan(2_000);
+    }
+    const long = await connect("localhost:3006");
+    expect(await upgraded(long.socket, "http://localhost:3000", `GET /live HTTP/1.1\r\nUpgrade: websocket\r\nX-Long: ${"x".repeat(20_000)}\r\n`)).toBe("closed ");
+    expect([knocks, dialed, behind.size]).toEqual([[], [], 0]);
+  });
+
+  it("closes a tunnel to a port nothing takes a connection on, to a full sandbox and to a door that is not there or does not open: answered 200 first, it carries nothing", async () => {
+    for (const full of ["502 ECONNREFUSED", "502 busy"]) {
+      closed = full;
+      const tunnel = await connect("localhost:3002");
+      expect([tunnel.status, await upgraded(tunnel.socket, "http://localhost:3000")], full).toEqual([200, "closed "]);
+    }
+    proxy.forwards([3000, 3006], path(), "cd".repeat(32));
+    const other = await connect("localhost:3006");
+    expect(await upgraded(other.socket, "http://localhost:3000")).toBe("closed ");
+    proxy.forwards([3000, 3006], join(folder, "gone.sock"), KEY);
+    const gone = await connect("localhost:3006");
+    expect(await upgraded(gone.socket, "http://localhost:3000")).toBe("closed ");
+    expect([dialed, behind.size]).toEqual([[], 0]);
+  });
+
+  it("ends a socket it carries to a port taken back, at once, and leaves another port's open; one its page closes, half or whole, leaves nothing behind the door", async () => {
+    const live = async (authority: string) => {
+      const { socket } = await connect(authority);
+      expect(await upgraded(socket, "http://localhost:3000")).toContain("echo GET /live");
+      const state = { socket, ended: false };
+      socket.once("close", () => (state.ended = true));
+      return state;
+    };
+    // A socket the page closes whole, one it ends, and one whose browser is gone with a reset.
+    for (const leave of [(socket: Socket) => socket.destroy(), (socket: Socket) => socket.end(), (socket: Socket) => socket.resetAndDestroy()]) {
+      const { socket } = await live("localhost:3006");
+      expect(behind.size).toBe(1);
+      leave(socket);
+      await vi.waitFor(() => expect(behind.size).toBe(0));
+    }
+    // Two sockets to the port, by two of its names: taken back, both end.
+    const [one, other] = [await live("localhost:3006"), await live("127.0.0.1:3006")];
+    expect(behind.size).toBe(2);
+    proxy.forwards([3000], path(), KEY);
+    await vi.waitFor(() => expect([one.ended, other.ended, behind.size]).toEqual([true, true, 0]));
+    // And only the port taken back: a socket to another stays, and carries on.
+    proxy.forwards([3000, 3001, 3006, 3007], path(), KEY);
+    const stays = await live("localhost:3006");
+    proxy.forwards([3001, 3006, 3007], path(), KEY);
+    await sleep(100);
+    expect([stays.ended, await said(stays.socket, "still")]).toEqual([false, "echo still"]);
+    // Its server gone is the page's socket's end.
+    for (const socket of behind) socket.destroy();
+    await vi.waitFor(() => expect(stays.ended).toBe(true));
+    // A server that says its last and ends its half: the page's socket has all of it, 4 MiB read late, and then ends whole.
+    const last = await connect("localhost:3007");
+    last.socket.pause().write(`${HANDSHAKE}Origin: http://localhost:3006\r\n\r\n`);
+    await vi.waitFor(() => expect(behind.size).toBe(1));
+    await sleep(200);
+    let got = 0;
+    const whole = new Promise<number>((done) => last.socket.on("data", (chunk: Buffer) => (got += chunk.length)).once("close", () => done(got)));
+    last.socket.resume();
+    expect(await whole).toBe(4 * 1024 * 1024);
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    expect((await connect("localhost:3000")).status).toBe(403);
+    expect(dialed).toEqual([]);
+  });
+
+  it("leaves nothing behind the door for a tunnel whose browser goes while the door answers its knock, and nothing open for one closed by the proxy's own close", async () => {
+    slow = 200;
+    const early = await connect("localhost:3006");
+    early.socket.on("error", () => {});
+    early.socket.write(`${HANDSHAKE}Origin: http://localhost:3000\r\n\r\n`);
+    await vi.waitFor(() => expect(knocks).toEqual([`${KEY} 3006`]));
+    early.socket.destroy();
+    await sleep(2 * slow);
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    slow = 0;
+    const open = await connect("localhost:3006");
+    expect(await upgraded(open.socket, "http://localhost:3000")).toContain("echo GET /live");
+    const ended = new Promise((done) => open.socket.once("close", done));
+    await proxy.close();
+    await ended;
+    await vi.waitFor(() => expect(behind.size).toBe(0));
   });
 
   it("gives the browser none of a chat's server's own 407: 502 in its place, in the proxy's words, and the server let go", async () => {

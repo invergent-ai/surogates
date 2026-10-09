@@ -14,7 +14,8 @@
 // port first of all. The profile is every chat's, so the proxy cannot tell whose tab asks;
 // what it can read, on a request its own browser signed, is where that browser says the
 // request comes from, and it carries only what comes from a page of a chat's own server, its
-// user or its agent (ownRequest).
+// user or its agent (ownRequest). A tunnel says nothing of that at its CONNECT, so its first
+// bytes are read: only a WebSocket such a page opens is carried (ownSocket).
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
@@ -27,7 +28,12 @@ import { chatPort, chatPortOf, SANDBOX_PORTS } from "./ports.js";
 
 export interface BrowserProxyOptions extends ReachOptions {
   connect?: Dial; // the connection to a judged address; net.connect by default
+  handshakeMs?: number; // how long a tunnel to a chat's port has to send its WebSocket's handshake
 }
+
+// How long a tunnel to a chat's port has to say what it is, and the most a WebSocket's handshake holds.
+const HANDSHAKE_MS = 5_000;
+const MAX_HANDSHAKE = 16 * 1024;
 
 // The ports of chats' own servers a browser may open, and how its connections to them are carried:
 // the VM manager's door, and the key its device knocks with there.
@@ -64,6 +70,22 @@ export function ownRequest(method: string, headers: IncomingHttpHeaders, allowed
   // The loopback's other name for a chat's page, which the browser calls another site.
   const from = headers.origin ?? headers.referer;
   const page = typeof from === "string" ? chatPortOf(from) : null;
+  return page !== null && allowed.has(page);
+}
+
+/**
+ * Whether *head*, a tunnel's first bytes up to their empty line, is a WebSocket's handshake (RFC 6455)
+ * from a page of a chat's own server, on a port *allowed* now: a GET that upgrades, with one Origin,
+ * which the browser writes and no page's code can set. The browser sends no fetch metadata with it.
+ * Every line is a header's own: one folded into the line before, or that names nothing, refuses it.
+ */
+export function ownSocket(head: string, allowed: ReadonlySet<number>): boolean {
+  const [first = "", ...lines] = head.split("\r\n");
+  if (!/^GET \S+ HTTP\/1\.1$/.test(first) || lines.some((line) => !/^[!#-'*+\-.0-9A-Z^-z|~]+:/.test(line))) return false;
+  const named = (name: string) => lines.filter((line) => line.toLowerCase().startsWith(`${name}:`)).map((line) => line.slice(name.length + 1).trim());
+  const [origin, ...others] = named("origin");
+  if (origin === undefined || others.length > 0 || !named("upgrade").some((value) => value.toLowerCase() === "websocket")) return false;
+  const page = chatPortOf(origin);
   return page !== null && allowed.has(page);
 }
 
@@ -287,6 +309,9 @@ export class BrowserProxy {
     }
     // The https upgrade's try at a check comes here; the plain request after it is answered.
     if (to && this.answered(to.host)) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+    // Signed in, or it was challenged above: a chat's own server is carried into its sandbox, and never dialed here.
+    const chat = to && !addresses ? chatPort(to.host, to.port) : null;
+    if (to && chat !== null) return void this.socketToChat(chat, to.host === "[::1]" ? 6 : 4, client, head, gone.signal);
     if (!to || !addresses) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     let upstream: Socket;
     try {
@@ -303,6 +328,55 @@ export class BrowserProxy {
     if (head.length > 0) upstream.write(head);
     upstream.pipe(client);
     client.pipe(upstream);
+  }
+
+  // A tunnel to a chat's port: only a WebSocket that a page of a chat's own server opens is carried. The browser
+  // says nothing of who asks with the CONNECT itself, so the tunnel is taken and its first bytes read, a moment
+  // and so many of them: another site's socket, https, whose inside cannot be read, and anything else end it,
+  // with no knock at the door.
+  private async socketToChat(port: number, first: 4 | 6, client: Duplex, early: Buffer, gone: AbortSignal): Promise<void> {
+    if (!this.chats?.ports.has(port)) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+    client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    const head = await new Promise<Buffer | null>((resolve) => {
+      let read = early;
+      const timer = setTimeout(() => settle(null), this.options.handshakeMs ?? HANDSHAKE_MS);
+      const settle = (whole: Buffer | null) => {
+        clearTimeout(timer);
+        client.off("data", more);
+        client.off("close", left);
+        client.pause();
+        resolve(whole);
+      };
+      const left = () => settle(null);
+      const more = (chunk: Buffer) => {
+        read = Buffer.concat([read, chunk]);
+        // A handshake begins with its GET, as a TLS hello does not.
+        if (read.length > MAX_HANDSHAKE || !"GET ".startsWith(read.subarray(0, 4).toString("latin1"))) return settle(null);
+        if (read.includes("\r\n\r\n")) settle(read);
+      };
+      client.on("data", more);
+      client.once("close", left);
+      more(Buffer.alloc(0));
+    });
+    const allowed = this.chats?.ports;
+    if (!head || !allowed || !ownSocket(head.subarray(0, head.indexOf("\r\n\r\n")).toString("latin1"), allowed)) return void client.destroy();
+    const upstream = await this.toChat(port, first, gone);
+    if (typeof upstream === "string") return void client.destroy();
+    this.keep(upstream);
+    upstream.once("close", () => client.destroy());
+    client.once("close", () => upstream.destroy());
+    // A browser closes a tunnel whole, never half: its end ends the tunnel. A chat's server that ends its
+    // half has said all it will: the tunnel goes once the browser has every byte of it.
+    client.once("end", () => upstream.destroy());
+    upstream.once("end", () => {
+      if (client.writableFinished) client.destroy();
+      else client.once("finish", () => client.destroy());
+    });
+    upstream.write(head);
+    upstream.pipe(client);
+    client.pipe(upstream);
+    upstream.resume();
+    client.resume();
   }
 
   // Plain http, as a browser sends it to a proxy: the absolute address, one request a connection.
