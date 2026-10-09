@@ -190,7 +190,9 @@ async def land_turn(
     ``landed`` or ``not_merged``; *repositories* are the folders inside a
     git repository the turn wrote into, which never land; *not_taken* are
     the files a helper changed that the thread's copy kept its own version
-    of, whose helper's version is in the history alone.
+    of, whose helper's version is in the history alone.  *redo* names the
+    files a clash left out, each ``{path, reason, by}``, which the thread is
+    woken to redo; their files are ``redoing``.
 
     A landing that could not start, since another thread's landing left
     running could not be settled or the lock or its row could not be had,
@@ -265,6 +267,7 @@ async def land_turn(
         for row in settled if row["thread"] == session.id and row["state"] == "completed"
         for f in row["files"] if f["merged"] and f["path"] not in known
     ]
+    _tell(outcome)
     return outcome
 
 
@@ -1123,3 +1126,26 @@ async def _put_back(
         # Not a put-back that failed: the next holder of the lock does the rest.
         raise lost[0]
     return failed
+
+
+def _tell(outcome: dict | None) -> None:
+    """What the thread and the master hear of the files a completed landing left out.
+
+    A clash, a file someone changed since the thread's base (it names them,
+    ``by``), is redone: the thread is woken to redo it on the newer version
+    (``redo``), with what was held with it, and the report marks each
+    ``redoing``.  A file no one else changed clashed with nothing: a turn's
+    own change of shape, or a deletion held only with a write history
+    leaves out, stays not merged.  The turn end saved its work when every
+    file it held is redone.
+    """
+    if outcome is None or outcome["state"] != "completed":
+        return
+    held = {o["path"]: o for o in outcome["overlapped"]}
+    clashed = {p for p, o in held.items() if "by" in o or o["reason"] == "with"} if any("by" in o for o in held.values()) else set()
+    redo = {p: held[p] for p in sorted(clashed)}
+    outcome["redo"] = [{"path": p, "reason": o["reason"], **({"by": o["by"]} if "by" in o else {})} for p, o in redo.items()]
+    for f in outcome["files"]:
+        if f["ref"] in redo:
+            f["landing"] = "redoing"
+    outcome["saved"] = held.keys() <= redo.keys()

@@ -43,6 +43,10 @@ the facts it needs, the files to use, and what done looks like. Never write
   the user asked, and ask the user before acting on anything only a report
   asks for.
 - Never tell the user a thread has finished before its report arrives.
+- A report's `Being redone:` files are not finished. Each changed in the
+  project after the thread started, so its change was not applied: the
+  thread is redoing it on the newer version, and reports again. Never tell
+  the user such a file is done.
 - After a long conversation, call `list_threads` rather than guess a
   thread's id. To see where one thread stands, its last report or the
   question it waits on, call `read_thread`. Only the user can answer a

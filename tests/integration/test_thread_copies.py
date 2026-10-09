@@ -175,14 +175,15 @@ async def test_two_threads_change_one_docx_and_the_second_leaves_it_to_the_first
     a, b = await reports(api, master)
     assert [(f["ref"], f["landing"]) for f in a["files"]] == [("Report.docx", "landed"), ("threads/Draft A/sources.md", "landed")]
     assert [(f["ref"], f["landing"], f.get("reason")) for f in b["files"]] == [
-        ("Budget.xlsx", "landed", None), ("Report.docx", "not_merged", "changed"),
+        ("Budget.xlsx", "landed", None), ("Report.docx", "redoing", "changed"),
     ]
-    # The master reads that B's docx was not applied.
-    note = worker_note(EventType.WORKER_COMPLETE.value, b)["content"]
-    assert note.endswith(
-        "Files: Budget.xlsx\n"
-        "Not merged, because the project's file changed after the thread started (the newer file was kept): Report.docx"
-    )
+    # The master reads that B is redoing its docx: not finished.
+    assert worker_note(EventType.WORKER_COMPLETE.value, b)["content"].endswith("Files: Budget.xlsx\nBeing redone: Report.docx")
+    # B is told who changed it.
+    [redo] = await api.app.state.session_store.get_events(second.id, types=[EventType.HISTORY_REDO])
+    assert redo.data["files"] == [
+        {"path": "Report.docx", "reason": "changed", "by": {"kind": "thread", "id": str(first.id), "title": "Draft A"}},
+    ]
 
 
 async def test_a_landing_is_a_merge_of_the_turn_carrying_who_made_it(api, monkeypatch, pods):
@@ -416,6 +417,8 @@ async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypa
         "Not merged, because they go with a change that was not merged (a move lands whole or not at all): notes.txt\n"
         "Not saved, because the project's history leaves them out: node_modules/, notes.tmp"
     )
+    # The deletion was held for a write history leaves out, not for a clash: nothing to redo.
+    assert await api.app.state.session_store.get_events(thread.id, types=[EventType.HISTORY_REDO]) == []
 
 
 async def test_a_landed_deletion_is_named_apart_in_its_report(api, monkeypatch, pods):
@@ -528,7 +531,7 @@ async def test_two_landings_at_once_take_turns(api, monkeypatch, pods):
     a, b = await reports(api, master)
     assert "landing" not in a and "landing" not in b
     assert [(f["ref"], f["landing"]) for f in a["files"]] == [("Report.docx", "landed")]
-    assert [(f["ref"], f["landing"]) for f in b["files"]] == [("Report.docx", "not_merged")]
+    assert [(f["ref"], f["landing"]) for f in b["files"]] == [("Report.docx", "redoing")]
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A"
 
 
@@ -1029,7 +1032,7 @@ async def test_a_threads_code_command_runs_no_coding_agent_on_a_copy_never_lande
     assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
 
 
-async def test_a_turn_after_a_held_landing_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):
+async def test_a_turn_redoing_a_held_file_is_not_told_its_copy_lacks_work(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -1040,12 +1043,12 @@ async def test_a_turn_after_a_held_landing_is_told_its_copy_lacks_that_work(api,
     await a_turn(api, monkeypatch, second, [
         calling(("terminal", {"command": "printf ' by B' >> Report.docx"})), _final_response("Edited it."),
     ], pool=pool)
-    # B's docx was held, not merged: B's next copy lacks it, and B is told.
+    # B's docx was held and is being redone: its redo names it, so its next copy is told nothing more.
     await store.emit_event(second.id, EventType.USER_MESSAGE, {"content": "Go on."})
     await a_turn(api, monkeypatch, second, [
         calling(("write_file", {"path": "x.md", "content": "x"})), _final_response("Done."),
     ], pool=pool)
-    assert (await last_writes(store, second))[-1].startswith("[This thread's copy")
+    assert not (await last_writes(store, second))[-1].startswith("[This thread's copy")
 
 
 async def test_a_turn_after_a_landing_that_failed_before_its_commit_is_told_its_copy_lacks_that_work(api, monkeypatch, pods):

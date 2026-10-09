@@ -131,6 +131,47 @@ def _turn_for_a_hand_back(events: list[Any]) -> bool:
     return opened_by == "hand back"
 
 
+def _redo_unread(events: list[Any]) -> bool:
+    """Whether a project's thread was told to redo files and none of the model's requests came after:
+    no turn has read it.
+
+    Told like a hand back (``_hand_back_unread``): a command's end moves the
+    cursor, and a redo is written as its turn ends, where a command typed
+    during that turn still waits.
+    """
+    unread = False
+    for event in events:
+        if _event_type(event) == EventType.LLM_REQUEST.value:
+            unread = False
+        elif _event_type(event) == EventType.HISTORY_REDO.value:
+            unread = True
+    return unread
+
+
+def _turn_for_a_redo(events: list[Any], *, is_command: Any) -> bool:
+    """Whether the turn a wake is about to run is the one a redo gives its thread.
+
+    The redo is unread and nothing was said after it that opens a turn of
+    its own.  A wake reads the user's last message to run its command; in
+    such a turn that message is not what the wake is for, and its command
+    must not run again.  A command the harness answers itself (*is_command*
+    says which) opens no turn of the model's, typed before the redo or after
+    it; any other message after the redo is the turn's, and its command runs
+    once.  A turn the redo opened and a dead worker cut off before its first
+    request is still the redo's.
+    """
+    opened = False
+    for event in events:
+        kind = _event_type(event)
+        if kind == EventType.LLM_REQUEST.value:
+            opened = False
+        elif kind == EventType.HISTORY_REDO.value:
+            opened = True
+        elif kind == EventType.USER_MESSAGE.value and not is_command(event):
+            opened = False
+    return opened
+
+
 #: The field a wake of this harness sets on its ``harness.wake``: under such
 #: a wake every answer to a command names its message, and a command is
 #: never given to the model as words.  A wake without it is an older
@@ -234,11 +275,11 @@ _GOAL_TURN_MESSAGES = frozenset({"outcome_kickoff", "outcome_continuation"})
 def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: Any) -> int | None:
     """Return the id of the first event in *events* that still waits for the model to read it.
 
-    A worker's report; a message of the user's own that is no command
-    (*is_plain_message* says which); and, while a goal is in flight, the
-    message that gives the goal its next turn.  A request reads what was
-    written before it, so the unread ones are those after the log's last
-    ``llm.request``.
+    A worker's report; a redo a thread was told of; a message of the
+    user's own that is no command (*is_plain_message* says which); and,
+    while a goal is in flight, the message that gives the goal its next
+    turn.  A request reads what was written before it, so the unread ones
+    are those after the log's last ``llm.request``.
     """
     first: int | None = None
     for event in events:
@@ -247,6 +288,7 @@ def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: 
             first = None
         elif first is None and (
             event_type in _REPORT_EVENT_TYPES
+            or event_type == EventType.HISTORY_REDO.value
             or is_plain_message(event)
             or goal_in_flight and _gives_a_goal_its_turn(event)
         ):
