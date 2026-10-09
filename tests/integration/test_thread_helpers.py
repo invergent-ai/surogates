@@ -36,7 +36,7 @@ from tests.test_steer_loop import _final_response
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import FENCED, edited, ends, stored
 from .test_thread_copies import a_thread, a_waking_thread_harness, git, pods, reports  # noqa: F401  (pods is a fixture)
-from .test_turn_sagas import a_looping_harness, a_turn, calling, stop
+from .test_turn_sagas import a_chat, a_looping_harness, a_turn, calling, stop
 from .test_workstream_threads import call_tool
 from .test_workstreams import create, master_of
 
@@ -852,3 +852,14 @@ async def test_a_stop_of_a_turn_during_which_an_earlier_turns_worker_handed_back
     await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
     # The worker's file lands with the next turn; the stopped turn's does not.
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "started.md"]
+
+
+async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_with_no_task_left_in_any_chat(api):
+    chat = await a_chat(api)  # no thread: the same answer as in a step that hands a copy on
+    store = api.app.state.session_store
+    await store.update_session_config_key(chat.id, "coordinator", True)
+    chat = await store.get_session(chat.id)
+    answer = await call_tool(api, chat, "spawn_task", goal="Draft the sources.", agent_type="no-such-agent")
+    assert "no-such-agent" in answer["error"] and "no task was made" in answer["error"], answer
+    async with api.app.state.session_factory() as db:
+        assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": chat.id})).scalar() == 0
