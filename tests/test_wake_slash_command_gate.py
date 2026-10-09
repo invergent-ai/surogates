@@ -192,8 +192,8 @@ def test_a_project_thread_runs_a_command_whose_helpers_work_on_copies_of_their_o
     ("loop", "A thread can't start /loop yet: do this step in the thread itself."),
     ("code", "A thread can't start /code yet: do this step in the thread itself."),
     # As a thread in the cloud answers them: the thread's rule comes before the local folder's.
-    ("auto-research", "A thread can't start /auto-research yet: do this step in the thread itself."),
-    ("deep-research", "A thread can't start /deep-research yet: do this step in the thread itself."),
+    ("auto-research", thread_refusal("/auto-research")),
+    ("deep-research", thread_refusal("/deep-research")),
     ("mission", None),
 ])
 def test_a_project_thread_on_the_users_computer_runs_the_commands_its_folder_can(command, answer):

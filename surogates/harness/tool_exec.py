@@ -37,7 +37,7 @@ from surogates.runtime.governance import floor_gate
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
-from surogates.workstreams import is_project_thread, thread_refusal, under_a_thread
+from surogates.workstreams import THREAD_REFUSED_AGENT_TYPES, is_project_thread, sub_agent, thread_refusal, under_a_thread
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -503,6 +503,28 @@ THREAD_REFUSED_TOOLS: frozenset[str] = frozenset({"cron_create", "dispatch_exper
 # only reaches a session that exists, or that a thread may not run, hands
 # nothing on, and a new tool that starts a session is put here on purpose.
 HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task"})
+
+
+def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
+    """What a session under a project's thread is refused in the call of *tool_name*, as its refusal names it; None when it may run.
+
+    A tool the thread's rule refuses, or a research's own sub-agent asked
+    for by its type, in any goal of the call: deep research started so runs
+    as from its command, and cannot finish in a thread.
+    """
+    if not under_a_thread(config):
+        return None
+    if tool_name in THREAD_REFUSED_TOOLS:
+        return tool_name
+    if tool_name in HELPER_STARTING_TOOLS and isinstance(arguments, dict):
+        goals = arguments.get("goals")
+        asked = [arguments, *(goal for goal in (goals if isinstance(goals, list) else []) if isinstance(goal, dict))]
+        for kind in (str(goal.get("agent_type") or "").strip() for goal in asked):
+            if kind in THREAD_REFUSED_AGENT_TYPES:
+                return sub_agent(kind)
+    return None
+
+
 #: What a thread's step says of files it and a helper both changed.
 NOT_TAKEN_UP = "Changed here and by a helper, so this copy keeps its own version (the helper's is in the history)"
 
@@ -1370,7 +1392,7 @@ async def _run_single_tool(
         and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
         and (offered_tools is None or tool_name in offered_tools)
         and (not allowed or tool_name in allowed) and parse_error is None
-        and tool_name not in THREAD_REFUSED_TOOLS
+        and thread_refuses(tool_name, tool_args, session.config) is None
     ):
         checkpoint_hash = await _snapshot_copy(
             session, tenant, sandbox_pool, credential_vault, reason=f"before {tool_name}",
@@ -1747,8 +1769,8 @@ async def _run_single_tool(
 
         if image_dispatched:
             pass  # result_content already set by the image branch.
-        elif tool_name in THREAD_REFUSED_TOOLS and under_a_thread(session.config):
-            result_content = json.dumps({"error": thread_refusal(tool_name)})
+        elif (refused := thread_refuses(tool_name, tool_args, session.config)) is not None:
+            result_content = json.dumps({"error": thread_refusal(refused)})
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)
         elif replay_of is not None and location != ToolLocation.SANDBOX:

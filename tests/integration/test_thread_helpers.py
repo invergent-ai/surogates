@@ -251,7 +251,7 @@ async def test_a_threads_research_command_is_refused_and_starts_nothing(api, mon
     await asyncio.wait_for(a_worker_waking(api, monkeypatch, pool, thread, a_turn_of_it).wake(thread.id), 60)
     [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
     name = command.split()[0]
-    assert answer == f"A thread can't start {name} yet: do this step in the thread itself.", why
+    assert answer == f"A thread can't start {name} {NO_OTHER_WAY}", why
     # No turn ran for it, no helper or task was started, no research run made, no pod, no history.
     thread = await store.get_session(thread.id)
     assert (ran, await helpers_of(api, thread), pods.pods) == ([], [], {})
@@ -718,3 +718,44 @@ async def test_a_threads_helper_and_its_own_are_refused_the_tools_their_thread_i
     its_own = await create_child_session(store=store, parent=helper, channel="worker")
     for session in (helper, its_own):
         assert await call_tool(api, session, tool) == {"error": thread_refusal(tool)}
+
+
+NO_OTHER_WAY = "yet, and has no other way to do it: tell the user it cannot be done in a project's thread."
+
+
+@pytest.mark.parametrize("tool, arguments, kind", [
+    ("delegate_task", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
+    ("delegate_task", {"goals": [{"goal": "Part one."}, {"goal": "Heat pumps", "agent_type": "deep-research"}]}, "deep-research"),
+    ("delegate_task", {"goal": "Write the report.", "agent_type": "research-writer"}, "research-writer"),
+    ("spawn_worker", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
+    ("spawn_task", {"goal": "Run the experiment.", "agent_type": "arbor-executor"}, "arbor-executor"),
+], ids=["delegate_task", "one goal of several", "the writer alone", "spawn_worker", "an experiment's executor"])
+async def test_a_thread_and_its_helpers_start_no_research_sub_agent_by_its_type(api, monkeypatch, pods, tool, arguments, kind):
+    thread = await a_coordinating_thread(api)
+    # The agent has the sub-agents: nothing but the thread's rule stands between the call and them.
+    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", AsyncMock(return_value=an_agent("terminal", "delegate_task")))
+    monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
+    locks = await project_locks_taken(monkeypatch)
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling((tool, arguments)), _final_response("Done."),
+    ], pool=SandboxPool(pods), saga_settings=FENCED), 120)
+    # Deep research run in a thread, with or without its command, starts a planner and a writer on copies of
+    # their own, where the writer finds no evidence; and the planner's .research/ folder lands among the files.
+    [answer] = [json.loads(result) for result in await results_of(api, thread, tool)]
+    assert answer == {"error": f'A thread can\'t start the "{kind}" sub-agent {NO_OTHER_WAY}'}
+    [call] = await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_CALL])
+    assert "checkpoint_hash" not in call.data
+    assert (await helpers_of(api, thread), pods.pods, locks) == ([], {}, [])
+    # A helper of the thread, and its own, get the same answer.
+    store = api.app.state.session_store
+    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    for session in (helper, await create_child_session(store=store, parent=helper, channel="worker")):
+        assert await call_tool(api, session, tool, **arguments) == answer
+
+
+async def test_what_a_thread_has_no_other_way_to_do_is_refused_in_words_that_send_it_nowhere_else():
+    # "Do this step in the thread itself" would, for research, be the very delegation that is refused.
+    for name in ("/deep-research", "/auto-research", "dispatch_experiments", 'the "deep-research" sub-agent'):
+        assert thread_refusal(name) == f"A thread can't start {name} {NO_OTHER_WAY}"
+    for name in ("/loop", "/code", "cron_create"):
+        assert thread_refusal(name) == f"A thread can't start {name} yet: do this step in the thread itself."
