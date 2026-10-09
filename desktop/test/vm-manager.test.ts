@@ -15,7 +15,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { Inbound } from "../src/guest/inbound.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
-import { Carrier } from "../src/vm/inbound.js";
+import { Carrier, DOOR, Door, Forwarded } from "../src/vm/inbound.js";
 import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
   type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
@@ -66,7 +66,7 @@ let agent: Duplex | undefined;
 let agentNet: Duplex | undefined;
 // What the latest fake VM's agent answers the host's streams on its inbound port with: a connection, or why none.
 // Unset, its agent takes no stream there.
-let reach: ((root: string, port: number) => Promise<Socket | string>) | undefined;
+let reach: ((root: string, port: number, first: 4 | 6) => Promise<Socket | string>) | undefined;
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
@@ -645,6 +645,8 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     // Root 1 listens on 3000, and on its own proxies' ports as every root does; nothing else listens.
     reach = (root, to) => {
       reached.push([root, to]);
+      // On 7000 the root has every connection it takes from the browser already.
+      if (to === 7000) return Promise.resolve("EMFILE");
       return root === "root-1" && [3000, 3128, 1080].includes(to) ? dial() : Promise.resolve("ECONNREFUSED");
     };
   });
@@ -667,6 +669,8 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     // The root's own proxies for its commands are no server of the chat's, though they listen: its runner is asked for neither.
     reached = [];
     expect([await manager.listening("root-1", 3128), await manager.listening("root-1", 1080), reached]).toEqual([false, false, []]);
+    // A root that takes no more connections could not be asked: that is said, and is not that nothing listens.
+    expect(await manager.listening("root-1", 7000)).toBe("busy");
     await manager.stop();
     expect(await manager.listening("root-1", 3000)).toBe(false);
   });
@@ -747,6 +751,352 @@ describe("whether a chat's own server listens, asked through the guest's inbound
     await manager.stop();
     expect(await asking).toBe(false);
     answering.resolve("ECONNREFUSED");
+  });
+});
+
+describe("a chat's own servers, through the manager's door", () => {
+  const KEY = "ab".repeat(32);
+  const OTHER_KEY = "cd".repeat(32);
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const run = (manager: VmManager, root = "root-1") => manager.perform({
+    id: `run-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "run", args: {},
+  }, new AbortController().signal);
+  const door = () => join(dir, "run", DOOR);
+  // A browser's proxy knocking at the manager's door with *line*: the door's answer line, then what comes
+  // back for *data*; an errno where there is no door, and "" for a knock dropped unanswered.
+  const knocking = (line: string, data = "hello") => new Promise<string>((resolve) => {
+    const socket = connect({ path: door(), allowHalfOpen: true });
+    let said = "";
+    const done = () => {
+      socket.destroy();
+      resolve(said);
+    };
+    socket.on("error", (error: NodeJS.ErrnoException) => resolve(String(error.code)));
+    socket.on("data", (chunk: Buffer) => {
+      said += chunk.toString();
+      if (said === "200\n") socket.write(data);
+      if (said === `200\nserved ${data}`) done();
+    });
+    // The door ends what it does not carry, whether its proxy closes it or not.
+    socket.on("end", done);
+    socket.write(line);
+  });
+  const knock = (key: string, port: number | string, data?: string) => knocking(`${key} ${port}\n`, data);
+  // Each root, port and family the fake guest's agent was asked to reach, and the server here its roots' loopback
+  // stands for: each connection it took.
+  let reached: Array<[string, number, number]>;
+  let server: ReturnType<typeof createServer>;
+  let taken: Socket[];
+  let port: number;
+  const dial = () => new Promise<Socket>((done) => {
+    const socket = connect({ host: "127.0.0.1", port, allowHalfOpen: true });
+    socket.once("connect", () => done(socket));
+  });
+
+  beforeEach(async () => {
+    reached = [];
+    taken = [];
+    server = createServer((socket) => {
+      taken.push(socket);
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => socket.write(`served ${chunk.toString()}`));
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    port = (server.address() as { port: number }).port;
+    // Root 1 listens on 3000, and on its own proxies' ports as every root does; nothing else listens.
+    reach = (root, to, first) => {
+      reached.push([root, to, first]);
+      return root === "root-1" && [3000, 3128, 1080].includes(to) ? dial() : Promise.resolve("ECONNREFUSED");
+    };
+  });
+
+  afterEach(async () => {
+    reach = undefined;
+    for (const socket of taken) socket.destroy();
+    await new Promise<void>((done) => server.close(() => done()));
+  });
+
+  it("carries a connection that knocks with a device's key to the root its port is forwarded to, by the family its knock names first", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    manager.forwards(KEY, [[3000, "root-1"], [8000, "root-1"]]);
+    // With no guest there is no door, and none is booted for a knock.
+    expect(await knock(KEY, 3000)).toBe("ENOENT");
+    await run(manager);
+    await until(() => existsSync(door()));
+    // The door is this user's alone.
+    expect(statSync(door()).mode & 0o777).toBe(0o600);
+    expect(await knock(KEY, 3000)).toBe("200\nserved hello");
+    expect(await knock(KEY, "3000 6")).toBe("200\nserved hello");
+    expect(await knock(KEY, 8000)).toBe("502 ECONNREFUSED\n");
+    expect(reached).toEqual([["root-1", 3000, 4], ["root-1", 3000, 6], ["root-1", 8000, 4]]);
+    // A connection held through the door when its guest stops ends with the guest, and the door goes too.
+    const held = connect({ path: door() });
+    held.on("error", () => {});
+    const ended = new Promise<void>((done) => held.once("close", () => done()));
+    held.write(`${KEY} 3000\n`);
+    await new Promise((done) => held.once("data", done));
+    // So does one that has not knocked yet.
+    const silent = connect({ path: door() });
+    silent.on("error", () => {});
+    const dropped = new Promise<void>((done) => silent.once("close", () => done()));
+    await new Promise((done) => silent.once("connect", done));
+    const door0 = door();
+    const stopped = performance.now();
+    await manager.stop();
+    await Promise.all([ended, dropped]);
+    // At the stop, not when a knock's time is up.
+    expect(performance.now() - stopped).toBeLessThan(2_000);
+    expect(existsSync(door0)).toBe(false);
+    expect(await knock(KEY, 3000)).toBe("ENOENT");
+  });
+
+  it("opens the door to no key but a device's own, no port but one forwarded for it, neither of the sandbox's own proxies' ports, and nothing that is not a knock", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    // A port past the last, forwarded by mistake, is no port either.
+    manager.forwards(KEY, [[3000, "root-1"], [3128, "root-1"], [1080, "root-1"], [65_536, "root-1"]]);
+    manager.forwards(OTHER_KEY, [[9000, "root-1"]]);
+    await run(manager);
+    await until(() => existsSync(door()));
+    for (const [key, to] of [
+      // Another device's key, for this one's port; a key nobody has; this key, for another device's port, or one nobody forwarded.
+      [OTHER_KEY, 3000], ["ef".repeat(32), 3000], [KEY, 9000], [KEY, 3001], [KEY, 80],
+      // The sandbox's own proxies for its commands, though the app named them.
+      [KEY, 3128], [KEY, 1080],
+      // What is no knock: a short key, an upper-case one, a port that is none, a family that is none.
+      ["ab".repeat(31), 3000], [KEY.toUpperCase(), 3000], [KEY, 0], [KEY, 65_536], [KEY, "3000 "], [KEY, "03000"], [KEY, "3000/"],
+      [KEY, "3000 4"], [KEY, "3000 7"], [KEY, "3000  6"], [KEY, "3000 6 "], [KEY, " 3000"],
+    ] as const) {
+      expect(await knock(key, to), `${key} ${to}`).toBe("403 refused\n");
+    }
+    // A line that never ends, and bytes sent before the door answers, are dropped unheard: one past a knock's size at once, not when its time is up.
+    const begun = performance.now();
+    expect(await knocking("x".repeat(300))).toBe("");
+    expect(performance.now() - begun).toBeLessThan(2_000);
+    expect(await knocking(`${KEY} 3000\nGET / HTTP/1.1\r\n\r\n`)).toBe("");
+    expect(reached).toEqual([]);
+    await manager.stop();
+  });
+
+  it("gives a knock that does not come whole its time and no more", async () => {
+    const forwarded = new Forwarded();
+    forwarded.set(KEY, [[3000, "root-1"]]);
+    mkdirSync(join(dir, "run"));
+    const slow = new Door(door(), forwarded, () => Promise.resolve("ECONNREFUSED"), { knockMs: 150 });
+    await until(() => existsSync(door()));
+    const begun = performance.now();
+    expect(await knocking(`${KEY} 30`)).toBe("");
+    expect(performance.now() - begun).toBeGreaterThanOrEqual(140);
+    slow.close();
+    expect(existsSync(door())).toBe(false);
+  });
+
+  it("forwards a port to the root told last, and to none once its device has none left", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    manager.forwards(KEY, [[3000, "root-2"]]);
+    await run(manager);
+    await run(manager, "root-2");
+    await until(() => existsSync(door()));
+    expect(await knock(KEY, 3000)).toBe("502 ECONNREFUSED\n");
+    manager.forwards(KEY, [[3000, "root-1"]]);
+    expect(await knock(KEY, 3000)).toBe("200\nserved hello");
+    manager.forwards(KEY, []);
+    expect(await knock(KEY, 3000)).toBe("403 refused\n");
+    expect(reached).toEqual([["root-2", 3000, 4], ["root-1", 3000, 4]]);
+    await manager.stop();
+  });
+
+  it("reaches into no root that is not set up in its guest, and takes what the guest answers as data", async () => {
+    const manager = new VmManager({ ...options(), reachMs: 200 }, fakeVm(roots));
+    manager.forwards(KEY, [[3000, "root-1"], [4000, "root-2"]]);
+    // Root 2 keeps the guest: root 1, torn down, is in it no more.
+    await run(manager);
+    await run(manager, "root-2");
+    await until(() => existsSync(door()));
+    await manager.teardown("root-1");
+    expect(await knock(KEY, 3000)).toBe("502 sandbox\n");
+    expect(reached).toEqual([]);
+    expect(await knock(KEY, 4000)).toBe("502 ECONNREFUSED\n");
+    // An agent that answers one stream with a reason of its own making, and the next not at all.
+    let asked = 0;
+    reach = () => ((asked += 1) === 1 ? Promise.resolve("403 denied\r\nx") : new Promise(() => {}));
+    await manager.stop();
+    const again = new VmManager({ ...options(), reachMs: 200 }, fakeVm(roots));
+    again.forwards(KEY, [[3000, "root-1"]]);
+    await run(again);
+    await until(() => existsSync(door()));
+    expect(await knock(KEY, 3000)).toBe("502 unreachable\n");
+    expect(await knock(KEY, 3000)).toBe("502 ETIMEDOUT\n");
+    await again.stop();
+  });
+
+  it("lets go of a connection its browser lets go: one left partway through the answer, and one left before the guest answered", async () => {
+    const answering = Promise.withResolvers<void>();
+    let slow = false;
+    reach = async (root, to, first) => {
+      reached.push([root, to, first]);
+      if (slow) await answering.promise;
+      return dial();
+    };
+    const manager = new VmManager(options(), fakeVm(roots));
+    manager.forwards(KEY, [[3000, "root-1"]]);
+    await run(manager);
+    await until(() => existsSync(door()));
+    // Held open, with the server's answer still to come.
+    const held = connect({ path: door() });
+    held.on("error", () => {});
+    held.write(`${KEY} 3000\n`);
+    await vi.waitFor(() => expect(taken).toHaveLength(1));
+    held.destroy();
+    await vi.waitFor(() => expect(taken[0]?.destroyed).toBe(true));
+    // Gone while the guest's agent still dials: the connection is let go when it comes.
+    slow = true;
+    const early = connect({ path: door() });
+    early.on("error", () => {});
+    early.write(`${KEY} 3000\n`);
+    await vi.waitFor(() => expect(reached).toHaveLength(2));
+    early.destroy();
+    await new Promise((done) => early.once("close", done));
+    answering.resolve();
+    await vi.waitFor(() => expect(taken).toHaveLength(2));
+    await vi.waitFor(() => expect(taken[1]?.destroyed).toBe(true));
+    await manager.stop();
+  });
+
+  it("gives the browser the whole of an answer whose server ended it, however slowly the browser reads", async () => {
+    // A root's server that sends 8 MiB and ends, which the guest's side of the door gets at once.
+    const whole = Buffer.alloc(8 << 20, 97);
+    const forwarded = new Forwarded();
+    forwarded.set(KEY, [[3000, "root-1"]]);
+    mkdirSync(join(dir, "run"));
+    const own = new Door(door(), forwarded, async () => {
+      const [ours, theirs] = duplexPair();
+      theirs.end(whole);
+      theirs.resume();
+      // Gone as soon as it has ended, as the guest's stream is once the root's server has closed.
+      ours.once("end", () => ours.destroy());
+      return ours;
+    });
+    await until(() => existsSync(door()));
+    const got = await new Promise<number>((resolve) => {
+      const socket = connect({ path: door() });
+      let bytes = -4;
+      socket.on("error", () => {});
+      // Read a little, stop for a while, then the rest.
+      socket.once("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+        socket.pause();
+        setTimeout(() => socket.on("data", (more: Buffer) => (bytes += more.length)).resume(), 300);
+      });
+      socket.on("close", () => resolve(bytes));
+      socket.write(`${KEY} 3000\n`);
+    });
+    expect(got).toBe(whole.length);
+    own.close();
+  });
+
+  // A door of its own with small bounds, into roots whose every connection is held open: each connection's ends
+  // towards the guest, by the order it was made, what the far one heard, and which were let go when each was asked for.
+  const bounded = async (bounds: { perRoot?: number; perKey?: number; open?: number }) => {
+    const forwarded = new Forwarded();
+    forwarded.set(KEY, [[3000, "root-1"], [3001, "root-1"], [4000, "root-2"]]);
+    forwarded.set(OTHER_KEY, [[5000, "root-3"]]);
+    const far: Duplex[] = [];
+    const near: Duplex[] = [];
+    const heard: string[] = [];
+    const gone: boolean[][] = [];
+    mkdirSync(join(dir, "run"));
+    const own = new Door(door(), forwarded, async (root, to) => {
+      reached.push([root, to, 4]);
+      gone.push(near.map((end) => end.destroyed));
+      const [ours, theirs] = duplexPair();
+      const at = far.push(theirs) - 1;
+      heard[at] = "";
+      theirs.on("data", (chunk: Buffer) => {
+        heard[at] += chunk.toString();
+      });
+      near.push(ours);
+      return ours;
+    }, bounds);
+    await until(() => existsSync(door()));
+    // A connection held open through the door: what the door answered, once it has, and whether it is still open.
+    const hold = async (key: string, to: number) => {
+      const socket = connect({ path: door() });
+      const held = { socket, said: "", open: true };
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => {
+        held.said += chunk.toString();
+      });
+      socket.on("close", () => {
+        held.open = false;
+      });
+      socket.write(`${key} ${to}\n`);
+      await vi.waitFor(() => expect(held.said !== "" || !held.open).toBe(true));
+      return held;
+    };
+    return { own, far, near, heard, gone, hold };
+  };
+
+  it("ends the connection idle longest to admit a new one at a root's bound, a byte either way counted, and none while there is room", async () => {
+    const { own, far, near, heard, gone, hold } = await bounded({ perRoot: 3 });
+    const first = await hold(KEY, 3000);
+    const second = await hold(KEY, 3001);
+    // With two of three held, nothing is ended for the third.
+    const third = await hold(KEY, 3000);
+    expect([first, second, third].map(({ said, open }) => [said, open])).toEqual([["200\n", true], ["200\n", true], ["200\n", true]]);
+    // A byte either way counts: the first hears from the browser alone, the second from its server alone; the third carries none.
+    first.socket.write("x");
+    far[1]?.write("y");
+    await vi.waitFor(() => expect([heard[0], second.said]).toEqual(["x", "200\ny"]));
+    const fourth = await hold(KEY, 3000);
+    await vi.waitFor(() => expect(third.open).toBe(false));
+    expect([first.open, second.open, fourth.said, fourth.open]).toEqual([true, true, "200\n", true]);
+    // Let go towards the guest before the new one is asked for there, so that the guest has room for it: that one, and no other.
+    expect(gone[3]).toEqual([false, false, true]);
+    expect(near.map((end) => end.destroyed)).toEqual([false, false, true, false]);
+    // And again: the server's byte is older than the browser's now, so the second goes.
+    first.socket.write("x");
+    fourth.socket.write("z");
+    await vi.waitFor(() => expect([heard[0], heard[3]]).toEqual(["xx", "z"]));
+    const fifth = await hold(KEY, 3001);
+    await vi.waitFor(() => expect(second.open).toBe(false));
+    expect([first.open, fourth.open, fifth.open, reached.length]).toEqual([true, true, true, 5]);
+    own.close();
+    await vi.waitFor(() => expect([first.open, fourth.open, fifth.open]).toEqual([false, false, false]));
+  });
+
+  it("keeps one chat's bound from another's, and a device's from another device's: past a device's bound a knock is answered busy, and nothing is ended", async () => {
+    const { own, hold } = await bounded({ perRoot: 2, perKey: 3 });
+    const held = [await hold(KEY, 3000), await hold(KEY, 3001)];
+    // The first chat is at its bound: another chat's port still opens, and ends none of the first's.
+    held.push(await hold(KEY, 4000));
+    expect(held.map(({ said, open }) => [said, open])).toEqual([["200\n", true], ["200\n", true], ["200\n", true]]);
+    // The device is at its own now: its next knock is refused, for either chat, and nothing is asked of the guest for it.
+    const before = reached.length;
+    for (const to of [4000, 3000]) {
+      const refused = await hold(KEY, to);
+      await vi.waitFor(() => expect(refused.open).toBe(false));
+      expect(refused.said).toBe("502 busy\n");
+    }
+    expect([held.map(({ open }) => open), reached.length]).toEqual([[true, true, true], before]);
+    // Another device's browser has its own.
+    expect((await hold(OTHER_KEY, 5000)).said).toBe("200\n");
+    // One that ends gives its place back.
+    held[2]?.socket.destroy();
+    await vi.waitFor(async () => expect((await hold(KEY, 4000)).said).toBe("200\n"));
+    own.close();
+  });
+
+  it("takes no more connections at once than its own bound, those that have not knocked among them", async () => {
+    const { own, hold } = await bounded({ open: 3 });
+    const silent = [connect({ path: door() }), connect({ path: door() })];
+    for (const socket of silent) socket.on("error", () => {});
+    await Promise.all(silent.map((socket) => new Promise((done) => socket.once("connect", done))));
+    expect((await hold(KEY, 3000)).said).toBe("200\n");
+    const past = await hold(KEY, 3000);
+    expect([past.said, past.open]).toEqual(["", false]);
+    for (const socket of silent) socket.destroy();
+    await vi.waitFor(async () => expect((await hold(KEY, 3000)).said).toBe("200\n"));
+    own.close();
   });
 });
 

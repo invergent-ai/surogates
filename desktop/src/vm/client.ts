@@ -14,7 +14,7 @@ import type { HostUser } from "../guest/protocol.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
-import { REACH_MS } from "./inbound.js";
+import { DOOR, REACH_MS } from "./inbound.js";
 import { type Boot, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
 
 // The same from src/vm and from dist/vm.
@@ -78,7 +78,10 @@ export type ToManager =
   | { type: "teardown"; id: string; root: string }
   // The app's answer to an ask of the host proxy's.
   | { type: "answer"; id: number; allow: boolean }
-  // Whether something in a root listens on a port of its own loopback now. Answered as a result, its ok true or false.
+  // What the browser of the device that knocks with *key* may open: each port of a chat's own servers, and the chat's root.
+  | { type: "forwards"; key: string; ports: Array<[number, string]> }
+  // Whether something in a root listens on a port of its own loopback now. Answered as a result, its ok true or false,
+  // or "busy" for a root that could not be asked.
   | { type: "listening"; id: string; root: string; port: number }
   // The keepalive, answered by a pong.
   | { type: "ping" }
@@ -163,8 +166,14 @@ export class VmClient {
   // Whether the last boot ran emulated: the manager's own bounds are then the emulated guest's.
   private emulated = false;
   private probes = 0;
+  // What each device's browser may open, by its key: told to each manager as it starts.
+  private readonly forwarded = new Map<string, Array<[number, string]>>();
+  /** Where a browser's proxy knocks for a connection into a chat's sandbox: the manager's door, there while a guest runs. */
+  readonly door: string;
 
-  constructor(private readonly options: VmClientOptions) {}
+  constructor(private readonly options: VmClientOptions) {
+    this.door = join(options.vm.run, DOOR);
+  }
 
   /**
    * One process operation of a root's, in the guest. A cancel is answered at once; the
@@ -240,10 +249,22 @@ export class VmClient {
   }
 
   /**
-   * Whether something in *root* listens on *port* of its own loopback now. False where no manager
-   * runs, which none is started to ask, and when it does not say within the agent's own bound. Never rejects.
+   * What the browser of the device that knocks with *key* may open from now on: each port of a chat's own
+   * servers, with the chat's root. None forgets the key. A manager that starts later is told too, and
+   * none is started to be told.
    */
-  listening(root: string, port: number): Promise<boolean> {
+  forwards(key: string, ports: Array<[number, string]>): void {
+    if (ports.length === 0) this.forwarded.delete(key);
+    else this.forwarded.set(key, ports);
+    if (!this.stopping) this.manager?.send({ type: "forwards", key, ports });
+  }
+
+  /**
+   * Whether something in *root* listens on *port* of its own loopback now. False where no manager
+   * runs, which none is started to ask, and when it does not say within the agent's own bound; "busy"
+   * for a root that takes no more of the browser's connections now, and so could not be asked. Never rejects.
+   */
+  listening(root: string, port: number): Promise<boolean | "busy"> {
     const manager = this.manager;
     if (!manager || this.stopping) return Promise.resolve(false);
     const id = `listening-${(this.probes += 1)}`;
@@ -252,7 +273,7 @@ export class VmClient {
       const answer = (outcome: Outcome) => {
         clearTimeout(timer);
         this.pending.delete(id);
-        resolve("ok" in outcome && outcome.ok === true);
+        resolve("ok" in outcome && (outcome.ok === true || outcome.ok === "busy") ? outcome.ok : false);
       };
       this.pending.set(id, answer);
       manager.send({ type: "listening", id, root, port });
@@ -339,6 +360,7 @@ export class VmClient {
       for (const answer of [...this.pending.values()]) answer(outcome);
     });
     manager.send({ type: "start", options: this.options.vm });
+    for (const [key, ports] of this.forwarded) manager.send({ type: "forwards", key, ports });
     return manager;
   }
 

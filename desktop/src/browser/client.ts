@@ -61,6 +61,8 @@ export type ToBrowser =
   | { type: "pause"; root: string; paused: boolean }
   // The chat's newest page brought to the front: answered whether there was one.
   | { type: "show"; id: string; root: string }
+  // The ports of chats' own servers the browser may open, the VM manager's door, and the key this device knocks with there.
+  | { type: "forwards"; ports: number[]; door: string; key: string }
   | { type: "stop" };
 
 export type FromBrowser =
@@ -108,6 +110,8 @@ export class BrowserClient {
   private readonly addressing = new Map<string, (url: string, refused?: string) => void>();
   private readonly showing = new Map<string, (shown: boolean) => void>();
   private downloaded: (download: StagedDownload) => void = () => {};
+  // What the browser may open of its chats' own servers, as told last: each host hears it as it starts.
+  private forwarded: Extract<ToBrowser, { type: "forwards" }> | null = null;
   private stopping: Promise<void> | null = null;
   // The chat whose user holds the browser, as the last pause left it; null: the agent drives.
   private holder: string | null = null;
@@ -176,6 +180,15 @@ export class BrowserClient {
     if (paused) this.holder = root;
     else if (this.holder === root) this.holder = null;
     this.host?.send({ type: "pause", root, paused });
+  }
+
+  /**
+   * The ports of chats' own servers the browser may open from now on, where its proxy knocks for each connection,
+   * and with which key. A running host is told; one started later hears it first; none is started to hear it.
+   */
+  forwards(ports: number[], door: string, key: string): void {
+    this.forwarded = { type: "forwards", ports, door, key };
+    this.host?.send(this.forwarded);
   }
 
   /**
@@ -250,6 +263,7 @@ export class BrowserClient {
     // A host knows that its browser is held only by being told. One that starts while it is held hears so
     // before the message that started it, which it then answers as any host does while its user holds the browser.
     if (this.holder !== null) host.send({ type: "pause", root: this.holder, paused: true });
+    if (this.forwarded) host.send(this.forwarded);
     host.onMessage((message) => {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);

@@ -60,6 +60,8 @@ function received(message: ToManager): void {
     answer(id, manager.perform(message.operation, controller.signal).finally(() => running.delete(id)));
   } else if (message.type === "teardown") {
     answer(message.id, (manager?.teardown(message.root) ?? Promise.resolve()).then(() => ({ ok: null })));
+  } else if (message.type === "forwards") {
+    manager?.forwards(message.key, message.ports);
   } else if (message.type === "listening") {
     answer(message.id, (manager?.listening(message.root, message.port) ?? Promise.resolve(false)).then((ok) => ({ ok })));
   } else if (message.type === "answer") {
