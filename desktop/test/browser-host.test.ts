@@ -3215,7 +3215,7 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
       expect(hits).toEqual([]);
     }, 90_000);
 
-    it("says why a navigation to a chat's port did not open: not allowed, taken back, not yet told at the door, over https, or nothing answering there now", async () => {
+    it("says why a navigation to a chat's port did not open: not allowed, taken back, not yet told at the door, over https, a sandbox that is full, or nothing answering there now", async () => {
       const a = session();
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/` })).toEqual(NOT_ALLOWED());
       host.forwards([at], doorPath(), KEY);
@@ -3235,6 +3235,22 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?nothing` })).toEqual(NOT_RUNNING);
       host.forwards([at], join(folder, "gone.sock"), KEY);
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?gone` })).toEqual(NOT_RUNNING);
+      // A sandbox that holds every connection it takes from the browser, the device's or the chat's, is not one whose server stopped.
+      host.forwards([at], doorPath(), "cd".repeat(32));
+      for (const full of ["502 busy", "502 EMFILE"]) {
+        closed = full;
+        expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?${full.slice(4)}` }), full).toEqual({
+          error: {
+            type: "browser",
+            message: `The sandbox holds as many connections from the agent's browser as it takes, so port ${at} of this chat's servers did not open. `
+              + `Close a page of a chat's servers in the browser, then open http://localhost:${at}/ again.`,
+          },
+        });
+      }
+      // A name with a dot after it is no chat's: this computer's own, as ever.
+      expect(await op(a, "browser.navigate", { url: `http://localhost.:${at}/` })).toEqual({
+        error: { type: "browser", message: `The agent's browser does not reach this computer's own services (localhost:${at})` },
+      });
       // Taken back: the page it had open reaches the port no more.
       host.forwards([at], doorPath(), KEY);
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?again` })).toMatchObject({ ok: { title: "Chat page" } });

@@ -998,8 +998,8 @@ export class BrowserHost {
     } catch {
       return null;
     }
-    // A chat's own server: not allowed; or allowed, and the door does not open for it yet, or nothing takes the
-    // connection there now. One that answers failed by itself, and the browser's word stands.
+    // A chat's own server: not allowed; or allowed, and the door does not open for it yet, the sandbox is full, or
+    // nothing takes the connection there now. One that answers failed by itself, and the browser's word stands.
     const chat = chatPortOf(address.href);
     if (chat !== null) {
       if (!this.forwarded?.ports.includes(chat)) {
@@ -1007,6 +1007,10 @@ export class BrowserHost {
       }
       const reaches = (await this.proxy?.server.reaches(chat)) ?? "unreachable";
       if (reaches === "refused") return `The sandbox has not been told that the agent's browser may open port ${chat} yet. Open it again in a moment.`;
+      if (reaches === "busy") {
+        return `The sandbox holds as many connections from the agent's browser as it takes, so port ${chat} of this chat's servers did not open. `
+          + `Close a page of a chat's servers in the browser, then open http://localhost:${chat}/ again.`;
+      }
       return reaches === "open" ? null : `Nothing answers on port ${chat} of the chat's servers now: its server is not running in the chat's sandbox`;
     }
     // An allowed port over https: carried for nobody, and no service of this computer's either.

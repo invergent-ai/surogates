@@ -37,6 +37,14 @@ interface Forwards {
   key: string;
 }
 
+// Why a connection to a chat's port is not carried: the port is not allowed here, or the door does not open
+// it for this device; the sandbox holds every connection it takes from the browser, the device's (the door's
+// "busy") or the chat's (the guest's EMFILE); or nothing took it, and there may be no door.
+export type NotCarried = "refused" | "busy" | "unreachable";
+// What the browser is answered for each.
+const NOT_CARRIED: Record<NotCarried, number> = { refused: 403, busy: 503, unreachable: 502 };
+const FULL = new Set(["busy", "EMFILE"]);
+
 /**
  * Whether a plain request to a chat's port comes from where the port was allowed for: a page of a
  * chat's own server, on a port *allowed* now, or its user's or its agent's own navigation. Read from
@@ -191,17 +199,17 @@ export class BrowserProxy {
   }
 
   // A connection to *port* of the chat's servers it is forwarded to, through the manager's door, the
-  // loopback's family *first* tried first there; or the status that refuses it: 403 for a port not
-  // allowed and for the door's own refusal, 502 for a port nothing took. Nothing here is dialed.
-  private async toChat(port: number, first: 4 | 6, gone: AbortSignal): Promise<Socket | 403 | 502> {
+  // loopback's family *first* tried first there; or why there is none, in the door's own words for a
+  // sandbox that is full. Nothing here is dialed.
+  private async toChat(port: number, first: 4 | 6, gone: AbortSignal): Promise<Socket | NotCarried> {
     const chats = this.chats;
-    if (!chats?.ports.has(port)) return 403;
+    if (!chats?.ports.has(port)) return "refused";
     const opened = await knock(chats.door, `${chats.key} ${port}${first === 6 ? " 6" : ""}`, gone);
-    if ("status" in opened) return opened.status === 403 ? 403 : 502;
+    if ("status" in opened) return opened.status === 403 ? "refused" : opened.status === 502 && FULL.has(opened.reason) ? "busy" : "unreachable";
     // Taken back, or its browser gone, while the door answered.
     if (!this.chats?.ports.has(port) || gone.aborted) {
       opened.socket.destroy();
-      return 403;
+      return "refused";
     }
     const carried = this.toChats.get(port) ?? new Set<Duplex>();
     this.toChats.set(port, carried.add(opened.socket));
@@ -214,12 +222,11 @@ export class BrowserProxy {
 
   /**
    * Whether a connection to *port* of a chat's servers is carried now, asked by one made through the door
-   * and let go: "open"; "refused" for a port not allowed here or one the door does not open for this
-   * device; "unreachable" where nothing took it, or there is no door. Never rejects.
+   * and let go: "open", or why not (NotCarried). Never rejects.
    */
-  async reaches(port: number): Promise<"open" | "refused" | "unreachable"> {
-    const carried = await this.toChat(port, 4, new AbortController().signal).catch(() => 502 as const);
-    if (typeof carried === "number") return carried === 403 ? "refused" : "unreachable";
+  async reaches(port: number): Promise<"open" | NotCarried> {
+    const carried = await this.toChat(port, 4, new AbortController().signal).catch(() => "unreachable" as const);
+    if (typeof carried === "string") return carried;
     carried.destroy();
     return "open";
   }
@@ -331,7 +338,7 @@ export class BrowserProxy {
       const allowed = this.chats?.ports;
       if (chat === null || !allowed?.has(chat) || !ownRequest(request.method ?? "", request.headers, allowed)) return void response.writeHead(403).end();
       const carried = await this.toChat(chat, url.hostname === "[::1]" ? 6 : 4, gone.signal);
-      if (typeof carried === "number") return void (response.headersSent || response.writeHead(carried).end());
+      if (typeof carried === "string") return void (response.headersSent || response.writeHead(NOT_CARRIED[carried]).end());
       socket = carried;
     }
     this.keep(socket);

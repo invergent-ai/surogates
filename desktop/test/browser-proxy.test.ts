@@ -522,6 +522,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
   let behind: Set<Socket>;
   // How long the door takes to answer a knock it carries.
   let slow: number;
+  // What the door answers a knock for a port nothing takes a connection on.
+  let closed: string;
   const path = () => join(folder, "browser.sock");
   // What the browser itself says of its own navigation, and its user's.
   const own = { "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
@@ -558,13 +560,14 @@ describe("a chat's own servers, through the browser's proxy", () => {
     knocks = [];
     behind = new Set();
     slow = 0;
+    closed = "502 ECONNREFUSED";
     door = createServer((socket) => {
       socket.on("error", () => {});
       socket.once("data", (chunk: Buffer) => {
         const line = chunk.toString().trimEnd();
         knocks.push(line);
         if (!line.startsWith(`${KEY} `)) return void socket.end("403 refused\n");
-        if (!/^[0-9a-f]{64} 300[01]( 6)?$/.test(line)) return void socket.end("502 ECONNREFUSED\n");
+        if (!/^[0-9a-f]{64} 300[01]( 6)?$/.test(line)) return void socket.end(`${closed}\n`);
         const upstream = connectTcp({ host: "127.0.0.1", port: ports.web });
         behind.add(upstream.once("close", () => behind.delete(upstream)));
         upstream.on("error", () => socket.destroy());
@@ -732,6 +735,19 @@ describe("a chat's own servers, through the browser's proxy", () => {
     expect(await fresh.reaches(3000)).toBe("refused");
     await fresh.close();
     expect(dialed).toEqual([]);
+  });
+
+  it("answers 503 where the sandbox holds every connection it takes from the browser, a device's or a chat's, and says so when asked: not that nothing listens", async () => {
+    for (const full of ["502 busy", "502 EMFILE"]) {
+      closed = full;
+      expect([(await fetched("http://localhost:3002/")).status, await proxy.reaches(3002)], full).toEqual([503, "busy"]);
+    }
+    // Any other word of the door's is a port nothing took.
+    for (const other of ["502 ETIMEDOUT", "502 sandbox", "502 unreachable", "502", "503 busy", "200busy"]) {
+      closed = other;
+      expect([(await fetched("http://localhost:3002/")).status, await proxy.reaches(3002)], other).toEqual([502, "unreachable"]);
+    }
+    expect([seen, dialed]).toEqual([[], []]);
   });
 
   it("ends what it carries to a port taken back, at once, carries nothing more to it, and leaves another port's alone", async () => {
