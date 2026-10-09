@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
+from asyncpg.exceptions import InternalClientError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, text, tuple_, update
@@ -123,7 +124,9 @@ def _database_unavailable(exc: Exception) -> bool:
     if isinstance(exc, DBAPIError):
         # A failover's shutdown arrives as the generic DBAPIError, with its connection invalidated.
         return isinstance(exc, (OperationalError, InterfaceError)) or exc.connection_invalidated
-    return isinstance(exc, (PoolTimeoutError, ConnectionError, TimeoutError))
+    # InternalClientError: what the driver says of a connection whose backend ended
+    # between two of a call's statements; SQLAlchemy passes it on as it is.
+    return isinstance(exc, (PoolTimeoutError, ConnectionError, TimeoutError, InternalClientError))
 
 
 def _completing(device_id: UUID, generation: int, operation_id: UUID, digest: str, outcome: dict[str, Any]) -> Any:

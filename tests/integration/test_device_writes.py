@@ -289,6 +289,42 @@ async def test_closing_a_stopped_write_waits_for_a_commit_still_on_its_way(lapto
     assert (await recorded(session_factory, request)).outcome == CANCELLED_OUTCOME
 
 
+async def test_a_backend_ended_between_two_chunks_is_waited_out_and_the_write_recorded_whole(
+    laptop_rig, stopping, session_factory, redis_client,
+):
+    rig = laptop_rig
+    ended = []
+
+    class Dropped(AsyncSession):
+        async def execute(self, statement, parameters=None, **kwargs):
+            if (
+                not ended and isinstance(statement, Insert) and statement.table.name == "device_transfer_chunks"
+                and parameters["seq"] == 2
+            ):
+                # As a failover ends it: this recording's own backend, between two of its statements.
+                pid = (await super().execute(text("SELECT pg_backend_pid()"))).scalar_one()
+                async with session_factory() as other:
+                    await other.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+                ended.append(pid)
+            return await super().execute(statement, parameters, **kwargs)
+
+    ops = DeviceOperations(
+        # An engine of its own: the pool keeps the connection whose backend ended.
+        async_sessionmaker(stopping.engine, class_=Dropped, expire_on_commit=False), redis_client, recheck_interval_s=0.2,
+    )
+    request = write_request(rig, IN_PARTS)
+    waiting = asyncio.create_task(ops.run(request))
+    try:
+        # Asked again once the database is back, not failed: recorded whole, once.
+        await eventually(lambda: open_count(rig, 1), timeout=10.0)
+        assert ended and not waiting.done()
+        [op] = await rig.ops.pending(rig.device_id, 1)
+        assert await stored(session_factory, str(op.id)) == IN_PARTS
+        assert await transfers_of(session_factory, rig.device_id) == 1
+    finally:
+        await stop(waiting)
+
+
 async def test_a_resumed_write_asks_for_the_same_operation_and_its_data_is_kept_once(laptop_rig, session_factory):
     rig = laptop_rig
     first = write_request(rig)

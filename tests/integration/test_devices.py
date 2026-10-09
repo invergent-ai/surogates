@@ -20,6 +20,7 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 import uvicorn
+from asyncpg.exceptions import InternalClientError
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -1101,6 +1102,8 @@ async def test_a_database_blip_while_recording_does_not_fail_the_operation(
         (DBAPIError("SELECT ...", {}, Exception("terminating connection"), connection_invalidated=True), True),
         (ConnectionRefusedError("the primary is restarting"), True),
         (TimeoutError("pool timeout"), True),
+        # What the driver says of a connection whose backend ended between two of a call's statements.
+        (InternalClientError("cannot switch to state 11; another operation (2) is in progress"), True),
         (DBAPIError("SELECT ...", {}, Exception("some other failure")), False),
         (IntegrityError("INSERT ...", {}, Exception("duplicate key")), False),
         (ProgrammingError("SELECT ...", {}, Exception("no such column")), False),
