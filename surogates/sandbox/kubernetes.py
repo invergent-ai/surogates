@@ -312,15 +312,39 @@ class K8sSandbox:
         await self._client.aclose()
 
     async def destroy(self, sandbox_id: str) -> None:
-        """Delete the sandbox pod and its S3 credential secret."""
-        entry = self._pods.pop(sandbox_id, None)
+        """Delete the sandbox pod and its S3 credential secret.
+
+        The pod is forgotten once its delete has answered: one cut off, or
+        never answered, can be asked for again.
+        """
+        entry = self._pods.get(sandbox_id)
         if entry is None:
             logger.warning("Attempted to destroy unknown sandbox %s", sandbox_id)
             return
 
         api = await self._get_api()
         await self._destroy_entry(api, entry)
+        self._pods.pop(sandbox_id, None)
         logger.info("Destroyed K8s sandbox %s (pod %s)", sandbox_id, entry.pod_name)
+
+    async def expire(self, sandbox_id: str, seconds: float) -> None:
+        """Have the pod end by itself within *seconds* from now, whatever becomes of its delete.
+
+        Its deadline is the cluster's, counted from the pod's start: it is
+        brought down to what the pod has lived and *seconds* more, and
+        never raised.  The worker's role needs ``patch`` on pods for it.
+        """
+        entry = self._pods.get(sandbox_id)
+        if entry is None:
+            return
+        api = await self._get_api()
+        pod = await api.read_namespaced_pod(entry.pod_name, entry.namespace)
+        if pod.status is None or pod.status.start_time is None:
+            return
+        deadline = int((datetime.now(timezone.utc) - pod.status.start_time).total_seconds() + seconds) + 1
+        if pod.spec.active_deadline_seconds is not None and deadline >= pod.spec.active_deadline_seconds:
+            return
+        await api.patch_namespaced_pod(entry.pod_name, entry.namespace, {"spec": {"activeDeadlineSeconds": deadline}})
 
     async def status(self, sandbox_id: str) -> SandboxStatus:
         """Check the current status of the sandbox pod.

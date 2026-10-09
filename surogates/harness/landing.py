@@ -76,8 +76,13 @@ _PACKS_LISTED = 4096
 #: How long a pruning waits for the project's lock before it gives the day up.  Its pod waits with it,
 #: in no wake and no session's keeping: the next completed landing prunes instead.
 _PRUNE_PATIENCE = 600
-#: How long a pruning's pod is given to go once the pruning is over: a delete never answered ends no task.
-_LET_GO_BOUND = 60
+#: How long each try to delete a pruning's pod is given, and how many there are: a delete never
+#: answered ends no task.
+_LET_GO_BOUND = 30
+_LET_GO_TRIES = 2
+#: What a pruning's pod is given to live beyond the wait for the lock and its own call: the settle
+#: before it, and its going.  A pod whose delete is never answered ends by itself then, not a day on.
+_PRUNING_POD_ROOM = 900
 #: A landing's steps go to its row whole, so not at every step: between its
 #: turning points at most this often, in seconds, and never so often that
 #: writing them takes more than one part in _ROW_SHARE of its time.  A row
@@ -352,7 +357,9 @@ def prune_later(
     pruning runs, in a pod of its own.  The pruning holds the project's
     lock and is fenced as before, so that turn's landing, as any other
     thread's, waits at the lock until the pruning is done.  The landing's
-    pod, *sandbox_id*, goes once it is, and no other pod of its session.
+    pod, *sandbox_id*, goes once it is, and no other pod of its session:
+    its delete is tried twice, and before anything else the pod is given a
+    deadline that fits a pruning, in place of a turn's day.
     """
     pruning = asyncio.ensure_future(_pruned_then_gone(
         session_factory=session_factory, sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, session_id=session_id,
@@ -362,18 +369,28 @@ def prune_later(
     pruning.add_done_callback(_PRUNINGS.discard)
 
 
-async def _pruned_then_gone(*, sandbox_pool: Any, sandbox_id: str, session_id: str, **pruning: Any) -> None:
+async def _pruned_then_gone(*, sandbox_pool: Any, sandbox_id: str, session_id: str, packs: int, **pruning: Any) -> None:
     try:
-        await prune_after(sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, **pruning)
-    finally:
-        # Also when the worker stops under it: its pod goes all the same, and that pod alone.  Within a
-        # bound: a loop that closes cancels this once and then waits for it, with no bound of its own.
+        # First, a life that fits a pruning: the pod is a turn's, made to last a day, and in no session's
+        # keeping now.  The longest its pruning can take, and room: a delete never answered leaves it that long.
+        life = _PRUNE_PATIENCE + _PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30 + _PRUNING_POD_ROOM
         try:
-            await asyncio.wait_for(
-                asyncio.shield(sandbox_pool.destroy_released(sandbox_id, session_id, alone=True)), _LET_GO_BOUND,
-            )
-        except BaseException:
-            logger.warning("Could not let pod %s go after its pruning", sandbox_id, exc_info=True)
+            await asyncio.wait_for(sandbox_pool.expire_released(sandbox_id, life), _LET_GO_BOUND)
+        except Exception:
+            logger.warning("Could not give pod %s a pruning's life: it keeps a turn's", sandbox_id, exc_info=True)
+        await prune_after(sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, packs=packs, **pruning)
+    finally:
+        # Also when the worker stops under it: its pod goes all the same, and that pod alone.  Each try
+        # within a bound: a loop that closes cancels this once and then waits for it, with no bound of its own.
+        for left in reversed(range(_LET_GO_TRIES)):
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(sandbox_pool.destroy_released(sandbox_id, session_id, alone=True)), _LET_GO_BOUND,
+                )
+                break
+            except BaseException:
+                if not left:
+                    logger.warning("Could not let pod %s go after its pruning", sandbox_id, exc_info=True)
 
 
 class _Released:

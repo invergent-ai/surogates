@@ -201,6 +201,16 @@ class SandboxPool:
         """
         return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
 
+    async def expire_released(self, sandbox_id: str, seconds: float) -> None:
+        """Have a sandbox :meth:`release_for_session` detached end by itself within *seconds*, where the backend can.
+
+        For one at its last work in no session's keeping: a delete that is
+        never answered then leaves it that long, not the life it was made with.
+        """
+        expire = getattr(self._backend, "expire", None)
+        if expire is not None:
+            await expire(sandbox_id, seconds)
+
     async def destroy_released(
         self, sandbox_id: str | None, session_id: str, *, alone: bool = False,
     ) -> None:

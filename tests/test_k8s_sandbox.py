@@ -68,6 +68,61 @@ class TestDestroy:
         )
         assert "abc" not in sandbox._pods
 
+    async def test_a_delete_that_was_never_answered_can_be_asked_again(self, sandbox: K8sSandbox):
+        api, asked = MagicMock(), []
+
+        async def delete(name, namespace, **kwargs):
+            asked.append(name)
+            if len(asked) == 1:
+                await asyncio.Event().wait()  # the cluster does not answer
+
+        api.delete_namespaced_pod = delete
+        api.delete_namespaced_secret = AsyncMock()
+        sandbox._api = api
+        sandbox._pods["abc"] = _PodEntry(sandbox_id="abc", pod_name="sandbox-abc", secret_name="secret-abc", namespace="test-ns", spec=SandboxSpec())
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(sandbox.destroy("abc"), 0.1)
+        # Not forgotten while its pod may still be there: the second delete reaches the cluster.
+        assert "abc" in sandbox._pods
+        await sandbox.destroy("abc")
+        assert asked == ["sandbox-abc", "sandbox-abc"] and "abc" not in sandbox._pods
+
+
+class TestExpire:
+    """A pod at its last work is given a deadline of its own, so one left behind does not live its day."""
+
+    @staticmethod
+    def a_pod(sandbox: K8sSandbox, *, lived: float, deadline: int | None):
+        from datetime import datetime, timedelta, timezone
+
+        api = MagicMock()
+        pod = MagicMock()
+        pod.status.start_time = datetime.now(timezone.utc) - timedelta(seconds=lived)
+        pod.spec.active_deadline_seconds = deadline
+        api.read_namespaced_pod = AsyncMock(return_value=pod)
+        api.patch_namespaced_pod = AsyncMock()
+        sandbox._api = api
+        sandbox._pods["abc"] = _PodEntry(sandbox_id="abc", pod_name="sandbox-abc", secret_name="secret-abc", namespace="test-ns", spec=SandboxSpec())
+        return api
+
+    async def test_its_deadline_is_brought_down_to_what_it_has_lived_and_the_time_given(self, sandbox: K8sSandbox):
+        api = self.a_pod(sandbox, lived=5000, deadline=86_400)
+        await sandbox.expire("abc", 1800)
+        [(name, namespace, body)] = [call.args for call in api.patch_namespaced_pod.await_args_list]
+        # Counted from the pod's start, as the cluster counts it.
+        assert (name, namespace) == ("sandbox-abc", "test-ns") and list(body) == ["spec"]
+        assert 6800 <= body["spec"]["activeDeadlineSeconds"] <= 6810
+
+    async def test_a_deadline_is_never_raised(self, sandbox: K8sSandbox):
+        api = self.a_pod(sandbox, lived=3000, deadline=3600)
+        await sandbox.expire("abc", 1800)
+        api.patch_namespaced_pod.assert_not_awaited()
+
+    async def test_a_pod_it_does_not_know_is_asked_nothing(self, sandbox: K8sSandbox):
+        api = self.a_pod(sandbox, lived=10, deadline=86_400)
+        await sandbox.expire("another", 1800)
+        api.read_namespaced_pod.assert_not_awaited()
+
 
 class TestStatusReadFailures:
     """``status()`` must not flap to FAILED on transient API errors --

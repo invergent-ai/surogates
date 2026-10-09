@@ -479,15 +479,19 @@ async def test_a_landings_row_whose_writes_are_quick_is_behind_by_its_interval(m
 class PrunesNever:
     """A pool whose pod is asked nothing, and records how it is let go."""
 
-    def __init__(self, *, goes: bool = True) -> None:
-        self.goes, self.let_go = goes, []
+    def __init__(self, *, goes: bool | int = True) -> None:
+        #: Whether its delete answers; or at which try it does.
+        self.goes, self.let_go, self.ends_within = goes, [], []
 
     async def execute_released(self, *args, **kwargs) -> str:
         raise AssertionError("the pod is not asked to prune")
 
+    async def expire_released(self, sandbox_id, seconds) -> None:
+        self.ends_within.append((sandbox_id, seconds))
+
     async def destroy_released(self, sandbox_id, session_id, *, alone=False) -> None:
         self.let_go.append((sandbox_id, session_id, alone))
-        if not self.goes:
+        if self.goes is False or (self.goes is not True and len(self.let_go) < self.goes):
             await asyncio.Event().wait()  # a delete the cluster never answers
 
 
@@ -515,6 +519,35 @@ async def test_a_pruning_that_cannot_take_the_projects_lock_gives_the_day_up_and
         await asyncio.wait_for(await a_pruning(pool), 5)
     assert pool.let_go == [("pod-1", "t1", True)] and "Could not prune the history of project w1" in caplog.text
     assert not landing._PRUNINGS
+    # Before anything else its pod was given a life that fits a pruning: the wait for the lock (cut to
+    # a fifth of a second here), the pod's own bound for a history of no size, and room.  A delete
+    # that never answers leaves it that long.
+    assert pool.ends_within == [("pod-1", 0.2 + 300 + 900)]
+
+
+async def test_a_prunings_pod_is_given_longer_for_a_larger_history():
+    pool = PrunesNever()
+    landing.prune_later(
+        session_factory=None, sandbox_pool=pool, sandbox_id="pod-1", session_id="t1", workstream="w1", packs=4 * 2**30,
+        saga_settings=None,
+    )
+    [pruning] = landing._PRUNINGS
+    await asyncio.sleep(0.05)
+    pruning.cancel()
+    await asyncio.wait([pruning], timeout=5)
+    # Ten minutes for the lock, five and three a GiB for the pod's call, fifteen of room: 42 minutes
+    # for 4 GiB, and half an hour for a history of no size.  Within the hour up to 10 GiB.
+    assert pool.ends_within == [("pod-1", 600 + 300 + 4 * 180 + 900)]
+
+
+async def test_a_delete_that_does_not_answer_is_tried_again(monkeypatch, caplog):
+    monkeypatch.setattr(landing, "project_lock", a_lock_never_free)
+    monkeypatch.setattr(landing, "_PRUNE_PATIENCE", 0.1)
+    monkeypatch.setattr(landing, "_LET_GO_BOUND", 0.2)
+    pool = PrunesNever(goes=2)  # its first delete is never answered, its second is
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        await asyncio.wait_for(await a_pruning(pool), 5)
+    assert pool.let_go == [("pod-1", "t1", True)] * 2 and "Could not let pod pod-1 go" not in caplog.text
 
 
 @pytest.mark.parametrize("ended", ["by its bound", "by a cancel"])
@@ -530,7 +563,8 @@ async def test_a_pruning_whose_pod_never_goes_ends_all_the_same(monkeypatch, cap
         pruning.cancel()
     with caplog.at_level(logging.WARNING, logger=landing.__name__):
         done, _ = await asyncio.wait([pruning], timeout=5)
-    assert done and pool.let_go == [("pod-1", "t1", True)] and "Could not let pod pod-1 go" in caplog.text
+    # Each try of its delete has the bound, and there are two: then the pod is left to the life it was given.
+    assert done and pool.let_go == [("pod-1", "t1", True)] * 2 and "Could not let pod pod-1 go" in caplog.text
     assert pruning.cancelled() is (ended == "by a cancel")
 
 
