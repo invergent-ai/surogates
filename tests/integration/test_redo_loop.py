@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import unread_reports, worker_note
 from surogates.harness.loop_pending import NAMES_ANSWERS
+from surogates.harness.tool_exec import _build_session_sandbox_spec
 from surogates.runtime import SlashCommandConfig
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
@@ -34,6 +36,7 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     a_short_fence,
     edited,
     ends,
+    lose_the_lock,
     rows,
     stored,
     turn_ends,
@@ -49,7 +52,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
     reports,
 )
 from .test_turn_sagas import a_turn, calling, stop
-from .test_workstream_threads import queued
+from .test_workstream_threads import harness_of, queued
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -744,8 +747,12 @@ async def test_a_routine_runs_changes_are_picked_up_as_the_routines(api, monkeyp
     main = git(durable, "rev-parse", "refs/heads/main")
     assert git(durable, "log", "-1", "--format=%an <%ae>", main) == f"Health check <routine:{schedule.id}@surogate>"
     [row] = await pickups(api, main)
-    assert [f["path"] for f in row.picked_up] == ["notes.txt"]
+    assert ([f["path"] for f in row.picked_up], row.saga_state) == (["notes.txt"], "completed")
     assert row.steps[0]["arguments"]["author"]["name"] == "Health check"
+    assert git(durable, "log", "-1", "--format=%(trailers:only,unfold)", main).splitlines() == [
+        f"Surogate-Project: {project_of(master.config['workspace_boundary'])}", f"Surogate-Agent: {run.agent_id}",
+        f"Surogate-User: {run.user_id}", f"Surogate-Saga: {row.saga_id}", "Surogate-Kind: pickup",
+    ]
     # A thread whose copy predates it is told the routine changed the file.
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "printf ' by A' >> notes.txt"})), _final_response("Edited."),
@@ -805,10 +812,8 @@ async def test_a_routine_run_of_a_project_over_the_cap_records_nothing(api, monk
     [over] = woken
     assert over.config["history_off"] is True
     await in_its_pod(api, pool, over, "echo tidied > notes.txt")
-    assert await landing_module.pick_up_routine(
-        session_factory=api.app.state.session_factory, sandbox_pool=pool, session=over, saga_settings=None,
-    ) is None
-    assert git(pods.project / "_history", "rev-parse", "refs/heads/main") == before
+    await ends(api, pool, over)
+    assert await pickups_of(api, master) == [] and main_of(pods) == before
 
 
 async def test_a_cloud_session_that_is_no_projects_wakes_with_its_bucket(api, monkeypatch, pods):
@@ -835,6 +840,10 @@ async def test_your_edit_before_a_routine_run_is_recorded_by_you_and_not_as_the_
     master = await master_of(api, await create(api))
     pool = SandboxPool(pods)
     await a_history(api, pool, master)
+    # Neither a run that has ended nor one that has called no tool yet is at work.
+    earlier, _ = await a_routine_run(api, master, "Tidy up")
+    await a_turn(api, monkeypatch, earlier, [calling(("terminal", {"command": "cat notes.txt"})), _final_response("Fine.")], pool=pool)
+    await a_routine_run(api, master, "Not started")
     (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded before the routine ran")
     run, schedule = await a_routine_run(api, master, "Health check")
     await a_turn(api, monkeypatch, run, [
@@ -932,8 +941,9 @@ async def test_a_routine_run_taken_up_by_another_worker_records_its_changes_as_t
     await a_history(api, pool, master)
     run, schedule = await a_routine_run(api, master, "Tidy up")
     await in_its_pod(api, pool, run, "echo tidied > notes.txt")
-    # Its worker died between its work and its record: the worker that ends its turn holds no pod of the master's.
-    await ends(api, SandboxPool(pods), run)
+    # Its worker died between its work and its record.  The worker that takes its turn up holds no pod of the
+    # master's, and the turn has called a tool: what the real files changed is not yours.
+    await a_turn(api, monkeypatch, run, [_final_response("Tidied.")], pool=SandboxPool(pods))
     [its] = await pickups_of(api, master)
     assert (changed(its), its.commit) == (["notes.txt"], main_of(pods))
     assert git(pods.project / "_history", "log", "-1", "--format=%ae", its.commit) == f"routine:{schedule.id}@surogate"
@@ -966,10 +976,16 @@ async def test_a_stopped_routine_runs_changes_are_the_routines_too(api, monkeypa
     pool = SandboxPool(pods)
     await a_history(api, pool, master)
     run, schedule = await a_routine_run(api, master, "Tidy up")
+
+    async def stopped(harness) -> None:
+        # As the stop's route does: the turn's end is written before the turn is torn down.
+        await api.app.state.session_store.emit_event(run.id, EventType.SESSION_PAUSE, {"reason": "stopped by the user"})
+        await stop(harness)
+
     await a_turn(api, monkeypatch, run, [
         calling(("terminal", {"command": "echo tidied > notes.txt"})), calling(("memory", {"action": "add", "content": "x"})),
         _final_response("never said"),
-    ], pool=pool, during=stop)
+    ], pool=pool, during=stopped)
     [its] = await pickups_of(api, master)
     assert (changed(its), its.commit) == (["notes.txt"], main_of(pods))
     assert git(pods.project / "_history", "log", "-1", "--format=%ae", its.commit) == f"routine:{schedule.id}@surogate"
@@ -1001,3 +1017,73 @@ async def test_a_routine_run_through_a_masters_pod_made_before_it_kept_a_history
     await ends(api, pool, thread)
     [landed] = await rows(api, thread)
     assert [f["path"] for f in landed.picked_up] == ["notes.txt"]
+
+
+async def test_a_routine_runs_pickup_is_tried_once(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    before = main_of(pods)
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
+    call, tries = landing_module._call, []
+
+    async def fails(sandbox_pool, owner, action, **arguments):
+        if action == "pickup":
+            tries.append(arguments["author"]["name"])
+            raise landing_module.LandingStepError("the pod's disk is full")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "_call", fails)
+    await ends(api, pool, run, settings=SimpleNamespace(default_step_timeout=29, default_max_retries=3, retry_delay=0))
+    # Its turn ends all the same; the next landing picks the change up, as yours.
+    assert tries == ["Tidy up"] and await pickups_of(api, master) == [] and main_of(pods) == before
+    assert len(await api.app.state.session_store.get_events(run.id, types=[EventType.SESSION_COMPLETE])) == 1
+
+
+async def test_a_routine_runs_pickup_that_lost_the_projects_lock_pushes_nothing(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    before = main_of(pods)
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
+    settle = landing_module.settle_running
+
+    async def then_the_lock_goes(*args, **kwargs):
+        settled = await settle(*args, **kwargs)
+        await lose_the_lock(api, SimpleNamespace(config={"workstream_id": project_of(master.config["workspace_boundary"])}))
+        return settled
+
+    monkeypatch.setattr(landing_module, "settle_running", then_the_lock_goes)
+    await ends(api, pool, run)
+    assert await pickups_of(api, master) == [] and main_of(pods) == before
+
+
+async def test_a_routine_run_on_the_users_computer_asks_no_pod_for_a_pickup(api, monkeypatch, pods, caplog):
+    master = await master_of(api, await create(api))
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await api.app.state.session_store.emit_event(
+        run.id, EventType.TOOL_CALL, {"tool_call_id": "call_0_terminal", "name": "terminal", "arguments": {}},
+    )
+    there = run.model_copy(update={"config": {**run.config, "execution": {"kind": "device", "device_id": str(run.id)}}})
+    asked: list = []
+
+    async def pick_up(**arguments):
+        asked.append(arguments)
+
+    monkeypatch.setattr(loop_artifact_completion, "pick_up_routine", pick_up)
+    monkeypatch.setattr(pods, "provision", pick_up)
+    harness = harness_of(api)
+    harness._sandbox_pool = SandboxPool(pods)
+    await harness._pick_up_routine(there, yours=True)
+    await harness._pick_up_routine(there)
+    assert asked == [] and "Could not pick up" not in caplog.text
+
+
+async def test_only_a_projects_masters_pod_keeps_a_history_of_its_workspace(api):
+    created = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    chat = await api.app.state.session_store.get_session(created.json()["id"])
+    tenant = SimpleNamespace(org_id=chat.org_id, user_id=chat.user_id)
+    assert chat.config.get("storage_bucket")
+    assert "HISTORY_MAIN" not in (await _build_session_sandbox_spec(chat, tenant, str(chat.id))).env

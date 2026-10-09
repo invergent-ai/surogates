@@ -1430,8 +1430,9 @@ class ArtifactCompletionMixin:
         changes recorded.
         """
         if (
-            self._sandbox_pool is None or routine_project(session) is None
-            or device_of(session.config) is not None or session.config.get("history_off")
+            self._sandbox_pool is None or routine_project(session) is None or session.config.get("history_off")
+            # On the user's computer there is no pod, and the folder's history is its own.
+            or device_of(session.config) is not None
         ):
             return
         try:

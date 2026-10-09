@@ -1196,9 +1196,9 @@ async def pick_up_routine(
     A pickup alone, pushed under the project's lock in the master's pod the
     run worked in, once the landings a killed worker left running are
     settled: what they applied is put back first, so it is no change of
-    the routine's.  One try: a pickup that fails, a run whose pod this
-    worker does not hold, a project over the cap and one with no history
-    yet record nothing, and the next landing picks the changes up as yours.
+    the routine's.  One try: a pickup that fails, and one in a project
+    with no history yet, record nothing, and the next landing picks the
+    changes up as yours.
 
     With *yours*, before the run's first call: what the real files changed
     up to here is recorded by you, as a landing's pickup records it, so
@@ -1208,7 +1208,7 @@ async def pick_up_routine(
     """
     workstream = routine_project(session)
     owner = sandbox_session_key(session)
-    if workstream is None or session.config.get("history_off") or sandbox_pool.sandbox_of(owner) is None:
+    if workstream is None:
         return None
     if yours:
         author = {"name": str(session.user_id), "email": f"user:{session.user_id}@surogate"}
