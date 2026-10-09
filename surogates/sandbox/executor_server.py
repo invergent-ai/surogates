@@ -74,7 +74,7 @@ _READ_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
 
 # A landing's steps, as ``_history`` actions, and the History method each runs.
 _HISTORY_STEPS = {
-    "fetch": "fetch", "commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record",
+    "fetch": "fetch", "pickup": "pickup", "commit": "commit_turn", "apply": "apply", "unapply": "unapply", "record": "record",
     "keep": "keep", "prune": "prune", "hand_off": "hand_off", "hand_back": "hand_back",
     "keep_apart": "keep_apart", "take_up": "take_up", "drop_hand_off": "drop_hand_off", "opened": "opened",
 }
