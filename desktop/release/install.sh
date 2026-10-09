@@ -203,7 +203,11 @@ signed_by() {
 # each would name a version, where dpkg calls a version of two lines older than any other. With
 # "any" as $2 the object may be on any number of lines, as the install record is written. $3 is
 # its bound in bytes where that is not a manifest's: the release job reads the app's own package
-# by this rule, for the state schema it writes into a manifest (publish.sh describe).
+# by this rule, for the state schema it writes into a manifest (publish.sh describe). A bound is
+# a number of bytes from 1 to a megabyte, written in the ten digits with no zero before it, and
+# nothing is read by any other: it goes into the shell's own arithmetic, where a name is a
+# variable's and what stands in its brackets is run. Asked letter by letter, and of no range of
+# letters, which is another range in another locale.
 #
 # It is JSON as JSON is written, and no more of what jq reads besides: the app reads a manifest
 # with a reader of its own (oneObject in src/shell/updates.ts), and takes what this takes and
@@ -215,6 +219,8 @@ signed_by() {
 # own, and changes with jq).
 one_object() {
   local most="${3:-4096}"
+  case "$most" in 0* | *[!0123456789]*) return 1 ;; esac
+  [ "${#most}" -le 7 ] && [ "$most" -le 1048576 ] || return 1
   head -c "$(( most + 1 ))" -- "$1" 2>/dev/null \
     | jq -ceRs --arg lines "${2:-one}" --argjson most "$most" '
       select(utf8bytelength <= $most and ($lines == "any" or test("\\A[^\\n]*\\n\\z")) and (test("\ufffd") | not)

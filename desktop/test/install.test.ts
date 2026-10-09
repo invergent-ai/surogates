@@ -43,9 +43,12 @@ createServer((request, response) => {
 }).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
 `;
 
-// The helper stopped (SIGKILL) before each command it runs, in turn, each time from the install
-// kept in /opt/pristine. A line for each stop: what current names and whether that folder is
-// whole, then how the same apply, run again to its end, exits and what it leaves.
+// The helper stopped (SIGKILL) before each command its own shell runs, in turn, each time from the
+// install kept in /opt/pristine. A line for each stop: what current names and whether that folder
+// is whole, then how the same apply, run again to its end, exits and what it leaves. Counted in
+// the helper's own shell alone, as SIGNALS counts: what a $( ) runs counts on from where it
+// began, and would stop the helper at a number before its own shell came to that number, so
+// that the commands just after a long $( ) were never stopped at. Its renames are among them.
 const STATE = String.raw`
 state() {
   local now
@@ -60,7 +63,7 @@ const STOPS = String.raw`${STATE}
 for stop in $(seq 1000); do
   find /opt/surogate -mindepth 1 -delete
   cp -a /opt/pristine/. /opt/surogate/
-  STOP="$stop" bash -T -c 'n=0; trap "(( ++n == STOP )) && kill -KILL \$\$" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
+  STOP="$stop" bash -T -c 'n=0; trap "(( BASHPID == \$\$ )) && (( ++n == STOP )) && kill -KILL \$\$" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
   [ "$?" -eq 137 ] || { echo "end $stop"; exit 0; }
   stopped="$(state)"
   /opt/surogate-test/install.sh --apply "$@" >/dev/null 2>&1
@@ -344,6 +347,38 @@ describe("the install script's waits", () => {
     const seconds = (name: string) => Number(new RegExp(`^  ${name}=(\\d+)$`, "m").exec(script)?.[1]);
     // With the lock held, the asking user's processes read a manifest and a signature, each small, and a tarball.
     expect(seconds("LOCK_WAIT")).toBeGreaterThan(2 * seconds("SMALL_WAIT") + seconds("READ_WAIT"));
+  });
+});
+
+describe("the install script's reader of one JSON object", () => {
+  it("reads by no bound but a number of bytes in the ten digits, from 1 to a megabyte: its bound goes into the shell's own arithmetic, where any other word is a command", () => {
+    const dir = mkdtempSync(join(tmpdir(), "install-test-"));
+    try {
+      const object = join(dir, "object.json");
+      writeFileSync(object, '{"a":1}\n');
+      // A locale of this computer's in which bash takes other characters than the ten for digits, where it has one.
+      const locales = spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout.trim().split("\n");
+      const wide = locales.find((locale) => spawnSync("bash", ["-c", '[[ "$1" =~ ^[0-9]$ ]]', "_", "٣"], { env: { ...process.env, LC_ALL: locale } }).status === 0) ?? "C";
+      // The reader, from the script's functions without its last line, with *bound* as its third argument where one is given.
+      const read = (...bound: string[]) => spawnSync("bash", ["-c", `cd "$3" && . <(sed '$d' "$1") && settings && one_object "$2" one "\${@:4}"`, "_", SCRIPT, object, dir, ...bound], {
+        encoding: "utf8", env: { ...process.env, LC_ALL: wide },
+      });
+      // With none, a manifest's 4096 bytes; and each bound from the object's own 8 bytes to a megabyte.
+      for (const bound of [[], ["8"], ["4096"], ["1048576"]]) expect(read(...bound), bound.join()).toMatchObject({ status: 0, stdout: '{"a":1}\n', stderr: "" });
+      // A bound below the object's bytes is a bound, and the object is longer.
+      for (const bound of ["1", "7"]) expect(read(bound), bound).toMatchObject({ stdout: "", stderr: "" });
+      expect(read("7").status).not.toBe(0);
+      // What is no such number is refused before it is reckoned with: in arithmetic a name is a
+      // variable's, and what stands in its brackets is run.
+      const ran = join(dir, "ran");
+      for (const bound of ["0", "08", "+8", "-8", " 8", "8 ", "8.0", "1e3", "0x10", "4096+1", "1048577", "9999999", "99999999999999999999", "٨", "4٠٩٦",
+        "most", "x[$(touch ran)]", "a[`touch ran`]", "$(touch ran)", "8;touch ran"]) {
+        expect(read(bound), bound).toMatchObject({ status: 1, stdout: "", stderr: "" });
+        expect(existsSync(ran), bound).toBe(false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
