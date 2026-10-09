@@ -45,21 +45,41 @@ _FIXED = 6 + 16
 GUARD = True
 
 
+# A float for a numeric column goes as its exact decimal expansion, 5e-324 as some 390 bytes of it.
+_FLOAT = _FIXED + 384
+
+
 def _bound(value: Any) -> int | None:
-    """No fewer bytes than *value* takes in a row's message; None when that is not known."""
-    if value is None or isinstance(value, (bool, float, uuid.UUID, datetime.date, datetime.time, datetime.timedelta)):
+    """No fewer bytes than *value* takes in a row's message; None when that is not known.
+
+    Each line holds for the widest form the driver gives the value, whatever its column:
+    """
+    # None is a length alone; a bool one byte; a UUID 16; a date, a time, a moment 4 to 12
+    # and an interval 16.  All binary: the driver never sends these as their text.
+    if value is None or isinstance(value, (bool, uuid.UUID, datetime.date, datetime.time, datetime.timedelta)):
         return _FIXED
+    if isinstance(value, float):
+        # 8 bytes for a float column; for a numeric one every decimal digit it has.
+        return _FLOAT
     if isinstance(value, str):
+        # Text, and what SQLAlchemy has already made text: JSON with its escapes, an enum's
+        # value.  A subclass of str is sent by its own characters.  UTF-8 is at most 4 bytes a character.
         return _FIXED + (len(value) if value.isascii() else 4 * len(value))
     if isinstance(value, (bytes, bytearray)):
         return _FIXED + len(value)
     if isinstance(value, memoryview):
         return _FIXED + value.nbytes
     if isinstance(value, int):
+        # 2 to 8 bytes for an integer column; for a numeric one two bytes for every
+        # four decimal digits, which is less than a byte for every seven bits.
         return _FIXED + value.bit_length()
     if isinstance(value, decimal.Decimal):
-        return _FIXED + 2 * len(str(value))
+        # Two bytes for every four decimal digits, counted with the zeros its exponent
+        # stands for on either side, which its text may not spell ("1E+1000").
+        _, digits, exponent = value.as_tuple()
+        return _FIXED + len(digits) + (abs(exponent) if isinstance(exponent, int) else 0)
     if isinstance(value, (list, tuple)):
+        # An array: its header, and each element with its own length.
         total = _FIXED + 32
         for item in value:
             inner = _bound(item)
@@ -67,6 +87,7 @@ def _bound(value: Any) -> int | None:
                 return None
             total += inner
         return total
+    # Anything else (a mapping, a range, an address, an enum that is no str): not known.
     return None
 
 

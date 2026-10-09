@@ -258,3 +258,20 @@ async def test_a_statement_sent_in_groups_on_an_autocommit_connection_leaves_no_
             assert not (await connection.get_raw_connection()).driver_connection.is_in_transaction()
     finally:
         await autocommit.dispose()
+
+
+async def test_many_rows_of_a_float_whose_decimal_form_is_long_end_when_stopped_at_any_wait(stopping, session_factory, table):
+    """A float for a numeric column goes as its exact decimal expansion: 5e-324 is some 390 bytes of it."""
+    async def insert():
+        async with stopping.session_factory() as db:
+            await db.execute(sqlalchemy.insert(table), [{"id": n, "body": None, "amount": 5e-324} for n in range(430)])
+            await db.commit()
+
+    for at in range(200):
+        await stopping.stop_at(at, insert())
+        left = await kept(session_factory)
+        if left == 430:
+            break
+        assert left == 0
+    else:
+        pytest.fail("the rows were never inserted")

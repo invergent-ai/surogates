@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import enum
+import importlib
 import subprocess
 import sys
 import uuid
@@ -42,12 +44,34 @@ def test_a_value_whose_size_is_not_known_sends_its_row_alone():
     assert in_groups([("a",), odd, ("b",)]) == [[("a",)], [odd], [("b",)]]
 
 
+def _numeric_bytes(number: decimal.Decimal) -> int:
+    """No less than a numeric takes in the driver's binary form: a header, and two bytes for every four
+    decimal digits it has, with the zeros a positive exponent stands for. Zeros after the point are not sent."""
+    _, digits, exponent = number.as_tuple()
+    if not isinstance(exponent, int):
+        return 8
+    return 8 + 2 * ((len(digits) + max(exponent, 0)) // 4 + 2)
+
+
 def test_the_bound_is_never_under_what_a_value_takes_on_the_wire():
     assert row_bound(("é" * 10,)) >= len(("é" * 10).encode()) and row_bound(("a" * 10,)) < row_bound(("é" * 10,))
     data = b"x" * 1000
     assert row_bound((data,)) >= 1000 and row_bound((memoryview(data),)) >= 1000 and row_bound((bytearray(data),)) >= 1000
-    assert row_bound((None, True, 7, 1.5, uuid.uuid4(), datetime.datetime.now(), datetime.date.today())) < 400
-    assert row_bound((10 ** 400,)) >= 400 and row_bound((decimal.Decimal("1" * 300),)) >= 300
+    assert row_bound((None, True, 7, uuid.uuid4(), datetime.datetime.now(), datetime.date.today())) < 400
+    # A float for a numeric column is its exact decimal expansion: the smallest one is the longest.
+    assert row_bound((5e-324,)) >= _numeric_bytes(decimal.Decimal(5e-324)) and row_bound((1.5,)) == row_bound((5e-324,))
+    for number in (decimal.Decimal("1" * 300), decimal.Decimal("1E+1000"), decimal.Decimal("1E-1000"), decimal.Decimal("NaN")):
+        assert row_bound((number,)) >= _numeric_bytes(number), number
+    assert row_bound((10 ** 400,)) >= _numeric_bytes(decimal.Decimal(10 ** 400))
+
+    class Name(str):
+        pass
+
+    class Colour(str, enum.Enum):
+        RED = "é" * 10
+
+    assert row_bound((Name("é" * 10),)) == row_bound(("é" * 10,)) == row_bound((Colour.RED,))
+    assert row_bound((enum.Enum("Plain", "A").A,)) is None
     assert row_bound((["x" * 500, "y" * 500],)) >= 1000
     assert row_bound({"a": "x" * 500}) >= 500  # named parameters
 
