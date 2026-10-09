@@ -51,8 +51,9 @@ class Computer:
             agent_id=self.agent_id, queue_key=SHARED_WORK_QUEUE_KEY,
         )
 
-    def api(self, *, session_scope_id: UUID | None = None) -> FastAPI:
-        """The browser routes with the API's own emitter and wake, which enqueues on the real queue."""
+    def api(self, *, as_user: bool = True, session_scope_id: UUID | None = None) -> FastAPI:
+        """The browser routes with the API's own emitter and wake, which enqueues on the real queue,
+        for a caller who is the computer's user, or a service that names them."""
         app = FastAPI()
         app.include_router(browser_routes.router, prefix="/v1")
         app.state.redis, app.state.session_store = self.redis, self.store
@@ -67,7 +68,7 @@ class Computer:
 
         async def tenant() -> TenantContext:
             return TenantContext(
-                org_id=self.org_id, user_id=None if session_scope_id else self.user_id, org_config={},
+                org_id=self.org_id, user_id=self.user_id if as_user else None, org_config={},
                 user_preferences={}, permissions=frozenset(), asset_root="/tmp/surogates-test",
                 session_scope_id=session_scope_id,
             )
@@ -75,11 +76,16 @@ class Computer:
         app.dependency_overrides[get_current_tenant] = tenant
         return app
 
-    async def chat(self, *events: tuple[EventType, dict], **config) -> UUID:
-        """A chat of the agent on a folder of this computer, left alone since *events*, which a turn read."""
+    async def chat(self, *events: tuple[EventType, dict], **other) -> UUID:
+        """A chat of the agent on a folder of this computer, left alone since *events*, which a turn read.
+
+        *other* says where it is not this computer's user's chat with the agent: another computer's
+        (device_id), another agent's (agent_id), or another user's (user_id).
+        """
+        device_id = other.pop("device_id", self.device_id)
         session = await self.store.create_session(
-            user_id=self.user_id, org_id=self.org_id, agent_id=self.agent_id,
-            config={"execution": {"kind": "device", "device_id": str(self.device_id)}, **config},
+            **{"user_id": self.user_id, "org_id": self.org_id, "agent_id": self.agent_id, **other},
+            config={"execution": {"kind": "device", "device_id": str(device_id)}},
         )
         read = 0
         for kind, data in events:
@@ -91,9 +97,19 @@ class Computer:
         await self.left(session.id)
         return session.id
 
-    async def idle(self) -> UUID:
+    async def idle(self, **other) -> UUID:
         """A chat whose last turn ended with an answer and left it active, as a command's answer does."""
-        return await self.chat((EventType.USER_MESSAGE, {"content": "Open the report."}), ANSWERED)
+        return await self.chat((EventType.USER_MESSAGE, {"content": "Open the report."}), ANSWERED, **other)
+
+    async def told_taken_over(self, **other) -> UUID:
+        """An idle chat whose log says its user took its browser over, as the control route writes it."""
+        chat = await self.idle(**other)
+        await self.store.emit_event(
+            chat, EventType.BROWSER_CONTROL_GRANTED,
+            {"session_id": str(chat), "owner_user_id": str(self.user_id), "computer": True},
+        )
+        await self.left(chat)
+        return chat
 
     async def left(self, *chats: UUID) -> None:
         """Nothing has happened in *chats* for ten minutes, well past the sweeper's threshold."""
@@ -105,9 +121,16 @@ class Computer:
                 )
             await db.commit()
 
-    async def control(self, chat: UUID, action: str, **api) -> dict:
-        async with AsyncClient(transport=ASGITransport(app=self.api(**api)), base_url="http://test") as client:
-            response = await client.post(f"/v1/sessions/{chat}/browser/control", json={"action": action})
+    async def control(self, chat: UUID, action: str, *, service: bool = False, token_of: UUID | None = None) -> dict:
+        """Post *action* to the chat's control route: as its user; as a *service* of the organisation
+        that names the user it speaks for, as the control plane posts it; or so with a worker's token,
+        which covers the one session *token_of*."""
+        named = service or token_of is not None
+        said = {"action": action, **({"owner_user_id": str(self.user_id)} if named else {})}
+        path = f"/v1{'/api' if named else ''}/sessions/{chat}/browser/control"
+        app = self.api(as_user=not named, session_scope_id=token_of)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(path, json=said)
         assert response.status_code == 200, response.text
         # Its events bumped the chat's clock: it is left alone again since.
         await self.left(chat)
@@ -271,3 +294,155 @@ async def test_a_turn_while_the_computers_browser_is_held_is_not_told_that_the_c
     assert await control.held_by(str(chat)) is None
     session = await computer.store.get_session(chat)
     assert await maybe_inject_browser_pause(session=session, browser_control=control) is None
+
+
+async def test_a_hand_back_made_from_another_chat_is_told_to_the_chat_first_taken_over_and_its_agent_is_left_alone(computer):
+    first, other = await computer.idle(), await computer.idle()
+    await computer.control(first, "acquire")
+    # The first chat gone from the computer, its user hands the browser back from another: that chat's
+    # pane tells its own route of the take-over, then of the hand back.
+    await computer.control(other, "acquire")
+    await computer.control(other, "release")
+    await computer.left(first)
+
+    try:
+        # The first chat no longer says its user holds the browser: it is told the hand back, and where it was made.
+        told = (await computer.store.get_events(first))[-1]
+        assert (told.type, told.data) == ("browser.control_returned", {
+            "session_id": str(first), "released_by": str(computer.user_id), "computer": True,
+            "handed_back_from": str(other),
+        })
+        assert await computer.log(first) == [
+            "user.message", "llm.response", "browser.control_granted", "browser.control_returned",
+        ]
+        # For its pane: its agent is not woken, has no work, and the chat does not look crashed. The agent
+        # goes on in the chat the browser was handed back from.
+        assert computer.wakes == [str(other)]
+        assert await computer.work(first) == []
+        assert await computer.work(other) == ["browser.control_returned"]
+        assert await computer.orphans() == {other}
+        await computer.sweep()
+        assert "harness.recovered" not in await computer.log(first)
+        assert not await computer.queued(first)
+    finally:
+        await computer.unqueue(first, other)
+
+
+async def test_a_chat_told_of_a_hand_back_made_elsewhere_is_taken_over_and_handed_back_anew_as_any(computer):
+    first, other = await computer.idle(), await computer.idle()
+    await computer.control(first, "acquire")
+    await computer.control(other, "acquire")
+    await computer.control(other, "release")
+    told = len(await computer.log(first))
+
+    try:
+        # Nothing stands to hand back in the first chat: its pane's release at its next load is passed over.
+        await computer.control(first, "release")
+        assert len(await computer.log(first)) == told
+        # Taken over anew, it is told anew; handed back from itself, its own agent is woken.
+        assert (await computer.control(first, "acquire"))["outcome"] == "granted"
+        await computer.control(first, "release")
+        assert (await computer.log(first))[told:] == ["browser.control_granted", "browser.control_returned"]
+        assert computer.wakes == [str(other), str(first)]
+        assert await computer.work(first) == ["browser.control_returned"]
+    finally:
+        await computer.unqueue(first, other)
+
+
+async def test_a_hand_back_is_told_to_no_chat_but_the_users_own_with_the_agent_on_that_computer_still_taken_over(
+    computer, session_factory,
+):
+    here = await computer.idle()
+    # The browser on this computer is one for the agent's chats there: these still say their user holds it.
+    standing = [await computer.told_taken_over(), await computer.told_taken_over()]
+    # These do not, or are not that browser's: never taken over, handed back already, the agent's on
+    # another computer, another agent's here, another user's, and one its user deleted.
+    never = await computer.idle()
+    handed_back = await computer.told_taken_over()
+    await computer.control(handed_back, "release")
+    deleted = await computer.told_taken_over()
+    await computer.store.update_session_status(deleted, "archived")
+    untold = [
+        never, handed_back, deleted,
+        await computer.told_taken_over(device_id=uuid4()),
+        await computer.told_taken_over(agent_id=f"another-agent-{uuid4()}"),
+        await computer.told_taken_over(user_id=await create_user(session_factory, computer.org_id)),
+    ]
+    before = {chat: await computer.log(chat) for chat in untold}
+
+    await computer.control(here, "acquire")
+    await computer.control(here, "release")
+
+    try:
+        for chat in standing:
+            assert (await computer.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
+        assert {chat: await computer.log(chat) for chat in untold} == before
+        assert computer.wakes == [str(handed_back), str(here)]
+    finally:
+        await computer.unqueue(here, handed_back)
+
+
+async def test_a_hand_back_with_no_take_over_standing_in_its_chat_tells_no_other_chat(computer):
+    first, other = await computer.told_taken_over(), await computer.idle()
+
+    # As a chat's pane posts at its load, where the computer says nobody holds the browser: passed over.
+    await computer.control(other, "release")
+
+    assert (await computer.log(first))[-1] == "browser.control_granted"
+    assert computer.wakes == []
+
+
+async def test_a_hand_back_a_service_posts_for_the_user_is_told_to_that_users_other_chats(computer):
+    first, other = await computer.told_taken_over(), await computer.idle()
+
+    # The service has no user of its own: the chats told are those of the user whose chat it is.
+    await computer.control(other, "acquire", service=True)
+    await computer.control(other, "release", service=True)
+
+    try:
+        told = (await computer.store.get_events(first))[-1]
+        assert (told.type, told.data["released_by"], told.data["handed_back_from"]) == (
+            "browser.control_returned", str(computer.user_id), str(other),
+        )
+    finally:
+        await computer.unqueue(other)
+
+
+async def test_a_token_for_one_chat_hands_back_no_other_chats_take_over(computer):
+    first, other = await computer.told_taken_over(), await computer.idle()
+
+    # A worker's token covers its own session: it tells that one, and no other chat of the computer.
+    await computer.control(other, "acquire", token_of=other)
+    await computer.control(other, "release", token_of=other)
+
+    try:
+        assert (await computer.log(other))[-2:] == ["browser.control_granted", "browser.control_returned"]
+        assert (await computer.log(first))[-1] == "browser.control_granted"
+    finally:
+        await computer.unqueue(other)
+
+
+async def test_the_chats_still_told_taken_over_are_looked_for_in_their_own_organisation(computer, session_factory):
+    # A chat with no user of its own, as a service's is: the organisation alone tells two such apart.
+    another_org = await create_org(session_factory)
+    ours = await computer.told_taken_over(user_id=None)
+    await computer.told_taken_over(user_id=None, org_id=another_org)
+
+    async def told(org_id: UUID) -> list[UUID]:
+        return await computer.store.chats_told_taken_over(
+            device_id=computer.device_id, org_id=org_id, agent_id=computer.agent_id, user_id=None,
+        )
+
+    assert await told(computer.org_id) == [ours]
+    assert len(await told(another_org)) == 1
+
+
+async def test_only_a_hand_back_is_passed_over_for_naming_the_chat_it_was_made_from(computer):
+    chat = await computer.idle()
+
+    # A message nobody answered is found, and is a wake's work, whatever it carries.
+    await computer.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Go on.", "handed_back_from": str(uuid4())})
+    await computer.left(chat)
+
+    assert await computer.orphans() == {chat}
+    assert await computer.work(chat) == ["user.message"]

@@ -47,9 +47,19 @@ def test_a_browsers_hand_back_still_does():
     assert [e.id for e in _actionable_pending_events(events, cursor=4)] == [6]
 
 
-async def _wake(monkeypatch, *since_the_turn: EventType) -> tuple[int, list[EventType]]:
-    """Wake a local-folder chat whose last turn ended with an answer, *since_the_turn* landing after it:
-    how many turns the wake ran, and what it wrote to the chat's log."""
+def test_a_hand_back_made_from_another_chat_gives_this_chats_wake_no_work():
+    # Told to a chat that still said its user held the browser, for its pane: its agent goes on in the
+    # chat the browser was handed back from.
+    elsewhere = SimpleNamespace(id=5, type=EventType.BROWSER_CONTROL_RETURNED, data={"handed_back_from": str(uuid4())})
+    own = SimpleNamespace(id=6, type=EventType.BROWSER_CONTROL_RETURNED, data={"computer": True})
+    # Only a hand back is read so: nothing a message carries takes its turn away.
+    message = SimpleNamespace(id=7, type=EventType.USER_MESSAGE, data={"content": "Go on.", "handed_back_from": str(uuid4())})
+    assert [e.id for e in _actionable_pending_events([elsewhere, own, message], cursor=4)] == [6, 7]
+
+
+async def _wake(monkeypatch, *since_the_turn: EventType, **told: str) -> tuple[int, list[EventType]]:
+    """Wake a local-folder chat whose last turn ended with an answer, *since_the_turn* landing after it,
+    each saying *told* besides: how many turns the wake ran, and what it wrote to the chat's log."""
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
     session = _session()
     session.config.update({"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/u/project"})
@@ -57,7 +67,7 @@ async def _wake(monkeypatch, *since_the_turn: EventType) -> tuple[int, list[Even
         SimpleNamespace(id=1, type=EventType.USER_MESSAGE.value, data={"content": "Open the report."}),
         SimpleNamespace(id=2, type=EventType.LLM_RESPONSE.value, data={"message": {"role": "assistant", "content": "It is open."}}),
         *[
-            SimpleNamespace(id=3 + n, type=kind.value, data={"session_id": str(session.id), "computer": True})
+            SimpleNamespace(id=3 + n, type=kind.value, data={"session_id": str(session.id), "computer": True, **told})
             for n, kind in enumerate(since_the_turn)
         ],
     ]
@@ -83,3 +93,8 @@ async def test_a_wake_at_a_hand_back_runs_the_agents_turn(monkeypatch):
     turns, wrote = await _wake(monkeypatch, EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED)
     assert turns == 1
     assert wrote == [EventType.HARNESS_WAKE]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_finds_only_a_hand_back_made_from_another_chat_runs_no_turn(monkeypatch):
+    assert await _wake(monkeypatch, EventType.BROWSER_CONTROL_RETURNED, handed_back_from=str(uuid4())) == (0, [])

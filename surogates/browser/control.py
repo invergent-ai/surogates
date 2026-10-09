@@ -14,6 +14,12 @@ if TYPE_CHECKING:
 
 _KEY_PREFIX = "surogates:browser:control:"
 
+# In a ``browser.control_returned`` of a chat on its user's computer: the chat the browser was handed
+# back from, when it is not this one.  The agent's browser there is one for all its chats, so a hand
+# back made from one is told to each that still said its user held it, for its pane alone: its agent
+# is neither woken nor given work (surogates.harness.loop_pending, SessionStore.find_orphaned_sessions).
+HANDED_BACK_FROM = "handed_back_from"
+
 
 def _key(session_id: str) -> str:
     return f"{_KEY_PREFIX}{session_id}"

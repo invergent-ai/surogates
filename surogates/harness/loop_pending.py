@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from surogates.browser.control import HANDED_BACK_FROM
 from surogates.session.events import EventType
 
 _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
@@ -22,6 +23,14 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
 })
 
 
+def _handed_back_elsewhere(event_type: str, event: Any) -> bool:
+    """Whether an event tells a chat that its browser was handed back from another chat: told for its
+    pane, as the take-over was.  The agent goes on in the chat its user handed it back from."""
+    return event_type == EventType.BROWSER_CONTROL_RETURNED.value and HANDED_BACK_FROM in (
+        getattr(event, "data", None) or {}
+    )
+
+
 def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     """Return post-cursor events that should start harness work."""
     pending = []
@@ -35,6 +44,7 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
             event.id is not None
             and event.id > cursor
             and event_type not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
+            and not _handed_back_elsewhere(event_type, event)
         ):
             pending.append(event)
     return pending

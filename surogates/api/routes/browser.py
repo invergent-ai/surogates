@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
-from surogates.browser.control import AcquireOutcome
+from surogates.browser.control import HANDED_BACK_FROM, AcquireOutcome
 from surogates.browser.shell import ShellSession
 from surogates.devices.binding import device_of
 from surogates.session.events import EventType
@@ -232,6 +232,47 @@ async def _told_taken_over(app_state: Any, session_id: UUID) -> bool:
     return bool(events) and events[-1].type == EventType.BROWSER_CONTROL_GRANTED.value
 
 
+async def _tell_the_agents_other_chats_handed_back(
+    app_state: Any, session_id: UUID, tenant: TenantContext, emit: Any, released_by: str,
+) -> None:
+    """Tell the agent's other chats on the computer that their user no longer holds its browser.
+
+    The agent's browser there is one for all its chats.  Its user takes it over from one, which is
+    told, and hands it back from that one or, once that chat is gone from the computer, from
+    another: the first would say they hold it for good.  So a hand back ends every take-over those
+    chats were told of.  Each is told once, naming the chat it was made from, for its pane: its agent
+    is not woken there, and goes on in the chat the browser was handed back from.
+
+    Only chats the caller's token covers, as every route of a session answers; and a chat that
+    cannot be told leaves the hand back made.
+    """
+    try:
+        session = await app_state.session_store.get_session(session_id)
+        others = await app_state.session_store.chats_told_taken_over(
+            device_id=device_of(session.config), org_id=session.org_id,
+            agent_id=session.agent_id, user_id=session.user_id,
+        )
+    except Exception:
+        logger.warning(
+            "Could not look for the other chats to tell of the hand back made from session %s",
+            session_id, exc_info=True,
+        )
+        return
+    for other in others:
+        if not tenant.owns_session(session.org_id, other):
+            continue
+        try:
+            await emit(str(other), EventType.BROWSER_CONTROL_RETURNED, {
+                "session_id": str(other), "released_by": released_by, "computer": True,
+                HANDED_BACK_FROM: str(session_id),
+            })
+        except Exception:
+            logger.warning(
+                "Could not tell session %s of the hand back made from session %s",
+                other, session_id, exc_info=True,
+            )
+
+
 @router.get(
     "/api/sessions/{session_id}/browser/state",
     response_model=BrowserStateResponse,
@@ -311,7 +352,8 @@ async def post_browser_control(
         # Told to the chat as the cloud's are, its user having taken it over or handed it back in the
         # desktop: there is no lease here. Each is told once: a take-over while one stands, and a
         # hand back with none standing, answer as done and tell the chat nothing. Handed back, its
-        # agent goes on.
+        # agent goes on, and the agent's other chats there that still said their user held the
+        # browser are told too.
         sid = str(session_id)
         taken_over = await _told_taken_over(request.app.state, session_id)
         if body.action == "acquire":
@@ -322,6 +364,7 @@ async def post_browser_control(
         if taken_over:
             await emit(sid, EventType.BROWSER_CONTROL_RETURNED, {"session_id": sid, "released_by": owner_user_id, "computer": True})
             await wake(sid)
+            await _tell_the_agents_other_chats_handed_back(request.app.state, session_id, tenant, emit, owner_user_id)
         return {"outcome": "released"}
 
     if body.action == "acquire":

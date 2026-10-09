@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from surogates.browser.control import HANDED_BACK_FROM
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -2423,6 +2424,13 @@ class SessionStore:
             "browser.unavailable",
             "browser.control_granted",
         )
+        # A hand back made from another chat is told to this one as the
+        # take-over was, for its pane: it wakes nobody here.
+        handed_back_elsewhere = and_(
+            EventRow.type == "browser.control_returned",
+            EventRow.data.has_key(HANDED_BACK_FROM),
+        )
+
         # Correlated scalar subqueries: latest event for the session
         # under test, skipping trailing-async events so the predicate
         # sees the most recent harness-driven event.  Used to distinguish
@@ -2434,6 +2442,7 @@ class SessionStore:
                 .where(
                     EventRow.session_id == SessionRow.id,
                     EventRow.type.notin_(trailing_async_event_types),
+                    not_(handed_back_elsewhere),
                 )
                 .order_by(EventRow.id.desc())
                 .limit(1)
@@ -2505,6 +2514,40 @@ class SessionStore:
             result = await db.execute(stmt)
             rows = result.scalars().all()
         return [Session.model_validate(r) for r in rows]
+
+    async def chats_told_taken_over(
+        self, *, device_id: UUID, org_id: UUID, agent_id: str, user_id: UUID | None,
+    ) -> list[UUID]:
+        """A user's chats with an agent on one computer that still say their user holds its browser.
+
+        The agent's browser there is one for all those chats.  Each is told of
+        a take-over and of a hand back in its own log, so the last of the two
+        says what it shows.  A deleted chat is told nothing more.
+        """
+        last_told = (
+            select(EventRow.type)
+            .where(
+                EventRow.session_id == SessionRow.id,
+                EventRow.type.in_((
+                    EventType.BROWSER_CONTROL_GRANTED.value,
+                    EventType.BROWSER_CONTROL_RETURNED.value,
+                )),
+            )
+            .order_by(EventRow.id.desc())
+            .limit(1)
+            .correlate(SessionRow)
+            .scalar_subquery()
+        )
+        stmt = select(SessionRow.id).where(
+            SessionRow.org_id == org_id,
+            SessionRow.user_id == user_id,
+            SessionRow.agent_id == agent_id,
+            SessionRow.status != "archived",
+            SessionRow.config["execution"]["device_id"].astext == str(device_id),
+            last_told == EventType.BROWSER_CONTROL_GRANTED.value,
+        )
+        async with self._sf() as db:
+            return list((await db.execute(stmt)).scalars())
 
 
 # ---------------------------------------------------------------------------

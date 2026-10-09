@@ -95,7 +95,24 @@ class StubSessions:
     async def get_session(self, session_id: UUID) -> Any:
         if session_id not in self.sessions:
             raise LookupError(session_id)
-        return self.sessions[session_id]
+        session = self.sessions[session_id]
+        # A chat's row names its user: the one the tests' tokens are for, where a test names none.
+        session.user_id = getattr(session, "user_id", USER_1)
+        return session
+
+    async def chats_told_taken_over(
+        self, *, device_id: UUID, org_id: UUID, agent_id: str, user_id: UUID | None,
+    ) -> list[UUID]:
+        """As the store answers it: that user's chats with the agent on the computer whose last word of
+        their browser's control is a take-over."""
+        told = []
+        for sid, session in self.sessions.items():
+            said = [kind for kind in (entry if isinstance(entry, str) else entry[0] for entry in self.events.get(sid, []))
+                    if kind in ("browser.control_granted", "browser.control_returned")]
+            theirs = (session.org_id, session.agent_id, getattr(session, "user_id", USER_1)) == (org_id, agent_id, user_id)
+            if theirs and session.config["execution"]["device_id"] == str(device_id) and said[-1:] == ["browser.control_granted"]:
+                told.append(sid)
+        return told
 
     async def get_events(self, session_id: UUID, *, types: list[Any] | None = None, **_: Any) -> list[Any]:
         wanted = {kind.value for kind in types or []}
@@ -682,6 +699,65 @@ class TestControlEndpoint:
             "browser.control_granted", "browser.control_returned", "browser.control_granted",
         ]
         assert wakes == [str(sid)]
+
+
+    async def test_a_local_folder_chats_hand_back_is_made_whether_or_not_the_agents_other_chats_can_be_told(
+        self, app_factory,
+    ) -> None:
+        build, _resolver, _control = app_factory
+        sid, away, told = uuid4(), uuid4(), uuid4()
+        on_computer = {"execution": {"kind": "device", "device_id": str(uuid4())}}
+        store = StubSessions()
+        for chat in (sid, away, told):
+            store.sessions[chat] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config=on_computer)
+        # Two more chats of the agent on the computer still say their user holds its browser.
+        store.events[away] = ["browser.control_granted"]
+        store.events[told] = ["browser.control_granted"]
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        emit = store.emitter(events)
+
+        async def one_log_away(session_id: str, event_type: Any, data: dict) -> None:
+            if session_id == str(away):
+                raise RuntimeError("the chat's log is away")
+            await emit(session_id, event_type, data)
+
+        app = build()
+        app.state.session_store = store
+        app.state.session_event_emitter = one_log_away
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async def control(action: str) -> httpx.Response:
+                return await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+
+            await control("acquire")
+            handed_back = await control("release")
+
+            # One could not be told: the hand back is made all the same, and the next chat is told.
+            assert (handed_back.status_code, handed_back.json()) == (200, {"outcome": "released"})
+            assert events[1:] == [
+                (str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True}),
+                (str(told), "browser.control_returned", {
+                    "session_id": str(told), "released_by": str(USER_1), "computer": True, "handed_back_from": str(sid),
+                }),
+            ]
+            # Only the chat it was handed back from is woken.
+            assert wakes == [str(sid)]
+
+            async def no_answer(**_: Any) -> list[UUID]:
+                raise RuntimeError("the database is away")
+
+            # The other chats cannot even be looked for: the hand back is made, told to its own chat, and its agent woken.
+            store.chats_told_taken_over = no_answer
+            await control("acquire")
+            handed_back = await control("release")
+
+        assert (handed_back.status_code, handed_back.json()) == (200, {"outcome": "released"})
+        assert [(of, kind) for of, kind, _ in events[3:]] == [
+            (str(sid), "browser.control_granted"), (str(sid), "browser.control_returned"),
+        ]
+        assert wakes == [str(sid), str(sid)]
 
 
 class _StubBrowserPool:
