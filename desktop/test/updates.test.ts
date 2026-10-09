@@ -133,7 +133,8 @@ describe("an update", () => {
       const found = updates();
       if (why) await expect(found.check(), `${version} ${JSON.stringify(fields)}`).rejects.toThrow(why);
       else await found.check();
-      expect(found.state, `${version} ${JSON.stringify(fields)}`).toEqual({ state: "none" });
+      // Nothing of any is taken; one that no trusted key signed has a line of its own, which says what may mend it.
+      expect(found.state, `${version} ${JSON.stringify(fields)}`).toEqual({ state: why === unsigned ? "unsigned" : "none" });
       expect(heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
     }
     // A manifest is one short line, and its signature 64 bytes: more in the place of either is refused unread.

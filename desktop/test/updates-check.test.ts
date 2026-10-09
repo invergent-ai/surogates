@@ -3,15 +3,17 @@
 // quit while a release downloads, and the mark of the version installed now.
 
 import { sign } from "node:crypto";
-import { existsSync, lstatSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { CHECK_MS, listedKeys, signedRelease } from "../src/shell/updates.js";
+import { CHECK_MS, KEY_CHANGED, listedKeys, signedRelease, updateLine } from "../src/shell/updates.js";
 import { helperWith, keys, next, ranged, servedBase, sha256 } from "./updates-base.js";
 
 const base = servedBase();
+const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const NO_RELEASE = "is not a release of Surogate Desktop for this computer";
 const version = () => join(base.cache(), "1.2.4");
 // A manifest of *fields*, as the release job writes one, and its signature by the test's key.
@@ -32,7 +34,7 @@ describe("a signed manifest", () => {
     expect(JSON.parse(base.served.get("/desktop/latest.json")!.toString())).toEqual(JSON.parse(manifest.toString()));
     const found = base.updates();
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json is not signed by Surogate's release key`);
-    expect(found.state).toEqual({ state: "none" });
+    expect(found.state).toEqual({ state: "unsigned" });
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
   });
 
@@ -112,6 +114,41 @@ describe("a signed manifest", () => {
     const found = base.updates();
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json ${NO_RELEASE}`);
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+  });
+});
+
+describe("a release that no key this computer trusts has signed", () => {
+  const LINE = { text: `Surogate's newest release is not signed by a key this computer trusts. ${KEY_CHANGED}`, button: null };
+  it("has a line that says what mends it, as the install script says it: a computer that missed the release which brought a new key takes no later one, and no one at it can know why", async () => {
+    base.publish("1.2.4", {}, next.privateKey);
+    const states: string[] = [];
+    const found = base.updates({}, () => states.push(found.state.state));
+    await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json is not signed by Surogate's release key`);
+    expect([found.state, updateLine(found.state), states]).toEqual([{ state: "unsigned" }, LINE, ["unsigned"]]);
+    // Nothing of it was downloaded, and nothing is installed from it.
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+    await found.install();
+    expect(found.state).toEqual({ state: "unsigned" });
+    // The line goes once the base's newest is one its keys take.
+    base.publish("1.2.4");
+    await found.check();
+    expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
+  });
+
+  it("leaves the line of an update that is here: one downloaded and offered stays offered", async () => {
+    base.publish("1.2.4");
+    const found = base.updates();
+    await found.check();
+    base.publish("1.2.5", {}, next.privateKey);
+    await expect(found.check()).rejects.toThrow("is not signed by Surogate's release key");
+    expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
+  });
+
+  it("says what mends it in the install script's own words for it, where the script has them", () => {
+    const said = /is not signed by Surogate's release key, as this computer has it\. ([^"]+)"/.exec(readFileSync(SCRIPT, "utf8"))?.[1];
+    expect([undefined, KEY_CHANGED]).toContain(said);
+    // And whole on the line: the sidebar's bound for a helper's words is not this line's.
+    expect(LINE.text.endsWith("install it again")).toBe(true);
   });
 });
 

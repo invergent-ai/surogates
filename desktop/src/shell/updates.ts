@@ -78,7 +78,9 @@ export type UpdateState =
   | { state: "installed"; version: string }
   // The helper pkexec would run is not one the app can take: nothing is installed until the
   // install script has put it right.
-  | { state: "broken" };
+  | { state: "broken" }
+  // The base's newest release is signed by no key the helper lists: nothing of it is taken.
+  | { state: "unsigned" };
 
 // What the root helper's run came to: its exit code, null when it did not run or a signal ended
 // it; and the last of what it said, with how it ended where no exit code says.
@@ -140,6 +142,15 @@ export interface UpdateLine {
 }
 
 /** The sidebar's line for *state*, or null for none. */
+// What mends a computer that missed the release which brought a new release key: it takes nothing
+// the new key signs, and no one at it can know why. The install script's own words for it
+// (unsigned in release/install.sh), which the same computer's administrator reads there.
+export const KEY_CHANGED = "The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, "
+  + "or remove Surogate Desktop with --uninstall and install it again";
+
+// A release that none of the keys asked has signed.
+export class Unsigned extends Error {}
+
 export function updateLine(state: UpdateState | null): UpdateLine | null {
   switch (state?.state) {
     case "available":
@@ -154,6 +165,8 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
       return { text: `Surogate ${state.version} is installed.`, button: "Restart" };
     case "broken":
       return { text: "Surogate cannot update itself. Run the install script again.", button: null };
+    case "unsigned":
+      return { text: `Surogate's newest release is not signed by a key this computer trusts. ${KEY_CHANGED}`, button: null };
     default:
       return null;
   }
@@ -340,7 +353,7 @@ function oneObject(bytes: Buffer): Record<string, unknown> | null {
  * it took and the helper refused would be offered as an update, and then refused. Throws why not.
  */
 export function signedRelease(url: string, manifest: Buffer, signature: Buffer, keys: KeyObject[], channel: string): Release {
-  if (!keys.some((key) => verify(null, manifest, key, signature))) throw new Error(`${url} is not signed by Surogate's release key`);
+  if (!keys.some((key) => verify(null, manifest, key, signature))) throw new Unsigned(`${url} is not signed by Surogate's release key`);
   const release: Partial<Release> = oneObject(manifest) ?? {};
   // Whole numbers below 10^15, as the helper's own check has them.
   const counted = (value: unknown, least: number) => Number.isSafeInteger(value) && (value as number) >= least && (value as number) < 1e15;
@@ -536,7 +549,18 @@ export class Updates {
     const latest = `${base}/desktop/latest.json`;
     const manifest = await this.small(latest, MANIFEST_MAX);
     const signature = await this.small(`${latest}.sig`, SIGNATURE_MAX);
-    const release = signedRelease(latest, manifest, signature, keys, channel);
+    let release: Release;
+    try {
+      release = signedRelease(latest, manifest, signature, keys, channel);
+    } catch (error) {
+      // Signed by no key the helper lists: forged, or signed by a key that a release this computer
+      // never took brought. The helper would refuse it too, and say nothing more; the line says
+      // what mends the second, beside no update that is here and offered.
+      if (error instanceof Unsigned && !this.settled() && (this.state.state === "none" || this.state.state === "unsigned")) this.set({ state: "unsigned" });
+      throw error;
+    }
+    // One its keys take: the line goes.
+    if (this.state.state === "unsigned") this.set({ state: "none" });
     // Nor by one that was asking its base when the install began: the root helper reads the cache
     // while it runs, and nothing in it is changed or removed under it.
     if (this.settled()) return;
