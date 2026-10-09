@@ -1596,6 +1596,24 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
   });
 
+  it("ends at the step that failed where a folder stands in current's place, with the update's helper and mark in already: a state that names no removal, and that only one mends", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    expect(root("rm /opt/surogate/current && mkdir /opt/surogate/current").status).toBe(0);
+    const second = releaseOf("1.1.0");
+    manifestOf("1.1.0", second);
+    const ended = apply(second);
+    expect(ended).toMatchObject({ status: 1, stdout: "" });
+    expect(ended.stderr).toMatch(/^(mv: [^\n]*\n)?Surogate Desktop: stopped, as this step failed: mv -T [^\n]*\n$/);
+    expect(root("cmp /opt/surogate/bin/release.json /opt/surogate/versions/1.1.0/release.json && cmp /opt/surogate/bin/surogate-apply-update /opt/surogate/versions/1.1.0/bin/surogate-apply-update && test -d /opt/surogate/current && ls -A /opt/surogate/staging").stdout).toBe("");
+    // The same again says the same; a removal, and the release applied anew, mend it.
+    expect(apply(second).stderr).toMatch(/Surogate Desktop: stopped, as this step failed: mv -T [^\n]*\n$/);
+    expect(root("/opt/surogate-test/install.sh --uninstall").status).toBe(0);
+    expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(current()).toBe("/opt/surogate/versions/1.1.0");
+  });
+
   it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename: but for the helper of the release that the helper's mark names, whose loss leaves a pair that cannot be shown whole", () => {
     const helper = "/opt/surogate/bin/surogate-apply-update";
     const mark = "/opt/surogate/bin/release.json";

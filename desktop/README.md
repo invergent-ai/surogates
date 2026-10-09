@@ -94,15 +94,18 @@ They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` nam
 
     SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts
 
-A release is a tarball (`scripts/package.sh`), its manifest (`release/publish.sh describe`, which
-reads the tarball and runs with no key) signed with the release key (`release/publish.sh sign`,
-which opens no tarball), and both on the release bucket under `desktop/` with the install script
+A release is a tarball (`scripts/package.sh`), which is read where no key is
+(`release/publish.sh describe`), its manifest written and signed with the release key
+(`release/publish.sh sign`, which opens no tarball), and both on the release bucket under `desktop/` with the install script
 (`release/publish.sh send`). In `.github/workflows/release.yml` these are three jobs, as a job
 is the boundary and a step is none: `desktop-build` makes the tarball; `desktop-describe`, which
-holds no secret and runs no npm, reads it and writes its manifest; and `desktop-publish`, which
-alone holds the release key, runs no npm and opens no tarball, signs that manifest and sends the
-release. `release/install.sh` installs it into `/opt/surogate`, and is each version's root
-helper for updates (`--apply`):
+holds no secret and runs no npm, reads it and says the app's state schema; and
+`desktop-publish`, which alone holds the release key, runs no npm and opens no tarball, writes
+and signs the manifest of the tag, of the build's hash and size and of that schema, and sends
+the release. One thing rests on the describe job's runner alone, as the job that signs cannot
+see it: that the tarball's root helper is the tag's install script. No workflow runs a test of
+any of this: the tests are run by hand before a tag is pushed. `release/install.sh` installs a
+release into `/opt/surogate`, and is each version's root helper for updates (`--apply`):
 
     curl -fsSL https://surogate.ai/desktop/install.sh | bash
     curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall
@@ -119,10 +122,10 @@ folder of the release they belong to:
     /opt/surogate/versions/<version>/          that release's folder, with a copy of the helper and of the manifest in it
 
 The line means that one of them is not as an install or an update leaves it. No install, update
-or rollback leaves them so, wherever it is stopped: each of the states below needs root's own
-hand on those files, a damaged disk, or an install script from before the mark was written.
-Nothing short of a removal mends them, because what is damaged is what says which release keys
-this computer trusts. Do what the line says:
+or rollback leaves them so, wherever it is stopped. The states below need root's own hand on
+those files, a damaged disk, an install script from before the mark was written, or a removal
+that was stopped before its end. Nothing short of a removal mends them, because what is damaged
+is what says which release keys this computer trusts. Do what the line says:
 
     curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall
     curl -fsSL https://surogate.ai/desktop/install.sh | bash
@@ -130,14 +133,16 @@ this computer trusts. Do what the line says:
 The removal takes the app away for every user of the computer. It asks before it deletes your
 sign-in, your device token and your browser profiles, and chat folders stay.
 
-There are fourteen such states, under three lines. The first line is said of eleven:
+The script has four such lines. These are the states each is known to be said of; the list is
+of what was measured, and the script may refuse others in the same words. The first:
 
     /opt/surogate/bin/surogate-apply-update is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again
 
-- the helper is gone, and a version is installed;
-- the helper is a link;
-- the helper is not root's own file at mode 0755: its group or others may write it, or it is
-  another user's;
+- the helper is gone, and a version is installed, as a removal leaves it that was stopped before
+  its last step;
+- the helper is a link, or a folder stands in its place;
+- the helper is not root's own program: it is another user's, its group or others may write it,
+  or no one may run it. At any other mode it is taken, read-only or closed to others too;
 - the folder of the release that the mark names has lost its own copy of the helper,
   `bin/surogate-apply-update`, and the install is otherwise whole;
 - a link is where that copy was;
@@ -151,28 +156,37 @@ There are fourteen such states, under three lines. The first line is said of ele
 - an update was stopped so, and its folder has lost its own copy of the helper;
 - the mark names an older release than the helper is of.
 
-The second, of one:
+The second:
 
     /opt/surogate/bin/surogate-apply-update lists no release key: remove Surogate Desktop with --uninstall, and install it again
 
-- the helper lists no release key.
+- the helper lists no release key, or its list is not written in the one form that a list has
+  (the form is said at the list, in `release/install.sh`). A release job writes and signs no
+  manifest for such a script.
 
-The third, of two:
+The third:
 
     /opt/surogate/bin/release.json does not say which release /opt/surogate/bin/surogate-apply-update is of: remove Surogate Desktop with --uninstall, and install it again
 
 - the mark is gone;
 - the mark is not root's own file at mode 0644, or names no release.
 
-One more line of the kind is said where nothing is installed yet, and something that is no file,
-a link or a folder, stands where the mark goes:
+The fourth, where nothing is installed yet and something that is no file, a link or a folder,
+stands where the mark goes:
 
     /opt/surogate/bin/release.json is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again
 
+One state needs a removal and is told nothing of one: a folder where the link
+`/opt/surogate/current` should be. An update, and the install script, then end "stopped, as this
+step failed: mv -T ...", with the new version's helper and mark already in place. Remove
+Surogate Desktop and install it again there too.
+
 An update that was only stopped half way is none of these: the next update, or the install
 script, finishes it. And a line that ends "run Surogate Desktop's install script again" means
-what it says: the install script mends a version's folder that has lost its program or its
-`release.json`.
+what it says, where the base's newest release is the installed one or a newer: the install
+script then unpacks again a version's folder that has lost its program or its `release.json`.
+Where the installed version is newer than the base's newest, the script keeps it as it is
+("kept the installed ..., newer than the server's ..."), and mends nothing of it.
 
 A different line, with two ways on, is said where the release key changed while this computer
 took no update:
