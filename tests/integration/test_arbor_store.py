@@ -138,8 +138,9 @@ async def test_prune_is_recursive_and_terminal(research_run):
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_a_prune_stopped_at_any_of_its_waits_ends_with_the_whole_subtree_pruned_or_none_of_it(
-    research_run, stopping,
+    research_run, stopping, unguarded,
 ):
+    # Without the engines' guard: the prune's own statements are what end when stopped.
     store, run_id, org_id = research_run
     await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
     for _ in range(3):

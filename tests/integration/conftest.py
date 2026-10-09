@@ -26,6 +26,7 @@ from testcontainers.redis import RedisContainer
 
 import bcrypt as _bcrypt
 
+from surogates.db import many_rows
 from surogates.db.engine import apply_observability_ddl
 from surogates.db.models import Base
 from surogates.session.store import SessionStore
@@ -294,6 +295,13 @@ class Stopping:
             return True
         task.result()
         return False
+
+
+@pytest.fixture
+def unguarded(monkeypatch):
+    """Statements of many rows sent as the driver sends them, in parts: for a test that
+    shows a statement safe by itself, or the driver's fault, without the engines' guard."""
+    monkeypatch.setattr(many_rows, "GUARD", False)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

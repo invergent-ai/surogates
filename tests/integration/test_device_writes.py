@@ -187,8 +187,9 @@ IN_PARTS = os.urandom(CHUNK_BYTES * 3 + 32 * 1024)
 
 @pytest.mark.parametrize("handed_over", [False, True], ids=["by its user", "for another worker to resume"])
 async def test_a_write_stopped_at_any_wait_of_its_recording_ends_with_all_of_it_recorded_or_none(
-    laptop_rig, stopping, session_factory, redis_client, handed_over,
+    laptop_rig, stopping, session_factory, redis_client, handed_over, unguarded,
 ):
+    # Without the engines' guard: the recording's own statements are what end when stopped.
     rig = laptop_rig
     ops = DeviceOperations(stopping.session_factory, redis_client)
     for at in range(500):

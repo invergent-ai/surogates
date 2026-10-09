@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# Imported for what it sets on every engine of the process: see the module.
+from surogates.db import many_rows  # noqa: F401
 from surogates.db.engine import (
     async_engine_from_settings,
     async_session_factory,
