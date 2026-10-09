@@ -343,11 +343,24 @@ async function render(): Promise<void> {
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
-  // The update's line is a live region that stays, empty, as the quit's does.
+  // The update's line is a live region that stays, empty, as the quit's does. Written only when its
+  // words change, so that it speaks once a state.
   // Shown as text is: it may hold the root helper's own words, and the user's paths.
-  showText(byId("update-text"), state.update?.text ?? "");
-  byId("update-button").textContent = state.update?.button ?? "";
-  byId("update-button").hidden = !state.update?.button;
+  const words = state.update?.text ?? "";
+  if (byId("update-text").dataset.said !== words) {
+    byId("update-text").dataset.said = words;
+    showText(byId("update-text"), words);
+  }
+  // While an update installs the line has no button. The one its user pressed stays where it is,
+  // without its use, so that the keyboard is still on it when the line has one again.
+  const button = byId("update-button");
+  const label = state.update?.button ?? null;
+  const pressed = label === null && state.update !== null && state.update !== undefined && document.activeElement === button;
+  if (label !== null) button.textContent = label;
+  else if (!pressed) button.textContent = "";
+  button.hidden = label === null && !pressed;
+  if (pressed) button.setAttribute("aria-disabled", "true");
+  else button.removeAttribute("aria-disabled");
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""

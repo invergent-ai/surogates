@@ -262,9 +262,20 @@ describe("updates, through the app", () => {
       logged += chunk.toString();
     });
     await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    // The line is a live region: drawn again with the same words, it is not written again, and so not said again.
+    await page.evaluate(() => {
+      const counted = window as unknown as { written: number };
+      counted.written = 0;
+      new MutationObserver((changes) => (counted.written += changes.length)).observe(document.getElementById("update-text")!, { childList: true, characterData: true, subtree: true });
+    });
+    for (let drawn = 0; drawn < 10; drawn += 1) await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((window) => window.webContents.send("shell:changed")));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await page.evaluate(() => (window as unknown as { written: number }).written)).toBe(0);
     await page.click("#update-button");
     await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("An administrator needs to install this update.");
     await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Try again");
+    // The button its user pressed still has the keyboard, through the line that had none.
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("update-button");
     await expect.poll(() => logged, { timeout: 10_000 }).toContain("Surogate 0.0.1 was not installed (exit 126)");
     writeFileSync(join(home, "answer"), "1 the release's archive could not be unpacked\n");
     await page.click("#update-button");
