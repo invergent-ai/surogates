@@ -309,9 +309,13 @@ class Workers:
 @pytest_asyncio.fixture(loop_scope="session")
 async def workers(api, monkeypatch):
     yield Workers(api, monkeypatch)
-    # The routines these chats made are due: no other test's ticker should find them.
+    # The routines these chats made are due and their missions idle: no other test's ticker should find them.
     async with api.app.state.session_factory() as db:
         await db.execute(text("DELETE FROM scheduled_sessions WHERE org_id = :org"), {"org": api.org_id})
+        await db.execute(
+            text("UPDATE missions SET status = 'cancelled' WHERE org_id = :org AND status IN ('active', 'paused')"),
+            {"org": api.org_id},
+        )
         await db.commit()
 
 
