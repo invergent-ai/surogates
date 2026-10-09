@@ -144,6 +144,9 @@ describe("what pkexec answers for the helper", () => {
       [{ code: 127, said: "pkexec must be setuid root" }, "pkexec must be setuid root"],
       [{ code: 127, said: "Error getting authority: Error initializing authority: Could not connect: Connection refused" }, "Error getting authority: Error initializing authority: Could not connect: Connection refused"],
       [{ code: 127, said: "" }, "its helper exited 127"],
+      // Its words begin what it says of a refusal: behind another line they are no refusal's, as where
+      // the helper itself ends 127 for a tool that is not there.
+      [{ code: 127, said: `/opt/surogate/bin/surogate-apply-update: line 412: jq: command not found\n${AS_ANOTHER} Not authorized` }, "/opt/surogate/bin/surogate-apply-update: line 412: jq: command not found"],
       // Nor is an exit beside pkexec's two a refusal.
       [{ code: 125, said: "" }, "its helper exited 125"],
       [{ code: 128, said: `${AS_ANOTHER} Not authorized` }, `${AS_ANOTHER} Not authorized`],
