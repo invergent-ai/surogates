@@ -19,7 +19,7 @@
   --danger: light-dark(#b53333, #dd5353);
   --accent: #f59e0b;
   --accent-fg: #0b0e14;
-  --top: 40px;
+  --top: 36px;
   --sidebar-width: clamp(240px, 19vw, 370px);
   --panel-width: clamp(300px, 32vw, 640px);
 }
@@ -349,16 +349,17 @@ body.main.first {
 }
 
 .group-head {
-  margin: 18px 8px 4px 18px;
+  margin: 18px 8px 1px 18px;
   color: var(--dim);
   font-size: 13px;
 }
 
+/* Its top padding keeps the first row's focus ring inside what scrolls. */
 .projects {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 0 8px 8px;
+  padding: 3px 8px 8px;
 }
 
 .projects ul {
@@ -367,21 +368,69 @@ body.main.first {
   padding: 0;
 }
 
-.projects .item span,
+.projects .item .name,
 .card .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* A project with a thread waiting on its user. */
+/* A project's mark: its icon in its hue. */
+.pmark {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--hue);
+}
+
+.pmark[data-hue="0"] {
+  --hue: #d9534f;
+}
+
+.pmark[data-hue="1"] {
+  --hue: #2f9e6e;
+}
+
+.pmark[data-hue="2"] {
+  --hue: #3b82c4;
+}
+
+.pmark[data-hue="3"] {
+  --hue: #9b6bd1;
+}
+
+.pmark[data-hue="4"] {
+  --hue: #b07d12;
+}
+
+.pmark[data-hue="5"] {
+  --hue: #8c8a83;
+}
+
+.item .pmark svg {
+  color: inherit;
+}
+
+/* A project with a thread waiting on its user: a dot on its mark, with a ring in its row's colour,
+   which parts it from a mark of any hue. */
 .projects .waiting {
+  position: absolute;
+  top: -2px;
+  right: -3px;
   width: 6px;
   height: 6px;
-  margin-left: auto;
-  flex-shrink: 0;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 0 2px var(--under, var(--sidebar));
+}
+
+/* The row's colour under the ring: --hover over the sidebar's, as the one colour it shows, and the selected row's. */
+.projects .item:hover {
+  --under: light-dark(#e8e7e1, #1f1f1e);
+}
+
+.projects .item.selected {
+  --under: var(--row);
 }
 
 /* The sidebar's notices, between its projects and its user's row. The projects give them their
@@ -583,9 +632,11 @@ body.main.first {
   min-height: 0;
 }
 
+/* Opaque: it covers what the centre showed, as the Projects page. */
 .empty {
   position: absolute;
   inset: 0;
+  background: var(--centre);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -648,9 +699,10 @@ body.main.first {
   height: 40px;
 }
 
+/* Three columns at most, as Claude Desktop's Projects page, and fewer where they would be under 240 px. */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(max(240px, calc((100% - 24px) / 3)), 1fr));
   gap: 12px;
 }
 
@@ -672,12 +724,10 @@ body.main.first {
   background: var(--hover);
 }
 
-.card .badge {
-  display: inline-flex;
+.card .pmark {
   padding: 5px;
   border-radius: 6px;
-  background: var(--row);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--hue) 16%, transparent);
 }
 
 .card .name {
@@ -1086,8 +1136,8 @@ body.settings-page {
   position: relative;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
-  width: min(1200px, calc(100vw - 96px));
-  height: min(860px, calc(100vh - 96px));
+  width: calc(100vw - 96px);
+  height: calc(100vh - 96px);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -1483,4 +1533,40 @@ body.about-page {
   margin: 0;
   padding: 0;
   border: 0;
+}
+
+/* Quick entry: a box in the middle of a transparent window, over every other. */
+body.quick-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: transparent;
+}
+
+.quick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: calc(100% - 32px);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--raised);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.35);
+}
+
+.quick textarea {
+  width: 100%;
+  min-height: 72px;
+  max-height: 360px;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  user-select: text;
 }

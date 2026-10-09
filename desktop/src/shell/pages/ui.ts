@@ -1,9 +1,10 @@
 // What the desktop's own pages share: the theme mark, their icons, and text shown as text.
 //
-// Icons ported from Lucide (lucide-static 0.544.0), ISC License, Copyright (c) Lucide Contributors 2022.
+// Icons ported from Lucide (lucide-static 0.544.0; the projects' marks from lucide-react 1.8.0), ISC License,
+// Copyright (c) Lucide Contributors 2022.
 // Each icon is its SVG elements as data, built with createElementNS: no markup is parsed.
 
-import { segments } from "../text.js";
+import { ago, segments } from "../text.js";
 
 type Shape = [tag: string, attributes: Record<string, string>];
 
@@ -44,6 +45,11 @@ export const ICONS = {
   "log-out": [["path", { d: "m16 17 5-5-5-5" }], ["path", { d: "M21 12H9" }], ["path", { d: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" }]],
   "refresh-cw": [["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }], ["path", { d: "M21 3v5h-5" }], ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }], ["path", { d: "M8 16H3v5" }]],
   plug: [["path", { d: "M12 22v-5" }], ["path", { d: "M9 8V2" }], ["path", { d: "M15 8V2" }], ["path", { d: "M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" }]],
+  briefcase: [["path", { d: "M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" }], ["rect", { width: "20", height: "14", x: "2", y: "6", rx: "2" }]],
+  "book-open": [["path", { d: "M12 7v14" }], ["path", { d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" }]],
+  "chart-column": [["path", { d: "M3 3v16a2 2 0 0 0 2 2h16" }], ["path", { d: "M18 17V9" }], ["path", { d: "M13 17V5" }], ["path", { d: "M8 17v-3" }]],
+  "file-text": [["path", { d: "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" }], ["path", { d: "M14 2v5a1 1 0 0 0 1 1h5" }], ["path", { d: "M10 9H8" }], ["path", { d: "M16 13H8" }], ["path", { d: "M16 17H8" }]],
+  lightbulb: [["path", { d: "M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" }], ["path", { d: "M9 18h6" }], ["path", { d: "M10 22h4" }]],
 } satisfies Record<string, Shape[]>;
 
 export type IconName = keyof typeof ICONS;
@@ -90,6 +96,36 @@ export function mark(size = 64): SVGSVGElement {
   return svg;
 }
 
+// A project's mark, as Claude Desktop gives each project its own: an icon and a hue, chosen by its id,
+// so a project keeps its mark wherever it shows. The agent's icon field is not read: no client sets one.
+const MARKS: IconName[] = ["folder", "briefcase", "book-open", "chart-column", "file-text", "lightbulb"];
+const HUES = 6; // shell.css's [data-hue]
+
+export function projectMark(id: string, size = 16): HTMLElement {
+  let hash = 0;
+  for (const unit of id) hash = (hash * 31 + unit.charCodeAt(0)) >>> 0;
+  const made = document.createElement("span");
+  made.className = "pmark";
+  made.dataset.hue = String(hash % HUES);
+  made.append(icon(MARKS[Math.floor(hash / HUES) % MARKS.length]!, size));
+  return made;
+}
+
+/** *element*, showing how long ago *when* was, as it stays: freshen() tells it again as time goes on. */
+export function aged(element: HTMLElement, when: string, form: "short" | "long" = "short"): HTMLElement {
+  element.dataset.at = when;
+  element.dataset.form = form;
+  element.textContent = ago(when, Date.now(), form);
+  return element;
+}
+
+/** Every age on the page told again, with nothing else drawn. */
+export function freshen(): void {
+  for (const found of document.querySelectorAll<HTMLElement>("[data-at]")) {
+    found.textContent = ago(found.dataset.at!, Date.now(), found.dataset.form === "long" ? "long" : "short");
+  }
+}
+
 // Every element that names an icon gets it, ahead of its text.
 export function fillIcons(root: ParentNode = document): void {
   for (const element of root.querySelectorAll<HTMLElement>("[data-icon]")) element.prepend(icon(element.dataset.icon as IconName));
@@ -107,6 +143,38 @@ export function markTheme(): void {
 }
 
 export const byId = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
+
+// What of *list* can have the keyboard now: its elements named with data-focus, as they show.
+const shownIn = (list: Element | null): HTMLElement[] =>
+  list ? [...list.querySelectorAll<HTMLElement>("[data-focus]")].filter((found) => found.checkVisibility()) : [];
+
+/**
+ * Run *redraw*, which draws lists anew, and keep the keyboard where it was. An element a redraw makes
+ * again is named by its data-focus, and a list it can leave by its data-focus-list. The keyboard goes
+ * back to the element of the same name while it shows in the same list. One that went to another
+ * list, out of sight, or away gives it to what took its place in its list, or else to the first of
+ * the list it went to, as a folded group's summary. Where neither list shows anything, as a group
+ * that went whole with its heading, it goes to the first that shows of what holds its list.
+ */
+export function keepFocus(redraw: () => void): void {
+  const had = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-focus]");
+  const list = had?.closest<HTMLElement>("[data-focus-list]")?.dataset.focusList;
+  const at = had ? shownIn(had.closest("[data-focus-list]")).indexOf(had) : -1;
+  redraw();
+  if (!had) return;
+  const now = document.activeElement as HTMLElement | null;
+  if (now && now !== document.body && now.checkVisibility()) return;
+  const same = document.querySelector<HTMLElement>(`[data-focus="${CSS.escape(had.dataset.focus!)}"]`);
+  if (same?.checkVisibility() && same.closest<HTMLElement>("[data-focus-list]")?.dataset.focusList === list) return same.focus();
+  const listed = list === undefined ? null : document.querySelector<HTMLElement>(`[data-focus-list="${CSS.escape(list)}"]`);
+  const left = shownIn(listed);
+  const next = left[Math.min(at, left.length - 1)] ?? shownIn(same?.closest("[data-focus-list]") ?? null)[0];
+  if (next) return next.focus();
+  for (let around = listed?.parentElement ?? null; around; around = around.parentElement) {
+    const first = shownIn(around)[0];
+    if (first) return first.focus();
+  }
+}
 
 /** Set *element*'s text to *text*, whole, with each special character marked as its code point: never markup. */
 export function showText(element: HTMLElement, text: string, keep = ""): void {

@@ -271,6 +271,68 @@ describe("Settings → Folders and permissions", () => {
     expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
+  it("says why a Take back or a Stop was refused once for each refusal, however often the list is drawn again, until one goes through", async () => {
+    const { shell, page } = await signedIn();
+    const settings = await foldersSettings(shell, page);
+    // The list as the main process would answer it, the test's own: its Take back and its Stop are each
+    // refused twice, in the same words, and then go through.
+    await shell.evaluate(({ webContents }, folder) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], processes: [{ id: "p-1", command: "npm run serve" }] };
+      const refusals = { takeBack: 2, stop: 2 };
+      for (const channel of ["settings:folders", "settings:take-back", "settings:stop"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
+      contents.ipc.handle("settings:take-back", () => {
+        if ((refusals.takeBack -= 1) >= 0) throw new Error("This chat cannot reach that host");
+        chat.hosts = [];
+      });
+      contents.ipc.handle("settings:stop", () => {
+        if ((refusals.stop -= 1) >= 0) throw new Error("This chat runs no such process");
+        chat.processes = [];
+      });
+      contents.send("settings:changed");
+    }, folders[0]!);
+    const alert = () => settings.textContent("#folders-failed");
+    // The alert's text is the one marked: it was not set again, so a screen reader did not say it again.
+    const mark = () => settings.evaluate(() => void Object.assign(document.getElementById("folders-failed")!.firstChild!, { saidBefore: true }));
+    const unsaid = () => settings.evaluate(() => "saidBefore" in (document.getElementById("folders-failed")!.firstChild ?? {}));
+    // Drawn again, as each change of the app's state draws it: the chat's row is a new one, and the alert's text the one it had.
+    const drawnAgainUnsaid = async () => {
+      await mark();
+      await settings.evaluate(() => void Object.assign(document.querySelector("#folders .row")!, { drawnBefore: true }));
+      await shell.evaluate(({ webContents }) => {
+        webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!.send("settings:changed");
+      });
+      await expect.poll(() => settings.evaluate(() => "drawnBefore" in document.querySelector("#folders .row")!), { timeout: 5_000 }).toBe(false);
+      expect(await unsaid()).toBe(true);
+    };
+    const takeBack = "Surogate did not take back example.com: This chat cannot reach that host.";
+    await settings.click('[aria-label="Take back example.com"]');
+    await expect.poll(alert, { timeout: 5_000 }).toBe(takeBack);
+    await drawnAgainUnsaid();
+    // Refused again, in the same words: it answers a new press, so it is said again, once.
+    await settings.click('[aria-label="Take back example.com"]');
+    await expect.poll(unsaid, { timeout: 5_000 }).toBe(false);
+    expect(await alert()).toBe(takeBack);
+    await drawnAgainUnsaid();
+    // One that goes through takes it away.
+    await settings.click('[aria-label="Take back example.com"]');
+    await expect.poll(alert, { timeout: 5_000 }).toBe("");
+    expect(await texts(settings, "#folders .line")).toEqual(["Runs npm run serveStop"]);
+    // A Stop is said as a Take back is: at each refusal, the same words again too, and not after one that goes through.
+    const stop = "Surogate did not stop npm run serve: This chat runs no such process.";
+    await settings.click('[aria-label="Stop npm run serve"]');
+    await expect.poll(alert, { timeout: 5_000 }).toBe(stop);
+    await mark();
+    await settings.click('[aria-label="Stop npm run serve"]');
+    await expect.poll(unsaid, { timeout: 5_000 }).toBe(false);
+    expect(await alert()).toBe(stop);
+    await drawnAgainUnsaid();
+    await settings.click('[aria-label="Stop npm run serve"]');
+    await expect.poll(alert, { timeout: 5_000 }).toBe("");
+    expect(await texts(settings, "#folders .line")).toEqual([]);
+  });
+
   it("reads each chat's title afresh once its user has logged out, as for another account", async () => {
     const { shell, page, client } = await signedIn();
     agent.titles.set(CHAT, "Quarterly report");
@@ -293,5 +355,72 @@ describe("Settings → Folders and permissions", () => {
     await bound(client, folders[0]!, CHAT, "free");
     const again = await foldersSettings(shell, page);
     await expect.poll(() => texts(again, "#folders .row .label > span:first-child")).toEqual(["Receipts"]);
+  });
+
+  it("keeps the keyboard on its Take back or Stop as the list is drawn again, and gives it to the next once its line goes", async () => {
+    const { shell, page } = await signedIn();
+    const settings = await foldersSettings(shell, page);
+    // The list as the main process would answer it, the test's own: a chat with two hosts, the browser and a process.
+    await shell.evaluate(({ webContents }, folder) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], browser: true, processes: [{ id: "p-1", command: "npm run serve" }] };
+      for (const channel of ["settings:folders", "settings:take-back", "settings:take-back-browser", "settings:stop"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
+      contents.ipc.handle("settings:take-back", (_event, _root, host) => {
+        chat.hosts = chat.hosts.filter((found) => found !== host);
+      });
+      contents.ipc.handle("settings:take-back-browser", () => {
+        chat.browser = false;
+      });
+      contents.ipc.handle("settings:stop", (_event, _root, id) => {
+        chat.processes = chat.processes.filter((found) => found.id !== id);
+      });
+      contents.send("settings:changed");
+    }, folders[0]!);
+    const focused = () => settings.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? null);
+    await settings.focus('[aria-label="Take back example.org"]');
+    // Drawn again, as each change of the app's state draws it: the button is a new one, with the keyboard.
+    await settings.evaluate(() => Object.assign(document.activeElement!, { drawnBefore: true }));
+    await shell.evaluate(({ webContents }) => {
+      webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!.send("settings:changed");
+    });
+    await expect.poll(() => settings.evaluate(() => !("drawnBefore" in document.activeElement!))).toBe(true);
+    expect(await focused()).toBe("Take back example.org");
+    // Taken back, with Enter held: the line under it takes its place, and the key's repeats stop nothing.
+    await settings.keyboard.down("Enter");
+    await expect.poll(focused).toBe("Take back the browser on this computer");
+    await settings.keyboard.down("Enter");
+    await settings.keyboard.down("Enter");
+    await settings.keyboard.up("Enter");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await focused()).toBe("Take back the browser on this computer");
+    // The browser's line is one of them: taken back, the line under it takes its place.
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("Stop npm run serve");
+    // The last line's place is the one before it.
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("Take back example.com");
+    // Nothing left to take back or stop: the section's heading has the keyboard.
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("H2");
+    // Under a search, the keyboard goes only where the search shows: a hidden chat's line never takes it.
+    await shell.evaluate(({ webContents }, folder) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      const chats = [
+        { root: "r-2", title: "Alpha", mode: "free", hosts: ["alpha.example"], processes: [] },
+        { root: "r-3", title: "Beta", mode: "free", hosts: ["beta.example"], processes: [] },
+      ];
+      for (const channel of ["settings:folders", "settings:take-back"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:folders", () => [{ folder, chats }]);
+      contents.ipc.handle("settings:take-back", (_event, root, host) => {
+        const chat = chats.find((found) => found.root === root)!;
+        chat.hosts = chat.hosts.filter((found) => found !== host);
+      });
+      contents.send("settings:changed");
+    }, folders[0]!);
+    await settings.fill("#settings-search", "Beta");
+    await settings.focus('[aria-label="Take back beta.example"]');
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("H2");
   });
 });

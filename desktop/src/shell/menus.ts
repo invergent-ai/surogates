@@ -70,19 +70,23 @@ export function appMenu(act: MenuActions, developer: boolean): MenuItemConstruct
 export interface TrayState {
   device: string | null; // how this computer is connected to the agent, as the sidebar says it; null with no agent
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
+  shortcut: string | null; // the keys that open quick entry, while the app holds them
 }
 
 export interface TrayActions {
   show(): void;
+  quickEntry(): void;
   settings(): void;
   quit(): void;
   quitNow(): void; // a quit that waits goes now, with no question
 }
 
-// The tray's menu, as Claude Desktop's (index.chunk-B33tFrRY.js): the window first, then what to know, then Quit.
+// The tray's menu, as Claude Desktop's (index.chunk-B33tFrRY.js): the window and quick entry first, then what to know, then Quit.
 export function trayMenu(state: TrayState, act: TrayActions): MenuItemConstructorOptions[] {
   return [
     { label: "Show Surogate", click: () => act.show() },
+    // The keys are said, not taken: the app holds them for the whole display, not for its menus.
+    { label: "Quick entry", ...(state.shortcut === null ? {} : { accelerator: state.shortcut, registerAccelerator: false }), click: () => act.quickEntry() },
     ...(state.device === null ? [] : [{ label: state.device, enabled: false }]),
     { type: "separator" },
     { label: "Settings…", click: () => act.settings() },

@@ -8,7 +8,7 @@ import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web
 import { ACCOUNT, connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
-const { report: REPORT, budget: BUDGET, question: QUESTION, idle: IDLE } = FIXTURE_IDS;
+const { report: REPORT, budget: BUDGET, question: QUESTION, approval: APPROVAL, failed: FAILED, idle: IDLE, resolved: RESOLVED } = FIXTURE_IDS;
 
 let home: string;
 let agent: FakeAgent;
@@ -299,6 +299,66 @@ describe("the Overview pane", () => {
     await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 2", "Idle 1", "Resolved 1"]);
   });
 
+  it("keeps the keyboard on what had it when the window's page draws again: a project in the sidebar, a thread's row", async () => {
+    const { shell, page, client } = await opened();
+    const redraw = () => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    const budget = `#projects [data-project="${BUDGET}"] .project`;
+    for (const selector of [budget, `[data-thread="${QUESTION}"]`]) {
+      await page.focus(selector);
+      const before = await page.evaluate(() => (document.activeElement as HTMLElement).outerHTML);
+      await redraw();
+      // Drawn anew: the element is another, and the keyboard is on it.
+      await expect.poll(() => page.evaluate((chosen) => document.activeElement === document.querySelector(chosen), selector)).toBe(true);
+      expect(await page.evaluate(() => (document.activeElement as HTMLElement).outerHTML)).toBe(before);
+    }
+    // A project that moves up the sidebar as it is drawn again takes the keyboard with it: its place goes to another.
+    const order = () => page.$$eval("#projects [data-project]", (rows) => rows.map((row) => (row as HTMLElement).dataset.project));
+    expect(await order()).toEqual([REPORT, BUDGET]);
+    await page.focus(budget);
+    await client.evaluate(([open, moved]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.projects.find((project) => project.id === moved)!.updatedAt = new Date().toISOString();
+      fake.changed(open!, null);
+    }, [REPORT, BUDGET]);
+    await expect.poll(order).toEqual([BUDGET, REPORT]);
+    expect(await page.evaluate((chosen) => document.activeElement === document.querySelector(chosen), budget)).toBe(true);
+  });
+
+  it("gives the keyboard, after a Resolve or Reopen moves its row, to the row that took its place, or to where the row went", async () => {
+    const { page } = await opened();
+    const focused = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus ?? null);
+    // The second of three waiting threads, resolved from the keyboard: the third takes its place.
+    await page.focus(`[data-act="${APPROVAL}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 2", "Working 2", "Idle 1", "Resolved 2"]);
+    await expect.poll(focused).toBe(`act:${FAILED}`);
+    // The only idle thread: its group goes, and the folded group it went to has the keyboard.
+    await page.focus(`[data-act="${IDLE}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 2", "Working 2", "Idle 0", "Resolved 3"]);
+    await expect.poll(focused).toBe("summary:resolved");
+    // Reopened from the Resolved group: the next resolved row takes its place.
+    await page.keyboard.press("Enter");
+    await page.focus(`[data-act="${IDLE}"]`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 2", "Working 2", "Idle 1", "Resolved 2"]);
+    await expect.poll(focused).toBe(`act:${RESOLVED}`);
+  });
+
+  it("gives the keyboard to the first group that shows once the group whose heading had it empties and goes", async () => {
+    const { page, client } = await opened();
+    const focused = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus ?? null);
+    await page.focus('[data-focus="summary:idle"]');
+    // Its one thread starts working, as the agent tells it: the Idle group goes from the pane, its heading with it.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.group = "working";
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => texts(page, ".section summary")).toEqual(["Waiting on you 3", "Working 3", "Idle 0", "Resolved 1"]);
+    await expect.poll(focused).toBe("summary:waiting");
+  });
+
   it("shows a row's Resolve or Reopen in its age's place, over nothing else of the row", async () => {
     // Long chips, which fill their line to the row's end.
     const idle = agent.projects!.threads[REPORT]!.find((thread) => thread.id === IDLE)!;
@@ -349,9 +409,12 @@ describe("the Overview pane", () => {
     expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
     await page.click("#overview");
     expect(await page.isVisible("#panel")).toBe(true);
-    await page.click("#close-panel");
+    // Closed from the keyboard, the pane gives it to the button that opens it again.
+    await page.focus("#close-panel");
+    await page.keyboard.press("Enter");
     expect(await page.isVisible("#panel")).toBe(false);
     expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("overview");
   });
 });
 
@@ -571,6 +634,44 @@ describe("a thread read in the Overview pane", () => {
     await settings!.click('[data-setting="textSize"] [data-value="large"]');
     await expect.poll(async () => (await pane(shell))?.url)
       .toBe(transcript(QUESTION, "textSize=large&transcriptWidth=medium&motion=system"));
+  });
+
+  it("keeps its own colour behind its page while Settings dims the system's controls over the window", async () => {
+    const { shell, page } = await opened();
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+    // Each colour the pane's view and the controls' strip are painted from now on, in a dark theme.
+    await shell.evaluate(({ BrowserWindow, nativeTheme }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      const view = (window.contentView.children as Electron.WebContentsView[])
+        .find((found) => new URL(found.webContents.getURL() || "about:blank").pathname.startsWith("/transcript/"))!;
+      const painted = { pane: [] as string[], strip: [] as string[] };
+      Object.assign(globalThis, { painted });
+      const paint = view.setBackgroundColor.bind(view);
+      view.setBackgroundColor = (colour) => {
+        painted.pane.push(colour);
+        paint(colour);
+      };
+      const set = window.setTitleBarOverlay.bind(window);
+      window.setTitleBarOverlay = (overlay) => {
+        painted.strip.push(overlay.color!);
+        set(overlay);
+      };
+      nativeTheme.themeSource = "dark";
+    });
+    const painted = () => shell.evaluate(() => (globalThis as unknown as { painted: { pane: string[]; strip: string[] } }).painted);
+    await expect.poll(painted).toEqual({ pane: ["#1a1a19"], strip: ["#1a1a19"] });
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    // The strip dims under Settings, whose own backdrop dims the pane: the pane's view is painted as before.
+    await expect.poll(painted).toEqual({ pane: ["#1a1a19", "#1a1a19"], strip: ["#1a1a19", "#0c0c0b"] });
+    await settings!.waitForSelector("#close");
+    await settings!.click("#close");
+    await expect.poll(painted).toEqual({ pane: ["#1a1a19", "#1a1a19", "#1a1a19"], strip: ["#1a1a19", "#0c0c0b", "#1a1a19"] });
   });
 
   it("paints its first frame in a dark desktop's theme, with no bridge, before any script of its own", async () => {
