@@ -33,5 +33,9 @@ export const KEY_LISTS: KeyList[] = [
   ["with a second list added to it", (script) => rewritten(script, (list) => `${list}${list.replace("RELEASE_KEYS=(", "RELEASE_KEYS+=(")}`), 0],
   ["with the list given twice", (script) => rewritten(script, (list) => `${list}${list}`), 0],
   ["with a carriage return at each of its lines' ends", (script) => rewritten(script, (list) => list.replaceAll("\n", "\r\n")), 0],
+  // The list in its form, and a key more that bash alone has: added where no line begins with the
+  // list's name, which no reader of a list looks at. Both readers read the list's two; the release
+  // job, which asks bash too, refuses a script that the two would not read as bash runs it.
+  ["with a key added to it from the middle of another line", (script) => rewritten(script, (list) => `${list}  true && RELEASE_KEYS+=('-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA9SZBZHM7o/wDBWPfbhPMxucA2139J9j+nFHJYNwPA1w=\n-----END PUBLIC KEY-----')\n`), 2],
   ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1],
 ];
