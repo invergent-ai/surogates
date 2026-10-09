@@ -173,7 +173,7 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     harness._handle_loop_command.assert_awaited_once()
     # The gate did not fire, so no "disabled" response was emitted; the
     # stand-in handler wrote no answer, so the wake wrote the command's.
-    assert _llm_responses(store) == ["/loop could not be finished. Type it again."]
+    assert _llm_responses(store) == ["/loop was cut off before it could answer. Check `/loop list` before typing it again."]
 
 
 @pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research", "code"])
