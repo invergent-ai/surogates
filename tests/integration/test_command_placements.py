@@ -45,7 +45,8 @@ from tests.test_steer_loop import _final_response
 
 from .test_command_wake_once import MISSION, Workers, a_coordinator, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import queued
+from .test_workstream_threads import answered, queued, start, turn_ends
+from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -70,7 +71,7 @@ WORK = frozenset(kind.value for kind in (
 THE_WAKES_OWN = "{command} was cut off before it could answer. Check {look} before typing it again."
 LOOK_AT = {
     "/goal": "`/goal status`", "/mission": "`/mission status`", "/loop": "`/loop list`", "/code": "`/code status`",
-    "/compress": "the conversation", "/clear": "the conversation",
+    "/compress": "the conversation", "/clear": "the conversation", "/deep-research": "the conversation",
 }
 
 
@@ -195,6 +196,8 @@ class Command:
     made: str | None = None
     #: Typed in a chat whose mission is in flight.
     of_a_coordinator: bool = False
+    #: Typed in a project's thread, once its first turn has read its goal.
+    in_a_thread: bool = False
 
 
 COMMANDS = {
@@ -207,6 +210,11 @@ COMMANDS = {
     "/loop <prompt>": Command("/loop 1d Check the cash report", "_handle_loop_command", ("Loop scheduled: ",), made="a_routine"),
     "/loop list": Command("/loop list", "_handle_loop_command", ("No active loops.",)),
     "/code status": Command("/code status", "_handle_code_command", ("",)),
+    "/mission <text> in a thread": Command(MISSION, "_handle_mission_command", ("Mission ",), made="a_mission", in_a_thread=True),
+    # Refused there, by the wake itself: no handler is run for it.
+    "/deep-research in a thread": Command(
+        "/deep-research Heat pumps in cold climates", "", ("A thread can't start /deep-research",), in_a_thread=True,
+    ),
 }
 #: The command typed after the one placed: one of another handler's, so each one's runs can be counted.
 SECOND = {False: Command("/loop list", "_handle_loop_command", ("",)), True: Command("/goal status", "_handle_goal_command", ("",))}
@@ -218,7 +226,8 @@ class Placement:
     def __init__(self, workers: Workers, model: Model, command: Command, dies: str) -> None:
         self.workers, self.model, self.command, self.dies = workers, model, command, dies
         self.store = Dies(workers.store, dies)
-        self.second = SECOND[command.handler == "_handle_loop_command"]
+        # A thread refuses /loop.
+        self.second = SECOND[command.handler == "_handle_loop_command" or command.in_a_thread]
         #: Each conversation /compress was given, and what the user typed, in order.
         self.compressed: list[list[dict]] = []
         self.typed: list[str] = []
@@ -230,6 +239,12 @@ class Placement:
         """The chat as it stands before anything of the placement is typed."""
         if self.command.of_a_coordinator:
             self.chat = await a_coordinator(self.workers)
+        elif self.command.in_a_thread:
+            thread = await start(self.workers.api, await master_of(self.workers.api, await create(self.workers.api)))
+            await self.workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+            await answered(self.workers.api, thread, "On it.")
+            await turn_ends(self.workers.api, thread)
+            self.chat = thread.id
         else:
             self.chat = await self.workers.chat(talk=() if moment == BEFORE_ANY_WAKE else TALKED)
         await self.workers.api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
@@ -364,7 +379,7 @@ class Placement:
                 faults.append(f"{name} is answered {said[0]!r}")
             # Run again by design after a death before its answer, and only then.
             runs = 1 + (command is self.command and self.dies == BEFORE_THE_ANSWER)
-            if self.workers.ran.count(command.handler) != runs:
+            if command.handler and self.workers.ran.count(command.handler) != runs:
                 faults.append(f"{name} was run {self.workers.ran.count(command.handler)} times, not {runs}: {self.workers.ran}")
         if answered_at != sorted(answered_at):
             faults.append("the second command was answered before the first")
@@ -572,7 +587,11 @@ async def placed(workers, monkeypatch):
         await db.commit()
 
 
-PLACEMENTS = list(itertools.product(COMMANDS, MOMENTS, COMPANY, DEATHS))
+PLACEMENTS = [
+    placement for placement in itertools.product(COMMANDS, MOMENTS, COMPANY, DEATHS)
+    # A thread's command is placed where its user types one: after a turn's end.
+    if not COMMANDS[placement[0]].in_a_thread or placement[1] == BEFORE_ANY_WAKE
+]
 
 
 @pytest.mark.parametrize("command, moment, company, dies", PLACEMENTS, ids=[" | ".join(placement) for placement in PLACEMENTS])
