@@ -266,8 +266,8 @@ async def keep_copy(
     refs and reads no real file, so a settle that fails does not stop it.
     It writes the history's refs all the same, so it then waits out the
     fence first, as the settle would have: no landing that lost the lock
-    unseen is still writing them.  With the rows unreadable it waits the
-    whole fence, and keeps.  *waited* are the rows a settle before this
+    unseen is still writing them.  With the rows unreadable it waits as
+    long as such a landing's push can live, and keeps.  *waited* are the rows a settle before this
     one already found quiet for the fence.
     """
     owner = sandbox_session_key(session)
@@ -455,23 +455,31 @@ async def _fenced(session_factory: Any, workstream_id: Any, saga_settings: Any, 
     For a lock holder that writes the history's refs without having
     settled the landings left running.  A row in *waited* was found quiet
     for the fence before, and is written since only by who settles it.
-    The rows are read as a step is tried.  Unread through those tries, the
-    whole fence is waited out: a landing alive when this lock was taken
-    lost its own before, and ends within a fence of that, asked or not.
-    The caller then asks its lock, as after any wait.
+    The rows are read as a step is tried.  Unread, no mark is seen, and a
+    fence proves nothing: it is the longest a live landing goes without
+    marking its row, not the longest it lives.  The wait is then for as
+    long as a landing's push can still be alive once this lock is taken
+    (:func:`_life`), a fence at a time, the rows asked for again after
+    each: read, they say again which landing lives.  The caller then asks
+    its lock, as after any wait.
     """
-    fence = _fence(saga_settings)
+    fence, life = _fence(saga_settings), _life(saga_settings)
     orchestrator = _orchestrator(saga_settings)
+    blind = 0.0
     while True:
         try:
             rows = await orchestrator.attempt(partial(running_landings, session_factory, workstream_id))
         except Exception:
+            if blind >= life:
+                return
             logger.warning(
-                "Could not read the landings running in project %s: waiting the whole fence out", workstream_id,
-                exc_info=True,
+                "Could not read the landings running in project %s: %d s waited of the %d s a landing's push can live",
+                workstream_id, blind, life, exc_info=True,
             )
-            await asyncio.sleep(fence)
-            return
+            wait = min(fence, life - blind)
+            await asyncio.sleep(wait)
+            blind += wait
+            continue
         waited.update(row.id for row, quiet in rows if quiet >= fence)
         alive = [quiet for row, quiet in rows if row.id not in waited]
         if not alive:
@@ -491,6 +499,24 @@ def _fence(saga_settings: Any) -> float:
         (SAGA_DEFAULT_STEP_TIMEOUT_SECONDS, SAGA_DEFAULT_MAX_RETRIES, SAGA_DEFAULT_RETRY_DELAY_SECONDS)
     )
     return timeout + delay * retries + 1
+
+
+def _life(saga_settings: Any) -> float:
+    """The longest a landing's push is still alive after its lock has gone to another, and a second more.
+
+    A landing asks for its lock before each apply and before its record,
+    never inside a step, and not between its look at the history and its
+    first push, the commit step.  So one that lost its lock unseen can
+    still be in that look, a try's bound, and then in a push through
+    every try the step has and the pauses between them.
+    """
+    timeout, retries, delay = (
+        (saga_settings.default_step_timeout, saga_settings.default_max_retries, saga_settings.retry_delay)
+        if saga_settings is not None else
+        (SAGA_DEFAULT_STEP_TIMEOUT_SECONDS, SAGA_DEFAULT_MAX_RETRIES, SAGA_DEFAULT_RETRY_DELAY_SECONDS)
+    )
+    # A step's pause before its n-th retry is n delays.
+    return timeout + (1 + retries) * timeout + delay * retries * (retries + 1) / 2 + 1
 
 
 def _orchestrator(saga_settings: Any) -> SagaOrchestrator:

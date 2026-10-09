@@ -11,6 +11,8 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -598,3 +600,15 @@ async def test_a_pruning_tells_the_pod_which_packs_the_bucket_dates_older_than_t
         )
     # With no object store to ask, the pod is told nothing and goes by the dates it sees.
     assert [request.get("old") for request in asked] == [["pack-old"], None]
+
+
+def test_a_landings_push_can_live_a_look_and_every_try_of_a_step_after_its_lock_is_gone():
+    # The defaults: a try of 300 s, two more tries, pauses of 1 s and 2 s.
+    assert landing._fence(None) == 300 + 2 * 1 + 1
+    # The look before the first push, a try's bound; the push through its three tries and the pauses
+    # between them; and a second more.
+    assert landing._life(None) == 300 + 3 * 300 + (1 + 2) + 1 == 1204
+    one_try = SimpleNamespace(default_step_timeout=3, default_max_retries=0, retry_delay=5)
+    assert landing._life(one_try) == 3 + 3 + 0 + 1
+    four_tries = SimpleNamespace(default_step_timeout=10, default_max_retries=3, retry_delay=2)
+    assert landing._life(four_tries) == 10 + 4 * 10 + 2 * (1 + 2 + 3) + 1

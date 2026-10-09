@@ -1823,7 +1823,7 @@ async def test_a_landing_whose_row_stays_running_holds_no_pruning_back(api, monk
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
 
 
-@pytest.mark.parametrize("unreadable", ["once", "at every try"])
+@pytest.mark.parametrize("unreadable", ["once", "for a while", "at every try"])
 @pytest.mark.parametrize("failed", [False, True], ids=["a turn whose landing could not start", "a failed turn"])
 async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(api, monkeypatch, pods, failed, unreadable):
     slow = SimpleNamespace(default_step_timeout=3, default_max_retries=0, retry_delay=0)  # a fence of four seconds
@@ -1836,7 +1836,7 @@ async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(a
     running, call, unread, quiet_at_the_keep = rows_module.running_landings, landing_module._call, [], []
 
     async def the_rows_cannot_be_read(session_factory, workstream_id):
-        if unreadable == "at every try" or not unread:
+        if unreadable == "at every try" or len(unread) < (1 if unreadable == "once" else 2):
             unread.append(True)
             raise ConnectionError("the database did not answer")
         return await running(session_factory, workstream_id)
@@ -1850,14 +1850,67 @@ async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(a
     monkeypatch.setattr(landing_module, "_call", watched)
     await ends(api, pool, second, failed=failed, settings=slow)
     # B's turn is kept, and its push went out only once A's landing had been quiet for the fence:
-    # a landing still alive would have marked its row within it.  With the rows unread at every try,
-    # the whole fence is waited out, which every landing alive when the lock was taken has ended in.
+    # a landing still alive would have marked its row within it.  With the rows unread at every try
+    # no mark is seen, so the wait is the longest a landing's push lives after the lock is taken:
+    # the look before its first push, and that push through every try.
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
-    assert len(quiet_at_the_keep) == 1 and quiet_at_the_keep[0] >= landing_module._fence(slow)
+    waited = landing_module._life(slow) if unreadable == "at every try" else landing_module._fence(slow)
+    assert len(quiet_at_the_keep) == 1 and quiet_at_the_keep[0] >= waited
+    if unreadable == "for a while":
+        # Asked for again after a fence, the rows were read, and said A's landing was dead: no longer wait.
+        assert quiet_at_the_keep[0] < landing_module._life(slow)
     [end] = await turn_ends(api, second) if not failed else [
         e.data for e in await api.app.state.session_store.get_events(second.id, types=[EventType.SESSION_FAIL])
     ]
     assert end["saved"] is True
+
+
+async def test_a_keep_that_cannot_read_the_rows_waits_out_a_landing_in_a_late_try_of_its_push(api, monkeypatch, pods):
+    # A try of a second, three tries, pauses of 0.2 s and 0.4 s: a fence of 2.4 s, a push alive for 3.6 s.
+    tried = SimpleNamespace(default_step_timeout=1, default_max_retries=2, retry_delay=0.2)
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md")
+    await edited(pool, second, "echo by B > B.md")
+    call, running, tries, at = landing_module._call, rows_module.running_landings, [], {}
+    pushing = asyncio.Event()
+
+    async def a_push_in_three_tries(sandbox_pool, owner, action, **arguments):
+        if owner == str(first.id) and action == "commit":
+            tries.append(time.monotonic())
+            if len(tries) == 1:
+                await lose_the_lock(api, first)  # unseen: A asks for its lock only between its steps
+                pushing.set()
+            if len(tries) < 3:
+                await asyncio.sleep(0.8)
+                raise landing_module.LandingStepError("the pod's step timed out")
+            await asyncio.sleep(0.8)  # its last try, the one that pushes
+            try:
+                return await call(sandbox_pool, owner, action, **arguments)
+            finally:
+                at["A's push ended"] = time.monotonic()
+        if owner == str(second.id) and action == "keep":
+            at["B kept"] = time.monotonic()
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def unreadable_to_b(session_factory, workstream_id):
+        if pushing.is_set():
+            raise ConnectionError("the database did not answer")
+        return await running(session_factory, workstream_id)
+
+    monkeypatch.setattr(landing_module, "_call", a_push_in_three_tries)
+    monkeypatch.setattr(landing_module, "running_landings", unreadable_to_b)
+    landing_of_a = asyncio.ensure_future(ends(api, pool, first, settings=tried))
+    await asyncio.wait_for(pushing.wait(), 20)
+    # B's turn fails while A, its lock lost, is in the first try of its push; B cannot read the rows.
+    await asyncio.wait_for(ends(api, pool, second, failed=True, settings=tried), 60)
+    await asyncio.wait_for(landing_of_a, 60)
+    # A fence is not a push's life: one fence in, A was in its third try.  B's keep writes the refs
+    # only once that push is over, whichever try it ended in.
+    assert len(tries) == 3 and at["B kept"] >= at["A's push ended"]
+    assert at["B kept"] - tries[0] >= landing_module._life(tried) - 0.5
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
 
 
 @pytest.mark.parametrize("failed", [False, True], ids=["a turn whose landing could not start", "a failed turn"])
