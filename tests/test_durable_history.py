@@ -2587,3 +2587,29 @@ def test_a_pushed_pickup_keeps_the_index_and_the_next_pod_reads_no_file_again(tm
     pod = a_pod(tmp_path, project)
     assert [name for names in seen["readers"] for name in names] == []
     assert (pod.copy / "notes.txt").read_text() == "checked by the routine\n"
+
+
+def test_across_a_prunings_cut_a_file_no_commit_left_explains_is_by_no_one(tmp_path, project):
+    a_history(tmp_path, project)
+    kept = a_pod(tmp_path, project, "t1")
+    (kept.copy / "notes.txt").write_text("by A\n")
+    (kept.copy / "a.md").write_text("a, by A")
+    (kept.copy / "Budget.xlsx").write_bytes(b"PK\x03\x04 by A")
+    kept.keep(author=A, trailers=KEPT, base=True)  # a turn kept, not landed: its base stays old
+    for n in range(25):  # another thread lands meanwhile, touching neither notes.txt nor a.md
+        other = a_pod(tmp_path, project, "t2")
+        (other.copy / "Budget.xlsx").write_bytes(os.urandom(50_000))
+        land(other, f"saga:b{n}", author=B)
+    pruned = a_pod(tmp_path, project, "p").prune(
+        keep=["refs/heads/threads/t1", "refs/bases/t1"], now=time.time() + LATER + 86_400, spare=0,
+    )
+    assert pruned["commits"] == 20
+    mine = a_pod(tmp_path, project, "t1")
+    picked = mine.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    (project / "notes.txt").write_text("saved by you, after the pickup\n")
+    (project / "a.md").write_text("saved by you, after the pickup")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # The base is behind the cut, whose commit has no parent for git: its whole tree reads as its own
+    # change, and what was changed behind it is not known.  A file a commit left names is by its author;
+    # one none explains is by no one, never by whoever landed the cut's commit.
+    assert held(turn) == {"Budget.xlsx": {"kind": "thread", "id": "t2", "title": "Draft B"}, "a.md": None, "notes.txt": None}

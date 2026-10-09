@@ -548,7 +548,7 @@ class History:
             {"path": path, "before": real[path], "after": versions[path][1]}
             for path in sorted(versions, key=lambda p: (versions[p][1] is None, p)) if path not in held
         ]
-        by = self._changed_by(held, base, pickup)
+        by, whole = self._changed_by(held, base, pickup)
         overlapped = []
         for path in sorted(held):
             # Why each waits: the real file changed since, it is a change of
@@ -557,9 +557,12 @@ class History:
             reason = "changed" if path in changed else "shape" if path in shaped else "with"
             entry = {"path": path, "reason": reason, "before": real.get(path), "after": versions[path][1]}
             # Who changed it since the base.  A changed file history names no
-            # one for was saved by you after the pickup; a change of shape it
-            # names no one for is the turn's own; a file held with them has none.
-            who = by.get(path, YOU) if reason == "changed" else by.get(path) if reason == "shape" else None
+            # one for was saved by you after the pickup, where the history is
+            # whole since the base: behind a pruning's cut, who changed it is
+            # not known.  A change of shape it names no one for is the turn's
+            # own; a file held with them has none.
+            unnamed = YOU if whole else None
+            who = by.get(path, unnamed) if reason == "changed" else by.get(path) if reason == "shape" else None
             if who is not None:
                 entry["by"] = who
             overlapped.append(entry)
@@ -1486,32 +1489,44 @@ class History:
             return None  # not the platform's own, or not whole: nothing is left out for it
         return first[0]
 
-    def _changed_by(self, paths: Iterable[str], base: str, pickup: str | None) -> dict[str, dict]:
-        """Who last changed each of *paths* since *base*: you, by this landing's *pickup*, else whoever ``main`` names.
+    def _changed_by(self, paths: Iterable[str], base: str, pickup: str | None) -> tuple[dict[str, dict], bool]:
+        """Who last changed each of *paths* since *base*: you, by this landing's *pickup*, else whoever ``main`` names;
+        and whether the history is whole since the base.
 
         ``main`` is the history as this pod takes it again, after the commit
         step's push: its commits since the base, newest first, each against
         its first parent, read in the pod's copy of the history, which is
         whole where the pod's own clone is shallow.  A path counts as changed
         with a folder above it or a file under it.
+
+        Not whole where the base is behind a pruning's cut.  The cut's commit
+        has no parent for git, which lists its whole tree as its change: it
+        names no one, and neither does what was changed behind it.
         """
         wanted = set(paths)
         if not wanted:
-            return {}
-        log = ["log", "--no-renames", "--raw", "--no-abbrev", "-z", "--format=%x01%an%x00%ae"]
+            return {}, True
+        log = ["log", "--no-renames", "--raw", "--no-abbrev", "-z", "--format=%x01%H%x00%an%x00%ae"]
         commits = []
         if pickup is not None:
             commits += _commits(self._git([*log, "-1", pickup], env={"GIT_DIR": str(self.repo)}, cwd=self.repo))
+        cut: set[str] = set()
         if (main := self._take().get(MAIN)) is not None:
+            if (self._taken / "shallow").is_file():
+                cut = set((self._taken / "shallow").read_text().split())
             commits += _commits(self._git(
                 [*log, "--first-parent", main, "--not", base], env={"GIT_DIR": str(self._taken)}, cwd=self.repo,
             ))
         found: dict[str, dict] = {}
-        for name, email, touched in commits:
+        whole = True
+        for commit, name, email, touched in commits:
+            if commit in cut:
+                whole = False
+                continue
             for path in wanted - set(found):
                 if any(t == path or t.startswith(f"{path}/") or path.startswith(f"{t}/") for t in touched):
                     found[path] = _who(name, email)
-        return found
+        return found, whole
 
     def _in_durable(self, commit: str) -> bool:
         """Whether the durable history held *commit* when last taken."""
@@ -2123,21 +2138,21 @@ def _who(name: str, email: str) -> dict:
     return YOU
 
 
-def _commits(out: str) -> list[tuple[str, str, set[str]]]:
-    """``git log --raw -z``'s commits, each ``(name, email, paths it changed)``.
+def _commits(out: str) -> list[tuple[str, str, str, set[str]]]:
+    """``git log --raw -z``'s commits, each ``(id, name, email, paths it changed)``.
 
-    Read by position, never by what a name holds: each commit is its author's
-    name, marked, and email, then a change's fields and its path for each
-    file, so a path may hold any character git allows.
+    Read by position, never by what a name holds: each commit is its id,
+    marked, its author's name and email, then a change's fields and its path
+    for each file, so a path may hold any character git allows.
     """
     fields, commits, at = out.split("\0"), [], 0
-    while at + 1 < len(fields) and fields[at].startswith("\x01"):
-        name, email, at = fields[at][1:], fields[at + 1], at + 2
+    while at + 2 < len(fields) and fields[at].startswith("\x01"):
+        commit, name, email, at = fields[at][1:], fields[at + 1], fields[at + 2], at + 3
         touched = set()
         while at + 1 < len(fields) and fields[at].lstrip("\n").startswith(":"):
             touched.add(fields[at + 1])
             at += 2
-        commits.append((name, email, touched))
+        commits.append((commit, name, email, touched))
     return commits
 
 

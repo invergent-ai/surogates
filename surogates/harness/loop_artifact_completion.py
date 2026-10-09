@@ -1326,6 +1326,16 @@ class ArtifactCompletionMixin:
 
         await self._finalize_dynamic_loop_if_needed(session)
 
+        if landing is not None and landing.get("redo"):
+            from surogates.harness.worker_notify import notify_parent_of_task_event
+
+            # After the turn's end, so that its next turn reads it, and queued,
+            # as a report queues its master: the thread redoes those files.
+            await notify_parent_of_task_event(
+                session_store=self._store, parent_session_id=session.id, event_type=EventType.HISTORY_REDO,
+                payload={"saga": landing["saga"], "files": landing["redo"]}, redis=self._redis,
+            )
+
         # Advance cursor to the latest event.
         cursor_target = (
             through_event_id
