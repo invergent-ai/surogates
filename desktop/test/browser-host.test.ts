@@ -8,8 +8,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { getEventListeners } from "node:events";
-import { readFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { readFile, stat } from "node:fs/promises";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -119,6 +119,8 @@ let firsts: number;
 let said: Array<{ host: string; from: string; what: string }>;
 // Lets the fixture's stuck page go busy, for so many milliseconds: "first" has it ask for a file before it does.
 let gate: ((ms: number, first?: boolean) => void) | null;
+// The answers of the fixture's download that never ends, still open: a test ends one, and each is cut at the test's end.
+let stalling: ServerResponse[];
 let profile: string;
 let launch: Launch;
 let host: BrowserHost;
@@ -130,6 +132,7 @@ beforeEach(async () => {
   firsts = 0;
   said = [];
   gate = null;
+  stalling = [];
   site = createServer((req, res) => {
     if (req.url === "/said") {
       let what = "";
@@ -209,6 +212,24 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<scrip
       res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" });
       res.write("s".repeat(4_096));
       return void setTimeout(() => res.end("report"), 1_500);
+    }
+    // A download whose first part comes at once and whose end never does, with nothing more meanwhile.
+    if (req.url?.startsWith("/stalls.bin")) {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=stalls.bin" });
+      res.write("s".repeat(4_096));
+      return void stalling.push(res);
+    }
+    // One that comes a little at a time, for four seconds, and ends.
+    if (req.url === "/trickles.bin") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" });
+      let parts = 0;
+      const more = setInterval(() => {
+        res.write("t".repeat(4_096));
+        if ((parts += 1) < 10) return;
+        clearInterval(more);
+        res.end("end");
+      }, 400);
+      return;
     }
     // A download its site answers a moment after it is asked for: until then the browser has announced none. Asked
     // for outright, at the end of two redirects, and by a form.
@@ -312,6 +333,7 @@ const hostWith = (options: Omit<BrowserHostOptions, "proxy"> = {}) => new Browse
 
 afterEach(async () => {
   await host.close();
+  for (const open of stalling) open.destroy();
   await Promise.all([site, canary].map((server) => new Promise<void>((done) => server.close(() => done()))));
   rmSync(profile, { recursive: true, force: true });
 });
@@ -2218,6 +2240,53 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(told[0]).toBe('The page\'s download of "broken.txt" did not finish (canceled), so it was not saved.');
     expect(staged).toEqual([]);
   });
+
+  it("drops a download of the agent's that has no end once no byte of any download has come for the stated time, and says so as of any that did not finish: not one that still comes a little at a time, and never its user's own", async () => {
+    const staged: StagedDownload[] = [];
+    // The host's clock, which the test puts on: past the minute after a hand back in which a download may be its user's.
+    let skew = 0;
+    host = hostWith({ downloaded: (download) => staged.push(download), stalledMs: 2_000, now: () => performance.now() + skew });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const arriving = (host as unknown as { arriving: Set<unknown> }).arriving;
+    const told = async () => (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")).ok.notices as string[];
+    // One that takes four seconds, twice the stated time, with a part of it every 0.4 s: it is on its way all that while, and staged.
+    await script(a, "location.href = '/trickles.bin'; return 1;", "chat-1");
+    await expect.poll(() => staged.map(({ name, user }) => [name, user]), { timeout: 15_000 }).toEqual([["trickles.bin", false]]);
+    expect((await stat(staged[0]!.path)).size).toBe(10 * 4_096 + 3);
+    const folder = dirname(staged[0]!.path);
+    rmSync(staged[0]!.path);
+    expect(await told()).toEqual([]);
+    // One whose first part comes and nothing after: dropped two seconds on, and its agent told.
+    await script(a, "location.href = '/stalls.bin'; return 1;", "chat-1");
+    await expect.poll(() => arriving.size, { timeout: 5_000 }).toBe(1);
+    const began = performance.now();
+    await expect.poll(() => arriving.size, { timeout: 10_000 }).toBe(0);
+    expect(performance.now() - began).toBeGreaterThan(1_500);
+    expect(await told()).toEqual([notFinished("stalls.bin", "no more of it came for 2 s")]);
+    expect(notFinished("stalls.bin", "no more of it came for 2 s")).toBe('The page\'s download of "stalls.bin" did not finish (no more of it came for 2 s), so it was not saved.');
+    expect([staged.length, readdirSync(folder)]).toEqual([1, []]);
+    // Their own, begun while they hold the browser, and as still: on its way after the hand back, when the agent begins another.
+    host.pause("chat-1", true);
+    const [theirs] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), page.evaluate("void (location.href = '/stalls.bin?theirs')")]);
+    host.pause("chat-1", false);
+    skew += AFTER_HAND_BACK_MS + 1;
+    await script(a, "location.href = '/stalls.bin'; return 1;", "chat-1");
+    await expect.poll(() => arriving.size, { timeout: 5_000 }).toBe(1);
+    const again = performance.now();
+    await expect.poll(() => arriving.size, { timeout: 10_000 }).toBe(0);
+    // Its two seconds are its own: counted from when it began, whatever came, or did not, before it.
+    expect(performance.now() - again).toBeGreaterThan(1_500);
+    expect(await told()).toEqual([notFinished("stalls.bin", "no more of it came for 2 s")]);
+    // Theirs is not dropped, then or two stated times on: it ends when its site ends it, and is staged as theirs.
+    await new Promise((done) => setTimeout(done, 4_000));
+    expect(readdirSync(folder)).toHaveLength(1);
+    expect(await within(200, theirs.failure())).toBe("late");
+    stalling[1]!.end("end");
+    await expect.poll(() => staged.map(({ name, user }) => [name, user]), { timeout: 10_000 }).toEqual([["trickles.bin", false], ["stalls.bin", true]]);
+    expect(await told()).toEqual([]);
+  }, 90_000);
 
   it("drops a download still on its way when its user takes the browser over, as the operation that started it is interrupted: staged at no hand back, and its agent told once the browser is its again", async () => {
     const staged: StagedDownload[] = [];

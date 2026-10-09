@@ -139,6 +139,13 @@ export const GIVEN_AS_TAKEN = "The files of an upload were given to the page jus
 export const notFinished = (name: string, why: string): string => `The page's download of ${quoted(name)} did not finish (${why}), so it was not saved.`;
 // Why one did not finish: the browser's own word for one that was cancelled, or whose connection broke; of
 // any other, this host's words. What an error says itself is not the agent's to read.
+// How long the agent's downloads on their way may go with no byte of any download coming, before they are
+// dropped as ones that did not finish: a site can begin a download and never end it, and it would stay on
+// its way, its part kept, for as long as the browser runs. Its user's own are never dropped so.
+export const STALLED_MS = 60_000;
+// How often what is staged is looked at for that, at most.
+const STAGED_LOOK_MS = 5_000;
+const stalledFor = (ms: number): string => `no more of it came for ${ms / 1_000} s`;
 const unfinished = (failure: string | null): string => (failure === "canceled" ? failure : "the browser stopped it");
 const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
 
@@ -471,6 +478,7 @@ export interface BrowserHostOptions {
   downloaded?: (download: StagedDownload) => void; // where each download a page finished goes, to be saved
   downloadBytes?: number; // the most a download may be; a write's most unless told
   now?: () => number; // the clock, in milliseconds; the process's own steady one unless told
+  stalledMs?: number; // STALLED_MS unless told
 }
 
 export class BrowserHost {
@@ -543,6 +551,11 @@ export class BrowserHost {
   private staging: string | null = null;
   // The agent's downloads on their way, until each is handed on or dropped: a take-over stops them all.
   private readonly arriving = new Set<Download>();
+  // The look at what is staged, while a download of the agent's is on its way (watch); when a byte of any
+  // download last came, as far as that look has seen; and the downloads dropped for none having come.
+  private watching: NodeJS.Timeout | null = null;
+  private lastByte = 0;
+  private readonly stalled = new WeakSet<Download>();
   // The chat that last handed the browser back, and when.
   private handed: { by: string; at: number } | null = null;
   // When each navigation's request began, for as long as the browser keeps the request: a redirect's next
@@ -748,6 +761,7 @@ export class BrowserHost {
     await this.proxy?.server.close();
     this.proxy = null;
     // What it staged and nobody saved went with its browser; its folder goes now.
+    this.unwatch();
     if (this.staging !== null) await rm(this.staging, { recursive: true, force: true }).catch(() => {});
     this.staging = null;
     for (const kept of this.hearing.values()) clearTimeout(kept.quiet);
@@ -1294,7 +1308,10 @@ export class BrowserHost {
     const name = download.suggestedFilename();
     const { root, session } = of;
     const user = stop === null;
-    if (stop) this.arriving.add(download);
+    if (stop) {
+      this.arriving.add(download);
+      this.watch();
+    }
     // Taken over between its request and its announcement: stopped as one on its way is.
     if (stop?.aborted) void download.cancel().catch(() => {});
     // The agent's own is told whatever came of it, held meanwhile or not: it began before any take-over.
@@ -1308,7 +1325,8 @@ export class BrowserHost {
       try {
         path = await download.path();
       } catch {
-        tell(stop?.aborted ? interrupted(name) : notFinished(name, unfinished(await download.failure().catch(() => null))));
+        const why = this.stalled.has(download) ? stalledFor(this.options.stalledMs ?? STALLED_MS) : unfinished(await download.failure().catch(() => null));
+        tell(stop?.aborted ? interrupted(name) : notFinished(name, why));
         return;
       }
       const size = await stat(path).then((found) => found.size, () => null);
@@ -1321,7 +1339,55 @@ export class BrowserHost {
       this.options.downloaded({ root, session, name, path, user, ...(user && of.after === true ? { afterHandBack: true as const } : {}) });
     } finally {
       this.arriving.delete(download);
+      if (this.arriving.size === 0) this.unwatch();
     }
+  }
+
+  // What is staged is looked at while a download of the agent's is on its way: each file of the staging
+  // folder, and its size. The browser says of a download only that it began and that it ended, and not which
+  // file is whose until then: so a byte counts whichever download it is of. Once none has come for the
+  // stated time, in a new file or a longer one, every download of the agent's still on its way is stopped
+  // and dropped (stage tells why). Its user's own are not among them.
+  private watch(): void {
+    this.lastByte = this.now();
+    if (this.watching !== null) return;
+    const limit = this.options.stalledMs ?? STALLED_MS;
+    let sizes = new Map<string, number>();
+    let looking = false;
+    const mine: NodeJS.Timeout = setInterval(() => {
+      if (looking) return;
+      looking = true;
+      void this.sizes().then((found) => {
+        looking = false;
+        if (this.watching !== mine) return;
+        const more = [...found].some(([name, size]) => size > (sizes.get(name) ?? -1));
+        sizes = found;
+        if (more) this.lastByte = this.now();
+        if (this.now() - this.lastByte < limit) return;
+        for (const download of this.arriving) {
+          this.stalled.add(download);
+          void download.cancel().catch(() => {});
+        }
+      });
+    }, Math.min(STAGED_LOOK_MS, limit / 4));
+    this.watching = mine;
+  }
+
+  private unwatch(): void {
+    if (this.watching !== null) clearInterval(this.watching);
+    this.watching = null;
+  }
+
+  // Each file of the staging folder now, and its size: none where there is no folder, or it cannot be read.
+  private async sizes(): Promise<Map<string, number>> {
+    const found = new Map<string, number>();
+    const folder = this.staging;
+    if (folder === null) return found;
+    for (const name of await readdir(folder).catch(() => [])) {
+      const size = await stat(join(folder, name)).then((file) => file.size, () => null);
+      if (size !== null) found.set(name, size);
+    }
+    return found;
   }
 
   // A page's own question (an alert, a confirm, a prompt, a leave-this-page), in any tab of the browser's:
