@@ -1949,6 +1949,37 @@ async def test_a_hand_back_made_before_a_commands_wake_came_is_given_its_turn_on
         await asking.unqueue(chat)
 
 
+@pytest.mark.parametrize("command", [*COMMANDS, SWITCHED_OFF])
+async def test_a_command_typed_behind_a_hand_back_no_wake_has_read_is_answered_and_the_hand_back_given_one_turn(
+    asking, monkeypatch, command,
+):
+    chat = await asking.held()
+    # The browser handed back, and a command typed before the wake that queued came: one wake for both.
+    await asking.hands_back(chat)
+    await asking.says(chat, command)
+    await asking.unqueue(chat)
+
+    try:
+        # A command is the harness's to answer, whatever waits for the model: that wake answers it,
+        # asks the model nothing, and queues the hand back's turn.
+        harness, handed = answering(asking, monkeypatch, command)
+        before = await asking.log(chat)
+        await harness.wake(chat)
+        assert (handed, (await asking.log(chat))[len(before):].count("llm.response")) == ([], 1)
+        assert await asking.queued(chat)
+        await asking.unqueue(chat)
+        # Its wake runs no command again, and reads the hand back once, last in what the model is handed.
+        harness, handed = answering(asking, monkeypatch, command)
+        watched = watching(harness, monkeypatch)
+        await harness.wake(chat)
+        assert ran(watched) == []
+        [conversation] = handed
+        assert (conversation.count(HANDED_BACK), conversation[-1], conversation[0]["role"]) == (1, HANDED_BACK, "user")
+        assert not await asking.queued(chat)
+    finally:
+        await asking.unqueue(chat)
+
+
 async def test_a_hand_back_made_while_a_commands_wake_ran_is_given_its_turn_by_that_wakes_end(asking, monkeypatch):
     chat = await asking.held()
 
