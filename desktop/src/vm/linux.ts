@@ -130,6 +130,15 @@ export async function missingTools(paths: { virtiofsd?: string; zstd?: string } 
   ];
 }
 
+/** Whether a virtiofsd whose --help says *help* refuses a guest's writes itself (--readonly: 1.11 and later). */
+export const readonlyFlag = (help: string) => /^\s*--readonly\s*$/m.test(help);
+
+// Whether this computer's virtiofsd has --readonly, asked once.
+let refusesWrites: Promise<boolean> | undefined;
+const hasReadonly = () => (refusesWrites ??= new Promise<boolean>((resolve) => {
+  execFile(...cleanly(VIRTIOFSD, ["--help"]), { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => resolve(!error && readonlyFlag(stdout)));
+}));
+
 const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
 
 const exited = (child: ChildProcess) => new Promise<void>((resolve) => {
@@ -270,9 +279,11 @@ class LinuxVm implements VmBackend {
   /**
    * *folder* on a free root port, by *deadline*: its virtiofsd, which maps the host user
    * to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
-   * A share not added gives its port back.
+   * A share not added gives its port back. *readonly*: its virtiofsd refuses every write, where it
+   * has the option; the guest mounts it read-only either way (guest/places.ts).
    */
-  async share(folder: string, uid: number, deadline: number): Promise<Share> {
+  async share(folder: string, uid: number, deadline: number, readonly = false): Promise<Share> {
+    const refusing = readonly && (await hasReadonly());
     if (this.killed) throw new Error("the VM has gone");
     const port = Math.min(...this.free);
     if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);
@@ -280,7 +291,7 @@ class LinuxVm implements VmBackend {
     const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
     const pidfile = join(this.options.run, `vfs-${n}.pid`);
-    const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
+    const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user, refusing)]);
     this.daemons.push(daemon);
     writeFileSync(pidfile, String(daemon.pid ?? ""));
     try {

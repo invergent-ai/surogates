@@ -101,8 +101,10 @@ export interface VmBackend {
    * folder's owner to *uid* (protocol.ts, Share), or rejects with why not, by
    * *deadline* (performance.now()). A share whose server goes takes the VM with it,
    * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
+   * *uid* 0 is the guest's root, for the agent's own git on a folder's place; with *readonly*
+   * the share refuses every write of the guest's, where the backend's server can.
    */
-  share(folder: string, uid: number, deadline: number): Promise<Share>;
+  share(folder: string, uid: number, deadline: number, readonly?: boolean): Promise<Share>;
   /**
    * *share*, as share gave it, out of the running guest once the guest has let it go, and
    * its folder served no more: its place takes the next share. Rejects with why not by
