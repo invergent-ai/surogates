@@ -368,26 +368,26 @@ async def post_browser_control(
     if computer:
         # Told to the chat as the cloud's are, its user having taken it over or handed it back in the
         # desktop: there is no lease here. Each is told once: a take-over while one stands, and a
-        # hand back with none standing, answer as done and tell the chat nothing. One telling at a
-        # time for a chat, so two hand backs posted together tell it one.
+        # hand back with none standing, answer as done and tell the chat nothing. Two posts at once
+        # tell it one: the store takes them in turn, on one connection each.
         sid = str(session_id)
         store = request.app.state.session_store
-        async with store.telling_browser_control(session_id):
-            taken_over_at = await _taken_over_at(request.app.state, session_id)
-            if body.action == "acquire":
-                if taken_over_at is not None:
-                    return {"outcome": "refreshed", "owner_user_id": owner_user_id}
-                await emit(sid, EventType.BROWSER_CONTROL_GRANTED, {"session_id": sid, "owner_user_id": owner_user_id, "computer": True})
-                return {"outcome": "granted", "owner_user_id": owner_user_id}
-            if taken_over_at is not None:
-                # The take-over stopped the chat's agent when a browser call of the chat's answered
-                # paused since. Then the hand back says so, and its agent is woken to go on. With
-                # nothing stopped it is for the pane alone: nobody is woken, and no turn is run.
-                told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
-                stopped = await store.browser_call_paused_since(session_id, taken_over_at)
-                if stopped:
-                    told[RESUMES] = True
-                await emit(sid, EventType.BROWSER_CONTROL_RETURNED, told)
+        if body.action == "acquire":
+            taken_over = {"session_id": sid, "owner_user_id": owner_user_id, "computer": True}
+            if await store.tell_browser_control(session_id, EventType.BROWSER_CONTROL_GRANTED, taken_over) is None:
+                return {"outcome": "refreshed", "owner_user_id": owner_user_id}
+            return {"outcome": "granted", "owner_user_id": owner_user_id}
+        taken_over_at = await _taken_over_at(request.app.state, session_id)
+        if taken_over_at is not None:
+            # The take-over stopped the chat's agent when a browser call of the chat's answered
+            # paused since. Then the hand back says so, and its agent is woken to go on. With
+            # nothing stopped it is for the pane alone: nobody is woken, and no turn is run.
+            told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
+            stopped = await store.browser_call_paused_since(session_id, taken_over_at)
+            if stopped:
+                told[RESUMES] = True
+            # None when another post handed it back meanwhile: that one told the chat, and woke it.
+            if await store.tell_browser_control(session_id, EventType.BROWSER_CONTROL_RETURNED, told) is not None:
                 if stopped:
                     await wake(sid)
                 # The agent's other chats there that still said their user held the browser are told too.

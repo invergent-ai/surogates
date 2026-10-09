@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Sequence
 import hashlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -74,6 +73,10 @@ logger = logging.getLogger(__name__)
 
 class SessionNotFoundError(Exception):
     """Raised when a session lookup finds no matching row."""
+
+
+class _NothingToTell(Exception):
+    """An event whose condition did not hold was not written (``SessionStore.emit_event``'s *only_if*)."""
 
 
 class LeaseNotHeldError(Exception):
@@ -1095,6 +1098,7 @@ class SessionStore:
         data: dict,
         *,
         lease_token: UUID | None = None,
+        only_if: Callable[[AsyncSession], Awaitable[bool]] | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
@@ -1108,6 +1112,10 @@ class SessionStore:
         Trace context is read automatically from the :mod:`surogates.trace`
         contextvar.  If no trace is active the ``trace_id`` / ``span_id``
         columns are left ``NULL``.
+
+        *only_if* is asked in the event's own transaction, on its own
+        connection, before anything is written: when it answers no, nothing
+        is written and nothing is announced (``tell_browser_control``).
 
         Counter updates use raw SQL for atomic increment expressions
         (``message_count = message_count + 1``) which can't be expressed
@@ -1154,6 +1162,8 @@ class SessionStore:
         )
 
         async with self._sf() as db:
+            if only_if is not None and not await only_if(db):
+                raise _NothingToTell
             if lease_token is not None:
                 held = (await db.execute(
                     text(
@@ -2554,19 +2564,41 @@ class SessionStore:
         async with self._sf() as db:
             return list((await db.execute(stmt)).scalars())
 
-    @asynccontextmanager
-    async def telling_browser_control(self, session_id: UUID) -> AsyncIterator[None]:
-        """Hold the telling of a chat's take-overs and hand backs to one at a time, in every process.
+    async def tell_browser_control(self, session_id: UUID, event_type: EventType, data: dict) -> int | None:
+        """Tell a chat on its user's computer of a take-over, or of a hand back, unless it was told already.
 
-        The control route reads what the chat was last told and then tells it
-        the next.  Two hand backs posted together, as from a chat open in two
-        windows, would both read the take-over and both tell the chat, and its
-        agent would be given two turns.  A Postgres advisory lock, held by a
-        transaction of its own until the block ends.
+        A take-over is told only while none stands, and a hand back only
+        while one does: the chat's last control event says which.  Two posts
+        at once, as from a chat open in two windows, tell it one: they are
+        taken in turn under a Postgres advisory lock.  The lock, the reading
+        and the writing are one transaction on one connection: a holder that
+        asked the pool for a second would leave none once as many posts came
+        together as the pool is wide.
+
+        Returns the event's id, or None when there was nothing to tell.
         """
-        async with self._sf() as db:
+        handing_back = event_type is EventType.BROWSER_CONTROL_RETURNED
+
+        async def untold(db: AsyncSession) -> bool:
             await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
-            yield
+            last = (await db.execute(
+                select(EventRow.type)
+                .where(
+                    EventRow.session_id == session_id,
+                    EventRow.type.in_((
+                        EventType.BROWSER_CONTROL_GRANTED.value,
+                        EventType.BROWSER_CONTROL_RETURNED.value,
+                    )),
+                )
+                .order_by(EventRow.id.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            return (last == EventType.BROWSER_CONTROL_GRANTED.value) is handing_back
+
+        try:
+            return await self.emit_event(session_id, event_type, data, only_if=untold)
+        except _NothingToTell:
+            return None
 
     async def browser_call_paused_since(self, session_id: UUID, after_event_id: int) -> bool:
         """Whether a browser tool of a chat answered that its user holds the browser, after *after_event_id*.

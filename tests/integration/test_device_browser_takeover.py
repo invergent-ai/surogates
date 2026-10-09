@@ -20,6 +20,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from surogates.api.app import _install_browser_api_dependencies
 from surogates.api.routes import browser as browser_routes
@@ -33,6 +34,7 @@ from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_expanded_message
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
+from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -340,6 +342,82 @@ async def test_a_later_take_over_that_stopped_nothing_is_handed_back_for_the_pan
         assert computer.wakes == [str(chat)]
     finally:
         await computer.unqueue(chat)
+
+
+# As many connections as posts arrive at once, and no long wait for one: a telling that needed a second
+# connection while it held its first would leave none, and every post would wait this out and fail.
+POOL, POOL_WAIT_S = 4, 3.0
+
+
+@asynccontextmanager
+async def pooled(pg_url, session_factory, redis_client, connections: int):
+    """A computer whose API has a database pool of *connections*, and its own store on it."""
+    engine = create_async_engine(
+        pg_url, pool_size=connections, max_overflow=0, pool_timeout=POOL_WAIT_S, connect_args={"statement_cache_size": 0},
+    )
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = SessionStore(async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False))
+    try:
+        yield Computer(store, session_factory, redis_client, org_id, user_id)
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def narrow(pg_url, session_factory, redis_client):
+    async with pooled(pg_url, session_factory, redis_client, POOL) as computer:
+        yield computer
+
+
+async def test_a_take_over_and_a_hand_back_are_told_through_one_connection(pg_url, session_factory, redis_client):
+    # A pool of one: anything in the telling that held a connection while it asked for another would wait
+    # for itself until the pool gave up.
+    async with pooled(pg_url, session_factory, redis_client, 1) as single:
+        chat, held = await single.idle(), await single.told_taken_over()
+        try:
+            assert (await single.control(chat, "acquire"))["outcome"] == "granted"
+            await single.stopped(chat)
+            assert await single.control(chat, "release") == {"outcome": "released"}
+            assert (await single.log(chat))[-1] == "browser.control_returned"
+            # The other chat that still said its user held the browser was told on that one connection too.
+            assert (await single.log(held))[-1] == "browser.control_returned"
+        finally:
+            await single.unqueue(chat)
+
+
+async def test_as_many_take_overs_at_once_as_the_pool_is_wide_are_each_told_and_leave_a_read_its_connection(narrow):
+    chats = [await narrow.idle() for _ in range(POOL)]
+    started = time.monotonic()
+
+    async def an_unrelated_read() -> float:
+        await narrow.store.get_session(chats[0])
+        return time.monotonic() - started
+
+    *answers, read_after = await asyncio.gather(
+        *(narrow.control(chat, "acquire") for chat in chats), an_unrelated_read(),
+    )
+
+    assert [answer["outcome"] for answer in answers] == ["granted"] * POOL
+    # Nothing waited for a connection another post held while it asked for a second.
+    assert read_after < POOL_WAIT_S / 2
+    assert time.monotonic() - started < POOL_WAIT_S / 2
+
+
+async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_tell_it_one(narrow):
+    chat = await narrow.idle()
+    await narrow.control(chat, "acquire")
+    await narrow.stopped(chat)
+    started = time.monotonic()
+
+    try:
+        answers = await asyncio.gather(*(narrow.control(chat, "release") for _ in range(POOL)))
+        assert answers == [{"outcome": "released"}] * POOL
+        assert time.monotonic() - started < POOL_WAIT_S / 2
+        assert (await narrow.log(chat)).count("browser.control_returned") == 1
+        assert narrow.wakes == [str(chat)]
+    finally:
+        await narrow.unqueue(chat)
 
 
 async def test_two_hand_backs_posted_together_tell_the_chat_one_and_wake_its_agent_once(computer, monkeypatch):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -95,10 +94,19 @@ class StubSessions:
         # The chats whose agent was stopped: a browser call of theirs answered paused since their take-over.
         self.stopped: set[UUID] = set()
         self.asked_since: list[tuple[UUID, int]] = []
+        # What the chats were told, as (session, type, data): the list a test's emitter records in.
+        self.told: list[tuple[str, str, dict]] = []
 
-    @asynccontextmanager
-    async def telling_browser_control(self, session_id: UUID):
-        yield
+    async def tell_browser_control(self, session_id: UUID, event_type: Any, data: dict) -> int | None:
+        """As the store tells it: a take-over only while none stands, a hand back only while one does."""
+        log = self.events.setdefault(session_id, [])
+        said = [kind for kind in (entry if isinstance(entry, str) else entry[0] for entry in log)
+                if kind in ("browser.control_granted", "browser.control_returned")]
+        if (said[-1:] == ["browser.control_granted"]) is not (event_type.value == "browser.control_returned"):
+            return None
+        log.append(event_type.value)
+        self.told.append((str(session_id), event_type.value, data))
+        return len(log)
 
     async def browser_call_paused_since(self, session_id: UUID, after_event_id: int) -> bool:
         self.asked_since.append((session_id, after_event_id))
@@ -136,7 +144,9 @@ class StubSessions:
         ]
 
     def emitter(self, events: list[tuple[str, str, dict]]):
-        """The app's emitter in a test: what it emits is recorded, and is in its session's log for the routes to read back."""
+        """The app's emitter in a test: what it emits is recorded, and is in its session's log for the routes to read back.
+        What the store itself tells a chat of its browser's control is recorded in the same list."""
+        self.told = events
         record = _event_recorder(events)
 
         async def emit(session_id: str, event_type: Any, data: dict) -> None:
