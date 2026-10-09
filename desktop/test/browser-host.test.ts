@@ -3234,9 +3234,10 @@ await navigator.serviceWorker.ready;`);
     const page = tabs().get(a)![0]!;
     const asking = (host as unknown as { asking: Set<Page> }).asking;
     // A page whose question its user left open, as its agent's next operation finds it: here one only slow
-    // to answer, for a quarter of a second, which the host waits out.
+    // to answer, for a quarter of a second, which the host waits out. It is busy by the time the operation is
+    // sent: the host asks the page over a line of its own, which a script this test sent could reach the page after.
     asking.add(page);
-    void page.evaluate("(() => { const until = Date.now() + 250; while (Date.now() < until) {} })()").catch(() => {});
+    await page.evaluate("void setTimeout(() => { const until = Date.now() + 250; while (Date.now() < until) {} }, 0)");
     const going = op(a, "browser.navigate", { url: "http://fixture.test/second" }, "chat-1");
     // Its user takes the browser over while the operation waits.
     await new Promise((done) => setTimeout(done, 100));
