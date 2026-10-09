@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
+from typing import ClassVar
 
 from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES
 
@@ -170,8 +171,20 @@ def tracked(path: str) -> bool:
     return _EXCLUDED.search(path) is None
 
 
+#: Why a request to a history was not answered, for whoever asked to go by.  A code is never
+#: changed; the words beside it are a person's, and may be.  ``failed``: git, or the system
+#: under it, did not do what was asked.  ``history_refused``: the project's history is not what
+#: the platform wrote, and nothing was read from it.
+FAILED = "failed"
+HISTORY_REFUSED = "history_refused"
+
+
 class HistoryError(RuntimeError):
-    """A history operation failed."""
+    """A history operation failed: :attr:`code` says which way, and the message says it to a person."""
+
+    def __init__(self, message: str, *, code: str = FAILED) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class HistoryConflict(HistoryError):
@@ -215,6 +228,11 @@ class History:
     user: str       # who started the thread: main's first commit is theirs
     helper: str | None = None  # a thread's helper's own session: its pod and copy are its own
     turn: str | None = None    # the thread's turn this pod is opened for: required but in a helper's pod
+
+    #: What neither a copy nor history holds, and which of it is the platform's own:
+    #: never a file of the project's, never reported as unsaved.  A place's own.
+    excludes: ClassVar[list[str]] = HISTORY_EXCLUDES
+    platform: ClassVar[tuple[str, ...]] = PLATFORM_EXCLUDES
 
     @property
     def branch(self) -> str:
@@ -366,7 +384,7 @@ class History:
         # inode numbers and change times differ from pod to pod.
         self._main("config", "core.checkStat", "minimal")
         (self.repo / "info").mkdir(exist_ok=True)
-        (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
+        (self.repo / "info" / "exclude").write_text("\n".join(self.excludes) + "\n")
         (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
 
     def _read_real(self, main: str | None) -> None:
@@ -1430,10 +1448,10 @@ class History:
         if head is not None:
             text = head.decode(errors="replace")
             if not (text.startswith("ref: ") and text.endswith("\n")):
-                raise HistoryError("refused the project's history: its HEAD is not one the platform writes")
+                raise HistoryError("refused the project's history: its HEAD is not one the platform writes", code=HISTORY_REFUSED)
             _checked_ref(text[5:-1], "its HEAD")
             if config != _CONFIG:
-                raise HistoryError("refused the project's history: its config is not the platform's own")
+                raise HistoryError("refused the project's history: its config is not the platform's own", code=HISTORY_REFUSED)
         self._durable_shallow()
 
     def _durable_shallow(self) -> list[str]:
@@ -1848,7 +1866,7 @@ class History:
         empty = self._copy("ls-files", "-z", "--others", "--exclude-standard", "--directory").split("\0")
         made = {n for n in empty if n and not (self.project / n).is_dir()}
         names = sorted(ignored | made)
-        names = [n for n in names if not n.startswith(PLATFORM_EXCLUDES)]
+        names = [n for n in names if not n.startswith(self.platform)]
         repositories = {
             n for n in names
             if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
@@ -2063,7 +2081,7 @@ def _opened_folder(name: str, inside: int | None, make: bool) -> int | None:
         except OSError as exc:
             # A link, or a file, where the folder is: the first is ELOOP or, with a folder asked for, ENOTDIR.
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                raise HistoryError("refused the project's history: a folder of it is a link") from None
+                raise HistoryError("refused the project's history: a folder of it is a link", code=HISTORY_REFUSED) from None
             raise
     return None
 
@@ -2096,11 +2114,11 @@ def _opened(path: Path | str, what: str, *, dir_fd: int | None = None) -> int | 
         return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise HistoryError(f"refused the project's history: its {what} is a link") from None
+            raise HistoryError(f"refused the project's history: its {what} is a link", code=HISTORY_REFUSED) from None
         raise
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise HistoryError(f"refused the project's history: its {what} is not a file")
+        raise HistoryError(f"refused the project's history: its {what} is not a file", code=HISTORY_REFUSED)
     # Another pod may have rewritten it.
     os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
     return fd
@@ -2152,14 +2170,14 @@ def _block(trailers: list[list[str]]) -> str:
 def _checked_id(value: str, where: str) -> str:
     """*value*, a commit id read from *where*; refused when it is anything else, never quoted: it reaches the pod's logs."""
     if not _ID.fullmatch(value):
-        raise HistoryError(f"refused the project's history: {where} holds what is not a commit id")
+        raise HistoryError(f"refused the project's history: {where} holds what is not a commit id", code=HISTORY_REFUSED)
     return value
 
 
 def _checked_ref(value: str, where: str) -> str:
     """*value*, a ref of the history read from *where*; refused when it is anything else."""
     if not _REF.fullmatch(value) or ".." in value:
-        raise HistoryError(f"refused the project's history: {where} holds what is not one of its refs")
+        raise HistoryError(f"refused the project's history: {where} holds what is not one of its refs", code=HISTORY_REFUSED)
     return value
 
 
