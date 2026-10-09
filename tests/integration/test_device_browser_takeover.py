@@ -345,6 +345,27 @@ async def test_a_repeat_of_a_hand_back_is_answered_that_the_agent_goes_on_while_
         await computer.unqueue(chat)
 
 
+async def test_a_repeat_is_answered_that_nobody_goes_on_where_the_turns_worker_died_and_its_lease_ran_out(
+    computer, session_factory,
+):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    assert await computer.hands_back(chat) == GOES_ON
+    await computer.unqueue(chat)
+    # The turn began, read the hand back, and its worker died: its lease is past its time.
+    await computer.store.try_acquire_lease(chat, "the-turns-worker")
+    await computer.store.emit_event(chat, EventType.LLM_REQUEST, {})
+    async with session_factory() as db:
+        await db.execute(text("UPDATE session_leases SET expires_at = now() - interval '1 minute' WHERE session_id = :sid"), {"sid": chat})
+        await db.commit()
+
+    try:
+        # No worker holds the chat: nobody is going on now, whatever the sweeper does of it later.
+        assert await computer.hands_back(chat) == FOR_THE_PANE
+    finally:
+        await computer.store.release_stale_lease(chat)
+
+
 @pytest.mark.parametrize("since", ["taken over again", "taken over again and released", "stopped"])
 async def test_a_repeat_is_answered_that_nobody_goes_on_once_the_hand_backs_turn_is_off(computer, since):
     chat = await computer.idle()
