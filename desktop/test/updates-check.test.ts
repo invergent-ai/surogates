@@ -159,6 +159,7 @@ describe("a helper's list of release keys", () => {
     const with_ = (change: (list: string) => string) => script.replace(list, change(list));
     expect(listedKeys(script)).toHaveLength(2);
     const spellings: Array<[string, string, number]> = [
+      ["spaces behind its opening bracket", with_((text) => text.replace("RELEASE_KEYS=(\n", "RELEASE_KEYS=(  \n")), 0],
       ["spaces after an entry's quote", with_((text) => text.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'  \n")), 0],
       ["a comment in it", with_((text) => text.replace("(\n", "(\n    # the first key, since 2026\n")), 0],
       ["a comment that has an apostrophe in it", with_((text) => text.replace("(\n", "(\n    # Surogate's release key since 2026\n")), 0],
@@ -216,7 +217,7 @@ describe("a check", () => {
     base.answer = () => {};
     const asking = base.updates({ signal: quit.signal }).check();
     setTimeout(() => quit.abort(new Error("Surogate quit")), 50);
-    await expect(asking).rejects.toThrow("Surogate quit");
+    await expect(asking).rejects.toThrow(/^Surogate quit$/);
   });
 
   it("stops a release's download when the app quits, and keeps what came for the next start", { timeout: 8_000 }, async () => {
@@ -315,9 +316,14 @@ describe("a check", () => {
       expect([await after(0), await after(0.2), await after(359.7), await after(0.1)]).toEqual([9, 9, 9, 10]);
       // The app's quit ends it: a check it cut short is no failure to say, and none follows.
       fails = true;
+      await after(360);
       const before = said.length;
+      let cut: (error: Error) => void = () => {};
+      const stops = keepChecked({ check: () => new Promise<void>((_resolve, reject) => (cut = reject)) }, quit.signal, (error) => said.push(String(error)));
       quit.abort(new Error("Surogate quit"));
-      expect([await after(360), await after(360), said.length]).toEqual([10, 10, before]);
+      cut(new Error("Surogate quit"));
+      stops();
+      expect([await after(360), await after(360), said.length]).toEqual([11, 11, before]);
     } finally {
       vi.useRealTimers();
     }

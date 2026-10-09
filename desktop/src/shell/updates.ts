@@ -294,13 +294,13 @@ export function listedKeys(script: string): KeyObject[] {
   const entries: string[] = [];
   let at: "before" | "open" | "key" | "closed" | "wrong" = "before";
   let entry = "";
-  let lists = 0;
   const lines = script.split("\n");
   // As the script reads: a last line with no newline is a line, and the end behind a newline is none.
   if (lines.at(-1) === "") lines.pop();
   for (const line of lines) {
+    // A line that sets the list: the first, in its form, opens it; any other, a second list or one
+    // added to it among them, leaves no list at all.
     if (/^[ \t]*RELEASE_KEYS\+?=/.test(line)) {
-      lists += 1;
       if (at === "before" && /^[ \t]*RELEASE_KEYS=\($/.test(line)) {
         at = "open";
         continue;
@@ -316,7 +316,7 @@ export function listedKeys(script: string): KeyObject[] {
       else at = "wrong";
     }
   }
-  if (at !== "closed" || lists !== 1) return [];
+  if (at !== "closed") return [];
   return entries.flatMap((pem) => {
     try {
       const key = createPublicKey(pem);
