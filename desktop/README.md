@@ -88,10 +88,14 @@ test runner does, finds it. The agent is told where the file was saved, or why i
 navigation's, the mouse's, the keyboard's or an upload's. One answer carries at most twenty
 notes of what its downloads came to and twenty of what else its pages did; more than that is
 not told. A download that begins and never ends is dropped, and told as not finished, once no
-byte of any download has come for a minute. One that never ends and keeps coming is not
-stopped: it is kept in the temporary folder as it comes, past the 50 MiB a saved file may be
-(141 MiB in 7 s was measured), and the agent is told nothing of it, until you take the
-browser over, which stops the agent's own, or the browser closes.
+byte of any download has come for a minute. One that keeps coming is stopped by what the
+temporary folder may hold while a download of the agent's is on its way: 400 MiB, eight files
+as large as one that can be saved. Past that, every download of the agent's still on its way
+is stopped and what it had staged removed. The browser does not say which of them was the
+large one, so all go, and the agent is told of each that the downloads together were too
+large to save, and that it may start again one that was not the large one. Your own
+downloads count toward the 400 MiB, and are never stopped by it. The folder is looked at
+once a second, so it can hold what comes in a second more.
 
 While the agent drives, a page gets a file only when the agent uploads one: up to ten files
 of the chat's folder, 50 MiB in all, read through the chat's file host and given to the file

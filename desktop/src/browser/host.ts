@@ -16,7 +16,7 @@ import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
-import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge } from "./downloads.js";
+import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
@@ -150,8 +150,18 @@ export const notFinished = (name: string, why: string): string => `The page's do
 // dropped as ones that did not finish: a site can begin a download and never end it, and it would stay on
 // its way, its part kept, for as long as the browser runs. Its user's own are never dropped so.
 export const STALLED_MS = 60_000;
-// How often what is staged is looked at for that, at most.
-const STAGED_LOOK_MS = 5_000;
+// The most the host's staging folder may hold while a download of the agent's is on its way. Past it, every
+// download of the agent's still on its way is stopped and dropped, and its agent told that it was too large
+// to save (tooMuch). A file is saved only up to what a write may carry, and is measured only once it has
+// ended: one that never ends and keeps coming would fill the disk, and the browser says which staged file
+// is whose only at a download's end, so the one that grows cannot be told from the rest and all of the
+// agent's go together. Eight files as large as one that can be saved: a browser fetches six at once from one
+// site, and what has ended and waits to be saved, each a write's most or less, is in the folder too. Its
+// user's own downloads count toward it, and are never stopped by it.
+export const STAGED_MOST_BYTES = 8 * MAX_WRITE_BYTES;
+// How often what is staged is looked at for both, at most: what a download that keeps coming adds between
+// two looks is what the folder can hold past its most.
+const STAGED_LOOK_MS = 1_000;
 const stalledFor = (ms: number): string => `no more of it came for ${ms / 1_000} s`;
 const unfinished = (failure: string | null): string => (failure === "canceled" ? failure : "the browser stopped it");
 const unmeasured = (name: string): string => `The page downloaded ${quoted(name)}, but its size could not be measured, so it was not saved.`;
@@ -486,6 +496,7 @@ export interface BrowserHostOptions {
   downloadBytes?: number; // the most a download may be; a write's most unless told
   now?: () => number; // the clock, in milliseconds; the process's own steady one unless told
   stalledMs?: number; // STALLED_MS unless told
+  stagedBytes?: number; // STAGED_MOST_BYTES unless told
 }
 
 export class BrowserHost {
@@ -563,6 +574,8 @@ export class BrowserHost {
   private watching: NodeJS.Timeout | null = null;
   private lastByte = 0;
   private readonly stalled = new WeakSet<Download>();
+  // The downloads stopped because more was staged than may be.
+  private readonly overfull = new WeakSet<Download>();
   // The chat that last handed the browser back, and when.
   private handed: { by: string; at: number } | null = null;
   // When each navigation's request began, for as long as the browser keeps the request: a redirect's next
@@ -1344,8 +1357,10 @@ export class BrowserHost {
       try {
         path = await download.path();
       } catch {
-        const why = this.stalled.has(download) ? stalledFor(this.options.stalledMs ?? STALLED_MS) : unfinished(await download.failure().catch(() => null));
-        tell(stop?.aborted ? interrupted(name) : notFinished(name, why));
+        if (stop?.aborted) tell(interrupted(name));
+        else if (this.overfull.has(download)) tell(tooMuch(name, this.options.stagedBytes ?? STAGED_MOST_BYTES));
+        else if (this.stalled.has(download)) tell(notFinished(name, stalledFor(this.options.stalledMs ?? STALLED_MS)));
+        else tell(notFinished(name, unfinished(await download.failure().catch(() => null))));
         return;
       }
       const size = await stat(path).then((found) => found.size, () => null);
@@ -1364,9 +1379,9 @@ export class BrowserHost {
 
   // What is staged is looked at while a download of the agent's is on its way: each file of the staging
   // folder, and its size. The browser says of a download only that it began and that it ended, and not which
-  // file is whose until then: so a byte counts whichever download it is of. Once none has come for the
-  // stated time, in a new file or a longer one, every download of the agent's still on its way is stopped
-  // and dropped (stage tells why). Its user's own are not among them.
+  // file is whose until then: so a byte counts whichever download it is of. Once the folder holds more than
+  // it may, or no byte has come for the stated time, in a new file or a longer one, every download of the
+  // agent's still on its way is stopped and dropped (stage tells why). Its user's own are not among them.
   private watch(): void {
     this.lastByte = this.now();
     if (this.watching !== null) return;
@@ -1382,9 +1397,11 @@ export class BrowserHost {
         const more = [...found].some(([name, size]) => size > (sizes.get(name) ?? -1));
         sizes = found;
         if (more) this.lastByte = this.now();
-        if (this.now() - this.lastByte < limit) return;
+        const held = [...found.values()].reduce((sum, size) => sum + size, 0);
+        const why = held > (this.options.stagedBytes ?? STAGED_MOST_BYTES) ? this.overfull : this.now() - this.lastByte >= limit ? this.stalled : null;
+        if (why === null) return;
         for (const download of this.arriving) {
-          this.stalled.add(download);
+          why.add(download);
           void download.cancel().catch(() => {});
         }
       });
