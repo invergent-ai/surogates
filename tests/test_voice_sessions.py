@@ -7,7 +7,11 @@ from uuid import uuid4
 import pytest
 
 from surogates.voice import sessions as voice_sessions
-from surogates.voice.sessions import SORRY_TURN, CallSession, CallTarget, VoiceSessions, normalize_caller, question_text
+from surogates.voice.lines import default_lines
+from surogates.voice.sessions import CallSession, CallTarget, VoiceSessions, normalize_caller, question_text
+
+SORRY_TURN = default_lines("ro").sorry_turn
+FILLER = default_lines("ro").filler
 
 
 @pytest.mark.parametrize("raw, expected", [("+40722000111", "40722000111"), ("40722000111", "40722000111"),
@@ -123,15 +127,16 @@ async def test_cut_while_the_agent_runs_a_tool_does_not_repeat_its_preamble():
     call._user_event = 1
     await call.record_heard("O clipă, verific.")
     assert [e.type for e in log.events].count("llm.response") == 1
-    assert call.note.startswith("[Apelantul te-a întrerupt")
+    assert call.note.startswith("[The caller interrupted you")
 
 
 async def test_cut_greeting_invents_no_reply_and_says_what_was_heard():
     call = _call(_Log())
-    call.note = "[Ai răspuns deja la telefon cu: «Bună ziua! Sunt Ana, cu ce vă pot ajuta?».] "
+    call.note = "[This call is in Romanian: speak only Romanian.] [You already answered the phone with: «Bună ziua! Sunt Ana, cu ce vă pot ajuta?».] "
     await call.record_heard("Bună ziua! Sunt")
     assert call.store.events == []
-    assert call.note == "[Ai răspuns la telefon, dar apelantul te-a întrerupt după: «Bună ziua! Sunt».] "
+    assert call.note == ("[This call is in Romanian: speak only Romanian.] "
+                         "[You answered the phone, but the caller interrupted you after: «Bună ziua! Sunt».] ")
 
 
 async def test_a_question_the_agent_already_said_is_not_said_twice():
@@ -153,7 +158,6 @@ async def test_a_paraphrased_question_is_not_asked_twice():
 
 async def test_a_tool_started_in_silence_is_announced():
     """The model often calls a tool without a word first; the caller would hear only typing for seconds."""
-    from surogates.voice.sessions import FILLER
     call = _call(_Log(("llm.request", {}), ("tool.call", {"name": "web_search", "arguments": "{}"}),
                       ("tool.result", {"name": "web_search"}), ("llm.request", {}),
                       ("llm.delta", {"content": "Euro e 4,97 lei."}),
@@ -209,7 +213,6 @@ async def test_end_call_marks_the_call_as_ending_and_is_not_announced():
 async def test_the_filler_is_spoken_while_the_tool_still_runs():
     """The filler must leave the sentence splitter on its own: before, it waited in the buffer for the
     answer's first word, so the caller heard it only once the tool had returned."""
-    from surogates.voice.sessions import FILLER
     from surogates.voice.text import SentenceSplitter
 
     call = _call(_Log(("llm.request", {}), ("tool.call", {"name": "web_search", "arguments": "{}"})))
@@ -218,3 +221,11 @@ async def test_the_filler_is_spoken_while_the_tool_still_runs():
         first = piece
         break
     assert SentenceSplitter().push(first) == [FILLER]
+
+
+def test_a_choices_line_with_other_braces_reads_the_choices_and_keeps_the_rest():
+    from surogates.voice.sessions import question_text
+
+    args = {"questions": [{"prompt": "Which day?", "choices": [{"label": "Monday"}, {"label": "Tuesday"}]}]}
+    text = question_text(args, choices_line="Options: {} (pick {one})")  # an owner's wording; no crash
+    assert "Monday" in text and "{one}" in text
