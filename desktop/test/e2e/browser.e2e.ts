@@ -215,7 +215,7 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
     const asked = await prompt(app!);
     expect(await asked.textContent("#prompt-title")).toMatch(/^Let .+ use a browser on this computer\?$/);
-    expect(await asked.getAttribute('[data-id="allow_session"]', "aria-disabled")).toBe("true");
+    expect(await asked.getAttribute("#prompt-buttons", "data-held")).toBe("true");
     await press(asked, "allow_session");
     // This computer's own address: the proxy refuses it, and says so, though the browser is up with the chat's tab.
     expect(await navigating).toEqual({
@@ -550,19 +550,17 @@ describe("a chat's browser taken over, and handed back", () => {
     await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     const answer = await clicked(client, "handBack");
     const asked = await prompted();
-    expect(await asked.getAttribute(HAND_BACK, "aria-disabled")).toBe("true");
-    // As it opens. Tab then Space, as a form invites: the keyboard does not reach Hand back, and nothing is pressed.
+    expect(await asked.getAttribute("#prompt-buttons", "data-held")).toBe("true");
+    // As it opens. Tab then Space, as a form invites: Tab moves the keyboard, as in any window, and nothing is pressed.
     await asked.keyboard.press("Tab");
     await asked.keyboard.press(" ");
     // A click where Hand back is.
-    // Forced: Playwright would wait for a button marked unavailable, as a person does not.
     await asked.click(HAND_BACK, { force: true, noWaitAfter: true });
-    // And the prompt's own page saying it was pressed: the main process takes no such word, then or ever.
+    // And the prompt's own page saying it was pressed, right after those: the main process goes by its own count.
     expect(await asked.evaluate(() =>
       (window as unknown as { surogatePrompt: { answer(button: string, choice: string | null): Promise<boolean> } }).surogatePrompt.answer("hand_back", null))).toBe(false);
-    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
     // Nothing came of any: the confirmation is up still, the browser its user's, and the page not answered.
-    await expect.poll(() => asked.getAttribute(HAND_BACK, "aria-disabled"), { timeout: 10_000 }).toBe("false");
+    await expect.poll(() => asked.getAttribute("#prompt-buttons", "data-held"), { timeout: 10_000 }).toBe("false");
     expect(await promptsShown(app!)).toBe(1);
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
     expect(await client.evaluate(() => [...document.querySelectorAll<HTMLElement>("button[id^=ask-]")].map((button) => button.dataset.answer ?? null))).toEqual([null]);
@@ -572,7 +570,44 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: false });
   });
 
-  it("answers the hand back's confirmation with no key and no press of a person who is typing: keys one after the other, a key held down, a click, and a press begun before it showed take nothing and move nothing, each holding it back anew; and a choice made after a quiet input protection answers", async () => {
+  it("answers the hand back's confirmation at a button pressed with no key and no press, as assistive technology presses one, and by the keyboard alone: Keep control keeps the browser, Hand back hands it back", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    const activate = (asked: Page, button: string, simulated: boolean) => asked.evaluate(([id, mouse]) => {
+      const pressed = document.querySelector<HTMLButtonElement>(`#prompt-buttons button[data-id="${id}"]`)!;
+      if (!mouse) return pressed.click();
+      for (const type of ["mousedown", "mouseup", "click"]) pressed.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }, [button, simulated] as const).catch(() => {});
+    for (const simulated of [false, true]) {
+      await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+      let answer = await clicked(client, "handBack");
+      let asked = await prompted();
+      // No button is said to be unavailable, held back or not.
+      expect(await asked.$$eval("#prompt-buttons button", (buttons) => buttons.filter((button) => button.hasAttribute("aria-disabled")).length)).toBe(0);
+      await expect.poll(() => heldBack(asked)).toBe(false);
+      await activate(asked, "keep", simulated);
+      expect(await answer()).toBe(false);
+      answer = await clicked(client, "handBack");
+      asked = await prompted();
+      await expect.poll(() => heldBack(asked)).toBe(false);
+      await activate(asked, "hand_back", simulated);
+      expect(await answer()).toBe("confirmed");
+    }
+    // By the keyboard alone: Tab to Hand back, and Enter once the protection has passed since Tab.
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    const answer = await clicked(client, "handBack");
+    const asked = await prompted();
+    await expect.poll(() => heldBack(asked)).toBe(false);
+    await asked.keyboard.press("Tab");
+    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("hand_back");
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    await asked.keyboard.press("Enter").catch(() => {});
+    expect(await answer()).toBe("confirmed");
+  });
+
+  it("answers the hand back's confirmation with no key and no press of a person who is typing: keys one after the other, a key held down, a click, and a press begun before it showed take nothing, each holding it back anew; and a choice made after a quiet input protection answers", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
     await bound(folder);
@@ -581,21 +616,20 @@ describe("a chat's browser taken over, and handed back", () => {
     const answer = await clicked(client, "handBack");
     const asked = await prompted();
     const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
-    // Whether the confirmation is up still, the browser its user's, where the keyboard is, and whether it is held back.
+    // Whether the confirmation is up still, the browser its user's, and whether it is held back.
     const state = async () => [
-      await promptsShown(app!), (await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT))?.takenOver,
-      await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id), await heldBack(asked),
+      await promptsShown(app!), (await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT))?.takenOver, await heldBack(asked),
     ];
     // Typed for the agent's browser, a key every 150 ms for three seconds: six times the input protection, which
-    // each key begins anew. Tab then Return, as a form takes them; Space; Escape; letters. None moves the keyboard
-    // from Keep control, where it starts, and none answers.
+    // each key begins anew. Tab then Return, as a form takes them; Space; Escape; letters. Tab moves the keyboard,
+    // as in any window, onto Hand back and off it again; and none answers, wherever the keyboard is.
     for (let n = 0; n < 4; n += 1) {
       for (const name of ["a", "Tab", "Enter", " ", "Enter", "Escape"]) {
         await asked.keyboard.press(name);
         await sleep(150);
       }
     }
-    expect(await state()).toEqual([1, true, "keep", true]);
+    expect(await state()).toEqual([1, true, true]);
     // The main process counts those keys by itself: its page's word that Hand back was pressed, right after one of
     // them, is not taken, though the confirmation has been up six times its protection.
     const word = () => asked.evaluate(() =>
@@ -612,11 +646,11 @@ describe("a chat's browser taken over, and handed back", () => {
     await asked.keyboard.down("Enter");
     expect(await word()).toBe(false);
     await asked.keyboard.up("Enter");
-    expect(await state()).toEqual([1, true, "keep", true]);
-    // A click on Hand back while still typing: nothing. Forced: Playwright would wait for a button marked unavailable.
+    expect(await state()).toEqual([1, true, true]);
+    // A click on Hand back while still typing: nothing.
     await asked.keyboard.press("Tab");
     await asked.click(HAND_BACK, { force: true, noWaitAfter: true });
-    expect(await state()).toEqual([1, true, "keep", true]);
+    expect(await state()).toEqual([1, true, true]);
     // A press begun before the confirmation was there, in the page under it, and let go over Hand back: no press of the confirmation's.
     await sleep(700);
     expect(await heldBack(asked)).toBe(false);
@@ -624,14 +658,15 @@ describe("a chat's browser taken over, and handed back", () => {
     await asked.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await asked.mouse.up();
     await sleep(200);
-    expect(await state()).toEqual([1, true, "keep", false]);
+    expect(await state()).toEqual([1, true, false]);
     // Its user has stopped, and chooses: Tab moves the keyboard to Hand back, which holds the confirmation back
     // anew, so that a Return right after it takes nothing; a Return after a quiet protection time hands the browser back.
-    await asked.keyboard.press("Tab");
-    expect(await state()).toEqual([1, true, "hand_back", true]);
+    const on = () => asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id);
+    for (let n = 0; n < 4 && (n === 0 || (await on()) !== "hand_back"); n += 1) await asked.keyboard.press("Tab");
+    expect([await on(), await state()]).toEqual(["hand_back", [1, true, true]]);
     await asked.keyboard.press("Enter");
     await sleep(200);
-    expect(await state()).toEqual([1, true, "hand_back", true]);
+    expect([await on(), await state()]).toEqual(["hand_back", [1, true, true]]);
     await key(asked, "Enter");
     expect(await answer()).toBe("confirmed");
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: false });
@@ -666,7 +701,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     void (await clicked(client, "handBack"))().catch(() => {});
     const asked = await prompted();
-    await expect.poll(() => asked.getAttribute(HAND_BACK, "aria-disabled"), { timeout: 10_000 }).toBe("false");
+    await expect.poll(() => asked.getAttribute("#prompt-buttons", "data-held"), { timeout: 10_000 }).toBe("false");
     // The page under it loads again, by its own code or its user's reload: nobody is left to answer for.
     await Promise.all([client.waitForEvent("load", { timeout: 15_000 }), client.evaluate(() => location.reload()).catch(() => {})]);
     await expect.poll(() => app!.evaluate(({ BrowserWindow }) =>
@@ -685,7 +720,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
     const first = await clicked(client, "handBack");
     const asked = await prompted();
-    await expect.poll(() => asked.getAttribute(HAND_BACK, "aria-disabled"), { timeout: 10_000 }).toBe("false");
+    await expect.poll(() => asked.getAttribute("#prompt-buttons", "data-held"), { timeout: 10_000 }).toBe("false");
     await asked.evaluate(() => Object.assign(window, { drawn: document.querySelector("#prompt-buttons button") }));
     // Its user's next click in the page asks again: refused, and no second prompt waits behind the first.
     expect(await atClick(client, "handBack")).toContain("Surogate is already asking");
@@ -693,7 +728,7 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await asked.textContent("#prompt-waiting")).toBe("");
     // The one up is as it was: not drawn anew, and not held back anew.
     expect(await asked.evaluate(() => (window as unknown as { drawn: Element }).drawn === document.querySelector("#prompt-buttons button"))).toBe(true);
-    expect(await asked.getAttribute(HAND_BACK, "aria-disabled")).toBe("false");
+    expect(await asked.getAttribute("#prompt-buttons", "data-held")).toBe("false");
     await press(asked, "hand_back");
     expect(await first()).toBe("confirmed");
   });

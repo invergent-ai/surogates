@@ -196,7 +196,7 @@ async function closed(page: Page): Promise<void> {
 
 /** Whether *page*'s prompt holds its buttons back: within its input protection, of its showing or of the last key or press. */
 export const heldBack = (page: Page): Promise<boolean> =>
-  page.$$eval("#prompt-buttons button", (buttons) => buttons.length === 0 || buttons.some((button) => button.getAttribute("aria-disabled") === "true"));
+  page.$eval("#prompt-buttons", (row) => row.children.length === 0 || (row as HTMLElement).dataset.held !== "false");
 
 /** Press *button* on *page*'s prompt, once its input protection lets it, and wait for the prompt to close. */
 export async function press(page: Page, button: string): Promise<void> {

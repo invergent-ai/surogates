@@ -144,10 +144,15 @@ open. It costs you that one download; a second click works.
 
 Hand back, in the pane, asks in a window of the desktop's own, "Hand the browser back to
 <agent>?". Keep control is its default. Nothing answers it, Keep control neither, until half
-a second has passed since it showed and since the last key or press it received: what you
-were typing into the browser when it opened answers nothing and moves nothing, and a key
-held down never does. Every prompt of the desktop's is held back so, with each of its
-buttons and Escape. The browser is handed back from the chat it was taken over from, or
+a second has passed since it showed, and no key or press answers it that comes within half
+a second of the one before: what you were typing into the browser when it opened answers
+nothing and changes no choice, and a key held down since before it opened never does. Tab
+and Shift+Tab move the keyboard at any time, a modifier by itself holds nothing back, and a
+key you press on a button and hold answers when you let it go. A button pressed with no key
+and no press, as a screen reader presses one, answers once half a second has passed with no
+key and no press at all; no button is marked unavailable meanwhile. Only the confirmation's
+own page, a file of the app's, can send that. Every prompt of the desktop's is held back so,
+with each of its buttons and Escape. The browser is handed back from the chat it was taken over from, or
 from any chat of the agent's once that one is deleted; where that chat is gone, Settings →
 Browser says so and offers Hand back itself, through the same confirmation, since no chat
 may be left with a browser pane to hand it back in. Nothing the agent's page does by itself hands the

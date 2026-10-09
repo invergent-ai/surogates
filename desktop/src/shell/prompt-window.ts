@@ -2,10 +2,12 @@
 // Desktop draws its local consent (index.chunk-CHp2HdS0.js, renderer/local_exec_consent/):
 // 460 px wide, frameless and modal over the app's window, its page one of the app's
 // files, with no web content in it. An answer counts only once the window has been
-// shown, or focused again, for the input protection's 500 ms, and only from a key or a
-// press that came that long after the one before it: keys already on their way when
-// the prompt took the keyboard, as of a person typing into the agent's browser, answer
-// nothing, whichever button they would reach. The page holds its buttons back as long.
+// shown, or focused again, for the input protection's 500 ms, and not from a key or a
+// press that came sooner than that after the one before it: keys already on their way
+// when the prompt took the keyboard, as of a person typing into the agent's browser,
+// answer nothing, whichever button they would reach. An answer with no key and no press
+// behind it, as assistive technology presses a button, counts once no key and no press
+// has come for that long. The page holds back the same keys and presses.
 // Over a hidden window, a prompt waits to be shown until the window is, and the user is told.
 
 import { BrowserWindow } from "electron";
@@ -18,6 +20,8 @@ import { ownPage } from "./window-policy.js";
 export const WIDTH = 460;
 // Claude Desktop's own: LOCAL_EXEC_CONSENT_INPUT_PROTECTION_MS.
 export const INPUT_PROTECTION_MS = 500;
+// The keys that only change what another key means.
+const MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph"]);
 // How long a window that was asked to close has before it is destroyed (Claude Desktop's own).
 const CLOSE_MS = 5_000;
 
@@ -66,24 +70,43 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   let closing = false;
   let armedAt = Number.POSITIVE_INFINITY;
   let arming: NodeJS.Timeout | undefined;
-  // When a key last went down in the prompt, or a press began; and whether that one may answer: it came once
-  // the prompt had been shown for the input protection, and that long after the key or press before it. The
-  // protection is counted anew from each: a person who is typing never answers, and one who stops and then
-  // chooses does. Seen here, before the page sees it: the page's own word of a key or a press is not taken.
+  // The keys and presses the window is sent, as this process sees them before the page does. *lastDown*: when
+  // a key last went down or a press began. *answers*: whether that one may answer, having come once the prompt
+  // had been shown for the input protection and that long after the key or press before it. The protection is
+  // counted anew from each: a person who is typing never answers, and one who stops and then chooses does.
+  // *lastInput*: when a key or a press last went down or came up. An answer with none of them behind it, as
+  // assistive technology presses a button, is taken once that long has passed with no key and no press at all;
+  // so the click that ends a press begun too soon answers nothing, however long the press is held.
   let lastDown = Number.NEGATIVE_INFINITY;
+  let lastInput = Number.NEGATIVE_INFINITY;
   let answers = false;
-  const down = (repeated = false) => {
+  // The key or press that went down last and has not come up: a held key's repeats are that key's still.
+  let pressed: string | null = null;
+  const down = (what: string, repeated: boolean) => {
     const now = performance.now();
-    // A key held down repeats only after a wait of its own, which can be longer than the protection: it is the
-    // key that was down before, and answers nothing however late it comes.
-    answers = !repeated && now >= armedAt && now - lastDown >= INPUT_PROTECTION_MS;
+    // A key held down repeats after a wait of its own, which can be longer than the protection. Its repeats are
+    // the press that began it: one seen to begin here, that may answer, still may; one held since before the
+    // prompt, or since a key that was held back, answers nothing however late its repeats come.
+    answers = repeated ? answers && pressed === what : now >= armedAt && now - lastDown >= INPUT_PROTECTION_MS;
+    if (!repeated) pressed = what;
     lastDown = now;
+    lastInput = now;
+  };
+  const up = (what: string) => {
+    if (pressed === what) pressed = null;
+    lastInput = performance.now();
   };
   // Every key and press the window is sent, whoever sends it: one event for each key that goes down, a held
-  // key's repeats among them, and one for each press of the mouse or a finger.
+  // key's repeats among them, and one for each press of the mouse or a finger; and one as each comes up. A
+  // modifier by itself is no key: Shift held for Shift+Tab holds nothing back.
   contents.on("input-event", (_event, input) => {
-    if (input.type === "rawKeyDown" || input.type === "keyDown") down(input.modifiers?.includes("isautorepeat") === true);
-    else if (input.type === "mouseDown" || input.type === "touchStart") down();
+    const key = (input as { key?: string; code?: string }).code ?? (input as { key?: string }).key ?? "key";
+    if (MODIFIERS.has((input as { key?: string }).key ?? "")) return;
+    if (input.type === "rawKeyDown" || input.type === "keyDown") down(key, input.modifiers?.includes("isautorepeat") === true);
+    else if (input.type === "keyUp") up(key);
+    else if (input.type === "mouseDown" || input.type === "touchStart") down(input.type, false);
+    else if (input.type === "mouseUp") up("mouseDown");
+    else if (input.type === "touchEnd" || input.type === "touchCancel") up("touchStart");
   });
   const send = (channel: string, ...args: unknown[]) => {
     if (!contents.isDestroyed()) contents.send(channel, ...args);
@@ -118,13 +141,15 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   };
   handle("prompt:state", () => ({ content, waiting: options.queue.waiting(), armed: performance.now() >= armedAt, protection: INPUT_PROTECTION_MS }));
   // True once taken; false for one that the input protection holds back: before it has passed since the prompt
-  // was shown, or with no key or press behind it that came after a quiet protection time.
+  // was shown, or too soon after a key or a press that may not answer. Which button, and which choice, is the
+  // page's word: this process sees keys and presses, not what they land on. Whether, is this process's own count.
   handle("prompt:answer", (pressed, chosen) => {
     const offered = content.buttons.find((candidate) => candidate.id === pressed);
     if (!offered) throw new Error("Not a button of this prompt");
     const choice = content.choice === null ? null : content.choice.options.find((option) => option.value === chosen)?.value;
     if (choice === undefined) throw new Error("Not an option of this prompt");
-    if (!answers || performance.now() < armedAt) return false;
+    const now = performance.now();
+    if (now < armedAt || !(answers || now - lastInput >= INPUT_PROTECTION_MS)) return false;
     answer ??= { button: offered.id, choice };
     close();
     return true;

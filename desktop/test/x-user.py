@@ -10,6 +10,8 @@ Run only inside test/isolated.sh, whose DISPLAY is an Xvfb of the run's own:
     x-user.py click <x> <y>         a left click at that place on the screen
     x-user.py type <text>           each character's key, pressed and released
     x-user.py press <key>           one key by its X name, as Return or Escape
+    x-user.py down <key>            one key by its X name pressed and held: the display repeats it
+    x-user.py up <key>              that key let go
 """
 
 import ctypes
@@ -65,6 +67,11 @@ def main(argv: list[str]) -> None:
         key = x11.XKeysymToKeycode(display, symbol)
         xtst.XTestFakeKeyEvent(display, key, 1, CURRENT_TIME)
         xtst.XTestFakeKeyEvent(display, key, 0, CURRENT_TIME)
+    elif what in ("down", "up"):
+        symbol = x11.XStringToKeysym(argv[1].encode())
+        if not symbol:
+            sys.exit(f"x-user.py: no such key: {argv[1]}")
+        xtst.XTestFakeKeyEvent(display, x11.XKeysymToKeycode(display, symbol), 1 if what == "down" else 0, CURRENT_TIME)
     else:
         sys.exit(f"x-user.py: no such act: {what}")
     x11.XSync(display, 0)

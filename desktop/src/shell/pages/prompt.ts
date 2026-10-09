@@ -2,8 +2,10 @@
 // sends. Every string is set as text, with each special character in it shown as its
 // code point. The buttons answer the main process, which takes no answer before the
 // input protection has passed, nor one from a key or a press that came sooner than
-// that after the one before it; the page holds its buttons back as long, and a key
-// that comes meanwhile does nothing here at all.
+// that after the one before it; the page holds the same keys and presses back, and a
+// key held back does nothing here but move the keyboard. A button pressed with no key
+// and no press, as assistive technology presses one, answers once none has come for
+// that long.
 
 import { byId, markTheme, showText } from "./ui.js";
 
@@ -40,15 +42,23 @@ markTheme();
 let content: Content | null = null;
 // Whether the prompt has been shown, or focused again, for the input protection: as the main process says.
 let armed = false;
-// The input protection, in milliseconds; when a key last went down here, or a press began; and whether that
-// one acts: it came once the prompt was armed, and a protection time after the one before it. One that does
-// not act does nothing: it moves no focus, changes no choice and answers nothing. The main process counts the
-// same keys and presses by itself, and takes an answer from none but one that acts.
+// The input protection, in milliseconds. *lastDown*: when a key last went down here, or a press began.
+// *acts*: whether that one acts, having come once the prompt was armed and a protection time after the one
+// before it; one that does not act changes no choice and answers nothing. *lastInput*: when a key or a press
+// last went down or came up. *pressed*: the key or press that went down last and has not come up. The main
+// process counts the same keys and presses by itself, and decides by its own count.
 let protection = 500;
 let lastDown = Number.NEGATIVE_INFINITY;
+let lastInput = Number.NEGATIVE_INFINITY;
 let acts = false;
+let pressed: string | null = null;
+// The keys that went down held back and have not come up: their coming up does nothing either.
+const stilled = new Set<string>();
 let quiet: number | undefined;
+// A key or a press that came now would be held back.
 const held = (): boolean => !armed || performance.now() - lastDown < protection;
+// A button pressed now answers: by the key or press that acts, or with none at all for a protection time.
+const answering = (): boolean => armed && (acts || performance.now() - lastInput >= protection);
 
 const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] => {
   const made = document.createElement(tag);
@@ -61,36 +71,55 @@ const chosen = (): string | null => document.querySelector<HTMLInputElement>("#p
 
 function answer(id: string): void {
   const offered = content?.buttons.find((button) => button.id === id);
-  if (!offered || !acts) return;
+  if (!offered || !answering()) return;
   void prompt.answer(id, content?.choice ? chosen() : null);
 }
 
-// Every button is held back until the input protection has passed, since the prompt was shown and since the
-// last key or press: focusable, and marked unavailable.
+// Whether a key or a press would be held back now is said on the buttons' row, for how they are drawn; no
+// button is marked unavailable for it: each can be reached and pressed at any time, and what is pressed too
+// soon answers nothing.
 function hold(): void {
-  for (const button of document.querySelectorAll<HTMLButtonElement>("#prompt-buttons button")) button.setAttribute("aria-disabled", String(held()));
+  const row = byId("prompt-buttons");
+  row.dataset.held = String(held());
+  row.dataset.armed = String(armed);
   // Looked at again once what is left of the protection since the last key or press has passed.
   clearTimeout(quiet);
   const left = lastDown + protection - performance.now();
   if (armed && left > 0) quiet = window.setTimeout(hold, left + 1);
 }
 
+// The keys that only change what another key means: none of them is a key that holds anything back.
+const MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph"]);
+const named = (event: Event): string => (event instanceof KeyboardEvent ? event.code || event.key : "press");
+
 // A key went down, or a press began: it acts only where the prompt was not held back, and holds it back anew.
-// A key held down repeats after a wait of its own, which can outlast the protection: it never acts.
+// A key held down repeats after a wait of its own, which can outlast the protection: its repeats are the
+// press that began it, and act only where that one was seen to begin here and acted.
 function down(event: Event): void {
-  acts = !held() && !(event instanceof KeyboardEvent && event.repeat);
-  lastDown = performance.now();
+  if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
+  const repeated = event instanceof KeyboardEvent && event.repeat;
+  acts = repeated ? acts && pressed === named(event) : !held();
+  if (!repeated) pressed = named(event);
+  lastDown = lastInput = performance.now();
   hold();
-  if (!acts) still(event);
+  if (acts) return;
+  if (event instanceof KeyboardEvent) stilled.add(named(event));
+  still(event);
+}
+function up(event: Event): void {
+  if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
+  if (pressed === named(event)) pressed = null;
+  lastInput = performance.now();
 }
 // What a key or a press that does not act would do next does not happen either: its key coming up, its click.
-// A key does nothing at all: keys are what a person typing elsewhere sends here. But for the clipboard's and
-// the selection's own keys, which answer nothing and move nothing: what a prompt shows can be copied at any
-// time. A press of the mouse is made where it lands, and one that does not act is held back from the buttons
-// alone: a choice it lands on is taken.
+// A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for Tab,
+// which moves the keyboard as in any window, and for the clipboard's and the selection's own keys: what a
+// prompt shows can be read and copied at any time. A press of the mouse is made where it lands, and one that
+// does not act is held back from the buttons alone: a choice it lands on is taken.
 const CLIPBOARD = new Set(["a", "c", "v", "x"]);
 function still(event: Event): void {
   if (event instanceof KeyboardEvent) {
+    if (event.key === "Tab") return;
     if ((event.ctrlKey || event.metaKey) && !event.altKey && CLIPBOARD.has(event.key.toLowerCase())) return;
   } else if (!(event.target instanceof Element && event.target.closest("#prompt-buttons"))) return;
   event.preventDefault();
@@ -98,11 +127,15 @@ function still(event: Event): void {
 }
 document.addEventListener("keydown", down, true);
 document.addEventListener("pointerdown", down, true);
+// A click with a key or a press behind it goes by that one; with none, by how long none has come. Looked at
+// before the key's or the press's coming up is counted: the click that ends a press is that press's.
 for (const after of ["keyup", "click"]) {
   document.addEventListener(after, (event) => {
-    if (!acts) still(event);
+    if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
+    if (event instanceof KeyboardEvent ? stilled.delete(named(event)) : !answering()) still(event);
   }, true);
 }
+for (const after of ["keyup", "pointerup", "pointercancel"]) document.addEventListener(after, up, true);
 
 // More may wait than the line here holds: each chat keeps its own later prompts back until this one is answered.
 function waiting(count: number): void {

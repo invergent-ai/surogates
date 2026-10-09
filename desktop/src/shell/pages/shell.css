@@ -1396,7 +1396,7 @@ body.prompt-page {
   color: var(--centre);
 }
 
-.prompt .actions .btn[aria-disabled="true"] {
+.prompt .actions[data-armed="false"] .btn {
   opacity: 0.5;
   cursor: default;
 }
