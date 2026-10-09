@@ -504,3 +504,19 @@ async def test_a_file_changed_between_the_pickup_and_its_apply_is_retried_as_an_
     assert "landing" not in report and {f["ref"]: f["landing"] for f in report["files"]}["c.md"] == "redoing"
     [redo] = await api.app.state.session_store.get_events(thread.id, types=[EventType.HISTORY_REDO])
     assert redo.data["files"] == [{"path": "c.md", "reason": "changed", "by": {"kind": "you"}}]
+
+
+async def test_a_file_whose_author_a_prunings_cut_hides_is_not_redone():
+    # Its landing names no one for it (the thread's base is behind the cut): no redo is started on a guess.
+    outcome = {
+        "state": "completed", "saved": False, "overlapped": [{"path": "notes.txt", "reason": "changed"}],
+        "files": [{"ref": "notes.txt", "landing": "not_merged"}],
+    }
+    landing_module._tell(outcome)
+    assert (outcome["redo"], outcome["saved"], outcome["files"][0]["landing"]) == ([], False, "not_merged")
+    # Beside a file someone is named for, that one alone is redone, and the turn's end saved less than its work.
+    outcome["overlapped"].append({"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}})
+    outcome["files"].append({"ref": "Report.docx", "landing": "not_merged"})
+    landing_module._tell(outcome)
+    assert outcome["redo"] == [{"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}}]
+    assert ([f["landing"] for f in outcome["files"]], outcome["saved"]) == (["not_merged", "redoing"], False)
