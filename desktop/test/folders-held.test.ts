@@ -45,20 +45,55 @@ describe("the folders the app holds", () => {
     expect([await late, asked]).toEqual([[{ dev: 9, ino: 9 }], ["/dead"]]);
   });
 
-  it("are looked at two at a time, and with two that do not answer no other is looked at: the threads left are the app's", async () => {
+  it("are looked at two at a time by all calls together, and each folder once for all who ask: a second call at once holds what the first holds", async () => {
     let running = 0;
     let most = 0;
+    const asked: string[] = [];
     const slow = async (folder: string) => {
+      asked.push(folder);
       most = Math.max(most, ++running);
       await new Promise((resolve) => setTimeout(resolve, 10));
       running -= 1;
       return { dev: 2, ino: Number(folder.slice(1)) } as Stats;
     };
-    expect(await new FolderLooks(slow, 1_000).held(["/1", "/2", "/3", "/4", "/5"])).toEqual([1, 2, 3, 4, 5].map((ino) => ({ dev: 2, ino })));
-    expect(most).toBe(2);
+    const all = [1, 2, 3, 4, 5].map((ino) => ({ dev: 2, ino }));
+    const folders = ["/1", "/2", "/3", "/4", "/5"];
+    const looks = new FolderLooks(slow, 1_000);
+    // Two calls in one turn, as a click on Check again makes: both hold every folder, by one look at each.
+    expect(await Promise.all([looks.held(folders), looks.held(folders)])).toEqual([all, all]);
+    expect([most, asked]).toEqual([2, folders]);
+    // And a third while they run, for one folder more.
+    const [first, third] = await Promise.all([looks.held(folders), looks.held(["/6", "/1"])]);
+    expect([first, third, most]).toEqual([all, [{ dev: 2, ino: 6 }, { dev: 2, ino: 1 }], 2]);
+  });
+
+  it("hold every folder that answers beside one that never does, at the first call and at each after it: the dead one has one of the two looks, and the other serves the rest", async () => {
+    const asked: string[] = [];
+    const said: string[] = [];
+    const look = (folder: string) => (asked.push(folder), folder === "/dead" ? new Promise<Stats>(() => {}) : Promise.resolve({ dev: 3, ino: Number(folder.slice(1)) } as Stats));
+    const looks = new FolderLooks(look, 30, (folder) => said.push(folder));
+    const healthy = [1, 2, 3, 4].map((ino) => ({ dev: 3, ino }));
+    const folders = ["/dead", "/1", "/2", "/3", "/4"];
+    expect(await looks.held(folders)).toEqual(healthy);
+    for (let again = 0; again < 3; again += 1) {
+      const began = Date.now();
+      expect(await looks.held(folders)).toEqual(healthy);
+      // The dead one is not waited for a second time: its look is older than its bound.
+      expect(Date.now() - began).toBeLessThan(25);
+    }
+    expect(asked.filter((folder) => folder === "/dead")).toEqual(["/dead"]);
+    // Said once, to the log: its chat's tools fail later, at its file host's start, and nothing else tells why.
+    expect(said).toEqual(["/dead"]);
+  });
+
+  it("begin no third look while two have not answered within their bound: the threads left are the app's, and a folder that would have answered is not held", async () => {
     const asked: string[] = [];
     const dead = new FolderLooks((folder) => (asked.push(folder), folder.startsWith("/dead") ? new Promise<Stats>(() => {}) : Promise.resolve({ dev: 3, ino: 3 } as Stats)), 20);
+    const began = Date.now();
+    // It waits for a look to end for as long as either may still answer, and no longer.
     expect(await dead.held(["/dead1", "/dead2", "/alive"])).toEqual([]);
+    expect(Date.now() - began).toBeLessThan(500);
+    expect(await dead.held(["/alive"])).toEqual([]);
     expect(asked).toEqual(["/dead1", "/dead2"]);
   });
 });

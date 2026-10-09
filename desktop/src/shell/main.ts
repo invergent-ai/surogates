@@ -22,7 +22,7 @@ import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
-import { FolderLooks } from "./folders-held.js";
+import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
@@ -378,15 +378,18 @@ function startDelivery(check = false): void {
 // has something left to unpack.
 function lookForTools(): void {
   const unpacking = delivery !== null && delivery.state.state !== "ready";
-  vmLacking = boundFolders().then((held) => missingTools({}, unpacking, held));
-  lookForFileTools(true);
+  // The folders are taken once, for the VM's tools and for the file helper's: the two looks then
+  // hold the same folders, and the line and a file tool name the same tools.
+  const held = boundFolders();
+  vmLacking = held.then((folders) => missingTools({}, unpacking, folders));
+  lookForFileTools(true, held);
 }
 
 // Each folder this computer's chats are bound to, as its file host holds it: by what it is now. One
 // that is not there or cannot be read has no file host, and none starts once the journal is closed.
 // Never looked at on this thread: a folder on a mount that has stopped answering would stop the app
 // with it. One that does not answer in time is not held (FolderLooks).
-const folderLooks = new FolderLooks();
+const folderLooks = new FolderLooks(undefined, undefined, (folder) => report(new Error(`${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
 function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
   let folders: string[] = [];
   try {
@@ -404,9 +407,9 @@ function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
 // written a program. So the line and a file tool's answer name the same tools. *said*: tell the
 // pages even when nothing changed, as Check again asks.
 let toolsOwedSaid = false;
-function lookForFileTools(said = false): void {
+function lookForFileTools(said = false, folders = boundFolders()): void {
   toolsOwedSaid ||= said;
-  const look: Promise<string[]> = Promise.all([vmLacking, boundFolders()]).then(([vm, held]) => {
+  const look: Promise<string[]> = Promise.all([vmLacking, folders]).then(([vm, held]) => {
     const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, held)), ...vm];
     // A look that a later one has overtaken says nothing: the later one's folders are the newer,
     // and it tells the pages what this one owed them.

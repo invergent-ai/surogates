@@ -873,6 +873,14 @@ describe("the sandbox's tools, through the app", () => {
     expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
       error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
     });
+    // Check again looks for the VM's tools and the file helper's by the same folders, taken once:
+    // the line is still there, and still what a file tool says.
+    await (await shellPage(app!)).click("#sandbox-check");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(await said()).toBe(missing);
+    expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
+      error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
+    });
     // At the next launch the chat is bound already, and the app says so with nothing bound anew.
     await quit(app);
     app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE, ...env });
