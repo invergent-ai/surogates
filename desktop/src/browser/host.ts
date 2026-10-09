@@ -900,7 +900,7 @@ export class BrowserHost {
     const late = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, SETTLE_MS);
     });
-    const settled: Promise<void> = this.doing(page, Promise.race([read().then(read), late])).then(() => {
+    const settled: Promise<void> = Promise.race([this.doing(page, read().then(read)), late]).then(() => {
       clearTimeout(timer);
       if (this.settling.get(page) === settled) this.settling.delete(page);
     });
@@ -930,14 +930,15 @@ export class BrowserHost {
   }
 
   // Where *chooser*'s input is now, as the browser says it (place). Null where its page is closed, went
-  // elsewhere since it asked, or does not say within LOOK_MS.
+  // elsewhere since it asked, or does not say within LOOK_MS: the question is on its way to the page all
+  // the same, and counted so until it has reached it (doing).
   private async placed(chooser: FileChooser): Promise<Place | null> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), LOOK_MS);
     });
     try {
-      return await Promise.race([chooser.element().evaluate(place).catch(() => null), late]);
+      return await Promise.race([this.doing(chooser.page(), chooser.element().evaluate(place).catch(() => null)), late]);
     } finally {
       clearTimeout(timer);
     }
@@ -946,9 +947,13 @@ export class BrowserHost {
   // *page*, of *session*'s, asked for a file: the input is kept for an upload, and its agent told. Not while
   // its user holds the browser: what a page asks for then is their own doing, or the page's under their
   // hand, and no input of theirs is the agent's to fill, at the hand back either. Heard then, the page has
-  // leave to ask again, so its quiet begins anew.
+  // leave to ask again, so its quiet begins anew: or, where something is still on its way to it, when that
+  // has reached it (doing), and not five seconds from now with that still to come.
   private asks(page: Page, session: string, chooser: FileChooser): void {
-    if (this.held !== null) return void this.quiet(page);
+    if (this.held !== null) {
+      if ((this.hearing.get(page)?.acting ?? 0) === 0) this.quiet(page);
+      return;
+    }
     // Handed back, and not answered since: it asked for this before, under its user's hand or by what the take-over stopped.
     if (this.settling.has(page)) return;
     this.choosers.set(session, chooser);
@@ -1074,7 +1079,7 @@ export class BrowserHost {
     if (!files) return failed("A file for the page is a name, its type and what it holds");
     let refused: unknown;
     try {
-      refused = await this.bounded(chooser.page(), this.give(session, chooser, files, named?.input ?? null, stop), stop);
+      refused = await this.bounded(chooser.page(), this.doing(chooser.page(), this.give(session, chooser, files, named?.input ?? null, stop)), stop);
     } catch (error) {
       if (stop.aborted) return PAUSED;
       return failed(said(error));
@@ -1190,7 +1195,7 @@ export class BrowserHost {
   // that answers has had its question answered since, and is its agent's again.
   private async answers(page: Page): Promise<boolean> {
     let timer: NodeJS.Timeout | undefined;
-    const answered = await Promise.race([page.evaluate("1").then(() => true, () => true), new Promise<false>((resolve) => {
+    const answered = await Promise.race([this.doing(page, page.evaluate("1").then(() => true, () => true)), new Promise<false>((resolve) => {
       timer = setTimeout(() => resolve(false), ASKING_MS);
     })]);
     clearTimeout(timer);

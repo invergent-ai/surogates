@@ -66,6 +66,31 @@ const ASKING_PAGES: Record<string, string> = {
   busy: asking("BUSY", "", "document.getElementById('file').addEventListener('click', () => setTimeout(() => { const until = performance.now() + 3000; while (performance.now() < until) {} }, 0));"),
 };
 
+// A page that is busy for as long as its site says, once, and from then on asks for a file whenever it finds it has
+// leave to: where its site says so, it asks once before it goes busy as well. Its file input is at 60, 40.
+const STUCK = `<!doctype html><title>STUCK</title><body style="margin:0">
+<input id="file" type="file" style="position:absolute;left:20px;top:20px;width:260px;height:40px">
+<script>
+const say = (what) => navigator.sendBeacon("/said", what);
+const input = document.getElementById("file");
+let had = navigator.userActivation.isActive;
+let free = false;
+fetch("/gate").then((answer) => answer.text()).then((told) => {
+  const [ms, first] = told.split(" ");
+  if (first) input.click();
+  const until = performance.now() + Number(ms);
+  while (performance.now() < until) {}
+  free = true;
+  had = false;
+  say("free");
+});
+setInterval(() => {
+  const has = navigator.userActivation.isActive;
+  if (has && !had && free) { input.click(); say("asked"); }
+  had = has;
+}, 25);
+</script>`;
+
 let site: Server;
 let canary: Server;
 let ports: { site: number; canary: number };
@@ -74,6 +99,11 @@ let hits: string[];
 let framed: string[];
 // How many times fixture.test's download that answers its first asker late was asked for.
 let firsts: number;
+// What the fixture's pages say of themselves, each to its own site. A test that read a page would give it what a
+// click of its user's gives it, so where that is what is looked at, the page says and nobody reads it.
+let said: Array<{ host: string; from: string; what: string }>;
+// Lets the fixture's stuck page go busy, for so many milliseconds: "first" has it ask for a file before it does.
+let gate: ((ms: number, first?: boolean) => void) | null;
 let profile: string;
 let launch: Launch;
 let host: BrowserHost;
@@ -83,7 +113,21 @@ beforeEach(async () => {
   hits = [];
   framed = [];
   firsts = 0;
+  said = [];
+  gate = null;
   site = createServer((req, res) => {
+    if (req.url === "/said") {
+      let what = "";
+      req.on("data", (chunk) => (what += chunk));
+      return void req.on("end", () => {
+        said.push({ host: String(req.headers.host), from: new URL(String(req.headers.referer ?? "http://unknown/")).pathname, what });
+        res.writeHead(204).end();
+      });
+    }
+    if (req.url === "/stuck") return void res.writeHead(200, { "content-type": "text/html" }).end(STUCK);
+    if (req.url === "/gate") {
+      return void (gate = (ms, first = false) => res.writeHead(200, { "content-type": "text/plain" }).end(first ? `${ms} first` : String(ms)));
+    }
     // other.test's page with a file input of its own, framing fixture.test's page with another.
     if (req.headers.host === "other.test" && req.url === "/fileframe") {
       return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Framing</title>
@@ -3207,6 +3251,63 @@ await navigator.serviceWorker.ready;`);
     expect(performance.now() - taken).toBeGreaterThan(OWN_CHOOSER_MS);
     await new Promise((done) => setTimeout(done, 1_500));
     expect(ownChoosers()).toEqual([]);
+  }, 60_000);
+
+  // The fixture's stuck page, opened for a new session of chat-1's; and what the display shows of the browser's own
+  // choosers from now until the page has been free again for two seconds: it asks the moment it finds it has leave.
+  const stuck = async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/stuck" }, "chat-1");
+    await expect.poll(() => gate !== null, { timeout: 5_000 }).toBe(true);
+    const watched = async (busy: number) => {
+      const seen: number[] = [];
+      const freed = () => said.some(({ what }) => what === "free");
+      for (const until = performance.now() + busy + 10_000; performance.now() < until && !freed();) {
+        seen.push(ownChoosers().length);
+        await new Promise((done) => setTimeout(done, 250));
+      }
+      expect(freed()).toBe(true);
+      for (let n = 0; n < 8; n += 1) {
+        seen.push(ownChoosers().length);
+        await new Promise((done) => setTimeout(done, 250));
+      }
+      return Math.max(...seen);
+    };
+    return { a, watched };
+  };
+
+  it("opens no chooser of the browser's own for a busy page that this host's reading at a hand back reaches only after its user has taken the browser over again, and held it more than five seconds past the ten the reading is waited for", async () => {
+    const { watched } = await stuck();
+    host.pause("chat-1", true);
+    gate!(17_000);
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", false);
+    await new Promise((done) => setTimeout(done, 1_000));
+    host.pause("chat-1", true);
+    expect(await watched(17_000)).toBe(0);
+  }, 60_000);
+
+  it("opens no chooser of the browser's own for a busy page that is asked where its file input is, for an upload's prompt, and answers only after its user has held the browser five seconds", async () => {
+    const { a, watched } = await stuck();
+    await asksFor(a, () => op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 }, "chat-1"));
+    gate!(8_000);
+    await new Promise((done) => setTimeout(done, 300));
+    // The prompt's question of the page is given up within the second, and the page has not heard it yet.
+    expect(await within(2_000, host.address(a, true, "op-1", "chat-1"))).not.toBe("late");
+    host.pause("chat-1", true);
+    expect(await watched(8_000)).toBe(0);
+  }, 60_000);
+
+  it("opens no chooser of the browser's own for a busy page that an upload's steps reach only after its user has held the browser five seconds, the upload answered paused long before", async () => {
+    const { a, watched } = await stuck();
+    await asksFor(a, () => op(a, "browser.mouse", { action: "click", x: 60, y: 40, button: "left", clicks: 1 }, "chat-1"));
+    gate!(8_000);
+    await new Promise((done) => setTimeout(done, 300));
+    const upload = host.perform(launch, "chat-1", a, "browser.set_input_files", { files: [REPORT] }, new AbortController().signal, "op-1");
+    await new Promise((done) => setTimeout(done, 700));
+    host.pause("chat-1", true);
+    expect(await within(1_000, upload)).toEqual(PAUSED);
+    expect(await watched(8_000)).toBe(0);
   }, 60_000);
 
   it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {
