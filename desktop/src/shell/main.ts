@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,7 @@ import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
+import { FolderLooks } from "./folders-held.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
@@ -381,20 +382,17 @@ function lookForTools(): void {
 
 // Each folder this computer's chats are bound to, as its file host holds it: by what it is now. One
 // that is not there or cannot be read has no file host, and none starts once the journal is closed.
-function boundFolders(): Array<{ dev: number; ino: number }> {
-  const held: Array<{ dev: number; ino: number }> = [];
+// Never looked at on this thread: a folder on a mount that has stopped answering would stop the app
+// with it. One that does not answer in time is not held (FolderLooks).
+const folderLooks = new FolderLooks();
+function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
+  let folders: string[] = [];
   try {
-    for (const folder of openStack()?.bindings.folders() ?? []) {
-      try {
-        held.push(statSync(folder));
-      } catch {
-        // Its chat's operations are answered folder_unavailable.
-      }
-    }
+    folders = openStack()?.bindings.folders() ?? [];
   } catch {
     // The device is stopping.
   }
-  return held;
+  return folderLooks.held(folders);
 }
 
 // The file helper's tools, looked for again beside what the VM was last found to lack: with each
@@ -403,14 +401,21 @@ function boundFolders(): Array<{ dev: number; ino: number }> {
 // relative entries, and without any entry in a folder a chat is bound to, where a command may have
 // written a program. So the line and a file tool's answer name the same tools. *said*: tell the
 // pages even when nothing changed, as Check again asks.
+let toolsOwedSaid = false;
 function lookForFileTools(said = false): void {
-  lackingFound = vmLacking.then((vm) => {
-    const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, boundFolders())), ...vm];
+  toolsOwedSaid ||= said;
+  const look: Promise<string[]> = Promise.all([vmLacking, boundFolders()]).then(([vm, held]) => {
+    const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, held)), ...vm];
+    // A look that a later one has overtaken says nothing: the later one's folders are the newer,
+    // and it tells the pages what this one owed them.
+    if (lackingFound !== look) return lackingFound;
     const same = lacking !== null && lacking.join("\n") === found.join("\n");
     lacking = found;
-    if (said || !same) changed();
+    if (toolsOwedSaid || !same) changed();
+    toolsOwedSaid = false;
     return found;
   });
+  lackingFound = look;
 }
 
 // Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
