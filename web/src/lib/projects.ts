@@ -4,7 +4,7 @@
 // Projects and their threads (desktop design, Section 12): the wire types, and fixtures
 // with a thread in every group and with every reason, for fakes of a ProjectsSource.
 
-import type { LibraryEntry, Project, Routine, ThreadRow } from "./projects-contract.js";
+import type { LibraryEntry, ProducedFile, Project, Routine, ThreadRow } from "./projects-contract.js";
 
 export type * from "./projects-contract.js";
 
@@ -36,11 +36,13 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
     id, title, group: "idle", reason: null, statusLine: null, progress: null, files: [], place: cloud,
     createdAt: ago(minutes + 60), updatedAt: ago(minutes), resolvedAt: null, ...rest,
   });
-  const file = (threadId: string, label: string, ref: string, kind: "file" | "artifact" = "file") => ({ kind, label, ref, threadId });
+  // A file of each mark among them; an artifact has none.
+  const file = (threadId: string, label: string, ref: string, kind: "file" | "artifact" = "file", landing: ProducedFile["landing"] = kind === "file" ? "landed" : null) =>
+    ({ kind, label, ref, threadId, landing });
   const report = [
     thread(ids.question, "Check the revenue figures", 17, {
       group: "waiting", reason: "question", statusLine: "Which quarter's exchange rate should I use?", progress: { done: 2, total: 5 },
-      files: [file(ids.question, "revenue.xlsx", "threads/revenue/revenue.xlsx")],
+      files: [file(ids.question, "revenue.xlsx", "threads/revenue/revenue.xlsx", "file", "not_merged")],
     }),
     thread(ids.approval, "Send the draft to finance", 25, {
       group: "waiting", reason: "approval", statusLine: "Send an email to finance@example.com?",
@@ -50,7 +52,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
     }),
     thread(ids.working, "Draft the summary", 28, {
       group: "working", statusLine: "Writing the outlook", progress: { done: 3, total: 6 },
-      files: [file(ids.working, "summary.docx", "threads/summary/summary.docx"), file(ids.working, "Sales chart", "art-1", "artifact")],
+      files: [file(ids.working, "summary.docx", "threads/summary/summary.docx", "file", "redoing"), file(ids.working, "Sales chart", "art-1", "artifact")],
     }),
     thread(ids.computer, "Tidy the shared folder", 40, {
       group: "working", reason: "computer", statusLine: "Waiting for thinkpad",
@@ -58,7 +60,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
     }),
     thread(ids.idle, "Collect the sales data", 540, {
       group: "idle", statusLine: "Done: 4 regions",
-      files: ["north", "south", "east"].map((region) => file(ids.idle, `${region}.csv`, `threads/sales/${region}.csv`)),
+      files: ["north", "south", "east"].map((region) => file(ids.idle, `${region}.csv`, `threads/sales/${region}.csv`, "file", region === "east" ? "undone" : "landed")),
     }),
     thread(ids.resolved, "Book the review meeting", 9_000, {
       group: "resolved", statusLine: "Booked for Monday", resolvedAt: ago(8_900),

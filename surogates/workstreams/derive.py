@@ -56,6 +56,11 @@ class ThreadFacts:
     #: Its latest event of each of ``LATEST_TYPES``, and its turn summaries:
     #: every one, or only the newest when its files are not read.
     events: tuple[Any, ...]
+    #: Its landings that recorded files, each ``{id, files}`` as its
+    #: ``workstream_history`` row has them; none when its files are not read.
+    landings: tuple[dict[str, Any], ...] = ()
+    #: The files its next turn is told to redo (``landing.redo_files``).
+    redoing: frozenset[str] = frozenset()
 
 
 def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
@@ -69,7 +74,7 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "reason": reason,
         "status_line": status_line,
         "progress": _progress(todos.data if todos else {}),
-        "files": _files(facts),
+        "files": _files(facts, group),
         "place": facts.place,
         "created_at": utc(facts.created_at),
         "updated_at": utc(facts.updated_at),
@@ -176,17 +181,59 @@ def _progress(data: dict[str, Any]) -> dict[str, int] | None:
     return {"done": sum(t.get("status") == "completed" for t in todos), "total": len(todos)}
 
 
-def _files(facts: ThreadFacts) -> list[dict[str, str]]:
-    """The files every turn summary named, newest first, each once, at most
-    the shell's limit.  An entry the shell would refuse (not a file or an
-    artifact, no ref, or a label or ref too long) is left out: the shell
-    refuses every row over one such entry."""
-    files: list[dict[str, str]] = []
+def _files(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
+    """The files the thread's landings changed, with their marks, then the
+    artifacts its turn summaries named; at most the shell's limit.
+
+    A thread with no landing works on the real files, as one does in a
+    project over the file cap: its files are its turn summaries' too, with
+    no mark.
+    """
+    kinds = ("artifact",) if facts.landings else ("file", "artifact")
+    return [*_landed(facts, group), *_summarized(facts, kinds)][: SHELL_LIMITS["files"]]
+
+
+def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
+    """Each file the thread's landings changed, once, as its newest landing
+    of it left it: those left out first, then those that landed, each
+    newest first.
+
+    ``landed``; or ``not_merged`` when the landing left it out, ``redoing``
+    while the thread's next turn is to redo it.  A resolved thread takes
+    no next turn, so none of its files is being redone.  A file a landing
+    deleted is no file to open: it is left out.  So is one whose path the
+    shell would refuse as a label.
+    """
+    redoing = facts.redoing if group != "resolved" else frozenset()
+    left_out: list[dict[str, Any]] = []
+    landed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for landing in sorted(facts.landings, key=lambda row: row["id"], reverse=True):
+        for f in landing["files"]:
+            path = f["path"]
+            if path in seen:
+                continue
+            seen.add(path)
+            if (f["merged"] and f["after"] is None) or units(path) > SHELL_LIMITS["label"]:
+                continue
+            mark = "landed" if f["merged"] else ("redoing" if path in redoing else "not_merged")
+            (landed if f["merged"] else left_out).append(
+                {"kind": "file", "label": path, "ref": path, "thread_id": str(facts.id), "landing": mark}
+            )
+    return [*left_out, *landed]
+
+
+def _summarized(facts: ThreadFacts, kinds: tuple[str, ...]) -> list[dict[str, Any]]:
+    """The files of *kinds* every turn summary named, newest first, each
+    once, with no mark.  An entry the shell would refuse (no ref, or a label
+    or ref too long) is left out: the shell refuses every row over one such
+    entry."""
+    files: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     summaries = [e for e in facts.events if e.type == EventType.TURN_SUMMARY.value]
     for summary in sorted(summaries, key=lambda e: e.id, reverse=True):
         for artifact in summary.data.get("artifacts") or []:
-            if not isinstance(artifact, dict) or artifact.get("kind") not in ("file", "artifact"):
+            if not isinstance(artifact, dict) or artifact.get("kind") not in kinds:
                 continue
             kind, ref, label = artifact["kind"], artifact.get("ref"), artifact.get("label")
             if not isinstance(ref, str) or not ref or (kind, ref) in seen:
@@ -195,7 +242,7 @@ def _files(facts: ThreadFacts) -> list[dict[str, str]]:
             if units(ref) > SHELL_LIMITS["ref"] or units(label) > SHELL_LIMITS["label"]:
                 continue
             seen.add((kind, ref))
-            files.append({"kind": kind, "label": label, "ref": ref, "thread_id": str(facts.id)})
+            files.append({"kind": kind, "label": label, "ref": ref, "thread_id": str(facts.id), "landing": None})
             if len(files) == SHELL_LIMITS["files"]:
                 return files
     return files
