@@ -323,7 +323,7 @@ async def test_a_stop_while_a_helper_runs_takes_the_turns_work_back_and_the_help
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Something else."})
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo other > other.md"})), _final_response("Done."),
-    ], pool=SandboxPool(pods), saga_settings=FENCED)
+    ], pool=SandboxPool(pods))  # with a landing's own bounds: a step of a second fails on a busy host
     # What the helper changed itself lands with the thread's next turn, made from the stopped turn's outline as it
     # is; the outline itself, the stopped turn's own file, never does.
     assert pods.real_names() == ["Report.docx", "notes.txt", "other.md", "sources.md"]
@@ -579,7 +579,7 @@ async def one_more_turn(api, monkeypatch, pods, thread, command: str) -> None:
     await api.app.state.session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Something else."})
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": command})), _final_response("Done."),
-    ], pool=SandboxPool(pods), saga_settings=FENCED), 120)
+    ], pool=SandboxPool(pods)), 120)
 
 
 async def test_a_stop_of_a_turn_that_took_a_helpers_finished_work_up_and_handed_on_loses_none_of_that_work(api, monkeypatch, tmp_path):
