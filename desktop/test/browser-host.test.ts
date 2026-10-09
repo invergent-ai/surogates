@@ -7,11 +7,13 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { getEventListeners } from "node:events";
 import { readFile, stat } from "node:fs/promises";
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
-import { connect as connectTcp } from "node:net";
+import { connect as connectTcp, createServer as createTcp, type Server as TcpServer } from "node:net";
+import type { Duplex } from "node:stream";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,12 +29,15 @@ import {
   type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
+import { BrowserProxy } from "../src/browser/proxy.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
 const EXECUTABLE = TEST_BROWSER;
 const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
 const ROOT = "root-1";
+// How long the browser is left idle before it is asked to sign in again: past the ten seconds it keeps a connection it never used.
+const IDLE_MS = Number(process.env.SUROGATE_TEST_IDLE_MS ?? 15_000);
 
 // The fixture, as sites past this computer: fixture.test leads to 203.0.113.10 and other.test to
 // 203.0.113.11, each of which the proxy dials at the fixture's own port here. Every other name is unknown.
@@ -2709,6 +2714,312 @@ await connection.setLocalDescription(await connection.createOffer());
 await gathered;
 connection.close();
 return found.filter((line) => / udp /i.test(line));`)).toEqual([]);
+  });
+
+  describe("its proxy's sign-in", () => {
+    // A site past this computer, at fixture.test: its page asks for an image, a script it may keep an hour, data,
+    // a socket and an https address of its site, and by each of those ways for a name only the proxy answers, and
+    // only to a browser signed in to it. Every other name leads to a public address where nothing listens.
+    const ELSEWHERE = "203.0.113.12";
+    const SIGNS = `<!doctype html><title>Signs</title><img src="/img.png"><script src="/kept.js"></script>
+<script>
+const who = location.pathname.split("/").pop();
+const own = (how) => how + "-" + who + ".proxy-check.invalid";
+const socket = (address) => new Promise((done) => { const made = new WebSocket(address); made.onopen = made.onerror = (event) => done(event.type); });
+new Image().src = "http://" + own("image") + "/";
+(async () => {
+  await fetch("/data/" + who).then((answer) => answer.text());
+  await fetch("http://" + own("fetch") + "/", { mode: "no-cors" }).catch(() => {});
+  await fetch("https://fixture.test/secure/" + who, { mode: "no-cors" }).catch(() => {});
+  await fetch("https://" + own("tunnel") + "/", { mode: "no-cors" }).catch(() => {});
+  const site = await socket("ws://fixture.test/socket/" + who);
+  const proxy = await socket("ws://" + own("socket") + "/");
+  await fetch("/sockets/" + who + "/" + site + "/" + proxy);
+  await fetch("/done/" + who);
+})();
+</script>`;
+    const WAYS = ["image", "fetch", "tunnel", "socket"];
+    let origin: Server;
+    let secure: TcpServer;
+    // What the site was asked for, a socket's handshake too, and how many tunnels reached its https port.
+    let heard: string[];
+    let tunnels: number;
+    // The site's ends of every connection, a socket's too: closed at the test's end.
+    let taken: Set<Duplex>;
+    // Each request and tunnel the proxy was asked for: whether it carried the launch's sign-in, and its answer's status.
+    let asked: Array<{ what: string; signed: boolean; status: number }>;
+    let proxy: BrowserProxy;
+    let at: number;
+    // The launch's secret, as the proxy gave it to the host.
+    let secret: string;
+
+    beforeEach(async () => {
+      heard = [];
+      tunnels = 0;
+      asked = [];
+      taken = new Set();
+      origin = createServer((req, res) => {
+        heard.push(`${req.method} ${req.url}`);
+        if (req.url?.startsWith("/signs/")) return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(SIGNS);
+        if (req.url === "/kept.js") return void res.writeHead(200, { "content-type": "text/javascript", "cache-control": "public, max-age=3600" }).end("window.kept = 1;");
+        if (req.url?.startsWith("/file.bin")) return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" }).end("f".repeat(64 * 1024));
+        res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" }).end("ok");
+      });
+      origin.on("upgrade", (req, socket) => {
+        heard.push(`SOCKET ${req.url}`);
+        const accept = createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        socket.on("error", () => {});
+      });
+      // The site's https port: a tunnel that reaches it is counted at its first bytes, and let go.
+      secure = createTcp((socket) => void socket.on("error", () => {}).once("data", () => {
+        tunnels += 1;
+        socket.destroy();
+      }));
+      for (const server of [origin, secure]) server.on("connection", (socket: Duplex) => void taken.add(socket.once("close", () => taken.delete(socket))));
+      await Promise.all([origin, secure].map((server) => new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()))));
+      const [plain, tls] = [origin, secure].map((server) => (server.address() as { port: number }).port);
+      proxy = new BrowserProxy({
+        resolve: (name) => (name === "fixture.test" ? Promise.resolve([SITE]) : name.endsWith(".invalid") ? Promise.reject(new Error("ENOTFOUND")) : Promise.resolve([ELSEWHERE])),
+        local: () => ["127.0.0.1", "::1"],
+        subnets: () => [],
+        connect: (address, port) => connectTcp({ host: "127.0.0.1", port: address !== SITE ? 9 : port === 80 ? plain! : port === 443 ? tls! : 9 }),
+      });
+      const inner = proxy as unknown as { server: Server; own(request: IncomingMessage): boolean };
+      inner.server.on("request", (request: IncomingMessage, response: ServerResponse) => {
+        const entry = { what: `${request.method} ${request.url}`, signed: inner.own(request), status: 0 };
+        asked.push(entry);
+        response.once("finish", () => (entry.status = response.statusCode));
+      });
+      // Heard after the proxy's own listener, which answers nothing before its first wait: so each way it writes an answer is read.
+      inner.server.on("connect", (request: IncomingMessage, client: Duplex) => {
+        const entry = { what: `CONNECT ${request.url}`, signed: inner.own(request), status: 0 };
+        asked.push(entry);
+        for (const way of ["write", "end"] as const) {
+          const said = client[way].bind(client) as (...args: unknown[]) => unknown;
+          Object.assign(client, { [way]: (...args: unknown[]) => {
+            entry.status ||= Number(/^HTTP\/1\.1 (\d{3}) /.exec(String(args[0]))?.[1] ?? 0);
+            return said(...args);
+          } });
+        }
+      });
+      const made = proxy.signIn.bind(proxy);
+      proxy.signIn = () => {
+        const signIn = made();
+        secret = signIn.password;
+        return signIn;
+      };
+      at = await proxy.listen();
+      // The host's own proxy, made before its first launch so that the launch's own requests are heard too.
+      await host.close();
+      host = new BrowserHost();
+      Object.assign(host, { proxy: { server: proxy, port: at } });
+    });
+
+    afterEach(async () => {
+      await host.close();
+      for (const socket of taken) socket.destroy();
+      await Promise.all([origin, secure].map((server) => new Promise<void>((done) => server.close(() => done()))));
+    });
+
+    const context = () => (host as unknown as { running: Promise<BrowserContext> }).running;
+    // The fixture's page as *who* asks for it has asked for all it does.
+    const done = (who: string, times = 1) => expect.poll(() => heard.filter((what) => what === `GET /done/${who}`).length, { timeout: 30_000 }).toBe(times);
+    // What the proxy was asked for from *mark* on that is the page's as *who*: its site's, and the proxy's own names.
+    const asks = (who: string, mark: number) => asked.slice(mark)
+      .filter(({ what }) => what.includes(`/${who}`) || what.includes(`-${who}.proxy-check.invalid`) || what.startsWith("CONNECT fixture.test:"));
+    // Whether each way the page asks for a name only the proxy answers came through signed in, from the last time they were expected.
+    const answered = (who: string) => WAYS.map((way) => proxy.checked(`${way}-${who}`));
+    const expected = (who: string) => WAYS.forEach((way) => proxy.expect(`${way}-${who}`));
+    // The page as *who*, loaded *times* over: each of its requests signed in and carried, and none challenged.
+    async function carried(who: string, mark: number, times = 1): Promise<void> {
+      await done(who, times);
+      expect(answered(who), who).toEqual([true, true, true, true]);
+      const mine = asks(who, mark);
+      expect(mine.filter(({ signed, status }) => !signed || status === 407), who).toEqual([]);
+      expect(mine.map(({ what }) => what), who).toEqual(expect.arrayContaining([
+        `GET http://fixture.test/signs/${who}`, `GET http://fixture.test/data/${who}`, "CONNECT fixture.test:443", "CONNECT fixture.test:80",
+        `GET http://image-${who}.proxy-check.invalid/`, `GET http://fetch-${who}.proxy-check.invalid/`, `CONNECT tunnel-${who}.proxy-check.invalid:443`, `CONNECT socket-${who}.proxy-check.invalid:80`,
+      ]));
+      // Its site's socket opened; the one to the proxy's own name is answered by no socket.
+      expect(heard, who).toEqual(expect.arrayContaining([`GET /signs/${who}`, `GET /data/${who}`, `SOCKET /socket/${who}`, `GET /sockets/${who}/open/error`]));
+    }
+    // Its user at the keyboard: the address bar of the tab in front, and an address typed there.
+    function typed(address: string): void {
+      asUser("focus", xwindow()!.id);
+      asUser("down", "Control_L");
+      asUser("press", "l");
+      asUser("up", "Control_L");
+      asUser("type", address);
+      asUser("press", "Return");
+    }
+    // Every file under *folder* that holds *secret*, as it is or as a sign-in spells it.
+    function holding(folder: string): string[] {
+      const spelled = [secret, Buffer.from(`surogate:${secret}`).toString("base64"), Buffer.from(secret).toString("base64")];
+      return readdirSync(folder, { recursive: true, encoding: "utf8" }).filter((name) => {
+        const file = statSync(join(folder, name), { throwIfNoEntry: false });
+        if (!file?.isFile()) return false;
+        try {
+          const held = readFileSync(join(folder, name));
+          return spelled.some((one) => held.includes(one));
+        } catch {
+          // Gone since it was listed.
+          return false;
+        }
+      });
+    }
+
+    it("signs in to its proxy for all a page, its agent and its user do: held and handed back, left idle, its connections reset, a tab crashed and reloaded, and launched again; with its pages' cache on, and its secret nowhere", async () => {
+      const a = session();
+      // The agent's navigation, and what its page asks for: an image, a script, data, a socket, an https address.
+      expected("agent");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/agent" })).ok?.title).toBe("Signs");
+      await carried("agent", 0);
+      expect(tunnels).toBeGreaterThan(0);
+      // The launch's own challenge is the only one: the name it asks for first, by its https upgrade's try or outright.
+      const challenged = asked.filter(({ status }) => status === 407);
+      expect(challenged.map(({ what }) => what.replace(/[0-9a-f]{16}\.proxy-check\.invalid(:443|\/)/, "check")), JSON.stringify(challenged)).toEqual([expect.stringMatching(/^(CONNECT|GET http:\/\/)check$/)]);
+      expect(challenged[0]!.signed).toBe(false);
+
+      // The secret is on no command line and in no environment of the browser's, and in no file it or the host wrote.
+      const spelled = [secret, Buffer.from(`surogate:${secret}`).toString("base64")];
+      const running = processes();
+      expect(running.length).toBeGreaterThan(3);
+      for (const { pid, args } of running) {
+        expect(spelled.some((one) => args.join(" ").includes(one))).toBe(false);
+        let environment = "";
+        try {
+          environment = readFileSync(`/proc/${pid}/environ`, "utf8");
+        } catch {
+          // A sandboxed process, whose environment its user cannot read either.
+        }
+        expect(spelled.some((one) => environment.includes(one))).toBe(false);
+      }
+      const folders = [profile, process.env.HOME!, process.env.XDG_RUNTIME_DIR!, process.env.XDG_CONFIG_HOME!, process.env.XDG_CACHE_HOME!, tmpdir()];
+      expect(folders.flatMap(holding)).toEqual([]);
+
+      // A download.
+      let mark = asked.length;
+      await script(a, "location.href = '/file.bin/agent'; return 1;");
+      await expect.poll(() => asks("agent", mark).map(({ what, signed, status }) => [what, signed, status]), { timeout: 10_000 }).toEqual([["GET http://fixture.test/file.bin/agent", true, 200]]);
+
+      // A tab its user opens, and an address they type in it.
+      mark = asked.length;
+      expected("user");
+      asUser("focus", xwindow()!.id);
+      asUser("down", "Control_L");
+      asUser("press", "t");
+      asUser("up", "Control_L");
+      await expect.poll(async () => (await context()).pages().length, { timeout: 10_000 }).toBe(2);
+      typed("fixture.test/signs/user");
+      await carried("user", mark);
+
+      // While they hold the browser, in that tab; and its agent's again once they hand it back.
+      host.pause(ROOT, true);
+      mark = asked.length;
+      expected("held");
+      typed("fixture.test/signs/held");
+      await carried("held", mark);
+      host.pause(ROOT, false);
+      mark = asked.length;
+      expected("back");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/back" })).ok?.title).toBe("Signs");
+      await carried("back", mark);
+
+      // Left idle, past the time the browser keeps a connection it has not used.
+      await new Promise((waited) => setTimeout(waited, IDLE_MS));
+      mark = asked.length;
+      expected("idle");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/idle" })).ok?.title).toBe("Signs");
+      await carried("idle", mark);
+
+      // Every connection the browser has to its proxy reset under it.
+      const inner = proxy as unknown as { server: Server; carried: Set<Duplex> };
+      for (const connection of inner.carried) connection.destroy();
+      inner.server.closeAllConnections();
+      mark = asked.length;
+      expected("reset");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/reset" })).ok?.title).toBe("Signs");
+      await carried("reset", mark);
+
+      // Their tab crashes, and they load it again.
+      const theirs = (await context()).pages().find((page) => page.url().endsWith("/signs/held"))!;
+      const crashed = new Promise<void>((seen) => theirs.once("crash", () => seen()));
+      const line = await (await context()).newCDPSession(theirs);
+      void line.send("Page.crash").catch(() => {});
+      await crashed;
+      mark = asked.length;
+      expected("held");
+      asUser("focus", xwindow()!.id);
+      asUser("press", "F5");
+      await carried("held", mark, 2);
+
+      // Nothing was challenged since the launch's own, the browser's own services among it; and the script the
+      // site lets a browser keep was asked for once, by all those pages.
+      expect(asked.filter(({ status }) => status === 407)).toEqual(challenged);
+      expect(heard.filter((what) => what === "GET /kept.js")).toHaveLength(1);
+
+      // Its user closes the browser, and it is launched again: with another secret, and the one before opens nothing.
+      const before = secret;
+      for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+      await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+      await expect.poll(() => (host as unknown as { tabs: Map<string, unknown[]> }).tabs.size, { timeout: 10_000 }).toBe(0);
+      mark = asked.length;
+      expected("again");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/again" })).ok?.title).toBe("Signs");
+      await carried("again", mark);
+      expect(secret).not.toBe(before);
+      proxy.expect("before");
+      const old = await new Promise<number>((answered, fail) => {
+        const headers = { host: "before.proxy-check.invalid", "proxy-authorization": `Basic ${Buffer.from(`surogate:${before}`).toString("base64")}` };
+        httpRequest({ host: "127.0.0.1", port: at, path: "http://before.proxy-check.invalid/", headers }, (answer) => answered(answer.resume().statusCode ?? 0)).on("error", fail).end();
+      });
+      expect([old, proxy.checked("before")]).toEqual([407, false]);
+
+      await host.close();
+      expect(folders.flatMap(holding)).toEqual([]);
+    }, 240_000 + IDLE_MS);
+
+    it("carries a public site for another program at its port, as ever, and nothing else, whatever headers that program writes: no service of this computer's and no name of its own", async () => {
+      expect((await op(session(), "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(true);
+      // All the proxy answers to what a program writes to it, until it closes or a moment after its answer's head.
+      const writes = (written: string) => new Promise<string>((answered) => {
+        const program = connectTcp({ host: "127.0.0.1", port: at });
+        let answer = "";
+        const end = () => {
+          program.destroy();
+          answered(answer);
+        };
+        program.on("data", (chunk: Buffer) => {
+          answer += chunk.toString();
+          if (answer.includes("\r\n\r\n")) setTimeout(end, 100);
+        });
+        program.on("error", end).on("close", end).on("connect", () => program.write(written));
+        setTimeout(end, 5_000);
+      });
+      const own = `localhost:${ports.canary}`;
+      const CHALLENGED = /^HTTP\/1\.1 407 Proxy Authentication Required\r\n(?:[\w-]+: [^\r]*\r\n)*\r\n$/;
+      proxy.expect("forged");
+      for (const written of [
+        // A page's own request, as a browser would send it, written by hand.
+        `GET http://${own}/forged HTTP/1.1\r\nHost: ${own}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\nReferer: http://${own}/\r\n\r\n`,
+        // A socket's handshake, written into a tunnel before any answer.
+        `CONNECT ${own} HTTP/1.1\r\nHost: ${own}\r\n\r\nGET /socket HTTP/1.1\r\nHost: ${own}\r\nOrigin: http://${own}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+        `GET http://127.0.0.1:${ports.canary}/forged HTTP/1.1\r\nHost: 127.0.0.1:${ports.canary}\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n\r\n`,
+        "GET http://forged.proxy-check.invalid/ HTTP/1.1\r\nHost: forged.proxy-check.invalid\r\nSec-Fetch-Site: same-origin\r\n\r\n",
+        "GET http://forged.proxy-check.invalid/ HTTP/1.1\r\nHost: forged.proxy-check.invalid\r\nProxy-Authorization: Basic c3Vyb2dhdGU6\r\n\r\n",
+      ]) {
+        const answer = await writes(written);
+        expect(answer, written).toMatch(CHALLENGED);
+        expect(answer.toLowerCase(), written).toContain('proxy-authenticate: basic realm="surogate"\r\ncontent-length: 0\r\n');
+      }
+      expect(proxy.checked("forged")).toBe(false);
+      expect(hits).toEqual([]);
+      // A public site, which that program reaches by itself.
+      expect(await writes("GET http://fixture.test/data/program HTTP/1.1\r\nHost: fixture.test\r\nConnection: close\r\n\r\n")).toMatch(/^HTTP\/1\.1 200 OK\r\n[^]*\r\nok\r\n/);
+      expect(heard).toContain("GET /data/program");
+      expect(hits).toEqual([]);
+    }, 30_000);
   });
 
   it("refuses this computer's own services to the page, whichever way it reaches, and to a navigation", async () => {
