@@ -1,13 +1,13 @@
 """Landing: a project thread's turn applied to the project's real files.
 
 A landing is one saga, run by the worker at the turn's end, its steps
-calls of the pod's ``_history`` command: commit the turn on the thread's
-branch, apply each file, record the landing on ``main``.  The files to
-apply are fixed before the first apply.  A step that still fails after its
-retries rolls the landing back: the applied files are put back, in reverse
-order, and so is the file of an apply that failed, which may have written
-it before its reply was lost.  The real files are then as they were.  All
-or nothing.
+calls of the pod's ``_history`` command: pick up your edits on ``main``,
+commit the turn on the thread's branch, apply each file, record the
+landing on ``main``.  The files to apply are fixed before the first apply.
+A step that still fails after its retries rolls the landing back: the
+applied files are put back, in reverse order, and so is the file of an
+apply that failed, which may have written it before its reply was lost.
+The real files are then as they were.  All or nothing.
 
 A file the real files changed since the thread's branch point is left out
 by decision, not by failure: the newer file stays, and the thread's
@@ -243,7 +243,7 @@ async def land_turn(
                 "saga": None, "commit": None, "landed": [], "overlapped": [], "excluded": [], "repositories": [],
                 # What the pod's take-ups left out is named by this report or by none: its list goes with the pod.
                 "not_taken": kept.get("not_taken", []) if kept else [],
-                "files": [], "saved": kept is not None, "packs": 0,
+                "files": [], "picked_up": [], "saved": kept is not None, "packs": 0,
                 # Before its own first step nothing of it reached the real files.
                 "state": "compensated" if kept is not None and not began else "failed",
             }
@@ -695,6 +695,7 @@ async def _land(
     orchestrator = _orchestrator(saga_settings)
     saga = orchestrator.create_saga(session.id, kind="landing")
     thread = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
+    you = {"name": str(session.user_id), "email": f"user:{session.user_id}@surogate"}
     audit = [
         ["Surogate-Project", str(session.config["workstream_id"])],
         ["Surogate-Thread", str(session.id)],
@@ -725,7 +726,7 @@ async def _land(
 
     outcome: dict[str, Any] = {
         "saga": saga.saga_id, "state": "completed", "commit": None,
-        "landed": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": [], "files": [],
+        "landed": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": [], "files": [], "picked_up": [],
         # Whether the turn's work is in the history: its commit step pushed
         # it, and held no file, whose version the next copy would lack.
         "saved": False,
@@ -734,13 +735,16 @@ async def _land(
     }
     changes: list[dict] = []
     main: str | None = None
-    commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]])
+    commit: SagaStep | None = None
     try:
-        # The first look, outside the steps: it changes nothing, and under
-        # the lock no one else moves main until this landing is done.
-        looked = await asyncio.wait_for(_call(sandbox_pool, owner, "fetch"), commit.timeout_seconds)
-        main = looked["main"]
-        outcome["packs"] = looked["packs"]
+        # Your edits first, and the first look with them: main as the
+        # history has it now, which under the lock no one else moves until
+        # this landing is done, and what the real files changed since, by you.
+        picked = await execute(step("pickup", author=you, trailers=[*audit, ["Surogate-Kind", "pickup"]]))
+        main = picked["main"]
+        outcome["packs"] = picked["packs"]
+        # Who changed a file it leaves out: you, by the pickup, or main's history.
+        commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
         turn = await execute(commit)
         changes = turn["changes"]
         outcome.update(
@@ -758,6 +762,7 @@ async def _land(
             landed = [it.execute_result for it in applies]
             record = step(
                 "record", turn=turn["commit"], applied=landed, author=thread, main=main,
+                pickup=picked["commit"],
                 trailers=[
                     *audit, ["Surogate-Kind", "landing"],
                     *(["Surogate-Not-Merged", o["path"]] for o in turn["overlapped"]),
@@ -767,13 +772,15 @@ async def _land(
             await row.write()
             await held()
             recorded = await execute(record)
-            outcome.update(commit=recorded["commit"], landed=landed)
+            outcome.update(commit=recorded["commit"], landed=landed, picked_up=picked["picked_up"])
         saga.transition(SagaState.COMPLETED)
         if turn["commit"] is None:
             # Nothing changed, nothing landed: no change to the project's files to record.
             await _written(row.drop)
         else:
-            await row.write(state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"))
+            await row.write(
+                state="completed", commit=outcome["commit"], files=_row_files(saga, "completed"), picked_up=_row_picked_up(saga),
+            )
     except BaseException as exc:
         logger.warning("Landing of session %s did not finish", session.id, exc_info=True)
         # Kept, and shielded: a cancel never cuts a put-back short.
@@ -796,8 +803,11 @@ async def _land(
         outcome.update(state=state)
         if pushed is not None:
             # The push happened though its answer was lost: the landing counts.
-            outcome.update(commit=pushed, landed=[s.execute_result for s in saga.steps if s.tool_name == "history.apply"])
-        if commit.state is not StepState.COMMITTED:
+            outcome.update(
+                commit=pushed, landed=[s.execute_result for s in saga.steps if s.tool_name == "history.apply"],
+                picked_up=_row_picked_up(saga),
+            )
+        if commit is None or commit.state is not StepState.COMMITTED:
             # Its commit step never put the turn in the history, and its pod goes
             # at the turn's end: the copy is kept on its branch first.
             try:
@@ -830,6 +840,12 @@ def _cancelling() -> bool:
     """Whether this task is being cancelled, though an error may have taken the cancel's place."""
     task = asyncio.current_task()
     return task is not None and task.cancelling() > 0
+
+
+def _row_picked_up(saga: Any) -> list[dict]:
+    """A completed landing row's pickup: your edits it recorded on ``main``, each ``{path, before, after}``."""
+    pickup = next((s.execute_result for s in saga.steps if s.tool_name == "history.pickup"), None) or {}
+    return pickup.get("picked_up", [])
 
 
 def _row_files(saga: Any, state: str) -> list[dict]:
@@ -898,7 +914,10 @@ async def _settle(
         if looked["has_saga"]:
             if saga.state is SagaState.RUNNING:
                 saga.transition(SagaState.COMPLETED)
-            await _written(row.write, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"))
+            await _written(
+                row.write, tries=2, state="completed", commit=looked["main"], files=_row_files(saga, "completed"),
+                picked_up=_row_picked_up(saga),
+            )
             return "completed", looked["main"]
     if gone:
         # Nobody has the versions from before: given up once, with why, so
