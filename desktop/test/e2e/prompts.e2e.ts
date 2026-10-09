@@ -166,6 +166,31 @@ describe("the folder sheet", () => {
     }
   });
 
+  it("counts a touch as a press, by its start: a key that follows one within the input protection answers nothing, and a touch begun after it acts before it ends", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    const sheet = await prompt(app!);
+    // The page's own word, which the main process takes only after a key or a press of its user's that acts: what
+    // it answers here is the main process's own count of them, whatever the page holds back by itself.
+    const answer = () => sheet.evaluate(() =>
+      (window as unknown as { surogatePrompt: { answer(b: string, c: string | null): Promise<boolean> } }).surogatePrompt.answer("cancel", "ask"));
+    // A finger on the window, as the browser's own tools send one: on the prompt's title, which no press answers.
+    const line = await sheet.context().newCDPSession(sheet);
+    const touch = (type: "touchStart" | "touchEnd") => line.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchStart" ? [{ x: 20, y: 20 }] : [] });
+    await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("false");
+    // A touch begins, and Escape comes right after: within the protection of the touch's start, it answers nothing.
+    await touch("touchStart");
+    await sheet.keyboard.down("Escape");
+    await sheet.keyboard.up("Escape");
+    expect([await answer(), await promptsShown(app!)]).toEqual([false, 1]);
+    await touch("touchEnd");
+    // The protection passed with no key and no press, a touch that begins is one that acts: before it has ended.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    await touch("touchStart");
+    expect(await answer().catch(() => true)).toBe(true);
+    expect(await prepared).toBeNull();
+  });
+
   it("holds back what allows again once focus leaves it, and takes the focus back from the app's window", async () => {
     const client = await signedIn();
     const prepared = prepare(client);
