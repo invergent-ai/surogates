@@ -3,7 +3,7 @@
 // agent's commands, or slows them, and what the user can do about it. Electron-free.
 
 import type { Delivery } from "../vm/image.js";
-import { toolsMissing } from "../vm/linux.js";
+import { toolsMissing } from "../hosts/policy.js";
 import type { Boot, Emulated } from "../vm/manager.js";
 
 // The line's buttons: Retry the download, or the check of a delivered image whose boot did not

@@ -384,6 +384,15 @@ body.main.first {
   background: var(--accent);
 }
 
+/* The sidebar's notices, between its projects and its user's row. The projects give them their
+   room, to the last pixel; in a window too short for all of them even so, they scroll among
+   themselves, and the user's row below stays where it is. */
+.notices {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .warn {
   margin: 8px;
   padding: 9px 11px;
@@ -1396,7 +1405,17 @@ body.prompt-page {
   color: var(--centre);
 }
 
-.prompt .actions .btn[aria-disabled="true"] {
+/* Read by a screen reader, and drawn nowhere: the prompt's size is its content's. */
+.prompt .unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.prompt .actions[data-armed="false"] .btn {
   opacity: 0.5;
   cursor: default;
 }
@@ -1446,8 +1465,21 @@ body.about-page {
   white-space: nowrap;
 }
 
-/* Empty, the waiting quit's line takes no room, and stays a live region. */
-#quitting:has(#quitting-text:empty) {
+/* A failure's reason is the helper's own words, which may name a path with no space in it: it
+   wraps inside the sidebar. */
+#update-button[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#update-text,
+#sandbox-text {
+  overflow-wrap: anywhere;
+}
+
+/* Empty, the waiting quit's line and the update's take no room, and stay live regions. */
+#quitting:has(#quitting-text:empty),
+#update:has(#update-text:empty) {
   margin: 0;
   padding: 0;
   border: 0;

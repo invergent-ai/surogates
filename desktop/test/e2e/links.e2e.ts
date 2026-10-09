@@ -77,7 +77,7 @@ describe("a surogate:// link", () => {
     expect(await secondLaunch(home, link(origin))).toBe(0);
     await expect.poll(messages).toEqual([`Open a link to connect to ${host}?`]);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect([agent.asked.config, await page.isVisible("#first-run")]).toEqual([0, true]);
+    await expect.poll(async () => [agent.asked.config, await page.isVisible("#first-run")]).toEqual([0, true]);
     // Continued: the address is read, and the first run's own question follows.
     await app.evaluate(() => Object.assign(globalThis, { answer: 0 }));
     expect(await secondLaunch(home, link(origin))).toBe(0);

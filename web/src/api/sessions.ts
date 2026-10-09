@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
+import { browserRelease } from "@/lib/local-chat";
 import { authFetch } from "./auth";
 import { errorDetailMessage, paywallErrorMessage } from "./_errors";
 import type {
@@ -17,14 +18,21 @@ export interface SessionListResponse {
 }
 
 export interface BrowserStateResponse {
-  status: "live" | "user-control";
+  status: "live" | "user-control" | "unavailable";
   control_owner: string | null;
   live_view_path: string;
+  computer?: boolean; // on the user's computer, in a local-folder chat
 }
 
 export interface BrowserControlResponse {
   outcome: "granted" | "refreshed" | "conflict";
   owner_user_id: string;
+}
+
+export interface BrowserReleaseResponse {
+  outcome: "released";
+  // Of a chat on the user's computer: whether its agent goes on by itself, the hand back having given it a turn.
+  resumes?: boolean;
 }
 
 export async function listSessions(params?: {
@@ -301,6 +309,12 @@ export async function getBrowserPreviewSnapshot(
   return await response.blob();
 }
 
+// A post the control route did not make, with how it answered: a chat's pane on the user's
+// computer posts again what was answered busy (503).
+function notMade(message: string, response: Response): Error {
+  return Object.assign(new Error(message), { status: response.status });
+}
+
 export async function acquireBrowserControl(
   sessionId: string,
 ): Promise<BrowserControlResponse> {
@@ -312,20 +326,26 @@ export async function acquireBrowserControl(
       body: JSON.stringify({ action: "acquire" }),
     },
   );
-  if (!response.ok) throw new Error("Failed to acquire browser control");
+  if (!response.ok) throw notMade("Failed to acquire browser control", response);
   return (await response.json()) as BrowserControlResponse;
 }
 
-export async function releaseBrowserControl(sessionId: string): Promise<void> {
+// *handedBack* is said only of a chat on the user's computer, and only of a hand back its user
+// confirmed in the desktop there: the server gives that chat's agent a turn for it where it can.
+export async function releaseBrowserControl(
+  sessionId: string,
+  handedBack = false,
+): Promise<BrowserReleaseResponse> {
   const response = await authFetch(
     `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser/control`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "release" }),
+      body: JSON.stringify(browserRelease(handedBack)),
     },
   );
-  if (!response.ok) throw new Error("Failed to release browser control");
+  if (!response.ok) throw notMade("Failed to release browser control", response);
+  return (await response.json()) as BrowserReleaseResponse;
 }
 
 export async function closeBrowserSession(sessionId: string): Promise<void> {

@@ -57,6 +57,12 @@ def parse_slash_command(text: str) -> tuple[str, str] | None:
     return name, args
 
 
+def names_builtin_command(text: str) -> bool:
+    """Whether *text* is one of the built-in slash commands, whatever its arguments."""
+    match = _SLASH_COMMAND_RE.match((text or "").strip())
+    return match is not None and match.group(1) in _BUILTIN_SLASH_COMMANDS
+
+
 def build_expanded_message(*, name: str, args: str, skill_body: str) -> str:
     """Build the rewritten user message with the skill body inlined.
 

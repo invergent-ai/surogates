@@ -83,6 +83,7 @@ beforeEach(() => {
     expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
+    cacheDir: join(base, "cache", "surogate"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
     appDirs: [dirname(process.execPath), PACKAGE],
   };
@@ -116,6 +117,24 @@ describe("a tool host", { timeout: 30_000 }, () => {
     expect(readFileSync(join(folder, "most.bin")).equals(data)).toBe(true);
   });
 
+  it("makes a file only where nothing is for a write told to create, through its file helper in the folder's sandbox, and writes through no link made at a name", async () => {
+    const harness = host();
+    await ready(harness);
+    const b64 = (text: string) => Buffer.from(text).toString("base64");
+    const key = `${folder}/Downloads/report.txt`;
+    // The first makes the folder too.
+    expect(await harness.op("1", "write", { key, data: b64("first"), create: true })).toEqual({ ok: null });
+    expect(await harness.op("2", "write", { key, data: b64("second"), create: true })).toEqual({
+      error: { type: "os", code: "EEXIST", message: `File exists: '${key}'` },
+    });
+    // A link made at a name meanwhile, to a file outside the folder that is not there yet.
+    symlinkSync(join(base, "outside.txt"), join(folder, "Downloads", "notes.txt"));
+    expect(await harness.op("3", "write", { key: `${folder}/Downloads/notes.txt`, data: b64("third"), create: true })).toMatchObject({ error: { type: "sandbox" } });
+    expect([readdirSync(join(folder, "Downloads")).sort(), readFileSync(key, "utf8"), existsSync(join(base, "outside.txt"))]).toEqual([
+      ["notes.txt", "report.txt"], "first", false,
+    ]);
+  });
+
   it("leaves the user's folder as it was", async () => {
     const before = readdirSync(folder).sort();
     // Started in the folder: without its own chdir, srt would mount its
@@ -136,7 +155,8 @@ describe("a tool host", { timeout: 30_000 }, () => {
   it("fails to start without its sandbox, and says why", async () => {
     const harness = host({ bwrapPath: "/nonexistent/bwrap" });
     const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
-    expect(failed.type === "failed" && failed.message).toMatch(/bwrap/);
+    // In Section 9's words, before srt is asked.
+    expect(failed).toMatchObject({ type: "failed", message: "Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap" });
     expect(failed).not.toHaveProperty("folder");
     expect(await harness.exited).toBe(1);
   });
@@ -188,6 +208,16 @@ describe("a tool host", { timeout: 30_000 }, () => {
 
   it("refuses a folder that holds the app's own data or files, or the whole system", async () => {
     for (const refused of [base, "/", PACKAGE]) {
+      const harness = host({ folder: refused });
+      const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
+      expect(failed.type === "failed" && failed.message).toMatch(/home folder or the app's own data/);
+    }
+  });
+
+  it("refuses the app's own cache folder, a folder in it, and a folder that holds it", async () => {
+    const cache = join(base, "cache", "surogate");
+    mkdirSync(join(cache, "updates"), { recursive: true });
+    for (const refused of [cache, join(cache, "updates"), join(base, "cache")]) {
       const harness = host({ folder: refused });
       const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
       expect(failed.type === "failed" && failed.message).toMatch(/home folder or the app's own data/);
@@ -455,6 +485,19 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     expect(readFileSync(join(folder, "given-path"), "utf8").split(":")[0]).toBe(tools);
   });
 
+  it("holds its working folder as it holds the chat's: an entry of its PATH inside it is dropped too, where srt keeps what the sandbox may write", async () => {
+    const tools = join(base, "tools");
+    mkdirSync(tools);
+    writeFileSync(join(tools, "rg"), `#!/bin/sh\necho "$PATH" > '${folder}/given-path'\nexec /usr/bin/rg "$@"\n`, { mode: 0o755 });
+    const working = join(start.tmp, "bin");
+    mkdirSync(working, { recursive: true });
+    const harness = host({ appDirs: [...start.appDirs, tools] }, undefined, { ...process.env, PATH: `${working}:${tools}:${process.env.PATH ?? ""}` });
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    const given = readFileSync(join(folder, "given-path"), "utf8").trim().split(":");
+    expect([given[0], given.includes(working)]).toEqual([tools, false]);
+  });
+
   it("never runs a program from the folder through a relative entry of the host's PATH, wherever the host starts", async () => {
     const proof = join(folder, "ran-relative");
     mkdirSync(join(folder, "bin"));
@@ -464,6 +507,22 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     await ready(harness);
     expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
     expect(existsSync(proof)).toBe(false);
+  });
+
+  it.each([
+    // Spelled from the root, where a look that took the PATH as it is would read it.
+    ["a relative entry of its PATH", () => [join(base, "only").slice(1), join(base, "only")]],
+    ["an entry of its PATH inside the folder", () => [join(folder, "bin"), join(folder, "bin")]],
+  ])("looks for its own tools only where it lets srt look: with its only bubblewrap in %s, it says bubblewrap is missing", async (_name, entry) => {
+    // Every program of this computer's but bubblewrap.
+    const bin = join(base, "bin");
+    mkdirSync(bin);
+    for (const name of readdirSync("/usr/bin")) if (name !== "bwrap") symlinkSync(join("/usr/bin", name), join(bin, name));
+    const [spelled, dir] = entry() as [string, string];
+    mkdirSync(dir);
+    writeFileSync(join(dir, "bwrap"), "#!/bin/sh\n", { mode: 0o755 });
+    const harness = host({}, base, { ...process.env, PATH: `${spelled}:${bin}` });
+    expect(await refusal(harness)).toBe("Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap");
   });
 
   it.each([

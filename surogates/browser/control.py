@@ -14,6 +14,24 @@ if TYPE_CHECKING:
 
 _KEY_PREFIX = "surogates:browser:control:"
 
+# In a ``browser.control_returned`` of a chat on its user's computer (``computer: true``), which is
+# told for the chat's pane, as the take-over was, and is no work for anyone:
+#
+# ``resumes: true`` says the hand back gave the chat's agent a turn: its user confirmed it on that
+# computer, and the chat could take a turn then.  The turn itself is the ``session.resume`` written
+# with it, whose source is BROWSER_HAND_BACK: that is what wakes the agent, and what it reads as
+# the harness's note that it can go on (surogates.devices.browser.resumes_the_agent).
+RESUMES = "resumes"
+BROWSER_HAND_BACK = "browser_hand_back"
+# ``handed_back_from`` names the chat the browser was handed back from, when it is not this one.
+# The agent's browser there is one for all its chats, so a hand back made from one is told to each
+# that still said its user held it.  It never resumes the chat it is told to.
+HANDED_BACK_FROM = "handed_back_from"
+# In a ``browser.control_granted`` of such a chat, ``taken_over_from`` names the chat the browser
+# was taken over from, when it is not this one.  A chat whose hand back gave its agent a turn no
+# request has read yet is told so: the browser is held again, and that turn is off.
+TAKEN_OVER_FROM = "taken_over_from"
+
 
 def _key(session_id: str) -> str:
     return f"{_KEY_PREFIX}{session_id}"
@@ -43,6 +61,20 @@ class ControlEntry:
             owner_user_id=payload["owner_user_id"],
             acquired_at=datetime.fromisoformat(payload["acquired_at"]),
         )
+
+
+def paused_by_user_result() -> str:
+    """A browser tool's result while its user holds the browser: the cloud's live view, or a computer's own take-over."""
+    return json.dumps(
+        {
+            "error": "paused_by_user",
+            "guidance": (
+                "The user has taken control of the browser. Wait for them to "
+                "finish before continuing; every browser_* tool will return "
+                "this error until they release control."
+            ),
+        }
+    )
 
 
 class AcquireOutcome(str, Enum):

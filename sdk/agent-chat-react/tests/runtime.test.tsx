@@ -5,6 +5,7 @@ import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { useAgentChatRuntime } from "../src/runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
+  AgentChatBrowserStateResponse,
   AgentChatEventsPage,
   AgentChatEventStream,
   AgentChatEventType,
@@ -707,6 +708,40 @@ describe("useAgentChatRuntime", () => {
     expect(calls.sent).toEqual([{ sessionId: "s-1", content: "again" }]);
     expect(calls.opened).toHaveLength(2);
     expect(calls.opened[1]).toMatchObject({ sessionId: "s-1", after: 3 });
+  });
+
+  it.each([
+    ["its replayed event, then the server's state", ["event", "state"]],
+    ["the server's state, then its replayed event", ["state", "event"]],
+  ] as const)("says once that a chat's computer has no supported browser, at a reload that hears %s", async (_name, order) => {
+    const calls: AdapterCalls = { opened: [], sent: [], paused: [], retried: [], created: [] };
+    // The server's state, answered when the test lets it: the chat's last browser event said there is none.
+    let answer = () => {};
+    const adapter = {
+      ...createFakeAdapter(calls),
+      getBrowserState: () => new Promise<AgentChatBrowserStateResponse>((resolve) => {
+        answer = () => resolve({ status: "unavailable", controlOwner: null, liveViewPath: "", computer: true });
+      }),
+    };
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+    const hear = (eventId: number) => calls.opened[0]?.stream.emit("browser.unavailable", eventId, { session_id: "s-1", computer: true });
+
+    for (const step of order) {
+      await act(async () => {
+        if (step === "event") hear(7);
+        else answer();
+        await Promise.resolve();
+      });
+    }
+
+    const said = () => runtime.api.messages.map((message) => message.content);
+    expect(runtime.api.state.browser).toEqual({ status: "unavailable", controlOwner: null, computer: true });
+    expect(said()).toEqual(["No supported browser on the chat's computer."]);
+    // The agent tries its browser again: the chat has said it.
+    act(() => {
+      hear(8);
+    });
+    expect(said()).toEqual(["No supported browser on the chat's computer."]);
   });
 });
 

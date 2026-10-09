@@ -145,7 +145,7 @@ describe("the app's notifications", () => {
     await clickNotice(app!, 0);
     await expect.poll(() => shown(app!)).toBe(true);
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${FIXTURE_IDS.question}`);
-    expect(await page.textContent("#title")).toBe("Check the revenue figures");
+    await expect.poll(() => page.textContent("#title")).toBe("Check the revenue figures");
     expect(await page.textContent("#to-project")).toBe("Quarterly report");
     expect(await page.$$eval(".section .thread", (found) => found.length)).toBeGreaterThan(0);
   });

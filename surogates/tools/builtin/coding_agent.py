@@ -13,6 +13,7 @@ Required kwargs (injected by the harness dispatch): ``tenant``, ``session_id``,
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -76,6 +77,13 @@ def register(registry: ToolRegistry) -> None:
         handler=_run_coding_agent_handler,
         toolset="code",
     )
+
+
+def _in_its_turn(session: Any, config: dict[str, Any]) -> Any:
+    """*session* as the turn that runs the tool has it: the same session, with the turn's own config."""
+    turn = copy.copy(session)
+    turn.config = dict(config)
+    return turn
 
 
 def _build_ensure(
@@ -166,7 +174,9 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
         agent=agent, provider=provider, prompt=augmented,
         model=arguments.get("model"), effort=arguments.get("effort"),
         read_only=False,
-        ensure_sandbox=_build_ensure(sandbox_pool, session, tenant, owner, vault),
+        # The pod is made for the turn that runs the tool: from the turn's own config, which the
+        # stored row lacks (a project thread's turn's name, a project too large for history).
+        ensure_sandbox=_build_ensure(sandbox_pool, _in_its_turn(session, effective_config), tenant, owner, vault),
         execute=_execute,
         # Poll this session's interrupt so a cancel stops the run promptly
         # (kills the pod-side CLI) instead of polling to completion.

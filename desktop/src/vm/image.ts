@@ -6,14 +6,12 @@
 // file in it is checked; its last step is its completion mark, so a folder with that
 // mark and its files' sizes is a whole image, and one without is downloaded again.
 
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, truncateSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { open, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+import { spawnClean } from "../clean-child.js";
+import { download, type DownloadOptions, hashOf, sizeOf } from "../download.js";
 
 // Each file the image has, as the manifest names it: unpacked, and as downloaded.
 export interface ImageFile {
@@ -54,22 +52,39 @@ export function readManifest(path: string): ImageManifest {
 }
 
 /**
+ * Throws unless *path* is root's own word: root's, with no other who may write it, and a file and
+ * no link, wherever one leads. At whatever mode: an administrator may keep one read-only. With
+ * *run*, as the helper must be, it is a program too, since pkexec could run no other, and one
+ * that others may read, since the app reads its release keys from it as its user: the install
+ * script asks its helper the same (roots_program in release/install.sh), so the two never answer
+ * otherwise. A set-id or a sticky bit is not looked at, there or here: neither changes who may
+ * write the file, and no script is run as its owner.
+ */
+export function rootsOwn(path: string, run = false): void {
+  const found = lstatSync(path);
+  if (found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
+  if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not the install script's: only root may write it`);
+  if (!found.isFile()) throw new Error(`${path} is not the install script's: it is no file`);
+  if (run && (found.mode & 0o111) === 0) throw new Error(`${path} is not the install script's: it cannot be run`);
+  if (run && (found.mode & 0o004) === 0) throw new Error(`${path} is not the install script's: its user cannot read it`);
+}
+
+/**
  * The base URL in the install record at *path*, which the install script writes:
  * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
- * installed app's /etc/surogate/install.json is: a record that another than root may write is
- * not taken, as it would say where each of this computer's users downloads from.
+ * installed app's /etc/surogate/install.json is: a record that is not root's own word
+ * (rootsOwn) is not taken, as it would say where each of this computer's users downloads from.
  */
 export function installBase(path: string, rootOwned = false): string {
   let text: string;
   try {
-    const { uid, mode } = statSync(path);
-    if (rootOwned && (uid !== 0 || (mode & 0o022) !== 0)) throw new Error(`${path} is not the install script's: only root may write it`);
+    if (rootOwned) rootsOwn(path);
     text = readFileSync(path, "utf8");
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     if (code === undefined) throw error;
     if (code !== "ENOENT") throw new Error(`${path} could not be read: ${code}`);
-    throw new Error("Surogate was not installed by its install script, so it does not know where to download its sandbox from");
+    throw new Error("Surogate was not installed by its install script, so it does not know where it was installed from");
   }
   let base: unknown;
   try {
@@ -78,48 +93,30 @@ export function installBase(path: string, rootOwned = false): string {
     // Not JSON: it names no base.
   }
   const url = typeof base === "string" && URL.canParse(base) ? new URL(base) : null;
-  if (!url || !["https:", "http:"].includes(url.protocol)) throw new Error(`${path} names no web address to download the sandbox from`);
+  if (!url || !["https:", "http:"].includes(url.protocol)) throw new Error(`${path} names no web address that Surogate was installed from`);
+  // A user and a password in it would go out with every request, to every address a redirect names; and
+  // the app's own fetch refuses such an address in words of the system's. Refused here, in the app's own.
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(`${path} names a web address with a user or a password in it, which Surogate does not send: run the install script again with a --base that has none`);
+  }
   return url.href.replace(/\/+$/, "");
 }
 
-export type Fetch = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
-
-export interface DeliverOptions {
+export interface DeliverOptions extends DownloadOptions {
   manifest: ImageManifest;
   base: string; // where the app was installed from: the files are at <base>/desktop/vm/<key>/
   images: string; // <data>/vm/images: one folder per image, by its key
-  fetch?: Fetch;
   // Told how many of the downloads' bytes are here, of how many; and as each unpack begins, which
   // its hash and its syncs follow.
   progress?: (done: number, total: number) => void;
   unpacking?: () => void;
-  signal?: AbortSignal;
-  stallMs?: number; // how long no bytes may come before the download stops: STALL_MS
-  headersMs?: number; // how long its headers may take: HEADERS_MS
 }
 
-// Chromium's network bounds no body that stops coming, as from a peer gone over a sleep or a
-// proxy that holds a large download: a download that nothing comes for in this long stops.
-const STALL_MS = 30_000;
-// A proxy that scans a download may send its headers only once it has all of it: they get longer.
-const HEADERS_MS = 120_000;
+// How every download begins: a zstd frame's magic number.
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 // An image's folder's last step, written once all of it is on disk.
 const COMPLETE = "complete";
 const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
-const sizeOf = (path: string) => (existsSync(path) ? statSync(path).size : 0);
-// How every download begins: a zstd frame's magic number.
-const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
-
-// Whether *path* begins as a download does.
-function zstdAt(path: string): boolean {
-  const head = Buffer.alloc(ZSTD_MAGIC.length);
-  const fd = openSync(path, "r");
-  try {
-    return readSync(fd, head, 0, head.length, 0) === head.length && head.equals(ZSTD_MAGIC);
-  } finally {
-    closeSync(fd);
-  }
-}
 
 // *path*'s data, or a folder's entries, on disk. Not on the main thread, which is the windows': a
 // slow disk's flush of 2.9 GB would hold them.
@@ -165,14 +162,6 @@ async function intact(folder: string, manifest: ImageManifest): Promise<boolean>
     if (sizeOf(path) !== file.size || (await hashOf(path)).digest("hex") !== file.sha256) return false;
   }
   return true;
-}
-
-// The sha256 of *path*'s first *bytes*, or all of it.
-async function hashOf(path: string, bytes?: number): Promise<ReturnType<typeof createHash>> {
-  const hash = createHash("sha256");
-  if (bytes === 0) return hash;
-  for await (const chunk of createReadStream(path, bytes === undefined ? {} : { end: bytes - 1 })) hash.update(chunk as Buffer);
-  return hash;
 }
 
 /**
@@ -224,7 +213,9 @@ export async function deliver(options: DeliverOptions): Promise<string> {
     }
     if (!existsSync(downloaded)) {
       const others = manifest.files.filter((other) => other !== file).reduce((sum, other) => sum + here(other), 0);
-      await download(options, file, `${downloaded}.partial`, (have) => options.progress?.(others + have, total));
+      const url = `${options.base}/desktop/vm/${manifest.key}/${file.download}`;
+      await download({ url, name: file.download, size: file.downloadSize, sha256: file.downloadSha256, magic: ZSTD_MAGIC }, `${downloaded}.partial`, options,
+        (have) => options.progress?.(others + have, total));
       await settle(`${downloaded}.partial`, downloaded);
     }
     signal?.throwIfAborted();
@@ -239,110 +230,14 @@ export async function deliver(options: DeliverOptions): Promise<string> {
   return folder;
 }
 
-// *file*'s download into *partial*, resumed from what it holds, and checked by its hash.
-// *got* is told how many of its bytes are here.
-async function download(options: DeliverOptions, file: ImageFile, partial: string, got: (have: number) => void): Promise<void> {
-  let have = sizeOf(partial);
-  // Whether more came than the manifest's size: then it is not the file, whatever its start.
-  let past = false;
-  if (have > file.downloadSize) {
-    truncateSync(partial, 0);
-    have = 0;
-  }
-  let hash = await hashOf(partial, have);
-  got(have);
-  if (have < file.downloadSize) {
-    const url = `${options.base}/desktop/vm/${options.manifest.key}/${file.download}`;
-    const said = (error: unknown) => (error instanceof Error ? error.message : String(error));
-    // No headers for headersMs, or no next bytes for stallMs, stops it, whatever the fetch bounds.
-    const stallMs = options.stallMs ?? STALL_MS;
-    const quiet = new AbortController();
-    let timer: NodeJS.Timeout | undefined;
-    const heard = (ms = stallMs) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => quiet.abort(new Error(`nothing came for ${ms / 1000} s`)), ms);
-    };
-    const stalled = new Promise<never>((_resolve, reject) => quiet.signal.addEventListener("abort", () => reject(quiet.signal.reason), { once: true }));
-    stalled.catch(() => {});
-    const signal = options.signal ? AbortSignal.any([options.signal, quiet.signal]) : quiet.signal;
-    heard(options.headersMs ?? HEADERS_MS);
-    try {
-      let response: Response;
-      try {
-        response = await Promise.race([(options.fetch ?? fetch)(url, { headers: have > 0 ? { range: `bytes=${have}-` } : {}, signal }), stalled]);
-      } catch (error) {
-        options.signal?.throwIfAborted();
-        if (quiet.signal.aborted) throw new Error(`the download of ${file.download} stopped: ${said(quiet.signal.reason)}`);
-        throw new Error(`could not reach ${new URL(url).host}: ${said(error)}`);
-      }
-      // Its first bytes get the whole idle bound, not what is left of the headers'.
-      heard();
-      if (response.status === 200 && have > 0) {
-        // Not the rest of the file: the whole of it, from a server that ignores a Range, starts it
-        // again. Anything else, as a captive portal's page, is not the file, and leaves what is here.
-        if (Number(response.headers.get("content-length")) !== file.downloadSize) {
-          void response.body?.cancel().catch(() => {});
-          throw new Error(`${file.download} was not the file the app expects`);
-        }
-        truncateSync(partial, 0);
-        have = 0;
-        hash = createHash("sha256");
-        got(have);
-      } else if ((response.status === 206 && !response.headers.get("content-range")?.startsWith(`bytes ${have}-`)) || (response.status === 416 && have > 0)) {
-        // A range, but not from where it stopped, or none at all, as for an object shorter than what is
-        // kept: asked again, it would be the same, so the next try starts it afresh.
-        void response.body?.cancel().catch(() => {});
-        rmSync(partial, { force: true });
-        throw new Error(`the download of ${file.download} did not resume where it stopped`);
-      } else if (response.status !== 200 && response.status !== 206) {
-        void response.body?.cancel().catch(() => {});
-        throw new Error(`${new URL(url).host} answered ${response.status} for ${file.download}`);
-      }
-      const out = await open(partial, have > 0 ? "a" : "w", 0o600);
-      const reader = response.body?.getReader();
-      const next = () => reader && Promise.race([reader.read(), stalled]);
-      try {
-        for (let read = await next(); read && !read.done; read = await next()) {
-          heard();
-          past = have + read.value.length > file.downloadSize;
-          if (past) break;
-          hash.update(read.value);
-          // A write may take less than it is given: what is hashed is what is on disk.
-          for (let at = 0; at < read.value.length;) at += (await out.write(read.value, at)).bytesWritten;
-          have += read.value.length;
-          got(have);
-        }
-      } catch (error) {
-        options.signal?.throwIfAborted();
-        throw new Error(`the download of ${file.download} stopped: ${said(error)}`);
-      } finally {
-        // Not waited for: a body that stalled need not answer its cancel.
-        void reader?.cancel().catch(() => {});
-        await out.close();
-      }
-      // Ended short, as a server that caps a range sends: what came is kept for the next try's Range.
-      // A page in its place, as a captive portal's, does not begin as a download does.
-      if (!past && have < file.downloadSize && zstdAt(partial)) {
-        throw new Error(`the download of ${file.download} stopped: it ended after ${have} of ${file.downloadSize} bytes`);
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  if (past || have !== file.downloadSize || hash.digest("hex") !== file.downloadSha256) {
-    rmSync(partial, { force: true });
-    throw new Error(`${file.download} was not the file the app expects`);
-  }
-}
-
 // The downloaded *from*, unpacked by zstd into *to*, sparse, and checked by its hash. zstd, run by
 // its path, is given nothing of the app's environment, and ends at *signal*, as at the app's quit.
 async function unpack(from: string, to: string, file: ImageFile, signal?: AbortSignal): Promise<void> {
   const partial = `${to}.partial`;
   const said = await new Promise<string | null>((resolve) => {
-    const zstd = spawn("/usr/bin/zstd", ["-q", "-d", "-f", "--sparse", from, "-o", partial], { stdio: ["ignore", "ignore", "pipe"], env: {}, signal });
+    const zstd = spawnClean("/usr/bin/zstd", ["-q", "-d", "-f", "--sparse", from, "-o", partial], { stdio: ["ignore", "ignore", "pipe"], env: {}, signal });
     let stderr = "";
-    zstd.stderr.on("data", (chunk: Buffer) => {
+    zstd.stderr?.on("data", (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-2000);
     });
     zstd.once("error", (error) => resolve(error.message));

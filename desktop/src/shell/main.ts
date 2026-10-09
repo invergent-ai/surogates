@@ -21,12 +21,13 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
+import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
+import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
-import { VmExecutor } from "../vm/executor.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
-import { missingTools, toolsMissing } from "../vm/linux.js";
+import { missingTools } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
@@ -45,10 +46,12 @@ import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
-import { desktopPrompts } from "./prompts.js";
+import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
-import { asShown } from "./pages/ui.js";
+import { appTools, BWRAP } from "./tools.js";
+import { asShown } from "./text.js";
+import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -56,6 +59,13 @@ import { type Bounds, WindowStates } from "./window-state.js";
 // RunAsNode fuse off, ignores it but keeps it, and what the app starts would take it: the VM manager's
 // QEMU and virtiofsd, the system browser, every spawn. It goes before anything is started.
 delete process.env.ELECTRON_RUN_AS_NODE;
+// No fuse covers Chromium's remote debugging, and on the app's fuses --remote-debugging-port still opens
+// CDP: any process of the user's could drive the app's pages, its bridge among them. The installed app
+// refuses both switches; this package's own Electron keeps them, for the tests.
+if (app.isPackaged && ["remote-debugging-port", "remote-debugging-pipe"].some((name) => app.commandLine.hasSwitch(name))) {
+  console.error("Surogate does not start with remote debugging (--remote-debugging-port or --remote-debugging-pipe).");
+  process.exit(1);
+}
 
 const PAGES = join(import.meta.dirname, "pages");
 const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
@@ -90,7 +100,7 @@ let theme: Theme;
 // After ready: safeStorage answers only then.
 let credentials: CredentialStore;
 // The desktop's own prompts, over the window, once it is made.
-let prompts: FolderPrompts & ApprovalPrompts;
+let prompts: FolderPrompts & ApprovalPrompts & BrowserPrompts;
 let sessionStore: SessionStore;
 // Who is signed in to the app, with the agent: what adds this computer, and what the window's web client takes its session from.
 let signedIn: DesktopSession | null = null;
@@ -260,20 +270,33 @@ function utility<To, From>(script: string, serviceName: string, temp?: string): 
 
 const utilityManager = (): ManagerProcess => utility<ToManager, FromManager>(MANAGER, "Surogate VM");
 // A browser host keeps its own temp files, the browser's and Playwright's, under *profiles*: they go
-// with the profiles, and a host that is killed leaves none in the system's temp folder.
-const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", join(profiles, "tmp"));
+// with the profiles, and a host that is killed leaves none in the system's temp folder. What it stages
+// of a download is there too, and is read from nowhere else.
+const browserTemp = (profiles: string): string => join(profiles, "tmp");
+const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowser>(BROWSER_HOST, "Surogate browser", browserTemp(profiles));
 
 // What the VM needs of this computer (spec, Section 11, Requirements): what it lacks, looked for
 // once the app is ready (null until then); its image's download, in a packaged app, or why there
 // is none to make; its last boot.
 let lacking: string[] | null = null;
 let lackingFound: Promise<string[]> = Promise.resolve([]);
+// What the VM itself lacks, as last looked for: a change of the folders looks for the file helper's tools alone.
+let vmLacking: Promise<string[]> = Promise.resolve([]);
 const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
 // The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
 const VM_ENV = vmEnv(process.env, app.isPackaged);
 let delivery: ImageDelivery | null = null;
-// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
+// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after
+// it. The image's and an update's.
 const stopDelivery = new AbortController();
+// Where the install script recorded the base the app was installed from: root's, in an installed
+// app. A development build reads only SUROGATE_INSTALL_JSON's, a test's, so it never downloads
+// from an installed app's base.
+const INSTALL_RECORD = app.isPackaged ? ROOT_RECORD : process.env.SUROGATE_INSTALL_JSON;
+// What the app downloads from that base: no cookie of its own session goes with it, and none of it
+// through the HTTP cache: a second copy of what is downloaded, and cached ranges in a resume.
+const fromBase = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) =>
+  net.fetch(url, { ...init, credentials: "omit", cache: "no-store" });
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
@@ -287,18 +310,57 @@ const vmUser = () => {
 // names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
 // development build only.
 function imageDelivery(): ImageDelivery | null {
-  const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
-  if (VM_ENV.SUROGATE_VM_IMAGE || !record) return null;
+  if (VM_ENV.SUROGATE_VM_IMAGE || !INSTALL_RECORD) return null;
   return new ImageDelivery({
     manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
     // An installed app's record is root's alone to write, as the install script leaves it.
-    base: () => installBase(record, app.isPackaged),
+    base: () => installBase(INSTALL_RECORD, app.isPackaged),
     images: join(root, "vm", "images"),
-    // No cookie of the app's own session goes with it, and none of it through the HTTP cache: a second
-    // copy of what is downloaded, and cached ranges in a resume.
-    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit", cache: "no-store" }),
+    fetch: fromBase,
     signal: stopDelivery.signal,
   }, changed);
+}
+
+// Updates (spec, Section 9, "In-app updates"): an installed app checks the base it was installed
+// from at its start and every 6 hours, trusting the release keys that the helper pkexec runs
+// lists, and downloads into the user's cache. A development build updates only when a test names
+// an install record and a helper of its own, SUROGATE_UPDATE_HELPER.
+// A relative XDG_CACHE_HOME is ignored, as the XDG Base Directory specification says.
+const cacheHome = process.env.XDG_CACHE_HOME?.startsWith("/") ? process.env.XDG_CACHE_HOME : join(app.getPath("home"), ".cache");
+let updates: Updates | null = null;
+
+function startUpdates(): void {
+  const cache = join(cacheHome, "surogate", "updates");
+  const helper = process.env.SUROGATE_UPDATE_HELPER;
+  let options: UpdatesOptions;
+  if (app.isPackaged) {
+    options = installedUpdates(VERSION, cache, fromBase, stopDelivery.signal);
+  } else if (INSTALL_RECORD && helper) {
+    // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
+    options = {
+      version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
+      apply: helperRun([helper]),
+    };
+  } else {
+    return;
+  }
+  // Whichever build: all that a helper said of an install that did not end well goes to the log.
+  // What it keeps of a newest release that no trusted key signed is under the app's own root,
+  // which no chat's folder reaches.
+  updates = new Updates({ ...options, standing: join(root, "update-unsigned.json"), log: report }, changed);
+  // Checked at the start and every six hours; sooner after a check that failed; and when the
+  // computer wakes. A quit in the middle of one is no failure to say.
+  powerMonitor.on("resume", keepChecked(updates, stopDelivery.signal, report));
+}
+
+// The update line's button: the update downloaded installed by the root helper, then the app restarted
+// into it; or, installed already, the restart alone. Only while the line shows a button.
+async function updateAction(): Promise<void> {
+  if (!updates || !updateLine(updates.state)?.button) return;
+  // Where the downloaded files were no longer the app's own, the release is looked for again: one
+  // that cannot be found is said in the log, as a check's is.
+  await updates.install().catch(report);
+  if (updates.state.state === "installed") restart();
 }
 
 // The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
@@ -313,14 +375,54 @@ function startDelivery(check = false): void {
   }
 }
 
-// What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
-// zstd counts only while the image's delivery has something left to unpack.
+// What the sandbox lacks of this computer, looked for: at the app's start, and at the line's Check
+// again. The file helper's tools first, then the VM's; zstd counts only while the image's delivery
+// has something left to unpack.
 function lookForTools(): void {
-  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((found) => {
+  const unpacking = delivery !== null && delivery.state.state !== "ready";
+  // The folders are taken once, for the VM's tools and for the file helper's: the two looks then
+  // hold the same folders, and the line and a file tool name the same tools.
+  const held = boundFolders();
+  vmLacking = held.then((folders) => missingTools({}, unpacking, folders));
+  lookForFileTools(true, held);
+}
+
+// Each folder this computer's chats are bound to, as its file host holds it: by what it is now. One
+// that is not there or cannot be read has no file host, and none starts once the journal is closed.
+// Never looked at on this thread: a folder on a mount that has stopped answering would stop the app
+// with it. One that does not answer in time is not held (FolderLooks).
+const folderLooks = new FolderLooks(undefined, undefined, (folder) => report(new Error(`${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
+function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
+  let folders: string[] = [];
+  try {
+    folders = openStack()?.bindings.folders() ?? [];
+  } catch {
+    // The device is stopping.
+  }
+  return folderLooks.held(folders);
+}
+
+// The file helper's tools, looked for again beside what the VM was last found to lack: with each
+// look, once the device's folders are known, and at each change of them. They are looked for where
+// the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
+// relative entries, and without any entry in a folder a chat is bound to, where a command may have
+// written a program. So the line and a file tool's answer name the same tools. *said*: tell the
+// pages even when nothing changed, as Check again asks.
+let toolsOwedSaid = false;
+function lookForFileTools(said = false, folders = boundFolders()): void {
+  toolsOwedSaid ||= said;
+  const look: Promise<string[]> = Promise.all([vmLacking, folders]).then(([vm, held]) => {
+    const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, held)), ...vm];
+    // A look that a later one has overtaken says nothing: the later one's folders are the newer,
+    // and it tells the pages what this one owed them.
+    if (lackingFound !== look) return lackingFound;
+    const same = lacking !== null && lacking.join("\n") === found.join("\n");
     lacking = found;
-    changed();
+    if (toolsOwedSaid || !same) changed();
+    toolsOwedSaid = false;
     return found;
   });
+  lackingFound = look;
 }
 
 // Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
@@ -662,8 +764,9 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
-      tools: new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+      tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: join(cacheHome, "surogate"), env, vm: vmFor(), changed }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
+      staging: browserTemp(profilesOf(root, credential)),
       bindingOf: (bound) => bindings.get(bound),
       launch: () => {
         const browser = chosenBrowser(browserSetting.get(), findBrowsers());
@@ -677,6 +780,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       // Settings → Folders and permissions draws the chat's folder, mode and hosts again.
       main?.settingsContents()?.send("settings:changed");
       if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
+      // A folder bound or forgotten changes where the file hosts look for their tools.
+      lookForFileTools();
     },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
@@ -696,6 +801,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
   changed();
   return started.then((stack) => {
     starting.stack = stack;
+    // This device's folders are known now: the ones its chats were bound to before it started.
+    lookForFileTools();
     return stack;
   }, (error: unknown) => {
     if (device === starting) device = null;
@@ -1162,7 +1269,7 @@ async function signIn(agent: Agent): Promise<void> {
   }
 }
 
-// What a window asked for, a folder or Work freely: its prompts go once that window goes or its page is replaced.
+// What a window asked for, a folder, Work freely or a hand back: its prompts go once that window goes or its page is replaced.
 async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const contents = webContents.fromId(Number(window));
   const controller = new AbortController();
@@ -1190,6 +1297,14 @@ function bridge(contents: WebContents, agent: Agent): void {
     if (kept?.token === null) throw new Error(REVOKED);
     if (!device) throw new Error("This computer is not registered with the agent");
     return device.stack ?? device.started;
+  };
+  // The browser is one for every chat of the agent's here, held from the chat that took it over until that chat hands it back.
+  const HELD_FROM_ANOTHER_CHAT = "The agent's browser on this computer is taken over from another chat, and is handed back there";
+  // The device, for a call about a chat's browser: refused for a chat with no folder here.
+  const browsing = async (sessionId: string): Promise<DeviceStack> => {
+    const stack = await registered();
+    if (!stack.bindings.get(sessionId)) throw new Error("This chat has no folder on this computer");
+    return stack;
   };
   const handlers = bridgeHandlers(agent.origin, {
     getDevice: () => {
@@ -1220,9 +1335,67 @@ function bridge(contents: WebContents, agent: Agent): void {
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
     cancelPrepared: async (token, window) => (await registered()).binder.cancelPrepared(token, window),
-    getBinding: async (sessionId) => (await registered()).binder.bindingOf(sessionId),
+    getBinding: async (sessionId) => {
+      const stack = await registered();
+      const binding = stack.binder.bindingOf(sessionId);
+      return binding && { ...binding, takenOver: stack.tools.takenOver?.(sessionId) ?? false };
+    },
     // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
     revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
+    showBrowser: async (sessionId) => {
+      const stack = await browsing(sessionId);
+      if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");
+    },
+    // The user drives the agent's browser from now on, held from this chat, and the page hears the change.
+    // Another chat's take-over stands: this one does not end it.
+    takeOver: async (sessionId) => {
+      const stack = await browsing(sessionId);
+      if (!stack.takeOver(sessionId)) throw new Error(HELD_FROM_ANOTHER_CHAT);
+      contents.send("desktop:binding-changed", sessionId);
+    },
+    // Only at the desktop's own confirmation, in a prompt window of its own: its Hand back takes nothing until
+    // the prompts' input protection has passed, so a press its user began for the page answers nothing there.
+    // The page's preload asks for it only at its user's click, before they kept the browser and after: a page
+    // cannot wear its user down.
+    handBack: (sessionId, window) => preparing(window, async (signal) => {
+      const stack = await browsing(sessionId);
+      const held = stack.tools.takenOver?.(sessionId) ?? false;
+      // Nobody holds it: the agent drives it already, and nothing was handed back by anyone.
+      if (held === false) return "released";
+      // Held from another chat that is here: handed back there, and nothing is asked here.
+      if (held === "elsewhere") throw new Error(HELD_FROM_ANOTHER_CHAT);
+      // Held from this chat, which the confirmation names by its title; or from one that is gone, which can
+      // hand nothing back and is named no more: this chat's to hand back.
+      const title = held === true ? await titleSoon(sessionId) : null;
+      // The window first, where it was hidden since the click: the confirmation opens over it.
+      main?.show();
+      const asked = new AbortController();
+      handBacks.add(asked);
+      try {
+        if (!(await prompts.confirmHandBack({ agent: agent.name, gone: held !== true, title }, AbortSignal.any([signal, asked.signal])))) return false;
+        // Who holds it now, and not when the confirmation opened: it can have changed while it was up.
+        const now = stack.tools.takenOver?.(sessionId) ?? false;
+        // Whether anything was handed back: the browser may have been taken over from another chat while the
+        // confirmation was up, and is that chat's to hand back then.
+        if (!stack.handBack(sessionId)) return false;
+        handedBack(asked);
+        contents.send("desktop:binding-changed", sessionId);
+        // Which hand back it was, for the page to tell the server: only of the browser this chat held is it the
+        // one its user confirmed for this chat, which gives its agent a turn. Held from a chat that is gone,
+        // their confirmation handed back nobody's hold.
+        return now === true ? "confirmed" : "released";
+      } finally {
+        handBacks.delete(asked);
+      }
+    }),
+    openSettings: async (section) => {
+      // A project's dialog is over the window: Settings does not open over it.
+      if (projectDialog !== null && main?.settingsContents() === projectDialog) {
+        throw new Error("Surogate has a project's dialog open: close it to open Settings");
+      }
+      main?.show();
+      showSettings(section);
+    },
     getAppearance: appearanceNow,
     setAccount: (reported) => {
       // Another account, or none, or the first: nothing listed before is theirs. A page that
@@ -1406,6 +1579,7 @@ function state() {
     // While a quit waits for the threads working on this computer: how many it waits for.
     quitting: waiting ? (device?.stack?.working() ?? 0) : null,
     sandbox: sandboxLine(lacking, deliveryState(), boot),
+    update: updateLine(updates?.state ?? null),
   };
 }
 
@@ -1596,6 +1770,15 @@ const menuActions = {
 
 // Why the last browser picked with Custom… was not kept, until the next choice.
 let browserFailure: string | null = null;
+// Whether Settings is asking to hand the agent's browser back: one confirmation at a time.
+let handingBack = false;
+// The hand back confirmations asked and not answered yet, from a chat's page or from Settings, and what closes
+// each: once the browser is handed back by one, the others ask about a hold that is gone.
+const handBacks = new Set<AbortController>();
+// The browser was handed back through *by*: every other confirmation is closed, and nothing is asked after it.
+const handedBack = (by: AbortController): void => {
+  for (const other of handBacks) if (other !== by) other.abort();
+};
 
 // Settings → Browser's rows: what is found here, each named with the version it says.
 async function browserState() {
@@ -1606,7 +1789,11 @@ async function browserState() {
     const version = await browserVersion(browser.executable);
     if (version) versions.set(browser.executable, version);
   }));
-  return { choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure };
+  return {
+    choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure,
+    // Held from a chat that is gone: handed back here, where no chat's own page may be left to do it in.
+    held: openStack()?.heldFromGone() ?? false,
+  };
 }
 
 /**
@@ -1717,6 +1904,22 @@ function chatTitle(root: string): Promise<string> {
   return read;
 }
 
+// How long a prompt waits to name a chat: its user asked for it with a click, and an agent slow to answer holds it no longer.
+const TITLE_MS = 2_000;
+
+/** Chat *root*'s title for a prompt that names it: null for one the agent names not, or does not name within TITLE_MS. */
+async function titleSoon(root: string): Promise<string | null> {
+  let late: NodeJS.Timeout | undefined;
+  const title = await Promise.race([
+    chatTitle(root),
+    new Promise<string>((resolve) => {
+      late = setTimeout(resolve, TITLE_MS, "A chat");
+    }),
+  ]);
+  clearTimeout(late);
+  return title === "A chat" ? null : title;
+}
+
 // The device's stack while its journal is open: a computer the agent revoked keeps its stack, closed, until it is restored.
 const openStack = (): DeviceStack | null => (kept?.token === null ? null : device?.stack ?? null);
 
@@ -1803,7 +2006,7 @@ async function confirmArchive(name: string): Promise<boolean> {
 // calls are answered on its own view only; each answers why it was refused, or null once done.
 function showProject(editing: Opened | null): void {
   const page = join(PAGES, "project.html");
-  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+  main?.openSettings(page, PAGES_PRELOAD, undefined, (contents) => {
     projectDialog = contents;
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
@@ -1883,10 +2086,13 @@ function showProject(editing: Opened | null): void {
   });
 }
 
-// Settings, over the window: its page's calls are answered on its own view only.
-function showSettings(): void {
+// Settings, over the window, on *section* when one is named: its page's calls are answered on its own view only.
+function showSettings(section?: "browser"): void {
   const page = join(PAGES, "settings.html");
-  main?.openSettings(page, PAGES_PRELOAD, (contents) => {
+  // Open already: its page is shown the section. ponytail: one that still loads does not hear it, and opens on its own.
+  const open = main?.settingsContents();
+  if (section && open && open !== projectDialog) open.send("settings:show", section);
+  main?.openSettings(page, PAGES_PRELOAD, section, (contents) => {
     // A chat named not yet is asked about again, once.
     reads.clear();
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -1904,6 +2110,41 @@ function showSettings(): void {
         throw new Error("This chat cannot reach that host");
       }
       bindings.disallowDomain(root, host);
+    });
+    // A chat's browser taken back by its user: its agent's next browser call asks its first use again. Its tabs stay.
+    // The agent's browser held from that chat stays held: taking this back hands nothing back.
+    handle("settings:take-back-browser", (root) => {
+      const bindings = openStack()?.bindings;
+      if (!bindings || typeof root !== "string" || !bindings.browsing(root)) throw new Error("This chat does not use the browser on this computer");
+      bindings.disallowBrowser(root);
+    });
+    // The agent's browser handed back from here, where it is held from a chat that is gone: such a chat has no
+    // page to hand it back in, and another chat has a pane for it only where its own browser is open. Through the
+    // same confirmation as from a chat's page, at its user's click in the desktop's own page; one at a time, and
+    // closed with Settings. Whether it was handed back.
+    handle("settings:hand-back-browser", async () => {
+      const stack = openStack();
+      const agent = agents.get();
+      if (!stack?.heldFromGone() || !agent || handingBack) return false;
+      handingBack = true;
+      const closed = new AbortController();
+      const gone = () => closed.abort();
+      contents.once("destroyed", gone);
+      handBacks.add(closed);
+      try {
+        if (!(await prompts.confirmHandBack({ agent: agent.name, gone: true, title: null }, closed.signal))) return false;
+        // Whether anything was handed back: a chat may have taken the browser over while the confirmation was up.
+        if (!stack.handBackGone()) return false;
+        handedBack(closed);
+        // Every chat's page is told: none of them holds it, and each may use it again.
+        for (const { root } of stack.bindings.all()) main?.webContents()?.send("desktop:binding-changed", root);
+        return true;
+      } finally {
+        handingBack = false;
+        handBacks.delete(closed);
+        contents.off("destroyed", gone);
+        if (!contents.isDestroyed()) contents.send("settings:changed");
+      }
     });
     // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
     // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.
@@ -2063,7 +2304,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:place", (hole) => window.place(bounds(hole)));
   handle("shell:place-pane", (hole) => window.placePane(bounds(hole)));
   handle("shell:menu", popup);
-  handle("shell:settings", showSettings);
+  handle("shell:settings", () => showSettings());
   handle("shell:new-project", () => showProject(null));
   handle("shell:project-settings", () => {
     if (view.kind !== "project") throw new Error("No project is open");
@@ -2073,6 +2314,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
   handle("shell:sandbox", sandboxAction);
+  handle("shell:update", updateAction);
 }
 
 // Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
@@ -2098,6 +2340,18 @@ let askingAgain = false;
 let stopped = false;
 // Once the quit goes on: nothing shows the window again while the device stops.
 let leaving = false;
+// A quit that restarts the app into its update once it is done: the installed app started again from
+// its launcher, never process.execPath, which is the old version's own folder.
+let restarting = false;
+
+// A quit the user asked for stays a quit: once one is under way, an update that ends installed does
+// not turn it into a restart, nor ask "Quit now?" of a quit that waits. The update stays installed,
+// and the next start is the user's own.
+function restart(): void {
+  if (quitting) return;
+  restarting = true;
+  app.quit();
+}
 
 // A quit asked again while the first waits for the threads: quit now, or keep waiting.
 async function quitNow(): Promise<void> {
@@ -2118,7 +2372,11 @@ async function quit(): Promise<void> {
   const working = device?.stack?.working() ?? 0;
   if (working > 0) {
     const answer = await confirmQuit(working);
-    if (answer === "cancel") return;
+    if (answer === "cancel") {
+      // The update stays installed: the line's Restart asks again.
+      restarting = false;
+      return;
+    }
     if (answer === "wait" && (device?.stack?.working() ?? 0) > 0) {
       await new Promise<void>((resume) => {
         waiting = resume;
@@ -2152,6 +2410,10 @@ async function quit(): Promise<void> {
     await stopDevice(device?.started, vm);
   } finally {
     stopped = true;
+    if (restarting) {
+      const [execPath, ...args] = loginCommand();
+      app.relaunch({ execPath: execPath!, args });
+    }
     app.quit();
   }
 }
@@ -2204,6 +2466,7 @@ if (!app.requestSingleInstanceLock()) {
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();
+    startUpdates();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
       states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,

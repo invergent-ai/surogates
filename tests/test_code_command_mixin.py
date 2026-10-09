@@ -19,7 +19,7 @@ class _FakeStore:
     def __init__(self) -> None:
         self.events: list[tuple] = []
 
-    async def emit_event(self, session_id, event_type, data):
+    async def emit_event(self, session_id, event_type, data, *, lease_token=None):
         self.events.append((event_type, data))
         return len(self.events)  # real store returns a BIGSERIAL int id
 
@@ -167,9 +167,11 @@ async def test_run_idempotent_skips_relaunch():
     all_events = [user_evt, started]
 
     await h._handle_code_command(_session(), '/code codex "again"', _lease(), all_events)
-    # Already started for this source event — no relaunch, no new events.
+    # Already started for this source event — no relaunch; the command is
+    # answered, so the chat goes on.
     assert pool.calls == []
-    assert h._store.events == []
+    assert _last_message(h) == "The coding run was cut off. Type the command again to start it."
+    assert _event_types(h) == [EventType.LLM_RESPONSE]
 
 
 async def test_codex_run_writes_back_refreshed_auth():

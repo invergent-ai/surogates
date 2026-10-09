@@ -37,8 +37,9 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import land_turn
+from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later, turn_ended
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
 from surogates.workstreams.spend import admitted_at_wake
 
@@ -1064,9 +1065,12 @@ class ArtifactCompletionMixin:
         before the turn summary and the report, so both see the landed files.
         """
         landing: dict[str, Any] | None = None
+        # The turn is over: what it handed on lands with it, and is no later Stop's to drop.
+        turn_ended(session)
         if is_project_thread(session.config) and self._sandbox_pool is not None:
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
             try:
+                await self._open_copy_to_land(session)
                 landing = await land_turn(
                     store=self._store, session_factory=self._session_factory,
                     sandbox_pool=self._sandbox_pool, session=session,
@@ -1078,6 +1082,24 @@ class ArtifactCompletionMixin:
                 logger.exception("Landing failed for %s", session.id)
                 # The master hears it: the report names the turn's files as not saved.
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
+
+        not_kept: list[str] = []
+        # What a hand-back that failed leaves: its completion's mark, and the files kept apart.
+        unkept: dict[str, Any] = {}
+        if (
+            session.config.get("history_thread") and self._sandbox_pool is not None
+            and self._sandbox_pool.holds_copy(sandbox_session_key(session))
+        ):
+            # A thread's helper hands its copy back onto the thread's hand-off: it lands with the thread.
+            try:
+                kept = await keep_copy(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                    session=session, saga_settings=self._saga_settings, action="hand_back",
+                )
+                not_kept = kept["not_kept"] if kept else []
+            except Exception:
+                logger.exception("Could not hand the copy of %s back to its thread", session.id)
+                unkept = await self._kept_apart(session)
 
         # The turn's tool saga ends with it: a later stop compensates only its own turn.
         if self._turn_saga is not None:
@@ -1096,6 +1118,9 @@ class ArtifactCompletionMixin:
         # Detaching stays synchronous because it is in-memory and it carries
         # the ordering that matters: once the mapping is gone, no later turn
         # can resolve this session to a pod that is about to disappear.
+        # A landing that recorded a commit leaves its pod the day's pruning
+        # of the project's history: run at the very end, once the report is out.
+        prunes: str | None = None
         if self._sandbox_pool is not None:
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(
@@ -1106,10 +1131,13 @@ class ArtifactCompletionMixin:
                     "Sandbox detach failed for %s", session.id, exc_info=True,
                 )
             else:
-                self._spawn_background(
-                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
-                    name=f"sandbox-teardown-{session.id}",
-                )
+                if sandbox_id is not None and landing is not None and landing["state"] == "completed" and landing.get("commit"):
+                    prunes = sandbox_id
+                else:
+                    self._spawn_background(
+                        self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                        name=f"sandbox-teardown-{session.id}",
+                    )
 
         # The browser is intentionally NOT torn down here. A turn end is
         # not a session end: an agent driving a multi-step browser flow
@@ -1164,20 +1192,28 @@ class ArtifactCompletionMixin:
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
 
+        if not_kept:
+            # Another helper, or the thread, changed them first: theirs stays.
+            files = [f for f in files or [] if f.get("ref") not in not_kept] + [
+                {"kind": "file", "label": path, "ref": path, "landing": "not_merged", "reason": "kept"} for path in not_kept
+            ]
+
         complete_data: dict[str, Any] = {
             "reason": reason,
             "worker_id": self._worker_id,
+            **({"not_kept": not_kept} if not_kept else {}),
+            # A helper whose hand-back failed: its work is on no hand-off, and its thread is told.
+            **unkept,
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
-        if is_project_thread(session.config) and self._sandbox_pool is not None:
-            # Whether a landing ran and every write of the turn landed: a
-            # later turn on a copy made afresh lost nothing since.  A
-            # rolled-back, failed or held landing leaves writes the next copy
-            # lacks, and a turn that never used its pod is no landed turn.
-            complete_data["landed"] = landing is not None and (
-                landing["state"] == "completed" and all(f.get("landing") == "landed" for f in landing["files"])
-            )
+        if landing is not None:
+            # Whether this turn end saved the thread's work in the history: a
+            # later turn on a copy made afresh lost nothing before it.  A
+            # landing that failed before its commit step, or held a file,
+            # leaves work the next copy lacks.  A turn that never used its
+            # pod is no such turn end.
+            complete_data["saved"] = bool(landing.get("saved"))
 
         # Two independent best-effort settlements (neither raises); run
         # them concurrently to halve the session-complete round trip when
@@ -1279,6 +1315,7 @@ class ArtifactCompletionMixin:
                     session_factory=self._session_factory,
                     files=files,
                     landing=landing,
+                    unkept=unkept,
                 )
             except Exception:
                 logger.warning(
@@ -1309,6 +1346,55 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
+        if prunes is not None:
+            from surogates.storage.tenant import boundary_workspace_prefix
+
+            # Last, with the turn ended and reported, and outside the wake: its lease goes without
+            # waiting, so the thread's next message is not held for a pruning.  Its pod goes after it.
+            prune_later(
+                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, sandbox_id=prunes,
+                session_id=str(session.id), workstream=session.config["workstream_id"],
+                packs=landing.get("packs", 0), saga_settings=self._saga_settings,
+                # The bucket itself says which packs are old: no pod's clock, and not the worker's.
+                storage=self._storage, bucket=session.config.get("storage_bucket"),
+                prefix=boundary_workspace_prefix(session.config, session, session.id),
+            )
+
+    async def _kept_apart(self, session: Any) -> dict[str, Any]:
+        """A helper's copy whose hand-back failed, kept apart before its pod goes; what its completion says of it.
+
+        Nothing when the helper changed no file.  Else ``kept`` false, and
+        ``left``, the files kept apart, as a failed helper's are; no
+        ``left`` when the copy could not be kept apart either.
+        """
+        try:
+            apart = await keep_copy(
+                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                session=session, saga_settings=self._saga_settings, action="keep_apart", settle=False,
+            )
+        except Exception:
+            logger.exception("Could not keep the copy of %s apart", session.id)
+            return {"kept": False}
+        left = apart.get("left", []) if apart else []
+        return {"kept": False, "left": left} if left else {}
+
+    async def _open_copy_to_land(self, session: Session) -> None:
+        """Give a thread's turn that never used its pod one, when its end lands all the same.
+
+        Never for a thread on the user's computer: it works in the folder there,
+        and has no copy in the cloud to land.
+        """
+        owner = sandbox_session_key(session)
+        if device_of(session.config) is not None:
+            return
+        if self._sandbox_pool.holds_copy(owner) or self._storage is None or session.config.get("history_off"):
+            return
+        if await waits_to_land(self._session_factory, self._storage, session, fence=_fence(self._saga_settings)):
+            from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+            spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+            await self._sandbox_pool.ensure(owner, spec)
+
     async def _fail_session(
         self,
         session: Session,
@@ -1330,8 +1416,47 @@ class ArtifactCompletionMixin:
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
 
+        # A failed turn does not land, since its files may be half made, but
+        # its copy is kept on its branch, and lands with its next turn.  A
+        # failed helper's is kept apart, merged onto nothing, and its thread
+        # told.  Then its pod goes: the next turn takes the work up from the history.
+        saved: bool | None = None
+        left: list[str] = []
+        # The helpers' files the turn's take-ups left as its copy had them: named here, as a landing names them.
+        not_taken: list[str] = []
+        owner = sandbox_session_key(session)
+        # The turn is over, kept or not: what it handed on is no later Stop's to drop.
+        turn_ended(session)
+        if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
+            helper = bool(session.config.get("history_thread"))
+            try:
+                kept = await keep_copy(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
+                    session=session, saga_settings=self._saga_settings, action="keep_apart" if helper else "keep",
+                )
+                saved = kept is not None
+                left = kept.get("left", []) if kept else []
+                not_taken = kept.get("not_taken", []) if kept else []
+            except Exception:
+                logger.exception("Could not keep the copy of %s", session.id)
+                saved = False
+            try:
+                sandbox_id = await self._sandbox_pool.release_for_session(owner)
+            except Exception:
+                # The turn's end is still written: a pod left behind goes at its deadline.
+                logger.warning("Could not let the pod of %s go", session.id, exc_info=True)
+            else:
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
+                )
+
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,
+            # Whether the keep saved the turn's work, as a completed turn's landing does.
+            **({"saved": saved} if saved is not None else {}),
+            # A failed helper's changes, kept apart in the history: never in its thread's copy.
+            **({"left": left} if left else {}),
+            **({"not_taken": not_taken} if not_taken else {}),
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
@@ -1348,6 +1473,11 @@ class ArtifactCompletionMixin:
             session.id, EventType.SESSION_FAIL, fail_data,
         )
         error = f"{reason}: {data}" if data else reason
+        if left:
+            error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
+        elif saved and is_project_thread(session.config):
+            # Said as a landing that did not finish says it: nothing of the turn is lost.
+            error += ". Its work is kept, and lands with the thread's next turn"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )
@@ -1373,6 +1503,7 @@ class ArtifactCompletionMixin:
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
+                    not_taken=not_taken,
                 )
             except Exception:
                 logger.warning(

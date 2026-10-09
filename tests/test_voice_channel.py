@@ -7,7 +7,7 @@ from surogates.harness.prompt_library import default_library
 
 def test_voice_sessions_get_a_spoken_platform_hint():
     hint = default_library().platform_hint("voice")
-    assert hint and "telefon" in hint.lower() and "markdown" in hint.lower()
+    assert hint and "phone" in hint.lower() and "markdown" in hint.lower() and "language" in hint.lower()
 
 
 def test_a_voice_call_keeps_its_own_memory_boundary():

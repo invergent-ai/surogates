@@ -124,6 +124,11 @@ export class Bindings {
     if (changes > 0) this.changed(root);
   }
 
+  /** Take the browser back from a root: its agent's next browser call asks its first use again. One not allowed changes nothing. */
+  disallowBrowser(root: string): void {
+    this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
+  }
+
   /** Whether the root's user let its agent use the browser on this computer. */
   browsing(root: string): boolean {
     return this.db.prepare(`SELECT 1 FROM browsing WHERE root = ?`).get(root) !== undefined;

@@ -56,6 +56,8 @@ class FakeStore:
         session_id: UUID,
         event_type: EventType,
         data: dict[str, Any],
+        *,
+        lease_token: Any = None,
     ) -> int:
         self.events.append((session_id, event_type, data))
         event_id = self.next_event_id
@@ -166,8 +168,8 @@ async def test_handle_goal_set_persists_state_and_kicks_off_work() -> None:
             {"outcome_id": state["id"]},
         ),
     ]
-    response_event_id = store.next_event_id - 2
-    assert store.cursor_advances[-1]["through_event_id"] == response_event_id
+    # The cursor is not the handler's to move: the wake ends the command's turn.
+    assert store.cursor_advances == []
 
 
 @pytest.mark.asyncio
@@ -257,24 +259,24 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
 
 
 @pytest.mark.asyncio
-async def test_handle_mission_create_emits_kickoff_after_cursor_advance(
+async def test_handle_mission_create_emits_kickoff_before_its_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for PROD session 216e2577-…: the kickoff
-    ``user.message`` must be emitted AFTER ``advance_harness_cursor``
-    so its event id is strictly greater than the cursor.  Otherwise
-    the next wake sees ``no actionable pending events`` and bails —
-    the coordinator never starts on the mission.
+    ``user.message`` must stay past the cursor.  Otherwise the next
+    wake sees ``no actionable pending events`` and bails — the
+    coordinator never starts on the mission.
 
     Verifies the temporal sequence:
 
-        emit LLM_RESPONSE("Mission … started.")   # cursor → here
-        advance_harness_cursor(through=that_id)
-        emit USER_MESSAGE(kickoff content)         # id > cursor
+        emit USER_MESSAGE(kickoff content)
+        emit LLM_RESPONSE("Mission … started.")
         enqueue session                            # next wake fires
 
-    and that the kickoff event id is strictly greater than the cursor
-    advance.
+    and that the handler does not move the cursor.  The kickoff comes
+    first: once the answer is in the log the command is not run again,
+    and a worker that died between the two would leave the mission
+    started and never worked on.
     """
     from uuid import uuid4
 
@@ -316,23 +318,14 @@ async def test_handle_mission_create_emits_kickoff_after_cursor_advance(
         and d.get("synthetic") == "mission_kickoff"
     )
 
-    # Kickoff must come AFTER the LLM_RESPONSE (which is what the cursor
-    # advances through).  Reversing the order is the PROD bug.
-    assert response_idx < kickoff_idx, (
-        "kickoff user.message must be emitted after the slash response; "
-        "otherwise advance_harness_cursor races past it"
+    assert kickoff_idx < response_idx, (
+        "kickoff user.message must be emitted before the slash response; "
+        "otherwise a death between the two leaves the mission never worked on"
     )
 
-    # The cursor advance through the LLM_RESPONSE event must be strictly
-    # less than the kickoff event id, so the next wake sees the kickoff
-    # as pending.
-    assert len(store.cursor_advances) == 1
-    cursor_through = store.cursor_advances[0]["through_event_id"]
-    # FakeStore increments next_event_id by 1 per emit, so the kickoff
-    # id is exactly cursor_through + 1 in this fixture.
-    assert cursor_through + 1 == store.next_event_id - 1, (
-        "kickoff event id must be cursor + 1 (kickoff emitted post-cursor)"
-    )
+    # The handler leaves the cursor alone, so it cannot pass the kickoff:
+    # the next wake sees the kickoff as pending.
+    assert store.cursor_advances == []
 
     # And the session must be enqueued for a fresh wake to process the kickoff.
     assert len(redis.zadds) == 1, (

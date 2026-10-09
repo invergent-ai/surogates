@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -176,6 +176,31 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(inheriting.map(({ exe, args }) => `${exe.split("/").at(-1)} ${args.find((arg) => arg.startsWith("--type=")) ?? ""}`.trim())).toEqual([]);
     const plainElectron = processes.filter(({ exe, args }) => exe === realpathSync(ELECTRON) && !args.some((arg) => arg.startsWith("--type=")));
     expect(plainElectron.map(({ pid }) => pid)).toEqual([main]);
+    // What the file host holds open, and all it started: its socat bridges out here, and bubblewrap,
+    // seccomp's wrapper and the helper in the sandbox. Nothing of the main process's, which has its
+    // profile's files open for writing and its channels with its other processes: none of them holds
+    // a file at all but /dev/null, and the helper no socket but its three standard ones.
+    const opened = (pid: number) => {
+      try {
+        return readdirSync(`/proc/${pid}/fd`).flatMap((fd) => {
+          try {
+            return [[Number(fd), readlinkSync(`/proc/${pid}/fd/${fd}`)] as const];
+          } catch {
+            return []; // the listing's own
+          }
+        });
+      } catch {
+        return []; // gone meanwhile, or bubblewrap's own first process, which no other may read
+      }
+    };
+    const host = processes.find(({ args }) => args.some((arg) => arg.endsWith("/dist/hosts/host.js")))!;
+    const under = tree(host.pid);
+    expect(under.length).toBeGreaterThan(4);
+    expect(under.flatMap((pid) => opened(pid).filter(([, file]) => file.startsWith("/") && file !== "/dev/null").map(([fd, file]) => `${pid}: ${fd} ${file}`))).toEqual([]);
+    const sandboxed = processes.find(({ args }) => args.some((arg) => arg.endsWith("/dist/files/helper.js")))!;
+    expect(opened(sandboxed.pid).filter(([, file]) => file.startsWith("socket:")).map(([fd]) => fd)).toEqual([0, 1, 2]);
+    // The main process's own, for the measure of what was not handed on.
+    expect(opened(main).filter(([, file]) => file.startsWith(home)).length).toBeGreaterThan(10);
   });
 
   it("runs the folder's own configure script, refuses SQLite's WAL there plainly, and keeps a database with a rollback journal that this computer reads", async () => {
@@ -681,7 +706,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect(await operation("run", { command: "echo resumed", workdir: null, timeout: 30 })).toEqual({
       error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${stopped}` },
     });
-    expect(await page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${stopped}`);
+    // The sidebar's line is drawn from the page's next state, after the agent has its answer.
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${stopped}`);
     served.release();
     await page.click("#sandbox-retry");
     await expect.poll(() => page.isHidden("#sandbox"), { timeout: 60_000 }).toBe(true);
@@ -699,6 +725,16 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     }).stdout.trim().split("\n")[0] || 0);
     await expect.poll(unpacking, { timeout: 60_000, interval: 50 }).toBeGreaterThan(0);
     const zstd = unpacking();
+    // zstd holds its three standard descriptors and the two files it works on, and nothing else of the app's.
+    const held = readdirSync(`/proc/${zstd}/fd`).flatMap((fd) => {
+      try {
+        return [readlinkSync(`/proc/${zstd}/fd/${fd}`)];
+      } catch {
+        return [];
+      }
+    });
+    expect(held.length).toBeGreaterThanOrEqual(3);
+    expect(held.filter((file) => file !== "/dev/null" && !file.startsWith(join(home, "surogate", "vm", "images")))).toEqual([expect.stringMatching(/^socket:/)]);
     const closed = app!.waitForEvent("close");
     await app!.evaluate(({ app: electron }) => electron.quit());
     // It goes with the quit, not seconds later once it has written the image out.
@@ -742,7 +778,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect(await operation("run", { command: "echo slow", workdir: null, timeout: 60 })).toEqual(ran(`slow\n\n${EMULATED_NOTICE}`));
     expect(await operation("run", { command: "echo slow", workdir: null, timeout: 60 })).toEqual(ran("slow\n"));
     const page = await shellPage(app!);
-    expect(await page.textContent("#sandbox-text")).toBe(NO_KVM);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(NO_KVM);
     expect([await page.isHidden("#sandbox-log"), await page.isHidden("#sandbox-retry")]).toEqual([true, true]);
     await page.click("#open-settings");
     expect(await (await thisComputer(app!)).textContent("#sandbox")).toBe(NO_KVM);
@@ -796,5 +832,59 @@ describe("the sandbox's tools, through the app", () => {
     expect(await page.textContent("#sandbox-check")).toBe("Check again");
     await page.click("#sandbox-check");
     await expect.poll(() => page.isHidden("#sandbox")).toBe(true);
+  });
+
+  it("says the file helper's tools are missing too, and a file tool answers so in the same words, never srt's", async () => {
+    // Every program of this computer's but socat and ripgrep, as on a computer the install script has not run on.
+    const bin = mkdtempSync(join(home, "bin-"));
+    for (const name of readdirSync("/usr/bin")) if (name !== "socat" && name !== "rg") symlinkSync(join("/usr/bin", name), join(bin, name));
+    const folder = join(home, "files");
+    mkdirSync(folder);
+    const client = await launched({ PATH: bin });
+    const page = await shellPage(app!);
+    const missing = "Surogate's sandbox tools are missing. Run the install script again. It lacks socat, ripgrep";
+    // The look asks QEMU and virtiofsd for their versions first, each within 5 s.
+    await expect.poll(() => page.textContent("#sandbox-text"), { timeout: 15_000 }).toBe(missing);
+    await bind(client, folder);
+    expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
+      error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
+    });
+  });
+
+  it.each([
+    // Spelled from the root, where a look that took the PATH as it is would read it.
+    ["a relative entry of the PATH", (folder: string) => [join(folder, "..", "only").slice(1), join(folder, "..", "only")]],
+    ["an entry of the PATH inside the folder", (folder: string) => [join(folder, "bin"), join(folder, "bin")]],
+  ])("looks for the file helper's tools where the folder's file host does: with the only bubblewrap in %s, the sidebar and a file tool say alike that it is missing", async (_name, entry) => {
+    // Every program of this computer's but bubblewrap.
+    const bin = mkdtempSync(join(home, "bin-"));
+    for (const name of readdirSync("/usr/bin")) if (name !== "bwrap") symlinkSync(join("/usr/bin", name), join(bin, name));
+    const folder = join(home, "files");
+    mkdirSync(folder);
+    const [spelled, dir] = entry(folder) as [string, string];
+    mkdirSync(dir);
+    writeFileSync(join(dir, "bwrap"), "#!/bin/sh\n", { mode: 0o755 });
+    const env = { PATH: `${spelled}:${bin}` };
+    const client = await launched(env);
+    const missing = "Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap";
+    const said = async () => (await shellPage(app!)).textContent("#sandbox-text");
+    // A file host looks in none of its own folder: once a chat is bound to it, nor does the app.
+    await bind(client, folder);
+    await expect.poll(said, { timeout: 15_000 }).toBe(missing);
+    expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
+      error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
+    });
+    // Check again looks for the VM's tools and the file helper's by the same folders, taken once:
+    // the line is still there, and still what a file tool says.
+    await (await shellPage(app!)).click("#sandbox-check");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(await said()).toBe(missing);
+    expect(await operation("stat", { key: join(folder, "a.txt") })).toEqual({
+      error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${missing}` },
+    });
+    // At the next launch the chat is bound already, and the app says so with nothing bound anew.
+    await quit(app);
+    app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE, ...env });
+    await expect.poll(said, { timeout: 30_000 }).toBe(missing);
   });
 });

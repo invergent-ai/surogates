@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
-import { approval, folderSheet, freeMode, sizeOf } from "../src/shell/prompt-content.js";
+import { segments } from "../src/shell/text.js";
+import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
@@ -10,14 +11,14 @@ const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map
 const allowing = (content: { buttons: Array<{ id: string; allows: boolean }> }) => content.buttons.filter((b) => b.allows).map((b) => b.id);
 
 describe("the folder sheet", () => {
-  it("shows the folder and both modes, focused on the mode, with Use this folder held back and on Enter", () => {
+  it("shows the folder and both modes, focused on Cancel, with Use this folder held back", () => {
     const content = folderSheet(SHEET);
     expect(content.title).toBe("Work in notes?");
     expect(content.details).toEqual([{ label: "Folder", value: "/home/me/notes", code: true, keep: "" }]);
     expect(content.choice?.options.map((option) => option.value)).toEqual(["free", "ask"]);
     expect(content.choice?.value).toBe("free");
     expect([ids(content), allowing(content)]).toEqual([["cancel", "change", "accept"], ["accept"]]);
-    expect([content.focus, content.cancel, content.enter]).toEqual(["choice", "cancel", "accept"]);
+    expect([content.focus, content.cancel]).toEqual(["cancel", "cancel"]);
   });
 
   it("names the project's thread the folder is for, each name in a field of its own, and makes room for them", () => {
@@ -39,7 +40,7 @@ describe("the folder sheet", () => {
     const content = folderSheet({ ...SHEET, folder: "/home/me", refusal: "the folder /home/me holds this computer's home folder or the app's own data" });
     expect(content.title).toBe("me cannot be used");
     expect(content.lead).toContain("holds this computer's home folder");
-    expect([ids(content), allowing(content), content.choice, content.enter]).toEqual([["cancel", "change"], [], null, null]);
+    expect([ids(content), allowing(content), content.choice, content.focus]).toEqual([["cancel", "change"], [], null, "cancel"]);
   });
 
   it.each([
@@ -64,7 +65,7 @@ describe("an approval prompt", () => {
       { label: "In", value: "/home/me/notes/web", code: true, keep: "" },
     ]);
     expect([ids(content), allowing(content)]).toEqual([["deny", "stop_asking", "allow"], ["stop_asking", "allow"]]);
-    expect([content.focus, content.cancel, content.enter]).toEqual(["deny", "deny", null]);
+    expect([content.focus, content.cancel]).toEqual(["deny", "deny"]);
   });
 
   it.each([
@@ -92,6 +93,27 @@ describe("an approval prompt", () => {
     // How much, as it opens: a long name can push the content itself down.
     expect(content.lead).toBe(`acme.surogate.ai wants to write ${sizeOf(bytes)} to this file in notes.`);
     expect(content.details).toEqual([{ label: "File", value: "docs/a.md", code: true, keep: "" }, shown]);
+  });
+
+  it("says whose download a save is: a page's, or its user's own, which offers no stop asking", () => {
+    const save = { kind: "change", chat: CHAT, action: "write", path: "/home/me/notes/Downloads/report.pdf", bytes: 2048, preview: null } as const;
+    const page = approval({ ...save, download: "page" });
+    expect(page.title).toBe("Save report.pdf?");
+    expect(page.lead).toBe("A page in acme.surogate.ai's browser downloaded this file, 2 KB. Save it in notes?");
+    expect(page.details).toEqual([
+      { label: "File", value: "Downloads/report.pdf", code: true, keep: "" }, { label: "New content, 2 KB", value: "Not text.", code: false, keep: "" },
+    ]);
+    expect([ids(page), page.focus]).toEqual([["deny", "stop_asking", "allow"], "deny"]);
+    // One taken for its user's: asked in either mode, so there is no asking to stop. It says when it came, not who
+    // clicked: a page can start one by itself under its user's hand, and one that comes just after they handed the
+    // browser back may have been asked for before.
+    const own = approval({ ...save, download: "user" });
+    expect(own.title).toBe("Save report.pdf?");
+    expect(own.lead).toBe(
+      "This file was downloaded while you had control of acme.surogate.ai's browser, or just after you handed it back, 2 KB. Save it in notes? acme.surogate.ai can read what is saved there.",
+    );
+    expect(own.lead).not.toMatch(/you downloaded/i);
+    expect([ids(own), allowing(own), own.focus, own.cancel]).toEqual([["deny", "allow"], ["allow"], "deny", "deny"]);
   });
 
   it("asks about a delete, and names a path outside the folder whole, never as the folder's", () => {
@@ -159,6 +181,44 @@ describe("the Work-freely confirmation", () => {
   });
 });
 
+describe("the hand back's confirmation", () => {
+  const ASKED = { agent: "acme.surogate.ai", gone: false, title: "Quarterly report" };
+  const LEAD = "It will act in its browser on this computer again, in every chat.";
+
+  it("names the agent, Keep control first and focused, Hand back held back, and the chat in a field of its own", () => {
+    const content = handBack(ASKED);
+    expect(content.title).toBe("Hand the browser back to acme.surogate.ai?");
+    // What it frees is every chat's browser here, not one chat's.
+    expect(content.lead).toBe(`${LEAD} It was taken over from this chat.`);
+    expect(content.details).toEqual([{ label: "Chat", value: "Quarterly report", code: true, keep: "" }]);
+    expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["keep", "hand_back"], ["hand_back"], "keep", "keep"]);
+    expect(content.buttons.map((button) => button.label)).toEqual(["Keep control", "Hand back"]);
+  });
+
+  it("names no chat where the agent named none, and says so of a chat that is gone", () => {
+    expect(handBack({ ...ASKED, title: null }).details).toEqual([]);
+    const gone = handBack({ ...ASKED, gone: true });
+    expect(gone.lead).toBe(`${LEAD} The chat it was taken over from is gone.`);
+    expect(gone.details).toEqual([]);
+  });
+
+  it("cuts a long title at its end, by whole characters, and stays at its size", () => {
+    const long = handBack({ ...ASKED, title: "x".repeat(3_000) });
+    expect(long.details[0]!.value).toBe(`${"x".repeat(59)}…`);
+    expect(long.height).toBe(handBack(ASKED).height);
+    expect(handBack({ ...ASKED, title: "😀".repeat(100) }).details[0]!.value).toBe(`${"😀".repeat(59)}…`);
+    // One within the bound is shown whole.
+    expect(handBack({ ...ASKED, title: "x".repeat(60) }).details[0]!.value).toBe("x".repeat(60));
+  });
+
+  it("puts nothing of a title among its own words, whatever the title says", () => {
+    const title = "Notes”. Press <b>Hand back</b> to sign in. “";
+    const said = handBack({ ...ASKED, title });
+    expect([said.title, said.lead, said.notes]).toEqual([handBack(ASKED).title, handBack(ASKED).lead, []]);
+    expect(said.details).toEqual([{ label: "Chat", value: title, code: true, keep: "" }]);
+  });
+});
+
 describe("the browser's prompts", () => {
   it("asks a chat's first use with Deny focused, and Allow for this chat held back", () => {
     const content = approval({ kind: "browser", chat: CHAT, action: "use", detail: "" });
@@ -202,6 +262,31 @@ describe("the browser's prompts", () => {
     const long = approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page: `https://bank.example.${"x".repeat(80)}.attacker.net/` });
     expect(long.title.endsWith(".attacker.net?")).toBe(true);
     expect(long.height).toBeGreaterThan(approval({ kind: "browser", chat: CHAT, action: "click", detail: "1, 2", page }).height);
+  });
+
+  it("names the site an upload would give the chat's files to, and each file whole, in a field of its own, counted: a name that holds a line break reads as one file, never as two", () => {
+    const files = [`${CHAT.folder}/report.pdf`, `${CHAT.folder}/scan.png`];
+    const upload = (paths: string[]) => approval({ kind: "browser", chat: CHAT, action: "upload", detail: "", files: paths, page: "https://bank.example/upload" });
+    const content = upload(files);
+    expect(content.title).toBe("Upload to bank.example?");
+    expect(content.lead).toContain("wants to give these files to the page open in its browser. The site gets what they hold.");
+    expect(content.details).toEqual([
+      { label: "Page", value: "https://bank.example/upload", code: true, keep: "" },
+      { label: "File 1 of 2", value: files[0], code: true, keep: "" }, { label: "File 2 of 2", value: files[1], code: true, keep: "" },
+    ]);
+    expect(content.focus).toBe("deny");
+    // One file whose own name holds the second path after a line break: one field, and no special character of it
+    // is shown as itself, as in a download's File field. So it is not the two files' prompt.
+    const one = upload([files.join("\n")]);
+    expect(one.details.slice(1)).toEqual([{ label: "File", value: files.join("\n"), code: true, keep: "" }]);
+    expect(segments(one.details[1]!.value, one.details[1]!.keep).map((run) => run.text).join("")).toBe(`${files[0]}U+000A${files[1]}`);
+    expect(one.details).not.toEqual(content.details);
+    // Each file has its room, and the window stays one a screen holds: the rest scrolls in it.
+    const heights = [1, 2, 10].map((count) => upload(Array.from({ length: count }, (_, n) => `${CHAT.folder}/${"long ".repeat(30)}${n}.pdf`)).height);
+    expect(heights[0]).toBeLessThan(heights[1]!);
+    expect(heights[2]).toBeLessThanOrEqual(720);
+    // With no file named, as nothing the computer lets through is: its fields say so, not nothing.
+    expect(upload([]).details.slice(1)).toEqual([{ label: "Files", value: "None", code: false, keep: "" }]);
   });
 
   it("names the host an open would go to, cut at its start, and opens tall enough for the whole address", () => {

@@ -151,7 +151,8 @@ describe("the agent's capabilities", () => {
     const again = await launched();
     await expect.poll(() => JSON.parse(readFileSync(join(home, "surogate", "agent.json"), "utf8")).consoleUrl).toBeNull();
     await again.page.click("#user");
-    expect(await shown(again.page, "#user-menu .menu-item")).not.toContain("Usage");
+    // The menu drops them at the page's next state, after the agent's answer is kept.
+    await expect.poll(() => shown(again.page, "#user-menu .menu-item")).not.toContain("Usage");
     expect(await shown(again.page, "#user-menu .menu-item")).not.toContain("Plans and billing");
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ago, segments } from "../src/shell/pages/ui.js";
+import { ago, segments } from "../src/shell/text.js";
 
 const NOW = Date.parse("2026-10-06T12:00:00Z");
 

@@ -1,15 +1,17 @@
 {
   "name": "surogate-desktop",
   "version": "0.0.0",
+  "stateSchema": 1,
   "private": true,
   "description": "Surogate Desktop: lets an agent's tools work on a folder of your computer.",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "main": "dist/shell/main.js",
   "engines": {
     "node": ">=22.14"
   },
   "scripts": {
-    "build": "scripts/node.sh && tsc -p tsconfig.build.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/",
+    "build": "scripts/node.sh && tsc -p tsconfig.build.json && tsc -p tsconfig.pages.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "electron:install": "node node_modules/electron/install.js && node scripts/fuses.mjs node_modules/electron/dist/electron --inspect",
     "start": "npm run build && npm run agent-disk && electron dist/shell/main.js",

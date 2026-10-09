@@ -45,6 +45,7 @@ from surogates.devices.workspace import (
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RevisionConflict, RipgrepError, WorkspaceIO
+from surogates.tools.workspace_io.base import refuse_nul
 from surogates.tools.workspace_io.local import CODE_UNITS
 
 # What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
@@ -186,6 +187,9 @@ def _cap_strings(value: Any) -> Any:
 
 
 async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
+    if kind != "stat":
+        # As the app: a NUL is refused before anything else of the operation is looked at.
+        refuse_nul(*(a.get(name) for name in ("path", "key", "workdir", "command", "pattern", "glob")))
     if kind in _PROCESS_KINDS:
         return _cap_strings(await _run_process(folder, kind, a))
     if kind == "resolve":

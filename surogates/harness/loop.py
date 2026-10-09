@@ -38,7 +38,7 @@ from surogates.harness.agent_resolver import (
 )
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
-from surogates.harness.device_replay import replay_unanswered, resumable
+from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
@@ -80,7 +80,7 @@ from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal
+from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -93,6 +93,7 @@ from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
+from surogates.session.store import RERUN_WINDOW
 from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
 
 if TYPE_CHECKING:
@@ -157,7 +158,9 @@ from surogates.harness.loop_deep_research import (
 from surogates.harness.loop_messages import (
     _initial_system_message,
     _latest_user_event_data,
+    _latest_user_event_id,
     _latest_user_event_text,
+    _user_event_text,
     _latest_user_message_text,
     _should_notify_parent_on_completion,  # noqa: F401
     _view_context_note,  # noqa: F401
@@ -171,9 +174,23 @@ from surogates.harness.loop_mission_evaluator import (
     _maybe_run_mission_evaluator,  # noqa: F401
     _parse_judge_json,  # noqa: F401
 )
+from surogates.harness.outcomes import OutcomeState
 from surogates.harness.loop_pending import (
     _actionable_pending_events,
-    _slash_loop_already_processed,
+    _aware,
+    _command_answered,
+    _cut_off_at,
+    _first_plain_message_unread,
+    _first_unread,
+    _goal_turn_waits,
+    _left_behind,
+    _plain_message_unread,
+    _read_as_words,
+    _shown_before_its_answer,
+    NAMES_ANSWERS,
+    _turn_cut_off,
+    _hand_back_unread,
+    _turn_for_a_hand_back,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -194,13 +211,13 @@ from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
-    WORKER_NEWS_TYPES,
+    NEWS_TYPES,
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
+    held_news,
     prune_superseded_canvas_images,
     unread_reports,
-    worker_news,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -328,9 +345,8 @@ def _slash_command_name(content: str | None) -> str | None:
     """Map a user message to the canonical id of the built-in slash
     command it invokes, or None when it is not a gateable command.
 
-    Mirrors the dispatch matchers in ``AgentHarness.wake`` so the
-    capability gate and the dispatcher agree on what counts as each
-    command.
+    The capability gate and the dispatch in ``AgentHarness.wake`` both
+    read it, so they agree on what counts as each command.
     """
     if not content:
         return None
@@ -353,6 +369,49 @@ def _slash_command_name(content: str | None) -> str | None:
     return None
 
 
+#: What says how a command left things, for its user to look at when the
+#: command could not say so itself.
+_SAYS_HOW_IT_STANDS = {
+    "goal": "`/goal status`",
+    "mission": "`/mission status`",
+    "auto-research": "`/auto-research status`",
+    "loop": "`/loop list`",
+    "code": "`/code status`",
+}
+
+
+def _cut_off_before_its_answer(typed: str) -> str:
+    """The wake's own answer to the command *typed*, whose handler left
+    without one.  The wake cannot know whether the command took effect
+    before its handler failed, so the words claim neither: they send its
+    user to look before typing it again."""
+    look = _SAYS_HOW_IT_STANDS.get(_slash_command_name(typed) or "", "the conversation")
+    return f"{typed.split()[0]} was cut off before it could answer. Check {look} before typing it again."
+
+
+def command_never_answered(events: list) -> str | None:
+    """The oldest command of the harness's in *events*, a session's log,
+    that has no answer, as the word its user typed (``/goal``); None when
+    there is none.  For whoever gives the session up to say which command
+    could not be run."""
+    for event in events:
+        if event.type != EventType.USER_MESSAGE.value or (event.data or {}).get("synthetic"):
+            continue
+        typed = _user_event_text(event.data)
+        if (
+            _slash_command_name(typed) not in (None, _COMMAND_FOR_THE_MODEL)
+            and not _command_answered(events, event.id)
+            and not _read_as_words(events, event.id)
+        ):
+            return typed.split()[0]
+    return None
+
+
+#: The one built-in command the model answers: the wake rewrites its message
+#: and runs the model's turn on it.  The harness answers every other built-in
+#: command itself, with no model turn.
+_COMMAND_FOR_THE_MODEL = "deep-research"
+
 #: Commands that do their work in the conversation itself.  A project's
 #: master works through threads: a goal, a mission or an auto-research run
 #: there could neither delegate nor do the work, ``/deep-research`` hands its
@@ -362,10 +421,35 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
 
-# The commands a project's thread refuses: a routine's runs, a mission's
-# tasks, a research's experiments and helpers would all edit a copy the
-# thread never lands, and so would a coding agent, whose turn never lands.
-_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "mission", "auto-research", "deep-research", "code"})
+#: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
+#: pod's answer together.  Past it the stop goes on, and the hand-off stays as the turn left it.
+_STOP_HAND_OFF_BOUND = 60.0
+#: The threads whose stopped turn this worker could not write a turn-ending event for, each with the
+#: stopped turn's name and the event: written before the thread's next turn starts here, unless the
+#: thread has a later turn end by then.
+_STOPS_NOT_WRITTEN: dict[Any, tuple[int, dict[str, Any]]] = {}
+#: How many of them a worker keeps: the oldest goes for one more.
+_STOPS_KEPT = 1024
+
+
+def _keep_to_write(session_id: Any, turn: int, said: dict[str, Any]) -> None:
+    """Keep the stop of *session_id*'s turn *turn*, which could not be written, for the thread's next turn here."""
+    _STOPS_NOT_WRITTEN.pop(session_id, None)
+    _STOPS_NOT_WRITTEN[session_id] = (turn, said)
+    while len(_STOPS_NOT_WRITTEN) > _STOPS_KEPT:
+        oldest = next(iter(_STOPS_NOT_WRITTEN))
+        del _STOPS_NOT_WRITTEN[oldest]
+        logger.warning("Let go of the stop of thread %s that could not be written: too many are kept", oldest)
+
+# The commands a project's thread refuses.  A routine's runs would start from
+# old files, and their work would land only when someone next speaks to the
+# thread.  A coding agent's turn ends outside the thread's landing, so its
+# edits would stay in a copy never landed.  A deep research's writer works on
+# a copy of its own, where it finds none of the evidence its planner kept.
+# An auto-research run works on a git repository, and a copy holds none.
+# A mission's tasks each work on a copy of their own, handed back to the
+# thread: that one runs.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "auto-research", "deep-research", "code"})
 
 # The commands a chat on a local folder refuses: a research run's
 # experiments need the cloud's coding sandbox and a /workspace repository.
@@ -436,6 +520,12 @@ def _carries_information(text: str) -> bool:
     does, and an ASCII-only test would discard it.
     """
     return bool(re.search(r"[^\W_]", text, re.UNICODE))
+
+
+#: What revives a finished session with no message of its user's: a worker's
+#: report to a project's master, and, in a chat on its user's computer, the
+#: resume a hand back of the browser gave it that no turn has read.
+_REVIVED_BY_NEWS = frozenset({"worker_report", "unread_browser_hand_back"})
 
 
 class AgentHarness(
@@ -715,6 +805,10 @@ class AgentHarness(
         # and are discarded automatically on completion.
         self._background_tasks: set[asyncio.Task] = set()
 
+        # The message whose command this wake is answering, if any: each
+        # answer of the harness's names it.
+        self._answering: int | None = None
+
     # ------------------------------------------------------------------
     # Interrupt API (thread-safe)
     # ------------------------------------------------------------------
@@ -750,7 +844,7 @@ class AgentHarness(
         self._interrupt_requested = False
         self._interrupt_message = None
 
-    async def _has_stranded_user_message(self, session_id: UUID) -> bool:
+    async def _has_stranded_user_message(self, session: Session) -> bool:
         """Return True if a real user message landed past the harness cursor.
 
         Detects the completion race: a reply sent between the final
@@ -766,15 +860,97 @@ class AgentHarness(
         inbox.task_complete) always sit past the cursor and are
         excluded by the type filter.
         """
-        cursor = await self._store.get_harness_cursor(session_id)
-        events = await self._store.get_events(
-            session_id,
-            after=cursor,
-            types=[EventType.USER_MESSAGE],
-        )
+        cursor = await self._store.get_harness_cursor(session.id)
+        # A command is not stranded by the cursor: a command's end leaves
+        # the cursor before a report no turn has read, and one that still
+        # waits revives a finished session by its own rule.
         return any(
-            not (event.data or {}).get("synthetic") for event in events
+            self._is_plain_message(session, event)
+            for event in await self._store.get_events(session.id, after=cursor, types=[EventType.USER_MESSAGE])
         )
+
+    def _answers_itself(self, text: str, session: Session) -> bool:
+        """Whether *text* is a command the harness answers itself, with no
+        model turn: one gated off for this agent, which it refuses, or any
+        built-in command but /deep-research."""
+        return (
+            self._slash_command_block_reason(text, session) is not None
+            or _slash_command_name(text) not in (None, _COMMAND_FOR_THE_MODEL)
+        )
+
+    def _is_plain_message(self, session: Session, event: Any) -> bool:
+        """Whether *event* is a message the user wrote themselves that is no command of the harness's."""
+        return (
+            event.type == EventType.USER_MESSAGE.value
+            and not (event.data or {}).get("synthetic")
+            and not self._answers_itself(_user_event_text(event.data), session)
+        )
+
+    def _waiting_command(self, session: Session, events: list) -> Any | None:
+        """The oldest of ``_waiting_commands``; None when there is none."""
+        return next(iter(self._waiting_commands(session, events)), None)
+
+    def _model_goes_first(self, session: Session, events: list, command: Any) -> bool:
+        """Whether a turn of the model's comes before *command* in the
+        log's order: a message of the user's own before it that no request
+        has read, or a turn that a dead worker cut off.  The command then
+        waits for that turn's end, as one typed during a turn under way
+        does."""
+        cut_off = _cut_off_at(events)
+        unread = _first_plain_message_unread(
+            events, is_plain_message=lambda event: self._is_plain_message(session, event),
+        )
+        return cut_off is not None or (unread is not None and unread < command.id)
+
+    def _waiting_commands(self, session: Session, events: list) -> list:
+        """The messages of the user's in *events* that are commands of the
+        harness's no wake has answered, oldest first.
+        Every command a user typed is run, once, in the order typed,
+        however many arrived before or during a wake.  One that waits is
+        work for a wake whatever the cursor says, and whatever the session
+        was in the middle of when it was typed.  Not one behind a turn's
+        end older than the sweeper's own window for doing again what a
+        user asked for (``RERUN_WINDOW``), nor one an older harness gave
+        the model as words.  *events* is the session's log from its start:
+        which harness read a message is told by the wake before it."""
+        now = datetime.now(timezone.utc)
+        return [
+            event for event in events
+            if (
+                event.type == EventType.USER_MESSAGE.value
+                and not (event.data or {}).get("synthetic")
+                and self._answers_itself(_user_event_text(event.data), session)
+                and not _command_answered(events, event.id)
+                and not _read_as_words(events, event.id)
+                and not _left_behind(events, event.id, now=now, window=RERUN_WINDOW)
+            )
+        ]
+
+    async def _has_waiting_command(self, session: Session) -> bool:
+        """Whether a command typed during the turn that ended this session
+        still waits: the turn left it for its own wake to answer."""
+        typed = [
+            event for event in await self._store.get_events(session.id, types=[EventType.USER_MESSAGE])
+            if not (event.data or {}).get("synthetic")
+            and self._answers_itself(_user_event_text(event.data), session)
+        ]
+        if not typed:
+            return False
+        # Commands are answered in the order typed, so one waits only while
+        # the last one typed does.  The log is read from that one on, with
+        # the wake before it, which says whose turn it was typed in: a
+        # finished session's wakes come often, and its log is long.
+        last = typed[-1]
+        woken = await self._store.last_event(session.id, EventType.HARNESS_WAKE, before=last.id)
+        since = await self._store.get_events(
+            session.id,
+            after=last.id - 1,
+            types=[
+                EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
+                EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT, EventType.SESSION_COMPLETE,
+            ],
+        )
+        return self._waiting_command(session, [woken, *since] if woken is not None else since) is not None
 
     async def _expand_last_skill_again(self, session: Session, messages: list[dict], all_events: list) -> None:
         """Put back the skill the user's last message ran at its own wake,
@@ -811,6 +987,21 @@ class AgentHarness(
             session_factory=self._session_factory,
         )
 
+    async def _has_unread_hand_back(self, session_id: UUID) -> bool:
+        """Return True if a hand back of the browser gave the session a resume after its last
+        model request.
+
+        Read as a worker's report is (``_has_unread_report``): every model
+        request reads the hand backs written before it, so one after the last
+        request is one no turn read.  The control route writes it only for a
+        hand back its user confirmed, to a chat that could take a turn.
+        """
+        events = await self._store.get_events(
+            session_id,
+            types=[EventType.LLM_REQUEST, EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED],
+        )
+        return _hand_back_unread(events)
+
     async def _has_unread_report(self, session_id: UUID) -> bool:
         """Return True if a worker's report is newer than the session's last model request.
 
@@ -828,35 +1019,41 @@ class AgentHarness(
     async def _collect_reports(
         self,
         session: Session,
+        held: list[dict],
         after_event_id: int,
         before: int | None = None,
     ) -> tuple[list[dict], int]:
-        """Thread reports, and news of threads the user started, that reached
-        a project's master past *after_event_id*, and below *before* when given.
+        """*held*, the news waiting for a session's next request, with what
+        reached it past *after_event_id*, and below *before* when given:
+        for a project's master, thread reports and news of threads the user
+        started; for a chat on its user's computer, the resume their handing
+        back the browser gave it, unless they took it over again since.
 
         Read for each model request, and at the end of a reply, one message
-        per report, as replay renders them.  Only a master reads them live:
-        its only reporting children are its threads.  A ``delegate_task``
-        parent, which a master never is, already has its child's result as
-        the tool's result.
+        each, as replay renders them.  Of workers, only a master reads them
+        live: its only reporting children are its threads.  A
+        ``delegate_task`` parent, which a master never is, already has its
+        child's result as the tool's result.
         """
-        if not is_project_master(session.config):
-            return [], after_event_id
-        events = await self._store.get_events(
-            session.id,
-            after=after_event_id,
-            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED],
-        )
+        types: list[EventType] = []
+        if is_project_master(session.config):
+            types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
+        if device_of(session.config) is not None:
+            types += [EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
+        if not types:
+            return held, after_event_id
+        events = await self._store.get_events(session.id, after=after_event_id, types=types)
         if before is not None:
             events = [event for event in events if event.id < before]
         if not events:
-            return [], after_event_id
-        notes = [worker_news(event.type, event.data) for event in events]
-        return [note for note in notes if note is not None], max(event.id for event in events)
+            return held, after_event_id
+        for event in events:
+            held = held_news(held, event)
+        return held, max(event.id for event in events)
 
     async def _collect_steer_messages(
         self,
-        session_id: UUID,
+        session: Session,
         after_event_id: int,
     ) -> tuple[dict | None, int]:
         """Pull user messages that arrived past the steer cursor.
@@ -872,17 +1069,20 @@ class AgentHarness(
         nudges) are never re-examined and never steer.
         """
         events = await self._store.get_events(
-            session_id,
+            session.id,
             after=after_event_id,
             types=[EventType.USER_MESSAGE],
         )
         if not events:
             return None, after_event_id
         new_cursor = max(event.id for event in events)
+        # A command of the harness's is never the model's to read: the turn
+        # leaves it, and its own wake answers it once the turn has ended.
         rendered = [
             build_user_message_dict(event.data)
             for event in events
             if not (event.data or {}).get("synthetic")
+            and not self._answers_itself(_user_event_text(event.data), session)
         ]
         if not rendered:
             return None, new_cursor
@@ -901,6 +1101,11 @@ class AgentHarness(
         returning from the loop.
         """
         reason_msg = self._interrupt_message or "interrupted"
+        # A project thread's turn that is stopped is over from here on, whatever becomes of this worker.
+        # One taken at the wake, before its loop named a turn, has made no pod and handed nothing on:
+        # there is no turn of this wake to write an end for.
+        named = is_project_thread(session.config) and session.config.get("turn_after") is not None
+        stop_written = named and await self._write_that_the_turn_was_stopped(session, reason_msg)
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
         # A project's stopped turn spent what it spent: settle its holds now,
@@ -913,6 +1118,7 @@ class AgentHarness(
                 self._settle_allowance_reservation(session, cost_tracker),
             )
         if self._sandbox_pool is not None:
+            await self._take_back_what_the_turn_handed_on(session)
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
@@ -928,7 +1134,7 @@ class AgentHarness(
         # and leave the client's terminal flag stuck on, suppressing
         # the running indicator for the new turn's deltas.
         current = await self._store.get_session(session.id)
-        if current.status == "paused":
+        if current.status == "paused" and not stop_written:
             await self._store.emit_event(
                 session.id,
                 EventType.SESSION_PAUSE,
@@ -950,6 +1156,126 @@ class AgentHarness(
                 {"reason": "channel_stop", "worker_id": self._worker_id},
             )
         self._clear_interrupt()
+
+    async def _take_back_what_the_turn_handed_on(self, session: Session) -> None:
+        """Take a thread's stopped turn's own files off the hand-off it made for its helpers, before its pod goes.
+
+        A stopped turn lands nothing.  Its branch never had its work, but a
+        step that started a helper put its copy on the hand-off.  The pod
+        that made the hand-off knows it; where that pod went under the turn,
+        one is opened in its place.  As best it can, and within a bound.
+
+        Where it is not carried out, the log says so and why: the worker did
+        not hand the copy on itself (the turn was cut off and taken up
+        again), the pod or the project's lock was not had in time, or the
+        pod failed.  The stopped turn's files stay out all the same: the
+        hand-off names its turn, and the open of the next turn's copy
+        leaves another turn's own files out, keeping what helpers kept.
+
+        A turn that handed nothing on, as every turn of a session that is no
+        thread with a copy, is done here at once: no pod is asked, and none
+        opened.
+        """
+        from surogates.harness.landing import drop_hand_off, handed_on, turn_ended
+        from surogates.sandbox.pool import sandbox_session_key
+
+        left = "The thread's next copy leaves the stopped turn's own files out, and keeps its helpers' work."
+        if not handed_on(session):
+            named = is_project_thread(session.config) and session.config.get("turn_after") is not None
+            if named and await self._turn_started_a_helper(session):
+                logger.warning(
+                    "The stop of thread %s's turn was not carried out on its hand-off: this worker did not hand the "
+                    "copy on itself, the turn having been cut off and taken up again. %s", session.id, left,
+                )
+            return
+        try:
+            from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+            # The turn's pod, or one in its place where it is gone: a pod made now is told which
+            # hand-offs the turn made.
+            owner = sandbox_session_key(session)
+
+            async def taken_back() -> None:
+                spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+                await self._sandbox_pool.ensure(owner, spec)
+                await drop_hand_off(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, session=session,
+                    saga_settings=self._saga_settings,
+                )
+
+            # A stop stops: behind another thread's landing or the day's pruning the lock is minutes away.
+            await asyncio.wait_for(taken_back(), _STOP_HAND_OFF_BOUND)
+        except TimeoutError:
+            logger.warning(
+                "The stop of thread %s's turn was not carried out on its hand-off: its pod, the project's lock and "
+                "the pod's answer were not had within %d s. %s", session.id, _STOP_HAND_OFF_BOUND, left,
+            )
+        except Exception as exc:
+            logger.warning(
+                "The stop of thread %s's turn was not carried out on its hand-off: %s. %s", session.id, exc, left,
+                exc_info=True,
+            )
+        finally:
+            turn_ended(session)
+
+    async def _name_the_turn(self, session: Session) -> None:
+        """Before a thread's turn makes any pod: the name its pods are told (see :func:`landing.name_turn`).
+
+        A stop this worker could not write down for the thread is written
+        first, so the turn starting now comes after it; unless the thread
+        has had a turn end since, when it is only let go.
+        """
+        from surogates.harness.landing import TURN_ENDS, name_turn
+
+        kept = _STOPS_NOT_WRITTEN.get(session.id)
+        if kept is not None:
+            stopped, said = kept
+            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            if (ended.id if ended else 0) == stopped:
+                await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            # With a later turn end, written elsewhere since, the stopped turn is over already.
+            del _STOPS_NOT_WRITTEN[session.id]
+        await name_turn(self._store, session)
+
+    async def _write_that_the_turn_was_stopped(self, session: Session, reason: str) -> bool:
+        """Have a turn-ending event after a thread's turn that is stopped here, before anything else of the stop.
+
+        The user's own stop has one already, written by its route.  Any
+        other interrupt gets one now, so the thread's next turn is another
+        turn whatever becomes of this worker.  Whether one was written
+        here.  Where it cannot be, the log says so, and this worker writes
+        it before the thread's next turn starts here; a turn taken by
+        another worker first takes this turn's hand-off for its own, if
+        the stop could not take it back either.
+        """
+        from surogates.harness.landing import TURN_ENDS
+
+        said = {"reason": "interrupted", "message": reason, "worker_id": self._worker_id}
+        try:
+            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            if (ended.id if ended else 0) != session.config.get("turn_after"):
+                return False
+            await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            return True
+        except Exception:
+            _keep_to_write(session.id, session.config.get("turn_after") or 0, said)
+            logger.warning(
+                "Could not write that the turn of thread %s was stopped: it is written before the thread's next turn "
+                "here. Until then a turn another worker starts takes this turn's hand-off for its own, where the "
+                "stop did not take it back.", session.id, exc_info=True,
+            )
+            return False
+
+    async def _turn_started_a_helper(self, session: Session) -> bool:
+        """Whether a step of the thread's turn now ending called a tool that starts a helper, by its log."""
+        from surogates.harness.tool_exec import HELPER_STARTING_TOOLS
+
+        try:
+            # Since the turn-ending event the turn is named by: its own calls, a cut-off part of it included.
+            calls = await self._store.get_events(session.id, after=session.config.get("turn_after") or 0, types=[EventType.TOOL_CALL])
+        except Exception:
+            return False
+        return any(call.data.get("name") in HELPER_STARTING_TOOLS for call in calls)
 
     # ------------------------------------------------------------------
     # Lease renewal (background task)
@@ -1033,6 +1359,22 @@ class AgentHarness(
             return capability_allowed(session.config, name)
         return True
 
+    async def _with_history_cap(self, session: Session) -> Session:
+        """A project's thread, or a thread's helper, marked ``history_off`` while the project has more files than history keeps.
+
+        Its pod then has the plain layout, the real files at ``/workspace``:
+        it works on them, as before projects had history, and lands nothing.
+        A thread on the user's computer is never counted: it works in the folder there.
+        """
+        config = session.config or {}
+        if self._storage is None or not config.get("storage_bucket") or device_of(config) is not None or not (
+            is_project_thread(config) or config.get("history_thread")
+        ):
+            return session
+        from surogates.workstreams.history import over_history_cap
+
+        return session.model_copy(update={"config": {**config, "history_off": await over_history_cap(self._storage, session)}})
+
     def _overlay_repos(self, session: Session) -> Session:
         """Overlay the agent's configured repos + ssh targets onto a wake-local session.
 
@@ -1073,7 +1415,8 @@ class AgentHarness(
         if (
             name in _PROJECT_THREAD_REFUSED_COMMANDS
             and session is not None
-            and is_project_thread(session.config)
+            # A thread's helper too, and a helper's: its goal is read as its first message.
+            and under_a_thread(session.config)
         ):
             return thread_refusal(f"/{name}")
         if (
@@ -1184,6 +1527,7 @@ class AgentHarness(
             # /code and the coding tool can resolve them (the fetched row does
             # not carry them).
             session = self._overlay_repos(session)
+            session = await self._with_history_cap(session)
             # From here every sandbox request for this session, whoever
             # makes it, goes through its device or is refused.
             device_token = enter_device_session(session)
@@ -1212,26 +1556,41 @@ class AgentHarness(
             # A project's master is also resumed by a thread's report that
             # no turn has read: the master's turn has usually ended long
             # before a thread finishes, and the report is what it waits for.
+            # And a chat on its user's computer by the resume their handing
+            # back the browser gave it, where no turn has read it.  The
+            # control route makes the chat active as it writes that resume;
+            # a turn that began just then, and ended without reading it,
+            # left the chat finished again.  Only one whose turn completed: a
+            # failed one is its user's to retry.
             revived_by: str | None = None
             if session.status in ("paused", "completed", "failed", "archived"):
                 if session.status in ("completed", "failed"):
-                    if await self._has_stranded_user_message(session_id):
+                    if await self._has_stranded_user_message(session) or (
+                        # A failed session is its user's to retry.
+                        session.status == "completed" and await self._has_waiting_command(session)
+                    ):
                         revived_by = "stranded_user_message"
                     elif is_project_master(session.config) and await self._has_unread_report(session_id):
                         revived_by = "worker_report"
-                # A report has no user waiting on it: while the user's limit
-                # refuses the turn, the report waits for their next message,
-                # which the message route holds.
-                if revived_by == "worker_report" and admitted_at_wake(session):
+                    elif (
+                        session.status == "completed"
+                        and device_of(session.config) is not None
+                        and await self._has_unread_hand_back(session_id)
+                    ):
+                        revived_by = "unread_browser_hand_back"
+                # A report, or a hand back, has no message of the user's
+                # waiting on it: while their limit refuses the turn, it waits
+                # for their next message, which the message route holds.
+                if revived_by in _REVIVED_BY_NEWS and admitted_at_wake(session):
                     try:
                         refused = await self._admit_turn(session, "")
                     except (AllowanceReserveError, CommerceReserveError):
                         # Closed without a crash: no turn ran, and the next
-                        # report or message wakes the master again.
-                        logger.warning("Session %s: a report waits while ops is unreachable", session_id, exc_info=True)
+                        # report or message wakes the session again.
+                        logger.warning("Session %s: %s waits while ops is unreachable", session_id, revived_by, exc_info=True)
                         return
                     if refused is not None:
-                        logger.info("Session %s: the user's limit holds back a report", session_id)
+                        logger.info("Session %s: the user's limit holds back %s", session_id, revived_by)
                         return
                 if revived_by is not None:
                     logger.info(
@@ -1326,9 +1685,27 @@ class AgentHarness(
                 session_id, exclude_types=[EventType.LLM_DELTA],
             )
 
-            # 4. Check for pending events (events after the cursor).
+            # 4. Check for work: events after the cursor, or a call of the
+            # model's last response that was begun and never answered.  A
+            # worker that died after a sibling call's result moved the
+            # cursor past that call left nothing else to say so.  Or the
+            # resume a hand back of the browser gave the chat, read by no
+            # request: one that landed while a command's own wake was
+            # answering it is behind the cursor that wake moved.
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending and not resumable(session, all_events):
+            command_waits = self._waiting_command(session, all_events) is not None
+            # 4a. A paused mission's coordinator takes no turn on what
+            # arrives: a helper's report waits, unread and past the cursor,
+            # for the turn the resume queues.  Only its user's own doing is
+            # work meanwhile: a command, a message, or the turn on one that
+            # a dead worker cut off.  Decided here, before anything is
+            # written or held for a turn.
+            if not command_waits and not _hand_back_unread(all_events) and not _turn_cut_off(all_events) and await self._mission_is_paused(session) and not _plain_message_unread(
+                all_events, is_plain_message=lambda event: self._is_plain_message(session, event),
+            ):
+                logger.debug("Session %s: its mission is paused, nothing of its user's waits", session_id)
+                return
+            if not pending and not unanswered_calls(all_events) and not command_waits and not _hand_back_unread(all_events):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -1338,9 +1715,9 @@ class AgentHarness(
 
             # 4'. A project's turn no route admitted (a thread's, a helper's,
             # or a master's resumed or retried) is held against the user's
-            # allowance and paid turns, as a typed message is.  A report
-            # wake was held when it revived the master.
-            if revived_by != "worker_report" and admitted_at_wake(session):
+            # allowance and paid turns, as a typed message is.  A wake for a
+            # report or a hand back was held when it revived the session.
+            if revived_by not in _REVIVED_BY_NEWS and admitted_at_wake(session):
                 refused = await self._admit_turn(session, _latest_user_event_text(all_events))
                 if refused is not None:
                     # The turn never ran: a paid hold taken before the
@@ -1355,7 +1732,7 @@ class AgentHarness(
             await self._store.emit_event(
                 session_id,
                 EventType.HARNESS_WAKE,
-                {"worker_id": self._worker_id, "cursor": cursor},
+                {"worker_id": self._worker_id, "cursor": cursor, NAMES_ANSWERS: True},
             )
 
             # 5'. Another worker woke a local-folder session since this one
@@ -1376,8 +1753,14 @@ class AgentHarness(
                     logger.debug("Memory manager initialization failed", exc_info=True)
 
             # 6. Rebuild the message list from the full event history.
+            # A command that waits is the harness's to answer and never the
+            # model's to read: a turn of the model's is not shown it.
+            waiting = self._waiting_command(session, all_events)
+            model_first = waiting is not None and self._model_goes_first(session, all_events, waiting)
+            unanswered = {id(event) for event in self._waiting_commands(session, all_events)}
+            shown = [event for event in all_events if id(event) not in unanswered]
             messages = self._rebuild_messages(
-                all_events,
+                shown,
                 workspace_path=(session.config or {}).get("workspace_path"),
             )
 
@@ -1433,7 +1816,7 @@ class AgentHarness(
             # 9. Create per-session cost tracker.
             cost_tracker = SessionCostTracker()
 
-            # 10. Handle /compress command — compress context without LLM call.
+            # 10. The user's command, if their last message is one.
             #
             # Slash-command detection MUST look at the raw user text from the
             # event log, not the rebuilt-message content.  _rebuild_messages
@@ -1449,61 +1832,110 @@ class AgentHarness(
             )
             # A wake for a report has no new user input, so the user's last
             # message, a command already handled included, must not run again.
-            last_user_content = (
-                "" if revived_by == "worker_report" else _latest_user_event_text(all_events)
-            )
+            # Nor has the turn a hand back of the browser gives the agent,
+            # in a chat left active by a command's answer as in a finished one.
+            for_news = revived_by == "worker_report" or _turn_for_a_hand_back(all_events)
+            last_user_content = "" if for_news else _latest_user_event_text(all_events)
 
-            # Capability gate: refuse slash commands disabled for this
-            # agent (master switch off, or this command individually off)
-            # before the dispatch chain below would handle them.
+            # 10a. A command the harness answers itself, with no model
+            # turn: one gated off for this agent (master switch off, or this
+            # command individually off), which it refuses, or any built-in
+            # command but /deep-research.  It is answered once, by the first
+            # wake that finds it unanswered, whatever the session was in
+            # the middle of when it was typed, and that wake ends its turn.
+            # A wake that finds it answered is for something else (a
+            # helper's report, a browser's event, a recovery, a resume):
+            # the command is not run, nor refused, again.  Such a wake
+            # ends the command's turn if a worker's death, or a stop, left
+            # it open, and goes on to the model's turn only where the
+            # session works between its user's messages, as a mission's
+            # coordinator does.
+            if model_first:
+                # The log's order: the turn before the command goes first.
+                waiting = None
+            typed_at = _latest_user_event_id(all_events) or 0
+            if waiting is not None:
+                typed_at, last_user_content = waiting.id, _user_event_text(waiting.data)
             slash_block = self._slash_command_block_reason(
                 last_user_content, session,
             )
-            if slash_block is not None:
-                await self._emit_loop_response(
-                    session, lease, slash_block, user_content=last_user_content
-                )
-                return
+            command = _slash_command_name(last_user_content)
+            if slash_block is not None or command not in (None, _COMMAND_FOR_THE_MODEL):
+                is_new = waiting is not None
+                # The log as this wake found it, or with what was written
+                # since when this wake answers the command.
+                written = all_events
+                if is_new:
+                    self._answering = typed_at
+                    # Not where another worker has the session by now: the
+                    # command is that worker's.  What a handler does after
+                    # this is not written under the lease, so a lease that
+                    # moves once the handler has begun is caught only at
+                    # the answer.
+                    await self._store.renew_lease(session_id, lease.lease_token, ttl_seconds=_LEASE_TTL_SECONDS)
+                    # A wake for what this worker's death would leave where
+                    # the sweeper does not look: something typed behind the
+                    # command, once the command is answered, and a command
+                    # of a paused mission's chat.  The sweeper takes a log
+                    # that ends on an answer, or a paused mission's on no
+                    # turn, for one at rest.
+                    if self._redis is not None and (
+                        self._more_was_said(session, all_events, typed_at)
+                        or await self._mission_may_be_paused(session)
+                    ):
+                        from surogates.config import enqueue_session
 
-            if last_user_content == "/compress":
-                await self._handle_compress_command(
-                    session, messages, system_prompt, lease,
-                )
-                return
-
-            if last_user_content == "/clear":
-                await self._handle_clear_command(session, lease)
-                return
-
-            if last_user_content == "/goal" or last_user_content.startswith("/goal "):
-                await self._handle_goal_command(session, last_user_content, lease)
-                return
-
-            if last_user_content == "/mission" or last_user_content.startswith("/mission "):
-                await self._handle_mission_command(session, last_user_content, lease)
-                return
-
-            if last_user_content == "/auto-research" or last_user_content.startswith("/auto-research "):
-                await self._handle_auto_research_command(session, last_user_content, lease)
-                return
-
-            if last_user_content == "/code" or last_user_content.startswith("/code "):
-                await self._handle_code_command(
-                    session, last_user_content, lease, all_events,
-                )
-                return
-
-            if last_user_content.startswith("/loop"):
-                # Idempotency guard: ``_handle_loop_command`` creates a fresh
-                # scheduled-loop row each time it runs against a ``/loop ...``
-                # user message.  If the harness wakes a second time on the
-                # same message — e.g. after an orphan-sweeper recovery — we
-                # must not create a duplicate schedule.
-                if not _slash_loop_already_processed(all_events):
-                    await self._handle_loop_command(
-                        session, last_user_content, lease,
+                        await enqueue_session(
+                            self._redis, org_id=str(session.org_id),
+                            agent_id=session.agent_id, session_id=session.id,
+                        )
+                    try:
+                        if slash_block is not None:
+                            await self._emit_loop_response(
+                                session, lease, slash_block, user_content=last_user_content
+                            )
+                        else:
+                            await self._run_command(
+                                command, session, last_user_content, lease,
+                                messages=messages, system_prompt=system_prompt,
+                                all_events=all_events, typed=waiting,
+                            )
+                    except Exception:
+                        logger.exception("Session %s: %s failed", session_id, last_user_content.split()[0])
+                    written = all_events + await self._store.get_events(
+                        session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
-                return
+                    if not _command_answered(written, typed_at):
+                        # Whatever way its handler left, a command a wake has
+                        # run is answered by that wake: unanswered, every
+                        # later wake would run it again and take up nothing
+                        # typed after it.
+                        await self._emit_loop_response(
+                            session, lease, _cut_off_before_its_answer(last_user_content),
+                            user_content=last_user_content,
+                        )
+                        written = all_events + await self._store.get_events(
+                            session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
+                        )
+                at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
+                if is_new and self._redis is not None and (
+                    not at_rest or is_project_master(session.config) and unread_reports(written)
+                    or device_of(session.config) is not None and _hand_back_unread(written)
+                ):
+                    # What still waits, another command, a message, a turn
+                    # cut off, a goal's next turn, a thread's report to its
+                    # master or the turn a hand back of the browser gave,
+                    # gets its wake: the one it queued may have come and
+                    # gone, for nothing, while this command was the
+                    # session's work.
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(
+                        self._redis, org_id=str(session.org_id),
+                        agent_id=session.agent_id, session_id=session.id,
+                    )
+                if is_new or at_rest:
+                    return
 
             # 10b. /deep-research <topic> -- rewrite the user message to
             # a deterministic delegation directive so the base LLM hands
@@ -1511,10 +1943,9 @@ class AgentHarness(
             # delegate_task rather than running the research itself.
             # No early return: the rewritten message flows into step 11
             # so the LLM still runs this turn.
-            deep_research_topic = parse_deep_research_command(
-                last_user_content,
-            )
-            if deep_research_topic is not None:
+            elif (
+                deep_research_topic := parse_deep_research_command(last_user_content)
+            ) is not None:
                 _rewrite_user_content_preserving_attachments(
                     last_user,
                     all_events,
@@ -1582,15 +2013,24 @@ class AgentHarness(
                     # or expert.failure, so we intentionally skip the
                     # SKILL_INVOKED row here.
 
-            # A report wake replays the user's last message, which a skill
-            # may have expanded at its own wake.  Expanded again, the master
-            # keeps that skill's instructions, and the conversation the
-            # prompt cache holds.
-            elif revived_by == "worker_report":
+            # A wake for a report or a hand back replays the user's last
+            # message, which a skill may have expanded at its own wake.
+            # Expanded again, the session keeps that skill's instructions,
+            # and the conversation the prompt cache holds.
+            elif for_news:
                 await self._expand_last_skill_again(session, messages, all_events)
 
             # 11. Run the core LLM loop.
             await self._run_loop(session, messages, system_prompt, lease, cost_tracker=cost_tracker, all_events=all_events)
+
+            # 12. The command that waited for this turn gets its wake.
+            if model_first and self._redis is not None:
+                from surogates.config import enqueue_session
+
+                await enqueue_session(
+                    self._redis, org_id=str(session.org_id),
+                    agent_id=session.agent_id, session_id=session.id,
+                )
 
         except Exception as _harness_exc:
             cut_off = True
@@ -1622,13 +2062,20 @@ class AgentHarness(
             raise
         finally:
             leave_device_session(device_token)
+            if cut_off and session is not None:
+                # What this worker knew of the hand-offs of a turn it no longer runs is let go: a stop
+                # of a later turn here is not that turn's.
+                from surogates.harness.landing import turn_ended
 
-            # A thread's turn cut off outside its landing, by a cancel or a
-            # crash, leaves a copy that never landed: its pod goes, so no
-            # later turn on this worker goes on with that copy.
+                turn_ended(session)
+
+            # A thread's turn, or its helper's, cut off outside its landing, by
+            # a cancel or a crash, leaves a copy that was never kept: its pod
+            # goes, so no later turn on this worker goes on with that copy,
+            # and none waits out its pod's deadline.
             if (
-                cut_off and session is not None
-                and is_project_thread(session.config) and self._sandbox_pool is not None
+                cut_off and session is not None and self._sandbox_pool is not None
+                and (is_project_thread(session.config) or session.config.get("history_thread"))
             ):
                 from surogates.harness.landing import putting_back
 
@@ -1789,6 +2236,8 @@ class AgentHarness(
         - Per-session cost tracking
         """
         self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
+        if is_project_thread(session.config):
+            await self._name_the_turn(session)
         # --- Saga orchestrator ---
         saga = None
         # A project's thread always runs one: its steps are undone in its copy.
@@ -1820,7 +2269,7 @@ class AgentHarness(
                 await self._store.emit_event(
                     session.id,
                     EventType.SAGA_START,
-                    saga_start_event(new_saga.saga_id, str(session.id)),
+                    saga_start_event(new_saga.saga_id, str(session.id), new_saga.kind),
                 )
 
         # One stable turn_id per user turn. The wake() body services
@@ -1858,19 +2307,21 @@ class AgentHarness(
             ),
             default=0,
         )
-        # The worker reports no request had read when the wake began.  Replay
-        # left them out of ``messages``; the first request reads them.
+        # The worker reports, and the hand backs of the browser, that no
+        # request had read when the wake began.  Replay left them out of
+        # ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
         # What the user asked for, for the turn's summary: their own words,
         # never a worker's report, which replay and the live loop put after them.
         request = _latest_user_event_text(all_events or [])[:1000]
-        # Report cursor: the newest worker news the wake has.  A project's
-        # master reads later news live, before each request.
+        # Report cursor: the newest news the wake has.  A project's master,
+        # and a chat on its user's computer, read later news live, before
+        # each request.
         report_cursor = max(
             (
                 event.id
                 for event in (all_events or [])
-                if event.type in WORKER_NEWS_TYPES
+                if event.type in NEWS_TYPES
             ),
             default=0,
         )
@@ -2085,7 +2536,7 @@ class AgentHarness(
             # the same wake.  The interrupt check above already ran, so an
             # explicit Stop always wins over a steer.
             steer_message, steer_cursor = await self._collect_steer_messages(
-                session.id, steer_cursor,
+                session, steer_cursor,
             )
             if steer_message is not None:
                 messages.append(steer_message)
@@ -2158,10 +2609,10 @@ class AgentHarness(
             # it rebuilds is the one sent.  A master's threads also report
             # during its turn; this request reads those written before it,
             # and one that lands after it waits for the next request.
-            arrived, report_cursor = await self._collect_reports(
-                session, report_cursor, before=request_id,
+            reports, report_cursor = await self._collect_reports(
+                session, reports, report_cursor, before=request_id,
             )
-            messages.extend(reports + arrived)
+            messages.extend(reports)
             reports = []
 
             # 2. Call the LLM with retry (streaming or non-streaming).
@@ -2971,14 +3422,17 @@ class AgentHarness(
                 # wake going as a new user turn instead of completing and
                 # re-waking.
                 followup, steer_cursor = await self._collect_steer_messages(
-                    session.id, steer_cursor,
+                    session, steer_cursor,
                 )
                 # A thread's report that landed meanwhile keeps the wake
                 # going too; the next request reads it.  News alone waits
                 # for the master's next turn, which reads it from the log.
-                arrived, report_cursor = await self._collect_reports(session, report_cursor)
-                reports.extend(arrived)
-                if followup is not None or (reports and await self._has_unread_report(session.id)):
+                # So does the resume a hand back of the browser gave the chat.
+                reports, report_cursor = await self._collect_reports(session, reports, report_cursor)
+                if followup is not None or (reports and (
+                    await self._has_unread_report(session.id)
+                    or (device_of(session.config) is not None and await self._has_unread_hand_back(session.id))
+                )):
                     if followup is not None:
                         messages.append(followup)
                         request = _latest_user_message_text([followup])
@@ -4700,16 +5154,178 @@ class AgentHarness(
             user_message=request,
         )
 
+    async def _run_command(
+        self,
+        command: str,
+        session: Session,
+        text: str,
+        lease: SessionLease,
+        *,
+        messages: list[dict],
+        system_prompt: str,
+        all_events: list,
+        typed: Any,
+    ) -> None:
+        """Run the handler of the built-in *command* the user typed as *text*, in the message *typed*."""
+        # The compaction a run of this very command wrote before its worker died.
+        compacted = next((
+            event for event in all_events
+            if event.type == EventType.CONTEXT_COMPACT.value and (event.data or {}).get("answers") == typed.id
+        ), None)
+        if command == "compress":
+            # The conversation the command acts on, by the place its answer
+            # will stand at: the handler takes its last user message for
+            # the command.  A command that waits behind it is not in it.
+            behind = {id(event) for event in self._waiting_commands(session, all_events) if event is not typed}
+            messages = self._rebuild_messages(
+                _shown_before_its_answer([event for event in all_events if id(event) not in behind], typed.id),
+                workspace_path=(session.config or {}).get("workspace_path"),
+            )
+            await self._handle_compress_command(session, messages, system_prompt, lease, compacted=compacted)
+        elif command == "clear":
+            await self._handle_clear_command(session, lease, cleared=compacted is not None)
+        elif command == "goal":
+            await self._handle_goal_command(session, text, lease)
+        elif command == "mission":
+            await self._handle_mission_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
+        elif command == "auto-research":
+            await self._handle_auto_research_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
+        elif command == "code":
+            await self._handle_code_command(session, text, lease, all_events)
+        elif command == "loop":
+            await self._handle_loop_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
+
+    async def _end_command_turn(
+        self,
+        session: Session,
+        lease: SessionLease,
+        typed_at: int,
+        events: list,
+        *,
+        ends_here: bool,
+    ) -> bool:
+        """End the turn of the command the user typed at event *typed_at*, once the
+        harness has answered it in *events*, the session's log: whether the
+        session is at rest.  *ends_here* when this wake stops at the command;
+        a later wake that goes on to the model leaves the cursor to that turn.
+
+        A model's last answer ends its turn: the cursor moves past it and the
+        session comes to rest, so a later wake finds nothing to do.  A
+        command's answer ends its turn the same way, in one write.  A worker
+        that dies before that write leaves a turn the next wake ends: the
+        answer in the log says the command was run.
+
+        Not when more was said since that still waits: a message no request
+        has read, the user's own or the command's to start its work (a
+        goal's or a mission's first message), or another command.  The wake
+        that message queued goes on from here.  A message the turn under way
+        has read is not more to do.  Nor when the harness did not
+        answer the command: a coding run whose worker died stays as the
+        sweeper expects it.  A session whose mission is in flight stays active
+        for its helpers' reports, as at the end of its coordinator's turns;
+        so does one whose goal has its next turn queued, one with a message
+        of its user's no turn has read, and one whose turn a dead worker cut
+        off; and one its user stopped meanwhile stays stopped.
+        """
+        if not _command_answered(events, typed_at):
+            return False
+        if self._more_was_said(session, events, typed_at):
+            return False
+        goal_waits = self._goal_waits(session, events)
+        # What no turn has read: a helper's report, a goal's next turn, a
+        # message of the user's own.  The cursor never moves past it, since
+        # behind the cursor it would wake nobody, and the session does not
+        # rest over it.
+        unread = _first_unread(
+            events, goal_in_flight=goal_waits,
+            is_plain_message=lambda event: self._is_plain_message(session, event),
+        )
+        unread_message = unread is not None and any(
+            event.id == unread and event.type == EventType.USER_MESSAGE.value for event in events
+        )
+        # Nor does it rest over a turn of the model's a dead worker cut off.
+        cut_off = _turn_cut_off(events)
+        at_rest = (
+            not goal_waits and not unread_message and not cut_off
+            and not await self._mission_has_pending_work(session, or_raise=True)
+        )
+        if not at_rest and (cut_off or not ends_here):
+            # The turn that goes on moves the cursor itself.
+            return False
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=events[-1].id if unread is None else unread - 1,
+            lease_token=lease.lease_token,
+            at_rest=at_rest,
+        )
+        if at_rest:
+            await self._release_command_turn(session)
+        return at_rest
+
+    def _more_was_said(self, session: Session, events: list, typed_at: int) -> bool:
+        """Whether something said after the command typed at event
+        *typed_at* still waits in *events*, the session's log: a message
+        no request has read, the user's own or the harness's, or another
+        command."""
+        asked = max((event.id for event in events if event.type == EventType.LLM_REQUEST.value), default=0)
+        commands = {id(event) for event in self._waiting_commands(session, events)}
+        return any(
+            event.type == EventType.USER_MESSAGE.value and event.id > typed_at and (
+                id(event) in commands
+                or event.id > asked and ((event.data or {}).get("synthetic") or self._is_plain_message(session, event))
+            )
+            for event in events
+        )
+
+    async def _release_command_turn(self, session: Session) -> None:
+        """Let go of what a turn holds, at the end of a command's turn as at
+        the end of a model's (``_complete_session``): the sandbox a command
+        may have made, and the holds its message was admitted on.  The
+        holds go back with nothing spent.  Most commands ask the model
+        nothing; /compress asks it for a summary, as the compaction at the
+        start of every turn does, and neither is counted against a turn.
+
+        Nothing else of a model's turn end belongs here.  A command has no
+        tool saga, no summary and no files to land, and it reports to
+        nobody: its answer is its whole result.
+        """
+        if self._sandbox_pool is not None:
+            try:
+                sandbox_id = await self._sandbox_pool.release_for_session(str(session.id))
+            except Exception:
+                logger.debug("Sandbox detach failed for %s", session.id, exc_info=True)
+            else:
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                    name=f"sandbox-teardown-{session.id}",
+                )
+        nothing_spent = SessionCostTracker()
+        await asyncio.gather(
+            self._settle_commerce_reservation(session, nothing_spent),
+            self._settle_allowance_reservation(session, nothing_spent),
+        )
+
+    def _goal_waits(self, session: Session, events: list) -> bool:
+        """Whether the session's goal is in flight with its next turn queued
+        and unread: a command typed between two of a goal's turns must not
+        end the goal."""
+        state = OutcomeState.from_config((session.config or {}).get("outcome"))
+        return state is not None and state.status == "active" and _goal_turn_waits(events)
+
     async def _handle_clear_command(
         self,
         session: Session,
         lease: SessionLease,
+        *,
+        cleared: bool = False,
     ) -> None:
         """Handle the /clear slash command.
 
         Emits a CONTEXT_COMPACT event with an empty message list, effectively
         clearing all conversation history.  The next wake() will rebuild from
-        the compacted (empty) state.
+        the compacted (empty) state.  *cleared* when a run of this very
+        command wrote that event before its worker died: it is not written
+        a second time.
         """
         # Destroy the sandbox if one exists.
         if self._sandbox_pool is not None:
@@ -4720,16 +5336,19 @@ class AgentHarness(
 
         # Emit a CONTEXT_COMPACT event with empty messages — this replaces
         # the entire conversation history on next replay.
-        await self._store.emit_event(
-            session.id,
-            EventType.CONTEXT_COMPACT,
-            {
-                "compacted_messages": [],
-                "strategy": "clear",
-                "original_message_count": 0,
-                "compressed_message_count": 0,
-            },
-        )
+        if not cleared:
+            await self._store.emit_event(
+                session.id,
+                EventType.CONTEXT_COMPACT,
+                {
+                    **self._names_its_message(),
+                    "compacted_messages": [],
+                    "strategy": "clear",
+                    "original_message_count": 0,
+                    "compressed_message_count": 0,
+                },
+                lease_token=lease.lease_token,
+            )
         self._forget_compacted_reads(session)
 
         # Emit an assistant message confirming the clear.
@@ -4737,6 +5356,7 @@ class AgentHarness(
             session.id,
             EventType.LLM_RESPONSE,
             {
+                **self._names_its_message(),
                 "message": {
                     "role": "assistant",
                     "content": "Conversation cleared.",
@@ -4745,6 +5365,7 @@ class AgentHarness(
                 "output_tokens": 0,
                 "context_window": self._compressor.context_length,
             },
+            lease_token=lease.lease_token,
         )
         # Lease released by the outer wake() finally block.
 
@@ -4754,7 +5375,13 @@ class AgentHarness(
         session: Session,
         content: str,
         lease: SessionLease,
+        *,
+        typed_on: datetime | None = None,
     ) -> None:
+        """Answer ``/loop``.  *typed_on* is when the user sent it: a routine
+        this session made for the same prompt since then is the one a
+        worker made for this very command before it died, and is not made
+        a second time."""
         from surogates.scheduled.prompt_guard import (
             ScheduledPromptBlocked,
             validate_scheduled_prompt,
@@ -4819,9 +5446,21 @@ class AgentHarness(
             try:
                 parsed = parse_loop_command(raw)
                 validate_scheduled_prompt(parsed.prompt, source="loop")
+                made = None
+                if typed_on is not None:
+                    made = next((
+                        row for row in await store.list_for_user(
+                            org_id=self._tenant.org_id,
+                            user_id=principal_user_id,
+                            service_account_id=principal_sa_id,
+                            agent_id=session.agent_id,
+                            created_from_session_id=session.id,
+                        )
+                        if row.prompt == parsed.prompt and _aware(row.created_at) >= _aware(typed_on)
+                    ), None)
                 if parsed.interval is None:
                     schedule = parse_dynamic_loop_schedule(timezone_name="UTC")
-                    created = await store.create_dynamic_loop(
+                    created = made or await store.create_dynamic_loop(
                         org_id=self._tenant.org_id,
                         user_id=principal_user_id,
                         service_account_id=principal_sa_id,
@@ -4840,7 +5479,7 @@ class AgentHarness(
                     )
                 else:
                     schedule = parse_schedule(parsed.interval, timezone_name="UTC")
-                    created = await store.create_loop(
+                    created = made or await store.create_loop(
                         org_id=self._tenant.org_id,
                         user_id=principal_user_id,
                         service_account_id=principal_sa_id,
@@ -4878,15 +5517,13 @@ class AgentHarness(
         *,
         user_content: str | None = None,
     ) -> None:
+        # The cursor is the turn's end's to move (``_end_command_turn``): it
+        # must not pass what the user sent while this was being answered.
         assistant_message = {"role": "assistant", "content": message}
-        event_id = await self._store.emit_event(
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": assistant_message},
-        )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=event_id,
+            {"message": assistant_message, **self._names_its_message()},
             lease_token=lease.lease_token,
         )
 
@@ -4896,12 +5533,24 @@ class AgentHarness(
         messages: list[dict],
         system_prompt: str,
         lease: SessionLease,
+        *,
+        compacted: Any | None = None,
     ) -> None:
         """Handle the /compress slash command.
 
         Forces context compression regardless of threshold, emits the
         result as an assistant message so the user sees what happened.
+        *compacted* is the compaction a run of this very command wrote
+        before its worker died: the conversation is not compressed a
+        second time, and the answer says what is so.
         """
+        if compacted is not None:
+            await self._emit_loop_response(
+                session, lease,
+                f"Context compressed to {len(compacted.data.get('compacted_messages') or [])} messages. "
+                f"Strategy: {compacted.data.get('strategy', 'unknown')}.",
+            )
+            return
         original_count = len(messages)
 
         # Remove the /compress message itself — it's not real conversation.
@@ -4923,12 +5572,14 @@ class AgentHarness(
                 session.id,
                 EventType.LLM_RESPONSE,
                 {
+                    **self._names_its_message(),
                     "message": {
                         "role": "assistant",
                         "content": "Context is too small to compress — only "
                                    f"{len(messages)} messages.",
                     },
                 },
+                lease_token=lease.lease_token,
             )
             # Lease released by the outer wake() finally block.
             return
@@ -4943,11 +5594,13 @@ class AgentHarness(
                 session.id,
                 EventType.LLM_RESPONSE,
                 {
+                    **self._names_its_message(),
                     "message": {
                         "role": "assistant",
                         "content": f"Compression failed: {exc}",
                     },
                 },
+                lease_token=lease.lease_token,
             )
             # Lease released by the outer wake() finally block.
             return
@@ -4960,9 +5613,11 @@ class AgentHarness(
             session.id,
             EventType.CONTEXT_COMPACT,
             {
+                **self._names_its_message(),
                 **summary_data,
                 "compacted_messages": compressed,
             },
+            lease_token=lease.lease_token,
         )
         self._forget_compacted_reads(session)
 
@@ -4971,6 +5626,7 @@ class AgentHarness(
             session.id,
             EventType.LLM_RESPONSE,
             {
+                **self._names_its_message(),
                 "message": {
                     "role": "assistant",
                     "content": (
@@ -4983,6 +5639,7 @@ class AgentHarness(
                 "output_tokens": 0,
                 "context_window": self._compressor.context_length,
             },
+            lease_token=lease.lease_token,
         )
         # Lease released by the outer wake() finally block.
 
@@ -5018,7 +5675,7 @@ class AgentHarness(
         list refresh.  Messages are snapshotted so the chat thread can keep
         mutating the live list without racing the background reader.
         """
-        # A phone call is titled when it opens ("Apel de la …"); an LLM title would be one more
+        # A phone call is titled when it opens ("Call from …"); an LLM title would be one more
         # background call the session waits on before the caller's next turn.
         if (session.title or "").strip() or getattr(session, "channel", None) in REALTIME_CHANNELS:
             return

@@ -246,6 +246,8 @@ class EventType(str, Enum):
     # Agent browser lifecycle
     BROWSER_PROVISIONED = "browser.provisioned"
     BROWSER_DESTROYED = "browser.destroyed"
+    # A local-folder session's computer has no supported browser.
+    BROWSER_UNAVAILABLE = "browser.unavailable"
     BROWSER_CONTROL_GRANTED = "browser.control_granted"
     BROWSER_CONTROL_RETURNED = "browser.control_returned"
 

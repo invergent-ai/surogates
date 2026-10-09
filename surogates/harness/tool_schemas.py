@@ -123,6 +123,10 @@ def drop_unusable_tools(
     return kept or schemas
 
 
+# What only a session on a folder of the user's computer can use: a cloud session is not offered it.
+DEVICE_ONLY_TOOLS = frozenset({"browser_upload_file"})
+
+
 def describe_for_device(
     schemas: list[dict[str, Any]],
     config: dict[str, Any] | None,
@@ -130,10 +134,10 @@ def describe_for_device(
     """Return *schemas* with the terminal told what git and shared mappings cannot do in a folder of the user's computer.
 
     Only for a session whose ``config`` names a device; a cloud session's
-    list is returned unchanged.  Input is never mutated.
+    list is returned without DEVICE_ONLY_TOOLS.  Input is never mutated.
     """
     if device_of(config) is None:
-        return schemas
+        return [schema for schema in schemas if schema["function"]["name"] not in DEVICE_ONLY_TOOLS]
     described: list[dict[str, Any]] = []
     for schema in schemas:
         if schema["function"]["name"] == "terminal":

@@ -104,6 +104,7 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "browser_screenshot",
     "browser_scroll",
     "browser_type",
+    "browser_upload_file",
     "browser_wait",
     # Image analysis
     "vision_analyze",

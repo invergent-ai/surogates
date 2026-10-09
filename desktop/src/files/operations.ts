@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
   conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_FILES,
-  MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
+  MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, NUL_REFUSED, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
@@ -316,12 +316,17 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   // holds the home folder's credentials is refused at host start, and the system paths on the cloud's list are
   // left to the operating system's own permissions.
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
+  // Whether it may only make a file: said as true or false, or not at all. Any other word is refused, not
+  // taken for a write that may replace what is there.
+  if (args.create !== undefined && typeof args.create !== "boolean") throw valueError("'create' must be true or false");
   const encoded = text(args, "data");
   // Up to 50 MiB: a write's data that came in a transfer reaches the helper inline, once whole.
   if (encoded.length > Math.ceil(MAX_WRITE_BYTES / 3) * 4) throw WRITE_EFBIG;
   if (!isBase64(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
   if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
+  // The desktop's own, for what it saves by itself, as a page's download: the server's writes carry none.
+  if (args.create === true) return create(key, data);
   // The revision this call's stat saw: anything else there, or nothing, is a conflict. Before anything is made.
   const expected = args.expected_revision;
   const check = () => {
@@ -367,6 +372,29 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   } catch (error) {
     try {
       unlinkSync(temporary);
+    } catch {
+      // Already gone.
+    }
+    throw error;
+  }
+  return null;
+}
+
+// A file made only where nothing is: its name is opened create-only, so a file or a folder there
+// already is EEXIST, the look and the making are one act, and no temp file is renamed over what
+// another writer made meanwhile. What it made goes when the data cannot be written whole.
+function create(key: string, data: Buffer): null {
+  makeDirs(dirname(key));
+  const fd = io(key, () => openSync(key, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+  try {
+    try {
+      for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
+    } finally {
+      io(key, () => closeSync(fd));
+    }
+  } catch (error) {
+    try {
+      unlinkSync(key);
     } catch {
       // Already gone.
     }
@@ -584,7 +612,7 @@ async function ripgrep(args: Record<string, unknown>, { env, folder }: Context, 
   const pattern = text(args, "pattern");
   const glob = textOrNull(args, "glob");
   const lines = whole(args, "context");
-  if (pattern.includes("\0") || glob?.includes("\0")) throw valueError("embedded null byte");
+  if (pattern.includes("\0") || glob?.includes("\0")) throw valueError(NUL_REFUSED);
   const rg = findOnPath("rg", env.PATH, folder);
   if (!rg) throw new Failure({ type: "ripgrep", message: RG_MISSING });
   const argv = ["--no-ignore"];

@@ -10,10 +10,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from surogates.browser.control import paused_by_user_result
 from surogates.devices.browser import LOCATE, NO_BROWSER, SNAPSHOT
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.builtin import browser
 from surogates.tools.workspace_io import LocalWorkspaceIO
+from surogates.session.events import EventType
 from tests.fake_laptop import InProcessRunner
 
 FRAMES = {
@@ -56,6 +58,17 @@ class NoPool:
         self.asked.append("destroy")
 
 
+class Events:
+    """The session's event log in a test: what each tool told the session's pane."""
+
+    def __init__(self) -> None:
+        self.emitted: list[tuple[UUID, EventType, dict[str, Any]]] = []
+
+    async def emit_event(self, session_id: UUID, event_type: EventType, data: dict[str, Any]) -> int:
+        self.emitted.append((session_id, event_type, data))
+        return len(self.emitted)
+
+
 @pytest.fixture()
 def computer(tmp_path):
     folder = (tmp_path / "laptop").resolve()
@@ -78,6 +91,7 @@ def computer(tmp_path):
                     "browser": {"profile_id": str(uuid4())},
                 },
                 "storage": SimpleNamespace(write=_no_cloud_write),
+                "session_store": Events(),
             },
         )
 
@@ -161,6 +175,9 @@ async def test_closing_closes_only_the_sessions_tab_on_the_computer(computer) ->
     # Not the page failing: the computer's access ended, and no retry brings it back.
     ({"type": "revoked", "message": "Local access to this computer was revoked"},
      {"error": "revoked", "detail": "Local access to this computer was revoked"}),
+    # Its user took the browser over: every browser tool answers as the cloud's do while a user holds its browser.
+    ({"type": "paused_by_user", "message": "The user took over the agent's browser on this computer"},
+     json.loads(paused_by_user_result())),
 ])
 async def test_what_the_computer_refuses_is_the_tools_result(computer, error, result) -> None:
     for handler, args in [
@@ -168,9 +185,234 @@ async def test_what_the_computer_refuses_is_the_tools_result(computer, error, re
         (browser._browser_click_handler, {"x": 1, "y": 2}),
         (browser._browser_screenshot_handler, {}),
         (browser._browser_close_handler, {}),
+        (browser._browser_upload_file_handler, {"paths": ["a.txt"]}),
     ]:
         rig = computer({"error": error})
         assert json.loads(await handler(args, **rig.kwargs)) == result
+
+
+async def test_the_sessions_pane_hears_its_tab_on_the_computer_opened_and_closed(computer) -> None:
+    rig = computer(
+        {"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}},
+        {"ok": {"url": "https://example.com/next", "title": "Next", "opened": False, "notices": []}},
+        {"ok": {"closed": True}},
+        {"ok": {"closed": False}},
+    )
+    session = rig.kwargs["session_id"]
+    told = {"session_id": str(session), "computer": True}
+
+    await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs)
+    # In the tab it has: nothing new for the pane.
+    await browser._browser_navigate_handler({"url": "https://example.com/next", "snapshot": False}, **rig.kwargs)
+    await browser._browser_close_handler({}, **rig.kwargs)
+    # No tab to close: nothing closed.
+    await browser._browser_close_handler({}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_PROVISIONED, told), (session, EventType.BROWSER_DESTROYED, told),
+    ]
+
+
+async def test_the_sessions_pane_hears_there_is_no_browser_on_the_computer(computer) -> None:
+    rig = computer({"error": {"type": "no_browser", "message": "none"}}, {"error": {"type": "denied", "message": "no"}})
+    session = rig.kwargs["session_id"]
+
+    await browser._browser_navigate_handler({"url": "https://example.com"}, **rig.kwargs)
+    # A denial is the agent's to hear, not the pane's.
+    await browser._browser_get_state_handler({}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_UNAVAILABLE, {"session_id": str(session), "computer": True}),
+    ]
+
+
+async def test_a_sub_agents_tab_on_the_computer_is_told_to_its_root_chats_pane_too(computer) -> None:
+    rig = computer(
+        {"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}},
+        {"ok": {"closed": True}},
+        {"error": {"type": "no_browser", "message": "none"}},
+    )
+    session, root = rig.kwargs["session_id"], uuid4()
+    # As the server stamps a session made under a chat: the chat whose folder it works in.
+    rig.kwargs["session_config"]["sandbox_root_session_id"] = str(root)
+    # Each names the sub-agent: the chat's pane counts a tab for each session.
+    told = {"session_id": str(session), "computer": True}
+
+    await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs)
+    await browser._browser_close_handler({}, **rig.kwargs)
+    await browser._browser_navigate_handler({"url": "https://example.com"}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_PROVISIONED, told), (root, EventType.BROWSER_PROVISIONED, told),
+        (session, EventType.BROWSER_DESTROYED, told), (root, EventType.BROWSER_DESTROYED, told),
+        (session, EventType.BROWSER_UNAVAILABLE, told), (root, EventType.BROWSER_UNAVAILABLE, told),
+    ]
+
+
+async def test_a_chat_that_is_its_own_root_is_told_of_its_tab_once(computer) -> None:
+    rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
+    session = rig.kwargs["session_id"]
+    # A project's thread names itself: its own sandbox root.
+    rig.kwargs["session_config"]["sandbox_root_session_id"] = str(session)
+
+    await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs)
+
+    assert rig.kwargs["session_store"].emitted == [
+        (session, EventType.BROWSER_PROVISIONED, {"session_id": str(session), "computer": True}),
+    ]
+
+
+async def test_a_root_chats_pane_that_cannot_be_told_leaves_the_sub_agents_own_told_and_its_call_answered(computer) -> None:
+    rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
+    session, root = rig.kwargs["session_id"], uuid4()
+    rig.kwargs["session_config"]["sandbox_root_session_id"] = str(root)
+    events = rig.kwargs["session_store"]
+    record = events.emit_event
+
+    async def root_away(session_id: UUID, *args: Any) -> int:
+        if session_id == root:
+            raise RuntimeError("the root's event log is away")
+        return await record(session_id, *args)
+
+    events.emit_event = root_away
+    body = json.loads(await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs))
+
+    assert body["title"] == "Example"
+    assert events.emitted == [(session, EventType.BROWSER_PROVISIONED, {"session_id": str(session), "computer": True})]
+
+
+def test_a_sub_agents_tab_closed_on_the_computer_is_not_told_to_its_root_chats_agent() -> None:
+    from surogates.harness.loop import AgentHarness
+
+    root, child = uuid4(), uuid4()
+
+    def closed(log: UUID, **data: Any) -> SimpleNamespace:
+        return SimpleNamespace(id=1, session_id=log, type=EventType.BROWSER_DESTROYED.value, data=data)
+
+    def told(event: SimpleNamespace) -> list[str]:
+        return [message["content"] for message in AgentHarness._rebuild_messages(SimpleNamespace(), [event])]
+
+    # In the root's log for its pane alone: the root's own tab is as it was, and its agent is told of no close.
+    assert told(closed(root, session_id=str(child), computer=True)) == []
+    # A session's own tab closed is told to its agent: the root's and the sub-agent's on the computer, the
+    # cloud's, and one that names no session.
+    for own in (
+        closed(root, session_id=str(root), computer=True), closed(child, session_id=str(child), computer=True),
+        closed(root, session_id=str(root), browser_id="b-1"), closed(root, browser_id="b-1"),
+    ):
+        [note] = told(own)
+        assert "The browser was closed" in note
+
+
+def test_a_browser_event_with_no_data_names_no_session_and_does_not_stop_the_replay() -> None:
+    from surogates.devices.browser import of_a_sub_agent
+    from surogates.harness.loop import AgentHarness
+
+    # As no writer makes it. Read as the session's own, as one that names no session is.
+    bare = SimpleNamespace(id=1, session_id=uuid4(), type=EventType.BROWSER_DESTROYED.value, data=None)
+
+    assert of_a_sub_agent(bare) is False
+    [note] = AgentHarness._rebuild_messages(SimpleNamespace(), [bare])
+    assert "The browser was closed" in note["content"]
+
+
+async def test_a_pane_that_cannot_be_told_leaves_the_browser_call_answered(computer) -> None:
+    rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
+
+    async def broken(*args: Any) -> int:
+        raise RuntimeError("the event log is away")
+
+    rig.kwargs["session_store"].emit_event = broken
+    body = json.loads(await browser._browser_navigate_handler({"url": "https://example.com", "snapshot": False}, **rig.kwargs))
+
+    assert body["title"] == "Example"
+
+
+async def test_files_of_the_folder_go_to_the_page_once_it_asked_for_them(computer) -> None:
+    rig = computer({"ok": {"files": 1, "notices": []}})
+    (rig.folder / "report.pdf").write_bytes(b"%PDF")
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["report.pdf"]}, **rig.kwargs))
+
+    assert body == {"uploaded": 1}
+    # Named as the folder's own operations name it: the computer reads each through its file host.
+    assert rig.laptop.asked == [("browser.set_input_files", {"paths": [str(rig.folder / "report.pdf")]})]
+
+
+async def test_a_path_out_of_the_folder_never_reaches_the_computers_browser(computer) -> None:
+    rig = computer()
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["../../etc/passwd"]}, **rig.kwargs))
+
+    assert body["error"] == "upload_failed"
+    assert rig.laptop.asked == []
+
+
+async def test_a_path_the_computer_cannot_resolve_is_said_in_its_own_words_without_pythons_errno(computer) -> None:
+    rig = computer()
+
+    async def looping(kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
+        return {"error": {"type": "os", "code": "ELOOP", "message": "Too many levels of symbolic links: 'loop.txt'"}}
+
+    rig.laptop.files = SimpleNamespace(run=looping)
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["loop.txt"]}, **rig.kwargs))
+
+    assert body == {"error": "upload_failed", "detail": "Too many levels of symbolic links: 'loop.txt'"}
+    assert rig.laptop.asked == []
+
+
+@pytest.mark.parametrize(("paths", "wrong"), [
+    ("report.pdf", "'paths' must be a list of 1 to 10 files of the chat's folder"),
+    ([], "An upload names 1 to 10 files of the chat's folder: 'paths' holds 0"),
+    ([f"page-{n}.png" for n in range(11)], "An upload names 1 to 10 files of the chat's folder: 'paths' holds 11"),
+    (["report.pdf", 7], "Each of 'paths' must name a file of the chat's folder: item 2 is not text"),
+    (["report.pdf", ""], "Each of 'paths' must name a file of the chat's folder: item 2 is empty"),
+], ids=["a string", "no file", "eleven files", "a number among them", "an empty name among them"])
+async def test_an_upload_that_does_not_name_one_to_ten_files_is_refused_before_the_computer_is_asked_anything(
+    computer, paths, wrong,
+) -> None:
+    rig = computer()
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": paths}, **rig.kwargs))
+
+    assert body == {"error": "upload_failed", "detail": wrong}
+    # Not its folder, to resolve a name, nor its browser.
+    assert rig.laptop.files.kinds == []
+    assert rig.laptop.asked == []
+
+
+async def test_ten_files_are_one_upload(computer) -> None:
+    rig = computer({"ok": {"files": 10, "notices": []}})
+    names = [f"page-{n}.png" for n in range(10)]
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": names}, **rig.kwargs))
+
+    assert body == {"uploaded": 10}
+    assert rig.laptop.asked == [("browser.set_input_files", {"paths": [str(rig.folder / name) for name in names]})]
+
+
+async def test_a_page_that_asked_for_no_file_is_said_so(computer) -> None:
+    said = "The page has not asked for a file: click its upload button or its file input first"
+    rig = computer({"error": {"type": "browser", "message": said}})
+
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["a.txt"]}, **rig.kwargs))
+
+    assert body == {"error": "upload_failed", "detail": said}
+
+
+def test_the_upload_runs_in_the_harness_as_every_browser_tool_and_a_strict_coordinator_is_not_given_it() -> None:
+    from surogates.tools.builtin.coordinator import COORDINATOR_IMPLEMENTATION_TOOLS
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    assert TOOL_LOCATIONS["browser_upload_file"] is ToolLocation.HARNESS
+    assert "browser_upload_file" in COORDINATOR_IMPLEMENTATION_TOOLS
+
+
+async def test_a_chat_in_the_cloud_has_no_upload() -> None:
+    body = json.loads(await browser._browser_upload_file_handler({"paths": ["a.txt"]}, session_id=uuid4(), browser_pool=NoPool()))
+
+    assert body["error"] == "unsupported"
 
 
 # Every browser tool, with arguments it takes: none may reach the cloud's browser pool for a local-folder chat.
@@ -186,6 +428,7 @@ EVERY_TOOL = [
     (browser._browser_drag_handler, {"path": [[1, 2], [3, 4]]}),
     (browser._browser_wait_handler, {"ms": 0}),
     (browser._browser_screenshot_handler, {}),
+    (browser._browser_upload_file_handler, {"paths": ["a.txt"]}),
 ]
 
 
@@ -204,6 +447,7 @@ class AnyBrowser(Laptop):
             "browser.evaluate": {"value": 1},
             "browser.screenshot": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii"),
             "browser.close": {"closed": True},
+            "browser.set_input_files": {"files": 1, "notices": []},
         }.get(kind, {"notices": []})}
 
 

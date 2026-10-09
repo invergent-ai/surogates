@@ -201,7 +201,10 @@ describe("signing in", () => {
     await signIn(shell, page, agent);
     await expect.poll(() => agent.reauthorized).toEqual(["Bearer at-2"]);
     await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 5_000 }).toBe("Offline: reconnecting");
-    expect(await page.isVisible("#sign-in")).toBe(false);
+    // Offline and signed in at once, read in one look: the computer can show offline while the sign-in
+    // still loads the web client afresh, and it goes offline and back to connecting while it cannot connect.
+    const seen = () => page.evaluate(() => [document.getElementById("device")!.title, document.getElementById("sign-in")!.checkVisibility()]);
+    await expect.poll(seen).toEqual(["Offline: reconnecting", false]);
     expect(existsSync(state("session.json"))).toBe(true);
     // The new token is its only copy: kept, whatever the link does.
     expect(readFileSync(state("credentials.json"), "utf8")).toContain(ROTATED);

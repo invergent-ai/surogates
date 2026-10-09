@@ -16,12 +16,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.12"
 
@@ -70,7 +70,7 @@ jobs:
           ls -1 dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/*
@@ -101,7 +101,7 @@ jobs:
           - dir: voice
             name: surogates-voice
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # GitHub-hosted runners start with ~14 GB free; the api and sandbox
       # images add LibreOffice + Tesseract on top of the Python deps.
@@ -113,10 +113,10 @@ jobs:
           df -h /
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -127,7 +127,7 @@ jobs:
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: images/${{ matrix.dir }}/Dockerfile
@@ -152,15 +152,15 @@ jobs:
       # npmjs side first, so enabling it here would break publishing.
       NPM_CONFIG_PROVENANCE: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Enable pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -201,7 +201,7 @@ jobs:
       group: desktop-vm-image
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The guest kernel is the only boundary between two chats' commands: a desktop
       # release does not ship while noble-security has a newer one than the pin.
@@ -243,7 +243,7 @@ jobs:
         run: images/guest/publish.sh send images/guest/out
 
       - name: Keep the image's manifest for the desktop's tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: desktop-vm-manifest
           path: images/guest/out/manifest.json
@@ -262,7 +262,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: desktop-vm-manifest
           path: out
@@ -279,20 +279,172 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
           fi
 
+  # Surogate Desktop's release (desktop/release/), in three jobs, as every step of a job shares its
+  # runner: a job is the boundary, and a step is none. desktop-build makes the tarball from this
+  # tag with the VM image's manifest the desktop-vm-image job checked R2 against, and holds no
+  # secret: its npm ci runs the install scripts of the whole dependency tree. desktop-describe
+  # reads that tarball, all of it that is ever read before it is installed, and says one word of
+  # it, the app's state schema: it holds no secret either, and runs no npm. desktop-publish runs
+  # no npm, no script of a dependency's, and nothing that opens the tarball: in the
+  # desktop-release Environment, whose reviewer approves each run, it writes and signs the
+  # release's manifest with the release key, of this tag, the build's own two words for its
+  # tarball and that one of the describe job's, each a job's own output, then puts the release,
+  # the install script and latest.json on R2 under desktop/. The cloud's release waits for none.
+  # What rests on the describe job's runner alone: that a signed release's root helper is the
+  # tag's install script. The job that signs opens no tarball, and cannot see it.
+  # Every action of the workflow is named by its commit: a tag can be moved to other code.
+  desktop-build:
+    needs: desktop-vm-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # The tarball's hash and its size, which the publish job signs for and no others: the artifact
+    # is the run's, where any job may put another file under its name, and a job's outputs are its own.
+    outputs:
+      sha256: ${{ steps.tarball.outputs.sha256 }}
+      size: ${{ steps.tarball.outputs.size }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Build the app
+        working-directory: desktop
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          # The app's node is fetched and checked against its pin, never one a runner kept.
+          rm -rf bin
+          npm ci
+          node node_modules/electron/install.js
+          npm run build
+
+      - name: Take the VM image's manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-vm-manifest
+          path: out/vm
+
+      # The agent's disk holds root's files, and is made by a user who is not root, under fakeroot:
+      # in no user namespace, which a stock Ubuntu 24.04 refuses a program without a profile of its own.
+      - name: Install fakeroot, which the agent's disk is made with
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fakeroot
+
+      - name: Package the app
+        run: desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop
+
+      - name: Say the tarball's hash and size to the publish job
+        id: tarball
+        run: |
+          echo "sha256=$(sha256sum <"out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          echo "size=$(stat -c %s "out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz")" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the tarball for the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-tarball
+          path: out/desktop/surogate-desktop-*-linux-x64.tar.gz
+          if-no-files-found: error
+
+  desktop-describe:
+    needs: desktop-build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    # The app's state schema, the one word of this job's that the publish job signs for: a job's
+    # outputs are its own, where an artifact is the run's, and any job may put another file
+    # under its name.
+    outputs:
+      schema: ${{ steps.manifest.outputs.schema }}
+    steps:
+      # publish.sh, and the install script it reads the tarball's helper and package by, from the
+      # tag; the tarball from the build.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-tarball
+          path: out/desktop
+
+      # All that reads the build's tarball, in a job that has no secret and no Environment: what a
+      # flaw in a reader of the build's bytes could write, or leave running, stays on this runner.
+      # What the build says is read from the step's environment, never pasted into its script.
+      # The manifest it writes is this job's own check of the release; the publish job writes its
+      # own, and takes from here the state schema alone.
+      - name: Write its manifest, and say the app's state schema to the publish job
+        id: manifest
+        env:
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-build.outputs.sha256 }}
+        run: |
+          desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop
+          echo "schema=$(jq -r .stateSchema out/desktop/manifest.json)" >>"$GITHUB_OUTPUT"
+
+  desktop-publish:
+    needs:
+      - desktop-build
+      - desktop-describe
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    environment: desktop-release
+    permissions:
+      contents: read
+    # One release at a time, so latest.json names the newest of tags pushed close together.
+    concurrency:
+      group: desktop-release
+      cancel-in-progress: false
+    steps:
+      # publish.sh, and the install script it trusts and sends, from the tag; the tarball from the
+      # build. Each action by its commit: a tag can be moved to other code, which this job would
+      # run with the release key.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-tarball
+          path: out/desktop
+
+      # The signing opens no tarball and reads no file of another job's: it writes the manifest of
+      # this tag, of the tarball the build made, by the build's own words for its hash and its
+      # size, and of the state schema the describe job read, and signs it.
+      - name: Sign its manifest
+        env:
+          DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-build.outputs.sha256 }}
+          DESKTOP_TARBALL_SIZE: ${{ needs.desktop-build.outputs.size }}
+          DESKTOP_STATE_SCHEMA: ${{ needs.desktop-describe.outputs.schema }}
+        run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
+
+      # The manifest and its signature are sent only as a pair by the install script's keys, and
+      # the tarball only as the one that the manifest names, by its hash.
+      - name: Publish the release
+        env:
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
+
   release:
     needs:
       - wheel
       - images
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history + tags so release-notes.mjs can diff against the
           # previous tag and read every commit subject in the range.
           fetch-depth: 0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
 
@@ -304,16 +456,30 @@ jobs:
         run: node scripts/release-notes.mjs > release-notes.md
 
       - name: Download distribution artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           # The wheel and the sdist alone: never another file the build left in dist/.
           files: |
             dist/*.whl
             dist/*.tar.gz
           body_path: release-notes.md
+
+  # The cluster's rollout (update-images.yml): the nodes update their agent images and the agent
+  # pods restart. It waits for the cloud's release, which waits for the images, the npm packages
+  # and the wheel, and for no job of the desktop's: one of those that fails, or waits for its
+  # reviewer, changes how the run ends and never whether the cluster is rolled out.
+  rollout:
+    needs: release
+    # It holds the cluster's SSH key and reads nothing of the repository's.
+    permissions: {}
+    uses: ./.github/workflows/update-images.yml
+    secrets:
+      NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
+      MASTER_HOST: ${{ secrets.MASTER_HOST }}
+      SSH_KEY: ${{ secrets.SSH_KEY }}

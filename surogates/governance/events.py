@@ -37,11 +37,12 @@ def policy_denied_event(tool_name: str, reason: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def saga_start_event(saga_id: str, session_id: str) -> dict[str, Any]:
-    """Build the data payload for a ``SAGA_START`` event."""
+def saga_start_event(saga_id: str, session_id: str, kind: str) -> dict[str, Any]:
+    """Build the data payload for a ``SAGA_START`` event: *kind* is the saga's."""
     return {
         "saga_id": saga_id,
         "session_id": session_id,
+        "kind": kind,
         "timestamp": time.time(),
     }
 

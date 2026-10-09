@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -97,6 +99,26 @@ class TestLocalBackendObjects:
         for entry in entries:
             assert entry["modified"] is not None
 
+    async def test_list_entries_stops_at_a_limit(self, backend: LocalBackend):
+        for n in range(20):
+            await backend.write_text("bucket", f"many/{n:02}.txt", "x")
+        # A caller that must not read a folder of any size asks for one more than it will take.
+        assert len(await backend.list_entries("bucket", prefix="many", limit=5)) == 5
+        assert len(await backend.list_entries("bucket", prefix="many", limit=50)) == 20
+        assert len(await backend.list_entries("bucket", prefix="many")) == 20
+
+    async def test_a_bounded_listing_counts_a_folder_as_the_bucket_counts_its_marker(self, backend: LocalBackend, tmp_path):
+        await backend.create_bucket("bucket")
+        await backend.write("bucket", "packs/a.pack", b"a")
+        for n in range(40):
+            (tmp_path / "bucket" / "packs" / f"junk-{n:02d}").mkdir()
+        # A folder full of folders is not walked whole to find one file: each is an entry, named as a
+        # bucket names a folder's marker, and the listing stops at the limit all the same.
+        listed = await backend.list_entries("bucket", prefix="packs", limit=5)
+        assert len(listed) == 5 and all(e["key"].endswith("/") for e in listed if "junk" in e["key"])
+        # With no limit the listing is the files alone, as it was.
+        assert [e["key"] for e in await backend.list_entries("bucket", prefix="packs")] == ["packs/a.pack"]
+
     async def test_list_entries_with_prefix(self, backend: LocalBackend):
         await backend.write_text("bucket", "a.txt", "x")
         await backend.write_text("bucket", "sub/b.txt", "yy")
@@ -121,3 +143,50 @@ class TestLocalBackendSecurity:
     async def test_path_traversal_write(self, backend: LocalBackend):
         with pytest.raises(ValueError, match="traversal"):
             await backend.write("bucket", "../escape.txt", b"bad")
+
+    async def test_a_mark_is_an_empty_object_with_the_stores_own_date(self, backend: LocalBackend, tmp_path: Path):
+        before = time.time()
+        dated = await backend.mark("bucket", "proj/_history/pruning")
+        assert (tmp_path / "bucket" / "proj" / "_history" / "pruning").read_bytes() == b"" and dated >= before - 1
+        # Written again over itself, and dated again.
+        os.utime(tmp_path / "bucket" / "proj" / "_history" / "pruning", (before - 3600, before - 3600))
+        assert await backend.mark("bucket", "proj/_history/pruning") >= before - 1
+
+    @pytest.mark.parametrize("planted", ["a link at the key", "a link to nothing at the key", "a link at a folder above", "a folder at the key"])
+    async def test_a_mark_is_written_through_no_link_and_over_nothing_but_a_plain_file(
+        self, backend: LocalBackend, tmp_path: Path, planted: str,
+    ):
+        # What a thread's commands can leave in a project's folder on a disk: a bucket has no links.
+        await backend.write("bucket", "proj/Report.docx", b"the report")
+        await backend.write("bucket", "proj/elsewhere/keep.txt", b"kept")
+        history = tmp_path / "bucket" / "proj" / "_history"
+        if planted == "a link at a folder above":
+            history.symlink_to("elsewhere")
+        else:
+            history.mkdir()
+            if planted == "a link at the key":
+                (history / "pruning").symlink_to("../Report.docx")
+            elif planted == "a link to nothing at the key":
+                (history / "pruning").symlink_to("../made-by-the-mark.txt")
+            else:
+                (history / "pruning").mkdir()
+        with pytest.raises(ValueError, match="mark"):
+            await backend.mark("bucket", "proj/_history/pruning")
+        # Nothing was emptied, and nothing made where the link points.
+        assert (tmp_path / "bucket" / "proj" / "Report.docx").read_bytes() == b"the report"
+        assert sorted(f.name for f in (tmp_path / "bucket" / "proj" / "elsewhere").iterdir()) == ["keep.txt"]
+        assert not (tmp_path / "bucket" / "proj" / "made-by-the-mark.txt").exists()
+
+    async def test_a_mark_over_a_files_second_name_leaves_the_file_its_bytes(self, backend: LocalBackend, tmp_path: Path):
+        await backend.write("bucket", "proj/Report.docx", b"the report")
+        history = tmp_path / "bucket" / "proj" / "_history"
+        history.mkdir()
+        os.link(tmp_path / "bucket" / "proj" / "Report.docx", history / "pruning")  # a plain file, and the report itself
+        await backend.mark("bucket", "proj/_history/pruning")
+        assert (tmp_path / "bucket" / "proj" / "Report.docx").read_bytes() == b"the report"
+        assert (history / "pruning").read_bytes() == b"" and sorted(f.name for f in history.iterdir()) == ["pruning"]
+
+    @pytest.mark.parametrize("key", ["../escape", "proj/../../escape", "proj/_history/", "", "proj//pruning", "proj/./pruning"])
+    async def test_a_mark_outside_the_bucket_or_at_no_name_is_refused(self, backend: LocalBackend, key: str):
+        with pytest.raises(ValueError):
+            await backend.mark("bucket", key)

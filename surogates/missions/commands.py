@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -270,11 +271,10 @@ class MissionHandlerResult:
 
     ``kickoff_content`` carries the synthetic ``user.message`` body
     that a successful ``handle_mission_create`` wants the caller to
-    emit AFTER it has advanced the harness cursor through its own
-    slash-reply.  Deferring the kickoff emit to the caller prevents
-    the bug where the slash handler's ``advance_harness_cursor``
-    races past the kickoff event id, leaving the harness with
-    "no actionable pending events" on the next wake.
+    emit.  The caller writes it before its own slash-reply: once the
+    reply is in the log the command is answered and is not run again,
+    so a reply with no kickoff after it would leave the mission
+    started and never worked on.
     """
 
     ok: bool
@@ -363,6 +363,11 @@ def _outcome_is_active(outcome: dict[str, Any] | None) -> bool:
     return status in ("active", "paused")
 
 
+def _aware(moment: datetime) -> datetime:
+    """*moment* in UTC: the store gives some timestamps without their zone."""
+    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
+
+
 async def handle_mission_create(
     *,
     description: str,
@@ -377,6 +382,7 @@ async def handle_mission_create(
     service_account_id: UUID | None = None,
     max_iterations: int = 20,
     budget_tokens: int | None = None,
+    typed_on: datetime | None = None,
 ) -> MissionHandlerResult:
     """Create a new mission on the calling session.
 
@@ -397,12 +403,15 @@ async def handle_mission_create(
     :attr:`MissionHandlerResult.kickoff_content`.
 
     The kickoff ``user.message`` and the agent enqueue are intentionally
-    NOT emitted here.  The caller (the harness ``/mission`` slash
-    handler) must emit the kickoff AFTER its own
-    ``advance_harness_cursor`` runs — otherwise the cursor advance can
-    race past the kickoff's event id and leave the next wake with
-    "no actionable pending events".  Same control-flow pattern as
-    ``/goal``'s outcome kickoff in ``harness/loop.py``.
+    NOT emitted here: the caller (the harness ``/mission`` slash handler)
+    writes the kickoff, and then its answer.  Same control-flow pattern
+    as ``/goal``'s outcome kickoff.
+
+    *typed_on* is when the user sent the command, where a command is what
+    calls this.  A mission this session started since then with the same
+    description and rubric is the one a worker made for this very command
+    before it died: it is not refused as a second one, and what that
+    worker had not yet written is written now.
     """
     if (user_id is None) == (service_account_id is None):
         return MissionHandlerResult(
@@ -441,7 +450,14 @@ async def handle_mission_create(
             budget_tokens=budget_tokens,
         )
     except ActiveMissionConflictError as exc:
-        return MissionHandlerResult(ok=False, error=str(exc))
+        made = await mission_store.get_active_for_session(session_id)
+        if (
+            typed_on is None or made is None or made.status != "active"
+            or (made.description, made.rubric) != (description, rubric)
+            or _aware(made.created_at) < _aware(typed_on)
+        ):
+            return MissionHandlerResult(ok=False, error=str(exc))
+        mission_id = made.id
 
     async with session_factory() as db:
         sess = await db.get(ORMSession, session_id)
@@ -462,18 +478,21 @@ async def handle_mission_create(
         sess.config = cfg
         await db.commit()
 
-    await session_store.emit_event(
-        session_id, EventType.MISSION_DEFINED,
-        {
-            "mission_id": str(mission_id),
-            "description": description,
-            "rubric": rubric,
-            "max_iterations": max_iterations,
-        },
-    )
+    if await session_store.last_event(
+        session_id, EventType.MISSION_DEFINED, containing={"mission_id": str(mission_id)},
+    ) is None:
+        await session_store.emit_event(
+            session_id, EventType.MISSION_DEFINED,
+            {
+                "mission_id": str(mission_id),
+                "description": description,
+                "rubric": rubric,
+                "max_iterations": max_iterations,
+            },
+        )
 
     # Kickoff + enqueue are returned to the caller, NOT emitted here —
-    # see the docstring for the cursor-race rationale.
+    # see the docstring.
     kickoff = _KICKOFF_TEMPLATE.format(description=description, rubric=rubric)
     return MissionHandlerResult(
         ok=True, mission_id=mission_id,
@@ -493,6 +512,7 @@ async def handle_research_mission_create(
     mission_store: MissionStore,
     user_id: UUID | None = None,
     service_account_id: UUID | None = None,
+    typed_on: datetime | None = None,
 ) -> MissionHandlerResult:
     """Create a research-kind (Arbor) mission.
 
@@ -522,6 +542,7 @@ async def handle_research_mission_create(
         user_id=user_id, service_account_id=service_account_id,
         max_iterations=cmd.max_iterations or 20,
         budget_tokens=cmd.budget_tokens,
+        typed_on=typed_on,
     )
     if not base.ok:
         return base
@@ -530,7 +551,9 @@ async def handle_research_mission_create(
 
     store = ResearchStore(session_factory)
     short = str(base.mission_id)[:8]
-    run_id = await store.create_run(
+    # The run a worker made for this very command before it died, if any.
+    made = await store.get_run_for_mission(base.mission_id)
+    run_id = made.id if made is not None else await store.create_run(
         org_id=org_id, mission_id=base.mission_id, session_id=session_id,
         agent_id=agent_id, repo_path=cmd.repo,
         trunk_branch=f"research/run-{short}/trunk",
@@ -565,10 +588,13 @@ async def handle_research_mission_create(
         sess.config = cfg
         await db.commit()
 
-    await session_store.emit_event(
-        session_id, EventType.RESEARCH_DEFINED,
-        {"mission_id": str(base.mission_id), "run_id": str(run_id)},
-    )
+    if await session_store.last_event(
+        session_id, EventType.RESEARCH_DEFINED, containing={"run_id": str(run_id)},
+    ) is None:
+        await session_store.emit_event(
+            session_id, EventType.RESEARCH_DEFINED,
+            {"mission_id": str(base.mission_id), "run_id": str(run_id)},
+        )
 
     base.kickoff_content = _RESEARCH_KICKOFF_TEMPLATE.format(
         description=cmd.description, rubric=cmd.rubric,

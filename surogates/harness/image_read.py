@@ -98,11 +98,16 @@ async def handle_image_read(
     the same shape ``_handle_text`` / ``_handle_document`` produce.
     """
     # Import lazily — file_ops pulls in the whole tool registry.
+    from surogates.tools.utils.workspace_sandbox import NUL_REFUSED
     from surogates.tools.builtin.file_ops import (
         _apply_line_window,
         _render_read_window,
         get_max_lines,
     )
+
+    if "\0" in path:
+        # As read_file answers any other path with one, and before anything looks at it.
+        return json.dumps({"error": NUL_REFUSED}, ensure_ascii=False)
 
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())

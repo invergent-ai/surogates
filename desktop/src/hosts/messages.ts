@@ -27,6 +27,7 @@ export interface HostStart {
   expect: { dev: number; ino: number; boot: string };
   tmp: string; // the file helper's working folder, which srt wraps it from
   dataDir: string; // the app's own data, never inside the folder
+  cacheDir: string; // the app's own cache, <cache home>/surogate: the folder neither holds it nor lies in it
   env: Record<string, string>; // the app's: HOME, and LANG for the helper
   appDirs: string[]; // read-only folders the sandbox needs: the runtime and the app's files
   bwrapPath?: string;
