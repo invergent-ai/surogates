@@ -10,7 +10,7 @@ import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { type BrowserContext, type CDPSession, chromium, type Dialog, type Download, type FileChooser, type Page, type Request } from "playwright-core";
+import { type BrowserContext, type CDPSession, chromium, type Dialog, type Download, type FileChooser, type Frame, type Page, type Request } from "playwright-core";
 
 import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
@@ -588,9 +588,13 @@ export class BrowserHost {
   // draws, while its user holds the browser (overhear); *over*: those being made. *turn*: the page's quiet, as
   // it is counted now, and what ends the waits it began (quiet).
   private readonly hearing = new Map<Page, {
-    session: string; heard: ((chooser: FileChooser) => void) | null; lines?: CDPSession[]; over?: object;
+    session: string; heard: ((chooser: FileChooser) => void) | null; lines?: CDPSession[];
+    over?: { lines: CDPSession[]; more: Array<Promise<unknown>> };
     acting: number; quiet?: NodeJS.Timeout; turn?: { end(): void };
   }>();
+  // Of a page's own lines, the one to each of its frames, as it will be once made: none where the frame's page's
+  // process draws it (framed).
+  private readonly frameLines = new WeakMap<CDPSession[], Map<Frame, Promise<CDPSession | null>>>();
   // The pages whose tab crashed, and has not been loaded again since.
   private readonly crashed = new WeakSet<Page>();
   // The pages that have not answered yet since the browser was last handed back (settle): what one of them
@@ -1025,7 +1029,9 @@ export class BrowserHost {
     page.on("crash", () => this.crashed.add(page));
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) this.crashed.delete(page);
+      else this.framed(page, frame);
     });
+    page.on("framedetached", (frame) => this.unframed(page, frame));
     this.hearing.set(page, { session, heard: null, acting: 0 });
     // One that opens under its user's hand is heard from the hand back.
     if (this.held === null) this.hear(page);
@@ -1057,30 +1063,88 @@ export class BrowserHost {
   // what a click gave it for as long as it asks, and with it can open a window in front of its user, fill
   // their screen or write their clipboard, from any tab the agent ever opened. The browser says an ask to
   // each line that listens for it, and on this host's nobody reads the input: the page is given nothing, and
-  // its leave runs out. A line to the page, and one to each frame a process of its own draws: a frame made
-  // after this has no leave but what its user's own click gives it. Playwright's listener goes only once
-  // every one of those lines hears, which a busy page keeps waiting: until then it hears as before.
+  // its leave runs out. A line to the page, and one to each frame a process of its own draws: those it has
+  // now, and each it makes or sends elsewhere while they hold the browser (framed). Playwright's listener
+  // goes only once every one of those lines hears, which a busy page keeps waiting: until then it hears as before.
   private overhear(page: Page): void {
     const kept = this.hearing.get(page);
     if (!kept?.heard || kept.lines || kept.over) return;
-    const mine = {};
-    kept.over = mine;
     const lines: CDPSession[] = [];
-    const targets = [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
-    void Promise.allSettled(targets.map(async (target) => {
-      // None for a frame its page's own process draws, nor for a page that is gone.
-      const line = await page.context().newCDPSession(target).catch(() => null);
-      if (line === null) return;
-      lines.push(line);
-      line.on("Page.fileChooserOpened", () => this.overheard(page, lines));
-      // The browser stops a page's own chooser for a line only once the line has the page's events.
-      await Promise.all([line.send("Page.enable"), line.send("Page.setInterceptFileChooserDialog", { enabled: true })]);
-    })).then(() => {
+    const mine = { lines, more: [] as Array<Promise<unknown>> };
+    kept.over = mine;
+    const made = async (): Promise<void> => {
+      await Promise.allSettled([
+        this.line(page, page, lines),
+        ...page.frames().filter((frame) => frame !== page.mainFrame()).map((frame) => this.frameLine(page, frame, lines)),
+      ]);
+      // And those of the frames that came meanwhile.
+      for (let next = 0; next < mine.more.length; next += 1) await mine.more[next];
+    };
+    void made().then(() => {
       if (this.hearing.get(page) !== kept || kept.over !== mine || this.held === null) return void this.drop(lines);
       delete kept.over;
       kept.lines = lines;
       if (kept.heard) page.off("filechooser", kept.heard);
       kept.heard = null;
+    });
+  }
+
+  // A line of this host's own to *target*, a page or a frame of it, among its page's *lines*: it hears what
+  // the target asks for, and the browser opens no chooser of its own for it. None for a frame its page's own
+  // process draws, which that page's line hears, nor for a page that is gone. Never rejects.
+  private async line(page: Page, target: Page | Frame, lines: CDPSession[]): Promise<CDPSession | null> {
+    const line = await page.context().newCDPSession(target).catch(() => null);
+    if (line === null) return null;
+    lines.push(line);
+    line.on("Page.fileChooserOpened", () => this.overheard(page, lines));
+    // The browser stops a page's own chooser for a line only once the line has the page's events.
+    await Promise.all([line.send("Page.enable"), line.send("Page.setInterceptFileChooserDialog", { enabled: true })]).catch(() => {});
+    return line;
+  }
+
+  // The line to *frame* among its page's *lines*, made anew: a frame sent to another site is drawn by another
+  // process from then on, which the line it had does not reach. One at a time for a frame, and one line kept
+  // for it: a page that sends a frame to and fro makes no more of them than it has frames.
+  private frameLine(page: Page, frame: Frame, lines: CDPSession[]): Promise<CDPSession | null> {
+    const each = this.frameLines.get(lines) ?? new Map<Frame, Promise<CDPSession | null>>();
+    this.frameLines.set(lines, each);
+    const made = (each.get(frame) ?? Promise.resolve(null)).then(async (before) => {
+      const line = await this.line(page, frame, lines);
+      if (line === null) return before;
+      if (before !== null) this.unline(before, lines);
+      return line;
+    });
+    each.set(frame, made);
+    return made;
+  }
+
+  // *line*, one of a page's *lines*, hears no more and is closed.
+  private unline(line: CDPSession, lines: CDPSession[]): void {
+    if (lines.includes(line)) lines.splice(lines.indexOf(line), 1);
+    this.drop([line]);
+  }
+
+  // *frame* of *page* has a document now, made or sent elsewhere while its user holds the browser: heard on a
+  // line of this host's own as the frames the page had at the take-over are, where a process of its own draws
+  // it. Without one, the browser's own chooser would open for it while the page it is in is not let be yet.
+  private framed(page: Page, frame: Frame): void {
+    const kept = this.hearing.get(page);
+    const lines = kept?.lines ?? kept?.over?.lines;
+    if (this.held === null || !kept || !lines) return;
+    const made = this.frameLine(page, frame, lines);
+    kept.over?.more.push(made);
+  }
+
+  // *frame* is gone from *page*: so is the line to it.
+  private unframed(page: Page, frame: Frame): void {
+    const kept = this.hearing.get(page);
+    const lines = kept?.lines ?? kept?.over?.lines;
+    const each = lines && this.frameLines.get(lines);
+    const made = each?.get(frame);
+    if (!lines || !each || !made) return;
+    each.delete(frame);
+    void made.then((line) => {
+      if (line !== null) this.unline(line, lines);
     });
   }
 

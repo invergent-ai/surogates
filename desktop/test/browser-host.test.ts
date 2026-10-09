@@ -107,6 +107,72 @@ setInterval(() => {
 say("ready");
 </script>`;
 
+// A page that makes frames at its site's word, asked for when it loads: one of its own site, one of another's, and
+// it sends a frame of its own site it had from the start to the other site. It frames a page of the other site
+// from the start as well, which at that site's word makes a frame of this page's site: a frame of the page's own
+// site inside another's, drawn by the page's process and yet no part of the page for the browser's tools. At
+// another word the page is busy, for six seconds. It says when what a click gives it comes and goes, and whether
+// it had been busy by then.
+const FRAMER = `<!doctype html><title>FRAMER</title><body style="margin:0">
+<button id="press" style="position:absolute;left:0;top:0;width:280px;height:40px">press</button>
+<iframe id="moving" src="/framed-asks?moving" style="position:absolute;left:0;top:60px;width:200px;height:60px"></iframe>
+<iframe src="http://other.test/framer-inner" style="position:absolute;left:220px;top:60px;width:300px;height:160px;border:0"></iframe>
+<script>
+const say = (what) => navigator.sendBeacon("/said", what);
+let had = false;
+setInterval(() => {
+  const has = navigator.userActivation.isActive;
+  if (has !== had) say(has ? (freed ? "leave, free again" : "leave") : "no leave");
+  had = has;
+}, 25);
+let freed = false;
+const make = (src, left) => {
+  const frame = document.createElement("iframe");
+  frame.src = src;
+  frame.style.cssText = "position:absolute;top:240px;width:200px;height:60px;border:0;left:" + left + "px";
+  document.body.append(frame);
+};
+fetch("/word?frames").then(() => {
+  make("/framed-asks?same", 0);
+  make("http://other.test/framed-asks?other", 220);
+  document.getElementById("moving").src = "http://other.test/framed-asks?moved";
+});
+fetch("/word?busy").then(() => {
+  const until = performance.now() + 6000;
+  while (performance.now() < until) {}
+  freed = true;
+  had = false;
+});
+</script>`;
+const FRAMER_INNER = `<!doctype html><body style="margin:0"><script>
+fetch("/word?nested").then(() => {
+  const frame = document.createElement("iframe");
+  frame.src = "http://fixture.test/framed-asks?nested";
+  frame.style.cssText = "position:absolute;left:0;top:0;width:300px;height:160px;border:0";
+  document.body.append(frame);
+});
+</script>`;
+// A frame that asks for a file the moment it is made, leave or none, and again at each press in it and each time it
+// finds it has leave with none: it says whether it had leave when it was made, and each time it asks on leave. The
+// one a page has from the start asks for nothing.
+const FRAMED_ASKS = `<!doctype html><body style="margin:0"><input id="file" type="file">
+<script>
+const say = (what) => navigator.sendBeacon("/said", what);
+const input = document.getElementById("file");
+const asks = location.search !== "?moving";
+let had = navigator.userActivation.isActive;
+say("made " + (had ? "with leave" : "with no leave"));
+if (asks) input.click();
+const ask = () => {
+  const has = navigator.userActivation.isActive;
+  if (has && !had && asks) { input.click(); say("asked"); }
+  had = has;
+};
+// At the press itself: asking takes the leave from every frame of the page, and the first to ask has it.
+addEventListener("pointerdown", ask);
+setInterval(ask, 25);
+</script>`;
+
 // A page that asks for a file once, on the leave the agent's navigation gave it; then watches, task after task, for
 // leave to come back, which is Playwright's first reading of the input that asked, and is busy from that very task
 // on, for as long as its address says. Free again, it asks once more, a moment later, if it finds it has leave.
@@ -209,6 +275,9 @@ beforeEach(async () => {
         res.writeHead(204).end();
       });
     }
+    if (req.url === "/framer") return void res.writeHead(200, { "content-type": "text/html" }).end(FRAMER);
+    if (req.url === "/framer-inner") return void res.writeHead(200, { "content-type": "text/html" }).end(FRAMER_INNER);
+    if (req.url?.startsWith("/framed-asks")) return void res.writeHead(200, { "content-type": "text/html" }).end(FRAMED_ASKS);
     if (req.url?.startsWith("/acts")) return void res.writeHead(200, { "content-type": "text/html" }).end(ACTS(req.url === "/acts?framing"));
     if (req.url?.startsWith("/keeper")) return void res.writeHead(200, { "content-type": "text/html" }).end(KEEPER);
     if (req.url?.startsWith("/word")) return void words.set(req.url.slice("/word".length), () => void (res.headersSent || res.writeHead(200).end("go")));
@@ -4554,6 +4623,72 @@ await navigator.serviceWorker.ready;`);
     }
     await new Promise((done) => setTimeout(done, 1_500));
     expect(ownChoosers()).toEqual([]);
+  }, 60_000);
+
+  it("hears a frame made while its user holds the browser as it hears the page: one of the page's site or another's, one sent to another site then, one of the page's site inside another's, each made at a script's own moment with the agent's click fresh, has leave for nothing and opens nothing; one their own click lands in asks, heard and given nothing until the page is let be, and opens the browser's own chooser after", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/framer" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const press = await onScreen(page, "press");
+    // A point of the page, on the screen: the button's middle is at 140, 20.
+    const screen = (x: number, y: number) => [String(press[0] - 140 + x), String(press[1] - 20 + y)] as const;
+    const made = ["same", "other", "moved", "nested"];
+    const saying = (which: string) => said.filter(({ from }) => from === `/framed-asks?${which}`).map(({ what }) => what);
+    await expect.poll(() => words.size, { timeout: 5_000 }).toBe(3);
+    // The agent's click, a moment before the take-over: the page has what it gives for five seconds.
+    expect(await op(a, "browser.mouse", { action: "click", x: 60, y: 20, button: "left", clicks: 1 }, "chat-1")).toMatchObject({ ok: {} });
+    host.pause("chat-1", true);
+    await expect.poll(() => [playwrightHears(page), hears(page)], { timeout: 5_000 }).toEqual([0, 1]);
+    // The page's script and its frame's, waiting since before the take-over, make the frames now. None has leave,
+    // not the one that had the page's while it was of its site: each asks, and the browser refuses it.
+    words.get("?frames")!();
+    words.get("?nested")!();
+    await expect.poll(() => made.map((which) => saying(which)), { timeout: 5_000 }).toEqual(made.map(() => ["made with no leave"]));
+    await new Promise((done) => setTimeout(done, 1_000));
+    expect([made.map((which) => saying(which).length), ownChoosers()]).toEqual([[1, 1, 1, 1], []]);
+    // Each that a process of its own draws has a line of the host's by now, with the page's and the frame's it had.
+    expect((host as unknown as { hearing: Map<Page, { lines?: unknown[] }> }).hearing.get(page)?.lines).toHaveLength(5);
+    // Their own click in the other site's frame, and in the frame of the page's site inside the other site's: each
+    // has leave by it and asks. The page is not let be yet, and neither are its frames: no chooser opens.
+    asUser("focus", xwindow()!.id);
+    asUser("click", ...screen(320, 270));
+    await expect.poll(() => saying("other"), { timeout: 5_000 }).toEqual(["made with no leave", "asked"]);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect([hears(page), ownChoosers()]).toEqual([1, []]);
+    asUser("click", ...screen(320, 100));
+    await expect.poll(() => saying("nested"), { timeout: 5_000 }).toEqual(["made with no leave", "asked"]);
+    await new Promise((done) => setTimeout(done, 1_500));
+    expect([hears(page), ownChoosers()]).toEqual([1, []]);
+    // Let be, five seconds after the last of that: their click in a frame opens the browser's chooser, as in the page.
+    await expect.poll(() => hears(page), { timeout: 20_000 }).toBe(0);
+    expect(ownChoosers()).toEqual([]);
+    asUser("click", ...screen(320, 270));
+    await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => saying("other"), { timeout: 5_000 }).toEqual(["made with no leave", "asked", "asked"]);
+  }, 90_000);
+
+  it("gives a frame made while its user holds the browser no leave by a click of the agent's still on its way: the click reaches a busy page once it is free, the frame of the page's site that another site's frame made meanwhile has none of it, and no chooser of the browser's own opens", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/framer" }, "chat-1");
+    const saying = (which: string) => said.filter(({ from }) => from === which).map(({ what }) => what);
+    await expect.poll(() => words.size, { timeout: 5_000 }).toBe(3);
+    // The page is busy six seconds, by now: the agent's click on its button waits on it.
+    words.get("?busy")!();
+    await new Promise((done) => setTimeout(done, 300));
+    const clicking = op(a, "browser.mouse", { action: "click", x: 60, y: 20, button: "left", clicks: 1 }, "chat-1");
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await within(1_000, clicking)).toEqual(PAUSED);
+    // The other site's frame is not busy: it makes a frame of the page's site, which the page's process draws
+    // once it is free, when the click reaches the page too.
+    words.get("?nested")!();
+    const seen: number[] = [];
+    for (let n = 0; n < 36; n += 1) {
+      await new Promise((done) => setTimeout(done, 250));
+      seen.push(ownChoosers().length);
+    }
+    expect(saying("/framer")).toContain("leave, free again");
+    expect([saying("/framed-asks?nested"), Math.max(...seen)]).toEqual([["made with no leave"], 0]);
   }, 60_000);
 
   it("leaves a page's own question open for its user while they hold the browser: nobody answers it for them, and their own answer reaches the page", async () => {
