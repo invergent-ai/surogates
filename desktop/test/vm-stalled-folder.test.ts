@@ -13,7 +13,7 @@ import { duplexPair } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Control, type ControlRoots } from "../src/guest/control.js";
-import { type BootVm, type Folder, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, type Folder, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
 
@@ -31,7 +31,8 @@ const options = (): VmOptions => ({
 });
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU; its agent powers it off at a shutdown.
-const fakeVm = (roots: ControlRoots): BootVm => async () => {
+// *shared*: each folder it was asked to share.
+const fakeVm = (roots: ControlRoots, shared: string[] = []): BootVm => async () => {
   const [host, guest] = duplexPair();
   const [net] = duplexPair();
   const [inbound] = duplexPair();
@@ -48,7 +49,11 @@ const fakeVm = (roots: ControlRoots): BootVm => async () => {
   const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill });
   createInterface({ input: guest }).on("line", (line) => control.receive(line));
   control.hello();
-  return { control: host, net, inbound, exited, emulated: null, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
+  const share = async (folder: string) => {
+    shared.push(folder);
+    return { kind: "virtiofs" as const, tag: "r1" };
+  };
+  return { control: host, net, inbound, exited, emulated: null, share, unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
@@ -116,6 +121,55 @@ describe("a chat's folder on a mount that does not answer, asked again and again
       for (let n = 0; n < 4; n += 1) {
         expect(await within(manager.perform({ id: `${n}`, root: `root-${n}`, folder, kind: "which", args: {} }, new AbortController().signal), 3_000))
           .toMatchObject({ error: { type: "unavailable" } });
+      }
+      expect(await within(stat(dir).then(() => "answered"), 1_000)).toBe("answered");
+      await manager.stop();
+    } finally {
+      release();
+    }
+  });
+});
+
+describe("a folder's place on a mount that does not answer", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const KEY = "0123456789abcdef";
+  // A folder that answers, in the tests' own.
+  const answering = (name: string): Folder => {
+    const path = join(dir, name);
+    mkdirSync(path);
+    const { dev, ino } = statSync(path);
+    return { path, dev, ino };
+  };
+  const refused = (which: string, s: string) => ({
+    error: { type: "unavailable", message: `This computer's sandbox could not add this folder's history: ${which} did not answer within ${s} s` },
+  });
+
+  it("is answered as unavailable within the share's bound, by which of the two did not answer, and nothing of it is shared", async () => {
+    const shared: string[] = [];
+    const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots, shared));
+    const { folder, release } = stalledFolder();
+    try {
+      const begun = performance.now();
+      const place: Place = { key: KEY, history: answering("store").path, real: folder };
+      expect(await within(manager.place(place, new AbortController().signal), 3_000)).toEqual(refused("the folder", "0.3"));
+      // The app's data on such a mount: the folder answers, and its history does not.
+      const other: Place = { key: KEY, history: folder.path, real: answering("Documents") };
+      expect(await within(manager.place(other, new AbortController().signal), 3_000)).toEqual(refused("its place in the app's data", "0.3"));
+      expect(performance.now() - begun).toBeLessThan(2_000);
+      expect(shared).toEqual([]);
+      await manager.stop();
+    } finally {
+      release();
+    }
+  });
+
+  it("holds none of the threads this computer's other lookups need, asked again and again", async () => {
+    const manager = new VmManager({ ...options(), shareMs: 200 }, fakeVm(roots));
+    const { folder, release } = stalledFolder();
+    try {
+      const store = answering("store").path;
+      for (let n = 0; n < 4; n += 1) {
+        expect(await within(manager.place({ key: KEY, history: store, real: folder }, new AbortController().signal), 3_000)).toEqual(refused("the folder", "0.2"));
       }
       expect(await within(stat(dir).then(() => "answered"), 1_000)).toBe("answered");
       await manager.stop();

@@ -1,18 +1,24 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { duplexPair } from "node:stream";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Control, type ControlPlaces } from "../src/guest/control.js";
+import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
+import { Control, type ControlPlaces, type ControlRoots } from "../src/guest/control.js";
 import { Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
+import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { readonlyFlag } from "../src/vm/linux.js";
+import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { virtiofsdArgs } from "../src/vm/qemu.js";
 
 const KEY = "0123456789abcdef";
 const R1: Share = { kind: "virtiofs", tag: "r1" };
 const R2: Share = { kind: "virtiofs", tag: "r2" };
+const signal = () => new AbortController().signal;
 
 let dir: string;
 
@@ -24,6 +30,51 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
+
+const options = (): VmOptions => ({
+  kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: join(dir, "data", "sessions.img"),
+  run: join(dir, "run"), console: join(dir, "logs", "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, kvm: join(dir, "kvm"),
+});
+const place = (): Place => ({ key: KEY, history: join(dir, "store"), real: { path: join(dir, "Documents"), ...statSync(join(dir, "Documents")) } });
+
+// A guest whose agent's Control is the real one, on *roots* and *places*, and whose backend says what it was asked.
+const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots: Partial<ControlRoots> = {}): BootVm => async () => {
+  const [host, guest] = duplexPair();
+  const [net] = duplexPair();
+  const [inbound] = duplexPair();
+  let gone = (_said: string) => {};
+  const exited = new Promise<string>((resolve) => {
+    gone = resolve;
+  });
+  const kill = async () => {
+    host.destroy();
+    net.destroy();
+    inbound.destroy();
+    gone("");
+  };
+  const control = new Control(
+    (message) => void guest.write(`${JSON.stringify(message)}\n`),
+    { uid: () => 10_000, setup: async (root, folder, share) => void asked.push(["setup", root, folder, share]), teardown: async () => {}, perform: async () => ({ ok: true }), ...roots },
+    { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill },
+    {
+      mount: async (key, history, real) => void asked.push(["mount", key, history, real]),
+      unmount: async (key) => void asked.push(["unmount", key]),
+      ...places,
+    },
+  );
+  createInterface({ input: guest }).on("line", (line) => control.receive(line));
+  control.hello();
+  let made = 0;
+  return {
+    control: host, net, inbound, exited, emulated: null, kill,
+    share: async (folder, uid, _deadline, readonly) => {
+      made += 1;
+      asked.push(["share", folder, uid, readonly === true]);
+      return { kind: "virtiofs", tag: `r${made}` };
+    },
+    unshare: async (share) => void asked.push(["unshare", share]),
+  };
+};
 
 describe("a folder's virtiofsd for the agent's own git", () => {
   it("maps the host user to the guest's root, and refuses every write where the folder is shared read-only", () => {
@@ -230,5 +281,277 @@ describe("the agent's control port, asked for a place", () => {
       { type: "failed", id: 1, message: "The agent keeps no folder's history" },
       { type: "failed", id: 2, message: "The agent keeps no folder's history" },
     ]);
+  });
+});
+
+describe("the VM manager, asked for a folder's place", () => {
+  it("shares the folder's history and the folder with the guest's root, the folder read-only, once for every thread on it", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(asked).toEqual([
+      ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2],
+    ]);
+    await manager.unplace(KEY);
+    expect(asked.slice(3)).toEqual([["unmount", KEY], ["unshare", R2], ["unshare", R1]]);
+    // A guest that holds no root and no place stops: the next place boots another, and is shared anew.
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(asked.slice(6)).toEqual([
+      ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2],
+    ]);
+    await manager.stop();
+  });
+
+  it("shares neither for a folder replaced since it was bound, nor a history that is a link to elsewhere", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    const real = place().real;
+    expect(await manager.place({ ...place(), real: { ...real, ino: real.ino + 1 } }, signal())).toEqual(FOLDER_UNAVAILABLE);
+    symlinkSync(join(dir, "Documents"), join(dir, "linked"));
+    const elsewhere = { error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: it is not where the app keeps it" } };
+    expect(await manager.place({ ...place(), history: join(dir, "linked") }, signal())).toEqual(elsewhere);
+    // Nor one that is no folder, or is not there.
+    writeFileSync(join(dir, "file"), "");
+    expect(await manager.place({ ...place(), history: join(dir, "file") }, signal())).toEqual(elsewhere);
+    expect(await manager.place({ ...place(), history: join(dir, "none") }, signal())).toEqual(elsewhere);
+    // Nor a folder reached through a link, or one that has gone.
+    expect(await manager.place({ ...place(), real: { ...real, path: join(dir, "linked") } }, signal())).toEqual(FOLDER_UNAVAILABLE);
+    expect(await manager.place({ ...place(), real: { ...real, path: join(dir, "none") } }, signal())).toEqual(FOLDER_UNAVAILABLE);
+    expect(await manager.place({ ...place(), key: "../../etc" }, signal())).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: it has no key of a folder's" },
+    });
+    expect(asked).toEqual([]);
+    await manager.stop();
+  });
+
+  it("takes back the history's share when the folder's could not be made, or the agent could not mount them, and asks again the next time", async () => {
+    const asked: unknown[] = [];
+    let fail = true;
+    const manager = new VmManager(options(), recording(asked, {
+      mount: async () => {
+        if (fail) throw new Error("mount: wrong fs type");
+      },
+    }));
+    expect(await manager.place(place(), signal())).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: mount: wrong fs type" },
+    });
+    expect(asked).toEqual([
+      ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["unshare", R2], ["unshare", R1],
+    ]);
+    fail = false;
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.stop();
+    // The folder's share alone not made: the history's, which was, is taken back.
+    asked.length = 0;
+    const boot = recording(asked);
+    const refusing: BootVm = async (...args) => {
+      const vm = await boot(...args);
+      return { ...vm, share: (folder, uid, deadline, readonly) => (readonly ? Promise.reject(new Error("it holds 8 folders already")) : vm.share(folder, uid, deadline, readonly)) };
+    };
+    const other = new VmManager(options(), refusing);
+    expect(await other.place(place(), signal())).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: it holds 8 folders already" },
+    });
+    expect(asked).toEqual([["share", join(dir, "store"), 0, false], ["unshare", R1]]);
+    await other.stop();
+  });
+
+  it("takes a place again only once it has been let go, however soon it is asked for: as another, with shares of its own", async () => {
+    const asked: unknown[] = [];
+    // The agent's unmounts, each held until the test lets it go on.
+    let letGo = () => {};
+    let going: Promise<void>;
+    const hold = () => {
+      going = new Promise<void>((resolve) => {
+        letGo = resolve;
+      });
+    };
+    const unmounts = () => asked.filter((call) => (call as unknown[])[0] === "unmount");
+    const manager = new VmManager(options(), recording(asked, {
+      unmount: async (key) => {
+        asked.push(["unmount", key]);
+        await going;
+      },
+    }));
+    expect(await manager.place(place(), signal())).toBeNull();
+    hold();
+    const gone = manager.unplace(KEY);
+    // Asked for at once: not the place being let go, whose mounts and shares are on their way out.
+    const again = manager.place(place(), signal());
+    await vi.waitFor(() => expect(unmounts()).toHaveLength(1));
+    // While that one's mounts go, nothing is shared for the one asked for.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(asked.slice(3)).toEqual([["unmount", KEY]]);
+    letGo();
+    expect(await again).toBeNull();
+    await gone;
+    expect(asked.slice(3)).toEqual([
+      ["unmount", KEY], ["unshare", R2], ["unshare", R1],
+      ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true],
+      ["mount", KEY, { kind: "virtiofs", tag: "r3" }, { kind: "virtiofs", tag: "r4" }],
+    ]);
+    // A cancel is answered at once, while it waits for a place on its way out too.
+    hold();
+    const leaving = manager.unplace(KEY);
+    const cancel = new AbortController();
+    const waiting = manager.place(place(), cancel.signal);
+    await vi.waitFor(() => expect(unmounts()).toHaveLength(2));
+    cancel.abort();
+    expect(await waiting).toEqual(CANCELLED);
+    letGo();
+    await leaving;
+    await manager.stop();
+  });
+
+  it("lets a place go that was asked for before its letting go, though it waited for one before that", async () => {
+    const asked: unknown[] = [];
+    let letGo = () => {};
+    let going: Promise<void> | undefined;
+    const manager = new VmManager(options(), recording(asked, {
+      unmount: async (key) => {
+        asked.push(["unmount", key]);
+        await going;
+      },
+    }));
+    expect(await manager.place(place(), signal())).toBeNull();
+    going = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    // Let go, asked for again, and let go again, before the first has gone.
+    const first = manager.unplace(KEY);
+    const again = manager.place(place(), signal());
+    const last = manager.unplace(KEY);
+    await vi.waitFor(() => expect(asked.slice(3)).toEqual([["unmount", KEY]]));
+    going = undefined;
+    letGo();
+    expect(await again).toBeNull();
+    await Promise.all([first, last]);
+    // Each in the order it was asked: nothing of the place is left in the guest.
+    const R3 = { kind: "virtiofs", tag: "r3" };
+    const R4 = { kind: "virtiofs", tag: "r4" };
+    expect(asked.slice(3)).toEqual([
+      ["unmount", KEY], ["unshare", R2], ["unshare", R1],
+      ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R3, R4],
+      ["unmount", KEY], ["unshare", R4], ["unshare", R3],
+    ]);
+    await manager.stop();
+  });
+
+  it("answers a key it holds for one folder as no other folder's place, and no other history's", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    expect(await manager.place(place(), signal())).toBeNull();
+    const held = { error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: its key is another folder's place in the sandbox" } };
+    // Another folder under the key, another folder at the folder's path, and the folder with another history.
+    const copy = { path: join(dir, "copy"), ...statSync(join(dir, "copy")) };
+    expect(await manager.place({ ...place(), real: copy }, signal())).toEqual(held);
+    expect(await manager.place({ ...place(), real: { ...place().real, ino: copy.ino } }, signal())).toEqual(held);
+    mkdirSync(join(dir, "other"));
+    expect(await manager.place({ ...place(), history: join(dir, "other") }, signal())).toEqual(held);
+    expect(asked).toHaveLength(3);
+    // The place it holds is as it was, and once let go its key is the other's to take.
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.unplace(KEY);
+    expect(await manager.place({ ...place(), history: join(dir, "other") }, signal())).toBeNull();
+    expect(asked.slice(6)).toEqual([["share", join(dir, "other"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2]]);
+    await manager.stop();
+  });
+
+  it("shares no history kept in the folder, and no folder that holds its history or lies in it", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    const apart = { error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: it is not kept apart from the folder" } };
+    const folder = (path: string) => ({ path, ...statSync(path) });
+    // The history in the folder: the agent's git would write the user's folder.
+    mkdirSync(join(dir, "Documents", ".history"));
+    expect(await manager.place({ ...place(), history: join(dir, "Documents", ".history") }, signal())).toEqual(apart);
+    expect(await manager.place({ ...place(), history: join(dir, "Documents") }, signal())).toEqual(apart);
+    // The folder in its history, or above it: the history's share would let the guest write a folder shared read-only.
+    mkdirSync(join(dir, "store", "threads"));
+    expect(await manager.place({ ...place(), real: folder(join(dir, "store", "threads")) }, signal())).toEqual(apart);
+    expect(await manager.place({ ...place(), real: folder(dir) }, signal())).toEqual(apart);
+    expect(asked).toEqual([]);
+    // A folder whose name only begins as the history's does is apart from it.
+    mkdirSync(join(dir, "store-2"));
+    expect(await manager.place({ ...place(), real: folder(join(dir, "store-2")) }, signal())).toBeNull();
+    await manager.stop();
+  });
+
+  it("sets a thread's root up on its copy, at its folder's path", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    const copy = { path: join(dir, "copy"), ...statSync(join(dir, "copy")) };
+    const outcome = await manager.perform({ id: "1", root: "root-1", folder: copy, at: join(dir, "Documents"), kind: "which", args: { name: "sh" } }, signal());
+    expect(outcome).toEqual({ ok: true });
+    // The share is the copy's; the path its commands see is the folder's.
+    expect(asked).toEqual([["share", join(dir, "copy"), 10_000, false], ["setup", "root-1", join(dir, "Documents"), R1]]);
+    await manager.stop();
+  });
+
+  it("keeps the guest that holds a place running once its last root has gone, and stops it with its last place", async () => {
+    const asked: unknown[] = [];
+    const boot = recording(asked);
+    let boots = 0;
+    const manager = new VmManager(options(), (...args) => {
+      boots += 1;
+      return boot(...args);
+    });
+    const copy = { path: join(dir, "copy"), ...statSync(join(dir, "copy")) };
+    const work = () => manager.perform({ id: "1", root: "root-1", folder: copy, at: join(dir, "Documents"), kind: "which", args: { name: "sh" } }, signal());
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(await work()).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    // Between a thread's snapshot and its next command the guest holds the place alone.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(await work()).toEqual({ ok: true });
+    expect(boots).toBe(1);
+    expect(asked.filter((call) => (call as unknown[])[0] === "mount")).toHaveLength(1);
+    await manager.teardown("root-1");
+    await manager.unplace(KEY);
+    expect(await work()).toEqual({ ok: true });
+    expect(boots).toBe(2);
+    await manager.stop();
+  });
+
+  it("stops a guest whose agent does not answer a place, asks nothing more of it, and boots another for the next", async () => {
+    const asked: unknown[] = [];
+    let stuck = true;
+    const manager = new VmManager({ ...options(), setupMs: 100 }, recording(asked, {
+      mount: (key, history, real) => {
+        asked.push(["mount", key, history, real]);
+        return stuck ? new Promise<void>(() => {}) : Promise.resolve();
+      },
+    }));
+    expect(await manager.place(place(), signal())).toEqual(SANDBOX_STOPPED);
+    expect(asked).toEqual([["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2]]);
+    stuck = false;
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(asked.slice(3)).toEqual([["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2]]);
+    await manager.stop();
+  });
+
+  it("writes nothing into the folder or its history, and removes nothing of either when the place goes", async () => {
+    writeFileSync(join(dir, "Documents", "Report.docx"), "the real report\n");
+    writeFileSync(join(dir, "store", "HEAD"), "ref: refs/heads/main\n");
+    const manager = new VmManager(options(), recording([]));
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.unplace(KEY);
+    await manager.stop();
+    expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);
+    expect(readFileSync(join(dir, "Documents", "Report.docx"), "utf8")).toBe("the real report\n");
+    expect(readdirSync(join(dir, "store"))).toEqual(["HEAD"]);
+  });
+
+  it("lets go of nothing for a place it does not hold, and answers a place asked of a manager that is stopping", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    await manager.unplace(KEY);
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.unplace("fedcba9876543210");
+    expect(asked).toHaveLength(3);
+    await manager.stop();
+    expect(await manager.place(place(), signal())).toEqual({ error: { type: "unavailable", message: "This computer's sandbox is stopping" } });
   });
 });
