@@ -988,6 +988,124 @@ describe("the browser on this computer", () => {
     expect(journal.bindings.browsing(ROOT)).toBe(false);
   });
 
+  describe("a port of the chat's own servers", () => {
+    const open = (url: string, root = ROOT, calling = root) => op("browser.navigate", { url, wait_until: "load" }, root, calling);
+    const NOT_LISTENING = (number: number) => ({
+      error: {
+        type: "browser",
+        message: `Nothing listens on port ${number} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${number}/ again.`,
+      },
+    });
+    // The ports each chat's sandbox listens on, and each one the approvals asked it about.
+    let listens: Record<string, number[]>;
+    let probed: Array<[string, number]>;
+    const made = (prompts: User) => new Approvals({
+      bindings: journal.bindings, prompts, agent: "Research assistant",
+      listening: (root, number) => (probed.push([root, number]), Promise.resolve(listens[root]?.includes(number) === true)),
+    });
+
+    beforeEach(() => {
+      listens = { [ROOT]: [3000, 80], [OTHER]: [3000] };
+      probed = [];
+    });
+
+    it("asks the chat's sandbox whether it listens there, in either mode, however the address spells this computer: a port that does goes on to the browser", async () => {
+      bind(ROOT, "free");
+      journal.bindings.allowBrowser(ROOT);
+      user = new User("deny");
+      approvals = made(user);
+      const urls = ["http://localhost:3000/app", "http://127.0.0.1:3000/", "http://[::1]:3000/x", "http://2130706433:3000/", "http://0x7f.1:3000/", "http://LOCALHOST.:3000/"];
+      for (const url of urls) expect(await approvals.admit(open(url, ROOT, CHILD), never()), url).toBeNull();
+      // Its user is asked nothing for it, and the chat's own sandbox each time, by the chat and never its sub-agent.
+      expect([user.asked, probed]).toEqual([[], urls.map(() => [ROOT, 3000])]);
+      // A chat that asks every time is asked for the navigation as for any, once the sandbox has answered; port 80 is an address without one.
+      bind(OTHER, "ask");
+      journal.bindings.allowBrowser(OTHER);
+      listens[OTHER] = [80];
+      probed = [];
+      expect(await approvals.admit(open("http://localhost/", OTHER), never())).toEqual(ACT_DENIED);
+      expect(user.asked).toEqual([{ kind: "browser", chat: { ...chat(OTHER), root: OTHER }, action: "open", detail: "http://localhost/" }]);
+      expect(probed).toEqual([[OTHER, 80]]);
+      // Another chat's server on the port is not this chat's.
+      expect(await approvals.admit(open("http://localhost:3000/", OTHER), never())).toEqual(NOT_LISTENING(3000));
+    });
+
+    it("asks a chat that may not use the browser yet for the browser first, and its sandbox only then", async () => {
+      bind(ROOT, "free");
+      user = new User("deny");
+      approvals = made(user);
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(BROWSER_DENIED);
+      expect([user.asked, probed]).toEqual([[{ kind: "browser", chat: chat(), action: "use", detail: "" }], []]);
+      user.auto = "allow_session";
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toBeNull();
+      expect([user.asked.length, probed]).toEqual([2, [[ROOT, 3000]]]);
+    });
+
+    it("asks about nothing but a port of this computer's own names over plain http: any other address is the proxy's to judge", async () => {
+      bind(ROOT, "free");
+      journal.bindings.allowBrowser(ROOT);
+      user = new User("deny");
+      approvals = made(user);
+      for (const url of [
+        "https://localhost:3000/", "http://example.com:3000/", "http://app.localhost:3000/", "http://0.0.0.0:3000/", "http://127.0.0.2:3000/",
+        "http://[::ffff:127.0.0.1]:3000/", "http://[::]:3000/", "http://localhost.example.com:3000/", "http://user@localhost:3000/", "ws://localhost:3000/",
+        "not an address",
+      ]) {
+        expect(await approvals.admit(open(url), never()), url).toBeNull();
+      }
+      // Nor at any operation but a navigation, whatever it names.
+      expect(await approvals.admit(op("browser.observe", { script: "snapshot@1", params: { url: "http://localhost:3000/" } }), never())).toBeNull();
+      expect([user.asked, probed]).toEqual([[], []]);
+    });
+
+    it("asks nobody about a port nothing listens on in the chat's sandbox, or one of the sandbox's own proxies, and says why", async () => {
+      bind(ROOT, "ask");
+      journal.bindings.allowBrowser(ROOT);
+      user = new User("allow_session");
+      approvals = made(user);
+      expect(await approvals.admit(open("http://localhost:8000/"), never())).toEqual(NOT_LISTENING(8000));
+      for (const proxy of [3128, 1080]) {
+        listens[ROOT] = [proxy];
+        expect(await approvals.admit(open(`http://localhost:${proxy}/`), never())).toEqual({
+          error: { type: "browser", message: `Port ${proxy} is the sandbox's own proxy for this chat's commands, which the agent's browser does not open` },
+        });
+      }
+      // A sandbox that cannot be asked listens on nothing.
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => Promise.reject(new Error("no sandbox")) });
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
+      approvals = new Approvals({ bindings: journal.bindings, prompts: user, agent: "Research assistant" });
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(NOT_LISTENING(3000));
+      // Not even for the navigation, in a chat that asks every time.
+      expect([user.asked, probed]).toEqual([[], [[ROOT, 8000]]]);
+    });
+
+    it("goes with a take-over or a cancel while the sandbox is asked, as any browser prompt does", async () => {
+      bind(ROOT, "free");
+      journal.bindings.allowBrowser(ROOT);
+      let taken = false;
+      const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+      // A sandbox that answers only once its user has taken the browser over.
+      const answering = Promise.withResolvers<boolean>();
+      let asked = 0;
+      approvals = new Approvals({
+        bindings: journal.bindings, prompts: user, agent: "Research assistant", listening: () => ((asked += 1), answering.promise),
+        refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
+      });
+      const cancelled = new AbortController();
+      const leaving = approvals.admit(open("http://localhost:3000/"), cancelled.signal);
+      await vi.waitFor(() => expect(asked).toBe(1));
+      cancelled.abort();
+      expect(await leaving).toEqual(ACT_DENIED);
+      const waiting = approvals.admit(open("http://localhost:3000/"), never());
+      await vi.waitFor(() => expect(asked).toBe(2));
+      taken = true;
+      approvals.dismissBrowser();
+      answering.resolve(true);
+      expect(await waiting).toEqual(PAUSED);
+      expect(user.asked).toEqual([]);
+    });
+  });
+
   it("asks in Ask every time before each act on the page, after the first use, and never before a read", async () => {
     bind(ROOT, "ask");
     journal.bindings.allowBrowser(ROOT);

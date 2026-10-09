@@ -12,6 +12,7 @@
 
 import { posix } from "node:path";
 
+import { chatPortOf, SANDBOX_PORTS } from "../browser/ports.js";
 import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -114,6 +115,8 @@ export interface ApprovalsOptions {
   notComing?: (of: string) => void;
   // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
   refusal?: (operation: Operation) => Outcome | null;
+  // Whether something in a chat's sandbox listens on a port of its own loopback now: the browser is sent to no port nothing listens on.
+  listening?: (root: string, port: number) => Promise<boolean>;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
 
@@ -134,6 +137,14 @@ const BROWSER_DENIED = {
   unanswered: "Nobody answered on this computer in time, so the agent's browser did nothing",
   unnamed: "The agent's browser on this computer did not say in time which site would get the files, so nobody was asked and the page was given nothing",
 } as const;
+// A port the browser cannot open, whatever its user would say: the page failed, as the tools read it.
+const noPort = (message: string): Outcome => ({ error: { type: "browser", message } });
+const NOT_LISTENING = (port: number): Outcome => noPort(
+  `Nothing listens on port ${port} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${port}/ again.`,
+);
+const SANDBOX_PROXY = (port: number): Outcome => noPort(
+  `Port ${port} is the sandbox's own proxy for this chat's commands, which the agent's browser does not open`,
+);
 
 // Not denied: nobody was there to answer.
 const UNANSWERED = {
@@ -293,10 +304,13 @@ export class Approvals {
     });
   }
 
-  // A browser operation: the chat's first asks whether its agent may use the browser here at all,
-  // and in Ask every time each that acts on the page asks too, in the chat's line. Fails closed.
+  // A browser operation: the chat's first asks whether its agent may use the browser here at all; a
+  // navigation to a port of the chat's own servers asks the chat's sandbox whether it listens there, in
+  // either mode; and in Ask every time each that acts on the page asks too, in the chat's line. Fails closed.
   private async browse(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
     const root = operation.sessionId;
+    // The port of the chat's own servers a navigation opens, read from the address alone.
+    const port = operation.kind === "browser.navigate" ? chatPortOf(String(operation.args.url ?? "")) : null;
     const needed = (): { binding: Binding; use: boolean; act: boolean } | { answer: Outcome | null } => {
       let binding: Binding | undefined;
       let allowed = false;
@@ -311,7 +325,7 @@ export class Approvals {
       // open since its user took the browser back from it in Settings, which its close still closes.
       if (!allowed && operation.kind === "browser.close") return { answer: null };
       const act = binding.mode !== "free" && acts(operation);
-      return allowed && !act ? { answer: null } : { binding, use: !allowed, act };
+      return allowed && !act && port === null ? { answer: null } : { binding, use: !allowed, act };
     };
     const first = needed();
     if ("answer" in first) return first.answer;
@@ -358,6 +372,10 @@ export class Approvals {
             report(this.options.onError, error);
           }
         }
+        if (port !== null) {
+          const refused = await this.openPort(root, port, asking);
+          if (refused) return refused;
+        }
         if (!now.act) return null;
         const act = browserAct(operation);
         named = act.action === "upload";
@@ -391,6 +409,15 @@ export class Approvals {
     // An upload the browser was asked about that got no leave, however that came, is not coming: the browser is told.
     if (named && answer !== null) this.options.notComing?.(operation.id);
     return answer;
+  }
+
+  // A port of the chat's own servers its agent's browser would open: null once the chat's sandbox says
+  // something listens there; otherwise why the browser does not open it, and nobody is asked.
+  private async openPort(root: string, port: number, asking: AbortSignal): Promise<Outcome | null> {
+    if (SANDBOX_PORTS.has(port)) return SANDBOX_PROXY(port);
+    const listening = await settled(Promise.resolve().then(() => this.options.listening?.(root, port) ?? false).catch(() => false), asking);
+    if (asking.aborted) return browserDenied(BROWSER_DENIED.act);
+    return listening === true ? null : NOT_LISTENING(port);
   }
 
   /**

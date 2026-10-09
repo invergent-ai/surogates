@@ -38,7 +38,7 @@ let home: string;
 let origin: string;
 let agent: FakeAgent;
 let app: ElectronApplication | undefined;
-let canary: Server;
+let canary: Server[];
 let canaryPort: number;
 let hits: string[];
 let next = 0;
@@ -47,13 +47,19 @@ beforeEach(async () => {
   home = dataHome();
   agent = new FakeAgent();
   hits = [];
-  // This computer's own service, which the agent's browser must never reach.
-  canary = createServer((req, res) => {
-    hits.push(req.url ?? "");
-    res.end("canary");
-  });
-  await new Promise<void>((done) => canary.listen(0, "127.0.0.1", () => done()));
-  canaryPort = (canary.address() as { port: number }).port;
+  // This computer's own service, which the agent's browser must never reach: on both of the loopback's
+  // families, on one port, so that a dial that strays to either is heard.
+  for (;;) {
+    const [six, four] = canary = [0, 1].map(() => createServer((req, res) => {
+      hits.push(req.url ?? "");
+      res.end("canary");
+    })) as [Server, Server];
+    await new Promise<void>((done) => six.listen(0, "::1", () => done()));
+    canaryPort = (six.address() as { port: number }).port;
+    // The port IPv6 gave may be taken on IPv4: another is tried.
+    if (await new Promise<boolean>((done) => four.once("error", () => done(false)).listen(canaryPort, "127.0.0.1", () => done(true)))) break;
+    await new Promise<void>((done) => six.close(() => done()));
+  }
 });
 
 afterEach(async () => {
@@ -61,7 +67,7 @@ afterEach(async () => {
   app = undefined;
   await agent.stop();
   await agent.link.stop();
-  await new Promise<void>((done) => canary.close(() => done()));
+  await Promise.all(canary.map((server) => new Promise<void>((done) => server.close(() => done()))));
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -212,7 +218,8 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     const folder = join(home, "project");
     mkdirSync(folder);
     await bound(folder);
-    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    // This computer's loopback, under a name no chat's own server has.
+    const navigating = operation("browser.navigate", { url: `http://[::ffff:127.0.0.1]:${canaryPort}/`, wait_until: "load" });
     const asked = await prompt(app!);
     expect(await asked.textContent("#prompt-title")).toMatch(/^Let .+ use a browser on this computer\?$/);
     expect(await asked.getAttribute("#prompt-buttons", "data-held")).toBe("true");
@@ -221,6 +228,15 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     expect(await navigating).toEqual({
       error: { type: "browser", message: `The agent's browser does not reach this computer's own services (127.0.0.1:${canaryPort})` },
     });
+    // Under the name a chat's own server has, it is that port of the chat's sandbox, where nothing listens: never this computer's.
+    expect(await operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" })).toEqual({
+      error: {
+        type: "browser",
+        message: `Nothing listens on port ${canaryPort} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${canaryPort}/ again.`,
+      },
+    });
+    // Its user is asked nothing for it.
+    expect(await promptsShown(app!)).toBe(0);
     expect(hits).toEqual([]);
     expect(readdirSync(profiles())).toHaveLength(1);
     expect(browsers().length).toBeGreaterThan(0);
@@ -261,7 +277,8 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     const folder = join(home, "project");
     mkdirSync(folder);
     const page = await bound(folder);
-    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    // This computer's loopback, under a name no chat's own server has.
+    const navigating = operation("browser.navigate", { url: `http://[::ffff:127.0.0.1]:${canaryPort}/`, wait_until: "load" });
     await press(await prompt(app!), "allow_session");
     await navigating;
     expect(readdirSync(profiles())).toHaveLength(1);
