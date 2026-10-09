@@ -145,8 +145,8 @@ async def test_a_landing_of_a_few_hundred_files_writes_its_steps_a_handful_of_ti
     took = time.monotonic() - began
     [row] = await rows(api, thread)
     assert row.saga_state == "completed" and len(row.files) == files
-    # Three writes whatever its size, and one more every few seconds: never one a file,
-    # which made a landing's cost grow with the square of its files.
+    # Three writes whatever its size, and one more every five seconds at most (fewer when a write
+    # is slow): never one a file, which made a landing's cost grow with the square of its files.
     most = 3 + took / landing_module._ROW_EVERY
     assert len(written) <= most and sum(written) <= most * written[-1], (len(written), took)
     # Each try of a step still marks the row alive, for another lock holder's fence.
@@ -275,7 +275,7 @@ async def test_running_landings_are_the_projects_own_oldest_first_with_how_long_
 
 
 #: How a landing's row stands when its worker dies.  Its steps are written at
-#: most every few seconds, so a quick landing's row is ``behind``: as its steps
+#: most every five seconds, so a quick landing's row is ``behind``: as its steps
 #: were fixed.  A slow one's is, at best, ``exact``: written at the try it died in.
 ROWS = ["behind", "exact"]
 
@@ -1459,6 +1459,92 @@ async def test_a_landing_whose_commit_step_failed_keeps_the_turn_on_its_branch(a
     assert pods.real_names() == ["Report.docx", "notes.txt"]
     await ends(api, SandboxPool(pods), thread)  # its next turn, with no tool
     assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+
+
+async def test_a_landing_whose_commit_step_failed_keeps_nothing_once_its_lock_is_lost(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    call, keeps = landing_module._call, []
+
+    async def the_commit_fails_and_the_lock_goes(sandbox_pool, owner, action, **arguments):
+        if action == "commit":
+            await lose_the_lock(api, thread)  # a failover, unseen: the project is another holder's now
+            raise landing_module.LandingStepError("git add failed: Input/output error")
+        if action == "keep":
+            keeps.append(owner)
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_commit_fails_and_the_lock_goes)
+        await ends(api, pool, thread)
+    # A keep writes the history's refs: without the lock the pod is not asked, and the turn's end says so.
+    assert keeps == [] and not (pods.project / "_history" / "packed-refs").exists()
+    assert [done["saved"] for done in await turn_ends(api, thread)] == [False]
+    [report] = await reports(api, master)
+    assert (report["landing"], report.get("saved")) == ("compensated", None)
+
+
+@pytest.mark.parametrize("landing", ["rolled back", "of a turn that changed nothing", "completed"])
+async def test_only_a_landing_that_completed_with_a_commit_prunes_the_history(api, monkeypatch, pods, landing):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "true" if landing == "of a turn that changed nothing" else "echo a > a.md")
+    call, pruned = landing_module._call, []
+
+    async def the_apply_fails(sandbox_pool, owner, action, **arguments):
+        if action == "apply" and landing == "rolled back":
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    async def counted(**kwargs):
+        pruned.append(kwargs["sandbox_id"])
+
+    monkeypatch.setattr(landing_module, "_call", the_apply_fails)
+    monkeypatch.setattr(loop_artifact_completion, "prune_after", counted)
+    await ends(api, pool, thread)
+    # A pruning is a landing's last act: one that put no commit on main leaves the history as it is,
+    # and its pod goes with the turn.
+    assert len(pruned) == (1 if landing == "completed" else 0)
+    assert [row.saga_state for row in await rows(api, thread)] == {
+        "rolled back": ["compensated"], "of a turn that changed nothing": [], "completed": ["completed"],
+    }[landing]
+
+
+async def test_a_landing_that_completed_with_a_file_held_does_not_count_as_the_threads_work_saved(api):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    factory = api.app.state.session_factory
+
+    async def a_landing(state: str, *, overlapped: list[dict], events: tuple[int, int]) -> None:
+        orchestrator = SagaOrchestrator()
+        saga = orchestrator.create_saga(thread.id, kind="landing")
+        row = await rows_module.start_landing(
+            factory, saga, workstream_id=thread.config["workstream_id"], thread_id=thread.id,
+            agent_id=str(thread.agent_id), user_id=thread.user_id, tool_saga_id=None, events=events,
+        )
+        step = orchestrator.add_step(saga.saga_id, tool_name="history.commit", tool_call_id="", arguments={})
+
+        async def committed() -> dict:
+            return {"commit": "c" * 40, "base": "b" * 40, "changes": [], "overlapped": overlapped}
+
+        await orchestrator.execute_step(saga.saga_id, step.step_id, committed)
+        await rows_module.save_landing(factory, row, saga, state=state)
+
+    held = [{"path": "Report.docx", "reason": "changed", "before": "1" * 40, "after": "2" * 40}]
+    assert await rows_module.saved_through(factory, thread.id) is None  # no landing yet
+    await a_landing("completed", overlapped=[], events=(10, 20))
+    assert await rows_module.saved_through(factory, thread.id) == 20  # its turn is on the branch, whole
+    # A landing that completed leaving a file out moved the branch on without the thread's version of it:
+    # the thread's next copy lacks that work, and must be told.
+    await a_landing("completed", overlapped=held, events=(30, 40))
+    assert await rows_module.saved_through(factory, thread.id) is None
+    # One that did not complete left the branch at the turn, the held file's version with it.
+    await a_landing("running", overlapped=held, events=(50, 60))
+    assert await rows_module.saved_through(factory, thread.id) == 60
 
 
 async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the_real_files(api, monkeypatch, tmp_path):

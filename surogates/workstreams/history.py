@@ -5,8 +5,9 @@ The lock is a Postgres advisory transaction lock keyed by
 when its connection drops.  A row of ``workstream_history`` is a landing
 saga's durable record, written as the saga runs, so the next holder of the
 lock can finish or undo a landing whose worker died.  Its steps are written
-whole, so every few seconds rather than at each: between those writes a
-try of a step only marks the row alive.
+whole, so not at each: every five seconds, or every twenty times what a
+write of them takes when that is longer.  Between those writes a try of a
+step only marks the row alive.
 """
 
 from __future__ import annotations

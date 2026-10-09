@@ -2200,9 +2200,10 @@ class WorkstreamHistory(Base):
     """One change to a project's files, the landing saga's durable record.
 
     A landing writes its row before its first step, with the saga
-    ``running``, then its steps once they are fixed and every few seconds
-    as they change, so the next holder of the project's lock can finish or
-    undo a landing whose worker died.  ``steps`` may be a few seconds
+    ``running``, then its steps once they are fixed and, as they change,
+    every five seconds or every twenty times what a write of them takes,
+    whichever is longer, so the next holder of the project's lock can
+    finish or undo a landing whose worker died.  ``steps`` may be that far
     behind: a step shown ``pending`` may have run.
     The audit is kept without file contents: ``files`` and ``picked_up``
     hold git blob ids.  ``device_id`` and ``folder`` name a folder on that

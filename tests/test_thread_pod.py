@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -395,3 +396,77 @@ async def test_a_pruning_the_pod_did_not_finish_is_logged_and_the_landing_stands
             saga_settings=None,
         )
     assert "Could not prune the history of project w1" in caplog.text
+
+
+async def test_a_pruning_asks_the_projects_lock_before_it_asks_the_pod(monkeypatch, caplog):
+    asked = []
+
+    async def none(*_):
+        return []
+
+    class Pod:
+        async def execute_released(self, *args, **kwargs):
+            asked.append(args)
+            return json.dumps({"pruned": True})
+
+    @contextlib.asynccontextmanager
+    async def a_lock_lost_unseen(*_):
+        async def held():
+            raise ConnectionError("the lock's connection is gone")
+
+        yield held
+
+    monkeypatch.setattr(landing, "kept_refs", none)
+    monkeypatch.setattr(landing, "running_landings", none)
+    monkeypatch.setattr(landing, "project_lock", a_lock_lost_unseen)
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        await landing.prune_after(
+            session_factory=None, sandbox_pool=Pod(), sandbox_id="pod-1", workstream="w1", packs=0, saga_settings=None,
+        )
+    # A pruning rewrites the history's refs and deletes its packs: never without the lock.
+    assert asked == [] and "Could not prune the history of project w1" in caplog.text
+
+
+async def test_a_landings_row_is_behind_by_the_larger_of_its_interval_and_twenty_times_a_write(monkeypatch):
+    saves, marks = [], []
+
+    async def a_slow_write(session_factory, row, saga, **values):
+        await asyncio.sleep(0.05)
+        saves.append(values)
+
+    async def a_mark(session_factory, row):
+        marks.append(row)
+
+    monkeypatch.setattr(landing, "save_landing", a_slow_write)
+    monkeypatch.setattr(landing, "touch_landing", a_mark)
+    monkeypatch.setattr(landing, "_ROW_EVERY", 0.01)
+    row = landing._Row(None, 1, None)
+    await row.write()  # took a twentieth of a second: the steps are due again a second later, twenty times that
+    await asyncio.sleep(0.2)  # long past the interval, well short of twenty writes
+    await row.alive()
+    assert (len(saves), len(marks)) == (1, 1)  # marked alive, its steps not written
+    await asyncio.sleep(1.0)
+    await row.alive()
+    assert (len(saves), len(marks)) == (2, 1)
+
+
+async def test_a_landings_row_whose_writes_are_quick_is_behind_by_its_interval(monkeypatch):
+    saves, marks = [], []
+
+    async def a_write(session_factory, row, saga, **values):
+        saves.append(values)
+
+    async def a_mark(session_factory, row):
+        marks.append(row)
+
+    monkeypatch.setattr(landing, "save_landing", a_write)
+    monkeypatch.setattr(landing, "touch_landing", a_mark)
+    monkeypatch.setattr(landing, "_ROW_EVERY", 0.3)
+    row = landing._Row(None, 1, None)
+    await row.write()
+    await asyncio.sleep(0.05)  # long past twenty times a write that took no time
+    await row.alive()
+    assert (len(saves), len(marks)) == (1, 1)
+    await asyncio.sleep(0.3)
+    await row.alive()
+    assert (len(saves), len(marks)) == (2, 1)

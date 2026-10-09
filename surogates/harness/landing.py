@@ -14,10 +14,12 @@ by decision, not by failure: the newer file stays, and the thread's
 version is kept in history as the landing's second parent.
 
 The saga's durable record is its ``workstream_history`` row, written as it
-runs: marked alive at every try, its steps at each turning point and every
-few seconds between.  The record step is the push of the project's history, the moment a
-landing counts: a landing counts only once ``main`` in the history carries
-its saga, and one that does is never put back.  The next holder of the
+runs: marked alive at every try, its steps at each turning point and,
+between those, every five seconds or every twenty times what a write of
+them takes, whichever is longer.  The record step is the push of the
+project's history, the moment a landing counts: a landing counts only once
+``main`` in the history carries its saga, and one that does is never put
+back.  The next holder of the
 project's lock settles a landing a killed worker left running before it
 does anything else.
 """
@@ -66,7 +68,10 @@ _PRUNE_PER_GIB = 180
 #: A landing's steps go to its row whole, so not at every step: between its
 #: turning points at most this often, in seconds, and never so often that
 #: writing them takes more than one part in _ROW_SHARE of its time.  A row
-#: written at every step cost a landing the square of its files.
+#: written at every step cost a landing the square of its files.  So a row
+#: is behind its landing by the larger of _ROW_EVERY seconds and _ROW_SHARE
+#: times its last write: five seconds on a quick database, twenty when a
+#: write takes one.
 _ROW_EVERY = 5
 _ROW_SHARE = 20
 #: What a landing left running says, on each apply it could not put back, when it is given up.
@@ -101,10 +106,12 @@ class _Row:
     writes no steps: another lock holder's fence runs from that mark.  The
     steps are written at the landing's turning points: once they are fixed,
     with the record before its first try, when a put-back begins, and at
-    the end.  Between those they are written at most every few seconds, in
-    place of the mark.
+    the end.  Between those they are written in place of the mark once
+    ``_ROW_EVERY`` seconds have passed since the last write, or
+    ``_ROW_SHARE`` times what that write took when that is longer.
 
-    So a row is behind its landing by up to that long.  It never shows a
+    So a row is behind its landing by up to the larger of the two: five
+    seconds, or twenty times a write of its steps.  It never shows a
     step done that is not: an apply it shows ``pending`` may have run, and
     one it shows ``committed`` may have been put back.  Recovery puts both
     back, which is safe to repeat.
@@ -570,7 +577,7 @@ async def _settle(
         return await orchestrator.attempt(once, least=2 if found else 1)
 
     if not recovered:
-        # Where it stopped, before anything goes back: its own row may be seconds behind.
+        # Where it stopped, before anything goes back: its own row may be behind, by five seconds or twenty writes.
         await _written(row.write)
     gone: list[str] = []
     committed = next(
