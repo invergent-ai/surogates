@@ -439,7 +439,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", join(box.dir, "stops.sh"), `${box.container}:/opt/surogate-test/stops.sh`]).status).toBe(0);
     expect(root("rm -rf /opt/pristine && cp -a /opt/surogate /opt/pristine").status).toBe(0);
     const lines = root(`bash /opt/surogate-test/stops.sh ${these}`).stdout.trim().split("\n");
-    expect(lines.pop()).toMatch(/^end \d{2,}$/);
+    // Its last line is where no stop was made any more. How far the stops reach is not read from
+    // that number: each test that uses them asks for the states it must have seen.
+    expect(lines.pop()).toMatch(/^end \d+$/);
+    expect(lines.length).toBeGreaterThan(0);
     return lines;
   };
 
@@ -1967,6 +1970,18 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   const latest = (version: string) => {
     for (const end of ["", ".sig"]) copyFileSync(join(www(), "desktop", "releases", version, `manifest.json${end}`), join(www(), "desktop", `latest.json${end}`));
   };
+  // The computer as a test that stands alone begins: nothing of a test before it, then each of
+  // *releases* published in turn, with *fields* in its manifest's place, and installed.
+  const starting = (...releases: Array<[version: string, fields?: Record<string, unknown>]>) => {
+    const removed = uninstall();
+    expect(removed.status, removed.stderr).toBe(0);
+    for (const [version, fields] of releases) {
+      publish(version, undefined, fields);
+      const installed = install();
+      expect(installed.status, `${version}: ${installed.stderr}`).toBe(0);
+    }
+    expect(current()).toBe(`/opt/surogate/versions/${releases.at(-1)?.[0]}`);
+  };
   // The files of the base's release *version* handed to the helper pkexec runs, as the app downloads them.
   const handed = (version: string) => root(`cd /home/tester && curl -fsSLO ${base}/desktop/releases/${version}/manifest.json -O ${base}/desktop/releases/${version}/manifest.json.sig `
     + `-o release.tar.gz ${base}/desktop/releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz && /opt/surogate/bin/surogate-apply-update --apply manifest.json manifest.json.sig release.tar.gz`);
@@ -2123,6 +2138,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("lets an administrator approve through polkit the update a user downloaded, and nothing else of the helper", () => {
+    starting(["1.1.0"]);
     // The system bus and polkit, as a desktop runs them, and an administrator who has just approved.
     expect(root("mkdir -p /run/dbus && dbus-daemon --system --fork && (/usr/lib/polkit-1/polkitd --no-debug >/dev/null 2>&1 &) && sleep 2").status).toBe(0);
     expect(root(`echo 'polkit.addRule(function (action, subject) { if (action.id == "ai.invergent.surogate.update" && subject.user == "tester") return polkit.Result.YES; });' >/etc/polkit-1/rules.d/10-test.rules && sleep 2`).status).toBe(0);
@@ -2663,6 +2679,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("rolls back from no base that its record does not name as an install wrote it, and to no release while the installed version's mark is not root's own: curl is handed no word of a record's but an http or https URL, and nothing is asked of any base", () => {
+    starting(["1.4.0"], ["1.6.0", { stateSchema: 2 }]);
     expect(current()).toBe("/opt/surogate/versions/1.6.0");
     const record = "/etc/surogate/install.json";
     const mark = "/opt/surogate/versions/1.6.0/release.json";
@@ -2958,6 +2975,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("says what mends it where the base's release is signed by a key that an update stopped before its end brings: to run --version of that update first", () => {
+    starting(["3.4.0", { stateSchema: 2 }]);
     expect(current()).toBe("/opt/surogate/versions/3.4.0");
     const helper = "/opt/surogate/bin/surogate-apply-update";
     const schema = { stateSchema: 2 };
