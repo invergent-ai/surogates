@@ -78,19 +78,43 @@ _REPORT_EVENT_TYPES = frozenset({
     EventType.WORKER_COMPLETE.value,
     EventType.WORKER_FAILED.value,
 })
+#: The messages the harness writes to give a goal its next turn.
+_GOAL_TURN_MESSAGES = frozenset({"outcome_kickoff", "outcome_continuation"})
 
 
-def _first_unread_report(events: list[Any]) -> int | None:
-    """Return the id of the first worker's report in *events* that no model request has read.
+def _first_unread(events: list[Any], *, goal_in_flight: bool) -> int | None:
+    """Return the id of the first event in *events* that still waits for the model to read it.
 
-    A request reads the reports written before it, so the unread ones are
-    those after the log's last ``llm.request``.
+    A worker's report, and, while a goal is in flight, the message that
+    gives the goal its next turn.  A request reads what was written before
+    it, so the unread ones are those after the log's last ``llm.request``.
     """
     first: int | None = None
     for event in events:
         event_type = _event_type(event)
         if event_type == EventType.LLM_REQUEST.value:
             first = None
-        elif first is None and event_type in _REPORT_EVENT_TYPES:
+        elif first is None and (
+            event_type in _REPORT_EVENT_TYPES
+            or goal_in_flight and _gives_a_goal_its_turn(event)
+        ):
             first = event.id
     return first
+
+
+def _gives_a_goal_its_turn(event: Any) -> bool:
+    return (
+        _event_type(event) == EventType.USER_MESSAGE.value
+        and (event.data or {}).get("synthetic") in _GOAL_TURN_MESSAGES
+    )
+
+
+def _goal_turn_waits(events: list[Any]) -> bool:
+    """Return True if a goal's next turn is queued in *events* and no model request has read it."""
+    waits = False
+    for event in events:
+        if _event_type(event) == EventType.LLM_REQUEST.value:
+            waits = False
+        elif _gives_a_goal_its_turn(event):
+            waits = True
+    return waits

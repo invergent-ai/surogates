@@ -707,6 +707,26 @@ async def test_a_goal_set_by_a_command_is_worked_on_by_the_next_wake(workers):
     assert workers.ran == ["_handle_goal_command"]
 
 
+@pytest.mark.parametrize("command", ["/goal status", "/compress"])
+async def test_a_goal_in_flight_goes_on_after_a_command_typed_between_its_turns(workers, command):
+    chat = await workers.chat()
+    await workers.types(chat, "/goal Ship the Q3 report")
+    await workers.wake(chat)
+    # The goal's first turn ended with more to do: its next turn is queued, as a message of the harness's.
+    [first] = workers.requests
+    waiting = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1]
+    assert (waiting.data.get("synthetic"), await workers.status(chat)) == ("outcome_continuation", "active")
+
+    await workers.types(chat, command)
+    # The command is answered, and the chat does not rest on it: the goal's turn still waits.
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
+    await workers.wake(chat)
+
+    assert len(workers.requests) == 2
+    assert {"role": "user", "content": waiting.data["content"]} in workers.requests[1]
+    assert workers.ran == ["_handle_goal_command", ANSWERED[command]]
+
+
 MISSION = "/mission Audit the Q3 figures\n\nRubric:\n- every figure is sourced"
 
 

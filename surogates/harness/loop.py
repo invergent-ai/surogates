@@ -172,10 +172,12 @@ from surogates.harness.loop_mission_evaluator import (
     _maybe_run_mission_evaluator,  # noqa: F401
     _parse_judge_json,  # noqa: F401
 )
+from surogates.harness.outcomes import OutcomeState
 from surogates.harness.loop_pending import (
     _actionable_pending_events,
     _command_answered,
-    _first_unread_report,
+    _first_unread,
+    _goal_turn_waits,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -1554,6 +1556,15 @@ class AgentHarness(
                         session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written)
+                if is_new and self._redis is not None and self._goal_waits(session, written):
+                    # The wake the goal's turn queued may have come and
+                    # gone while this command held the session.
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(
+                        self._redis, org_id=str(session.org_id),
+                        agent_id=session.agent_id, session_id=session.id,
+                    )
                 if is_new or at_rest:
                     return
                 # A mission its user paused: its coordinator takes no turn
@@ -4808,8 +4819,9 @@ class AgentHarness(
         message queued goes on from here.  Nor when the harness did not
         answer the command: a coding run whose worker died stays as the
         sweeper expects it.  A session whose mission is in flight stays active
-        for its helpers' reports, as at the end of its coordinator's turns,
-        and one its user stopped meanwhile stays stopped.
+        for its helpers' reports, as at the end of its coordinator's turns;
+        so does one whose goal has its next turn queued; and one its user
+        stopped meanwhile stays stopped.
         """
         if any(
             event.type == EventType.USER_MESSAGE.value and event.id > typed_at
@@ -4818,10 +4830,12 @@ class AgentHarness(
             return False
         if not _command_answered(events, typed_at):
             return False
-        at_rest = not await self._mission_has_pending_work(session)
-        # Never past a helper's report no turn has read: behind the cursor
-        # it would wake nobody, and it is still to be read.
-        unread = _first_unread_report(events)
+        goal_waits = self._goal_waits(session, events)
+        at_rest = not goal_waits and not await self._mission_has_pending_work(session)
+        # Never past a helper's report, or a goal's next turn, that no turn
+        # has read: behind the cursor it would wake nobody, and it is
+        # still to be read.
+        unread = _first_unread(events, goal_in_flight=goal_waits)
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=events[-1].id if unread is None else unread - 1,
@@ -4829,6 +4843,13 @@ class AgentHarness(
             at_rest=at_rest,
         )
         return at_rest
+
+    def _goal_waits(self, session: Session, events: list) -> bool:
+        """Whether the session's goal is in flight with its next turn queued
+        and unread: a command typed between two of a goal's turns must not
+        end the goal."""
+        state = OutcomeState.from_config((session.config or {}).get("outcome"))
+        return state is not None and state.status == "active" and _goal_turn_waits(events)
 
     async def _handle_clear_command(
         self,
