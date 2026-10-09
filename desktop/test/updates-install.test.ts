@@ -230,6 +230,8 @@ describe("why an install failed, of all that was said", () => {
       [{ code: 1, said: "tar: oops\nSurogate Desktop: the release's archive could not be unpacked\nrm: cannot remove '/opt/surogate/staging/apply.x': Directory not empty" }, "the release's archive could not be unpacked"],
       // Its last line, of two of its own.
       [{ code: 1, said: "Surogate Desktop: downloading\nSurogate Desktop: /opt/surogate needs 428 MB free to apply this release, and has 12 MB\n\n" }, "/opt/surogate needs 428 MB free to apply this release, and has 12 MB"],
+      // Its own line begins with its name: a tool's line that only holds the name is not one.
+      [{ code: 1, said: "Surogate Desktop: the release's archive could not be unpacked\nrm: cannot remove '/home/someone/Surogate Desktop: notes': Permission denied" }, "the release's archive could not be unpacked"],
       // No line of its own: the last one said.
       [{ code: 2, said: "bash: line 12: jq: command not found\nbash: line 14: unexpected end" }, "bash: line 14: unexpected end"],
       // A signal ended it after it spoke: how it ended is the reason.
