@@ -85,8 +85,25 @@ export const LOOK_MS = 800;
 // all the same and what it asks for is kept again: a frame of it that is stuck would else keep the agent
 // out of the page for good.
 export const SETTLE_MS = 10_000;
-// How many times over a page is asked to answer before what it had asked for counts as heard (heardOut).
-export const READS = 4;
+// How many commands Playwright sends a page, one after the other and each only when the one before has
+// answered, between the browser saying that a file input asked (Page.fileChooserOpened) and Playwright
+// saying so (its filechooser event); and the Playwright they were counted on. Counted by reading
+// playwright-core's lib/coreBundle.js. CRPage._onFileChooserOpened finds the input in the frame's own
+// world of Playwright's (_adoptBackendNodeId sends DOM.resolveNode: one). Page._onFileChooserOpened then
+// reads it (handle.evaluate, by ExecutionContext._evaluateWithArguments), which first makes Playwright's
+// helper in that world where it has made none yet (_utilityScript sends Runtime.evaluate: two; made once
+// in each world of each document, so only a frame Playwright has evaluated nothing in takes this step),
+// and then reads the input (evaluateWithArguments sends Runtime.callFunctionOn with userGesture: three,
+// the one that gives the page leave). And by measuring: for a frame that takes all three, with two
+// answers the browser's own chooser opened in 7 runs of 9, with three in none of 4. A test fails where
+// the Playwright installed is another than this: the steps are to be counted again then, the two headed
+// tests of a page and of a frame "that asked for a file on the agent's click and was busy from then on"
+// run, and both written here.
+export const PLAYWRIGHT_MEASURED = "1.63.0";
+export const PLAYWRIGHT_READ_STEPS = 3;
+// How many times over a page is asked to answer before what it had asked for counts as heard (heardOut):
+// once for each of those steps, and once more, to spare.
+export const READS = PLAYWRIGHT_READ_STEPS + 1;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =

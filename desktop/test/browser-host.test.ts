@@ -10,6 +10,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { getEventListeners } from "node:events";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type Server, type ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import { connect as connectTcp } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -23,7 +24,7 @@ import { CANCELLED, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PROXY_BYPASSED, READS, SETTLE_MS, STAGED_MOST_BYTES, WEAKENING,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SETTLE_MS, STAGED_MOST_BYTES, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -554,6 +555,25 @@ describe("what a host that was killed left staged", () => {
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("how many times over a page is asked to answer, as it was counted", () => {
+  it("is counted on the Playwright that is installed: once for each step Playwright takes to read a file input that asked, and once more", () => {
+    const installed = (createRequire(import.meta.url)("playwright-core/package.json") as { version: string }).version;
+    expect(installed, [
+      `playwright-core is ${installed} here, and the steps it takes to read a file input that asked were counted on ${PLAYWRIGHT_MEASURED}.`,
+      "The host asks a page to answer once for each of those steps and once more, before it lets a page its user holds be",
+      "and before it keeps what a page asks for after a hand back: with a step more than was counted, the browser's own file",
+      "chooser can open in front of its user with no click of theirs.",
+      "Count again the commands Playwright sends a page, one after the other, between Chrome's Page.fileChooserOpened and its",
+      "own filechooser event (in lib/coreBundle.js: CRPage._onFileChooserOpened, _adoptBackendNodeId, Page._onFileChooserOpened,",
+      "ExecutionContext._utilityScript and evaluateWithArguments). Then run, headed, the tests of a page and of a frame \"that",
+      "asked for a file on the agent's click and was busy from then on\" in test/browser-host.test.ts, several times each.",
+      "Write the count and the version at PLAYWRIGHT_READ_STEPS and PLAYWRIGHT_MEASURED in src/browser/host.ts, where the",
+      "count made on 1.63.0 is written, and how it was made.",
+    ].join("\n")).toBe(PLAYWRIGHT_MEASURED);
+    expect([PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, READS]).toEqual(["1.63.0", 3, 4]);
   });
 });
 
