@@ -97,6 +97,14 @@ class TestLocalBackendObjects:
         for entry in entries:
             assert entry["modified"] is not None
 
+    async def test_list_entries_stops_at_a_limit(self, backend: LocalBackend):
+        for n in range(20):
+            await backend.write_text("bucket", f"many/{n:02}.txt", "x")
+        # A caller that must not read a folder of any size asks for one more than it will take.
+        assert len(await backend.list_entries("bucket", prefix="many", limit=5)) == 5
+        assert len(await backend.list_entries("bucket", prefix="many", limit=50)) == 20
+        assert len(await backend.list_entries("bucket", prefix="many")) == 20
+
     async def test_list_entries_with_prefix(self, backend: LocalBackend):
         await backend.write_text("bucket", "a.txt", "x")
         await backend.write_text("bucket", "sub/b.txt", "yy")

@@ -89,12 +89,16 @@ class StorageBackend(Protocol):
         """List object keys under *prefix*.  Returns relative keys."""
         ...
 
-    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict[str, Any]]:
+    async def list_entries(self, bucket: str, prefix: str = "", limit: int | None = None) -> list[dict[str, Any]]:
         """List objects under *prefix* with metadata.
 
         Each entry is ``{"key": str, "modified": datetime|float, "size": int}``,
         sorted by ``key``.  ``modified`` follows the same convention as
         :meth:`stat` (boto3 ``datetime`` on S3, POSIX float locally).
+
+        With *limit* the listing stops at that many entries, whichever they
+        are: for a caller that must not read a folder of any size, and asks
+        for one more than it will take to learn that there are more.
 
         Backends should populate this from their native list response —
         ``list_objects_v2`` already returns ``LastModified``/``Size`` for
@@ -230,13 +234,15 @@ class LocalBackend:
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
         return [entry["key"] for entry in await self.list_entries(bucket, prefix)]
 
-    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict[str, Any]]:
+    async def list_entries(self, bucket: str, prefix: str = "", limit: int | None = None) -> list[dict[str, Any]]:
         bucket_root = self._bucket_path(bucket)
         search_root = bucket_root / prefix if prefix else bucket_root
         if not search_root.is_dir():
             return []
         entries: list[dict[str, Any]] = []
         for path in search_root.rglob("*"):
+            if limit is not None and len(entries) >= limit:
+                break
             if not path.is_file():
                 continue
             st = path.stat()
@@ -420,7 +426,7 @@ class S3Backend:
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
         return [entry["key"] for entry in await self.list_entries(bucket, prefix)]
 
-    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict[str, Any]]:
+    async def list_entries(self, bucket: str, prefix: str = "", limit: int | None = None) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         async with self._client() as s3:
             paginator = s3.get_paginator("list_objects_v2")
@@ -434,6 +440,10 @@ class S3Backend:
                         "modified": obj.get("LastModified"),
                         "size": obj.get("Size", 0),
                     })
+                if limit is not None and len(entries) >= limit:
+                    # No page is asked for past the limit.
+                    break
+        entries = entries if limit is None else entries[:limit]
         entries.sort(key=lambda e: e["key"])
         return entries
 

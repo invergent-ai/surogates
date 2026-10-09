@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from functools import partial
 from typing import Any
@@ -41,6 +42,7 @@ from surogates.governance.saga.orchestrator import (
     SAGA_DEFAULT_STEP_TIMEOUT_SECONDS,
 )
 from surogates.sandbox.history import (
+    _PRUNE_EVERY,
     LandingStepError,  # noqa: F401  (what _call raises, named here for its callers)
     step_result,
 )
@@ -65,6 +67,12 @@ _PUT_BACK_BOUND = 300
 #: clone it from the mount, repack it and write it back.
 _PRUNE_BOUND = 300
 _PRUNE_PER_GIB = 180
+#: A pack's own name in the history's pack folder, or its index's: git's, and no other file's.
+_PACK = re.compile(r"pack-[0-9a-f]{40}\.(?:pack|idx)")
+#: The most files of the pack folder the worker lists to date them.  A landing leaves two packs,
+#: four files, and a pruning folds them into one: a folder past this holds what no landing wrote,
+#: and its packs are left to the pod's own rule.
+_PACKS_LISTED = 4096
 #: How long a pruning waits for the project's lock before it gives the day up.  Its pod waits with it,
 #: in no wake and no session's keeping: the next completed landing prunes instead.
 _PRUNE_PATIENCE = 600
@@ -378,7 +386,7 @@ class _Released:
         return await self._pool.execute_released(self._sandbox_id, name, input, **kwargs)
 
 
-async def _old_packs(storage: Any, bucket: str, prefix: str, fence: float) -> list[str]:
+async def _old_packs(storage: Any, bucket: str, prefix: str, fence: float) -> list[str] | None:
     """The history's packs the bucket itself dates older than *fence*, each named without its ending.
 
     Both ends of a pack's age are the bucket's: a mark written now, as
@@ -386,17 +394,46 @@ async def _old_packs(storage: Any, bucket: str, prefix: str, fence: float) -> li
     them.  The pod that prunes cannot tell: its mount dates the files it
     wrote itself by its own clock, and no clock of the worker's is in it
     here either.
+
+    The folder is a pod's to write, so it is read as hostile: ``_PACKS_LISTED``
+    files of it at most, and of those only the ones named as git names a
+    pack or its index.  None when it holds more: no list is made of a
+    folder of any size, and the pod goes by its own rule.
     """
+    folder = f"{prefix}_history/objects/pack/"
+    listed = await storage.list_entries(bucket, folder, limit=_PACKS_LISTED + 1)
+    if len(listed) > _PACKS_LISTED:
+        logger.warning(
+            "The pack folder of %s/%s holds more than %d files: its packs' ages are left to the pod that prunes",
+            bucket, prefix, _PACKS_LISTED,
+        )
+        return None
     mark = f"{prefix}_history/pruning"
     await storage.write(bucket, mark, b"")
     now = _epoch((await storage.stat(bucket, mark))["modified"])
     written: dict[str, float] = {}
-    for entry in await storage.list_entries(bucket, f"{prefix}_history/objects/pack/"):
-        stem, _, ending = entry["key"].rpartition("/")[2].rpartition(".")
-        if ending in ("pack", "idx"):
+    for entry in listed:
+        name = entry["key"].removeprefix(folder)
+        if _PACK.fullmatch(name):
             # As young as the younger of its two files.
+            stem = name.rpartition(".")[0]
             written[stem] = max(written.get(stem, 0.0), _epoch(entry["modified"]))
     return sorted(stem for stem, at in written.items() if now - at >= fence)
+
+
+async def _due(storage: Any, bucket: str, prefix: str) -> bool:
+    """Whether the day's pruning is due, by the mark the last one left: asked before anything else is.
+
+    The pod decides, and marks the day; this spares the lock, the settle,
+    the listing and the pod at every landing of a day already pruned.  By
+    the worker's clock against the bucket's date for the mark: a day is
+    coarse enough for both.
+    """
+    try:
+        marked = (await storage.stat(bucket, f"{prefix}_history/pruned"))["modified"]
+    except KeyError:
+        return True
+    return time.time() - _epoch(marked) >= _PRUNE_EVERY
 
 
 def _epoch(modified: Any) -> float:
@@ -426,20 +463,24 @@ async def prune_after(
     leaves every pack younger than the fence, for a push no row tells of:
     a keep's or a hand-off's.  Which packs are older is asked of the
     bucket, through *storage*, where the project's files are under
-    *prefix* of *bucket*: the pod is told them by name.  With no storage
-    it is told nothing, and goes by the dates it sees.
+    *prefix* of *bucket*: the pod is told them by name.  With no storage,
+    or a pack folder too full to list, it is told nothing, and goes by
+    the dates it sees.  And the bucket is asked first whether the day was
+    pruned already: then nothing more is done.
     """
     try:
+        if storage is not None and not await _due(storage, bucket, prefix):
+            return
         async with asyncio.timeout(_PRUNE_PATIENCE) as patience, project_lock(session_factory, workstream) as held:
             # The lock is had: the settle's waits and the pod's call have bounds of their own.
             patience.reschedule(None)
             await settle_running(
                 session_factory, _Released(sandbox_pool, sandbox_id), sandbox_id, workstream, saga_settings, held,
             )
+            old = await _old_packs(storage, bucket, prefix, _fence(saga_settings)) if storage is not None else None
             request = {
                 "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
-                "spare": _fence(saga_settings),
-                **({"old": await _old_packs(storage, bucket, prefix, _fence(saga_settings))} if storage is not None else {}),
+                "spare": _fence(saga_settings), **({"old": old} if old is not None else {}),
             }
             await held()
             step_result(await sandbox_pool.execute_released(

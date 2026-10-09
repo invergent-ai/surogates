@@ -537,9 +537,11 @@ async def test_a_pruning_whose_pod_never_goes_ends_all_the_same(monkeypatch, cap
 class Bucket:
     """An object store that dates what it holds by its own clock, as a bucket does."""
 
-    def __init__(self, now: float, packs: dict[str, float], *, dates=float) -> None:
-        self.now, self.dates, self.wrote = now, dates, []
+    def __init__(self, now: float, packs: dict[str, float], *, dates=float, pruned: float | None = None) -> None:
+        self.now, self.dates, self.wrote, self.listed = now, dates, [], []
         self.held = {f"proj/_history/objects/pack/{name}": written for name, written in packs.items()}
+        if pruned is not None:
+            self.held["proj/_history/pruned"] = pruned
 
     async def write(self, bucket: str, key: str, data: bytes) -> None:
         self.wrote.append((bucket, key))
@@ -548,8 +550,15 @@ class Bucket:
     async def stat(self, bucket: str, key: str) -> dict:
         return {"size": 0, "modified": self.dates(self.held[key])}
 
-    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict]:
-        return [{"key": key, "modified": self.dates(at), "size": 1} for key, at in sorted(self.held.items()) if key.startswith(prefix)]
+    async def list_entries(self, bucket: str, prefix: str = "", limit: int | None = None) -> list[dict]:
+        self.listed.append((prefix, limit))
+        found = [{"key": key, "modified": self.dates(at), "size": 1} for key, at in sorted(self.held.items()) if key.startswith(prefix)]
+        return found if limit is None else found[:limit]
+
+
+def pack(letter: str) -> str:
+    """A pack's own name, without its ending."""
+    return f"pack-{letter * 40}"
 
 
 @pytest.mark.parametrize("dates", [float, lambda at: datetime.fromtimestamp(at, timezone.utc)], ids=["a disk's", "a bucket's"])
@@ -557,18 +566,42 @@ class Bucket:
 async def test_the_packs_older_than_the_fence_are_found_by_the_buckets_own_dates(monkeypatch, dates, clock):
     there = 1_800_000_000.0  # the bucket's now, whatever the worker's clock says
     bucket = Bucket(there, {
-        "pack-old.pack": there - 3600, "pack-old.idx": there - 3600,
-        "pack-young.pack": there - 100, "pack-young.idx": there - 99,
+        f"{pack('a')}.pack": there - 3600, f"{pack('a')}.idx": there - 3600,
+        f"{pack('b')}.pack": there - 100, f"{pack('b')}.idx": there - 99,
         # Its index written within the fence: a pack is as young as the younger of its two files.
-        "pack-half.pack": there - 400, "pack-half.idx": there - 200,
-        "pack-edge.pack": there - 300, "pack-edge.idx": there - 300,
+        f"{pack('c')}.pack": there - 400, f"{pack('c')}.idx": there - 200,
+        f"{pack('d')}.pack": there - 300, f"{pack('d')}.idx": there - 300,
         ".~1a2b3c4d.landing~": there - 5000,
     }, dates=dates)
     real = time.time
     monkeypatch.setattr(time, "time", lambda: real() + clock)
     old = await landing._old_packs(bucket, "b1", "proj/", 300)
     # Against a mark the bucket itself has just dated: no clock but the bucket's is in a pack's age.
-    assert old == ["pack-edge", "pack-old"] and bucket.wrote == [("b1", "proj/_history/pruning")]
+    assert old == [pack("a"), pack("d")] and len(bucket.wrote) == 1
+
+
+async def test_only_a_packs_own_name_is_sent_on_to_the_pod():
+    there = 1_800_000_000.0
+    long_ago = there - 86_400
+    bucket = Bucket(there, {
+        f"{pack('a')}.pack": long_ago, f"{pack('a')}.idx": long_ago,
+        # What a pod's commands can leave in the folder, each older than the fence.
+        "": long_ago, "HEAD": long_ago, "Report": long_ago, "a\nb": long_ago, "pack-eeee.pack": long_ago,
+        f"{pack('b')}.rev": long_ago, f"{pack('c')}.pack.tmp": long_ago, f"{pack('D')}.pack": long_ago,
+        f"sub/{pack('e')}.pack": long_ago, f"../{pack('f')}.pack": long_ago, f"{pack('g')}.pack\n": long_ago,
+    })
+    assert await landing._old_packs(bucket, "b1", "proj/", 300) == [pack("a")]
+
+
+async def test_a_pack_folder_with_more_files_than_the_bound_is_left_to_the_pods_own_rule(monkeypatch, caplog):
+    there = 1_800_000_000.0
+    # A folder a pod filled: three hundred thousand names, none a pack's.
+    bucket = Bucket(there, {f"junk-{n:06}": there - 86_400 for n in range(300_000)} | {f"{pack('a')}.pack": there - 86_400})
+    with caplog.at_level(logging.WARNING, logger=landing.__name__):
+        assert await landing._old_packs(bucket, "b1", "proj/", 300) is None
+    # The store is asked for one more than the bound and no more, and nothing is written for a list not made.
+    assert bucket.listed == [("proj/_history/objects/pack/", landing._PACKS_LISTED + 1)] and bucket.wrote == []
+    assert f"more than {landing._PACKS_LISTED} files" in caplog.text
 
 
 async def test_a_pruning_tells_the_pod_which_packs_the_bucket_dates_older_than_the_fence(monkeypatch):
@@ -593,13 +626,54 @@ async def test_a_pruning_tells_the_pod_which_packs_the_bucket_dates_older_than_t
     monkeypatch.setattr(landing, "kept_refs", none)
     monkeypatch.setattr(landing, "running_landings", none)
     monkeypatch.setattr(landing, "project_lock", the_lock)
-    for storage in (Bucket(there, {"pack-old.pack": there - 3600, "pack-old.idx": there - 3600, "pack-new.pack": there, "pack-new.idx": there}), None):
+    packs = {f"{pack('a')}.pack": there - 3600, f"{pack('a')}.idx": there - 3600, f"{pack('b')}.pack": there, f"{pack('b')}.idx": there}
+    crowded = Bucket(there, packs | {f"junk-{n:05}": there for n in range(landing._PACKS_LISTED)})
+    for storage in (Bucket(there, packs), None, crowded):
         await landing.prune_after(
             session_factory=None, sandbox_pool=Pod(), sandbox_id="pod-1", workstream="w1", packs=0, saga_settings=None,
             storage=storage, bucket="b1", prefix="proj/",
         )
-    # With no object store to ask, the pod is told nothing and goes by the dates it sees.
-    assert [request.get("old") for request in asked] == [["pack-old"], None]
+    # With no object store to ask, or a pack folder past the bound, the pod is told nothing and goes
+    # by the dates it sees.
+    assert [request.get("old") for request in asked] == [[pack("a")], None, None]
+
+
+@pytest.mark.parametrize("pruned", [None, 3600, 86_400 + 60], ids=["never pruned", "pruned an hour ago", "pruned a day ago"])
+async def test_the_worker_asks_the_bucket_about_the_packs_only_when_a_pruning_is_due(monkeypatch, pruned):
+    asked = []
+
+    async def none(*_):
+        return []
+
+    class Pod:
+        async def execute_released(self, sandbox_id, name, input, **kwargs):
+            asked.append(json.loads(input))
+            return json.dumps({"pruned": True})
+
+    @contextlib.asynccontextmanager
+    async def the_lock(*_):
+        asked.append("the lock")
+
+        async def held():
+            return None
+
+        yield held
+
+    monkeypatch.setattr(landing, "kept_refs", none)
+    monkeypatch.setattr(landing, "running_landings", none)
+    monkeypatch.setattr(landing, "project_lock", the_lock)
+    now = time.time()
+    bucket = Bucket(now, {f"{pack('a')}.pack": now - 7200, f"{pack('a')}.idx": now - 7200}, pruned=None if pruned is None else now - pruned)
+    await landing.prune_after(
+        session_factory=None, sandbox_pool=Pod(), sandbox_id="pod-1", workstream="w1", packs=0, saga_settings=None,
+        storage=bucket, bucket="b1", prefix="proj/",
+    )
+    if pruned == 3600:
+        # Pruned within the day: one look at the day's mark, and nothing more is asked of the bucket,
+        # the lock or the pod, at this landing or the next.
+        assert (bucket.wrote, bucket.listed, asked) == ([], [], [])
+    else:
+        assert len(bucket.wrote) == 1 and len(bucket.listed) == 1 and [a if a == "the lock" else a["old"] for a in asked] == ["the lock", [pack("a")]]
 
 
 def test_a_landings_push_can_live_a_look_and_every_try_of_a_step_after_its_lock_is_gone():
