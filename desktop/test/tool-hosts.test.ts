@@ -53,6 +53,7 @@ function toolHosts(overrides: Partial<ToolHostsOptions> = {}): ToolHosts {
       return folder && made ? { folder, ...made } : undefined;
     },
     dataDir: join(base, "data"),
+    cacheDir: join(base, "cache", "surogate"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8" },
     // The fake rg's folder: one of the app's, which the helper's sandbox reads.
     appDirs: [...APP_DIRS, join(base, "tools")],
@@ -148,10 +149,12 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
 
   it("answers every operation when the sandbox cannot start, and tries again for the next", async () => {
     const executor = toolHosts({ bwrapPath: "/nonexistent/bwrap" });
-    const first = await executor.run(op("stat", { key: "/x" }), signal());
-    expect(first).toMatchObject({ error: { type: "unavailable" } });
-    expect((first as { error: { message: string } }).error.message).toMatch(/bwrap/);
-    expect(await executor.run(op("stat", { key: "/x" }), signal())).toMatchObject({ error: { type: "unavailable" } });
+    // In Section 9's words, never srt's.
+    const missing: Outcome = {
+      error: { type: "unavailable", message: "This computer could not open the folder's sandbox: Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap" },
+    };
+    expect(await executor.run(op("stat", { key: "/x" }), signal())).toEqual(missing);
+    expect(await executor.run(op("stat", { key: "/x" }), signal())).toEqual(missing);
     expect(spawned).toHaveLength(2);
   });
 
@@ -512,7 +515,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       await until(() => gone, 2_000);
       await new Promise((resolve) => setTimeout(resolve, 100));
       const said = written.mock.calls.map(([text]) => String(text)).filter((text) => text.startsWith("the file host"));
-      expect(said).toEqual(["the file host could not start: spawn /nonexistent/node ENOENT"]);
+      expect(said).toEqual(["the file host could not start: /nonexistent/node is not there, or cannot be run"]);
       host.kill();
     } finally {
       written.mockRestore();
@@ -694,7 +697,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     const start = fakes[0]?.sent[0];
     expect(start?.type).toBe("start");
     if (start?.type !== "start") return;
-    expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, appDirs: start.appDirs });
+    expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, cacheDir: start.cacheDir, appDirs: start.appDirs });
+    expect(start.cacheDir).toBe(join(base, "cache", "surogate"));
     expect(toolHosts({ appDirs: undefined }).guards().appDirs).toEqual(APP_DIRS);
     expect(() => toolHosts({ env: { PATH: "/usr/bin:/bin" } }).guards()).toThrow("the app's environment has no HOME");
   });

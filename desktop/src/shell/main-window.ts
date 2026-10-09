@@ -261,8 +261,8 @@ export class MainWindow {
     web.view.webContents.close();
   }
 
-  /** Open Settings over the window, with *preload*; *wire* registers its page's handlers. */
-  openSettings(page: string, preload: string, wire: (contents: WebContents) => void): void {
+  /** Open Settings over the window, with *preload*, at *hash* when named; *wire* registers its page's handlers. */
+  openSettings(page: string, preload: string, hash: string | undefined, wire: (contents: WebContents) => void): void {
     if (this.settingsView) {
       this.settingsView.webContents.focus();
       return;
@@ -283,7 +283,7 @@ export class MainWindow {
     this.settingsView = view;
     this.paint(this.dark);
     // Closed while its page still loads, the load ends with it, and nothing is left to say.
-    void view.webContents.loadFile(page).then(() => {
+    void view.webContents.loadFile(page, { hash }).then(() => {
       if (this.settingsView === view) view.webContents.focus();
     }, (error: unknown) => {
       if (this.settingsView === view) console.error(error);

@@ -54,10 +54,12 @@ def unanswered_calls(events: list[Any]) -> list[tuple[int, dict[str, Any]]]:
 
 
 def resumable(session: Any, events: list[Any]) -> bool:
-    """Whether a local-folder session has calls a stopped worker left unanswered.
+    """Whether a local-folder session has calls a stopped worker left unanswered,
+    which its wake resumes from the computer's journal.
 
-    That is work for a wake even when a sibling's result moved the harness
-    cursor past them.
+    A call left unanswered is work for any session's wake, even when a
+    sibling's result moved the harness cursor past it; only a local folder's
+    is resumed, since only its computer recorded what the call did.
     """
     return device_of(session.config) is not None and bool(unanswered_calls(events))
 

@@ -349,8 +349,14 @@ async def try_resolve_text_answer(
     event already recorded for the tool call → ``None`` (see
     :func:`response_event_exists`). On success returns the response
     event id. Callers treat ``None`` as "deliver the text as a normal
-    message".
+    message".  A built-in slash command is never an answer.
     """
+    # A command is never a question's answer: it is delivered as a message,
+    # and the harness answers it once the wait is over.
+    from surogates.harness.slash_skill import names_builtin_command
+
+    if names_builtin_command(text):
+        return None
     pending = await pending_input_for_session(store, session_id=session_id)
     if pending is None:
         return None

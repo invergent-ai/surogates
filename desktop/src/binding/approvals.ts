@@ -44,6 +44,11 @@ const BROWSER_READS: ReadonlySet<string> = new Set(["browser.observe", "browser.
 const LOOKING: ReadonlySet<unknown> = new Set(["move", "wheel"]);
 const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) && !(kind === "browser.mouse" && LOOKING.has(args.action));
 
+// Whose download a write saves (browser/downloads.ts): one a page of the agent's browser started, or
+// one that began while its user held the browser, or just after they handed it back, which asks in
+// either mode.
+export type DownloadBy = "page" | "user";
+
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
 // A network prompt names the root: a connection is known by its root's socket, not by which session's command made it.
 export interface ChatLabel {
@@ -61,18 +66,24 @@ export interface Preview {
 
 export type ApprovalRequest =
   | { kind: "command"; chat: ChatLabel; command: string; workdir: string | null; background: boolean }
-  // preview: null for a delete, and for data that is not text.
-  | { kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null }
+  // preview: null for a delete, and for data that is not text. download: a write that saves one, and whose.
+  | {
+    kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null;
+    download?: DownloadBy;
+  }
   // command: what the process runs, as its start named it; null for a process this run of the app did not start.
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
   // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
   // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
-  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null };
+  // An upload's is the address of the frame of the file input that gets the files, which can be another site's than the tab shows.
+  // files: an upload's, the files of the chat's folder it gives the page, each path whole and an item of its own, with no
+  // detail: joined in one text, a name that holds a line break would read as two files.
+  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null; files?: string[] };
 
 // down and up: a mouse button pressed and held, and released, each where it is.
-export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "other";
+export type BrowserAction = "use" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "upload" | "other";
 
 // Allow it this once; deny it; allow it and stop asking in this chat, which then works
 // freely (not offered for a network prompt); or, for a network prompt only, allow its
@@ -95,12 +106,19 @@ export interface ApprovalsOptions {
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
   // The address of the page a calling session's next browser operation acts in: a page moves itself, so an act's prompt names it.
-  address?: (session: string) => Promise<string>;
+  // For an *upload*: of the frame of the file input its page asked for, which the browser then holds for that upload alone,
+  // *of* being that upload's operation, by its id. Or why the upload can be given to nothing, whatever its user would
+  // answer: then nobody is asked. *root*: the chat that asks; a session is asked after only for its own.
+  address?: (session: string, upload?: boolean, of?: string, root?: string) => Promise<string | { refused: string }>;
+  // An upload the browser was asked about, by its operation's id, got no leave, however its prompt ended: it is not coming.
+  notComing?: (of: string) => void;
+  // What the tools refuse anyway, asked again when a browser operation's turn comes: its user may have taken the browser over meanwhile.
+  refusal?: (operation: Operation) => Outcome | null;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
 
 // How long an act's prompt waits for its page's address before it says the page is not known.
-const ADDRESS_MS = 1_000;
+export const ADDRESS_MS = 1_000;
 
 const DENIED = {
   command: "The user denied this command on this computer",
@@ -114,6 +132,7 @@ const BROWSER_DENIED = {
   use: "The user did not let the agent use the browser on this computer in this chat",
   act: "The user denied this in the agent's browser on this computer",
   unanswered: "Nobody answered on this computer in time, so the agent's browser did nothing",
+  unnamed: "The agent's browser on this computer did not say in time which site would get the files, so nobody was asked and the page was given nothing",
 } as const;
 
 // Not denied: nobody was there to answer.
@@ -161,14 +180,16 @@ function previewOf(data: string, bytes: number): Preview | null {
 // What the prompt shows. The hosts take only text in these fields and refuse
 // anything else before it runs; here it is shown as String() writes it. A write
 // whose data came in a transfer carries it by now: the runner asks once it is whole.
-function requestFor(operation: Operation, binding: Binding, agent: string, command: (process: string) => string | null): ApprovalRequest {
+function requestFor(
+  operation: Operation, binding: Binding, agent: string, command: (process: string) => string | null, download?: DownloadBy,
+): ApprovalRequest {
   const { kind, args } = operation;
   const chat = { agent, root: binding.root, calling: operation.callingSessionId, folder: binding.folder };
   const text = (name: string) => String(args[name] ?? "");
   if (kind === "delete") return { kind: "change", chat, action: kind, path: text("key"), bytes: null, preview: null };
   if (kind === "write") {
     const bytes = Buffer.byteLength(text("data"), "base64");
-    return { kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes) };
+    return { kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes), ...(download ? { download } : {}) };
   }
   if (kind === "write_stdin") {
     const process = text("session_id");
@@ -179,7 +200,7 @@ function requestFor(operation: Operation, binding: Binding, agent: string, comma
 }
 
 // What a browser operation would do in the page, as its prompt shows it.
-function browserAct({ kind, args }: Operation): { action: BrowserAction; detail: string } {
+function browserAct({ kind, args }: Operation): { action: BrowserAction; detail: string; files?: string[] } {
   const text = (value: unknown) => String(value ?? "");
   if (kind === "browser.navigate") return { action: "open", detail: text(args.url) };
   if (kind === "browser.evaluate") return { action: "script", detail: text(args.code) };
@@ -190,6 +211,7 @@ function browserAct({ kind, args }: Operation): { action: BrowserAction; detail:
     return { action: "type", detail: at ? `${JSON.stringify(text(args.text))} at ${text(at.x)}, ${text(at.y)}` : text(args.text) };
   }
   if (kind === "browser.mouse" && args.action === "drag") return { action: "drag", detail: JSON.stringify(args.path ?? []) };
+  if (kind === "browser.set_input_files") return { action: "upload", detail: "", files: (Array.isArray(args.paths) ? args.paths : [args.paths]).map(text) };
   if (kind === "browser.mouse") {
     const button = args.button === undefined || args.button === "left" ? "" : ` (${text(args.button)} button)`;
     const action = args.action === "down" || args.action === "up" ? args.action : "click";
@@ -220,26 +242,33 @@ export class Approvals {
   // ponytail: the pages whose user kept a chat asking, by page and chat, for the app's life, one per
   // refusal: a page is asked no more for that chat, and a page once replaced never asks again.
   private readonly kept = new Set<string>();
+  // Each chat's browser operations waiting their turn or asking, by a controller each: every chat's dismissed
+  // together when the browser is taken over, each gone once it settles.
+  private readonly browsing = new Map<string, Set<AbortController>>();
 
   constructor(private readonly options: ApprovalsOptions) {}
 
   /**
    * Null lets the operation run; an outcome is its denial. Settles once *signal*
    * aborts (a cancel, a suspend), with a denial: an operation waiting its turn
-   * leaves the line, and its open prompt is dismissed.
+   * leaves the line, and its open prompt is dismissed. *download*: the write saves a
+   * download, a page's or its user's own, and its prompt says so; its user's own asks
+   * in a chat that works freely too.
    */
-  async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+  async admit(operation: Operation, signal: AbortSignal, download?: DownloadBy): Promise<Outcome | null> {
     if (operation.kind.startsWith(BROWSER)) return this.browse(operation, signal);
     if (UNASKED.has(operation.kind)) return null;
-    const checked = this.asking(operation);
+    const checked = this.asking(operation, download);
     if ("answer" in checked) return checked.answer;
     const root = operation.sessionId;
     // Stopped: the runner drops what this answers, and it never lets it run.
     return this.inLine(root, signal, denied(operation.kind), async () => {
       // A "Stop asking" while it waited its turn lets it through unasked.
-      const again = this.asking(operation);
+      const again = this.asking(operation, download);
       if ("answer" in again) return again.answer;
-      const request = requestFor(operation, again.binding, this.options.agent, (process) => this.commands.get(`${root}\0${process}`) ?? null);
+      const request = requestFor(
+        operation, again.binding, this.options.agent, (process) => this.commands.get(`${root}\0${process}`) ?? null, download,
+      );
       let answer: ApprovalAnswer | undefined;
       try {
         // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
@@ -250,6 +279,8 @@ export class Approvals {
       // A dismissed prompt's answer is not its user's.
       if (signal.aborted) return denied(operation.kind);
       if (answer === "timeout") return denied(operation.kind, UNANSWERED[shapeOf(operation.kind)]);
+      // Its user's own download asks in either mode: its prompt offers no "stop asking", and an answer not offered denies.
+      if (answer === "stop_asking" && download === "user") return denied(operation.kind);
       if (answer === "stop_asking") {
         // The user let this one run either way.
         try {
@@ -276,65 +307,112 @@ export class Approvals {
         return { answer: browserDenied(couldNotAsk(error)) };
       }
       if (!binding) return { answer: FOLDER_UNAVAILABLE };
-      // A chat whose agent may not use the browser has no tab: its close closes nothing, and asks nothing.
+      // A chat whose agent may not use the browser asks nothing at a close: it has no tab, or only those left
+      // open since its user took the browser back from it in Settings, which its close still closes.
       if (!allowed && operation.kind === "browser.close") return { answer: null };
       const act = binding.mode !== "free" && acts(operation);
       return allowed && !act ? { answer: null } : { binding, use: !allowed, act };
     };
     const first = needed();
     if ("answer" in first) return first.answer;
-    return this.inLine(root, signal, browserDenied(BROWSER_DENIED.act), async () => {
-      // Allowed, or freed, while it waited its turn: asked no more than it still needs.
-      const now = needed();
-      if ("answer" in now) return now.answer;
-      const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: now.binding.folder };
-      const ask = async (request: ApprovalRequest): Promise<ApprovalAnswer | Outcome> => {
-        try {
-          // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
-          const answer = await settled(this.options.prompts.approve(request, signal), signal);
-          // A dismissed prompt's answer is not its user's.
-          if (signal.aborted) return browserDenied(BROWSER_DENIED.act);
-          return answer === "timeout" ? browserDenied(BROWSER_DENIED.unanswered) : (answer ?? "deny");
-        } catch (error) {
-          return browserDenied(couldNotAsk(error));
+    // Its prompt goes at a cancel, a suspend, or once the browser is taken over: by a controller of its own,
+    // never a signal combined with one that lives on, which AbortSignal.any keeps each it made for.
+    const own = new AbortController();
+    const asking = own.signal;
+    const cancel = () => own.abort();
+    if (signal.aborted) own.abort();
+    else signal.addEventListener("abort", cancel, { once: true });
+    const open = this.browsing.get(root) ?? new Set<AbortController>();
+    this.browsing.set(root, open.add(own));
+    let answer: Outcome | null;
+    // Whether the browser was asked which input this upload would fill: it keeps that input for this operation.
+    let named = false;
+    try {
+      answer = await this.inLine(root, asking, browserDenied(BROWSER_DENIED.act), async () => {
+        // Allowed, or freed, while it waited its turn: asked no more than it still needs. Refused meanwhile, as for a
+        // chat its user took the browser over: asked nothing.
+        const refused = this.options.refusal?.(operation) ?? null;
+        if (refused) return refused;
+        const now = needed();
+        if ("answer" in now) return now.answer;
+        const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: now.binding.folder };
+        const ask = async (request: ApprovalRequest): Promise<ApprovalAnswer | Outcome> => {
+          try {
+            // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
+            const answer = await settled(this.options.prompts.approve(request, asking), asking);
+            // A dismissed prompt's answer is not its user's.
+            if (asking.aborted) return browserDenied(BROWSER_DENIED.act);
+            return answer === "timeout" ? browserDenied(BROWSER_DENIED.unanswered) : (answer ?? "deny");
+          } catch (error) {
+            return browserDenied(couldNotAsk(error));
+          }
+        };
+        if (now.use) {
+          const answer = await ask({ kind: "browser", chat, action: "use", detail: "" });
+          if (typeof answer !== "string") return answer;
+          if (answer !== "allow_session") return browserDenied(BROWSER_DENIED.use);
+          try {
+            this.options.bindings.allowBrowser(root);
+          } catch (error) {
+            // The user let this one through either way.
+            report(this.options.onError, error);
+          }
         }
-      };
-      if (now.use) {
-        const answer = await ask({ kind: "browser", chat, action: "use", detail: "" });
+        if (!now.act) return null;
+        const act = browserAct(operation);
+        named = act.action === "upload";
+        // An open names where it goes; any other act, the page it acts in now; an upload, the frame of the input that gets the files.
+        const page = act.action === "open"
+          ? undefined
+          : await this.pageOf(operation, asking, act.action === "upload");
+        // The browser says the upload can be given to nothing: refused in its words, and nobody asked.
+        if (typeof page === "object" && page !== null) return { error: { type: "browser", message: page.refused } };
+        // An upload is asked about by the site that gets its files. Where the browser did not say it in time, its
+        // prompt would name none: nobody is asked, and it does not run.
+        if (act.action === "upload" && page === null) return browserDenied(BROWSER_DENIED.unnamed);
+        const answer = await ask(page === undefined ? { kind: "browser", chat, ...act } : { kind: "browser", chat, ...act, page });
         if (typeof answer !== "string") return answer;
-        if (answer !== "allow_session") return browserDenied(BROWSER_DENIED.use);
-        try {
-          this.options.bindings.allowBrowser(root);
-        } catch (error) {
-          // The user let this one through either way.
-          report(this.options.onError, error);
+        if (answer === "stop_asking") {
+          try {
+            this.options.bindings.setMode(root, "free");
+          } catch (error) {
+            report(this.options.onError, error);
+          }
         }
-      }
-      if (!now.act) return null;
-      const act = browserAct(operation);
-      // An open names where it goes; any other act, the page it acts in now.
-      const answer = await ask(act.action === "open"
-        ? { kind: "browser", chat, ...act }
-        : { kind: "browser", chat, ...act, page: await this.pageOf(operation.callingSessionId, signal) });
-      if (typeof answer !== "string") return answer;
-      if (answer === "stop_asking") {
-        try {
-          this.options.bindings.setMode(root, "free");
-        } catch (error) {
-          report(this.options.onError, error);
-        }
-      }
-      return answer === "allow" || answer === "stop_asking" ? null : browserDenied(BROWSER_DENIED.act);
-    });
+        return answer === "allow" || answer === "stop_asking" ? null : browserDenied(BROWSER_DENIED.act);
+      });
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      open.delete(own);
+      if (open.size === 0 && this.browsing.get(root) === open) this.browsing.delete(root);
+    }
+    // Dismissed when the browser was taken over: what its prompt settled with is not the user's answer.
+    if (asking.aborted && !signal.aborted) answer = this.options.refusal?.(operation) ?? browserDenied(BROWSER_DENIED.act);
+    // An upload the browser was asked about that got no leave, however that came, is not coming: the browser is told.
+    if (named && answer !== null) this.options.notComing?.(operation.id);
+    return answer;
   }
 
-  // The address of the page *session*'s act would act in, as the browser says it; null when it does not in time.
-  private async pageOf(session: string, signal: AbortSignal): Promise<string | null> {
+  /**
+   * The agent's browser is taken over: every chat's browser prompts, open or waiting their turn, go.
+   * The browser is one for every chat of the agent's, so none of them is asked about it while it is held.
+   */
+  dismissBrowser(): void {
+    for (const open of this.browsing.values()) {
+      for (const own of open) own.abort();
+    }
+    this.browsing.clear();
+  }
+
+  // The address of the page *operation*'s session would act in, as the browser says it; null when it does not in time.
+  // For an *upload*, of the frame of the file input that asked: the browser holds that input for that operation. Or why
+  // the browser gives that upload to nothing.
+  private async pageOf({ id, sessionId, callingSessionId }: Operation, signal: AbortSignal, upload: boolean): Promise<string | { refused: string } | null> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), ADDRESS_MS);
     });
-    const said = Promise.resolve().then(() => this.options.address?.(session) ?? null).catch(() => null);
+    const said = Promise.resolve().then(() => this.options.address?.(callingSessionId, upload, upload ? id : undefined, sessionId) ?? null).catch(() => null);
     try {
       return (await settled(Promise.race([said, late]), signal)) ?? null;
     } finally {
@@ -469,7 +547,7 @@ export class Approvals {
 
   // The chat's binding, when this operation must be asked about now; otherwise its
   // answer, null letting it run. A journal that cannot be read denies it.
-  private asking(operation: Operation): { binding: Binding } | { answer: Outcome | null } {
+  private asking(operation: Operation, download?: DownloadBy): { binding: Binding } | { answer: Outcome | null } {
     let binding: Binding | undefined;
     try {
       binding = this.options.bindings.get(operation.sessionId);
@@ -479,8 +557,9 @@ export class Approvals {
     // Fail closed: the tool hosts read the binding again only when it runs, so a bind
     // arriving meanwhile must not let it run unasked.
     if (!binding) return { answer: FOLDER_UNAVAILABLE };
-    // A mode it does not know asks.
-    if (binding.mode === "free") return { answer: null };
+    // A mode it does not know asks. So does a download taken for its user's, one that came while they held the
+    // browser or just after they handed it back, in either mode: saved in the chat's folder, it is the agent's to read.
+    if (binding.mode === "free" && download !== "user") return { answer: null };
     // The file helper takes only its own resolved paths as keys, so a link or a ".."
     // cannot carry a write that skips its prompt here out of this folder; a key that
     // is not already normal asks all the same.
@@ -490,7 +569,8 @@ export class Approvals {
         (key === `${binding.folder}/${CANVAS}` && operation.invocationId.startsWith(REQUEST))
         || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`))
       );
-    if (operation.kind === "write" && unasked) {
+    // A download is no write of the agent's own tools: wherever its Downloads leads, it asks.
+    if (operation.kind === "write" && unasked && download === undefined) {
       return { answer: null };
     }
     return { binding };

@@ -29,6 +29,9 @@ class _StubStore:
         self.events.append(getattr(event_type, "value", str(event_type)))
         return uuid.uuid4()
 
+    async def last_event(self, session_id, *types, **where):
+        return None
+
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def fresh_session(session_factory):

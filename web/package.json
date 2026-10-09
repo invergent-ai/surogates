@@ -19,6 +19,7 @@
     "test:local-chat": "node --experimental-strip-types --test ../scripts/web-local-chat.test.mjs",
     "test:chat-page": "node --test ../scripts/web-chat-page.test.mjs",
     "test:transparency": "node --experimental-strip-types --test ../scripts/web-transparency.test.mjs",
+    "test:browser-pane": "node --test ../scripts/web-browser-pane.test.mjs",
     "test:oauth-consent": "node --experimental-strip-types --test ../scripts/oauth-consent.test.mjs",
     "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
     "test:local-thread": "node --experimental-strip-types --test ../scripts/web-local-thread.test.mjs",

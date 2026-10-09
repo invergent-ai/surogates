@@ -4,12 +4,12 @@
 // the VM asks the chat's approvals about the hosts its connections reach past the
 // package hosts.
 
-import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
+import { spawnClean } from "../clean-child.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -79,7 +79,8 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
   // OPENSSL_CONF and the like, and srt on CLAUDE_CODE_TMPDIR, none of which the user's may set for it.
   // --disable-sigusr1: a plain node opens its inspector on SIGUSR1, which any process of the user's can
   // send, and has no fuse to refuse it as Electron has.
-  const child = spawn(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
+  // With its three standard descriptors and its channel, and nothing else the app has open.
+  const child = spawnClean(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
     detached: true,
     stdio: ["ignore", 2, 2, "ipc"],
     env: { PATH: process.env.PATH ?? "", HOME: homedir() },
@@ -111,7 +112,12 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
     console.error(`the file host could not start: ${error.message}`);
     gone();
   });
-  child.on("exit", gone);
+  // Started through the line that closes the app's descriptors, a node that is not there, or is no
+  // program, is that line's 127, and never an error of the spawn.
+  child.on("exit", (code) => {
+    if (code === 127 && !exited) console.error(`the file host could not start: ${options.execPath ?? NODE} is not there, or cannot be run`);
+    gone();
+  });
   child.on("close", gone);
   return {
     send: (message) => {
@@ -140,6 +146,9 @@ export interface ToolHostsOptions {
   bindingOf(rootSessionId: string): BoundFolder | undefined;
   network?: NetworkApprovals; // without it, every destination off the package hosts is refused
   dataDir: string;
+  // The app's own cache folder, <cache home>/surogate, by the cache home the app itself uses: no
+  // chat's folder may hold it or lie in it.
+  cacheDir: string;
   env: Record<string, string>;
   appDirs?: string[];
   bwrapPath?: string;
@@ -207,7 +216,7 @@ export class ToolHosts implements Executor {
   guards(): FolderGuards {
     const home = this.options.env.HOME;
     if (!home) throw new Error("the app's environment has no HOME");
-    return { home, dataDir: this.options.dataDir, appDirs: this.options.appDirs ?? APP_DIRS };
+    return { home, dataDir: this.options.dataDir, cacheDir: this.options.cacheDir, appDirs: this.options.appDirs ?? APP_DIRS };
   }
 
   // The app's quit: each folder's other holders get as long to let it go as its host
@@ -239,13 +248,14 @@ export class ToolHosts implements Executor {
   private hostFor(root: string, binding: BoundFolder): Host {
     const known = this.hosts.get(root);
     if (known) return known;
-    const { dataDir, env, bwrapPath, network } = this.options;
+    const { dataDir, cacheDir, env, bwrapPath, network } = this.options;
     const start: HostStart = {
       type: "start",
       folder: binding.folder,
       expect: { dev: binding.dev, ino: binding.ino, boot: binding.boot },
       tmp: join(dataDir, "tmp", root),
       dataDir,
+      cacheDir,
       env,
       appDirs: this.options.appDirs ?? APP_DIRS,
       ...(bwrapPath ? { bwrapPath } : {}),

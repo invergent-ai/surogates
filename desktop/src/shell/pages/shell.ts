@@ -3,7 +3,8 @@
 // its own. All text comes from the main process and is set with textContent, or with showText
 // where it may hold the user's paths or QEMU's words.
 
-import { aged, ago, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
+import { ago } from "../text.js";
+import { aged, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {
@@ -52,6 +53,7 @@ interface State {
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
   sandbox: { text: string; said: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
+  update: { text: string; button: string | null } | null; // a newer Surogate, and what the user can do about it
 }
 
 interface Shell {
@@ -80,6 +82,7 @@ interface Shell {
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
   sandbox(action: "retry" | "log" | "check"): Promise<void>;
+  update(): Promise<void>;
   onChanged(listener: () => void): () => void;
   focusPane(): Promise<void>;
   onPaneLeft(listener: (to: string) => void): () => void;
@@ -350,6 +353,27 @@ function draw(state: State): void {
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
+  // The update's line is a live region that stays, empty, as the quit's does. Written only when its
+  // words change, so that it speaks once a state.
+  // Shown as text is: it may hold the root helper's own words, and the user's paths.
+  const words = state.update?.text ?? "";
+  if (byId("update-text").dataset.said !== words) {
+    byId("update-text").dataset.said = words;
+    showText(byId("update-text"), words);
+    // Its longest words, with the notices beside it, are more than a short window's sidebar holds:
+    // the notices then scroll among themselves, and the line that has just spoken is the one in sight.
+    if (words !== "") byId("update").scrollIntoView({ block: "nearest" });
+  }
+  // While an update installs the line has no button. The one its user pressed stays where it is,
+  // without its use, so that the keyboard is still on it when the line has one again.
+  const button = byId("update-button");
+  const label = state.update?.button ?? null;
+  const pressed = label === null && state.update !== null && state.update !== undefined && document.activeElement === button;
+  if (label !== null) button.textContent = label;
+  else if (!pressed) button.textContent = "";
+  button.hidden = label === null && !pressed;
+  if (pressed) button.setAttribute("aria-disabled", "true");
+  else button.removeAttribute("aria-disabled");
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""
@@ -358,6 +382,11 @@ function draw(state: State): void {
   byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
   byId("why").textContent = state.unreachable ?? "";
 }
+
+// And it stays in sight when the notices' room changes, as when the window is made shorter.
+new ResizeObserver(() => {
+  if (byId("update-text").textContent) byId("update").scrollIntoView({ block: "nearest" });
+}).observe(byId("notices"));
 
 // One connection at a time: the form waits for the answer.
 byId<HTMLFormElement>("connect").addEventListener("submit", (event) => {
@@ -385,6 +414,7 @@ byId("quit-now").addEventListener("click", () => void shell.quitNow());
 byId("sandbox-log").addEventListener("click", () => void shell.sandbox("log"));
 byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"));
 byId("sandbox-check").addEventListener("click", () => void shell.sandbox("check"));
+byId("update-button").addEventListener("click", () => void shell.update());
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);

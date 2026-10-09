@@ -9,6 +9,7 @@ import { dirname } from "node:path";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import { Binder, type FolderPrompts } from "../binding/binder.js";
 import type { FolderGuards } from "../binding/folder.js";
+import { downloadSaver, type StagedDownload } from "../browser/downloads.js";
 import { connectDevice } from "../device.js";
 import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import type { Bindings } from "../journal/bindings.js";
@@ -36,8 +37,27 @@ export interface ToolLayer extends Executor {
   refusal?(operation: Operation): Outcome | null;
   // A deleted chat's root: what the tools keep for it goes, such as its browser tabs.
   retired?(root: string): void;
-  // The address of the page a calling session's next browser operation acts in, for its prompt.
-  address?(session: string): Promise<string>;
+  // The address of the page a calling session's next browser operation acts in, for its prompt; for an
+  // upload, of the frame of the file input its page asked for, *of* being the upload's operation, by its id; or
+  // why that upload can be given to nothing. *root*: the chat that asks, which is told of no other chat's session.
+  address?(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }>;
+  // An upload the browser was asked about, by its operation's id, got no leave: the browser keeps nothing for it.
+  notComing?(of: string): void;
+  // A chat's user takes the agent's browser over, for every chat, until that chat hands it back: whether the
+  // chat holds it now, which it does not while another chat's take-over stands. Where it is held, as a chat
+  // is told: true from that chat, false by nobody, "elsewhere" from another chat that is here, "orphaned"
+  // from a chat that is gone, which any chat may hand back. A hand back says whether it handed anything back.
+  // A chat's newest page shown.
+  takeOver?(root: string): boolean;
+  handBack?(root: string): boolean;
+  takenOver?(root: string): boolean | "orphaned" | "elsewhere";
+  // Whether it is held from a chat that is gone; and handed back then by the desktop itself, for no chat.
+  heldFromGone?(): boolean;
+  handBackGone?(): boolean;
+  show?(root: string): Promise<boolean>;
+  // What saves each download the agent's pages start: the stack's, through the binder. *stop* aborts when the
+  // download's chat is deleted.
+  saveDownloadsWith?(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void;
 }
 
 export interface DeviceStackOptions {
@@ -66,6 +86,25 @@ const ENDED: readonly LinkStatus[] = ["revoked", "unauthenticated"];
 export interface DeviceStack {
   readonly binder: Binder;
   readonly bindings: Bindings; // the journal's: each chat's folder, mode and grants
+  readonly tools: ToolLayer;
+  /**
+   * Its user takes the agent's browser over, from the chat: its tools refuse every chat's browser operations,
+   * and every chat's browser prompts go. Whether the chat holds the browser now: false while another chat's
+   * take-over stands, which this one does not end.
+   */
+  takeOver(root: string): boolean;
+  /**
+   * Its user hands the browser back: the agent's browser operations run again. From the chat that holds it,
+   * or from any chat once the one it was held from is gone; from another chat while its holder is here, nothing.
+   * Whether it was handed back.
+   */
+  handBack(root: string): boolean;
+  /**
+   * Whether the browser is held from a chat that is gone, which no chat's own page may be there to hand back
+   * for; and handed back then by the desktop itself, from its Settings. Whether it was handed back.
+   */
+  heldFromGone(): boolean;
+  handBackGone(): boolean;
   working(): number;
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
@@ -144,9 +183,13 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     refusal: (operation) => tools.refusal?.(operation) ?? null,
     retired: (root) => tools.retired?.(root),
     address: tools.address?.bind(tools),
+    notComing: tools.notComing?.bind(tools),
     approvalPrompts: options.approvalPrompts,
     onError: options.onError,
   });
+  // A download is saved as any write of the chat's, one at a time for a chat: asked in a chat that asks every
+  // time, and its user's own in either mode, then made on its file host.
+  tools.saveDownloadsWith?.(downloadSaver(journal.bindings, binder));
   const { identity } = options;
   // Settled once the agent ends this device's token: what a revoke waits for.
   const ended = Promise.withResolvers<void>();
@@ -206,6 +249,16 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   return {
     binder,
     bindings: journal.bindings,
+    tools,
+    takeOver: (root) => {
+      const held = tools.takeOver?.(root) === true;
+      // Each prompt dismissed is answered as the tools answer by then: paused.
+      if (held) binder.approvals.dismissBrowser();
+      return held;
+    },
+    handBack: (root) => tools.handBack?.(root) === true,
+    heldFromGone: () => tools.heldFromGone?.() === true,
+    handBackGone: () => tools.handBackGone?.() === true,
     working,
     stop,
     retire: () => {

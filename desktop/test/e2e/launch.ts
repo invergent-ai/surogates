@@ -1,6 +1,6 @@
 // Launching the built shell under Playwright, with its state in a folder of the test's own.
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -103,10 +103,14 @@ export async function gone(pid: number | undefined): Promise<void> {
   }
 }
 
+// Each app's process, kept from its launch: Playwright lets go of an app it has seen quit by itself, whose
+// process() then throws, and on a busy machine a test's afterEach can come after that.
+const processes = new WeakMap<ElectronApplication, ChildProcess>();
+
 /** Close the app; one that does not close within 10 s is killed, so no failed test leaves it running. */
 export async function quit(shell: ElectronApplication | undefined): Promise<void> {
   if (!shell) return;
-  const child = shell.process();
+  const child = processes.get(shell)!;
   await Promise.race([shell.close().catch(() => {}), new Promise((resolve) => setTimeout(resolve, 10_000))]);
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   // Playwright starts it as the leader of a process group of its own.
@@ -127,7 +131,7 @@ export const appsElectron = (): Promise<void> => (fused ??= getCurrentFuseWire(E
  */
 export async function launch(home: string, env: Record<string, string> = {}, args: string[] = [], requires: string[] = []): Promise<ElectronApplication> {
   await appsElectron();
-  return _electron.launch({
+  const app = await _electron.launch({
     executablePath: ELECTRON,
     // The basic store: no test leaves an item in the user's keyring.
     args: [...requires.flatMap((script) => ["-r", script]), MAIN, "--password-store=basic", ...args],
@@ -137,6 +141,8 @@ export async function launch(home: string, env: Record<string, string> = {}, arg
     // Playwright emulates a light system unless told: the pages follow the app's own theme.
     colorScheme: null,
   });
+  processes.set(app, app.process());
+  return app;
 }
 
 // The native confirmations answer globalThis.answer, their first button unless a test sets
@@ -194,10 +200,14 @@ async function closed(page: Page): Promise<void> {
   if (!page.isClosed()) await page.waitForEvent("close", { timeout: 5_000 });
 }
 
+/** Whether *page*'s prompt holds its buttons back: within its input protection, of its showing or of the last key or press. */
+export const heldBack = (page: Page): Promise<boolean> =>
+  page.$eval("#prompt-buttons", (row) => row.children.length === 0 || (row as HTMLElement).dataset.held !== "false");
+
 /** Press *button* on *page*'s prompt, once its input protection lets it, and wait for the prompt to close. */
 export async function press(page: Page, button: string): Promise<void> {
   const selector = `#prompt-buttons button[data-id="${button}"]`;
-  await expect.poll(() => page.getAttribute(selector, "aria-disabled")).not.toBe("true");
+  await expect.poll(() => heldBack(page)).toBe(false);
   // The window can close before the click is acknowledged: that it closed is what tells it answered.
   await page.click(selector, { noWaitAfter: true }).catch(() => {});
   await closed(page);
@@ -208,10 +218,12 @@ export const promptsShown = (shell: ElectronApplication) => shell.evaluate(({ Br
   BrowserWindow.getAllWindows().filter((window) => window.isVisible() && window.webContents.getURL().endsWith("/prompt.html")).length);
 
 /**
- * Press *key* on *page*'s prompt, which answers it: its window closes before the key comes up,
- * and can close before the key's press is acknowledged. That it closed is what tells it answered.
+ * Press *key* on *page*'s prompt, once its input protection lets it, which answers it: its window closes
+ * before the key comes up, and can close before the key's press is acknowledged. That it closed is what
+ * tells it answered.
  */
 export async function key(page: Page, name: string): Promise<void> {
+  await expect.poll(() => heldBack(page)).toBe(false);
   await page.keyboard.down(name).catch(() => {});
   await page.keyboard.up(name).catch(() => {});
   await closed(page);

@@ -37,18 +37,32 @@ describe("Settings → Folders and permissions", () => {
     bind(THIRD, "/home/me/notes", "ask", 3);
     journal.bindings.allowDomain(THIRD, "example.com");
     journal.bindings.allowDomain(THIRD, "[::1]");
+    journal.bindings.allowBrowser(SECOND);
     const titles: Record<string, string> = { [FIRST]: "Quarterly report", [SECOND]: "Receipts", [THIRD]: "A chat" };
     expect(await listFolders(journal.bindings, async (root) => titles[root]!, new LiveProcesses())).toEqual([
       {
         folder: "/home/me/notes",
         chats: [
-          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [], processes: [] },
+          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [], browser: false, processes: [] },
           // The hosts its user let it reach, in the order allowed.
-          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"], processes: [] },
+          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"], browser: false, processes: [] },
         ],
       },
-      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [], processes: [] }] },
+      // Its user let its agent use the browser on this computer.
+      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [], browser: true, processes: [] }] },
     ]);
+  });
+
+  it("takes a chat's browser back: its agent's next browser call asks its first use again, and another chat keeps its own", async () => {
+    bind(FIRST, "/home/me/notes", "free", 1);
+    bind(SECOND, "/home/me/taxes", "free", 2);
+    journal.bindings.allowBrowser(FIRST);
+    journal.bindings.allowBrowser(SECOND);
+    journal.bindings.disallowBrowser(FIRST);
+    expect([journal.bindings.browsing(FIRST), journal.bindings.browsing(SECOND)]).toEqual([false, true]);
+    // A chat that does not use it changes nothing.
+    journal.bindings.disallowBrowser(FIRST);
+    expect(journal.bindings.browsing(FIRST)).toBe(false);
   });
 
   it("is empty while no chat works on a folder of this computer", async () => {

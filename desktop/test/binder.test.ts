@@ -89,7 +89,7 @@ function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
   return new Binder({
     bindings: journal.bindings,
     prompts: user,
-    guards: { home: join(base, "home"), dataDir: join(base, "data"), appDirs: [join(base, "app")] },
+    guards: { home: join(base, "home"), dataDir: join(base, "data"), cacheDir: join(base, "cache"), appDirs: [join(base, "app")] },
     agent: "Research assistant",
     hosts,
     approvalPrompts: allowing,

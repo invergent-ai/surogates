@@ -3,7 +3,8 @@
 // the main process and is set with textContent, or with showText where it may hold the
 // user's paths or QEMU's words.
 
-import { asShown, byId, fillIcons, keepFocus, markTheme, showText } from "./ui.js";
+import { asShown } from "../text.js";
+import { byId, fillIcons, keepFocus, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -13,7 +14,7 @@ interface Appearance {
 }
 
 interface State {
-  browser: { choice: string; rows: Array<{ value: string; label: string; disabled: boolean }>; none: boolean; failure: string | null };
+  browser: { choice: string; rows: Array<{ value: string; label: string; disabled: boolean }>; none: boolean; failure: string | null; held: boolean };
   appearance: Appearance;
   preferences: Record<string, "on" | "off">;
   startAtLoginRefused: string | null;
@@ -26,19 +27,24 @@ interface State {
 // A folder this computer's chats work on, and each chat on it (folders.ts).
 interface Folder {
   folder: string;
-  chats: Array<{ root: string; title: string; mode: "free" | "ask"; hosts: string[]; processes: Array<{ id: string; command: string }> }>;
+  chats: Array<{
+    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; processes: Array<{ id: string; command: string }>;
+  }>;
 }
 
 interface Settings {
   state(): Promise<State>;
   folders(): Promise<Folder[]>;
   takeBack(root: string, host: string): Promise<void>;
+  takeBrowserBack(root: string): Promise<void>;
+  handBrowserBack(): Promise<boolean>;
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
   sandbox(action: "retry" | "log" | "check"): Promise<void>;
   close(): Promise<void>;
   onChanged(listener: () => void): () => void;
+  onShow(listener: (section: string) => void): () => void;
 }
 
 const settings = (globalThis as unknown as { surogateSettings: Settings }).surogateSettings;
@@ -118,7 +124,8 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   return held;
 }
 
-// A chat's row: its title, as text, its mode, each host its user let it reach, and each background process it runs.
+// A chat's row: its title, as text, its mode, each host its user let it reach, the browser if it may use it, and
+// each background process it runs.
 // Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
   // Each line's button, named by its chat and what it ends: a redraw gives the keyboard back to it.
@@ -140,6 +147,9 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
     title,
     mode,
     ...chat.hosts.map((host) => keyed(line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host)), `host ${host}`)),
+    ...(chat.browser
+      ? [keyed(line("Uses the browser on this computer", "Take back", "the browser on this computer", () => settings.takeBrowserBack(chat.root)), "browser")]
+      : []),
     ...chat.processes.map(({ id, command }) => keyed(line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id)), `process ${id}`)),
   );
   row.append(label);
@@ -207,6 +217,10 @@ async function render(): Promise<void> {
   note.textContent = state.browser.failure
     ?? (state.browser.none ? "No supported browser is installed. Install Google Chrome, Microsoft Edge, Brave or Vivaldi, or choose one with Custom…. The Snap build of Chromium is not supported." : "");
   note.hidden = note.textContent === "";
+  // Held from a chat that is gone: handed back here.
+  byId("browser-held").hidden = !state.browser.held;
+  // Held again: what was said of the last hand back from here is true no more.
+  if (state.browser.held) byId("browser-handed-back").hidden = true;
   // A build that cannot start at login says why, and its On does nothing; its Off still removes an entry already there.
   const refused = byId("login-refused");
   refused.textContent = state.startAtLoginRefused ?? "";
@@ -267,6 +281,12 @@ byId("sandbox-log").addEventListener("click", () => void settings.sandbox("log")
 byId("sandbox-retry").addEventListener("click", () => void settings.sandbox("retry"));
 byId("sandbox-check").addEventListener("click", () => void settings.sandbox("check"));
 // Custom… opens the system's dialog: the page shows the choice kept once the main process answers.
+// Asked in the desktop's own confirmation, over this page: whatever its answer, the page is drawn anew when it is given.
+// Handed back from here, no agent takes a turn for it, as one does at a hand back from the chat that held the
+// browser: the page says so, for whoever expects the agent to go on.
+byId("browser-hand-back").addEventListener("click", () => void settings.handBrowserBack().then((handed) => {
+  if (handed) byId("browser-handed-back").hidden = false;
+}, () => {}));
 byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
   void settings.set("browser", (event.target as HTMLSelectElement).value).then(render, render);
 });
@@ -287,4 +307,10 @@ document.addEventListener("keydown", (event) => {
   void settings.close();
 });
 settings.onChanged(() => void render());
+// Opened on a section, or shown one while open, as the agent's page opens Browser: one the nav has, or none.
+const open = (name: string): void => {
+  if (document.querySelector(`.settings-nav [data-section="${CSS.escape(name)}"]`)) show(name);
+};
+settings.onShow(open);
+open(location.hash.slice(1));
 void render().then(() => byId("settings-search").focus());

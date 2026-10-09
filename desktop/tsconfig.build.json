@@ -2,7 +2,9 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "lib": ["ES2024"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/shell/pages", "src/shell/*.cts", "src/browser/main.ts", "src/browser/host.ts", "src/browser/operations.ts", "src/browser/observe.ts"]
 }

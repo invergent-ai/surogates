@@ -98,7 +98,7 @@ describe("the sidebar's projects", () => {
   it("open a project's conversation, its master session, in the centre under the project's header", async () => {
     const { shell, page, client } = await signedIn();
     await opened(page, client, REPORT);
-    expect(await page.textContent("#title")).toBe("Quarterly report");
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
     expect(await webShown(shell)).toBe(true);
     expect(await page.getAttribute(row(REPORT), "aria-current")).toBe("page");
     // A thread waits on the user: the Overview button says so.
@@ -145,10 +145,12 @@ describe("the sidebar's projects", () => {
   it("are gone, with the open project, once the user signs out", async () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
+    // The title is the agent's host before the project opens too: only after the project's own does it tell the sign-out.
+    await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
     await client.waitForLoadState();
     await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
     await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
-    expect(await page.$$eval("#projects .project", (found) => found.length)).toBe(0);
+    await expect.poll(() => page.$$eval("#projects .project", (found) => found.length)).toBe(0);
     expect(await page.isVisible("#projects-head")).toBe(false);
   });
 
@@ -172,7 +174,7 @@ describe("the sidebar's projects", () => {
     await clickBoth(page, row(REPORT), "#open-projects");
     // Report's answer comes after the Projects page was chosen: it opens nothing.
     await pause(1_000);
-    expect(await page.isVisible("#projects-page")).toBe(true);
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
     expect(client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
   });
 
@@ -270,7 +272,7 @@ describe("the Projects page", () => {
     expect(await page.isVisible("#no-match")).toBe(false);
     await page.click("#cards .card");
     await expect.poll(() => webShown(shell)).toBe(true);
-    expect(await page.isVisible("#projects-page")).toBe(false);
+    await expect.poll(() => page.isVisible("#projects-page")).toBe(false);
     await expect.poll(() => page.textContent("#title")).toBe("Quarterly report");
     expect(await page.isVisible("#title")).toBe(true);
     expect(await page.isVisible("#panel")).toBe(true);

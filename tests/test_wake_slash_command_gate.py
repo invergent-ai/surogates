@@ -80,8 +80,14 @@ def _stub_store(session: Session, events: list[Any]) -> AsyncMock:
     )
     store.release_lease = AsyncMock(return_value=None)
     store.get_harness_cursor = AsyncMock(return_value=0)
-    store.get_events = AsyncMock(return_value=events)
-    store.emit_event = AsyncMock(return_value=1000)
+    store.get_events = AsyncMock(side_effect=lambda *_, **__: list(events))
+
+    async def emit_event(session_id, event_type, data, **_):
+        # As the real store: what a wake writes, its later reads find.
+        events.append(SimpleNamespace(id=1000 + len(events), type=getattr(event_type, "value", event_type), data=data))
+        return events[-1].id
+
+    store.emit_event = AsyncMock(side_effect=emit_event)
     store.advance_harness_cursor = AsyncMock(return_value=None)
     return store
 
@@ -165,11 +171,12 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     await harness.wake(session.id)
 
     harness._handle_loop_command.assert_awaited_once()
-    # The gate did not fire, so no "disabled" response was emitted.
-    assert _llm_responses(store) == []
+    # The gate did not fire, so no "disabled" response was emitted; the
+    # stand-in handler wrote no answer, so the wake wrote the command's.
+    assert _llm_responses(store) == ["/loop was cut off before it could answer. Check `/loop list` before typing it again."]
 
 
-@pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research", "code"])
+@pytest.mark.parametrize("command", ["loop", "auto-research", "deep-research", "code"])
 def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     harness = _harness(AsyncMock(), _permissive())
     thread = _session()
@@ -177,6 +184,45 @@ def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     assert harness._slash_command_block_reason(f"/{command} Go.", thread) == thread_refusal(f"/{command}")
     # Elsewhere they run as before.
     assert harness._slash_command_block_reason(f"/{command} Go.", _session()) is None
+
+
+@pytest.mark.parametrize("command", ["mission"])
+def test_a_project_thread_runs_a_command_whose_helpers_work_on_copies_of_their_own(command):
+    harness = _harness(AsyncMock(), _permissive())
+    thread = _session()
+    thread.config["workstream_role"] = "thread"
+    # Its helpers keep their work on its hand-off, which lands with it.
+    assert harness._slash_command_block_reason(f"/{command} Go.", thread) is None
+
+
+@pytest.mark.parametrize("command, answer", [
+    ("loop", "A thread can't start /loop yet: do this step in the thread itself."),
+    ("code", "A thread can't start /code yet: do this step in the thread itself."),
+    # As a thread in the cloud answers them: the thread's rule comes before the local folder's.
+    ("auto-research", thread_refusal("/auto-research")),
+    ("deep-research", thread_refusal("/deep-research")),
+    ("mission", None),
+])
+def test_a_project_thread_on_the_users_computer_runs_the_commands_its_folder_can(command, answer):
+    harness = _harness(AsyncMock(), _permissive())
+    thread = _session()
+    thread.config["workstream_role"] = "thread"
+    thread.config["execution"] = {"kind": "device", "device_id": "00000000-0000-0000-0000-0000000000d1"}
+    assert harness._slash_command_block_reason(f"/{command} Go.", thread) == answer
+
+
+@pytest.mark.parametrize("command", ["loop", "auto-research", "deep-research", "code"])
+@pytest.mark.parametrize("where", ["in the cloud", "on the user's computer"])
+def test_a_session_under_a_project_thread_is_refused_the_commands_its_thread_is(command, where):
+    harness = _harness(AsyncMock(), _permissive())
+    helper = _session()
+    # A helper, or a helper's helper: neither is a thread, and each says which thread it is under.
+    helper.config["under_thread"] = "00000000-0000-0000-0000-0000000000aa"
+    if where == "on the user's computer":
+        helper.config["execution"] = {"kind": "device", "device_id": "00000000-0000-0000-0000-0000000000d1"}
+    assert harness._slash_command_block_reason(f"/{command} Go.", helper) == thread_refusal(f"/{command}")
+    # What a thread may run, they may.
+    assert harness._slash_command_block_reason("/mission Go.", helper) is None
 
 
 @pytest.mark.asyncio

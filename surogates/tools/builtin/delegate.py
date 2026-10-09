@@ -586,6 +586,15 @@ async def _run_single_delegation(
                 },
             )
             result_text = outcome["text"]
+            done = next((e.data or {} for e in outcome["events"] if e.type == EventType.SESSION_COMPLETE.value), {})
+            if done.get("not_kept"):
+                # The helper's version of these is in the history, not in the thread's copy.
+                result_text += "\n\nNot kept, because the thread or another helper changed them first: " + ", ".join(done["not_kept"])
+            from surogates.harness.loop_context_replay import not_handed_back
+
+            if unkept := not_handed_back(done, copy="this copy"):
+                # Its hand-back failed: none of its work is in the thread's copy.
+                result_text += f"\n\n{unkept}"
             if memory_manager is not None:
                 try:
                     memory_manager.on_delegation(
@@ -670,9 +679,13 @@ async def _poll_child_completion(
                 }
             if event.type == EventType.SESSION_FAIL.value:
                 reason = (event.data or {}).get("reason", "unknown")
+                # A failed helper's files may be half made: they stay in the history, apart.
+                left = (event.data or {}).get("left")
                 return {
                     "status": "failed",
-                    "reason": f"Child session failed: {reason}",
+                    "reason": f"Child session failed: {reason}" + (
+                        f". Its changes to {', '.join(left)} were kept apart, not brought into this copy" if left else ""
+                    ),
                 }
 
         if len(events) > last_event_count:

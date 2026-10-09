@@ -241,12 +241,12 @@ describe("Settings", () => {
       await expect.poll(() => settings.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
       // The agent's web client too: it takes the desktop's theme from its media query.
       await expect.poll(() => client.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(theme === "dark");
-      expect(await settings.getAttribute(`[data-setting="theme"] [data-value="${theme}"]`, "aria-pressed")).toBe("true");
+      await expect.poll(() => settings.getAttribute(`[data-setting="theme"] [data-value="${theme}"]`, "aria-pressed")).toBe("true");
     }
     const overlays = await shell.evaluate(() => (globalThis as unknown as { overlays: Array<{ color: string }> }).overlays);
     // Under Settings, dimmed with the window.
     expect(overlays.slice(-2).map((overlay) => overlay.color)).toEqual(["#0c0c0b", "#6e6e6b"]);
-    expect(await client.evaluate(() => (window as unknown as { themes: string[] }).themes.slice(-2))).toEqual(["dark", "light"]);
+    await expect.poll(() => client.evaluate(() => (window as unknown as { themes: string[] }).themes.slice(-2))).toEqual(["dark", "light"]);
     await settings.click('[data-setting="textSize"] [data-value="large"]');
     const saved = () => JSON.parse(readFileSync(join(home, "surogate", "settings.json"), "utf8")) as Record<string, string>;
     await expect.poll(() => saved().textSize).toBe("large");
@@ -280,7 +280,7 @@ describe("Settings", () => {
     expect(await texts(settings, ".row:not([hidden]) .label > span:first-child")).toEqual(["Added"]);
     await settings.fill("#settings-search", "");
     // With no console named, Usage stays gone, the search cleared too.
-    expect(await texts(settings, ".settings-nav .item")).toEqual([
+    await expect.poll(() => texts(settings, ".settings-nav .item")).toEqual([
       "General", "Account", "This computer", "Browser", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
@@ -373,7 +373,7 @@ describe("Settings", () => {
     await page.click("#open-settings");
     const settings = await settingsPage(shell);
     await settings.click('[data-section="account"]');
-    expect(await settings.textContent("#email")).toBe("flavius@example.com");
+    await expect.poll(() => settings.textContent("#email")).toBe("flavius@example.com");
     // By its name, not its id.
     expect(await settings.textContent("#organisation")).toBe("Surogate");
     await settings.click('[data-section="computer"]');
@@ -412,7 +412,7 @@ describe("Settings → General", () => {
     const entry = join(home, "c", "autostart", "surogate.desktop");
     await page.click("#open-settings");
     const settings = await settingsPage(shell);
-    expect(await pressed(settings, "startAtLogin")).toBe("off");
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("off");
     await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
     await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
     // A development build starts itself: its Electron, on its main.
@@ -491,7 +491,7 @@ describe("Settings → General", () => {
     await shellPage(app);
     await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
     const settings = await settingsPage(app);
-    expect(await settings.textContent("#login-refused")).toBe("This build cannot start at login: GNOME does not start a program whose path holds a %.");
+    await expect.poll(() => settings.textContent("#login-refused")).toBe("This build cannot start at login: GNOME does not start a program whose path holds a %.");
     expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
     // Asked all the same, as the page could ask: refused, and nothing is written.
     const set = settings.evaluate(() => (globalThis as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
@@ -527,7 +527,7 @@ describe("Settings → General", () => {
     await shellPage(app);
     await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
     const settings = await settingsPage(app);
-    expect(await settings.textContent("#login-refused")).toBe(
+    await expect.poll(() => settings.textContent("#login-refused")).toBe(
       "This build cannot start at login: KDE and other desktops start it through systemd, which misreads a $, a ` or a \\ in its path.",
     );
     expect(await settings.isDisabled('[data-setting="startAtLogin"] [data-value="on"]')).toBe(true);
@@ -629,7 +629,7 @@ describe("Settings → General", () => {
     await page.click("#open-settings");
     const settings = await settingsPage(shell);
     // On, as the app starts: closing the window hides it, and the device link stays up.
-    expect(await pressed(settings, "keepRunning")).toBe("on");
+    await expect.poll(() => pressed(settings, "keepRunning")).toBe("on");
     await settings.click('[data-setting="keepRunning"] [data-value="off"]');
     await expect.poll(() => pressed(settings, "keepRunning")).toBe("off");
     expect(preferences()).toMatchObject({ keepRunning: false });
@@ -643,7 +643,7 @@ describe("Settings → General", () => {
     expect(await menu(shell)).toEqual(["File", "Edit", "View", "Help"]);
     await page.click("#open-settings");
     const settings = await settingsPage(shell);
-    expect(await pressed(settings, "developer")).toBe("off");
+    await expect.poll(() => pressed(settings, "developer")).toBe("off");
     // Cancelled: it stays off.
     await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
     await settings.click('[data-setting="developer"] [data-value="on"]');

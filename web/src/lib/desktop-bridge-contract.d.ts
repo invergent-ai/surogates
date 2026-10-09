@@ -30,6 +30,55 @@ export interface DesktopPreparedFolder {
 export interface DesktopBinding {
   folder: string; // as the folder sheet showed it, and the agent was told
   mode: "free" | "ask";
+  // Where the agent's browser on this computer is held, as this chat reads it. While it is held from any
+  // chat, the agent's browser calls wait in every chat here.
+  //   true         its user holds it, taken over from this chat, which hands it back.
+  //   false        nobody holds it: the agent drives it, and this chat may take it over.
+  //   "elsewhere"  held from another chat that is here. This chat can neither take it over nor hand it
+  //                back, as takeOver and handBack say: it is handed back there.
+  //   "orphaned"   held from a chat that is gone (deleted, or its folder forgotten here), which can hand
+  //                nothing back: every chat reads this then, and any of them hands it back, as handBack says.
+  // Only true says this chat holds it, not any value but false: for "elsewhere" the desktop refuses both
+  // takeOver and handBack, so a page offers neither. A chat the browser is not held from reads a change
+  // at its next getBinding: onBindingChanged names the chat it is held from.
+  takenOver: boolean | "orphaned" | "elsewhere";
+}
+
+// The agent's browser on this computer, for a chat bound here (Section 5): each call takes the chat's
+// id as getBinding does (a sub-agent's chat is its root's), and rejects as getBinding does, and for a
+// chat with no folder on this computer. A take-over and a hand back are told by onBindingChanged, for
+// the chat the browser is held from. The browser is one for every chat of the agent's on this computer:
+// held from one chat, it is held for all, and only that chat hands it back.
+export interface DesktopBrowser {
+  // The chat's newest page, brought to the front. Rejects with "Surogate shows the agent's browser
+  // only when its user asks, with a click" but at a click of its user's, once for each, within 5 s
+  // of it, as revealFolder does; and when the chat has no page open.
+  show(sessionId: string): Promise<void>;
+  // The user drives the browser from now on, held from this chat: the agent's browser calls in every
+  // chat on this computer answer that the user has taken control, and their browser questions waiting
+  // here go, with what the agent was doing in the browser, cut short. It needs no click, since it
+  // stops the agent and lets it do nothing more: so call it only at its user's own, as a page that
+  // calls it by itself stops every chat's browser until its user hands it back. The chat's page comes
+  // to the front only at a click of its user's, as show's does. Rejects with "The agent's browser on this
+  // computer is taken over from another chat, and is handed back there" while another chat's
+  // take-over stands (takenOver reads "elsewhere"), which this one does not end.
+  takeOver(sessionId: string): Promise<void>;
+  // The desktop asks its user, in a prompt window of its own, whose Hand back takes no press for a
+  // moment after it opens; true once the agent drives the browser again, in every chat here; false
+  // when the user keeps it, nobody answers in time, or the page that asked loads again meanwhile, which
+  // closes the prompt. A page cannot hand it back on its own, nor ask to: rejects with "Surogate
+  // hands the agent's browser back only when its user asks, with a click" but at a click of its
+  // user's, once for each, within 5 s of it, as show does, whatever its user chose before; and with
+  // "Surogate is already asking" while this window's last one is still open. Only the chat the browser
+  // is held from hands it back, while that chat is here: from another chat (takenOver reads "elsewhere")
+  // it rejects with "The agent's browser on this computer is taken over from another chat, and is handed
+  // back there", and nothing is asked. Once the chat it was held from is gone (takenOver reads "orphaned"),
+  // any chat hands it back, at its user's click and the desktop's prompt as any. With no prompt where
+  // nobody holds the browser. It resolves which hand back was made: "confirmed", its user confirmed
+  // handing back the browser this chat held; "released", the browser is the agent's again and no hand
+  // back of this chat's was confirmed (held from a chat that is gone, or by nobody); false, kept, or
+  // handed back from another chat meanwhile.
+  handBack(sessionId: string): Promise<false | "confirmed" | "released">;
 }
 
 // The project's thread a folder is asked for (Section 12): the sheet names both. The page's own
@@ -94,6 +143,13 @@ export interface DesktopBridge {
   // look at this folder, or at two others, has not returned; and once the folder is not there,
   // does not answer within 5 s, or was replaced after it was confirmed for the chat.
   revealFolder?(sessionId: string): Promise<void>;
+  // The browser's calls and Settings came after version 1's first desktops too: the page looks for each.
+  browser?: DesktopBrowser;
+  // Opens the desktop's own Settings on *section*: Browser, as the browser pane's no-browser message
+  // offers. Rejects with "Surogate opens its Settings only when its user asks, with a click" but at
+  // a click of its user's, as revealFolder does, and with "Surogate has a project's dialog open:
+  // close it to open Settings" while one is over the window.
+  openSettings?(section: "browser"): Promise<void>;
   // Hears each chat bound on this computer, each change of a chat's mode, and each chat's folder
   // forgotten here, as for a deleted chat, by the chat's id.
   onBindingChanged?(listener: (sessionId: string) => void): () => void;

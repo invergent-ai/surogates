@@ -8,7 +8,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, opened, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, launch, prompt, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, key, launch, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
 let agent: FakeAgent;
@@ -190,8 +190,11 @@ describe("the app's menu", () => {
     await expect.poll(reloads).toBe(1);
     // The folder sheet for a new chat, over the window.
     void client.evaluate(() => window.surogateDesktop!.prepareFolder("last")).catch(() => {});
-    await prompt(shell);
-    await keys("prompt.html", true);
+    const sheet = await prompt(shell);
+    // A prompt takes no key that comes within its input protection of another: Ctrl+R first, which it does not
+    // take for a reload, and Escape once the prompt may be answered.
+    await keys("prompt.html", false);
+    await key(sheet, "Escape");
     await expect.poll(() => shown("prompt.html")).toBe(false);
     expect(await reloads()).toBe(1);
     await pick(shell, "about");

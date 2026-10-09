@@ -28,6 +28,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 //
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getChatRouteState } from "./chat-route-state";
+import { ComputerBrowser } from "./computer-browser";
 import { LocalChatBar } from "./local-chat-bar";
 import { NewChatPlace } from "./new-chat-place";
 import {
@@ -392,6 +393,19 @@ export function ChatPage() {
               onSelectBrowserProfile={setBrowserProfileId}
               firstMessage={given}
               onFirstMessageSent={answerGiven}
+              // A local-folder chat's browser is on its computer: the pane says where, with the desktop's buttons there.
+              computerBrowser={
+                sessionId
+                  ? ({ available, readOnly }) => (
+                      <ComputerBrowser
+                        key={sessionId}
+                        sessionId={sessionId}
+                        available={available}
+                        readOnly={readOnly}
+                      />
+                    )
+                  : undefined
+              }
               composerFooter={
                 !sessionId && place.text ? (
                   <NewChatPlace

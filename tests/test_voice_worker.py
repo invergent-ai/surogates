@@ -1,4 +1,5 @@
 """Which of our numbers was called, and by whom, from the SIP participant LiveKit puts in the room."""
+from surogates.voice.agent import CallConfig
 from surogates.voice.worker import CallInfo, call_info
 
 
@@ -43,7 +44,7 @@ class _Scape:
 def test_the_soundscape_follows_who_speaks_and_the_agent_thinking():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
-    session, scape, agent = _Session(), _Scape(), SimpleNamespace(last_said="")
+    session, scape, agent = _Session(), _Scape(), SimpleNamespace(last_said="", config=CallConfig())
     follow_call(session, agent, scape, SimpleNamespace(on_lookup=None))
     session.emit("agent_state_changed", "thinking")
     assert scape.calls[-2:] == [("agent_speaking", False), ("agent_thinking", True)]
@@ -59,7 +60,7 @@ def test_the_pen_writes_once_when_the_caller_answers_a_question_for_details():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
     session, scape = _Session(), _Scape()
-    agent = SimpleNamespace(last_said="Pe ce nume fac programarea?")
+    agent = SimpleNamespace(last_said="Pe ce nume fac programarea?", config=CallConfig())
     follow_call(session, agent, scape, SimpleNamespace(on_lookup=None))
     session.emit("user_state_changed", "speaking")
     session.emit("user_state_changed", "listening")
@@ -88,7 +89,39 @@ def test_the_background_hears_about_lookups_from_the_call():
     from types import SimpleNamespace
     from surogates.voice.worker import follow_call
     session, scape, call = _Session(), _Scape(), SimpleNamespace(on_lookup=None)
-    follow_call(session, SimpleNamespace(last_said=""), scape, call)
+    follow_call(session, SimpleNamespace(last_said="", config=CallConfig()), scape, call)
     call.on_lookup(True)
     call.on_lookup(False)
     assert scape.calls[-2:] == [("lookup", True), ("lookup", False)]
+
+
+def test_a_provider_that_gives_up_ends_the_call_as_a_provider_error():
+    from livekit.agents.llm import LLMError
+    from livekit.agents.stt import STTError
+    from livekit.agents.tts import TTSError
+
+    from surogates.voice.speech import Slot
+    from surogates.voice.worker import provider_failed
+
+    def err(cls, recoverable=False):
+        return cls(timestamp=0.0, label="x", error=RuntimeError("auth_error"), recoverable=recoverable)
+
+    el = Slot(provider="elevenlabs", model="m", voice="v", key_ref="vault://k")
+    providers = CallConfig(hearing=el, speaking=el)
+    assert provider_failed(err(STTError), providers)  # a revoked key: the ears are gone for good
+    assert provider_failed(err(TTSError), providers)
+    assert not provider_failed(err(STTError, recoverable=True), providers)  # a blip that LiveKit retries
+    assert not provider_failed(err(LLMError), providers)  # the agent's turn failed: it says sorry instead
+    assert not provider_failed(None, providers)  # the caller hung up
+    # our own speech servers failing is our outage, not the owner's provider
+    assert not provider_failed(err(STTError), CallConfig())
+    assert not provider_failed(err(TTSError), CallConfig(hearing=el))
+
+
+def test_only_the_owners_key_failing_is_a_provider_error():
+    from surogates.voice.worker import ProviderUnavailable, refused_outcome
+
+    assert refused_outcome(ProviderUnavailable("elevenlabs", "key_missing")) == "provider_error"
+    # a missing plugin or a bad option is our bug: never shown to the owner as their provider's fault
+    assert refused_outcome(ImportError("livekit.plugins.fishaudio")) == "error"
+    assert refused_outcome(ValueError("could not convert string to float: 'fast'")) == "error"

@@ -15,22 +15,27 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+import numpy as np
+from livekit import rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess
+from livekit.agents.stt import STTError
+from livekit.agents.tts import TTSError
 from livekit.plugins import silero
 from redis.asyncio import Redis
 
 from surogates.channels.resolve import resolve_tenant
 from surogates.config import load_settings
-from surogates.voice.agent import BUSY, GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
+from surogates.voice.agent import CallConfig, VoiceAgent
 from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
 from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
-from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions, normalize_caller
-from surogates.voice.stt import RoSTT
+from surogates.voice.sessions import CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.text import asks_for_details
+from surogates.voice.speech import Slot, build_stt, build_tts, phrase_scope, turn_handling
 from surogates.voice.tts import PhraseCache, RoTTS
 
 log = logging.getLogger("surogates.voice")
+NO_LINE = CallConfig().lines  # before a number's agent is known, its lines are too: the platform default
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,14 @@ def call_info(room_name: str, attributes: Mapping[str, str]) -> CallInfo | None:
                     caller=(attributes.get("sip.phoneNumber") or "").strip() or None)
 
 
+class ProviderUnavailable(Exception):
+    """A line's speech provider cannot be used for this call (its key is missing or unreadable)."""
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"{provider}: {reason}")
+        self.provider, self.reason = provider, reason
+
+
 @dataclass
 class Runtime:
     """What one call needs from the platform: DB, Redis, ops routing. Built per job process."""
@@ -59,10 +72,11 @@ class Runtime:
     client: Any
     routing: Any
     sessions: VoiceSessions
+    vault: Any = None  # owners' provider keys; None when the platform has no encryption key
 
     @classmethod
     async def open(cls, settings: Any) -> Runtime:
-        from surogates.api.app import build_channel_routing_cache
+        from surogates.api.app import _build_vault, build_channel_routing_cache
         from surogates.db.engine import async_engine_from_settings, async_session_factory
         from surogates.runtime.platform_client import PlatformClient
         from surogates.session.store import SessionStore
@@ -75,7 +89,23 @@ class Runtime:
         routing = build_channel_routing_cache(settings=settings, platform_client=client)
         sessions = VoiceSessions(store=SessionStore(sf, redis=redis), redis=redis, session_factory=sf,
                                  storage=create_backend(settings), settings=settings)
-        return cls(engine=engine, redis=redis, client=client, routing=routing, sessions=sessions)
+        return cls(engine=engine, redis=redis, client=client, routing=routing, sessions=sessions,
+                   vault=_build_vault(settings.encryption_key, sf))
+
+    async def key(self, org_id: UUID, slot: Slot) -> str:
+        """The owner's key for a provider slot, from the vault. Raises ProviderUnavailable: a provider
+        line without its key cannot speak, and the caller must hear that instead of silence."""
+        if slot.ours or not slot.key_ref:
+            return ""
+        if self.vault is None:
+            raise ProviderUnavailable(slot.provider, "no_vault")
+        try:
+            value = await self.vault.resolve_ref(slot.key_ref, org_id=org_id)
+        except Exception as e:  # a bad ref, an undecryptable value, the database
+            raise ProviderUnavailable(slot.provider, "key_unreadable") from e
+        if not value:
+            raise ProviderUnavailable(slot.provider, "key_missing")
+        return value
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -91,6 +121,9 @@ def prewarm(proc: JobProcess) -> None:
     import surogates.db.engine  # noqa: F401
     import surogates.runtime.platform_client  # noqa: F401
     import surogates.session.store  # noqa: F401
+    # a line's provider plugin (openai alone took 130 ms): imported here, not before the greeting
+    import livekit.plugins.cartesia, livekit.plugins.deepgram, livekit.plugins.elevenlabs  # noqa: E401, F401
+    import livekit.plugins.fishaudio, livekit.plugins.gradium, livekit.plugins.openai  # noqa: E401, F401
     import surogates.storage.backend  # noqa: F401
 
 
@@ -106,12 +139,49 @@ async def say_and_hang_up(ctx: JobContext, session: AgentSession, text: str,
     await ctx.delete_room()
 
 
-async def apologize(ctx: JobContext, tts_url: str, voice: str, text: str, redis=None) -> None:
+async def apologize(ctx: JobContext, tts: Any, text: str, phrases: PhraseCache | None = None) -> None:
     """Say one sentence and end the call, before (or instead of) a conversation."""
-    tts = RoTTS(url=tts_url, voice=voice)
     bare = AgentSession(tts=tts)
     await bare.start(agent=Agent(instructions=""), room=ctx.room)
-    await say_and_hang_up(ctx, bare, text, PhraseCache(redis, tts) if redis is not None else None)
+    await say_and_hang_up(ctx, bare, text, phrases)
+
+
+def tone(rate: int = 16000) -> list[rtc.AudioFrame]:
+    """Two short low beeps: the line's own voice could not be reached, and no other voice may pretend
+    to be it (or speak a language the caller never chose)."""
+    t = np.arange(int(0.18 * rate)) / rate
+    beep = (0.25 * np.sin(2 * np.pi * 480 * t) * np.minimum(1, np.minimum(t, t[::-1]) / 0.01) * 32767).astype("<i2")
+    gap = np.zeros(int(0.12 * rate), "<i2")
+    pcm = np.concatenate([beep, gap, beep, np.zeros(int(0.3 * rate), "<i2")]).tobytes()
+    return [rtc.AudioFrame(data=pcm, sample_rate=rate, num_channels=1, samples_per_channel=len(pcm) // 2)]
+
+
+def refused_outcome(error: Exception) -> str:
+    """How a call refused before it started is reported: the owner's key is theirs to fix (provider_error),
+    anything else building the line's speech (a missing plugin, a bad option) is ours."""
+    return "provider_error" if isinstance(error, ProviderUnavailable) else "error"
+
+
+def provider_failed(error: object, config: CallConfig) -> bool:
+    """The session closed because the owner's provider gave up for good (a revoked key, no credits left,
+    the provider down): its owner must see why. Our own speech servers failing is our outage, not theirs."""
+    if isinstance(error, STTError):
+        return not error.recoverable and not config.hearing.ours
+    if isinstance(error, TTSError):
+        return not error.recoverable and not config.speaking.ours
+    return False
+
+
+async def tone_and_hang_up(ctx: JobContext, tts_url: str) -> None:
+    bare = AgentSession(tts=RoTTS(url=tts_url))  # never synthesizes: the tone is the audio
+
+    async def frames():
+        for f in tone():
+            yield f
+
+    await bare.start(agent=Agent(instructions=""), room=ctx.room)
+    await bare.say(" ", audio=frames(), allow_interruptions=False, add_to_chat_ctx=False).wait_for_playout()
+    await ctx.delete_room()
 
 
 async def run_all(*steps: tuple[str, Any]) -> None:
@@ -143,7 +213,7 @@ def follow_call(session: AgentSession, agent: Any, scape: Any, call: Any) -> Non
         speaking = ev.new_state == "speaking"
         if speaking and agent.last_said != pen_for:
             pen_for = agent.last_said  # once per question, however many breaths the answer takes
-            if asks_for_details(agent.last_said):
+            if asks_for_details(agent.last_said, agent.config.language):
                 scape.writing()
         scape.caller_speaking(speaking)
 
@@ -174,7 +244,8 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
-    call, tasks, tts, slots, tenant, background = None, set(), None, None, None, None
+    call, tasks, tts, heard, slots, tenant, background = None, set(), None, None, None, None, None
+    outcome = "completed"
     started = datetime.now(timezone.utc)
 
     async def report(outcome: str) -> None:
@@ -195,10 +266,11 @@ async def entrypoint(ctx: JobContext) -> None:
             task.cancel()
         await run_all(
             ("end the session", call and call.end()),
-            ("report the call", call and report("completed")),
+            ("report the call", call and report(outcome)),
             ("release the line", slots and slots.release(info.call_id)),
             ("stop the background", background and background.aclose()),
             ("close the TTS", tts and tts.aclose()),
+            ("close the STT", heard and heard.aclose()),
             ("close the runtime", rt.aclose()),
         )
 
@@ -208,38 +280,52 @@ async def entrypoint(ctx: JobContext) -> None:
         tenant = await resolve_tenant(rt.routing, "voice", info.called) if info else None
     except Exception:  # ops down, 401, a timeout: the caller hears why, not silence
         log.exception("could not resolve room %s (called %s)", ctx.room.name, info and info.called)
-        return await apologize(ctx, vs.tts_url, "female", SORRY)
+        return await apologize(ctx, RoTTS(url=vs.tts_url), NO_LINE.sorry)
     if info is None or tenant is None:
         log.warning("no agent for room %s (called %s)", ctx.room.name, info and info.called)
-        return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE, rt.redis)
+        default = RoTTS(url=vs.tts_url)
+        return await apologize(ctx, default, NO_LINE.unavailable, PhraseCache(rt.redis, default))
 
     config = CallConfig.from_routing(tenant.get("config"))
+    org_id = UUID(str(tenant["org_id"]))
+    try:  # the line's own voice and ears; a provider line without its key cannot take the call
+        # each distinct key once (one account often hears and speaks), together: the caller is waiting
+        slots_by_ref = {s.key_ref: s for s in (config.speaking, config.hearing)}
+        keys = dict(zip(slots_by_ref, await asyncio.gather(*(rt.key(org_id, s) for s in slots_by_ref.values()))))
+        tts = build_tts(config.speaking, key=keys[config.speaking.key_ref], language=config.language,
+                        tts_url=vs.tts_url)
+        heard = build_stt(config.hearing, key=keys[config.hearing.key_ref], language=config.language,
+                          stt_url=vs.stt_url)
+    except Exception as e:
+        log.warning("call %s refused: %s", info.call_id, e, exc_info=not isinstance(e, ProviderUnavailable))
+        await report(refused_outcome(e))
+        return await tone_and_hang_up(ctx, vs.tts_url)
+    phrases = PhraseCache(rt.redis, tts, scope=phrase_scope(config.speaking, config.language, str(org_id)))
     slots = CallSlots(rt.redis, vs.max_concurrent_calls)  # releasing a line never taken is a no-op
     if not await slots.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
         await report("busy")
-        return await apologize(ctx, vs.tts_url, config.voice, BUSY, rt.redis)
+        return await apologize(ctx, tts, config.lines.busy, phrases)
     try:
         call = await rt.sessions.open_call(
-            CallTarget(org_id=UUID(str(tenant["org_id"])), agent_id=tenant["agent_id"],
+            CallTarget(org_id=org_id, agent_id=tenant["agent_id"],
                        remember_callers=config.remember_callers),
-            call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.greeting)
+            call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.lines.greeting,
+            language=config.language, lines=config.lines)
     except Exception:
         log.exception("could not open a session for call %s", info.call_id)
         await report("error")
-        return await apologize(ctx, vs.tts_url, config.voice, SORRY, rt.redis)
+        return await apologize(ctx, tts, config.lines.sorry, phrases)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
     try:  # how the call reads in Studio's session list; cosmetic, never worth failing a call over
-        await call.store.update_session_title_if_empty(call.session_id, f"Apel de la {call.caller}")
+        await call.store.update_session_title_if_empty(call.session_id, f"Call from {call.caller}")
     except Exception:
         log.debug("could not title call %s", info.call_id, exc_info=True)
 
     agent = VoiceAgent(config)
-    tts = RoTTS(url=vs.tts_url, voice=config.voice)
-    phrases = PhraseCache(rt.redis, tts)
-    session = AgentSession(vad=ctx.proc.userdata["vad"], stt=RoSTT(url=vs.stt_url), llm=SurogatesLLM(call),
-                           tts=tts, turn_handling=TURN_HANDLING,
+    session = AgentSession(vad=ctx.proc.userdata["vad"], stt=heard, llm=SurogatesLLM(call),
+                           tts=tts, turn_handling=turn_handling(config.hearing),
                            user_away_timeout=config.idle_ask_seconds)
 
     def spawn(coro) -> None:
@@ -251,14 +337,21 @@ async def entrypoint(ctx: JobContext) -> None:
     def _error(ev) -> None:
         if isinstance(ev.source, SurogatesLLM):  # the turn failed: say so instead of leaving silence
             log.warning("call %s turn failed: %r", info.call_id, ev.error)
-            session.say(SORRY_TURN, add_to_chat_ctx=False)
+            session.say(config.lines.sorry_turn, add_to_chat_ctx=False)
 
     @session.on("close")
     def _closed(ev) -> None:
         # the session gave up (unrecoverable STT/LLM/TTS errors, or the caller left): never keep a caller
-        # on the line with nobody there
+        # on the line with nobody there. Decided here, not on the first error: LiveKit rides out a few failed
+        # sentences, and the call goes on. A provider that gave up gets the same two beeps as a missing key.
+        nonlocal outcome
         log.info("call %s session closed: %s", info.call_id, ev.reason)
-        spawn(hang_up())
+        if provider_failed(ev.error, config):
+            log.warning("call %s: %s gave up: %r", info.call_id, ev.error.label, ev.error.error)
+            outcome = "provider_error"
+            spawn(tone_and_hang_up(ctx, vs.tts_url))
+        else:
+            spawn(hang_up())
 
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:
@@ -270,10 +363,10 @@ async def entrypoint(ctx: JobContext) -> None:
         await ctx.delete_room()  # a Future, not a coroutine: spawn() needs this wrapper
 
     async def still_there() -> None:
-        await fixed(session, phrases, STILL_THERE, add_to_chat_ctx=False).wait_for_playout()
+        await fixed(session, phrases, config.lines.still_there, add_to_chat_ctx=False).wait_for_playout()
         await asyncio.sleep(config.idle_hangup_seconds)
         if session.user_state == "away":
-            await say_and_hang_up(ctx, session, GOODBYE, phrases)
+            await say_and_hang_up(ctx, session, config.lines.goodbye, phrases)
 
     @session.on("user_state_changed")
     def _away(ev) -> None:
@@ -282,10 +375,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def time_limit() -> None:
         await asyncio.sleep(config.max_call_seconds)
-        await say_and_hang_up(ctx, session, GOODBYE, phrases)
+        await say_and_hang_up(ctx, session, config.lines.goodbye, phrases)
 
     await session.start(agent=agent, room=ctx.room)
-    fixed(session, phrases, config.greeting)
+    fixed(session, phrases, config.lines.greeting)
 
     async def _background() -> None:  # alongside the greeting: a slow download never delays the call
         nonlocal background

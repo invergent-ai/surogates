@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
+from asyncpg.exceptions import InternalClientError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, text, tuple_, update
@@ -77,6 +78,8 @@ _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
 _CANCEL_PATIENCE_S = 5.0
+# How soon it asks again when the database was out of reach.
+_CANCEL_RETRY_S = 0.05
 
 # The invocation of an operation asked for outside any tool call: the user's
 # own request on a chat's files.  A tool call's invocation starts with its
@@ -121,6 +124,11 @@ def _database_unavailable(exc: Exception) -> bool:
     if isinstance(exc, DBAPIError):
         # A failover's shutdown arrives as the generic DBAPIError, with its connection invalidated.
         return isinstance(exc, (OperationalError, InterfaceError)) or exc.connection_invalidated
+    if isinstance(exc, InternalClientError):
+        # What the driver says of a connection whose backend ended between two of a
+        # call's statements, which SQLAlchemy passes on as it is.  Its other faults
+        # (no encoder for a type, a malformed bind) never go away, and are not this.
+        return str(exc).startswith("cannot switch to state")
     return isinstance(exc, (PoolTimeoutError, ConnectionError, TimeoutError))
 
 
@@ -331,10 +339,13 @@ async def _keep_payload(db: AsyncSession, operation_id: UUID, transfer: dict[str
     ))
     # Views, not slices: a slice of bytes is a copy, and the chunks would hold a second one of the data.
     view = memoryview(data)
-    await db.execute(insert(DeviceTransferChunk), [
-        {"operation_id": operation_id, "seq": seq, "data": view[at:at + CHUNK_BYTES]}
-        for seq, at in enumerate(range(0, len(data), CHUNK_BYTES))
-    ])
+    chunk = insert(DeviceTransferChunk)
+    for seq, at in enumerate(range(0, len(data), CHUNK_BYTES)):
+        # One statement a chunk, as the link stores a read's, never one of many
+        # rows: the driver writes that in parts, and a stop that comes between
+        # two of them is lost there.  The call then waits for ever on a
+        # statement it never finished sending, and keeps its connection.
+        await db.execute(chunk, {"operation_id": operation_id, "seq": seq, "data": view[at:at + CHUNK_BYTES]})
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,7 +551,9 @@ class DeviceOperations:
             except Exception as exc:
                 if not _database_unavailable(exc):
                     raise
-                logger.warning("%s an operation: database unavailable (%s); retrying", what, type(exc).__name__)
+                logger.warning(
+                    "%s an operation: database unavailable (%s: %s); retrying", what, type(exc).__name__, exc,
+                )
                 await asyncio.sleep(self._recheck_interval_s)
 
     async def _within_redis_patience(self, call: Awaitable[_T], *, intervals: float = 1) -> _T:
@@ -1115,8 +1128,15 @@ class DeviceOperations:
                 )
             )).scalars())
 
-    async def _cancel_where(self, *conditions: Any) -> int:
+    async def _cancel_where(self, *conditions: Any, decided_for: UUID | None = None) -> int:
         async with self._sf() as db:
+            if decided_for is not None:
+                # A recording holds its device's row FOR SHARE until its commit is
+                # decided: waited for here, so one whose commit is still on its
+                # way is seen, and closed, rather than missed.
+                await db.execute(
+                    select(Device.id).where(Device.id == decided_for).with_for_update(key_share=True)
+                )
             rows = (await db.execute(
                 update(DeviceOperation)
                 .where(DeviceOperation.completed_at.is_(None), *conditions)
@@ -1130,21 +1150,40 @@ class DeviceOperations:
         return len(rows)
 
     async def _cancel_own(self, request: OperationRequest) -> None:
-        """Close a stopped call's operation, best effort: a failure leaves it open as before."""
-        try:
-            async with asyncio.timeout(_CANCEL_PATIENCE_S):
-                # Shielded: a second cancel of the stopping task must not
-                # abandon the write half-way.
-                await asyncio.shield(self._cancel_where(
-                    DeviceOperation.calling_session_id == request.calling_session_id,
-                    DeviceOperation.invocation_id == request.invocation_id,
-                    DeviceOperation.ordinal == request.ordinal,
-                ))
-        except Exception:
-            logger.warning(
-                "could not cancel operation %s of %s; it stays open",
-                request.ordinal, request.invocation_id, exc_info=True,
-            )
+        """Close a stopped call's operation, within _CANCEL_PATIENCE_S: past it, it stays open as before.
+
+        Asked again while the database is out of reach: the stop that brought
+        the call here may have ended the connection its recording was on, and
+        the pool lends that connection to the next caller, which is this one.
+        Giving up on it would leave an operation its user stopped open, for
+        its computer to run.
+        """
+        async def close() -> None:
+            try:
+                async with asyncio.timeout(_CANCEL_PATIENCE_S):
+                    while True:
+                        try:
+                            await self._cancel_where(
+                                DeviceOperation.calling_session_id == request.calling_session_id,
+                                DeviceOperation.invocation_id == request.invocation_id,
+                                DeviceOperation.ordinal == request.ordinal,
+                                decided_for=request.device_id,
+                            )
+                            return
+                        except Exception as exc:
+                            if not _database_unavailable(exc):
+                                raise
+                            await asyncio.sleep(_CANCEL_RETRY_S)
+            except Exception:
+                # Said here: once its caller was stopped again, nothing awaits this any more.
+                logger.warning(
+                    "could not cancel operation %s of %s; it stays open",
+                    request.ordinal, request.invocation_id, exc_info=True,
+                )
+
+        # Shielded, the asking again with it: a second cancel of the
+        # stopping task must not abandon the write half-way.
+        await asyncio.shield(asyncio.ensure_future(close()))
 
 
 async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> int:

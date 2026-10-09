@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
+import { ControlLink } from "../../src/vm/control.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
 import {
@@ -985,10 +986,14 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     ];
     await guest.stop();
     for (const [init, said] of cases) {
-      const outcome = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, init) }).then(async (booted) => {
-        await booted.stop();
-        return "it said hello";
-      }, (error: Error) => error.message);
+      // Booted as Guest.boot boots, but heard out past its 15 s for the hello: with no outcome the agent
+      // waits 12 s from its own start, which a busy machine's boot pushes past the host's 15 s. What this
+      // pins is the guest's own refusal: its VM exits, saying why, and no hello comes first.
+      const booted = { ...options, agentDisk: agentDiskWith(dir, init) };
+      const deadline = performance.now() + 60_000;
+      const vm = await bootLinux(booted, undefined, deadline);
+      const outcome = await ControlLink.open(vm.control, booted.user, deadline, vm.exited).then(() => "it said hello", (error: Error) => error.message);
+      await vm.kill();
       expect(outcome, said).toContain("The VM exited");
       expect(readFileSync(options.console, "utf8")).toContain(said);
     }

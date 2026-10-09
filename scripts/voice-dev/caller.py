@@ -39,7 +39,27 @@ LOUD = 300  # int16 RMS above which a frame is speech
 BUSY = 100  # RMS above which the background track is typing (the agent is still working); distant room events stay below
 
 
+# A line in another language (VOICE_QA_LANGUAGE=en…) needs a caller who speaks and understands it: ours
+# are Romanian only, so the caller then uses ElevenLabs (ELEVENLABS_API_KEY; a few credits per call).
+LANGUAGE = os.environ.get("VOICE_QA_LANGUAGE", "ro")
+# VOICE_QA_RECORD=/path/stem saves what the caller heard: stem-voice.wav and stem-background.wav
+RECORD = os.environ.get("VOICE_QA_RECORD")
+EL = "https://api.elevenlabs.io/v1"
+EL_CALLER_VOICE = "JBFqnCBsd6RMkjVDRZzb"  # a premade male voice, unlike the agent's
+
+
+def _el_key() -> str:
+    return os.environ["ELEVENLABS_API_KEY"]
+
+
 async def speech(text: str, voice: str = "male") -> np.ndarray:
+    if LANGUAGE != "ro":
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{EL}/text-to-speech/{EL_CALLER_VOICE}?output_format=pcm_24000",
+                             headers={"xi-api-key": _el_key()},
+                             json={"text": text, "model_id": "eleven_flash_v2_5", "language_code": LANGUAGE})
+            r.raise_for_status()
+            return np.frombuffer(r.content, "<i2")
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(TTS, json={"input": text, "voice": voice, "response_format": "pcm", "stream_format": "audio"})
         r.raise_for_status()
@@ -49,6 +69,18 @@ async def speech(text: str, voice: str = "male") -> np.ndarray:
 async def transcribe(pcm: np.ndarray) -> str:
     if not len(pcm):
         return ""
+    if LANGUAGE != "ro":
+        import io
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1), w.setsampwidth(2), w.setframerate(RATE), w.writeframes(pcm.astype("<i2").tobytes())
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{EL}/speech-to-text", headers={"xi-api-key": _el_key()},
+                             data={"model_id": "scribe_v2", "language_code": LANGUAGE, "tag_audio_events": "false"},
+                             files={"file": ("agent.wav", buf.getvalue(), "audio/wav")})
+            r.raise_for_status()
+            return r.json().get("text", "")
     x = soxr.resample(pcm, RATE, 16000).astype("<i2").tobytes()
     finals = []
     async with connect(STT, max_size=None) as ws:
@@ -78,6 +110,7 @@ class Call:
         self.called, self.caller = called, caller
         self.room_name = f"call-qa-{uuid.uuid4().hex[:8]}"
         self.heard: list[tuple[float, np.ndarray, bool]] = []  # (when, frame, loud) of the agent's voice
+        self.background: list[np.ndarray] = []  # the background track's frames, kept only when recording
         self.busy_at: list[float] = []  # when the agent's background track was typing
         self.ended = asyncio.Event()
         self._room = rtc.Room()
@@ -140,6 +173,8 @@ class Call:
 
     async def _typing(self, track: rtc.Track) -> None:
         async for ev in rtc.AudioStream(track, sample_rate=RATE, num_channels=1):
+            if RECORD:
+                self.background.append(np.frombuffer(ev.frame.data, "<i2"))
             x = np.frombuffer(ev.frame.data, "<i2").astype(np.float32)
             if float(np.sqrt(np.mean(x ** 2))) > BUSY:
                 self.busy_at.append(time.monotonic())
@@ -217,6 +252,13 @@ async def main(lines: list[str], called: str, caller: str) -> None:
             reply = await call.ask(line)
             print(f"\ncaller: {line!r}\nagent after {_secs(reply.delay)}: {reply.text!r}")
         print("\nthe agent hung up" if await call.wait_hung_up(8) else "\ncall still open; hanging up")
+        if RECORD:
+            import wave
+            for part, frames in (("voice", [f for _, f, _ in call.heard]), ("background", call.background)):
+                with wave.open(f"{RECORD}-{part}.wav", "wb") as w:
+                    w.setnchannels(1), w.setsampwidth(2), w.setframerate(RATE)
+                    w.writeframes(np.concatenate(frames).tobytes() if frames else b"")
+            print(f"recorded {RECORD}-voice.wav and {RECORD}-background.wav")
 
 
 if __name__ == "__main__":

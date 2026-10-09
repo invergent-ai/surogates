@@ -13,14 +13,39 @@ const origin = process.argv.find((arg) => arg.startsWith(PREFIX))?.slice(PREFIX.
 
 if (origin !== undefined && window.top === window && location.origin === origin) {
   const call = (name: string) => (...args: unknown[]) => ipcRenderer.invoke(`desktop:${name}`, ...args);
-  // Show folder only at its user's click: one heard here, in the preload's own world, where the
-  // page's scripts cannot make a trusted one. A click by key or by assistive technology counts. It
-  // allows one Show folder, for as long as Chromium's activation lasts.
+  // What raises a window of this computer, and what asks its user to hand the agent's browser back,
+  // happens only at its user's click: one heard here, in the preload's own world, where the page's
+  // scripts cannot make a trusted one. A click by key or by assistive technology counts. It allows
+  // one such call, for as long as Chromium's activation lasts.
   const CLICK_MS = 5_000;
   let clickedAt = -Infinity;
+  // The press last heard, by its own time. A label passes its click on to its control: a second click
+  // of the one press, which carries the time of the first, and allows no second call.
+  let press = NaN;
+  // Whether the key last pressed is held down still, and repeating: on a button the browser makes a click
+  // of each repeat, and none of those is a press of its user's. Not once the key comes up, or the window
+  // loses the keyboard, where its coming up would not be heard.
+  let repeating = false;
+  for (const type of ["keydown", "keyup", "blur"] as const) {
+    window.addEventListener(type, (event) => {
+      if (event.isTrusted) repeating = type === "keydown" && (event as KeyboardEvent).repeat;
+    }, true);
+  }
   window.addEventListener("click", (event) => {
-    if (event.isTrusted) clickedAt = performance.now();
+    // A click the keyboard made carries no count of presses (detail 0); the mouse's is a press whatever a key does.
+    if (!event.isTrusted || event.timeStamp === press || (repeating && event.detail === 0)) return;
+    press = event.timeStamp;
+    clickedAt = performance.now();
   }, true);
+  // Whether its user just clicked: true once for each press.
+  const clicked = (): boolean => {
+    const now = navigator.userActivation.isActive && performance.now() - clickedAt < CLICK_MS;
+    clickedAt = -Infinity;
+    return now;
+  };
+  // A call made only at its user's click, and refused in *words* otherwise, before it leaves the page.
+  const atClick = (name: string, words: string) => (...args: unknown[]) =>
+    (clicked() ? ipcRenderer.invoke(`desktop:${name}`, ...args) : Promise.reject(new Error(words)));
   // The projects source the page serves (Section 12) stays here, and is called for the main
   // process, which checks each answer.
   let projects: ProjectsSource | null = null;
@@ -99,13 +124,18 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     cancelPrepared: call("cancelPrepared"),
     getBinding: call("getBinding"),
     // Only at its user's click: the agent's page cannot open file manager windows by itself.
-    revealFolder: (sessionId: unknown) => {
-      const clicked = navigator.userActivation.isActive && performance.now() - clickedAt < CLICK_MS;
-      clickedAt = -Infinity;
-      return clicked
-        ? ipcRenderer.invoke("desktop:revealFolder", sessionId)
-        : Promise.reject(new Error("Surogate shows a chat's folder only when its user asks, with a click"));
+    revealFolder: atClick("revealFolder", "Surogate shows a chat's folder only when its user asks, with a click"),
+    browser: {
+      // Only at its user's click: the agent's page cannot bring the agent's browser over what its user is doing.
+      show: atClick("showBrowser", "Surogate shows the agent's browser only when its user asks, with a click"),
+      // A take-over needs no click: it stops the agent's browser, in every chat here, and lets it do nothing
+      // more. It raises the chat's page only with one.
+      takeOver: (sessionId: unknown) => ipcRenderer.invoke("desktop:takeOver", sessionId, clicked()),
+      // Only at its user's click: the agent's page cannot open the desktop's confirmation by itself, whatever its user chose before.
+      handBack: atClick("handBack", "Surogate hands the agent's browser back only when its user asks, with a click"),
     },
+    // Only at its user's click: the agent's page cannot put Settings over the window by itself.
+    openSettings: atClick("openSettings", "Surogate opens its Settings only when its user asks, with a click"),
     onBindingChanged: (listener: (sessionId: string) => void) => {
       const relay = (_event: unknown, sessionId: unknown) => {
         if (typeof sessionId === "string") listener(sessionId);

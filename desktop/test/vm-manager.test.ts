@@ -336,6 +336,37 @@ describe("the VM manager on the host", () => {
     }
   });
 
+  it("looks for the VM's tools where the sandbox's are looked for: on no relative entry of the PATH, and in no folder a chat is bound to, where a command may have written a program", async () => {
+    const tool = (bin: string, name: string, script: string) => {
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
+      chmodSync(join(bin, name), 0o755);
+      return join(bin, name);
+    };
+    const [bound, system] = [join(dir, "bound"), join(dir, "system")];
+    const ran = join(dir, "ran");
+    const virtiofsd = tool(system, "virtiofsd", "echo 'virtiofsd 1.13.2'");
+    for (const name of ["newuidmap", "newgidmap"]) tool(join(bound, "bin"), name, "true");
+    tool(join(bound, "bin"), "qemu-system-x86_64", `echo bound >>${ran}; echo 'QEMU emulator version 10.1.0'`);
+    tool(join(bound, "node_modules", ".bin"), "qemu-system-x86_64", `echo relative >>${ran}; echo 'QEMU emulator version 10.1.0'`);
+    const [path, cwd] = [process.env.PATH, process.cwd()];
+    process.chdir(bound);
+    try {
+      // The only QEMU and id-map tools are in the chat's folder, by a whole entry and by a relative one: none is found, and none is run.
+      process.env.PATH = `node_modules/.bin:${join(bound, "bin")}:${system}`;
+      expect(await missingTools({ virtiofsd }, false, [statSync(bound)])).toEqual(["QEMU 8.2 or later", "newuidmap and newgidmap"]);
+      expect(existsSync(ran)).toBe(false);
+      // Those of the system, behind them on the PATH, are the ones found.
+      tool(system, "qemu-system-x86_64", `echo system >>${ran}; echo 'QEMU emulator version 10.1.0'`);
+      for (const name of ["newuidmap", "newgidmap"]) tool(system, name, "true");
+      expect(await missingTools({ virtiofsd }, false, [statSync(bound)])).toEqual([]);
+      expect(readFileSync(ran, "utf8")).toBe("system\n");
+    } finally {
+      process.env.PATH = path;
+      process.chdir(cwd);
+    }
+  });
+
   it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM", { timeout: 20_000 }, async () => {
     const virtiofsd = join(dir, "virtiofsd");
     writeFileSync(virtiofsd, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n");

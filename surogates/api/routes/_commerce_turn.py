@@ -232,7 +232,7 @@ async def reserve_allowance(
     always: bool = False,
     channel: str | None = None,
     session_config: dict | None = None,
-) -> None:
+) -> dict | None:
     """Channel-agnostic per-user allowance reservation (no HTTP request).
 
     A no-op unless ops projects a positive ``end_user_token_allowance``,
@@ -248,7 +248,8 @@ async def reserve_allowance(
     receipt's feature package (``entitlements``) without a read.
 
     Reserves the turn's estimate against the end-user's cap and pins the
-    receipt on ``session.config`` for the worker to settle. Raises
+    receipt on ``session.config`` for the worker to settle. Returns the
+    hold it pinned, None when it pinned none. Raises
     :class:`~surogates.runtime.platform_client.AllowanceExhaustedError`
     on 402 (cap spent / subscription required / operator plan spent /
     channel not in the package) and :class:`AllowanceReserveError` when
@@ -268,7 +269,7 @@ async def reserve_allowance(
             session_config,
             runtime_payload.get("default_user_features"),
         )
-        return
+        return None
     if platform_client is None:
         raise AllowanceReserveError("platform_client not wired")
     try:
@@ -285,21 +286,20 @@ async def reserve_allowance(
     await pin_entitlements(
         session_store, session_id, session_config, receipt.get("features"),
     )
-    if receipt.get("allowance_id"):
-        if session_store is None:
-            raise AllowanceReserveError("session_store not wired")
-        # Appended, not overwritten: a second message can land while a
-        # turn is still running, and each hold must survive until the
-        # worker settles the whole list atomically.
-        await session_store.append_session_config_list(
-            session_id,
-            "allowance_reservations",
-            {
-                "allowance_id": receipt["allowance_id"],
-                "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
-                "reservation_id": receipt.get("reservation_id") or "",
-            },
-        )
+    if not receipt.get("allowance_id"):
+        return None
+    if session_store is None:
+        raise AllowanceReserveError("session_store not wired")
+    hold = {
+        "allowance_id": receipt["allowance_id"],
+        "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
+        "reservation_id": receipt.get("reservation_id") or "",
+    }
+    # Appended, not overwritten: a second message can land while a
+    # turn is still running, and each hold must survive until the
+    # worker settles the whole list atomically.
+    await session_store.append_session_config_list(session_id, "allowance_reservations", hold)
+    return hold
 
 
 async def authorize_allowance_turn(

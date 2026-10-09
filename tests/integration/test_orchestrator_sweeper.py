@@ -11,15 +11,18 @@ live worker can replay it.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
 
+import surogates.harness.loop as loop_module
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.devices.operations import DeviceOperations
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
+from tests.test_wake_slash_command_gate import _harness, _permissive
 
 from .conftest import create_org, create_user
 
@@ -260,3 +263,89 @@ async def test_a_response_with_null_tool_calls_does_not_stop_the_sweep(session_s
     assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
     member = encode_queue_member(org_id=str(orphan.org_id), agent_id=agent_id, session_id=str(orphan.id))
     assert await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member) == 1
+
+
+async def _read_through(session_store, session, event_id: int) -> None:
+    """*session*'s worker read its log through *event_id*: its cursor is there."""
+    lease = await session_store.try_acquire_lease(session.id, "the-turns-worker")
+    await session_store.advance_harness_cursor(session.id, event_id, lease.lease_token)
+    await session_store.release_lease(session.id, lease.lease_token)
+
+
+async def _turns_of_a_wake(session_store, monkeypatch, session) -> int:
+    """Wake *session* as a worker does, with the real store: how many turns the wake ran."""
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    harness = _harness(session_store, _permissive())
+    # The helper's compressor is a spec mock: left alone it hands the turn a mock instead of the messages.
+    harness._compressor.prune_stale_browser_states = lambda messages: messages
+    harness._run_loop = AsyncMock()
+    await asyncio.wait_for(harness.wake(session.id), 10.0)
+    return harness._run_loop.await_count
+
+
+@pytest.mark.parametrize("opened", ["before", "after"])
+async def test_a_worker_that_died_with_one_of_two_calls_answered_is_recovered_whichever_side_its_browser_opened(
+    session_store, session_factory, redis_client, monkeypatch, opened,
+):
+    # The model asked for two tools at once. One answered, which moved the cursor; the other opened the
+    # chat's browser and was still running when the worker died.
+    agent_id = f"sweeper-sibling-agent-{opened}"
+    calls = [
+        {"id": "a", "type": "function", "function": {"name": "browser_navigate", "arguments": "{}"}},
+        {"id": "b", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+    ]
+    session = await _stuck(
+        session_store, session_factory, agent_id,
+        (EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": calls}}),
+        (EventType.TOOL_CALL, {"tool_call_id": "a", "name": "browser_navigate"}),
+        (EventType.TOOL_CALL, {"tool_call_id": "b", "name": "read_file"}),
+    )
+    answered = (EventType.TOOL_RESULT, {"tool_call_id": "b", "name": "read_file", "content": "Q3 plan"})
+    browser = (EventType.BROWSER_PROVISIONED, {"session_id": str(session.id), "browser_id": "b-1"})
+    for kind, data in ([browser, answered] if opened == "before" else [answered, browser]):
+        event_id = await session_store.emit_event(session.id, kind, data)
+        if kind is EventType.TOOL_RESULT:
+            await _read_through(session_store, session, event_id)
+    await _backdate(session_factory, session.id, seconds=120)
+    member = encode_queue_member(org_id=str(session.org_id), agent_id=agent_id, session_id=str(session.id))
+
+    try:
+        assert [o.id for o in await session_store.find_orphaned_sessions(stale_seconds=60, agent_id=agent_id)] == [session.id]
+        sweeper = _sweeper(session_store, redis_client, agent_id)
+        assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
+        assert await redis_client.zscore(SHARED_WORK_QUEUE_KEY, member) is not None
+        # The wake the sweeper queued finds the call left unanswered, and runs the turn.
+        assert await _turns_of_a_wake(session_store, monkeypatch, session) == 1
+    finally:
+        await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member)
+
+
+@pytest.mark.parametrize(
+    "since", [EventType.BROWSER_PROVISIONED, EventType.BROWSER_DESTROYED], ids=lambda kind: kind.value,
+)
+async def test_an_idle_chat_whose_browser_opened_or_closed_since_its_turn_is_left_alone(
+    session_store, session_factory, redis_client, monkeypatch, since,
+):
+    # Its turn ended with an answer, every call answered: the browser's own events after it are no turn's.
+    agent_id = f"sweeper-idle-browser-agent-{since.value}"
+    call = {"id": "a", "type": "function", "function": {"name": "browser_navigate", "arguments": "{}"}}
+    session = await _stuck(
+        session_store, session_factory, agent_id,
+        (EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}}),
+        (EventType.TOOL_CALL, {"tool_call_id": "a", "name": "browser_navigate"}),
+        (EventType.TOOL_RESULT, {"tool_call_id": "a", "name": "browser_navigate", "content": "{}"}),
+    )
+    answer = await session_store.emit_event(
+        session.id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "It is open."}},
+    )
+    await _read_through(session_store, session, answer)
+    await session_store.emit_event(session.id, since, {"session_id": str(session.id), "browser_id": "b-1"})
+    await _backdate(session_factory, session.id, seconds=120)
+
+    assert await session_store.find_orphaned_sessions(stale_seconds=60, agent_id=agent_id) == []
+    sweeper = _sweeper(session_store, redis_client, agent_id)
+    assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 0
+    # And a wake that came all the same would run nothing, and write nothing.
+    written = len(await session_store.get_events(session.id))
+    assert await _turns_of_a_wake(session_store, monkeypatch, session) == 0
+    assert len(await session_store.get_events(session.id)) == written

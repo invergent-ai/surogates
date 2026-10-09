@@ -131,6 +131,26 @@ class OAuthTokens:
             )).one()
         return auth_time is not None and not revoked and auth_time > time.time() - FAMILY_LIFETIME.total_seconds()
 
+    async def computer(self, family_id: UUID) -> UUID | None:
+        """The computer the sign-in *family_id* added or restored, while the sign-in lasts.
+
+        None for a sign-in that ended, or that is bound to no computer.  The desktop's window holds
+        a web session of its sign-in: what that session asks comes from that computer's own app.
+        """
+        async with self._sf() as db:
+            revoked, auth_time, device = (await db.execute(
+                select(
+                    func.bool_or(OAuthRefreshToken.revoked_at.is_not(None)),
+                    func.min(OAuthRefreshToken.auth_time),
+                    # A family binds one computer, from the row that bound it on: as text, which has a max.
+                    func.max(cast(OAuthRefreshToken.device_id, Text)),
+                )
+                .where(OAuthRefreshToken.family_id == family_id)
+            )).one()
+        if auth_time is None or revoked or auth_time <= time.time() - FAMILY_LIFETIME.total_seconds():
+            return None
+        return UUID(device) if device is not None else None
+
     async def bind(self, family_id: UUID, device_id: UUID) -> None:
         """Bind a sign-in to the computer it added or restored: revoking the computer ends it."""
         async with self._sf() as db:
