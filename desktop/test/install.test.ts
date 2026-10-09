@@ -3339,7 +3339,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's company CA, on Ubuntu ${release}`, { timeout: 600_000 }, () => {
   // The install's own computer, behind a company's network that signs every site with its CA: the
   // base is served over TLS with a certificate that CA signed, which this computer's roots do not trust.
-  const { it: box, docker, root, as, releaseOf, manifestOf, current } = lab(release, INSTALL_LAB, ["--network", "host"]);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, INSTALL_LAB, ["--network", "host"]);
   let server: ChildProcess;
   let base: string;
   let certs: string;
@@ -3573,5 +3573,30 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("ls -A /etc/surogate").stdout).toBe("ca.pem\ninstall.json\n");
     const again = install();
     expect(again.status, again.stderr).toBe(0);
+  });
+
+  it("rolls back through the network the company's CA signs, as it installs through it, a release it must download again among them", () => {
+    // Two newer releases at the base, each installed: the first's folder goes with the second update.
+    for (const version of ["1.1.0", "1.2.0"]) {
+      publish(version);
+      expect(install().status, version).toBe(0);
+    }
+    expect(versions()).toEqual(["1.1.0", "1.2.0"]);
+    const rollBack = (version: string) => as("tester", `curl --cacert company.pem -fsSL ${base}/desktop/install.sh | bash -s -- --version ${version}`);
+    const back = rollBack("1.0.0");
+    expect(back.status, back.stderr).toBe(0);
+    // Its manifest, its signature and its tarball, each through the CA.
+    expect(back.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.0.0\n");
+    expect(back.stdout).toContain("Surogate Desktop: 1.0.0 is installed\n");
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    expect(leftovers()).toBe("");
+    // The CA lets a server be reached, and signs no release: one that no trusted key signed is rolled back to through no CA.
+    publish("1.1.5", other.privateKey);
+    expect(rollBack("1.1.5")).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/1.1.5/manifest.json${UNSIGNED}\n` });
+    // And a kept CA that is not root's own word is handed to no download of a rollback's either.
+    expect(root("chmod 666 /etc/surogate/ca.pem").status).toBe(0);
+    expect(rollBack("1.1.0")).toMatchObject({ status: 1, stderr: "Surogate Desktop: /etc/surogate/ca.pem is not as Surogate Desktop's install leaves it: run its install script again with --ca-cert\n" });
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    expect(leftovers()).toBe("");
   });
 });
