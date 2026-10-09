@@ -199,6 +199,26 @@ describe("the browser host's client", () => {
     }
   });
 
+  it("tells a host the ports of its chats' own servers it may open, one started later too, and starts none to tell", async () => {
+    const hosts: FakeHost[] = [];
+    const client = new BrowserClient(() => {
+      hosts.push(new FakeHost());
+      return hosts.at(-1)!;
+    });
+    client.forwards([3000], "/run/vm/browser.sock", "ab".repeat(32));
+    expect(hosts).toHaveLength(0);
+    // The host hears what it may open before the operation that started it.
+    void client.perform(LAUNCH, operation("op-1"), new AbortController().signal);
+    expect(hosts[0]!.sent.map((message) => message.type)).toEqual(["forwards", "op"]);
+    expect(hosts[0]!.sent[0]).toEqual({ type: "forwards", ports: [3000], door: "/run/vm/browser.sock", key: "ab".repeat(32) });
+    client.forwards([], "/run/vm/browser.sock", "ab".repeat(32));
+    expect(hosts[0]!.sent.at(-1)).toEqual({ type: "forwards", ports: [], door: "/run/vm/browser.sock", key: "ab".repeat(32) });
+    // A host started after one that went hears the latest.
+    hosts[0]!.exit();
+    void client.perform(LAUNCH, operation("op-2"), new AbortController().signal);
+    expect(hosts[1]!.sent[0]).toEqual({ type: "forwards", ports: [], door: "/run/vm/browser.sock", key: "ab".repeat(32) });
+  });
+
   it("hands each download its host staged to its listener", () => {
     const host = new FakeHost();
     const client = new BrowserClient(() => host);

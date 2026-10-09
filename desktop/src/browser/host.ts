@@ -18,6 +18,7 @@ import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
+import { chatPort, chatPortOf } from "./ports.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
@@ -661,6 +662,8 @@ export class BrowserHost {
   private readonly begun = new WeakMap<Request, Begun>();
   // The navigations not known to have ended as a page, oldest first: a download may be the end of one.
   private readonly open = new Map<Request, Begun>();
+  // The ports of chats' own servers the browser may open, as the app told them: its proxy's, whenever one runs.
+  private forwarded: { ports: number[]; door: string; key: string } | null = null;
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -772,6 +775,15 @@ export class BrowserHost {
       this.named.delete(session);
       this.release(kept.input?.chooser);
     }
+  }
+
+  /**
+   * The ports of chats' own servers the browser may open from now on, the VM manager's *door* and the *key* this
+   * device knocks with there (BrowserProxy.forwards): what it carries to a port no longer among them ends now.
+   */
+  forwards(ports: readonly number[], door: string, key: string): void {
+    this.forwarded = { ports: [...ports], door, key };
+    this.proxy?.server.forwards(ports, door, key);
   }
 
   /**
@@ -986,6 +998,20 @@ export class BrowserHost {
     } catch {
       return null;
     }
+    // A chat's own server: not allowed; or allowed, and the door does not open for it yet, or nothing takes the
+    // connection there now. One that answers failed by itself, and the browser's word stands.
+    const chat = chatPortOf(address.href);
+    if (chat !== null) {
+      if (!this.forwarded?.ports.includes(chat)) {
+        return `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${chat})`;
+      }
+      const reaches = (await this.proxy?.server.reaches(chat)) ?? "unreachable";
+      if (reaches === "refused") return `The sandbox has not been told that the agent's browser may open port ${chat} yet. Open it again in a moment.`;
+      return reaches === "open" ? null : `Nothing answers on port ${chat} of the chat's servers now: its server is not running in the chat's sandbox`;
+    }
+    // An allowed port over https: carried for nobody, and no service of this computer's either.
+    const secure = address.protocol === "https:" && address.username === "" && address.password === "" ? chatPort(address.hostname, Number(address.port || 443)) : null;
+    if (secure !== null && this.forwarded?.ports.includes(secure)) return `A chat's server opens over http:// only: open http://localhost:${secure}/ instead`;
     const found = destination(address.hostname, Number(address.port || (address.protocol === "https:" ? 443 : 80)));
     if (!found) return null;
     const key = `${found.host}:${found.port}`;
@@ -1992,6 +2018,8 @@ export class BrowserHost {
       const server = new BrowserProxy(this.options.proxy);
       return { server, port: await server.listen() };
     })();
+    // What was told before any proxy ran.
+    if (this.forwarded) this.proxy.server.forwards(this.forwarded.ports, this.forwarded.door, this.forwarded.key);
     keepWebRtcProxied(launch.profile);
     // Its first launch: what a host that was killed left staged here goes, and this host's own folder is made.
     let staging = this.staging;
