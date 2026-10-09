@@ -173,7 +173,8 @@ from surogates.harness.loop_mission_evaluator import (
 )
 from surogates.harness.loop_pending import (
     _actionable_pending_events,
-    _slash_loop_already_processed,
+    _command_answered,
+    _taken_up,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -192,7 +193,7 @@ from surogates.harness.loop_vision import (
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
-from surogates.harness.loop_code_commands import CodeCommandMixin
+from surogates.harness.loop_code_commands import CodeCommandMixin, _latest_user_event_id
 from surogates.harness.loop_context_replay import (
     WORKER_NEWS_TYPES,
     ContextReplayMixin,
@@ -328,9 +329,8 @@ def _slash_command_name(content: str | None) -> str | None:
     """Map a user message to the canonical id of the built-in slash
     command it invokes, or None when it is not a gateable command.
 
-    Mirrors the dispatch matchers in ``AgentHarness.wake`` so the
-    capability gate and the dispatcher agree on what counts as each
-    command.
+    The capability gate and the dispatch in ``AgentHarness.wake`` both
+    read it, so they agree on what counts as each command.
     """
     if not content:
         return None
@@ -352,6 +352,11 @@ def _slash_command_name(content: str | None) -> str | None:
         return "deep-research"
     return None
 
+
+#: The one built-in command the model answers: the wake rewrites its message
+#: and runs the model's turn on it.  The harness answers every other built-in
+#: command itself, with no model turn.
+_COMMAND_FOR_THE_MODEL = "deep-research"
 
 #: Commands that do their work in the conversation itself.  A project's
 #: master works through threads: a goal, a mission or an auto-research run
@@ -1433,7 +1438,7 @@ class AgentHarness(
             # 9. Create per-session cost tracker.
             cost_tracker = SessionCostTracker()
 
-            # 10. Handle /compress command — compress context without LLM call.
+            # 10. The user's command, if their last message is one.
             #
             # Slash-command detection MUST look at the raw user text from the
             # event log, not the rebuilt-message content.  _rebuild_messages
@@ -1453,57 +1458,45 @@ class AgentHarness(
                 "" if revived_by == "worker_report" else _latest_user_event_text(all_events)
             )
 
-            # Capability gate: refuse slash commands disabled for this
-            # agent (master switch off, or this command individually off)
-            # before the dispatch chain below would handle them.
+            # 10a. A command the harness answers itself, with no model
+            # turn: one gated off for this agent (master switch off, or this
+            # command individually off), which it refuses, or any built-in
+            # command but /deep-research.  It is answered once, by the wake
+            # that finds its message not yet taken up, and that wake ends
+            # its turn.  A wake that finds the message taken up is for
+            # something else (a helper's report, a browser's event, a
+            # recovery, a resume): the command is not run, nor refused,
+            # again.  Such a wake ends the command's turn if a worker's
+            # death, or a stop, left it open, and goes on to the model's
+            # turn only where the session works between its user's
+            # messages, as a mission's coordinator does.
             slash_block = self._slash_command_block_reason(
                 last_user_content, session,
             )
-            if slash_block is not None:
-                await self._emit_loop_response(
-                    session, lease, slash_block, user_content=last_user_content
-                )
-                return
-
-            if last_user_content == "/compress":
-                await self._handle_compress_command(
-                    session, messages, system_prompt, lease,
-                )
-                return
-
-            if last_user_content == "/clear":
-                await self._handle_clear_command(session, lease)
-                return
-
-            if last_user_content == "/goal" or last_user_content.startswith("/goal "):
-                await self._handle_goal_command(session, last_user_content, lease)
-                return
-
-            if last_user_content == "/mission" or last_user_content.startswith("/mission "):
-                await self._handle_mission_command(session, last_user_content, lease)
-                return
-
-            if last_user_content == "/auto-research" or last_user_content.startswith("/auto-research "):
-                await self._handle_auto_research_command(session, last_user_content, lease)
-                return
-
-            if last_user_content == "/code" or last_user_content.startswith("/code "):
-                await self._handle_code_command(
-                    session, last_user_content, lease, all_events,
-                )
-                return
-
-            if last_user_content.startswith("/loop"):
-                # Idempotency guard: ``_handle_loop_command`` creates a fresh
-                # scheduled-loop row each time it runs against a ``/loop ...``
-                # user message.  If the harness wakes a second time on the
-                # same message — e.g. after an orphan-sweeper recovery — we
-                # must not create a duplicate schedule.
-                if not _slash_loop_already_processed(all_events):
-                    await self._handle_loop_command(
-                        session, last_user_content, lease,
+            command = _slash_command_name(last_user_content)
+            if slash_block is not None or command not in (None, _COMMAND_FOR_THE_MODEL):
+                typed_at = _latest_user_event_id(all_events) or 0
+                is_new = not _taken_up(all_events, typed_at, cursor)
+                # What was written since the command: as this wake found
+                # the log, or with the answer this wake writes.
+                written = all_events
+                if is_new:
+                    if slash_block is not None:
+                        await self._emit_loop_response(
+                            session, lease, slash_block, user_content=last_user_content
+                        )
+                    else:
+                        await self._run_command(
+                            command, session, last_user_content, lease,
+                            messages=messages, system_prompt=system_prompt,
+                            all_events=all_events, typed_at=typed_at,
+                        )
+                    written = await self._store.get_events(
+                        session_id, after=typed_at, exclude_types=[EventType.LLM_DELTA],
                     )
-                return
+                at_rest = await self._end_command_turn(session, lease, typed_at, written)
+                if is_new or at_rest:
+                    return
 
             # 10b. /deep-research <topic> -- rewrite the user message to
             # a deterministic delegation directive so the base LLM hands
@@ -1511,10 +1504,9 @@ class AgentHarness(
             # delegate_task rather than running the research itself.
             # No early return: the rewritten message flows into step 11
             # so the LLM still runs this turn.
-            deep_research_topic = parse_deep_research_command(
-                last_user_content,
-            )
-            if deep_research_topic is not None:
+            elif (
+                deep_research_topic := parse_deep_research_command(last_user_content)
+            ) is not None:
                 _rewrite_user_content_preserving_attachments(
                     last_user,
                     all_events,
@@ -4699,6 +4691,78 @@ class AgentHarness(
             turn_id=turn_id,
             user_message=request,
         )
+
+    async def _run_command(
+        self,
+        command: str,
+        session: Session,
+        typed: str,
+        lease: SessionLease,
+        *,
+        messages: list[dict],
+        system_prompt: str,
+        all_events: list,
+        typed_at: int,
+    ) -> None:
+        """Run the handler of the built-in *command* the user *typed* at event *typed_at*."""
+        if command == "compress":
+            await self._handle_compress_command(session, messages, system_prompt, lease)
+        elif command == "clear":
+            await self._handle_clear_command(session, lease)
+        elif command == "goal":
+            await self._handle_goal_command(session, typed, lease)
+        elif command == "mission":
+            await self._handle_mission_command(session, typed, lease)
+        elif command == "auto-research":
+            await self._handle_auto_research_command(session, typed, lease)
+        elif command == "code":
+            await self._handle_code_command(session, typed, lease, all_events)
+        # A worker that dies once it has answered, before it moves the cursor,
+        # leaves a command the next wake runs once more.  Not ``/loop``: a
+        # second run is a second routine, and its answer in the log says the
+        # first was made.
+        elif command == "loop" and not _command_answered(all_events, typed_at):
+            await self._handle_loop_command(session, typed, lease)
+
+    async def _end_command_turn(
+        self,
+        session: Session,
+        lease: SessionLease,
+        typed_at: int,
+        events: list,
+    ) -> bool:
+        """End the turn of the command the user typed at event *typed_at*, once the
+        harness has answered it in *events*: whether the session is at rest.
+
+        A model's last answer ends its turn: the cursor moves past it and the
+        session comes to rest, so a later wake finds nothing to do.  A
+        command's answer ends its turn the same way, in one write.  A worker
+        that dies before the cursor is past the answer leaves a command the
+        next wake runs once more.
+
+        Not when more was said since, by the user or by the command itself to
+        start its work (a goal's or a mission's first message): the wake that
+        message queued goes on from here.  Nor when the harness did not
+        answer the command: a coding run whose worker died stays as the
+        sweeper expects it.  A session whose mission is in flight stays active
+        for its helpers' reports, as at the end of its coordinator's turns,
+        and one its user stopped meanwhile stays stopped.
+        """
+        if any(
+            event.type == EventType.USER_MESSAGE.value and event.id > typed_at
+            for event in events
+        ):
+            return False
+        if not _command_answered(events, typed_at):
+            return False
+        at_rest = not await self._mission_has_pending_work(session)
+        await self._store.advance_harness_cursor(
+            session.id,
+            through_event_id=events[-1].id,
+            lease_token=lease.lease_token,
+            at_rest=at_rest,
+        )
+        return at_rest
 
     async def _handle_clear_command(
         self,

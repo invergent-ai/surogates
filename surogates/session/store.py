@@ -2273,8 +2273,15 @@ class SessionStore:
         session_id: UUID,
         through_event_id: int,
         lease_token: UUID,
+        *,
+        at_rest: bool = False,
     ) -> None:
-        """Advance the durable cursor.  Only succeeds if the caller holds the lease."""
+        """Advance the durable cursor.  Only succeeds if the caller holds the lease.
+
+        With *at_rest*, a session still active comes to rest (``completed``)
+        in the same write: the end of a turn is recorded whole or not at
+        all, and a session its user stopped meanwhile stays stopped.
+        """
         async with self._sf() as db:
             # Verify lease ownership (SELECT FOR UPDATE).
             lease_row = (
@@ -2305,6 +2312,12 @@ class SessionStore:
                 ),
                 {"sid": session_id, "cursor": through_event_id},
             )
+            if at_rest:
+                await db.execute(
+                    update(SessionRow)
+                    .where(SessionRow.id == session_id, SessionRow.status == "active")
+                    .values(status="completed", updated_at=func.now())
+                )
             await db.commit()
 
     async def get_pending_events(self, session_id: UUID) -> list[Event]:
