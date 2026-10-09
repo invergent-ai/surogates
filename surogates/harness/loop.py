@@ -789,16 +789,13 @@ class AgentHarness(
         excluded by the type filter.
         """
         cursor = await self._store.get_harness_cursor(session.id)
-        typed = [
-            event for event in await self._store.get_events(session.id, after=cursor, types=[EventType.USER_MESSAGE])
-            if not (event.data or {}).get("synthetic")
-        ]
-        if any(self._is_plain_message(session, event) for event in typed):
-            return True
-        # A command past the cursor is stranded only while it waits: a
-        # command's end leaves the cursor before a report no turn has read,
-        # and an answered command is done with wherever the cursor lies.
-        return bool(typed) and await self._has_waiting_command(session)
+        # A command is not stranded by the cursor: a command's end leaves
+        # the cursor before a report no turn has read, and one that still
+        # waits revives a finished session by its own rule.
+        return any(
+            self._is_plain_message(session, event)
+            for event in await self._store.get_events(session.id, after=cursor, types=[EventType.USER_MESSAGE])
+        )
 
     def _answers_itself(self, text: str, session: Session) -> bool:
         """Whether *text* is a command the harness answers itself, with no
