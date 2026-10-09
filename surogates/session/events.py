@@ -152,6 +152,9 @@ class EventType(str, Enum):
     THREAD_PROPOSED = "thread.proposed"
     # A project's thread is told to redo its change to files its landing left out.
     HISTORY_REDO = "history.redo"
+    # A project coordinator's follow-up to one of its threads: the thread
+    # reads it as a message typed into it, but it is never the user's.
+    COORDINATOR_MESSAGE = "coordinator.message"
 
     # Subagent task layer (spawn_task tool / tasks_tick dispatcher).
     # Emitted to the parent (spawning) session so the coordinator agent
@@ -266,3 +269,8 @@ class EventType(str, Enum):
 
     # Scheduled loop run result surfaced inline on a web/api parent session.
     LOOP_RESULT = "loop.result"
+
+
+#: What a session reads as a message typed into it: the user's own, and a
+#: project coordinator's follow-up to its thread, which is never the user's.
+MESSAGE_TYPES = (EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE)

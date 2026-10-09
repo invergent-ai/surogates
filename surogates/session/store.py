@@ -2151,6 +2151,8 @@ class SessionStore:
             EventType.LLM_RESPONSE.value,
             EventType.TOOL_RESULT.value,
             EventType.USER_MESSAGE.value,
+            # A project coordinator's follow-up is something new said, too.
+            EventType.COORDINATOR_MESSAGE.value,
         )
         last_progress_id = (
             select(func.max(EventRow.id))
@@ -2915,8 +2917,8 @@ class SessionStore:
 #: The events a turn under way writes.  A log that ends on one of them, with
 #: no lease held, is a turn its worker left.
 _TURN_EVENT_TYPES = (
-    "user.message", "harness.wake", "llm.request", "llm.thinking", "llm.delta", "llm.response",
-    "tool.call", "tool.result",
+    "user.message", "coordinator.message", "harness.wake", "llm.request", "llm.thinking", "llm.delta",
+    "llm.response", "tool.call", "tool.result",
 )
 
 #: How long what a session's user asked for is still run once the session

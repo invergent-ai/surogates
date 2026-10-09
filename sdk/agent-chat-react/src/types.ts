@@ -569,6 +569,7 @@ export interface AgentChatInboxEventStream {
 
 export type AgentChatEventType =
   | "user.message"
+  | "coordinator.message"
   | "llm.request"
   | "llm.response"
   | "llm.thinking"

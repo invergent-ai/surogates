@@ -238,8 +238,12 @@ def test_a_file_named_in_two_turns_is_listed_once_newest_first():
            items=[item("input_required", "expired", "Which year?", 3)]), "Which year?"),
     (facts(THREAD, "T", 60, "active", events=[event(7, "user.message", content="2025.")],
            items=[item("input_required", "expired", "Which year?", 3)]), None),
+    # The coordinator's follow-up is a message after it too, though not the user's.
+    (facts(THREAD, "T", 60, "active", events=[
+        event(1, "user.message", content="Go."), event(7, "coordinator.message", content="Use 2025."),
+    ], items=[item("input_required", "expired", "Which year?", 3)]), None),
     (facts(THREAD, "T", 60, "active", items=[item("action_required", "pending", "Send it?", 5)]), None),
-], ids=["pending", "expired-unanswered", "expired-answered", "an-approval-only"])
+], ids=["pending", "expired-unanswered", "expired-answered", "expired-followed-up", "an-approval-only"])
 def test_the_question_a_thread_waits_on(given, asked):
     found = question_of(given)
     assert (found.title if found else None) == asked

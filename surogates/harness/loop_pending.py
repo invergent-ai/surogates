@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from surogates.devices.browser import for_the_pane_alone, resumes_the_agent, takes_the_browser_over
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 
 _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
     EventType.HARNESS_RECOVERED.value,
@@ -116,7 +116,7 @@ def _turn_for_a_hand_back(events: list[Any]) -> bool:
             kind == EventType.LLM_RESPONSE.value
             and not ((getattr(event, "data", None) or {}).get("message") or {}).get("tool_calls")
         )
-        if kind == EventType.USER_MESSAGE.value:
+        if kind in MESSAGE_TYPES:
             opened_by, taken, asked = "message", False, False
         elif kind == EventType.HARNESS_WAKE.value:
             taken = True
@@ -157,8 +157,9 @@ def _turn_for_a_redo(events: list[Any], *, is_command: Any) -> bool:
     must not run again.  A command the harness answers itself (*is_command*
     says which) opens no turn of the model's, typed before the redo or after
     it; any other message after the redo is the turn's, and its command runs
-    once.  A turn the redo opened and a dead worker cut off before its first
-    request is still the redo's.
+    once.  So is a project coordinator's follow-up after the redo, which is
+    never a command.  A turn the redo opened and a dead worker cut off
+    before its first request is still the redo's.
     """
     opened = False
     for event in events:
@@ -167,7 +168,7 @@ def _turn_for_a_redo(events: list[Any], *, is_command: Any) -> bool:
             opened = False
         elif kind == EventType.HISTORY_REDO.value:
             opened = True
-        elif kind == EventType.USER_MESSAGE.value and not is_command(event):
+        elif kind in MESSAGE_TYPES and not is_command(event):
             opened = False
     return opened
 
@@ -409,7 +410,8 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
     stands after the last thing that turn wrote: never inside it, where it
     would part a call from its result, and where a compaction would leave
     the turn's end standing.  What its user typed after the command and
-    that turn did not read comes after the block.
+    that turn did not read comes after the block, and so does a project
+    coordinator's follow-up to its thread.
 
     The answer to a ``/clear`` is left out: it is the harness's word to
     its user and nothing for the model, whose conversation starts anew on
@@ -447,7 +449,7 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
         for place in range(read_to + 1, stands_after):
             said = events[place]
             if (
-                _event_type(said) == EventType.USER_MESSAGE.value
+                _event_type(said) in MESSAGE_TYPES
                 and not (getattr(said, "data", None) or {}).get("synthetic")
                 and id(said) not in moved
             ):

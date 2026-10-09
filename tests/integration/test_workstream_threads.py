@@ -406,22 +406,50 @@ async def test_a_follow_up_runs_a_finished_thread_again(api, status):
     result = await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
     assert result == {"status": "sent", "thread_id": str(thread.id)}
     assert (await store.get_session(thread.id)).status == "active"
-    events = await events_of(api, thread.id, EventType.SESSION_RESUME, EventType.USER_MESSAGE)
-    # Marked as the coordinator's, so neither the thread nor the user reading it takes it for the user's.
+    events = await events_of(api, thread.id, EventType.SESSION_RESUME, EventType.COORDINATOR_MESSAGE)
+    # The coordinator's own kind, and marked, so neither the thread nor the user reading it takes it for the user's.
     assert [(e.type, e.data.get("content")) for e in events[-2:]] == [
-        ("session.resume", None), ("user.message", "[From the project's coordinator]\nUse the 2025 figures."),
+        ("session.resume", None), ("coordinator.message", "[From the project's coordinator]\nUse the 2025 figures."),
     ]
     assert await queued(api, thread)
     async with api.app.state.session_factory() as db:
         assert (await db.get(WorkstreamThread, thread.id)).resolved_at is None
 
 
-async def test_a_follow_up_to_a_working_thread_is_steered_in(api):
+async def test_a_follow_up_to_a_working_thread_is_steered_in(api, monkeypatch):
     master = await master_of(api, await create(api))
     thread = await start(api, master)
+    store = api.app.state.session_store
+    [goal] = await events_of(api, thread.id, EventType.USER_MESSAGE)
+    lease = await store.try_acquire_lease(thread.id, "worker-turn", ttl_seconds=60)
+    await store.advance_harness_cursor(thread.id, goal.id, lease.lease_token)  # its turn has read its goal
+    await store.release_lease(thread.id, lease.lease_token)
+    harness = _make_loop_harness(session_store=store)
     await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Keep it to one page.")
-    events = await events_of(api, thread.id, EventType.SESSION_RESUME, EventType.USER_MESSAGE)
-    assert [e.type for e in events] == ["user.message", "user.message"]
+    events = await events_of(api, thread.id, EventType.SESSION_RESUME, EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE)
+    assert [e.type for e in events] == ["user.message", "coordinator.message"]
+    # The thread reads it as a typed message is read: steered into its turn, and replayed so.
+    follow_up = {"role": "user", "content": "[From the project's coordinator]\nKeep it to one page."}
+    working = await store.get_session(thread.id)
+    assert (await harness._collect_steer_messages(working, goal.id))[0] == follow_up
+    assert harness._rebuild_messages(await store.get_events(thread.id))[-1] == follow_up
+    # One that lands as the turn ends is not stranded: the wake that finds the thread ended resumes it.
+    assert await harness._has_stranded_user_message(working)
+    # A wake that replays it does not steer it in a second time.
+    asked: list = []
+
+    async def model(**kwargs):
+        asked.append([m["content"] for m in kwargs["create_kwargs"]["messages"] if m["role"] == "user"])
+        return _final_response("Kept it to one page.")
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+    everything = await store.get_events(thread.id)
+    lease = await store.try_acquire_lease(thread.id, "worker-turn", ttl_seconds=60)
+    await harness._run_loop(
+        await store.get_session(thread.id), harness._rebuild_messages(everything), "system", lease, all_events=everything,
+    )
+    await store.release_lease(thread.id, lease.lease_token)
+    assert asked == [["Draft the A memo as A.docx.", "[From the project's coordinator]\nKeep it to one page."]]
 
 
 async def not_this_projects_threads(api, master) -> dict[str, str]:
@@ -453,7 +481,7 @@ async def test_a_master_reaches_only_its_own_threads(api, tool, arguments):
             target = UUID(thread_id)
             assert (await store.get_session(target)).status == "active", case
             assert not [
-                e for e in await events_of(api, target, EventType.USER_MESSAGE, EventType.SESSION_PAUSE)
+                e for e in await events_of(api, target, EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE, EventType.SESSION_PAUSE)
                 if e.data.get("content") != "Draft the A memo as A.docx."
             ], case
 
@@ -466,7 +494,7 @@ async def test_a_thread_cannot_reach_its_siblings(api):
         result = await call_tool(api, first, tool, thread_id=str(second.id), **arguments)
         assert result == {"error": f"No thread {second.id} in this project."}, tool
     assert (await api.app.state.session_store.get_session(second.id)).status == "active"
-    assert len(await events_of(api, second.id, EventType.USER_MESSAGE)) == 1
+    assert len(await events_of(api, second.id, EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE)) == 1
 
 
 async def test_a_deleted_thread_takes_no_follow_up(api):
@@ -475,7 +503,7 @@ async def test_a_deleted_thread_takes_no_follow_up(api):
     await api.app.state.session_store.update_session_status(thread.id, "archived")
     result = await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
     assert result == {"error": f"Thread {thread.id} was deleted."}
-    assert len(await events_of(api, thread.id, EventType.USER_MESSAGE)) == 1
+    assert len(await events_of(api, thread.id, EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE)) == 1
 
 
 async def test_stopping_a_working_thread_pauses_it(api):
@@ -1586,7 +1614,7 @@ async def test_a_follow_up_that_cannot_reopen_its_thread_writes_nothing(api, mon
     monkeypatch.setattr(WorkstreamStore, "reopen_thread", fail)
     result = await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
     assert "the database went away" in result["error"]
-    assert len(await events_of(api, thread.id, EventType.USER_MESSAGE)) == 1
+    assert len(await events_of(api, thread.id, EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE)) == 1
 
 
 def dispatcher(api, harness=None, **options) -> Orchestrator:

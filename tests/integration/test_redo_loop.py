@@ -40,7 +40,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
     reports,
 )
 from .test_turn_sagas import a_turn, calling
-from .test_workstream_threads import queued
+from .test_workstream_threads import call_tool, queued
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -549,3 +549,61 @@ async def test_a_redo_takes_the_files_held_with_a_clash_and_only_a_landing_that_
 
 async def test_a_projects_stream_carries_a_redo():
     assert EventType.HISTORY_REDO in STREAM_TYPES
+
+
+async def test_a_follow_up_wake_reads_the_follow_up_and_runs_no_command_of_the_users_again(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
+    command = "/report-writer Edit the report."
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": command})
+    await store.emit_event(thread.id, EventType.SKILL_INVOKED, {"skill": "report-writer", "raw_message": command})
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    expanded: list = []
+
+    async def a_skill(**kwargs):
+        expanded.append(kwargs["text"])
+        return "Follow the report-writer skill: edit the report.", "report-writer", None, "skill"
+
+    monkeypatch.setattr(loop_module, "expand_slash_skill", a_skill)
+    monkeypatch.setattr(loop_module, "expand_skill_again", a_skill)
+    seen: list = []
+
+    async def the_turn(session, messages, *_, **__):
+        seen.append(messages[-1]["content"])
+
+    harness = a_waking_thread_harness(api, monkeypatch, pool, the_turn)
+    del harness._rebuild_messages  # the log replayed as it is
+    await harness.wake(thread.id)
+    # The follow-up is the turn's message: the command typed before it does not run again in its place.
+    assert seen == ["[From the project's coordinator]\nUse the 2025 figures."]
+    assert expanded == []
+
+
+async def test_a_follow_up_whose_words_are_a_command_is_the_models_to_read_and_has_one_turn(workers, monkeypatch, pods):
+    api, store = workers.api, workers.store
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    workers.sandbox_pool = SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
+    await workers.nobody_is_queued()
+    expanded: list = []
+
+    async def a_skill(**kwargs):
+        expanded.append(kwargs["text"])
+        return "Follow the report-writer skill: tidy the notes.", "report-writer", None, "skill"
+
+    monkeypatch.setattr(loop_module, "expand_slash_skill", a_skill)
+    # As the log would hold one with no mark before its words: the coordinator's tool heads each with its mark.
+    sent = ["/goal status", "/report-writer Tidy the notes."]
+    for words in sent:
+        await store.emit_event(thread.id, EventType.COORDINATOR_MESSAGE, {"content": words})
+        await workers.wake(thread.id, SlashCommandConfig())
+    # Each is the model's to read, as words: only the thread's user types a command or names a skill.
+    assert [request[-1] for request in workers.requests] == [{"role": "user", "content": words} for words in sent]
+    assert (workers.ran, expanded) == ([], [])
+    assert [e for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE]) if "answers" in e.data] == []
+    # Read, each wakes nobody again.
+    assert await workers.status(thread.id) == "completed" and not await queued(api, thread)
+    await workers.wake(thread.id, SlashCommandConfig())
+    assert len(workers.requests) == 2

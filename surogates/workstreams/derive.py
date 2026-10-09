@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 
 #: ``ThreadGroup``, in the order the shell draws its sections.
 GROUPS = ("waiting", "working", "idle", "resolved")
@@ -24,7 +24,7 @@ WAITING_KINDS = {"input_required": "question", "action_required": "approval", "g
 #: too: every one for a row's files, or only the newest when the files are
 #: not read (``WorkstreamStore.thread_facts``).
 LATEST_TYPES = tuple(t.value for t in (
-    EventType.USER_MESSAGE, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
+    *MESSAGE_TYPES, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
     EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
 ))
@@ -103,7 +103,7 @@ def question_of(facts: ThreadFacts) -> Any | None:
     pending = [i for i in asked if i.status == "pending"]
     if pending:
         return max(pending, key=lambda i: i.source_event_id)
-    replied = _id(_latest(facts).get(EventType.USER_MESSAGE.value))
+    replied = _messaged(_latest(facts))
     unanswered = [i for i in asked if i.status == "expired" and i.source_event_id > replied]
     return max(unanswered, key=lambda i: i.source_event_id, default=None)
 
@@ -141,7 +141,7 @@ def _working(latest: dict[str, Any]) -> tuple[str | None, str | None]:
         return "computer", f"Waiting for {wait.data.get('device_name') or 'your computer'}"
     # An iteration summary from before the latest message is the last turn's.
     summary = latest.get(EventType.ITERATION_SUMMARY.value)
-    if summary is not None and summary.id > _id(latest.get(EventType.USER_MESSAGE.value)):
+    if summary is not None and summary.id > _messaged(latest):
         return None, _line(summary.data.get("summary"))
     return None, None
 
@@ -229,6 +229,11 @@ def _latest(facts: ThreadFacts) -> dict[str, Any]:
 
 def _id(event: Any) -> int:
     return event.id if event is not None else 0
+
+
+def _messaged(latest: dict[str, Any]) -> int:
+    """The id of the thread's newest message, the user's or its coordinator's follow-up; 0 with none."""
+    return max(_id(latest.get(t.value)) for t in MESSAGE_TYPES)
 
 
 def aware(moment: datetime) -> datetime:

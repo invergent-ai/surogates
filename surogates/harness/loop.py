@@ -92,7 +92,7 @@ from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.store import RERUN_WINDOW
 from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
 
@@ -157,6 +157,7 @@ from surogates.harness.loop_deep_research import (
 )
 from surogates.harness.loop_messages import (
     _initial_system_message,
+    _latest_message_is_a_follow_up,
     _latest_user_event_data,
     _latest_user_event_id,
     _latest_user_event_text,
@@ -858,8 +859,9 @@ class AgentHarness(
 
         Only non-synthetic messages count: mission continuations and
         harness nudges must never revive a terminal session (same rule
-        as the dispatcher's crash-loop ``_has_user_signal_since``).
-        Completion bookkeeping events (turn.summary, session.complete,
+        as the dispatcher's crash-loop ``_has_user_signal_since``).  A
+        project coordinator's follow-up to its thread counts as a message
+        does.  Completion bookkeeping events (turn.summary, session.complete,
         inbox.task_complete) always sit past the cursor and are
         excluded by the type filter.
         """
@@ -869,7 +871,7 @@ class AgentHarness(
         # waits revives a finished session by its own rule.
         return any(
             self._is_plain_message(session, event)
-            for event in await self._store.get_events(session.id, after=cursor, types=[EventType.USER_MESSAGE])
+            for event in await self._store.get_events(session.id, after=cursor, types=list(MESSAGE_TYPES))
         )
 
     def _answers_itself(self, text: str, session: Session) -> bool:
@@ -882,7 +884,11 @@ class AgentHarness(
         )
 
     def _is_plain_message(self, session: Session, event: Any) -> bool:
-        """Whether *event* is a message the user wrote themselves that is no command of the harness's."""
+        """Whether *event* is a message the user wrote themselves that is no
+        command of the harness's, or a project coordinator's follow-up to
+        its thread, which is never a command, whatever its words."""
+        if event.type == EventType.COORDINATOR_MESSAGE.value:
+            return True
         return (
             event.type == EventType.USER_MESSAGE.value
             and not (event.data or {}).get("synthetic")
@@ -969,7 +975,7 @@ class AgentHarness(
         message ran no skill, or replay folded it into another."""
         raw = _latest_user_event_text(all_events)
         # This message's skill, not one the same words ran before.
-        typed_at = max((event.id for event in all_events if event.type == EventType.USER_MESSAGE.value), default=0)
+        typed_at = max((event.id for event in all_events if event.type in MESSAGE_TYPES), default=0)
         if not any(
             event.type == EventType.SKILL_INVOKED.value and event.id > typed_at and event.data.get("raw_message") == raw
             for event in all_events
@@ -1074,7 +1080,8 @@ class AgentHarness(
     ) -> tuple[dict | None, int]:
         """Pull user messages that arrived past the steer cursor.
 
-        Reads non-synthetic ``user.message`` events appended after
+        Reads non-synthetic ``user.message`` events, and a project
+        coordinator's follow-ups to its thread, appended after
         ``after_event_id``, renders each through the same path replay uses
         (:func:`build_user_message_dict`), and coalesces them into one user
         turn so a burst of follow-ups becomes a single steered turn.
@@ -1087,7 +1094,7 @@ class AgentHarness(
         events = await self._store.get_events(
             session.id,
             after=after_event_id,
-            types=[EventType.USER_MESSAGE],
+            types=list(MESSAGE_TYPES),
         )
         if not events:
             return None, after_event_id
@@ -1097,8 +1104,7 @@ class AgentHarness(
         rendered = [
             build_user_message_dict(event.data)
             for event in events
-            if not (event.data or {}).get("synthetic")
-            and not self._answers_itself(_user_event_text(event.data), session)
+            if self._is_plain_message(session, event)
         ]
         if not rendered:
             return None, new_cursor
@@ -1865,7 +1871,11 @@ class AgentHarness(
             # its redo: in a thread the redo's own wake left active, its
             # worker dead before the model was asked, as in a finished one.
             for_redo = _turn_for_a_redo(all_events, is_command=lambda event: self._is_command(session, event))
-            last_user_content = "" if for_news or for_redo else _latest_user_event_text(all_events)
+            # Nor is a project coordinator's follow-up to its thread a
+            # command or a skill's name, whatever its words: only the
+            # thread's user types one.
+            followed_up = _latest_message_is_a_follow_up(all_events)
+            last_user_content = "" if for_news or for_redo or followed_up else _latest_user_event_text(all_events)
 
             # 10a. A command the harness answers itself, with no model
             # turn: one gated off for this agent (master switch off, or this
@@ -2326,15 +2336,16 @@ class AgentHarness(
         self._completed_iteration_summaries = {}
 
         # Steer cursor: highest user-message event already folded into the
-        # replayed ``messages``.  Mid-wake real follow-ups past this cursor
-        # are incorporated at iteration boundaries (see the loop top).  Kept
-        # separate from the durable session cursor, which tracks crash
-        # recovery, not in-memory message incorporation.
+        # replayed ``messages``, a coordinator's follow-up included.  Mid-wake
+        # real follow-ups past this cursor are incorporated at iteration
+        # boundaries (see the loop top).  Kept separate from the durable
+        # session cursor, which tracks crash recovery, not in-memory message
+        # incorporation.
         steer_cursor = max(
             (
                 event.id
                 for event in (all_events or [])
-                if event.type == EventType.USER_MESSAGE.value
+                if event.type in MESSAGE_TYPES
             ),
             default=0,
         )
@@ -5272,7 +5283,7 @@ class AgentHarness(
             is_plain_message=lambda event: self._is_plain_message(session, event),
         )
         unread_message = unread is not None and any(
-            event.id == unread and event.type == EventType.USER_MESSAGE.value for event in events
+            event.id == unread and event.type in MESSAGE_TYPES for event in events
         )
         # Nor does it rest over a turn of the model's a dead worker cut off.
         cut_off = _turn_cut_off(events)
@@ -5296,12 +5307,12 @@ class AgentHarness(
     def _more_was_said(self, session: Session, events: list, typed_at: int) -> bool:
         """Whether something said after the command typed at event
         *typed_at* still waits in *events*, the session's log: a message
-        no request has read, the user's own or the harness's, or another
-        command."""
+        no request has read, the user's own, a project coordinator's
+        follow-up or the harness's, or another command."""
         asked = max((event.id for event in events if event.type == EventType.LLM_REQUEST.value), default=0)
         commands = {id(event) for event in self._waiting_commands(session, events)}
         return any(
-            event.type == EventType.USER_MESSAGE.value and event.id > typed_at and (
+            event.type in MESSAGE_TYPES and event.id > typed_at and (
                 id(event) in commands
                 or event.id > asked and ((event.data or {}).get("synthetic") or self._is_plain_message(session, event))
             )
@@ -5799,9 +5810,8 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
     to a turn that has already been answered.
     """
     for event in reversed(events or []):
-        event_type = getattr(event, "type", None)
-        type_value = getattr(event_type, "value", event_type)
-        if type_value != EventType.USER_MESSAGE.value:
+        # A coordinator's follow-up starts a turn too: it carries no mode.
+        if getattr(event, "type", None) not in MESSAGE_TYPES:
             continue
         data = getattr(event, "data", None)
         return data.get("metadata") if isinstance(data, dict) else None

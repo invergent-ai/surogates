@@ -1661,6 +1661,16 @@ async def test_the_sweeper_spares_a_paused_missions_chat_only_while_no_turn_of_i
     assert await workers.looks_abandoned(chat)
 
 
+async def test_the_sweeper_takes_a_paused_missions_chat_that_ends_on_a_follow_up_nobody_woke_it_for(workers):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, "not typed")
+    assert not await workers.looks_abandoned(chat)
+
+    # A project coordinator's follow-up to its thread is a turn to run, as a message typed into it is.
+    await workers.store.emit_event(chat, EventType.COORDINATOR_MESSAGE, {"content": "[From the project's coordinator]\nGo on."})
+    assert await workers.looks_abandoned(chat)
+
+
 async def test_a_wake_that_goes_on_to_the_model_behind_a_command_leaves_the_cursor_to_that_turn(workers):
     chat = await a_coordinator(workers)
     await workers.types(chat, "/mission status")

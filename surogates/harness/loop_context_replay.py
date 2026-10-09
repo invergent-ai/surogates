@@ -23,7 +23,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 
 logger = logging.getLogger(__name__)
@@ -558,7 +558,8 @@ class ContextReplayMixin:
                 iteration_open = True
                 awaiting_tool_ids = set()
 
-            elif etype == EventType.USER_MESSAGE.value:
+            elif etype in MESSAGE_TYPES:
+                # A coordinator's follow-up is read as a typed message is: its marked content.
                 rendered = build_user_message_dict(event.data)
                 if iteration_open and not (event.data or {}).get("synthetic"):
                     deferred_users.append(rendered)

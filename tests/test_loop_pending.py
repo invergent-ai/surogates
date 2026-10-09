@@ -14,6 +14,8 @@ from surogates.harness.loop_pending import (
     _actionable_pending_events, _command_answered, _cut_off_at, _first_unread, _hand_back_unread, _in_typed_order,
     _left_behind, _read_as_words, _redo_unread, _shown_before_its_answer, _turn_for_a_hand_back, _turn_for_a_redo,
 )
+from surogates.harness.loop_attachments import _attachments_note
+from surogates.harness.loop_messages import _latest_message_is_a_follow_up, _latest_user_event_data, _latest_user_event_text
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive, _session, _stub_store
 
@@ -160,6 +162,15 @@ def test_what_its_user_typed_behind_a_command_and_the_turn_did_not_read_is_repla
     # Read by a request of the turn, it is the turn's, and stays in it.
     read = [*events[:3], event(3.5, EventType.LLM_REQUEST), *events[3:]]
     assert [e.id for e in _in_typed_order(read)] == [1, 3, 3.5, 4, 5, 2, 7, 8, 6]
+
+
+def test_a_coordinators_follow_up_behind_a_command_that_the_turn_did_not_read_is_replayed_after_the_commands_block():
+    events = [
+        event(1, EventType.LLM_REQUEST), event(2, EventType.USER_MESSAGE), event(3, EventType.COORDINATOR_MESSAGE),
+        event(4, EventType.LLM_RESPONSE), event(5, EventType.SESSION_COMPLETE), event(6, EventType.LLM_RESPONSE, answers=2),
+    ]
+    # Left before the turn's last answer, the follow-up's own turn would be asked on the command's answer.
+    assert [e.id for e in _in_typed_order(events)] == [1, 4, 2, 6, 3, 5]
 
 
 def test_two_commands_that_waited_for_one_turn_are_replayed_after_it_in_the_order_typed():
@@ -335,6 +346,10 @@ def said(id_: int, text: str = "Open the report.") -> SimpleNamespace:
     return SimpleNamespace(id=id_, type=EventType.USER_MESSAGE.value, data={"content": text})
 
 
+def followed_up(id_: int, text: str = "[From the project's coordinator]\nKeep it to one page.") -> SimpleNamespace:
+    return SimpleNamespace(id=id_, type=EventType.COORDINATOR_MESSAGE.value, data={"content": text})
+
+
 def answered(id_: int, *, calls: bool = False) -> SimpleNamespace:
     """The model's response: its answer, which ends a turn, or its *calls* for tools, which does not."""
     message = {"role": "assistant", "content": "" if calls else "Done."}
@@ -415,6 +430,8 @@ def test_a_hand_back_is_unread_until_a_request_reads_it_or_its_user_takes_the_br
     ([said(1), answered(2), handed_back(3, computer=True, resumes=True)], False),
     ([said(1), answered(2), resumed(3, "user_retry")], False),
     ([said(1), answered(2), handed_back(3)], False),
+    # A project coordinator's follow-up to its thread, no wake has taken yet, keeps its turn as a message does.
+    ([said(1, "/goal status"), woken(2), answered(3), followed_up(4), resumed(5)], False),
     ([], False),
 ], ids=[
     "answered-then-handed-back", "ended-then-handed-back", "its-turn-cut-off", "as-the-turn-before-ended",
@@ -423,7 +440,7 @@ def test_a_hand_back_is_unread_until_a_request_reads_it_or_its_user_takes_the_br
     "a-new-message-after-a-command", "a-command-after-an-answered-turn",
     "taken-over-again", "taken-over-again-over-a-message", "handed-back-anew", "taken-over-again-in-its-turn",
     "the-clouds-taken-over",
-    "the-hand-backs-own-event", "another-resume", "the-clouds", "empty",
+    "the-hand-backs-own-event", "another-resume", "the-clouds", "a-follow-up-after-a-command", "empty",
 ])
 def test_a_turn_is_a_hand_backs_once_the_users_last_message_is_done_with_and_until_it_is_answered(log, the_hand_backs):
     assert _turn_for_a_hand_back(log) is the_hand_backs
@@ -537,11 +554,14 @@ def test_a_commands_end_does_not_move_the_cursor_past_a_redo():
     (("/report-writer Go on.",), False),
     (("/loop 5m Go on.", "Go on."), False),
     (("Go on.", "/loop 5m Go on."), False),
+    # So has its coordinator's follow-up, which is no command whatever its words.
+    ((EventType.COORDINATOR_MESSAGE,), False),
     ((REQUEST,), False),
     ((REQUEST, ANSWER, DONE, "/loop 5m Go on."), False),
 ], ids=[
     "the redo alone", "a command waiting", "a command answered", "a dead wake", "a message", "a skill",
-    "a message behind a command", "a command behind a message", "read", "read, and a command since",
+    "a message behind a command", "a command behind a message", "a coordinator's follow-up", "read",
+    "read, and a command since",
 ])
 def test_the_turn_after_a_redo_is_the_redos_unless_something_else_opened_it(after_the_redo, the_redos):
     events = log(SAID, REQUEST, ANSWER, DONE, REDO)
@@ -555,3 +575,32 @@ def test_the_turn_after_a_redo_is_the_redos_unless_something_else_opened_it(afte
 
 def test_a_turn_no_redo_opened_is_not_the_redos():
     assert _turn_for_a_redo(log(SAID, REQUEST, ANSWER, DONE), is_command=lambda _event: True) is False
+
+
+def test_the_latest_message_a_turn_answers_is_a_coordinators_follow_up_as_it_is_the_users():
+    typed = said(1, "/report-writer Edit the report.")
+    typed.data.update(metadata={"mode": "sketch", "view_context": {"route": "/board"}}, attachments=[
+        {"path": "/workspace/brief.pdf", "filename": "brief.pdf", "size": 10, "mime_type": "application/pdf"},
+    ])
+    assert not _latest_message_is_a_follow_up([typed])
+    events = [typed, followed_up(2)]
+    assert _latest_message_is_a_follow_up(events)
+    # Its words, with nothing of the message the user typed before it: no mode, no page, no attachment.
+    assert _latest_user_event_text(events) == "[From the project's coordinator]\nKeep it to one page."
+    assert _latest_user_event_data(events) == {"content": "[From the project's coordinator]\nKeep it to one page."}
+    assert loop_module._latest_whiteboard_metadata(events) is None
+    assert _attachments_note([typed]) is not None and _attachments_note(events) is None
+    # The user's own message after it is the latest again.
+    assert not _latest_message_is_a_follow_up([*events, said(3)])
+    assert _latest_user_event_text([*events, said(3)]) == "Open the report."
+
+
+def test_a_coordinators_follow_up_is_never_a_command_whatever_its_words():
+    harness = _harness(_stub_store(_session(), []), _permissive())
+    session = _session()
+    typed, sent = said(1, "/goal status"), followed_up(2, "/goal status")
+    assert (harness._is_command(session, typed), harness._is_plain_message(session, typed)) == (True, False)
+    assert (harness._is_command(session, sent), harness._is_plain_message(session, sent)) == (False, True)
+    # Only the user's own waits for an answer of the harness's.
+    assert harness._waiting_commands(session, [typed, sent]) == [typed]
+    assert loop_module.command_never_answered([sent]) is None
