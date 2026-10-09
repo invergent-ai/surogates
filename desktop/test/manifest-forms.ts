@@ -15,10 +15,14 @@ export const written = (field: "size" | "stateSchema", number: string) => line({
 export const own = (text: string) => line({ note: "@" }).replace('"@"', text);
 // A number *steps* fields and places down from the manifest, in a field of its own: inside lists,
 // or inside objects, or inside each by turns.
-export const down = (steps: number, ...around: Array<[open: string, close: string]>) => {
+export const down = (steps: number, ...around: Array<[open: string, close: string]>) => own(nested(steps, ...around));
+// The text of that number alone: 1, inside as many lists or objects as put it *steps* down in a field.
+export const nested = (steps: number, ...around: Array<[open: string, close: string]>) => {
   const inside = Array.from({ length: steps - 1 }, (_, at) => around[at % around.length]!);
-  return own(`${inside.map(([open]) => open).join("")}1${inside.map(([, close]) => close).reverse().join("")}`);
+  return `${inside.map(([open]) => open).join("")}1${inside.map(([, close]) => close).reverse().join("")}`;
 };
+// The same line with a field of its own named twice: *first* and then *second*, each as it is where its value goes.
+export const twice = (first: string, second: string) => line({ note: "@" }).replace('"note":"@"', `"note":${first},"note":${second}`);
 export const LIST: [string, string] = ["[", "]"];
 export const OBJECT: [string, string] = ['{"n":', "}"];
 // The line without its closing brace, to write more fields behind in bytes.
@@ -121,7 +125,27 @@ export const FORMS: Form[] = [
   ["of a version that climbs", line({}, "../../etc"), false, false],
   ["of a version that is a number", line({ version: 124 }), false, false],
   ["of a version written with an escape", line().replace('"version":"1.2.4"', '"version":"1.2.\\u0034"'), true, true],
-  ["with its version named twice, the release's last", line().replace('{"version"', '{"version":"9.9.9","version"'), true, true],
+  // A field named twice in any one object, whatever its two values: of the two a reader keeps one,
+  // jq the last, and neither says what it dropped. And jq 1.7 cannot read a first value that is
+  // deeper than it reads at all, where another reader drops it unread.
+  ["with its version named twice, the release's last", line().replace('{"version"', '{"version":"9.9.9","version"'), false, false],
+  ["with its size named twice, the release's last", line().replace('"size":', '"size":1,"size":'), false, false],
+  ["with its state schema named twice, the same both times", line().replace('"stateSchema":1}', '"stateSchema":1,"stateSchema":1}'), false, false],
+  ["with a field of its own named twice", twice("1", "2"), false, false],
+  ["with a field of its own named twice, the same both times", twice("1", "1"), false, false],
+  ["with a field of its own named twice, the first time a list", twice("[1]", "2"), false, false],
+  ["with a field of its own named twice, the second time a list", twice("1", "[2]"), false, false],
+  ["with a field of its own named twice, each time an object of other fields", twice('{"a":1}', '{"b":2}'), false, false],
+  ["with a field of its own named twice, the first 300 down in lists", twice(nested(300, LIST), "1"), false, false],
+  ["with a field of its own named twice, the first 300 down in objects", twice(nested(300, OBJECT), "1"), false, false],
+  ["with a field of its own named twice, the first 1000 down in lists", twice(nested(1000, LIST), "1"), false, false],
+  ["with a field of its own named twice, the second 300 down in lists", twice("1", nested(300, LIST)), false, false],
+  ["with a field of its own named twice, the second time by an escape", line({ note: "@" }).replace('"note":"@"', '"note":1,"\\u006eote":2'), false, false],
+  ["with a field named twice in an object of its own", own('{"a":1,"a":2}'), false, false],
+  ["with a field named twice in an object in a list of its own", own('[{"a":1,"a":2}]'), false, false],
+  // One name in two objects is two fields.
+  ["with a field of one name in two objects of its own", own('[{"a":1},{"a":2}]'), true, true],
+  ["with a field of its own name inside it", own('{"note":{"note":1}}'), true, true],
   // Its other fields.
   ["of another channel", line({ channel: "beta" }), false, false],
   ["of another platform", line({ platform: "darwin" }), false, false],

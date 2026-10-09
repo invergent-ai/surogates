@@ -220,6 +220,7 @@ describe("the desktop's release manifest", () => {
       ["a package with a byte order mark before it", (top) => writeFileSync(app(top), '\uFEFF{"version":"1.2.3","stateSchema":1}\n')],
       ["a package with a number of its own in 18 digits", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1,"more":123456789012345678}\n')],
       ["a package with a number of its own written 01", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1,"more":01}\n')],
+      ["a package with its state schema named twice", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1,"stateSchema":2}\n')],
       ["a package of more than a megabyte", (top) => writeFileSync(app(top), `{"version":"1.2.3","stateSchema":1,"more":"${"x".repeat(1024 * 1024)}"}\n`)],
       // A package of this computer's that names one, and a link to it where the app's is: the
       // app that is installed would read whatever its own computer has there.

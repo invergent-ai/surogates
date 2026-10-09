@@ -1051,6 +1051,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       ...["+1", "01", "1.", ".5", "nan", "infinity"].map((number): [string, Buffer] => [`a number written ${number}`, more(number)]),
       ["a number in 18 digits", more("123456789012345678")],
       ["a number 65 fields and places down", more("[".repeat(64), "1", "]".repeat(64))],
+      // A field named twice, whatever its two values: jq keeps the last, and cannot read a first that is deeper than it reads at all.
+      ["a field named twice", more('1,"more":2')],
+      ["a field named twice, the first 300 down", more("[".repeat(299), "1", "]".repeat(299), ',"more":1')],
+      ["its version named twice", `${object.replace('{"version"', '{"version":"9.9.9","version"')}\n`],
       ["its size with a zero before it", sized(`0${size}`)],
       ["its size with a plus before it", sized(`+${size}`)],
       ["its size in 18 digits", sized(`${size}.${"0".repeat(18 - size.length)}`)],

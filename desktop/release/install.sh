@@ -218,10 +218,27 @@ signed_by() {
 # 17 digits before it makes a number of it: 137438953472.000015 is whole to another reader, and
 # not to jq); and no value more than 64 fields and places down (how deep jq reads at all is its
 # own, and changes with jq).
+#
+# And no field is named twice in any one object, whatever its two values. Of the two, jq keeps the
+# last and says nothing of the first; another reader may keep either; and where the first is
+# deeper than jq reads at all, one jq refuses the text and another, or another reader, drops it
+# unread and takes the rest. So the text is asked first as jq streams it, each value under its
+# path as it is read, before any field has replaced another: a path that was ended and comes
+# again is a field named twice, as no place of a list is. The file is read twice for it; each
+# caller's is root's own, or a copy in a folder of root's own.
 one_object() {
   local most="${3:-4096}"
   case "$most" in 0* | *[!0123456789]*) return 1 ;; esac
   [ "${#most}" -le 7 ] && [ "$most" -le 1048576 ] || return 1
+  head -c "$(( most + 1 ))" -- "$1" 2>/dev/null \
+    | jq -n --stream '
+      reduce inputs as $read ({};
+        $read[0] as $path
+        | if ($read | length) == 2
+          then reduce range(1; ($path | length) + 1) as $steps (.; if has($path[:$steps] | tojson) then error("a field named twice") else . end)
+            | .[$path | tojson] = 1
+          else .[$path[:-1] | tojson] = 1 end)
+      | empty' >/dev/null 2>&1 || return 1
   head -c "$(( most + 1 ))" -- "$1" 2>/dev/null \
     | jq -ceRs --arg lines "${2:-one}" --argjson most "$most" '
       select(utf8bytelength <= $most and ($lines == "any" or test("\\A[^\\n]*\\n\\z")) and (test("\ufffd") | not)
