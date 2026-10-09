@@ -1154,3 +1154,217 @@ def test_a_repository_made_again_owes_its_copy_no_record_of_a_landing_made_befor
     assert (again.copy / "B.md").read_text() == "B's, landed since\n"
     assert again.open() == {"copy": "moved"}
     assert not list((again.repo / "refs").glob("set-aside/*/*"))
+
+
+#: One request, as its runner takes it, run to its end or killed at one of its steps: each git it
+#: runs, and each file it writes or puts in its place.  Killed, every process of it goes at once.
+STEPPED = """
+import json, os, pathlib, signal, subprocess, sys
+at, count = int(sys.argv[2]), [0]
+def stepped(real):
+    def step(*args, **kwargs):
+        count[0] += 1
+        if count[0] == at:
+            os.killpg(0, signal.SIGKILL)
+        return real(*args, **kwargs)
+    return step
+subprocess.run, os.replace = stepped(subprocess.run), stepped(os.replace)
+pathlib.Path.write_bytes = stepped(pathlib.Path.write_bytes)
+from surogates.sandbox import local_history
+try:
+    answer = local_history.run(json.loads(sys.argv[1]))
+except local_history.HistoryError as refusal:
+    answer = {"error": refusal.code}
+print(json.dumps({"steps": count[0], "answer": answer}))
+"""
+OURS, THEIRS, NEW = THREAD, THREAD.replace("0b6c", "1b6c"), THREAD.replace("0b6c", "2b6c")
+SAGA = [["Surogate-Saga", "saga:ours"]]
+
+
+def stepped(root: Path, thread: str, action: str, args: dict, at: int = 0) -> dict | None:
+    """*thread*'s request on the folder under *root*, killed at its step *at*; its steps and answer when it ran to its end."""
+    request = {"store": str(root / "store"), "folder": str(root / "Documents"), "thread": thread, "user": "u1", "action": action, "args": args}
+    ran = subprocess.run(
+        [sys.executable, "-c", STEPPED, json.dumps(request), str(at)], capture_output=True, text=True,
+        cwd=Path(__file__).parents[1], start_new_session=True, timeout=300,
+    )
+    if at:
+        assert ran.returncode == -signal.SIGKILL, (at, ran.returncode, ran.stdout, ran.stderr)
+        return None
+    assert ran.returncode == 0, ran.stderr
+    return json.loads(ran.stdout)
+
+
+def a_folder_two_threads_work_on(root: Path) -> tuple[LocalHistory, dict]:
+    """A folder under *root* with our thread's turn about to land, and what the folder must hold whatever is cut.
+
+    Another thread has landed a change to the report and a new file, and you have saved a file since.
+    Our thread changed the report too, on the older one; changed the notes; made a file; and deleted one,
+    which waits with the report: a deletion beside a write that is left out may be a move.
+    """
+    folder = root / "Documents"
+    (folder / "sub").mkdir(parents=True)
+    for name, text in (("Report.docx", "report v1"), ("notes.txt", "v1 notes"), ("old.txt", "to be deleted"), ("sub/deep.txt", "deep")):
+        (folder / name).write_text(f"{text}\n")
+        os.utime(folder / name, (time.time() - 60, time.time() - 60))
+    ours, theirs = a_copy(root, folder, OURS), a_copy(root, folder, THEIRS)
+    (theirs.copy / "Report.docx").write_text("their report\n")
+    (theirs.copy / "A-new.md").write_text("their new file\n")
+    land(theirs, "saga:theirs")
+    (folder / "yours.txt").write_text("saved by you since\n")
+    (ours.copy / "Report.docx").write_text("our report, made on the old one\n")
+    (ours.copy / "notes.txt").write_text("our notes\n")
+    (ours.copy / "B.md").write_text("our own\n")
+    (ours.copy / "old.txt").unlink()
+    # Whatever is cut: no file of yours or of the other thread's is gone or written over.
+    return ours, {
+        "Report.docx": b"their report\n", "A-new.md": b"their new file\n", "yours.txt": b"saved by you since\n",
+        "sub/deep.txt": b"deep\n", "old.txt": b"to be deleted\n",
+    }
+
+
+def applied(folder: Path, copy: Path, changes: list[dict]) -> None:
+    """The host's applies, a copy of each file."""
+    for change in changes:
+        if change["after"] is None:
+            (folder / change["path"]).unlink(missing_ok=True)
+        else:
+            shutil.copyfile(copy / change["path"], folder / change["path"])
+
+
+def the_next_turn_lands_whole(root: Path, kept: dict, *, landed: bool, new: str = NEW) -> None:
+    """After a cut: the thread's next turn opens and lands, and the folder holds every file it had, each with its bytes.
+
+    *kept* are your files and the other thread's.  The history is whole: its objects are all there, a
+    new thread's first copy is the folder's files, and no landing after the cut deletes or writes
+    anything but our thread's own work.  With *landed*, our work reached the folder before the cut.
+    """
+    folder, store = root / "Documents", root / "store" / "history.git"
+    ours = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+    opened = ours.open()
+    assert opened["copy"] in ("made", "moved", "kept"), opened
+    after = land(ours, "saga:next", B)
+    assert {(c["path"], c["after"] is None) for c in after["changes"]} <= {("notes.txt", False), ("B.md", False)}, after
+    now = dict(files_of(folder))
+    assert {name: now.get(name) for name in kept} == kept
+    if landed or opened["copy"] != "made":
+        # The thread's own work is in the folder: landed before the cut, or by this turn.
+        assert (now["notes.txt"], now["B.md"]) == (b"our notes\n", b"our own\n"), (opened, now)
+    if store.exists():
+        assert git(store, "fsck", "--no-dangling") == ""
+    fresh = LocalHistory.at(root / "store", folder, thread=new, user="u1")
+    assert fresh.open() == {"copy": "made"}
+    assert files_of(fresh.copy) == files_of(folder)
+
+
+def each_cut(tmp_path: Path, thread: str, action: str, args: dict):
+    """The folder under ``tmp_path/whole`` copied for each step of *thread*'s request, and the request killed at that step."""
+    whole = tmp_path / "whole"
+    shutil.copytree(whole, tmp_path / "counted", symlinks=True)
+    steps = stepped(tmp_path / "counted", thread, action, args)["steps"]
+    assert steps > 1
+    for at in range(1, steps + 1):
+        root = tmp_path / f"cut-{at}"
+        shutil.copytree(whole, root, symlinks=True)
+        before = files_of(root / "Documents")
+        stepped(root, thread, action, args, at)
+        # The history writes no file of the folder, at any step.
+        assert files_of(root / "Documents") == before, at
+        yield at, root
+
+
+def test_a_first_open_killed_at_any_step_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path):
+    _, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    for _at, root in each_cut(tmp_path, NEW, "open", {}):
+        again = LocalHistory.at(root / "store", root / "Documents", thread=NEW, user="u1")
+        assert again.open() == {"copy": "made"}
+        assert files_of(again.copy) == files_of(root / "Documents")
+        assert land(again, "saga:new")["commit"] is None
+        the_next_turn_lands_whole(root, kept, landed=False, new=THREAD.replace("0b6c", "3b6c"))
+
+
+@pytest.mark.parametrize("action", ["open", "changed", "pickup", "commit", "keep"])
+def test_a_request_killed_at_any_step_before_a_landing_applies_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path, action):
+    ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    args = {
+        "open": {}, "changed": {}, "pickup": {"author": YOURS, "trailers": SAGA},
+        "commit": {"author": B, "trailers": SAGA, "pickup": None}, "keep": {"author": B, "trailers": SAGA, "base": True},
+    }[action]
+    if action == "commit":
+        args["pickup"] = ours.pickup(author=YOURS, trailers=SAGA)["commit"]
+    for _at, root in each_cut(tmp_path, OURS, action, args):
+        the_next_turn_lands_whole(root, kept, landed=False)
+
+
+def test_a_landing_stopped_after_any_of_its_applies_deletes_and_overwrites_nothing_of_anyone_elses(tmp_path):
+    ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    picked = ours.pickup(author=YOURS, trailers=SAGA)
+    turn = ours.commit_turn(author=B, trailers=SAGA, pickup=picked["commit"])
+    assert [c["path"] for c in turn["changes"]] == ["B.md", "notes.txt"]
+    assert [(o["path"], o["reason"]) for o in turn["overlapped"]] == [("Report.docx", "changed"), ("old.txt", "with")]
+    store = tmp_path / "whole" / "store" / "history.git"
+    for done in range(len(turn["changes"]) + 1):
+        root = tmp_path / f"applied-{done}"
+        shutil.copytree(tmp_path / "whole", root, symlinks=True)
+        # What each apply replaces or removes is a version the history holds already: the turn's base was pushed first.
+        for change in turn["changes"][:done]:
+            if change["before"] is not None:
+                assert git(store, "cat-file", "-t", change["before"]) == "blob"
+        applied(root / "Documents", root / "store" / "threads" / OURS, turn["changes"][:done])
+        # Never recorded and never asked again: what it kept is not to be forgotten, unless it wrote nothing.
+        again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+        if done:
+            with refused("landing_unsettled"):
+                again.forget(saga="saga:ours")
+        else:
+            assert again.forget(saga="saga:ours") == {"landing": None}
+        the_next_turn_lands_whole(root, kept, landed=False)
+
+
+@pytest.mark.parametrize("asked_again", [False, True])
+def test_a_record_killed_at_any_step_is_finished_or_never_was_and_the_next_landing_takes_nothing_of_anyone_elses(tmp_path, asked_again):
+    ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    picked = ours.pickup(author=YOURS, trailers=SAGA)
+    turn = ours.commit_turn(author=B, trailers=SAGA, pickup=picked["commit"])
+    applied(tmp_path / "whole" / "Documents", ours.copy, turn["changes"])
+    # A command still running writes the copy after the turn was committed.
+    (ours.copy / "late.md").write_text("written after the turn was committed\n")
+    step = {"turn": turn["commit"], "applied": turn["changes"], "author": B, "trailers": SAGA, "main": picked["main"], "pickup": picked["commit"]}
+    pushed = 0
+    for at, root in each_cut(tmp_path, OURS, "record", step):
+        store, folder = root / "store" / "history.git", root / "Documents"
+        again = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+        landing = git(store, "rev-parse", "refs/heads/main")
+        recorded = "Surogate-Saga: saga:ours" in git(store, "log", "-1", "--format=%B", landing) and git(store, "log", "-1", "--format=%s", landing) == "Landing"
+        pushed += recorded
+        if asked_again:
+            answer = again.record(**step)
+            assert re.fullmatch(r"[0-9a-f]{40}", answer["set_aside"]), at
+            assert git(again.repo, "cat-file", "-p", f"{answer['set_aside']}:late.md") == "written after the turn was committed"
+            assert again.forget(saga="saga:ours") == {"landing": answer["commit"]}
+        elif recorded:
+            # The push counted: the thread's next open finishes it, and says what it set aside.
+            finished = again.open()["finished"]
+            assert finished["landing"] == landing, at
+            assert git(again.repo, "cat-file", "-p", f"{finished['set_aside']}:late.md") == "written after the turn was committed"
+        if asked_again or recorded:
+            # The copy is the landing's files: the newer report, and no file the thread wrote since.
+            assert dict(files_of(again.copy)) == {**dict(files_of(folder))}, at
+            (again.copy / "late.md").unlink(missing_ok=True)
+        else:
+            # It never counted: the landing is as it was before its record, and its kept files are not forgotten.
+            with refused("landing_unsettled"):
+                again.forget(saga="saga:ours")
+            (root / "store" / "threads" / OURS / "late.md").unlink()
+        the_next_turn_lands_whole(root, kept, landed=True)
+    # The cuts fall on both sides of the push.
+    assert 0 < pushed < at
+
+
+def test_a_forget_killed_at_any_step_changes_nothing_and_answers_the_same_when_asked_again(tmp_path):
+    ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    landed = land(ours, "saga:ours", B)
+    for at, root in each_cut(tmp_path, OURS, "forget", {"saga": "saga:ours"}):
+        again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+        assert again.forget(saga="saga:ours") == {"landing": landed["landing"]}, at
+    the_next_turn_lands_whole(root, kept, landed=True)
