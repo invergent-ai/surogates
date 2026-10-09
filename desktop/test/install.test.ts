@@ -22,6 +22,7 @@ import { certificate, rewritten } from "./certificates.js";
 import { HELPER_MODES } from "./helper-modes.js";
 
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
+const DESKTOP = fileURLToPath(new URL("..", import.meta.url));
 const PUBLISH = fileURLToPath(new URL("../release/publish.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
 const ENABLED = process.env.SUROGATE_INSTALL_TESTS === "1";
@@ -3341,7 +3342,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's company CA, on Ubuntu ${release}`, { timeout: 600_000 }, () => {
   // The install's own computer, behind a company's network that signs every site with its CA: the
   // base is served over TLS with a certificate that CA signed, which this computer's roots do not trust.
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, INSTALL_LAB, ["--network", "host"]);
+  // With the libraries a desktop's Electron is linked with, and this package, built, for the app's own
+  // trust of the CA: run by its own Electron, on the release's own certutil and NSS.
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, [
+    ...INSTALL_LAB,
+    "RUN apt-get update && apt-get install -y --no-install-recommends libgtk-3-0t64 libnss3 libgbm1 libasound2t64",
+  ], ["--network", "host", "-v", `${DESKTOP}:/opt/surogate-app:ro`]);
   let server: ChildProcess;
   let base: string;
   // The same base as a server of the public web serves it: its certificate signed by an authority
@@ -3388,9 +3394,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     certs = mkdtempSync(join(box.dir, "certs-"));
     const company = certificate(certs, "company");
     const another = certificate(certs, "another");
-    // A certificate authority's file that is no CA of this network's.
+    // A certificate authority's file that is no CA of this network's: the user's own IT's, in their NSS database.
     certificate(certs, "it");
     const site = certificate(certs, "site", "company");
+    // The app's other sites: one the company's CA signed for another name, and one the user's own IT signed.
+    certificate(certs, "misnamed", "company", "DNS:elsewhere.example");
+    certificate(certs, "itsite", "it");
     // What the administrator hands the script: the company's CA with its key beside it, as a CA's own
     // file holds it; both of the company's CAs in one file; a site's certificate, alone and before a
     // CA's file with its key; and no certificate.
@@ -3419,7 +3428,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "megabyte.pem", "megabyte-and-one.pem", "thousand.pem"]) {
       expect(docker(["cp", join(certs, file), `${box.container}:/home/tester/${file}`]).status).toBe(0);
     }
-    expect(root("chown -R tester /home/tester").status).toBe(0);
+    // The other user's own copy, for a build of their own.
+    expect(docker(["cp", join(certs, "it.pem"), `${box.container}:/home/other/it.pem`]).status).toBe(0);
+    expect(root("chown -R tester /home/tester && chown -R other /home/other && mkdir /opt/sites").status).toBe(0);
+    for (const file of ["site.pem", "site.key", "misnamed.pem", "misnamed.key", "itsite.pem", "itsite.key"]) {
+      expect(docker(["cp", join(certs, file), `${box.container}:/opt/sites/${file}`]).status).toBe(0);
+    }
+    expect(root("chmod -R a+rX /opt/sites").status).toBe(0);
     mkdirSync(join(www(), "desktop"), { recursive: true });
     copyFileSync(join(box.dir, "install.sh"), join(www(), "desktop", "install.sh"));
     publish("1.0.0");
@@ -3642,6 +3657,65 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(leftovers()).toBe("");
   });
 
+  // What both TLS stacks of an Electron answer three sites, as *user* (test/company-ca-probe.mjs):
+  // one the company's CA signed, one it signed for another name, and one the user's own IT signed.
+  // *installed*, this package's Electron as a release lays it out (scripts/package.sh): under the
+  // app's name, with the app in resources/app, which is how an Electron knows itself installed.
+  // Else as a development build starts. With no display at all: it opens no window, and the
+  // container is on this computer's own network, where an X server of its own would take, or be
+  // refused, a display number that a server of this computer's has. Docker gives Chromium's sandbox
+  // no user namespaces. Neither plays a part in which CAs are trusted.
+  const answers = (user: string, installed: boolean, env = "") => {
+    const electron = installed ? "/opt/installed/surogate" : "/opt/surogate-app/node_modules/electron/dist/electron";
+    const answered = as(user, `DBUS_SESSION_BUS_ADDRESS=disabled: PROBE_SITES=/opt/sites ${env} timeout -s KILL 60 ${electron} --no-sandbox --ozone-platform=headless --disable-gpu --password-store=basic`
+      + `${installed ? "" : " /opt/surogate-app/test/company-ca-probe.mjs"}`);
+    return JSON.parse(answered.stdout.split("\n").find((line) => line.startsWith("{")) ?? "null") as unknown;
+  };
+  const UNTRUSTED = { chromium: "net::ERR_CERT_AUTHORITY_INVALID", node: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" };
+  const MISNAMED = { chromium: "net::ERR_CERT_COMMON_NAME_INVALID", node: "ERR_TLS_CERT_ALTNAME_INVALID" };
+
+  it("is trusted by an installed app in both its TLS stacks on this release's NSS, each certificate's name still checked, in the database Chromium reads, beside the user's own CA: from /etc/surogate/ca.pem alone, as root's own word", () => {
+    expect(root("mkdir -p /opt/installed/resources/app && cd /opt/surogate-app/node_modules/electron/dist"
+      + " && for file in *; do [ \"$file\" = electron ] || [ \"$file\" = resources ] || ln -s \"$PWD/$file\" /opt/installed/ || exit 1; done && cp electron /opt/installed/surogate"
+      + " && ln -s /opt/surogate-app/dist /opt/surogate-app/test /opt/installed/resources/app/"
+      + " && echo '{\"name\":\"surogate\",\"type\":\"module\",\"main\":\"test/company-ca-probe.mjs\"}' >/opt/installed/resources/app/package.json").status).toBe(0);
+    // A user whose Chromium ran before Surogate did: its database where Chromium makes it, with a CA of their own IT's in it.
+    const theirs = ".local/share/pki/nssdb";
+    const held = () => as("tester", `certutil -L -d sql:${theirs} | tail -n +5 | sed 's/  */ /g; s/ $//; s/[0-9a-f]\\{16\\}/<hex>/' | sort`).stdout;
+    expect(as("tester", `mkdir -p -m 700 ${theirs} && certutil -N -d sql:${theirs} --empty-password && certutil -A -d sql:${theirs} -n 'IT Root' -t CT,C,C -a -i it.pem`).status).toBe(0);
+    // The kept file as the rollback's test left it, one that others may write: an installed app takes
+    // no certificate authority from it, and says so.
+    expect(root("stat -c %a /etc/surogate/ca.pem").stdout).toBe("666\n");
+    expect(answers("tester", true)).toEqual({
+      installed: true,
+      said: "/etc/surogate/ca.pem is not the install script's: only root may write it. Your company's certificate authority is not trusted until the file is mended. Ask your administrator to run Surogate's install script again with --ca-cert.",
+      site: UNTRUSTED, misnamed: UNTRUSTED, itsite: { ...UNTRUSTED, chromium: 200 },
+    });
+    expect(held()).toBe("IT Root CT,C,C\n");
+    // Mended as the app says, by an update through the company's network.
+    publish("1.3.0");
+    const updated = install("--ca-cert both.pem");
+    expect(updated.status, updated.stderr).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/1.3.0");
+    // The app's own trust of the CA, as its main does it at start, with a file of another CA's named
+    // in its environment, as a development build is handed one: an installed app reads the kept file alone.
+    expect(answers("tester", true, "SUROGATE_CA_CERT=/home/tester/it.pem")).toEqual({
+      installed: true, said: null, site: { chromium: 200, node: 200 }, misnamed: MISNAMED,
+      // The user's own CA is trusted as it was, where Chromium reads it; Node was given the company's alone.
+      itsite: { ...UNTRUSTED, chromium: 200 },
+    });
+    // Both of the company's CAs, under the app's names, beside the user's entry in the database Chromium made; and no ~/.pki.
+    expect(held()).toBe("IT Root CT,C,C\nSurogate company CA <hex> C,,\nSurogate company CA <hex> C,,\n");
+    expect(root("test ! -e /home/tester/.pki").status).toBe(0);
+    // Another Chromium of that user's, as their Chrome is and the agent's browser: it trusts what the database holds, with no word of the app's.
+    expect(answers("tester", true, "PROBE_BROWSER=1")).toEqual({ installed: true, said: null, site: { ...UNTRUSTED, chromium: 200 }, misnamed: { ...UNTRUSTED, chromium: MISNAMED.chromium }, itsite: { ...UNTRUSTED, chromium: 200 } });
+    // Without the app's trust, as another user whose app has not started, neither stack trusts any of them.
+    expect(answers("other", true, "PROBE_BROWSER=1")).toEqual({ installed: true, said: null, site: UNTRUSTED, misnamed: UNTRUSTED, itsite: UNTRUSTED });
+    // And a development build is told by that name what an installed app is not: it trusts the file its environment names.
+    expect(answers("other", false, "SUROGATE_CA_CERT=/home/other/it.pem")).toEqual({ installed: false, said: null, site: UNTRUSTED, misnamed: UNTRUSTED, itsite: { chromium: 200, node: 200 } });
+    expect(root("rm -rf /home/other/.local/share/pki").status).toBe(0);
+  });
+
   // An entry as the app names one for a company's CA, and what the script says of a database it leaves.
   const OURS = "Surogate company CA 0123456789abcdef";
   const STILL = "an entry of Surogate's for the company's certificate authority may still be trusted there";
@@ -3756,15 +3830,18 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const theirs = { "Surogate company CA of our old proxy": "old", [`${OURS} backup`]: "backup", "Surogate company CA 0123456789ABCDEF": "upper", "Surogate company CA 1123456789abcdef ": "spaced", "mine\nSurogate company CA 2123456789abcdef": "second" };
     const lookalikes = "Surogate company CA of our old proxy C,,\nSurogate company CA 0123456789abcdef backup C,,\nSurogate company CA 0123456789ABCDEF C,,\nSurogate company CA 1123456789abcdef C,,\nmine\nSurogate company CA 2123456789abcdef C,,\n";
     authorities(...Object.values(theirs));
-    // The two folders Chromium keeps a user's database in, and the one tester's session names for its data, which tester may not change.
+    // The two folders Chromium keeps a user's database in, and the one tester's session names for
+    // its data, which tester may not change. In the XDG one, the entries the app itself makes at a
+    // start, beside the user's own.
+    expect(answers("tester", true)).toMatchObject({ said: null, site: { chromium: 200, node: 200 } });
+    expect(entries("tester", ".local/share/pki/nssdb")).toMatch(/^IT Root CT,C,C\n(Surogate company CA [0-9a-f]{16} C,,\n){2}$/);
     database("tester", ".pki/nssdb", { [OURS]: "company", "IT Root": "it", ...theirs });
-    // The company's CA under a name of the user's own, as their IT gave it to their browser.
-    database("tester", ".local/share/pki/nssdb", { "Company Root": "company", [OURS]: "it" });
     database("tester", "dat/pki/nssdb", { [OURS]: "company", "IT Root": "it" });
     expect(as("tester", "chmod a-w dat/pki/nssdb dat/pki/nssdb/*").status).toBe(0);
     // The other user's: one with a password, as a smart card's user has; and one that is no database.
     expect(as("other", "echo secret >password").status).toBe(0);
-    database("other", ".pki/nssdb", { [OURS]: "company", "IT Root": "it" }, "-f password");
+    // In it, the company's CA under a name of the user's own, as their IT gave it to their browser.
+    database("other", ".pki/nssdb", { [OURS]: "it", "Company Root": "company" }, "-f password");
     expect(as("other", "mkdir -p -m 700 .local/share/pki/nssdb && echo garbage >.local/share/pki/nssdb/cert9.db").status).toBe(0);
     const before1 = entries("tester", ".pki/nssdb");
     expect(before1).toBe(`${OURS} C,,\nIT Root C,,\n${lookalikes}`);
@@ -3796,11 +3873,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // The app's entries are gone from both of Chromium's folders and from behind a password. Every
     // entry of a user's own stays, the company's CA under their own name among them.
     expect(entries("tester", ".pki/nssdb")).toBe(`IT Root C,,\n${lookalikes}`);
-    expect(entries("tester", ".local/share/pki/nssdb")).toBe("Company Root C,,\n");
-    expect(entries("other", ".pki/nssdb")).toBe("IT Root C,,\n");
+    expect(entries("tester", ".local/share/pki/nssdb")).toBe("IT Root CT,C,C\n");
+    expect(entries("other", ".pki/nssdb")).toBe("Company Root C,,\n");
     expect(entries("tester", "dat/pki/nssdb")).toBe(`${OURS} C,,\nIT Root C,,\n`);
     // Each database is its user's as it was, and no user without one was given one.
     expect(root("stat -c %U /home/tester/.pki/nssdb/cert9.db /home/tester/.local/share/pki/nssdb/cert9.db /home/other/.pki/nssdb/cert9.db && test ! -e /root/.pki && test ! -e /root/.local").stdout).toBe("tester\ntester\nother\n");
     expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate && test ! -e /usr/local/bin/surogate").status).toBe(0);
+    // Their browser trusts the company's sites no more, and their own IT's as before; and an app
+    // installed again with no CA finds none to trust, and no entry of its own to bring back.
+    const gone = { installed: true, said: null, site: UNTRUSTED, misnamed: UNTRUSTED, itsite: { ...UNTRUSTED, chromium: 200 } };
+    expect(answers("tester", true, "PROBE_BROWSER=1")).toEqual(gone);
+    expect(answers("tester", true)).toEqual(gone);
+    expect(entries("tester", ".pki/nssdb")).toBe(`IT Root C,,\n${lookalikes}`);
   });
 });
