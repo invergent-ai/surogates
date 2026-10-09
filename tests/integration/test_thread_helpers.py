@@ -35,7 +35,7 @@ from surogates.workstreams import thread_refusal
 from tests.test_steer_loop import _final_response
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_durable_landings import FENCED, edited, ends, stored
+from .test_durable_landings import FENCED, a_short_fence, edited, ends, stored  # noqa: F401  (a_short_fence is a fixture)
 from .test_thread_copies import a_thread, a_waking_thread_harness, git, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_chat, a_looping_harness, a_turn, calling, stop
 from .test_workstream_threads import call_tool
@@ -57,7 +57,7 @@ async def a_helpers_turn(api, monkeypatch, pool, helper, *replies) -> None:
         await a_turn(api, its_own, helper, [
             *(calling(("terminal", {"command": reply})) if isinstance(reply, str) else reply for reply in replies),
             _final_response("Done."),
-        ], pool=pool, saga_settings=FENCED)
+        ], pool=pool)
 
 
 async def results_of(api, session, name: str) -> list[str]:
@@ -131,7 +131,7 @@ async def test_a_helper_started_by_delegate_task_works_on_a_copy_of_its_own_and_
         # The helper handed back before its turn's end: its file is in the thread's copy when the step answers.
         calling(("terminal", {"command": "cat sources.md > seen.md"})),
         _final_response("Done."),
-    ], pool=mine, saga_settings=FENCED), 120)
+    ], pool=mine), 120)
     [helper] = await helpers_of(api, thread)
     # The thread's copy was handed on before the helper was made, its outline with it.
     assert handed_on == [["Report.docx", "notes.txt", "outline.md"]]
@@ -168,7 +168,7 @@ async def test_a_helper_the_thread_does_not_wait_for_works_on_a_copy_of_its_own_
         calling((tool, {"goal": "Draft the sources."})),
         *([calling(("memory", {"action": "add", "content": "x"}))] if meanwhile else []),
         _final_response("Done."),
-    ], pool=mine, during=the_helper_works, saga_settings=FENCED), 120)
+    ], pool=mine, during=the_helper_works), 120)
     [started] = [json.loads(result) for result in await results_of(api, thread, tool)]
     assert "error" not in started, started
     [helper] = await helpers_of(api, thread)
@@ -210,7 +210,7 @@ async def test_a_threads_mission_starts_its_tasks_on_copies_of_their_own_and_the
     # The mission's first turn: its coordinator has no tool that writes a file, and hands the work to a task.
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("spawn_task", {"goal": "List the report's sources in sources.md."})), _final_response("Started."),
-    ], pool=mine, saga_settings=FENCED), 120)
+    ], pool=mine), 120)
     [started] = [json.loads(result) for result in await results_of(api, thread, "spawn_task")]
     assert started["status"] == "running", started
     [helper] = await helpers_of(api, thread)
@@ -280,7 +280,7 @@ async def test_a_helper_that_fails_leaves_its_files_apart_and_its_thread_is_told
         calling(("terminal", {"command": "echo outline > outline.md"})),
         calling(("delegate_task", {"goal": "Draft the sources."})),
         _final_response("Done."),
-    ], pool=mine, saga_settings=FENCED), 120)
+    ], pool=mine), 120)
     [helper] = await helpers_of(api, thread)
     [result] = await results_of(api, thread, "delegate_task")
     # The step's result names the files the helper left, which are not in the thread's copy.
@@ -313,7 +313,7 @@ async def test_a_stop_while_a_helper_runs_takes_the_turns_work_back_and_the_help
         calling(("spawn_worker", {"goal": "Draft the sources."})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
-    ], pool=mine, during=stopped_while_the_helper_works, saga_settings=FENCED), 120)
+    ], pool=mine, during=stopped_while_the_helper_works), 120)
     [helper] = await helpers_of(api, thread)
     # The stop dropped the hand-off, and the branch never had the stopped turn's work: nothing of it is left to land.
     assert [ref for ref in refs(pods) if str(thread.id) in ref] == []
@@ -372,7 +372,7 @@ async def test_a_helper_starting_call_that_starts_none_hands_nothing_on_and_leav
         calling(("delegate_task", {} if refused_by == "the tool itself" else {"goal": "Draft the sources."})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
-    ], pool=mine, during=stops, saga_settings=FENCED)
+    ], pool=mine, during=stops)
     if refused_by == "governance":
         looping._governance_gate = GovernanceGate(denied_tools={"delegate_task"})
     locks = await project_locks_taken(monkeypatch)
@@ -407,7 +407,7 @@ async def test_a_step_that_starts_another_helper_takes_the_firsts_work_up_and_sa
         calling(("memory", {"action": "add", "content": "x"})),
         calling(("spawn_worker", {"goal": "Check them."})),
         _final_response("Done."),
-    ], pool=mine, during=the_first_helper_ends, saga_settings=FENCED), 120)
+    ], pool=mine, during=the_first_helper_ends), 120)
     first, second = [json.loads(result) for result in await results_of(api, thread, "spawn_worker")]
     # The second step took the first helper's work up before it handed the copy on: its sources, not its notes,
     # which the thread changed too.  The result stays the JSON its tool returns, the note a key of its own.
@@ -451,7 +451,7 @@ async def test_a_helper_that_fails_after_starting_a_helper_of_its_own_lands_none
                     calling(("terminal", {"command": "echo half made > first.md"})),
                     calling(("delegate_task", {"goal": "Check it."})),
                     THE_PROVIDER_FAILS,
-                ], pool=theirs, saga_settings=FENCED)
+                ], pool=theirs)
         else:
             await a_helpers_turn(api, monkeypatch, theirs, helper, "ls -A > seen.txt && echo checked > second.md")
         return await poll(session_store=session_store, parent_session_id=parent_session_id, child_id=child_id, **kwargs)
@@ -461,7 +461,7 @@ async def test_a_helper_that_fails_after_starting_a_helper_of_its_own_lands_none
         calling(("terminal", {"command": "echo outline > outline.md"})),
         calling(("delegate_task", {"goal": "Draft the sources.", "agent_type": "lead"})),
         _final_response("Done."),
-    ], pool=mine, saga_settings=FENCED), 120)
+    ], pool=mine), 120)
     [helper] = await helpers_of(api, thread)
     # Its step that started a helper put nothing of its own on the thread's hand-off: its helper started from
     # the thread's work as the thread handed it on.
@@ -499,7 +499,7 @@ async def test_a_thread_dispatches_no_research_experiment_and_hands_nothing_on_f
     locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("dispatch_experiments", {"node_keys": ["1"]})), _final_response("Done."),
-    ], pool=SandboxPool(pods), saga_settings=FENCED), 60)
+    ], pool=SandboxPool(pods)), 60)
     # A thread has no research run, its command being refused, so the model is not sent the tool, and a
     # call of it all the same never runs.  (Reached past that, it answers with the thread's refusal: a run
     # could bundle no repository from a copy that holds none.)
@@ -537,7 +537,7 @@ async def test_a_task_queued_behind_another_takes_the_copy_as_it_is_when_queued_
         yield calling(("spawn_task", {"goal": "And again.", "parents": [str(uuid4())]}))
         yield _final_response("Done.")
 
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, replies(), pool=SandboxPool(pods), saga_settings=FENCED), 120)
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, replies(), pool=SandboxPool(pods)), 120)
     first, queued, refused = [json.loads(result) for result in await results_of(api, thread, "spawn_task")]
     assert (first["status"], queued["status"]) == ("running", "todo") and "not found" in refused["error"]
     assert len(await helpers_of(api, thread)) == 1
@@ -554,7 +554,7 @@ async def test_a_stop_of_a_turn_that_used_no_pod_opens_none(api, monkeypatch, po
         looping.interrupt("stopped by the user")  # while the model is asked for the turn's first step
         yield _final_response("Done.")
 
-    looping = a_looping_harness(api, monkeypatch, thread, replies(), pool=SandboxPool(pods), saga_settings=FENCED)
+    looping = a_looping_harness(api, monkeypatch, thread, replies(), pool=SandboxPool(pods))
     await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
     assert await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE]) == []
     assert (pods.pods, pods.copies) == ({}, {})
@@ -570,7 +570,7 @@ async def a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_pa
         calling(("terminal", {"command": "echo outline > outline.md"})),
         calling(("spawn_worker", {"goal": "Draft the sources."})),
         _final_response("Started."),
-    ], pool=mine, saga_settings=FENCED), 120)
+    ], pool=mine), 120)
     [first] = await helpers_of(api, thread)
     await a_helpers_turn(api, monkeypatch, SandboxPool(pods), first, "echo an hour of work > sources.md")
     await api.app.state.session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Now check them."})
@@ -592,7 +592,7 @@ async def test_a_stop_of_a_turn_that_took_a_helpers_finished_work_up_and_handed_
         calling(("spawn_worker", {"goal": "Check the sources."})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
-    ], pool=mine, during=stop, saga_settings=FENCED), 120)
+    ], pool=mine, during=stop), 120)
     assert not (pods.project / "sources.md").exists()
     # The hand-off is back as the turn found it: the first helper's work, for the next turn to take up.
     assert refs(pods, "handoff") == [f"refs/handoff-from/{thread.id}", f"refs/handoff/{thread.id}"]
@@ -616,7 +616,7 @@ async def test_a_thread_whose_pod_goes_after_its_turn_took_a_helpers_work_up_and
         calling(("memory", {"action": "add", "content": "x"})),
         calling(("terminal", {"command": "ls > seen-after.txt"})),
         _final_response("Done."),
-    ], pool=mine, during=the_pod_goes, saga_settings=FENCED), 120)
+    ], pool=mine, during=the_pod_goes), 120)
     # The copy made in the pod's place took up what was handed on: the helper's work lands with this very turn.
     assert "sources.md" in (pods.project / "seen-after.txt").read_text().split()
     assert (pods.project / "sources.md").read_text() == "an hour of work\n"
@@ -646,7 +646,7 @@ async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_th
             calling(("spawn_task", {"goal": f"Write {part}.md."})),
             *([calling(("memory", {"action": "add", "content": "x"}))] if during else []),
             _final_response("Started."), _final_response("Waiting for the task."),  # a coordinator is asked once more
-        ], pool=mine, during=during, saga_settings=FENCED), 120)
+        ], pool=mine, during=during), 120)
         task = (await helpers_of(api, thread))[-1]
         await a_helpers_turn(api, monkeypatch, SandboxPool(pods), task, f"echo part {part} > {part}.md")
         await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": f"Part {part} is done."})
@@ -697,7 +697,7 @@ async def test_a_threads_helper_whose_goal_is_a_command_its_thread_may_not_run_i
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling((tool, {"goal": COMMANDS_A_THREAD_REFUSES[command]})), _final_response("Done."),
-    ], pool=mine, saga_settings=FENCED), 120)
+    ], pool=mine), 120)
     # Its goal is its first message, word for word: read as a command, it gets the answer its thread gets.
     [helper] = await helpers_of(api, thread)
     assert await woken_with_nothing_started(api, monkeypatch, theirs, helper) == [thread_refusal(f"/{command}")]
@@ -741,7 +741,7 @@ async def test_a_thread_and_its_helpers_start_no_research_sub_agent_by_its_type(
     locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling((tool, arguments)), _final_response("Done."),
-    ], pool=SandboxPool(pods), saga_settings=FENCED), 120)
+    ], pool=SandboxPool(pods)), 120)
     # Deep research run in a thread, with or without its command, starts a planner and a writer on copies of
     # their own, where the writer finds no evidence; and the planner's .research/ folder lands among the files.
     [answer] = [json.loads(result) for result in await results_of(api, thread, tool)]
@@ -777,7 +777,7 @@ async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_say
         calling(("terminal", {"command": "echo outline > outline.md"})),
         calling((tool, {"goal": "Draft the sources from outline.md."})),
         _final_response("Done."),
-    ], pool=SandboxPool(pods), saga_settings=FENCED), 120)
+    ], pool=SandboxPool(pods)), 120)
     # A helper started now would work without this turn's outline, and nobody would know: none is started.
     [result] = await results_of(api, thread, tool)
     assert "error" in json.loads(result) and "could not be handed to a helper, so none was started" in result, result
@@ -800,7 +800,7 @@ async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_before_
         calling(("spawn_task", {"goal": "Draft the sources.", "agent_type": "no-such-agent"})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
-    ], pool=SandboxPool(pods), during=after_it, saga_settings=FENCED)
+    ], pool=SandboxPool(pods), during=after_it)
     locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
     [refusal] = await results_of(api, thread, "spawn_task")

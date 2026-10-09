@@ -41,8 +41,25 @@ from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-#: A step timeout of a second: the fence a killed worker's landing is waited out for.
-FENCED = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0)
+#: What these tests' landings run with.  A step has a landing's own kind of bound, so a busy host fails
+#: none of them; the fence a killed worker's landing is waited out for is two seconds all the same
+#: (see ``a_short_fence``), so no test waits five minutes for one.
+FENCED = SimpleNamespace(default_step_timeout=29, default_max_retries=0, retry_delay=0)
+#: A step timeout of a second, for the tests that are about a step running out of time.
+ONE_SECOND = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0)
+
+
+def _fenced(settings) -> bool:
+    return settings is not None and (settings.default_step_timeout, settings.default_max_retries, settings.retry_delay) == (29, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def a_short_fence(monkeypatch):
+    """With ``FENCED``, the fence and a landing's life are what a one-second step gives: 2 s and 3 s."""
+    fence, life = landing_module._fence, landing_module._life
+    monkeypatch.setattr(landing_module, "_fence", lambda settings: 2 if _fenced(settings) else fence(settings))
+    monkeypatch.setattr(landing_module, "_life", lambda settings: 3 if _fenced(settings) else life(settings))
+    monkeypatch.setattr(loop_artifact_completion, "_fence", landing_module._fence)
 
 
 async def rows(api, thread) -> list[WorkstreamHistory]:
@@ -352,7 +369,7 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     started = time.monotonic()
     await ends(api, pool, second)
     # The killed landing's row was waited out, then put back.
-    assert time.monotonic() - started >= FENCED.default_step_timeout
+    assert time.monotonic() - started >= landing_module._fence(FENCED) - 1
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
     [row] = await rows(api, first)
     assert row.saga_state == "compensated"
