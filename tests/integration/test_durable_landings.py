@@ -51,8 +51,8 @@ async def rows(api, thread) -> list[WorkstreamHistory]:
         )).scalars())
 
 
-async def ends(api, pool, thread, *, failed: bool = False, settings=FENCED) -> None:
-    """*thread*'s turn ends, or fails, as a worker ends it."""
+async def ends(api, pool, thread, *, failed: bool = False, settings=FENCED, pruned: bool = True) -> None:
+    """*thread*'s turn ends, or fails, as a worker ends it; and the day's pruning it left, unless *pruned* is false."""
     store = api.app.state.session_store
     harness = harness_of(api)
     harness._sandbox_pool, harness._saga_settings, harness._storage = pool, settings, api.app.state.storage
@@ -64,6 +64,9 @@ async def ends(api, pool, thread, *, failed: bool = False, settings=FENCED) -> N
     else:
         await harness._complete_session(thread, messages, lease, reason="completed", turn_id="turn-1")
     await store.release_lease(thread.id, lease.lease_token)
+    if pruned:
+        # A pruning goes on after its turn: most tests look at the history as it leaves it.
+        await asyncio.gather(*landing_module._PRUNINGS)
 
 
 def stored(api, thread, tmp_path) -> ThreadPods:
@@ -1500,11 +1503,11 @@ async def test_only_a_landing_that_completed_with_a_commit_prunes_the_history(ap
             raise landing_module.LandingStepError("the pod's step timed out")
         return await call(sandbox_pool, owner, action, **arguments)
 
-    async def counted(**kwargs):
+    def counted(**kwargs):
         pruned.append(kwargs["sandbox_id"])
 
     monkeypatch.setattr(landing_module, "_call", the_apply_fails)
-    monkeypatch.setattr(loop_artifact_completion, "prune_after", counted)
+    monkeypatch.setattr(loop_artifact_completion, "prune_later", counted)
     await ends(api, pool, thread)
     # A pruning is a landing's last act: one that put no commit on main leaves the history as it is,
     # and its pod goes with the turn.
@@ -1656,6 +1659,45 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
     assert (durable / "pruned").stat().st_mtime == pruned  # not again the same day
 
 
+async def test_a_turns_end_and_the_threads_next_turn_do_not_wait_for_the_days_pruning(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool, store = SandboxPool(pods), api.app.state.session_store
+    await edited(pool, thread, "echo a > a.md")
+    execute, begun, go, reaped = pool.execute_released, asyncio.Event(), asyncio.Event(), []
+
+    async def a_long_pruning(sandbox_id, name, input, **kwargs):
+        begun.set()
+        await go.wait()
+        return await execute(sandbox_id, name, input, **kwargs)
+
+    async def every_pod_of_the_session(session_id):
+        reaped.append(session_id)
+
+    monkeypatch.setattr(pool, "execute_released", a_long_pruning)
+    # A backend that can destroy every pod of a session, as the Docker one can by its label.
+    monkeypatch.setattr(pods, "destroy_for_session", every_pod_of_the_session, raising=False)
+    await asyncio.wait_for(ends(api, pool, thread, pruned=False), 20)
+    await asyncio.wait_for(begun.wait(), 10)
+    # The pruning is under way, and the turn is over all the same: ended, reported, its lease given up.
+    assert [done["saved"] for done in await turn_ends(api, thread)] == [True]
+    assert [f["ref"] for f in (await reports(api, master))[0]["files"]] == ["a.md"]
+    lease = await store.try_acquire_lease(thread.id, "the next worker", ttl_seconds=60)
+    assert lease is not None
+    await store.release_lease(thread.id, lease.lease_token)
+    # The thread's next turn works meanwhile, in a pod of its own beside the one that prunes.
+    [pruning] = pods.pods
+    await edited(pool, thread, "echo b > b.md")
+    [working] = set(pods.pods) - {pruning}
+    go.set()
+    await asyncio.gather(*landing_module._PRUNINGS)
+    # The pruning done, its pod goes, alone: the pod of the turn now running stays.
+    assert (pods.project / "_history" / "pruned").exists()
+    assert set(pods.pods) == {working} and reaped == []
+    await ends(api, pool, thread)
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt"]
+
+
 async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_running(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     lander, other = await a_thread(api, "Lander", master), await a_thread(api, "Draft B", master)
@@ -1679,7 +1721,6 @@ async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_run
 
     begun: list[int] = []
     monkeypatch.setattr(landing_module, "prune_after", another_landing_has_begun)
-    monkeypatch.setattr(loop_artifact_completion, "prune_after", another_landing_has_begun)
     monkeypatch.setattr(pool, "execute_released", watched)
     await ends(api, pool, lander)
     # Fenced, as a landing is: the pod is not asked, and the day is not marked pruned.
@@ -1689,7 +1730,6 @@ async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_run
         await db.execute(text("DELETE FROM workstream_history WHERE id = :id"), {"id": begun[0]})
         await db.commit()
     monkeypatch.setattr(landing_module, "prune_after", prune)
-    monkeypatch.setattr(loop_artifact_completion, "prune_after", prune)
     await edited(pool, lander, "echo again > again.md")
     await ends(api, pool, lander)
     assert asked == ["prune"] and (pods.project / "_history" / "pruned").exists()

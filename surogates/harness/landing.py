@@ -76,6 +76,8 @@ _ROW_EVERY = 5
 _ROW_SHARE = 20
 #: What a landing left running says, on each apply it could not put back, when it is given up.
 _GONE = "The project's history no longer has the versions from before this landing: its files cannot be put back"
+#: The day's prunings under way, kept until done: each outlives the wake whose landing left it.
+_PRUNINGS: set[asyncio.Future] = set()
 #: Each thread's put-back still running, kept until done: a cancel never cuts one short.
 _PUTTING_BACK: dict[str, asyncio.Future] = {}
 #: A cancelled landing's pod going, once its slow put-back is done.
@@ -174,7 +176,7 @@ async def land_turn(
     ``failed`` when the copy could not be kept either.
 
     A landing that completed with a commit leaves the day's pruning to
-    its caller (:func:`prune_after`), which runs it once the turn's report
+    its caller (:func:`prune_later`), which starts it once the turn's report
     is out: ``packs`` is the history's size, for the pruning's bound.
 
     The whole saga runs under the project's lock: one landing at a time per
@@ -312,6 +314,39 @@ async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
         # Taken up at the landing, whose commit step takes it up first.
         logger.warning("Could not take up the helpers' work into %s", owner, exc_info=True)
         return []
+
+
+def prune_later(
+    *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, session_id: str, workstream: Any, packs: int,
+    saga_settings: Any,
+) -> None:
+    """Start the day's pruning after a landing, in no wake: the turn's lease goes without waiting for it.
+
+    A pruning is bounded by the history's size, minutes for a large one,
+    and nothing of the turn is behind it: its end and its report are
+    written.  So the thread's next message starts its next turn while the
+    pruning runs, in a pod of its own.  The pruning holds the project's
+    lock and is fenced as before, so that turn's landing, as any other
+    thread's, waits at the lock until the pruning is done.  The landing's
+    pod, *sandbox_id*, goes once it is, and no other pod of its session.
+    """
+    pruning = asyncio.ensure_future(_pruned_then_gone(
+        session_factory=session_factory, sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, session_id=session_id,
+        workstream=workstream, packs=packs, saga_settings=saga_settings,
+    ))
+    _PRUNINGS.add(pruning)
+    pruning.add_done_callback(_PRUNINGS.discard)
+
+
+async def _pruned_then_gone(*, sandbox_pool: Any, sandbox_id: str, session_id: str, **pruning: Any) -> None:
+    try:
+        await prune_after(sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, **pruning)
+    finally:
+        # Also when the worker stops under it: its pod goes all the same, and that pod alone.
+        try:
+            await asyncio.shield(sandbox_pool.destroy_released(sandbox_id, session_id, alone=True))
+        except BaseException:
+            logger.warning("Could not let pod %s go after its pruning", sandbox_id, exc_info=True)
 
 
 async def prune_after(

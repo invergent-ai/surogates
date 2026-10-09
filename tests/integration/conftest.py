@@ -6,6 +6,7 @@ and provides async engine, session factory, and store fixtures.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import uuid
@@ -88,6 +89,23 @@ async def _flush_rate_limit_keys(redis_client):
     except Exception:
         pass
     yield
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _prunings_end_with_their_test():
+    """Wait for the prunings a test's landings started: each goes on after its turn, in no wake.
+
+    The tests share one loop, so one left under way would run into the
+    next test.
+    """
+    yield
+    from surogates.harness import landing
+
+    pending = list(landing._PRUNINGS)
+    if pending:
+        _, late = await asyncio.wait(pending, timeout=60)
+        for pruning in late:
+            pruning.cancel()
 
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,7 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import _fence, keep_copy, land_turn, prune_after
+from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1345,18 +1345,13 @@ class ArtifactCompletionMixin:
             )
 
         if prunes is not None:
-            # Last, with the turn ended and reported: nothing a person waits for is behind it.
-            try:
-                await prune_after(
-                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, sandbox_id=prunes,
-                    workstream=session.config["workstream_id"], packs=landing.get("packs", 0),
-                    saga_settings=self._saga_settings,
-                )
-            finally:
-                # Also when the wake is cancelled under it: its pod goes all the same.
-                self._spawn_background(
-                    self._destroy_sandbox_quietly(prunes, str(session.id)), name=f"sandbox-teardown-{session.id}",
-                )
+            # Last, with the turn ended and reported, and outside the wake: its lease goes without
+            # waiting, so the thread's next message is not held for a pruning.  Its pod goes after it.
+            prune_later(
+                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, sandbox_id=prunes,
+                session_id=str(session.id), workstream=session.config["workstream_id"],
+                packs=landing.get("packs", 0), saga_settings=self._saga_settings,
+            )
 
     async def _kept_apart(self, session: Any) -> dict[str, Any]:
         """A helper's copy whose hand-back failed, kept apart before its pod goes; what its completion says of it.

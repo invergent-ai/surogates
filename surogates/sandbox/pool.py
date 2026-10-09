@@ -202,19 +202,25 @@ class SandboxPool:
         return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
 
     async def destroy_released(
-        self, sandbox_id: str | None, session_id: str,
+        self, sandbox_id: str | None, session_id: str, *, alone: bool = False,
     ) -> None:
         """Tear down a sandbox already detached by :meth:`release_for_session`.
 
         This is the slow half -- deleting a pod is a round trip to the
         cluster -- and it no longer needs the session lock, because the
         mapping is gone and nothing can resolve to this sandbox any more.
+
+        *alone* destroys that sandbox and nothing else of its session's:
+        for one that outlived its wake, whose session may hold another
+        sandbox, and its lock, by now.
         """
         if sandbox_id is not None:
             await self._backend.destroy(sandbox_id)
             logger.info(
                 "Destroyed sandbox %s for session %s", sandbox_id, session_id,
             )
+        if alone:
+            return
 
         # Optional backend-level reap (label-based), independent of the
         # mapping above.
