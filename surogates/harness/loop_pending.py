@@ -180,3 +180,14 @@ def _goal_turn_waits(events: list[Any]) -> bool:
         elif _gives_a_goal_its_turn(event):
             waits = True
     return waits
+
+
+def _plain_message_unread(events: list[Any], *, is_plain_message: Any) -> bool:
+    """Return True if a message the user wrote themselves, and no command, is in *events* with no model request after it."""
+    unread = False
+    for event in events:
+        if _event_type(event) == EventType.LLM_REQUEST.value:
+            unread = False
+        elif is_plain_message(event):
+            unread = True
+    return unread

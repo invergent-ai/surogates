@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, not_, select, text, true, update, delete, func, or_, tuple_
+from sqlalchemy import and_, case, exists, not_, select, text, true, update, delete, func, or_, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -2469,10 +2469,18 @@ class SessionStore:
                 else_=0,
             ) == 0,
         )
+        # A paused mission's coordinator takes no turn on what arrives: its
+        # chat ends on a helper's report, or a browser's event, with no
+        # worker dead.  It is abandoned only when its log ends inside a turn.
+        waits_on_a_paused_mission = and_(
+            exists().where(MissionRow.session_id == SessionRow.id, MissionRow.status == "paused"),
+            latest_event_type.notin_(_TURN_EVENT_TYPES),
+        )
         latest_event_ended_work = or_(
             latest_event_type.in_(session_end_event_types),
             latest_event_is_an_old_crash,
             latest_llm_response_is_clean,
+            waits_on_a_paused_mission,
         )
         stmt = (
             select(SessionRow)
@@ -2514,6 +2522,13 @@ class SessionStore:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+#: The events a turn under way writes.  A log that ends on one of them, with
+#: no lease held, is a turn its worker left.
+_TURN_EVENT_TYPES = (
+    "user.message", "harness.wake", "llm.request", "llm.thinking", "llm.delta", "llm.response",
+    "tool.call", "tool.result",
+)
 
 #: How long what a session's user asked for is still run once the session
 #: has gone quiet over it: a crashed turn is retried, and a command typed

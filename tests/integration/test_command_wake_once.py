@@ -1084,27 +1084,102 @@ async def test_a_coordinators_command_is_answered_once_and_a_wake_with_nothing_n
     assert conversation[-1] == {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."}
 
 
-async def test_a_paused_missions_coordinator_takes_no_turn_on_a_report_and_reads_it_when_the_mission_is_resumed(workers):
-    chat = await a_coordinator(workers)
-    assert await workers.types(chat, "/mission pause") == "Mission paused."
+async def pause(workers: Workers, chat: UUID, how: str) -> None:
+    """The chat's mission is paused: by its user's command, or with no command, as a budget's end pauses it."""
+    if how == "typed":
+        assert await workers.types(chat, "/mission pause") == "Mission paused."
+        workers.ran.clear()
+    else:
+        async with workers.api.app.state.session_factory() as db:
+            await db.execute(text("UPDATE missions SET status = 'paused' WHERE session_id = :id"), {"id": chat})
+            await db.commit()
 
-    helpers = []
+
+@pytest.mark.parametrize("how", ["typed", "not typed"])
+async def test_a_paused_missions_coordinator_takes_no_turn_and_writes_nothing_on_what_arrives(workers, how):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, how)
+    written = await workers.log(chat)
+    admitted = AsyncMock(return_value=None)
+
+    reports = 0
+    for arrives in [workers.a_helper_reports] * 6 + [workers.its_browser_is_handed_back]:
+        await arrives(chat)
+        reports += arrives == workers.a_helper_reports
+        worker = workers.worker()
+        worker._admit_turn = admitted
+        await worker.wake(chat)
+        # No turn, no word, no hold, and nothing a sweeper would take for a worker's death.
+        assert (workers.requests, workers.ran, admitted.await_count) == ([], [], 0)
+        assert await workers.log(chat) == written + ["worker.complete"] * reports + ["browser.control_returned"] * (reports == 6 and arrives != workers.a_helper_reports)
+        assert not await workers.looks_abandoned(chat)
+        assert not await workers.swept(chat)
+
+
+async def test_a_paused_missions_user_still_gets_a_turn_on_what_they_say(workers):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, "typed")
+
+    await workers.says(chat, "How far along is it?")
+    await workers.wake(chat)
+    [conversation] = workers.requests
+    assert conversation[-1] == {"role": "user", "content": "How far along is it?"}
+
+    # Their last message is no command now, and the mission is paused all the same.
     for _ in range(2):
+        await workers.a_helper_reports(chat)
+        await workers.wake(chat)
+    assert (len(workers.requests), workers.ran, (await workers.missions(chat))[0].status) == (1, [], "paused")
+
+
+async def test_a_resumed_missions_coordinator_reads_the_reports_that_waited_once_and_in_order(workers):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, "typed")
+    helpers = []
+    for _ in range(3):
         helpers.append(await workers.a_helper_reports(chat))
         await workers.wake(chat)
-        # No turn of the model's, the pause answered once, and nothing a sweeper would take for a death.
-        assert (workers.requests, workers.ran) == ([], ["_handle_mission_command"])
-        assert ((await workers.said(chat)).count("Mission paused."), await workers.looks_abandoned(chat)) == (1, False)
-    assert (await workers.missions(chat))[0].status == "paused"
 
     assert await workers.types(chat, "/mission resume") == "Mission resumed."
     # The command queues the coordinator: its turn reads the reports that waited.
     await workers.wake(chat)
 
     [conversation] = workers.requests
-    for helper in helpers:
-        assert {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} in conversation
-    assert workers.ran == ["_handle_mission_command"] * 2
+    assert [message["content"] for message in conversation[-3:]] == [
+        f"[Worker {helper} completed]\nChecked the figures." for helper in helpers
+    ]
+    assert workers.ran == ["_handle_mission_command"]
+
+
+async def test_the_sweeper_spares_a_paused_missions_chat_only_while_no_turn_of_its_is_under_way(workers):
+    chat = await a_coordinator(workers)
+    await workers.a_helper_reports(chat)
+    # A mission in flight whose chat ends on a report nobody woke it for: its wake was lost.
+    assert await workers.looks_abandoned(chat)
+
+    await pause(workers, chat, "not typed")
+    assert not await workers.looks_abandoned(chat)
+
+    # A worker that dies in a turn of a paused mission's chat is a death still.
+    await workers.store.emit_event(chat, EventType.TOOL_CALL, {"tool_call_id": "call_todo", "name": "todo", "arguments": "{}"})
+    assert await workers.looks_abandoned(chat)
+
+
+async def test_a_wake_that_goes_on_to_the_model_behind_a_command_leaves_the_cursor_to_that_turn(workers):
+    chat = await a_coordinator(workers)
+    await workers.types(chat, "/mission status")
+    handed_back = await workers.store.emit_event(
+        chat, EventType.BROWSER_CONTROL_RETURNED, {"session_id": str(chat), "released_by": str(workers.api.user_id)},
+    )
+
+    # The coordinator's turn is cut off before it has asked the model anything.
+    dying = workers.worker()
+    dying._run_loop = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await dying.wake(chat)
+
+    # What woke it is still past the cursor, for the wake that recovers the chat.
+    assert await workers.store.get_harness_cursor(chat) < handed_back
 
 
 async def test_a_helpers_failure_no_turn_has_read_is_not_passed_over_either(workers):

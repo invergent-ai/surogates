@@ -182,6 +182,7 @@ from surogates.harness.loop_pending import (
     _first_unread,
     _goal_turn_waits,
     _left_behind,
+    _plain_message_unread,
     _turn_cut_off,
 )
 from surogates.harness.loop_tool_recovery import (
@@ -365,13 +366,6 @@ def _slash_command_name(content: str | None) -> str | None:
 #: and runs the model's turn on it.  The harness answers every other built-in
 #: command itself, with no model turn.
 _COMMAND_FOR_THE_MODEL = "deep-research"
-
-#: What a paused mission's chat says when something wakes it: no turn of
-#: the model's runs, and a session whose last event is a helper's report
-#: would look to the sweeper like one whose worker died.
-MISSION_PAUSED_NOTE = (
-    "The mission is paused. What arrived is read when it is resumed with /mission resume."
-)
 
 #: Commands that do their work in the conversation itself.  A project's
 #: master works through threads: a goal, a mission or an auto-research run
@@ -824,6 +818,14 @@ class AgentHarness(
         return (
             self._slash_command_block_reason(text, session) is not None
             or _slash_command_name(text) not in (None, _COMMAND_FOR_THE_MODEL)
+        )
+
+    def _is_plain_message(self, session: Session, event: Any) -> bool:
+        """Whether *event* is a message the user wrote themselves that is no command of the harness's."""
+        return (
+            event.type == EventType.USER_MESSAGE.value
+            and not (event.data or {}).get("synthetic")
+            and not self._answers_itself(_user_event_text(event.data), session)
         )
 
     def _waiting_command(self, session: Session, events: list) -> Any | None:
@@ -1424,7 +1426,18 @@ class AgentHarness(
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending and not resumable(session, all_events) and self._waiting_command(session, all_events) is None:
+            command_waits = self._waiting_command(session, all_events) is not None
+            # 4a. A paused mission's coordinator takes no turn on what
+            # arrives: a helper's report waits, unread and past the cursor,
+            # for the turn the resume queues.  Only its user's own doing is
+            # work meanwhile, a command or a message.  Decided here, before
+            # anything is written or held for a turn.
+            if not command_waits and await self._mission_is_paused(session) and not _plain_message_unread(
+                all_events, is_plain_message=lambda event: self._is_plain_message(session, event),
+            ):
+                logger.debug("Session %s: its mission is paused, nothing of its user's waits", session_id)
+                return
+            if not pending and not resumable(session, all_events) and not command_waits:
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -1617,14 +1630,6 @@ class AgentHarness(
                         agent_id=session.agent_id, session_id=session.id,
                     )
                 if is_new or at_rest:
-                    return
-                # A mission its user paused: its coordinator takes no turn
-                # on what arrives meanwhile.  A helper's report stays unread
-                # and past the cursor, for the turn the resume queues.
-                if await self._mission_is_paused(session):
-                    await self._emit_loop_response(
-                        session, lease, MISSION_PAUSED_NOTE, user_content=last_user_content
-                    )
                     return
 
             # 10b. /deep-research <topic> -- rewrite the user message to
@@ -4900,11 +4905,7 @@ class AgentHarness(
         # rest over it.
         unread = _first_unread(
             events, goal_in_flight=goal_waits,
-            is_plain_message=lambda event: (
-                event.type == EventType.USER_MESSAGE.value
-                and not (event.data or {}).get("synthetic")
-                and not self._answers_itself(_user_event_text(event.data), session)
-            ),
+            is_plain_message=lambda event: self._is_plain_message(session, event),
         )
         unread_message = unread is not None and any(
             event.id == unread and event.type == EventType.USER_MESSAGE.value for event in events
