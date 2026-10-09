@@ -1306,6 +1306,24 @@ async def test_a_paused_missions_user_still_gets_a_turn_on_what_they_say(workers
     assert (len(workers.requests), workers.ran, (await workers.missions(chat))[0].status) == (1, [], "paused")
 
 
+async def test_a_paused_missions_turn_that_its_workers_death_cut_off_is_resumed_once(workers):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, "typed")
+    await a_turn_cut_off(workers, chat, at="in the call", command=None)
+
+    recovered = []
+    for _ in range(4):
+        recovered.append(await workers.swept(chat))
+        await workers.wake(chat)
+
+    # The turn on its user's own message is resumed by the first recovery; the pause holds the rest.
+    assert (recovered, len(workers.requests), (await workers.said(chat))[-1]) == ([True, False, False, False], 1, "Noted.")
+    assert (await workers.missions(chat))[0].status == "paused"
+    await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+    assert (len(workers.requests), await workers.looks_abandoned(chat)) == (1, False)
+
+
 async def test_a_resumed_missions_coordinator_reads_the_reports_that_waited_once_and_in_order(workers):
     chat = await a_coordinator(workers)
     await pause(workers, chat, "typed")

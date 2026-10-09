@@ -1448,9 +1448,10 @@ class AgentHarness(
             # 4a. A paused mission's coordinator takes no turn on what
             # arrives: a helper's report waits, unread and past the cursor,
             # for the turn the resume queues.  Only its user's own doing is
-            # work meanwhile, a command or a message.  Decided here, before
-            # anything is written or held for a turn.
-            if not command_waits and await self._mission_is_paused(session) and not _plain_message_unread(
+            # work meanwhile: a command, a message, or the turn on one that
+            # a dead worker cut off.  Decided here, before anything is
+            # written or held for a turn.
+            if not command_waits and not _turn_cut_off(all_events) and await self._mission_is_paused(session) and not _plain_message_unread(
                 all_events, is_plain_message=lambda event: self._is_plain_message(session, event),
             ):
                 logger.debug("Session %s: its mission is paused, nothing of its user's waits", session_id)
