@@ -30,14 +30,16 @@ from surogates.browser.control import paused_by_user_result
 from surogates.browser.registry import BrowserEntry
 from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
+from surogates.devices.binding import device_of
 from surogates.devices.browser import tell_pane
+from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.loop_messages import maybe_inject_browser_pause
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_expanded_message
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.session.events import EventType
-from surogates.session.store import CONTROL_LOCK_WAIT_MS, SessionStore
+from surogates.session.store import CONTROL_LOCK_WAIT_MS, SessionStore, browser_control_lock
 from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
@@ -368,16 +370,18 @@ async def test_a_plain_release_posted_after_a_hand_back_leaves_its_turn_to_come_
     # A second window of the chat, loaded while the browser was held: its Hand back, pressed once the
     # first window had handed it back, is answered by the desktop that the browser was released.
     alone, with_a_take_over = await computer.idle(), await computer.idle()
-    for chat in (alone, with_a_take_over):
-        await computer.control(chat, "acquire")
-        assert await computer.hands_back(chat) == GOES_ON
 
     try:
+        await computer.control(alone, "acquire")
+        assert await computer.hands_back(alone) == GOES_ON
         # Its pane posts the release alone: passed over, and the turn is still the agent's.
         assert await computer.control(alone, "release") == FOR_THE_PANE
         assert await computer.work(alone) == ["session.resume"]
         assert await computer.hands_back(alone) == GOES_ON
+        await computer.store.emit_event(alone, EventType.LLM_REQUEST, {})
         # Posted behind a take-over nobody made, as the pane used to, the turn was taken back for it.
+        await computer.control(with_a_take_over, "acquire")
+        assert await computer.hands_back(with_a_take_over) == GOES_ON
         await computer.control(with_a_take_over, "acquire")
         assert await computer.control(with_a_take_over, "release") == FOR_THE_PANE
         assert await computer.work(with_a_take_over) == []
@@ -665,10 +669,16 @@ async def test_a_take_over_gives_no_turn_whatever_its_telling_is_asked(computer)
     assert (await computer.resumed(chat), (await computer.store.get_session(chat)).status) == ([], "completed")
 
 
-async def test_a_telling_the_database_refuses_for_another_reason_is_not_answered_as_busy(computer):
-    # No such chat: the event has no session to belong to. Busy is said of a lock that was waited for, alone.
+async def test_a_telling_the_database_refuses_for_another_reason_is_not_answered_as_busy(computer, monkeypatch):
+    chat = await computer.idle()
+
+    # Busy is said of a lock that was waited for, alone: any other refusal of the database's is its own.
+    async def refused(self, db, event) -> None:
+        await db.execute(text("INSERT INTO events (session_id, type, data) VALUES (:nobody, 'x', '{}')"), {"nobody": uuid4()})
+
+    monkeypatch.setattr(SessionStore, "_write_event", refused)
     with pytest.raises(IntegrityError):
-        await computer.store.tell_browser_control(uuid4(), EventType.BROWSER_CONTROL_GRANTED, {"computer": True})
+        await computer.store.tell_browser_control(chat, EventType.BROWSER_CONTROL_GRANTED, {"computer": True})
 
 
 async def test_a_hand_back_whose_turn_cannot_be_written_is_not_told_and_can_be_made_again(computer, monkeypatch):
@@ -786,10 +796,17 @@ async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_give_i
 BUSY = {"detail": "The chat is being told of its browser by another request. Post it again."}
 
 
+# What a telling waits for, held from outside: the lock of the chat's computer's browser, or the chat's row.
 HELD_FROM_OUTSIDE = {
-    "its lock": select(func.pg_advisory_xact_lock(func.hashtext(text("'browser-control:' || :chat")))),
+    "its lock": select(func.pg_advisory_xact_lock(func.hashtext(text(":lock")))),
     "its row": text("SELECT 1 FROM sessions WHERE id = CAST(:chat AS uuid) FOR UPDATE"),
 }
+
+
+async def hold_from_outside(db, held: str, store: SessionStore, chat: UUID) -> None:
+    session = await store.get_session(chat)
+    lock = browser_control_lock(session.org_id, session.user_id, session.agent_id, device_of(session.config))
+    await db.execute(HELD_FROM_OUTSIDE[held], {"lock": lock} if held == "its lock" else {"chat": str(chat)})
 
 
 @pytest.mark.parametrize("held", HELD_FROM_OUTSIDE)
@@ -810,7 +827,7 @@ async def test_posts_kept_waiting_for_one_chats_lock_are_answered_busy_and_leave
             # Whatever holds the chat's lock, or the row a telling writes to under it, holds it for
             # longer than a telling waits, and then lets it go: a post left waiting would then be made.
             async with session_factory() as holder:
-                await holder.execute(HELD_FROM_OUTSIDE[held], {"chat": str(chat)})
+                await hold_from_outside(holder, held, narrow.store, chat)
                 taken.set()
                 await asyncio.sleep(longest + 1.5)
                 await holder.rollback()
@@ -1022,6 +1039,104 @@ async def test_a_take_over_wakes_and_sweeps_none_of_the_agents_other_chats_on_th
         assert not await computer.queued(chat)
     # The others are told nothing of it: the take-over is told to the chat it was made from.
     assert {chat: await computer.log(chat) for chat in (other, never_run)} == before
+
+
+async def test_a_take_over_from_another_chat_takes_back_the_turn_of_a_hand_back_no_request_has_read(computer):
+    handed_back, taken_from = await computer.idle(), await computer.idle()
+    await computer.control(handed_back, "acquire")
+    assert await computer.hands_back(handed_back) == GOES_ON
+    await computer.unqueue(handed_back)
+
+    # The agent's browser on the computer is one for all its chats: taken over from another, it is held.
+    assert (await computer.control(taken_from, "acquire"))["outcome"] == "granted"
+    await computer.left(handed_back)
+
+    try:
+        # The chat whose hand back's turn was still to come is told, naming where it was taken over
+        # from: its agent is not told the browser tools work again while its user has the browser.
+        [*_, told] = await computer.store.get_events(handed_back, types=[EventType.BROWSER_CONTROL_GRANTED])
+        assert told.data == {
+            "session_id": str(handed_back), "owner_user_id": str(computer.user_id), "computer": True,
+            "taken_over_from": str(taken_from),
+        }
+        assert (await computer.log(handed_back))[-3:] == ["browser.control_returned", "session.resume", "browser.control_granted"]
+        assert unread_reports(await computer.store.get_events(handed_back)) == []
+        assert await computer.work(handed_back) == []
+        assert await computer.orphans() == set()
+        # Handed back from the chat it was taken over from: that chat's agent goes on, and this one
+        # is told for its pane, as any chat that still said its user held the browser.
+        assert await computer.hands_back(taken_from) == GOES_ON
+        assert computer.wakes == [str(handed_back), str(taken_from)]
+        assert await computer.handed_back(handed_back) == {
+            "session_id": str(handed_back), "released_by": str(computer.user_id), "computer": True,
+            "handed_back_from": str(taken_from),
+        }
+        assert await computer.work(handed_back) == []
+    finally:
+        await computer.unqueue(handed_back, taken_from)
+
+
+async def test_a_take_over_is_told_to_no_other_chat_but_the_users_own_there_with_a_hand_backs_turn_still_to_come(
+    computer, session_factory,
+):
+    another_user, _ = await add_user(session_factory, computer.org_id)
+    idle, held = await computer.idle(), await computer.told_taken_over()
+    # Chats whose hand back gave a turn no request has read: this one's own, then those that are not
+    # this user's with the agent on this computer; and one whose turn was read, and one stopped.
+    theirs = {
+        "another computer's": await computer.idle(device_id=uuid4()),
+        "another agent's": await computer.idle(agent_id=f"another-agent-{uuid4()}"),
+        "another user's": await computer.idle(user_id=another_user),
+    }
+    read, mine = await computer.idle(), await computer.idle()
+    for chat in (*theirs.values(), read, mine):
+        await computer.store.emit_event(chat, EventType.BROWSER_CONTROL_GRANTED, {"computer": True})
+        told = await computer.store.tell_browser_control(
+            chat, EventType.BROWSER_CONTROL_RETURNED, {"session_id": str(chat), "computer": True}, gives_a_turn=True,
+        )
+        assert told.turn
+    await computer.store.emit_event(read, EventType.LLM_REQUEST, {})
+    before = {chat: await computer.log(chat) for chat in (idle, held, read, mine, *theirs.values())}
+    taken_from = await computer.idle()
+
+    # A worker's token speaks for its own session: its take-over is told to that one alone.
+    await computer.control(taken_from, "acquire", token_of=taken_from)
+    assert {chat: await computer.log(chat) for chat in before} == before
+    await computer.control(taken_from, "release", token_of=taken_from)
+
+    await computer.control(taken_from, "acquire")
+    assert await computer.log(mine) == [*before.pop(mine), "browser.control_granted"]
+    assert {chat: await computer.log(chat) for chat in before} == before
+
+
+async def test_a_take_over_posted_while_another_chats_hand_back_is_being_told_waits_and_takes_its_turn_back(
+    computer, monkeypatch,
+):
+    handed_back, taken_from = await computer.idle(), await computer.idle()
+    await computer.control(handed_back, "acquire")
+    # The hand back's telling is slow to be written: its user is already in another chat, taking over.
+    write = SessionStore._write_event
+
+    async def slow_to_tell(self, db, event) -> None:
+        if event.event_type is EventType.BROWSER_CONTROL_RETURNED:
+            await asyncio.sleep(0.4)
+        await write(self, db, event)
+
+    monkeypatch.setattr(SessionStore, "_write_event", slow_to_tell)
+
+    async def a_moment_later() -> dict:
+        await asyncio.sleep(0.1)
+        return await computer.control(taken_from, "acquire")
+
+    try:
+        handed, taken = await asyncio.gather(computer.hands_back(handed_back), a_moment_later())
+        assert (handed, taken["outcome"]) == (GOES_ON, "granted")
+        # The tellings of one computer's browser are taken in turn, whichever chat each is posted to:
+        # the take-over saw the hand back's turn, and took it back.
+        assert (await computer.log(handed_back))[-3:] == ["browser.control_returned", "session.resume", "browser.control_granted"]
+        assert await computer.work(handed_back) == []
+    finally:
+        await computer.unqueue(handed_back, taken_from)
 
 
 async def test_a_turn_while_the_computers_browser_is_held_is_not_told_that_the_clouds_is(computer):
@@ -2177,7 +2292,7 @@ async def test_the_hold_taken_for_a_hand_backs_turn_is_given_back_where_the_tell
     metered(asking.api, BOTH_PLANES, ops := Ops())
 
     async with session_factory() as holder:
-        await holder.execute(HELD_FROM_OUTSIDE["its lock"], {"chat": str(chat)})
+        await hold_from_outside(holder, "its lock", asking.store, chat)
         answer = await asking.control(chat, "release", asking.window, handed_back=True)
         await holder.rollback()
 

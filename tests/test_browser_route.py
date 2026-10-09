@@ -98,7 +98,8 @@ class StubSessions:
         self.told: list[tuple[str, str, dict]] = []
 
     async def tell_browser_control(
-        self, session_id: UUID, event_type: Any, data: dict, *, gives_a_turn: bool = False,
+        self, session_id: UUID, event_type: Any, data: dict, *,
+        gives_a_turn: bool = False, to_its_users_other_chats: bool = False,
     ) -> BrowserControlTold:
         """As the store tells it: a take-over only while none stands, a hand back only while one does,
         and with a hand back that gives a turn, where the chat can take one, the chat made active and

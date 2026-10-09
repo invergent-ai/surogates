@@ -27,6 +27,10 @@ BROWSER_HAND_BACK = "browser_hand_back"
 # The agent's browser there is one for all its chats, so a hand back made from one is told to each
 # that still said its user held it.  It never resumes the chat it is told to.
 HANDED_BACK_FROM = "handed_back_from"
+# In a ``browser.control_granted`` of such a chat, ``taken_over_from`` names the chat the browser
+# was taken over from, when it is not this one.  A chat whose hand back gave its agent a turn no
+# request has read yet is told so: the browser is held again, and that turn is off.
+TAKEN_OVER_FROM = "taken_over_from"
 
 
 def _key(session_id: str) -> str:

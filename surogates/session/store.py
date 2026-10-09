@@ -23,7 +23,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from surogates.browser.control import BROWSER_HAND_BACK, RESUMES
+from surogates.browser.control import BROWSER_HAND_BACK, RESUMES, TAKEN_OVER_FROM
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -146,6 +146,44 @@ _A_HAND_BACKS_TURN_STANDS = text(
         ORDER BY e.id DESC LIMIT 1
     ) last ON true
     WHERE s.id = :id
+    """
+)
+
+
+def browser_control_lock(org_id: Any, user_id: Any, agent_id: Any, device_id: Any) -> str:
+    """The name of the lock the tellings of one browser are taken in turn
+    under: an agent's browser on one computer of a user's, which is one for
+    all that user's chats with the agent there.  So a take-over told from
+    one chat is taken in turn with a hand back being told to another, and
+    sees what it gave."""
+    return f"browser-control:{org_id}:{user_id}:{agent_id}:{device_id}"
+
+
+#: A user's other chats with an agent on one computer whose last word of the
+#: browser's control is a hand back that gave a turn no request of the
+#: model's has read yet.
+_OTHER_CHATS_WITH_A_HAND_BACKS_TURN_TO_COME = text(
+    """
+    SELECT s.id
+    FROM sessions s
+    JOIN LATERAL (
+        SELECT e.id, e.type, e.data FROM events e
+        WHERE e.session_id = s.id AND e.type IN ('browser.control_granted', 'browser.control_returned')
+        ORDER BY e.id DESC LIMIT 1
+    ) last ON true
+    WHERE s.org_id = :org_id
+      AND s.user_id IS NOT DISTINCT FROM :user_id
+      AND s.agent_id = :agent_id
+      AND s.config->'execution'->>'device_id' = :device_id
+      AND s.id <> :id
+      AND s.status <> 'archived'
+      AND last.type = 'browser.control_returned'
+      AND last.data->>'resumes' = 'true'
+      AND NOT EXISTS (
+          SELECT 1 FROM events r
+          WHERE r.session_id = s.id AND r.type = 'llm.request' AND r.id > last.id
+      )
+    ORDER BY s.id
     """
 )
 
@@ -2700,14 +2738,16 @@ class SessionStore:
             return list((await db.execute(stmt)).scalars())
 
     async def tell_browser_control(
-        self, session_id: UUID, event_type: EventType, data: dict, *, gives_a_turn: bool = False,
+        self, session_id: UUID, event_type: EventType, data: dict, *,
+        gives_a_turn: bool = False, to_its_users_other_chats: bool = False,
     ) -> BrowserControlTold:
         """Tell a chat on its user's computer of a take-over, or of a hand back, unless it was told already.
 
         A take-over is told only while none stands, and a hand back only
         while one does: the chat's last control event says which.  Two posts
         at once, as from a chat open in two windows, tell it one: they are
-        taken in turn under a Postgres advisory lock.  The lock, the reading
+        taken in turn under a Postgres advisory lock, the one of the browser
+        they are of (``browser_control_lock``).  The lock, the reading
         and the writing are one transaction on one connection: a holder that
         asked the pool for a second would leave none once as many posts came
         together as the pool is wide.
@@ -2720,6 +2760,15 @@ class SessionStore:
         or that failed, is told the hand back and given nothing.  So the log
         never says of a turn that it was given when it was not, nor the
         reverse.
+
+        A take-over told *to_its_users_other_chats* is told, in that same
+        transaction, to each other chat of theirs with the agent on the
+        computer whose hand back gave a turn no request has read yet,
+        naming the chat it was made from (``taken_over_from``).  The browser
+        is one for all those chats: such a turn would begin by reading that
+        the browser tools work again, with its user holding the browser.
+        Told so, it is off, as when the browser is taken over again from
+        that chat itself.
 
         A hand back with nothing to tell says, read under the same lock,
         whether the hand back that stands gave a turn that is still to come
@@ -2735,7 +2784,7 @@ class SessionStore:
         written: list[_EventWrite] = []
         try:
             async with self._sf() as db:
-                await self._lock_browser_control(db, session_id)
+                whose = await self._lock_browser_control(db, session_id)
                 last = (await db.execute(
                     select(EventRow.type)
                     .where(
@@ -2758,12 +2807,20 @@ class SessionStore:
                     .where(SessionRow.id == session_id, SessionRow.status.in_(("active", "completed")))
                     .values(status="active", updated_at=func.now())
                 )).rowcount == 1
-                telling = [(event_type, {**data, RESUMES: True} if resumes else data)]
+                telling = [(session_id, event_type, {**data, RESUMES: True} if resumes else data)]
                 if resumes:
-                    telling.append((EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK}))
-                # Neither is for an inbox, so making them ready here asks nothing of Redis under the lock.
-                for kind, said in telling:
-                    written.append(await self._ready_event(session_id, kind, said))
+                    telling.append((session_id, EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK}))
+                if to_its_users_other_chats and not handing_back:
+                    others = (await db.execute(
+                        _OTHER_CHATS_WITH_A_HAND_BACKS_TURN_TO_COME, {**whose._mapping, "id": session_id},
+                    )).scalars()
+                    telling += [
+                        (other, event_type, {**data, "session_id": str(other), TAKEN_OVER_FROM: str(session_id)})
+                        for other in others
+                    ]
+                # None is for an inbox, so making them ready here asks nothing of Redis under the lock.
+                for chat, kind, said in telling:
+                    written.append(await self._ready_event(chat, kind, said))
                     await self._write_event(db, written[-1])
                 await db.commit()
         except DBAPIError as error:
@@ -2774,12 +2831,24 @@ class SessionStore:
             await self._announce_event(event)
         return BrowserControlTold(told=True, turn=resumes)
 
-    async def _lock_browser_control(self, db: AsyncSession, session_id: UUID) -> None:
-        """Take a chat's browser-control lock for *db*'s transaction, waiting
-        no longer than ``CONTROL_LOCK_WAIT_MS`` for it or for anything the
-        transaction locks after it."""
+    async def _lock_browser_control(self, db: AsyncSession, session_id: UUID) -> Any:
+        """Take, for *db*'s transaction, the lock of the browser a chat's
+        take-overs and hand backs are of, waiting no longer than
+        ``CONTROL_LOCK_WAIT_MS`` for it or for anything the transaction
+        locks after it.  Returns whose browser it is: the chat's
+        organisation, user, agent and computer.
+        """
+        whose = (await db.execute(
+            select(
+                SessionRow.org_id, SessionRow.user_id, SessionRow.agent_id,
+                SessionRow.config["execution"]["device_id"].astext.label("device_id"),
+            ).where(SessionRow.id == session_id)
+        )).one_or_none()
+        if whose is None:
+            raise SessionNotFoundError(f"session {session_id} not found")
         await db.execute(text(f"SET LOCAL lock_timeout = {CONTROL_LOCK_WAIT_MS}"))
-        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(browser_control_lock(*whose)))))
+        return whose
 
     async def hand_backs_turn_stands(self, session_id: UUID, *, behind_tellings: bool = True) -> bool:
         """Whether a chat's last hand back gave its agent a turn that is still to come or under way.

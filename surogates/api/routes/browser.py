@@ -479,7 +479,13 @@ async def post_browser_control(
         sid = str(chat.id)
         if body.action == "acquire":
             taken_over = {"session_id": sid, "owner_user_id": owner_user_id, "computer": True}
-            if not (await _tell(store, chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over)).told:
+            # Told too to their other chats there that a hand back had just given a turn: the browser
+            # is one for all of them.  A token for one session tells that one alone.
+            telling = await _tell(
+                store, chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over,
+                to_its_users_other_chats=tenant.session_scope_id is None,
+            )
+            if not telling.told:
                 return {"outcome": "refreshed", "owner_user_id": owner_user_id}
             return {"outcome": "granted", "owner_user_id": owner_user_id}
         # A release answers whether the agent goes on by itself: only at a hand back its user
