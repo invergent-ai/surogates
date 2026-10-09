@@ -94,6 +94,28 @@ They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` nam
 
     SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts
 
+## The acceptance VMs
+
+`test/acceptance.test.ts` installs the release this package builds on Ubuntu 24.04 and 26.04,
+each from its cloud image booted under QEMU, with the install script and from a server on this
+computer, as a person installs it; starts the app, updates it, cuts the power, rolls it back and
+removes it. It is behind `SUROGATE_ACCEPTANCE_TESTS=1`, needs `/dev/kvm`, QEMU, `qemu-img`,
+`ssh` and `ssh-keygen`, a build, and the Ubuntu archive for the VMs' own apt, and takes about
+40 minutes:
+
+    npm run build
+    SUROGATE_ACCEPTANCE_TESTS=1 SUROGATE_ACCEPTANCE_IMAGES=~/.cache/surogate-scratch/cloud-images npx vitest run test/acceptance.test.ts
+
+The two cloud images are expected in the folder that `SUROGATE_ACCEPTANCE_IMAGES` names, as
+`noble.img` and `resolute.img`: on the computer the desktop is built on, that folder is
+`~/.cache/surogate-scratch/cloud-images`, on its disk and not in its temporary folder, which a
+restart empties. The test downloads neither, and says so where one is not there. It only reads
+them: each VM's disk is a file of its own over the image. These two lines, in that folder, bring
+them back:
+
+    curl -fLo noble.img https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+    curl -fLo resolute.img https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img
+
 A release is a tarball (`scripts/package.sh`), which is read where no key is
 (`release/publish.sh describe`), its manifest written and signed with the release key
 (`release/publish.sh sign`, which opens no tarball), and both on the release bucket under `desktop/` with the install script

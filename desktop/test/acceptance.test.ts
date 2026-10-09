@@ -14,7 +14,7 @@
 
 import { type ChildProcess, type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -159,7 +159,7 @@ describe("the acceptance VMs' probe", () => {
 });
 
 describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance VMs", { timeout: 1_200_000 }, () => {
-  let dir: string;
+  let dir = "";
   let server: ChildProcess;
   let port: string;
   // How many files the update's release holds.
@@ -191,6 +191,11 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
   };
 
   beforeAll(async () => {
+    // The two cloud images are found where the run says, and never downloaded here: said before
+    // anything is built, where one is not there.
+    for (const image of ["noble.img", "resolute.img"]) {
+      if (!existsSync(join(IMAGES, image))) throw new Error(`SUROGATE_ACCEPTANCE_IMAGES names no folder that holds ${image}: "The acceptance VMs" in the README says where the images are kept, and the two lines that bring them back`);
+    }
     dir = mkdtempSync(join(tmpdir(), "acceptance-"));
     const www = join(dir, "www", "desktop");
     // The install script that trusts the test's own key, and publish.sh beside it, as the two are
@@ -245,7 +250,8 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
   afterAll(() => {
     for (const qemu of running) qemu.kill("SIGKILL");
     server?.kill();
-    rmSync(dir, { recursive: true, force: true });
+    // No folder was made where an image was not there.
+    if (dir !== "") rmSync(dir, { recursive: true, force: true });
   });
 
   // A clean VM of *image*, booted from a disk of its own, with or without nested virtualization, its
