@@ -1464,7 +1464,19 @@ async def test_a_landing_whose_commit_step_failed_keeps_the_turn_on_its_branch(a
     assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
 
 
-async def test_a_landing_whose_commit_step_failed_keeps_nothing_once_its_lock_is_lost(api, monkeypatch, tmp_path):
+async def locked(api, thread) -> bool:
+    """Whether any connection holds *thread*'s project's lock now."""
+    async with api.app.state.session_factory() as db:
+        return bool((await db.execute(text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+            "AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
+        ), {"key": f"workstream:{thread.config['workstream_id']}"})).scalar())
+
+
+@pytest.mark.parametrize("keep", ["is made", "fails too"])
+async def test_a_landing_whose_commit_step_failed_and_whose_lock_is_lost_keeps_its_turn_under_the_lock_taken_again(
+    api, monkeypatch, tmp_path, keep,
+):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     pods = stored(api, thread, tmp_path)
@@ -1477,17 +1489,34 @@ async def test_a_landing_whose_commit_step_failed_keeps_nothing_once_its_lock_is
             await lose_the_lock(api, thread)  # a failover, unseen: the project is another holder's now
             raise landing_module.LandingStepError("git add failed: Input/output error")
         if action == "keep":
-            keeps.append(owner)
+            # A keep writes the history's refs: the pod is asked only by who holds the project's lock.
+            keeps.append(await locked(api, thread))
+            if keep == "fails too":
+                raise landing_module.LandingStepError("git push failed: Input/output error")
         return await call(sandbox_pool, owner, action, **arguments)
 
     with monkeypatch.context() as patch:
         patch.setattr(landing_module, "_call", the_commit_fails_and_the_lock_goes)
         await ends(api, pool, thread)
-    # A keep writes the history's refs: without the lock the pod is not asked, and the turn's end says so.
-    assert keeps == [] and not (pods.project / "_history" / "packed-refs").exists()
-    assert [done["saved"] for done in await turn_ends(api, thread)] == [False]
+    # Not under the lock that was lost: once, under the lock taken afresh.
+    assert keeps == [True]
     [report] = await reports(api, master)
-    assert (report["landing"], report.get("saved")) == ("compensated", None)
+    said = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    assert "\nNot landed, and the project's files are as they were: " in said and pods.real_names() == ["Report.docx", "notes.txt"]
+    if keep == "is made":
+        # The turn is on its branch, its end and its report say so, and the thread's next turn lands it.
+        assert git(pods.project / "_history", "show", f"refs/heads/threads/{thread.id}:a.md") == "a"
+        assert [done["saved"] for done in await turn_ends(api, thread)] == [True]
+        assert (report["landing"], report["saved"]) == ("compensated", True)
+        assert said.endswith("\nThe thread's work is kept, and lands with its next turn")
+        await ends(api, SandboxPool(pods), thread)
+        assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    else:
+        # Saved is said only of a keep that was made.
+        assert not (pods.project / "_history" / "packed-refs").exists()
+        assert [done["saved"] for done in await turn_ends(api, thread)] == [False]
+        assert (report["landing"], report.get("saved")) == ("compensated", None)
+        assert "kept" not in said
 
 
 @pytest.mark.parametrize("landing", ["rolled back", "of a turn that changed nothing", "completed"])

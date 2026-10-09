@@ -173,7 +173,10 @@ async def land_turn(
     lands nothing and is no saga.  The turn's copy is then kept on its
     branch, as a failed turn's is, to land with the thread's next turn: its
     state is ``compensated``, the project's files being as they were, or
-    ``failed`` when the copy could not be kept either.
+    ``failed`` when the copy could not be kept either.  So is the copy of
+    a landing whose commit step failed: under the landing's lock, or, when
+    that keep was not made, the lock lost among the causes, under one taken
+    afresh.  ``saved`` is true only of a keep that was made.
 
     A landing that completed with a commit leaves the day's pruning to
     its caller (:func:`prune_later`), which starts it once the turn's report
@@ -223,6 +226,13 @@ async def land_turn(
         else:
             # The landing is done; only the lock's transaction did not end cleanly.
             logger.warning("The project's lock for %s ended with an error", session.id, exc_info=True)
+    if outcome.pop("unkept", False):
+        # Its commit step never put the turn in the history, and the keep under the landing's own lock
+        # was not made: that lock was lost, or the pod refused.  Once more under a lock taken afresh,
+        # as a landing that could not start is kept, or the turn's work goes with its pod.
+        kept = await _kept(session_factory, sandbox_pool, session, saga_settings, waited)
+        if kept is not None:
+            outcome.update(saved=True, not_taken=kept.get("not_taken", []))
     known = {f["ref"] for f in outcome["files"]}
     outcome["files"] += [
         # A landing of this thread a killed worker had pushed: its files landed, and the report says so.
@@ -545,7 +555,9 @@ async def _land(
                 # What the commit step would have named: the pod's list goes with the pod.
                 outcome.update(saved=True, not_taken=kept.get("not_taken", []))
             except Exception:
-                logger.warning("Could not keep the copy of %s", session.id, exc_info=True)
+                logger.warning("Could not keep the copy of %s under its landing's lock", session.id, exc_info=True)
+                # Its caller's, once this lock is let go: under one taken afresh, which a lock lost here is no bar to.
+                outcome["unkept"] = True
     applied = {c["path"]: c for c in outcome["landed"]}
     reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
     paths = sorted({c["path"] for c in changes} | set(reasons))
