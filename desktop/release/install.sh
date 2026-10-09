@@ -1048,10 +1048,6 @@ install_all() {
   say "open Surogate from your applications, or run surogate"
 }
 
-# Whether $1 is an http or https URL with no white space in it, read byte for byte in no locale of
-# its caller's: what is a base is then the same for whoever runs the script, and for root's part
-# of it. In most locales, more characters than ASCII's six are white space, and bytes that are no
-# characters match nothing.
 # Whether base $1 names its server alone, with no user and no password before it (user:password@):
 # asked of the part between the two slashes and the next slash, question mark or hash.
 nameless() {
@@ -1059,9 +1055,16 @@ nameless() {
   [[ "${server%%[/?#]*}" != *@* ]]
 }
 
+# Whether $1 is an http or https URL with no white space in it, read byte for byte in no locale of
+# its caller's: what is a base is then the same for whoever runs the script, and for root's part
+# of it. In most locales, more characters than ASCII's six are white space, and bytes that are no
+# characters match nothing.
+# Its server begins right behind the two slashes: curl reads a third slash there as a slip and
+# takes what follows for the server, a user and a password before it too, where nameless above
+# would find no server at all, and so no user.
 http_url() {
   local LC_ALL=C
-  [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
+  [[ "$1" =~ ^https?://[^/?#[:space:]][^[:space:]]*$ ]]
 }
 
 # Whether $1 is a version, x.y.z in the ten digits, read in no locale of its caller's as a base is:

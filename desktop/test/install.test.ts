@@ -2051,6 +2051,16 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
         });
       }
     }
+    // A base names its server right behind its two slashes. With a third slash there, the script
+    // would find no server and so no user, and curl, which takes the third for a slip, would send
+    // the login: it is no URL here, as it is none to the app. Nor is one with no server at all.
+    // The refusal says nothing of what was typed, and comes before sudo is asked, whose log keeps
+    // its command line.
+    for (const named of ["http:///user:secret@127.0.0.1:9", `http:///user:secret@${base.slice("http://".length)}`, "https:////user:secret@surogate.example", "http://", "https://?user:secret@surogate.example", "http://#user:secret@surogate.example"]) {
+      for (const started of [as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base '${named}'`), root(`/opt/surogate-test/install.sh --base '${named}'`)]) {
+        expect(started, named).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
+      }
+    }
     // An at sign after the server's name is no user's: such a base is read on, to this computer's own refusal or its install.
     expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
     expect(root("cp /etc/os-release /root/os-release").status).toBe(0);
@@ -2075,7 +2085,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     // computer, which it does not support, a base it takes gets as far as that refusal.
     for (const locale of ["C", "C.UTF-8", "de_DE.UTF-8"]) {
       const based = (url: string) => as("tester", `curl -fsSL ${base}/desktop/install.sh | LC_ALL=${locale} bash -s -- --base ${url}`);
-      for (const url of ["$'http://b\\303\\274cher.example'", "$'http://surogate.example/\\343\\200\\200'", "$'http://surogate.example/\\377\\376'"]) {
+      for (const url of ["$'http://b\\303\\274cher.example'", "$'http://surogate.example/\\343\\200\\200'", "$'http://surogate.example/\\377\\376'", "'http://surogate.example/a@b'", "'http://surogate.example?to=a@b'", "'http://surogate.example#a@b'"]) {
         expect(based(url), `${locale} ${url}`).toMatchObject({ status: 1, stdout: "", stderr: unsupported });
       }
       for (const url of ["'http://surogate.example/a b'", "$'http://surogate.example/a\\tb'", "$'http://surogate.example\\n'"]) {
@@ -2802,6 +2812,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ["an empty record", `: >${record}`],
       ["a record of more than 4096 bytes", padded],
     ] as const) refused(what, made, noServer);
+    // Nor from one with a slash more before its server, which curl would read a login from.
+    refused("a base with a third slash before a login", `echo '{"base":"${base.replace("http://", "http:///user:secret@")}","channel":"stable"}' >${record}`,
+      `${record} names no server to roll back from: run Surogate Desktop's install script again`);
     // Nor from a base with a user or a password in it, which no install writes: said as what it is.
     refused("a base with a password in it", `echo '{"base":"${base.replace("http://", "http://user:secret@")}","channel":"stable"}' >${record}`,
       `${record} names a base with a user or a password in it: run Surogate Desktop's install script again, with a base that names its server alone`);
