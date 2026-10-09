@@ -50,7 +50,8 @@ class CallConfig:
         pron = cfg.get("pronunciations")
         pron = ({k: v.strip() for k, v in pron.items() if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()}
                 if isinstance(pron, dict) else {})  # a non-text value would be spoken as "None" or "5"
-        language = cfg["language"] if isinstance(cfg.get("language"), str) and LANGUAGE.match(cfg["language"]) else d.language
+        language = (cfg["language"].split("-")[0]  # "pt-BR" speaks pt: plugins and text rules take plain codes
+                    if isinstance(cfg.get("language"), str) and LANGUAGE.match(cfg["language"]) else d.language)
         return cls(language=language, lines=lines_from_routing(language, cfg),
                    hearing=Slot.from_routing(cfg.get("hearing")),
                    speaking=Slot.from_routing(cfg.get("speaking"), voice=cfg.get("voice")),  # "voice": before providers

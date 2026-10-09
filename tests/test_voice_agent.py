@@ -56,3 +56,9 @@ def test_call_config_carries_the_background_sound():
     cfg = CallConfig.from_routing({"sound": {"scene": "clinic", "room": "low", "hold": "piano"}})
     assert cfg.sound == SoundSettings(scene="clinic", room="low", hold="piano")
     assert CallConfig().sound.silent and CallConfig.from_routing({"sound": "loud"}).sound.silent
+
+
+def test_a_regional_language_tag_is_read_as_its_language():
+    # Studio stores plain codes; a regional tag from an older row still speaks its language, never ro
+    assert CallConfig.from_routing({"language": "ro-RO"}).language == "ro"
+    assert CallConfig.from_routing({"language": "pt-BR"}).language == "pt"
