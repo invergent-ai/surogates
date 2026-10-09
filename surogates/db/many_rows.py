@@ -12,7 +12,7 @@ of statements that are "small enough" holds.
 So every engine of this process sends such a statement in groups of rows that
 together cannot fill those four packets, each group a statement of its own in
 the caller's transaction; a row that could fill them alone goes alone, as a
-statement of one row, which the driver writes whole.  A statement small enough
+statement of many rows that has one, which the driver writes whole.  A statement small enough
 is sent as it always was.  The listener is on every engine made in a process
 that imports ``surogates.db``, the tests' engines too; it acts for asyncpg only.
 """
@@ -110,9 +110,9 @@ def _send_whole(cursor: Any, statement: str, parameters: Any, context: Any) -> b
     if len(groups) == 1 and len(groups[0]) > 1:
         # Small enough: sent as it always was.
         return None
+    # Each group as a statement of many rows, a lone row as a list of one: what the
+    # cursor then answers (its rowcount, no result) is what the whole statement
+    # answered.  One row cannot fill four packets, so the driver writes it whole.
     for group in groups:
-        if len(group) == 1:
-            cursor.execute(statement, group[0])
-        else:
-            cursor.executemany(statement, group)
+        cursor.executemany(statement, group)
     return True

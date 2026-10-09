@@ -7,7 +7,12 @@ import uuid
 
 import pytest
 import pytest_asyncio
+import sqlalchemy
 from sqlalchemy import event, func, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from surogates.db import many_rows
 
 from surogates.db.models import Session, Task, TaskLink
 
@@ -159,3 +164,79 @@ async def test_few_small_rows_go_as_one_statement_and_many_in_groups_all_of_them
         assert sorted((await db.execute(
             select(TaskLink.parent_id).where(TaskLink.child_id == child)
         )).scalars()) == sorted(ids)
+
+
+# -- a table of the tests' own -------------------------------------------------
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def table(session_factory):
+    """many_rows_cases (id, body, amount), empty, dropped after the test."""
+    async with session_factory() as db:
+        await db.execute(text("DROP TABLE IF EXISTS many_rows_cases"))
+        await db.execute(text("CREATE TABLE many_rows_cases (id integer PRIMARY KEY, body text, amount numeric)"))
+        await db.commit()
+    yield sqlalchemy.table("many_rows_cases", sqlalchemy.column("id"), sqlalchemy.column("body"), sqlalchemy.column("amount"))
+    async with session_factory() as db:
+        await db.execute(text("DROP TABLE IF EXISTS many_rows_cases"))
+        await db.commit()
+
+
+async def kept(session_factory) -> int:
+    async with session_factory() as db:
+        return (await db.execute(text("SELECT count(*) FROM many_rows_cases"))).scalar_one()
+
+
+BODY = "b" * 40_000
+
+
+async def _counts(session_factory, table) -> dict[str, int]:
+    """What each kind of statement of many rows answers as its rowcount."""
+    bound = sqlalchemy.bindparam
+    answers = {}
+    async with session_factory() as db:
+        await db.execute(text("DELETE FROM many_rows_cases"))
+        answers["insert"] = (await db.execute(
+            sqlalchemy.insert(table), [{"id": n, "body": BODY, "amount": 1} for n in range(3)]
+        )).rowcount
+        answers["update, three of four match"] = (await db.execute(
+            sqlalchemy.update(table).where(table.c.id == bound("which")).values(body=bound("to")),
+            [{"which": n, "to": BODY + str(n)} for n in range(4)],
+        )).rowcount
+        answers["update, a large row then two small"] = (await db.execute(
+            sqlalchemy.update(table).where(table.c.id == bound("which")).values(body=bound("to")),
+            [{"which": 0, "to": BODY * 2}, {"which": 1, "to": "s"}, {"which": 2, "to": "s"}],
+        )).rowcount
+        answers["driver sql"] = (await (await db.connection()).exec_driver_sql(
+            "INSERT INTO many_rows_cases (id, body) VALUES ($1, $2)", [(n, BODY) for n in range(10, 14)]
+        )).rowcount
+        answers["few small rows"] = (await db.execute(
+            sqlalchemy.insert(table), [{"id": n, "body": "s", "amount": 1} for n in range(20, 23)]
+        )).rowcount
+        await db.commit()
+    return answers
+
+
+async def test_a_statement_sent_in_groups_answers_the_rowcount_it_answered_whole(session_factory, table, monkeypatch):
+    monkeypatch.setattr(many_rows, "GUARD", False)
+    whole = await _counts(session_factory, table)
+    monkeypatch.setattr(many_rows, "GUARD", True)
+    assert await _counts(session_factory, table) == whole
+
+
+@pytest.mark.parametrize("rows", [2, 5])
+async def test_rows_of_3_mib_each_sent_alone_end_when_stopped_at_any_wait(stopping, session_factory, table, rows):
+    body = "b" * (3 * 1024 * 1024)
+
+    async def insert():
+        async with stopping.session_factory() as db:
+            await db.execute(sqlalchemy.insert(table), [{"id": n, "body": body, "amount": 1} for n in range(rows)])
+            await db.commit()
+
+    for at in range(200):
+        await stopping.stop_at(at, insert())
+        left = await kept(session_factory)
+        if left == rows:
+            break
+        assert left == 0
+    else:
+        pytest.fail("the rows were never inserted")
