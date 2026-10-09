@@ -14,6 +14,7 @@ import type { HostUser } from "../guest/protocol.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
+import { REACH_MS } from "./inbound.js";
 import { type Boot, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
 
 // The same from src/vm and from dist/vm.
@@ -77,6 +78,8 @@ export type ToManager =
   | { type: "teardown"; id: string; root: string }
   // The app's answer to an ask of the host proxy's.
   | { type: "answer"; id: number; allow: boolean }
+  // Whether something in a root listens on a port of its own loopback now. Answered as a result, its ok true or false.
+  | { type: "listening"; id: string; root: string; port: number }
   // The keepalive, answered by a pong.
   | { type: "ping" }
   // The computer woke from sleep (Electron's powerMonitor).
@@ -159,6 +162,7 @@ export class VmClient {
   private readonly boots = new Set<(boot: Boot) => void>();
   // Whether the last boot ran emulated: the manager's own bounds are then the emulated guest's.
   private emulated = false;
+  private probes = 0;
 
   constructor(private readonly options: VmClientOptions) {}
 
@@ -233,6 +237,26 @@ export class VmClient {
     const gone = new Promise<void>((resolve) => manager.onExit(resolve));
     manager.kill();
     await gone;
+  }
+
+  /**
+   * Whether something in *root* listens on *port* of its own loopback now. False where no manager
+   * runs, which none is started to ask, and when it does not say within the agent's own bound. Never rejects.
+   */
+  listening(root: string, port: number): Promise<boolean> {
+    const manager = this.manager;
+    if (!manager || this.stopping) return Promise.resolve(false);
+    const id = `listening-${(this.probes += 1)}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => answer({ ok: false }), REACH_MS + 5_000);
+      const answer = (outcome: Outcome) => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        resolve("ok" in outcome && outcome.ok === true);
+      };
+      this.pending.set(id, answer);
+      manager.send({ type: "listening", id, root, port });
+    });
   }
 
   /** The computer woke: its manager is told, and the pings it missed meanwhile are not held against it. */

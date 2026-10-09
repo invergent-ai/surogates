@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { createInterface } from "node:readline";
 import { type ClientHttp2Session, connect as connectH2 } from "node:http2";
+import { connect, createServer, type Socket } from "node:net";
 import { type Duplex, duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
+import { Inbound } from "../src/guest/inbound.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
@@ -61,6 +63,9 @@ async function withQemu(script: string, body: () => Promise<void>): Promise<void
 // and of its net port, where the agent opens its HTTP/2 session.
 let agent: Duplex | undefined;
 let agentNet: Duplex | undefined;
+// What the latest fake VM's agent answers the host's streams on its inbound port with: a connection, or why none.
+// Unset, its agent takes no stream there.
+let reach: ((root: string, port: number) => Promise<Socket | string>) | undefined;
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
@@ -71,6 +76,9 @@ const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null =
   agent = guest;
   const [net, guestNet] = duplexPair();
   agentNet = guestNet;
+  const [inbound, guestInbound] = duplexPair();
+  const reaching = reach;
+  if (reaching) new Inbound(guestInbound, reaching);
   let gone = (_said: string) => {};
   const exited = new Promise<string>((resolve) => {
     gone = resolve;
@@ -78,6 +86,7 @@ const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null =
   const kill = async () => {
     host.destroy();
     net.destroy();
+    inbound.destroy();
     gone("");
   };
   if (roots) {
@@ -86,7 +95,7 @@ const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null =
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
     control.hello();
   }
-  return { control: host, net, exited, emulated, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
+  return { control: host, net, inbound, exited, emulated, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
@@ -209,6 +218,7 @@ describe("the VM manager on the host", () => {
       "const run = process.argv[2];",
       'net.createServer(() => {}).listen(run + "/control.sock");',
       'net.createServer(() => {}).listen(run + "/net.sock");',
+      'net.createServer(() => {}).listen(run + "/inbound.sock");',
       "net.createServer((socket) => {",
       '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
       '  socket.once("data", () => socket.write(\'{"return": {}}\\n\'));',
@@ -243,6 +253,7 @@ describe("the VM manager on the host", () => {
       "const run = process.argv[2];",
       'net.createServer(() => {}).listen(run + "/control.sock");',
       'net.createServer(() => {}).listen(run + "/net.sock");',
+      'net.createServer(() => {}).listen(run + "/inbound.sock");',
       "const deleting = new Set();",
       "net.createServer((socket) => {",
       '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
@@ -564,6 +575,118 @@ describe("a root's network, through the guest's net port", () => {
     const session = connectH2("http://guest", { createConnection: () => agentNet as Duplex });
     expect(await connection(session, "192.0.2.1:9")).toEqual([403, "denied"]);
     await manager.stop();
+  });
+});
+
+describe("whether a chat's own server listens, asked through the guest's inbound port", () => {
+  const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+  const run = (manager: VmManager, root = "root-1") => manager.perform({
+    id: `run-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "run", args: {},
+  }, new AbortController().signal);
+  // Each root and port the fake guest's agent was asked to reach, and the server here its roots' loopback stands for:
+  // each connection it took, and what each sent before it ended.
+  let reached: Array<[string, number]>;
+  let server: ReturnType<typeof createServer>;
+  let taken: Socket[];
+  let heard: string[];
+  let port: number;
+  const dial = () => new Promise<Socket>((done) => {
+    const socket = connect({ host: "127.0.0.1", port, allowHalfOpen: true });
+    socket.once("connect", () => done(socket));
+  });
+  const gone = () => vi.waitFor(() => expect(taken.every((socket) => socket.destroyed)).toBe(true));
+
+  beforeEach(async () => {
+    reached = [];
+    taken = [];
+    heard = [];
+    server = createServer((socket) => {
+      const at = taken.push(socket) - 1;
+      heard[at] = "";
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => {
+        heard[at] += chunk.toString();
+      });
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    port = (server.address() as { port: number }).port;
+    // Root 1 listens on 3000, and nothing else does.
+    reach = (root, to) => {
+      reached.push([root, to]);
+      return root === "root-1" && to === 3000 ? dial() : Promise.resolve("ECONNREFUSED");
+    };
+  });
+
+  afterEach(async () => {
+    reach = undefined;
+    for (const socket of taken) socket.destroy();
+    await new Promise<void>((done) => server.close(() => done()));
+  });
+
+  it("says whether something in a root listens on a port, by a connection made and let go", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    await run(manager);
+    await run(manager, "root-2");
+    expect([await manager.listening("root-1", 3000), await manager.listening("root-1", 8000), await manager.listening("root-2", 3000)]).toEqual([true, false, false]);
+    expect(reached).toEqual([["root-1", 3000], ["root-1", 8000], ["root-2", 3000]]);
+    // The root's server saw one connection, which said nothing and is gone.
+    await gone();
+    expect(heard).toEqual([""]);
+    await manager.stop();
+    expect(await manager.listening("root-1", 3000)).toBe(false);
+  });
+
+  it("asks nothing of a root that is not set up in its guest, and boots no guest for the question", async () => {
+    let boots = 0;
+    const boot = fakeVm(roots);
+    const manager = new VmManager(options(), (...args) => (boots += 1, boot(...args)));
+    expect(await manager.listening("root-1", 3000)).toBe(false);
+    expect(boots).toBe(0);
+    // Root 2 keeps the guest: root 1, torn down, is in it no more.
+    await run(manager);
+    await run(manager, "root-2");
+    await manager.teardown("root-1");
+    expect(await manager.listening("root-1", 3000)).toBe(false);
+    // Nor one the guest never heard of, whatever it is called.
+    expect(await manager.listening("root-3", 3000)).toBe(false);
+    expect([reached, boots]).toEqual([[], 1]);
+    await manager.stop();
+  });
+
+  it("takes what the guest answers as data, and gives up on an agent that does not answer, whose connection is let go when it comes", async () => {
+    // An agent that answers the first stream with a reason of its own making, the second with a status of its own,
+    // and the third only once the host has given it up.
+    let asked = 0;
+    const late = Promise.withResolvers<void>();
+    reach = async () => {
+      asked += 1;
+      if (asked === 1) return "403 denied\r\nx";
+      if (asked === 2) throw new Error("broken");
+      await late.promise;
+      return dial();
+    };
+    const manager = new VmManager({ ...options(), reachMs: 200 }, fakeVm(roots));
+    await run(manager);
+    expect([await manager.listening("root-1", 3000), await manager.listening("root-1", 3000)]).toEqual([false, false]);
+    const begun = performance.now();
+    expect(await manager.listening("root-1", 3000)).toBe(false);
+    expect(performance.now() - begun).toBeGreaterThanOrEqual(190);
+    late.resolve();
+    await vi.waitFor(() => expect(taken).toHaveLength(1));
+    await gone();
+    await manager.stop();
+  });
+
+  it("answers that nothing listens when the guest goes while it is asked", async () => {
+    const answering = Promise.withResolvers<Socket | string>();
+    reach = (root, to) => (reached.push([root, to]), answering.promise);
+    const manager = new VmManager(options(), fakeVm(roots));
+    await run(manager);
+    const asking = manager.listening("root-1", 3000);
+    await vi.waitFor(() => expect(reached).toHaveLength(1));
+    await manager.stop();
+    expect(await asking).toBe(false);
+    answering.resolve("ECONNREFUSED");
   });
 });
 
@@ -1040,7 +1163,7 @@ describe("the emulated VM", () => {
       'const net = require("node:net");',
       "const run = process.argv[2];",
       'require("node:fs").writeFileSync(run + "/../argv", JSON.stringify(process.argv.slice(3)));',
-      'for (const name of ["control", "net"]) net.createServer(() => {}).listen(run + "/" + name + ".sock");',
+      'for (const name of ["control", "net", "inbound"]) net.createServer(() => {}).listen(run + "/" + name + ".sock");',
       "net.createServer((socket) => {",
       '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
       '  socket.once("data", () => socket.write(\'{"return": {}}\\n\'));',

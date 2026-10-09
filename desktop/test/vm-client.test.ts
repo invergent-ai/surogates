@@ -322,6 +322,68 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     });
   });
 
+  it("asks its manager whether a root listens on a port, starts none to ask, and takes one that went or does not say as no", async () => {
+    const heard: Array<(message: FromManager) => void> = [];
+    const exits: Array<() => void> = [];
+    const sent: ToManager[] = [];
+    const tell = (message: FromManager) => heard.forEach((listener) => listener(message));
+    let starts = 0;
+    const vm = new VmClient({
+      vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } },
+      spawn: () => {
+        starts += 1;
+        return {
+          send: (message) => {
+            sent.push(message);
+            if (message.type === "start") tell({ type: "ready" });
+            // Port 9000 is one its manager never answers about.
+            if (message.type === "listening" && message.port !== 9000) tell({ type: "result", id: message.id, outcome: { ok: message.port === 3000 } });
+            if (message.type === "stop") exits.forEach((listener) => listener());
+          },
+          onMessage: (listener) => void heard.push(listener),
+          onExit: (listener) => void exits.push(listener),
+          kill: () => exits.splice(0).forEach((listener) => listener()),
+        };
+      },
+    });
+    clients.push(vm);
+    // No manager runs: nothing listens, and none is started to say so.
+    expect(await vm.listening("root-1", 3000)).toBe(false);
+    expect(starts).toBe(0);
+    void vm.perform(operation(), signal());
+    await vi.waitFor(() => expect(sent.some((message) => message.type === "start")).toBe(true));
+    expect([await vm.listening("root-1", 3000), await vm.listening("root-1", 8000)]).toEqual([true, false]);
+    expect(sent.filter((message) => message.type === "listening")).toEqual([
+      { type: "listening", id: expect.any(String), root: "root-1", port: 3000 }, { type: "listening", id: expect.any(String), root: "root-1", port: 8000 },
+    ]);
+    // An answer that is not a yes is a no.
+    const odd = vm.listening("root-1", 9000);
+    const last = sent.at(-1) as { id: string };
+    tell({ type: "result", id: last.id, outcome: { ok: "yes" } });
+    expect(await odd).toBe(false);
+    // A manager that never says is given up on, past the bound it has itself for its guest's agent.
+    vi.useFakeTimers();
+    try {
+      const silent = vm.listening("root-1", 9000);
+      let answered: boolean | undefined;
+      void silent.then((answer) => {
+        answered = answer;
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(answered).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(answered).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+    // The manager went: what waited for its answer listens on nothing.
+    const waiting = vm.listening("root-1", 9000);
+    exits.splice(0).forEach((listener) => listener());
+    expect(await waiting).toBe(false);
+    expect(await vm.listening("root-1", 3000)).toBe(false);
+    expect(starts).toBe(1);
+  });
+
   it("tears a root down through its manager, and starts none to do it", async () => {
     const vm = client();
     await vm.teardown("root-1");

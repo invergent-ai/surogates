@@ -1,16 +1,18 @@
 // The guest agent, under tini (vm/init). It speaks the control protocol
 // (control.ts) on the ai.surogate.control port, runs each root's commands in that
-// root's own namespaces (root.ts), and carries their connections to the host proxy
-// on the ai.surogate.net port (network.ts). Anything it does not catch ends it, and
-// with it the guest.
+// root's own namespaces (root.ts), carries their connections to the host proxy
+// on the ai.surogate.net port (network.ts), and the browser's connections to a
+// root's own servers from the ai.surogate.inbound port (inbound.ts). Anything it
+// does not catch ends it, and with it the guest.
 
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 import { Control } from "./control.js";
+import { Inbound } from "./inbound.js";
 import { Network } from "./network.js";
 import { findPort, openPort } from "./port.js";
-import type { FromAgent } from "./protocol.js";
+import { type FromAgent, INBOUND_PORT } from "./protocol.js";
 import { BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
 
 // Anything the agent does not catch ends it at once, and with it tini and the guest
@@ -50,11 +52,13 @@ const say = (message: FromAgent) => void port.write(`${JSON.stringify(message)}\
 const roots = new Roots({
   start: enter, uid: uidOf, kill: killRoot, contain, cgroups: CGROUPS, unmount: unmountShare, flush: flushRoot,
   tunnels: (root, uid) => network.listen(root, uid),
+  arrivals: (root, id) => network.arrival(root, id),
   lost: (root) => say({ type: "lost", root }),
   handles: (root, handles, live) => say({ type: "handles", root, handles, live }),
   // Past two of the host's pings unheard, it is asleep or gone (vm/manager.ts, PING_MS).
   hostSilenceMs: 25_000,
 });
+new Inbound(await openPort(await findPort(INBOUND_PORT)), (root, to, first) => roots.reach(root, to, first));
 const control = new Control(say, roots, { setClock, powerOff, woke: (ms) => roots.woke(ms), heard: () => roots.heard() });
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();

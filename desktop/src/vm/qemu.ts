@@ -7,7 +7,7 @@ import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { MAX_SHARES } from "../guest/protocol.js";
+import { INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
 
 // Ubuntu's, whose AppArmor profile lets its namespace sandbox work under 24.04's restriction.
 export const VIRTIOFSD = "/usr/libexec/virtiofsd";
@@ -30,7 +30,7 @@ export function guestCpus(threads = availableParallelism()): number {
   return Math.min(4, Math.max(1, Math.floor(threads / 2)));
 }
 
-// *run* holds the control, net and QMP sockets and QEMU's pidfile; *console* is the guest's console log.
+// *run* holds the control, net, inbound and QMP sockets and QEMU's pidfile; *console* is the guest's console log.
 // *emulated*: QEMU's TCG in place of KVM, a host thread a vCPU and a 256 MiB translation cache on
 // top of the guest's memory, the CPU TCG can give, and the agent told on the kernel's command line.
 export function qemuArgs(disks: Disks, run: string, console: string, cpus = guestCpus(), emulated = false): string[] {
@@ -55,6 +55,8 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     "-device", "virtserialport,chardev=control,name=ai.surogate.control",
     "-chardev", `socket,id=net,path=${option(join(run, "net.sock"))},server=on,wait=off`,
     "-device", "virtserialport,chardev=net,name=ai.surogate.net",
+    "-chardev", `socket,id=inbound,path=${option(join(run, "inbound.sock"))},server=on,wait=off`,
+    "-device", `virtserialport,chardev=inbound,name=${INBOUND_PORT}`,
     "-chardev", `file,id=console,path=${option(console)}`, "-device", "virtconsole,chardev=console",
     ...ports,
     "-device", "virtio-rng-pci", "-nic", "none",

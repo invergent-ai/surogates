@@ -34,6 +34,7 @@ const options = (): VmOptions => ({
 const fakeVm = (roots: ControlRoots): BootVm => async () => {
   const [host, guest] = duplexPair();
   const [net] = duplexPair();
+  const [inbound] = duplexPair();
   let gone = (_said: string) => {};
   const exited = new Promise<string>((resolve) => {
     gone = resolve;
@@ -41,12 +42,13 @@ const fakeVm = (roots: ControlRoots): BootVm => async () => {
   const kill = async () => {
     host.destroy();
     net.destroy();
+    inbound.destroy();
     gone("");
   };
   const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill });
   createInterface({ input: guest }).on("line", (line) => control.receive(line));
   control.hello();
-  return { control: host, net, exited, emulated: null, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
+  return { control: host, net, inbound, exited, emulated: null, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
