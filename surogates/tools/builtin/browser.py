@@ -1263,6 +1263,18 @@ async def _browser_upload_file_handler(
     return json.dumps(_noted({"uploaded": given}, client))
 
 
+# Appended to browser_navigate for a session on the user's computer (describe_for_device): the one
+# address of that computer its browser opens, a server the session itself started in its sandbox.
+DEVICE_SERVERS_NOTE = (
+    "On the user's computer, `http://localhost:<port>/` opens a server you started in this chat's sandbox. "
+    "Start the server first, as a background command, then navigate to it: the user is asked to allow each port "
+    "for the chat the first time you open it. Name it `localhost`: not `0.0.0.0`, not the sandbox's proxy and not "
+    "the computer's own address. Use `http://`, not `https://`. "
+    "A page that calls another port of yours, as a front end calls its API, reaches it only once that port is allowed too: "
+    "navigate to that port once yourself. No other address of the computer or of its networks opens."
+)
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         name="browser_navigate",

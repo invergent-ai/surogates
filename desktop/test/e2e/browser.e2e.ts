@@ -510,7 +510,7 @@ describe.skipIf(!run || process.env.SUROGATE_VM_TESTS !== "1")("a chat's own ser
     const denied = operation("browser.navigate", { url: `http://localhost:${canaryPort}/`, wait_until: "load" });
     const asked = await prompted();
     expect(await asked.textContent("#prompt-title")).toMatch(new RegExp(`^Let .+'s browser open port ${canaryPort} of this chat's servers\\?$`));
-    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`]]);
+    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`], ["Folder", folder]]);
     expect(await asked.evaluate(() => [
       (document.activeElement as HTMLElement).dataset.id, [...document.querySelectorAll<HTMLElement>("#prompt-buttons button")].map((button) => button.dataset.id),
     ])).toEqual(["deny", ["deny", "allow_session"]]);
@@ -537,6 +537,134 @@ describe.skipIf(!run || process.env.SUROGATE_VM_TESTS !== "1")("a chat's own ser
       error: { type: "browser", message: "Port 3128 is the sandbox's own proxy for this chat's commands, which the agent's browser does not open" },
     });
     // Its user was asked nothing more, and this computer's own service on that port heard nothing, on either family.
+    expect([await promptsShown(app!), hits]).toEqual([0, []]);
+  }, 180_000);
+
+  it("shows a development server of the chat's in the agent's browser, which loads its page again by itself when a file changes; lists its port in Settings, and ends it there at once", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    // The chat's server, as a development server is: its page holds a socket open to it, and is told over it to load again when a file changes.
+    writeFileSync(join(folder, "version.txt"), "first");
+    writeFileSync(join(folder, "serve.js"), `const fs = require("node:fs");
+const version = () => { try { return fs.readFileSync(__dirname + "/version.txt", "utf8").trim(); } catch { return ""; } };
+const sockets = new Set();
+const server = require("node:http").createServer((req, res) => res.setHeader("cache-control", "no-store").end(\`<title>The chat's page, \${version()}</title><script>
+const live = new WebSocket("ws://" + location.host + "/live");
+live.onmessage = () => location.reload();
+live.onclose = () => { document.title += ", its socket closed"; };
+</script>\`));
+server.on("upgrade", (req, socket) => {
+  const accept = require("node:crypto").createHash("sha1").update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+  socket.write("HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + "\\r\\n\\r\\n");
+  sockets.add(socket);
+  socket.on("error", () => {}).on("close", () => sockets.delete(socket)).on("end", () => socket.destroy());
+  socket.on("data", (sent) => { if ((sent[0] & 15) === 8) socket.end(Buffer.from([0x88, 0])); });
+});
+let shown = version();
+setInterval(() => {
+  if (version() === shown) return;
+  shown = version();
+  for (const socket of sockets) socket.write(Buffer.from([0x81, 6, ...Buffer.from("reload")]));
+}, 100);
+server.listen(${canaryPort}, "127.0.0.1");`);
+    const page = await bound(folder, [], { SUROGATE_VM_IMAGE: IMAGE });
+    // The agent starts it in the chat, on the very port this computer's own canary has, and it answers inside the sandbox.
+    const background = { command: "node serve.js", workdir: null, task_id: "servers", pty: false, notify_on_complete: false, watcher_interval: null };
+    expect(await operation("start", background)).toMatchObject({ ok: { session_id: expect.any(String) } });
+    const answering = `curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${canaryPort}/`;
+    await expect.poll(async () => (await operation("run", { command: answering, workdir: null, timeout: 10 })).ok?.output, { timeout: 30_000 }).toBe("200");
+    // It opens it: its user allows the browser, then the port, in a prompt that says which chat's, by its folder.
+    const opening = operation("browser.navigate", { url: `http://localhost:${canaryPort}/`, wait_until: "load" });
+    await press(await prompt(app!), "allow_session");
+    const asked = await prompted();
+    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`], ["Folder", folder]]);
+    expect(await asked.$$eval("#prompt-notes > *", (lines) => lines.every((line) => line.getBoundingClientRect().bottom <= window.innerHeight))).toBe(true);
+    await press(asked, "allow_session");
+    expect(await opening).toMatchObject({ ok: { url: `http://localhost:${canaryPort}/`, title: "The chat's page, first" } });
+    const title = async () => (await operation("browser.evaluate", { code: "return document.title;" })).ok?.value;
+    // A file changes in the chat: the page loads again by itself, over its socket, with nothing navigated.
+    expect(await operation("run", { command: "printf second > version.txt", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    await expect.poll(title, { timeout: 15_000 }).toBe("The chat's page, second");
+    // Settings → Folders and permissions lists the port under its chat.
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = app!.windows().find((window) => window.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    await settings!.waitForLoadState();
+    await settings!.click('[data-section="folders"]');
+    const line = settings!.locator("#folders .row .line", { hasText: `Its browser opens port ${canaryPort} of this chat's servers` });
+    await expect.poll(() => line.count(), { timeout: 10_000 }).toBe(1);
+    // Taken back: the page's socket ends at once, its next request is refused, and the chat keeps its browser and its server.
+    await line.locator("button").click();
+    await expect.poll(() => line.count(), { timeout: 10_000 }).toBe(0);
+    await expect.poll(title, { timeout: 5_000 }).toBe("The chat's page, second, its socket closed");
+    expect((await operation("browser.evaluate", { code: `return fetch("/taken-back", { cache: "no-store" }).then((answer) => answer.status, () => "refused");` })).ok?.value).toBe(403);
+    expect(await settings!.locator("#folders .row .line").allTextContents()).toEqual(["Uses the browser on this computerTake back", "Runs node serve.jsStop"]);
+    // The agent's next navigation there asks again; denied, nothing opens.
+    const again = operation("browser.navigate", { url: `http://localhost:${canaryPort}/?again`, wait_until: "load" });
+    const second = await prompted();
+    expect(await second.textContent("#prompt-title")).toMatch(new RegExp(`^Let .+'s browser open port ${canaryPort} of this chat's servers\\?$`));
+    await press(second, "deny");
+    expect(await again).toEqual({ error: { type: "denied", message: `The user did not let the agent's browser open port ${canaryPort} of this chat's servers` } });
+    // This computer's own service on that port heard nothing, on either family.
+    expect([await promptsShown(app!), hits]).toEqual([0, []]);
+  }, 180_000);
+
+  it("says which chat has a port another chat's agent opens, by its folder, and moves the port to the chat allowed last: Settings lists it under that chat alone", async () => {
+    const [folder, second] = [join(home, "project"), join(home, "second")];
+    mkdirSync(folder);
+    writeFileSync(join(folder, "index.html"), "<title>The first chat's page</title>");
+    const page = await bound(folder, [], { SUROGATE_VM_IMAGE: IMAGE });
+    await alsoBound(await webClient(app!, origin), second);
+    writeFileSync(join(second, "index.html"), "<title>The second chat's page</title>");
+    // Each chat's own server, on one port, each in its own sandbox.
+    const background = { command: `python3 -m http.server ${canaryPort} --bind 127.0.0.1`, workdir: null, task_id: "servers", pty: false, notify_on_complete: false, watcher_interval: null };
+    const answering = `curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${canaryPort}/`;
+    for (const chat of [CHAT, OTHER]) {
+      expect(await operation("start", background, undefined, 1, chat)).toMatchObject({ ok: { session_id: expect.any(String) } });
+      await expect.poll(async () => (await operation("run", { command: answering, workdir: null, timeout: 10 }, undefined, 1, chat)).ok?.output, { timeout: 30_000 }).toBe("200");
+    }
+    const open = (chat: string, mark: string) => operation("browser.navigate", { url: `http://localhost:${canaryPort}/?${mark}`, wait_until: "load" }, undefined, 1, chat);
+    // The first chat's user allows its browser, and the port.
+    const first = open(CHAT, "first");
+    await press(await prompt(app!), "allow_session");
+    await press(await prompted(), "allow_session");
+    expect(await first).toMatchObject({ ok: { title: "The first chat's page" } });
+    // The second chat's agent opens the same port: its prompt names its own folder, says which chat has the port now and
+    // that allowing moves it, and draws every note inside its window.
+    const other = open(OTHER, "second");
+    await press(await prompted(), "allow_session");
+    const asked = await prompted();
+    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`], ["Folder", second]]);
+    const notes = await asked.$$eval("#prompt-notes > *", (lines) => lines.map((line) => [line.textContent, line.getBoundingClientRect().bottom <= window.innerHeight]));
+    expect(notes).toHaveLength(4);
+    expect(notes[0]).toEqual([`A chat on ${folder} has port ${canaryPort} in the browser now. Allowing this moves the port to this chat.`, true]);
+    expect(notes.every(([, inside]) => inside)).toBe(true);
+    await press(asked, "allow_session");
+    expect(await other).toMatchObject({ ok: { title: "The second chat's page" } });
+    // Settings lists the port under the second chat alone.
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = app!.windows().find((window) => window.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    await settings!.waitForLoadState();
+    await settings!.click('[data-section="folders"]');
+    const held = `Its browser opens port ${canaryPort} of this chat's serversTake back`;
+    await expect.poll(() => settings!.$$eval("#folders .row", (rows) => rows.map((row) => [...row.querySelectorAll(".line")].map((line) => line.textContent))), { timeout: 10_000 }).toEqual([
+      ["Uses the browser on this computerTake back", `Runs python3 -m http.server ${canaryPort} --bind 127.0.0.1Stop`],
+      ["Uses the browser on this computerTake back", held, `Runs python3 -m http.server ${canaryPort} --bind 127.0.0.1Stop`],
+    ]);
+    // The first chat's next navigation there asks again, and is told who has it.
+    const again = open(CHAT, "again");
+    const back = await prompted();
+    expect((await back.$$eval("#prompt-notes > *", (lines) => lines.map((line) => line.textContent)))[0])
+      .toBe(`A chat on ${second} has port ${canaryPort} in the browser now. Allowing this moves the port to this chat.`);
+    await press(back, "deny");
+    expect(await again).toMatchObject({ error: { type: "denied" } });
     expect([await promptsShown(app!), hits]).toEqual([0, []]);
   }, 180_000);
 });
