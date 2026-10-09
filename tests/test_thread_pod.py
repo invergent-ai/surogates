@@ -865,7 +865,7 @@ async def test_a_masters_pod_runs_only_the_steps_that_need_no_copy(tmp_path, mon
 
     async with client:
         # A landing's own steps are a thread's: refused with a reason, never a crash.
-        for action in ("commit", "apply", "record", "keep", "hand_off", "take_up", "prune"):
+        for action in ("commit", "apply", "record", "keep", "hand_off", "take_up"):
             assert await run("_history", action=action) == {
                 "error": f"This pod has no copy of a project's files: it cannot {action}",
             }
@@ -874,6 +874,8 @@ async def test_a_masters_pod_runs_only_the_steps_that_need_no_copy(tmp_path, mon
         assert await run("_history", action="unapply", path="gone.md", before=None, after=None) == {
             "path": "gone.md", "before": None, "after": None,
         }
+        # Nor does the day's pruning, after a routine's pickup: with no history yet there is nothing to prune.
+        assert await run("_history", action="prune", keep=[], now=time.time()) == {"pruned": False}
         # Its checkpoints stay its workspace's own.
         assert await run("_checkpoint", action="take") == {"of": str(workspace)}
 

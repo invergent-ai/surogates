@@ -79,8 +79,9 @@ _HISTORY_STEPS = {
     "keep_apart": "keep_apart", "take_up": "take_up", "drop_hand_off": "drop_hand_off", "opened": "opened",
 }
 # The steps a master's pod runs, which has no copy: a routine run's pickup,
-# and what settles a landing left running before it, the look and a put-back.
-_MASTER_STEPS = frozenset({"pickup", "fetch", "unapply"})
+# what settles a landing left running before it, the look and a put-back,
+# and the day's pruning after it, which reads no copy.
+_MASTER_STEPS = frozenset({"pickup", "fetch", "unapply", "prune"})
 
 
 def _record_read(name: str, args: dict, workspace: str, result: str) -> None:

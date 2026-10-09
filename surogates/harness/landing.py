@@ -1256,8 +1256,39 @@ async def routines_at_work(session_factory: Any, session: Any) -> bool:
         ))))
 
 
+async def _prune_after_pickup(
+    *, session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, saga_settings: Any, held: Any,
+    packs: int, storage: Any, bucket: str | None, prefix: str,
+) -> None:
+    """The day's pruning after a pickup pushed alone, through the master's pod, under the pickup's own lock.
+
+    A project where routines run and no thread lands is pruned by no
+    landing: each pickup would leave its pack for good, and every new pod
+    copies them all.  Due as after a landing, by the mark the last pruning
+    left, and by a landing's rule: its bound, its fence, the packs the
+    bucket itself dates older.  The landings left running were settled
+    before the pickup.  It never fails its caller: the pickup stands, and
+    the history is pruned on a later day.
+    """
+    try:
+        if storage is not None and not await _due(storage, bucket, prefix):
+            return
+        old = await _old_packs(storage, bucket, prefix, _fence(saga_settings)) if storage is not None else None
+        request = {
+            "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
+            "spare": _fence(saga_settings), **({"old": old} if old is not None else {}),
+        }
+        await held()
+        step_result(await sandbox_pool.execute(
+            owner, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
+        ))
+    except Exception:
+        logger.warning("Could not prune the history of project %s", workstream, exc_info=True)
+
+
 async def pick_up_routine(
     *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, yours: bool = False,
+    storage: Any = None, bucket: str | None = None, prefix: str = "",
 ) -> dict | None:
     """Record what a master's routine run changed in the real files as the routine's: its pickup, or None.
 
@@ -1273,6 +1304,11 @@ async def pick_up_routine(
     the run's own pickup holds what changed while it worked and no more.
     Not while another routine run of the project is at work: a change may
     be its, and is left for a routine's pickup.
+
+    A pickup that pushed leaves the day's pruning, when it is due, to the
+    same pod under the same lock, its row written first: *storage* is
+    asked whether it is, and which packs are old, where the project's
+    files are under *prefix* of *bucket*.
     """
     workstream = routine_project(session)
     owner = sandbox_session_key(session)
@@ -1306,11 +1342,15 @@ async def pick_up_routine(
         picked = await orchestrator.execute_step(
             saga.saga_id, pickup.step_id, lambda: _call(sandbox_pool, owner, "pickup", **pickup.arguments),
         )
-    if picked["commit"] is None:
-        return None
-    saga.transition(SagaState.COMPLETED)
-    await record_pickup(
-        session_factory, saga, workstream_id=workstream, commit=picked["commit"], picked_up=picked["picked_up"],
-        agent_id=str(session.agent_id), user_id=session.user_id,
-    )
+        if picked["commit"] is None:
+            return None
+        saga.transition(SagaState.COMPLETED)
+        await record_pickup(
+            session_factory, saga, workstream_id=workstream, commit=picked["commit"], picked_up=picked["picked_up"],
+            agent_id=str(session.agent_id), user_id=session.user_id,
+        )
+        await _prune_after_pickup(
+            session_factory=session_factory, sandbox_pool=sandbox_pool, owner=owner, workstream=workstream,
+            saga_settings=saga_settings, held=held, packs=picked["packs"], storage=storage, bucket=bucket, prefix=prefix,
+        )
     return picked

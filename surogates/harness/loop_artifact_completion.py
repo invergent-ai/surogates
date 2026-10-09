@@ -1465,6 +1465,7 @@ class ArtifactCompletionMixin:
             if yours == await self._store.has_event(session.id, EventType.TOOL_CALL, after=self._routine_turn):
                 return
             from surogates.harness.tool_exec import _build_session_sandbox_spec
+            from surogates.storage.tenant import boundary_workspace_prefix
 
             owner = sandbox_session_key(session)
             spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
@@ -1472,6 +1473,9 @@ class ArtifactCompletionMixin:
             await pick_up_routine(
                 session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
                 session=session, saga_settings=self._saga_settings, yours=yours,
+                # For the day's pruning after it: the bucket itself says whether it is due, and which packs are old.
+                storage=self._storage, bucket=session.config.get("storage_bucket"),
+                prefix=boundary_workspace_prefix(session.config, session, owner),
             )
         except Exception:
             # The changes are picked up at the next landing, as yours.

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ from .test_command_placements import Model, calls
 from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
+    FENCED,
     a_landing_killed,
     a_short_fence,
     edited,
@@ -1714,3 +1717,90 @@ async def test_a_routine_runs_pickup_neither_answers_nor_ends_a_threads_wait_ove
     assert (await row_of(api, project, thread))["reason"] == "files"
     assert await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_RESUME]) == []
 
+
+async def a_routine_writes(api, pool, pods, master, name: str, text: str):
+    """A run of a routine of *master*'s that wrote ``notes.txt`` and ended."""
+    run, schedule = await a_routine_run(api, master, name)
+    await in_its_pod(api, pool, run, "true")
+    (pods.project / "notes.txt").write_text(text)  # as its call wrote it
+    await ends(api, pool, run)
+    return run, schedule
+
+
+def prunings(monkeypatch, pool) -> list[dict]:
+    """Each pruning asked of a pod of *pool* from here on, a session's or one let go of."""
+    asked: list[dict] = []
+    execute, released = pool.execute, pool.execute_released
+
+    async def watched(owner, name, input, **kwargs):
+        if name == "_history" and json.loads(input)["action"] == "prune":
+            asked.append({**json.loads(input), "timeout": kwargs.get("timeout")})
+        return await execute(owner, name, input, **kwargs)
+
+    async def watched_released(sandbox_id, name, input, **kwargs):
+        if name == "_history" and json.loads(input)["action"] == "prune":
+            asked.append({**json.loads(input), "timeout": kwargs.get("timeout")})
+        return await released(sandbox_id, name, input, **kwargs)
+
+    monkeypatch.setattr(pool, "execute", watched)
+    monkeypatch.setattr(pool, "execute_released", watched_released)
+    return asked
+
+
+async def test_a_routines_pickup_prunes_the_history_when_the_day_is_due_and_no_thread_lands(api, monkeypatch, tmp_path):
+    master = await master_of(api, await create(api))
+    pods = stored(api, master, tmp_path)
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)  # its landing pruned that day
+    durable = pods.project / "_history"
+    asked = prunings(monkeypatch, pool)
+    for n in range(6):
+        await a_routine_writes(api, pool, pods, master, "Health check", f"checked {n}\n")
+    # The day is pruned already: one pack a pickup, and nothing folds them.
+    assert asked == [] and len(list((durable / "objects" / "pack").glob("*.pack"))) >= 7
+    # Days on, with no thread landing.
+    long_ago = time.time() - 2 * 86_400
+    for old in (durable / "pruned", *(durable / "objects" / "pack").iterdir()):
+        os.utime(old, (long_ago, long_ago))
+    old = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
+    await a_routine_writes(api, pool, pods, master, "Health check", "checked again\n")
+    # Through the master's pod, under the pickup's lock, by a landing's rule: its bound, its fence, the bucket's old packs.
+    [pruning] = asked
+    assert pruning["timeout"] > landing_module._PRUNE_BOUND and pruning["spare"] == landing_module._fence(FENCED)
+    assert pruning["old"] == sorted({name.rpartition(".")[0] for name in old})
+    left = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
+    # Folded into one; the pickup's own pack, younger than the fence, waits for the next pruning.
+    assert not old & left and len([name for name in left if name.endswith(".pack")]) == 2
+    assert git(durable, "fsck", "--no-dangling") == ""
+    marked = (durable / "pruned").stat().st_mtime
+    assert time.time() - marked < 60
+    # Not twice a day: neither the next pickup nor a thread's landing prunes again.
+    await a_routine_writes(api, pool, pods, master, "Health check", "and again\n")
+    thread = await a_thread(api, "Draft A", master)
+    await edited(pool, thread, "echo a > a.md")
+    await ends(api, pool, thread)
+    assert len(asked) == 1 and (durable / "pruned").stat().st_mtime == marked
+    # The thread opened on a whole history, and landed on the routine's last pickup.
+    [landed] = await rows(api, thread)
+    assert landed.saga_state == "completed" and (pods.project / "a.md").read_text() == "a\n"
+    assert git(durable, "show", f"{landed.commit}:notes.txt") == "and again"
+
+
+async def test_a_pruning_that_fails_after_a_routines_pickup_fails_no_run_and_says_so(api, monkeypatch, pods, caplog):
+    master = await master_of(api, await create(api))
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    os.utime(pods.project / "_history" / "pruned", (time.time() - 2 * 86_400,) * 2)
+    execute = pool.execute
+
+    async def no_pruning(owner, name, input, **kwargs):
+        if name == "_history" and json.loads(input)["action"] == "prune":
+            raise ConnectionError("the pod went under its pruning")
+        return await execute(owner, name, input, **kwargs)
+
+    monkeypatch.setattr(pool, "execute", no_pruning)
+    run, schedule = await a_routine_writes(api, pool, pods, master, "Health check", "checked\n")
+    [its] = await pickups_of(api, master)
+    assert (changed(its), its.commit, its.saga_state) == (["notes.txt"], main_of(pods), "completed")
+    assert len(await api.app.state.session_store.get_events(run.id, types=[EventType.SESSION_COMPLETE])) == 1
+    assert "Could not prune the history of project" in caplog.text and "Could not pick up" not in caplog.text
