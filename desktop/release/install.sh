@@ -261,19 +261,23 @@ helper_release() {
 
 # The release whose helper's pair is found half done, into the variable $1 names, or nothing: an
 # apply was stopped between its mark's rename and the helper's. The mark is root's own word for a
-# release (marked), that release is here, its folder's mark the helper's mark byte for byte, with
-# a helper of its own, and the helper pkexec runs is other bytes than that one, or is not there.
-# Nothing is half done where there is no such mark, where its release is not here (an older
+# release (marked), that release is here, its folder's mark the helper's mark byte for byte, and
+# the helper pkexec runs is not, byte for byte, that folder's own: it is other bytes, or is not
+# there, or the folder has no helper of its own to show which it is. A folder that cannot give
+# its helper is half of a pair no less: were it passed over, the helper there now, which may be
+# the release's before, would decide what is installed next.
+# Nothing is half done where there is no such mark, or where its release is not here: an older
 # version applied since, with the helper kept, has taken its folder away; or the folder is the
-# same version built again, stopped before its mark's rename), or where the folder has no helper
-# of its own to compare with: an apply of that version unpacks it again.
+# same version built again, stopped before its mark's rename. Nor is the folder of any other
+# version than the mark names a part of the pair: one that has lost its helper is unpacked again
+# by an apply of that version.
 half_done() {
   local -n found="$1"
   local own
   found="$(marked)" || found=""
   [ -n "$found" ] || return 0
   own="$ROOT/versions/$found/bin/surogate-apply-update"
-  if cmp -s "$HELPER_MARK" "$ROOT/versions/$found/release.json" && [ -f "$own" ] && [ ! -L "$own" ] && ! cmp -s "$own" "$HELPER"; then return 0; fi
+  if cmp -s "$HELPER_MARK" "$ROOT/versions/$found/release.json" && ! cmp -s "$own" "$HELPER"; then return 0; fi
   found=""
 }
 
@@ -291,8 +295,8 @@ half_done() {
 # Such a pair is finished or refused, and never passed over, which would leave the release before
 # trusted for what is applied next:
 # - The helper there now is one whose keys are taken, or this is a first install (trusted).
-# - The folder is whole for the mark, and its mark and its helper are root's own, the helper at any
-#   mode that an apply takes and that lets no one else write it.
+# - The folder is whole for the mark, with a helper of its own, and its mark and its helper are
+#   root's own, the helper at any mode that an apply takes and that lets no one else write it.
 # - The helper is never finished toward an older release, from a mark that is behind it, as an
 #   install script that writes no mark leaves one under a newer release: where a newer version
 #   than the mark names is installed, or the helper is the own one of a newer version that is here.

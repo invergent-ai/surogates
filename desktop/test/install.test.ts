@@ -1361,6 +1361,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       ["its own helper no program", `chmod 644 ${own}/bin/surogate-apply-update`],
       ["its own mark another user's", `chown tester ${own}/release.json`],
       ["its folder without its program", `rm ${own}/surogate`],
+      // Nor a folder that cannot give its helper at all: with none to compare, nothing shows the
+      // helper there to be this release's, and the keys of the release before are not asked.
+      ["its folder without a helper of its own", `rm ${own}/bin/surogate-apply-update`],
+      ["a link where its own helper is", `ln -sf /usr/bin/true ${own}/bin/surogate-apply-update`],
     ] as const) {
       halfDone(made);
       const before = standing();
@@ -1415,22 +1419,53 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
   });
 
-  it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename", () => {
+  it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename: but for the helper of the release that the helper's mark names, whose loss leaves a pair that cannot be shown whole", () => {
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    // The two ways a folder is without a program of its own: it is gone, or a link is there, here to one that runs.
+    const losses = (program: string) => [`rm ${program}`, `ln -sf /usr/bin/true ${program}`];
+    const tarballs: Record<string, string> = {};
     for (const version of ["1.0.0", "1.1.0"]) {
       const tarball = releaseOf(version);
+      tarballs[version] = tarball;
       manifestOf(version, tarball);
       expect(apply(tarball).status).toBe(0);
-      // Its mark is there, and a program is not: the folder is not whole.
-      for (const program of ["surogate", "bin/surogate-apply-update"]) {
-        expect(root(`rm /opt/surogate/versions/${version}/${program}`).status).toBe(0);
-        expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
-        expect(root(`test -x /opt/surogate/versions/${version}/${program}`).status).toBe(0);
-        // Nor when the program is a link, here to one that runs: it is no file of the folder's own.
-        expect(root(`ln -sf /usr/bin/true /opt/surogate/versions/${version}/${program}`).status).toBe(0);
-        expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
-        expect(root(`test -x /opt/surogate/versions/${version}/${program} && test ! -L /opt/surogate/versions/${version}/${program}`).status, program).toBe(0);
+      // Its mark is there, and the app is not: the folder is not whole, and is unpacked again.
+      for (const lost of losses(`/opt/surogate/versions/${version}/surogate`)) {
+        expect(root(lost).status, lost).toBe(0);
+        expect(apply(tarball), lost).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
+        expect(root(`test -x /opt/surogate/versions/${version}/surogate && test ! -L /opt/surogate/versions/${version}/surogate`).status, lost).toBe(0);
+      }
+      // Its own helper is not, and it is the release that the helper's mark names: with no helper
+      // of the folder's own, nothing shows that the one pkexec runs is this release's and not the
+      // one before's, left there by an update that stopped. That pair cannot be finished, and no
+      // apply goes on with keys this release may have dropped.
+      const own = `/opt/surogate/versions/${version}/bin/surogate-apply-update`;
+      for (const lost of losses(own)) {
+        expect(root(`cmp ${mark} /opt/surogate/versions/${version}/release.json && ${lost}`).status, lost).toBe(0);
+        const before = standing();
+        expect(apply(tarball), lost).toMatchObject({
+          status: 1, stdout: "", stderr: `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again\n`,
+        });
+        expect(standing(), lost).toBe(before);
+        expect(root("ls -A /opt/surogate/staging").stdout, lost).toBe("");
+        // Put back by hand, for what follows.
+        expect(root(`rm -f ${own} && install -m 0755 ${helper} ${own}`).status, lost).toBe(0);
       }
     }
+    // Beside it, where no pair is half done: the same loss in the folder of a version that the
+    // mark does not name is unpacked again, as before. As a rollback leaves a computer, put so by
+    // hand: the helper and its mark are the newer release's, whose folder is whole, and the
+    // version that runs is the one before.
+    expect(root(`ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current && cmp ${mark} /opt/surogate/versions/1.1.0/release.json && cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update`).status).toBe(0);
+    manifestOf("1.0.0", tarballs["1.0.0"]!);
+    for (const lost of losses("/opt/surogate/versions/1.0.0/bin/surogate-apply-update")) {
+      expect(root(lost).status, lost).toBe(0);
+      expect(apply(tarballs["1.0.0"]!), lost).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root("test -x /opt/surogate/versions/1.0.0/bin/surogate-apply-update && test ! -L /opt/surogate/versions/1.0.0/bin/surogate-apply-update "
+        + `&& cmp ${mark} /opt/surogate/versions/1.1.0/release.json && cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout, lost).toBe("/opt/surogate/versions/1.0.0\n");
+    }
+    expect(root("ln -sfn /opt/surogate/versions/1.1.0 /opt/surogate/current").status).toBe(0);
     // An update removes the version before the last: it leaves versions whole, by a rename into staging.
     const tarball = releaseOf("1.2.0");
     manifestOf("1.2.0", tarball);
