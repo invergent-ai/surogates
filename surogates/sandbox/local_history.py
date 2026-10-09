@@ -30,11 +30,13 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from itertools import takewhile
 from pathlib import Path
 from typing import Any, ClassVar
 
 from surogates.sandbox.history import (
     _ATTRIBUTES,
+    _CHECKPOINT,
     _OPEN_TIMEOUT,
     _TIMEOUT,
     FAILED,
@@ -45,6 +47,7 @@ from surogates.sandbox.history import (
     History,
     HistoryError,
     _as,
+    _ID,
     _checked_id,
     _name,
     _replace,
@@ -52,11 +55,13 @@ from surogates.sandbox.history import (
 
 #: Why a request was not answered, beside the cloud's two codes (history.py): a thread with no
 #: whole copy, which its next open makes; a file whose name history cannot record, which
-#: nothing lands past until it is renamed; and a request that is none this history takes.
-#: Whoever asked goes by the code, never by the words.
+#: nothing lands past until it is renamed; a request that is none this history takes; and a
+#: landing the history holds whose copy could not be made its files, so that nothing is read
+#: from the copy.  Whoever asked goes by the code, never by the words.
 NO_WHOLE_COPY = "no_whole_copy"
 NAME_NOT_UTF8 = "name_not_utf8"
 NOT_A_REQUEST = "not_a_request"
+RECORD_UNFINISHED = "record_unfinished"
 
 #: On a folder of the user's these are the platform's: the whiteboard's
 #: canvas, the harness's own files, and where a coding tool checks a
@@ -88,6 +93,11 @@ _REDIRECTS = ("commondir", "hooks", "modules", "objects/info/alternates", "objec
 _MADE = "made"
 #: A thread's repository is packed again at its turn's start once it holds more packs than this.
 _PACKS = 20
+#: A file in a thread's repository from when a landing's record was finished until an answer says so.
+_FINISHED = "finished"
+#: What a thread's copy held beyond its turn when a record made it the landing's files is kept
+#: for its last sixteen such records: the oldest goes for one more.
+_ASIDE = 16
 _PINNED = {
     "GIT_CONFIG_COUNT": str(len(_OVERRIDES)), "GIT_ALLOW_PROTOCOL": "file",
     **{f"GIT_CONFIG_KEY_{n}": key for n, key in enumerate(_OVERRIDES)},
@@ -138,6 +148,16 @@ class LocalHistory(History):
         return self.store
 
     @property
+    def landed(self) -> str:
+        """The thread's landing its copy was last made the files of: a record is finished once this names it."""
+        return f"refs/landed/{self.thread}"
+
+    @property
+    def aside(self) -> str:
+        """Under it, what the copy held beyond its turn when a record made it the landing's files: ``<nth>-<turn>``."""
+        return f"refs/set-aside/{self.thread}"
+
+    @property
     def _taken(self) -> Path:
         """Git reads the folder's history in place: nothing is copied."""
         return self.store
@@ -185,6 +205,12 @@ class LocalHistory(History):
         branch.  Then a copy with nothing unlanded moves to ``main``'s tip,
         your edits picked up as at its first open (``moved``); one with
         unlanded work stays where it is, and so does its base (``kept``).
+
+        Before the copy is read as anything's base, a landing of the
+        thread's that the history holds and the copy was never made the
+        files of is finished (:meth:`_unrecorded`).  ``finished`` then
+        names it, once, with what was set aside: by this open, or by an
+        act that came before it.
         """
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
@@ -199,6 +225,9 @@ class LocalHistory(History):
                     return {"history": "off", "reason": reason}
                 self.copy.parent.mkdir(parents=True, exist_ok=True)
                 self._open()
+                if (found := self._landing(self._take())) is not None:
+                    # Made from the history as it is: no record of the thread's is owed to this copy.
+                    self._main("update-ref", self.landed, found[0])
                 (self.repo / _MADE).write_bytes(b"")
                 return {"copy": "made"}
             if os.path.lexists(self.copy) and not (self._admin / "index").is_file():
@@ -211,9 +240,12 @@ class LocalHistory(History):
                     env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
                 )
                 (self.copy / ".git").unlink()
+            self._unrecorded()
             if len(list((self.repo / "objects" / "pack").glob("*.pack"))) > _PACKS:
                 self._git(["repack", "-a", "-d", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
-            return {"copy": "moved" if self._to_main() else "kept"}
+            moved = self._to_main()
+            finished = self._said()
+            return {"copy": "moved" if moved else "kept", **({"finished": finished} if finished else {})}
         finally:
             _TIMEOUT.reset(budget)
 
@@ -225,9 +257,26 @@ class LocalHistory(History):
         either picked up or found at the apply.  Nothing is committed and
         no ref moves.
         """
+        self._unrecorded()
         self._add_all(self._copy)
         names = self._copy("diff", "--cached", "--name-only", "--no-renames", "-z", self._main("rev-parse", self.base))
         return {"paths": sorted(n for n in names.split("\0") if n)}
+
+    def snapshot(self, reason: str) -> str:
+        self._unrecorded()
+        return super().snapshot(reason)
+
+    def restore(self, commit: str) -> None:
+        self._unrecorded()
+        super().restore(commit)
+
+    def commit_turn(self, **step: Any) -> dict:
+        self._unrecorded()
+        return super().commit_turn(**step)
+
+    def keep(self, **step: Any) -> dict:
+        self._unrecorded()
+        return super().keep(**step)
 
     def record(self, **step: Any) -> dict:
         """The cloud's record, and then the copy is made the landing's files.
@@ -236,10 +285,139 @@ class LocalHistory(History):
         file the landing left out is the newer one in the copy from now on,
         as the thread's next turn must find it, and the thread's own version
         is the landing's second parent.  What history leaves out stays.
+        ``set_aside`` is a snapshot of what the copy held beyond its turn,
+        written after the turn was committed, where making the copy the
+        landing's took it away; None where it took nothing.
+
+        Safe to repeat wherever ``main`` is by then: no lock is held across
+        a computer's absence, so another thread may have landed since a try
+        cut after its push.  The landing is found by its saga where the
+        thread's own branch has it, and the copy of a thread that has worked
+        on since is left alone.
         """
-        recorded = super().record(**step)
-        self._copy("read-tree", "-u", "--reset", recorded["commit"])
-        return recorded
+        self._unrecorded()
+        saga = f"Surogate-Saga: {dict(map(tuple, step['trailers']))['Surogate-Saga']}"
+        found = self._landing(self._take())
+        if found is not None and saga in found[2]:
+            commit = found[0]
+        else:
+            commit = super().record(**step)["commit"]
+            self._unrecorded(told=True)
+        # Told here, where a try of this record cut after its push was finished just now.
+        self._said(commit)
+        return {"commit": commit, "set_aside": self._asides().get(step["turn"], (None, None))[1]}
+
+    def _landing(self, refs: dict[str, str]) -> tuple[str, str, list[str]] | None:
+        """The thread's landing where *refs*, the history's, still have its branch: it, its turn, and its message.
+
+        A record's push moves the thread's branch and its base to the
+        landing together, and the thread's next push, of a turn or of a
+        kept one, moves the branch off its base again.  Read in the history
+        itself: this repository may not hold the landing yet.
+        """
+        landing = refs.get(self.branch)
+        if landing is None or refs.get(self.base) != landing:
+            return None
+        said = self._git(["cat-file", "commit", landing], env={"GIT_DIR": str(self._taken)}, cwd=self._taken).split("\n")
+        parents = [line[7:] for line in takewhile(lambda line: line.startswith("parent "), said[1:])]
+        message = said[said.index("") + 1:] if "" in said else []
+        if len(parents) != 2 or message[:1] != ["Landing"]:
+            return None
+        return landing, _checked_id(parents[1], "a commit"), message
+
+    def _unrecorded(self, *, told: bool = False) -> None:
+        """Finish a record of this thread's that was cut after its push, before the copy is read as anything's base.
+
+        The push is the moment a landing counts; making the copy the
+        landing's files comes after it, and a request's bound, a stop or a
+        lost guest can fall between.  The copy then still holds the turn's
+        files, on a base that is the landing: read so, every file another
+        thread landed would be one this thread deleted, and the thread's old
+        version of a file the landing left out would be its change to the
+        newer one.  So no act reads the copy before this: the history holds
+        a landing of the thread's that :attr:`landed` does not name, and the
+        copy is made its files now.
+
+        What the copy holds beyond the turn and the landing is set aside
+        first, on a ref (:meth:`_set_aside`).  A copy whose index is the
+        landing's already was made so, git writing the index last, and is
+        left as it is, with whatever the thread has written since.  Safe to
+        cut anywhere: the ref that says it is done moves last.  Where it
+        cannot be done the request is refused, and nothing was read from
+        the copy.  Unless whoever asked is *told* by this request's own
+        answer, a note is left for the thread's next open to tell.
+        """
+        if not (self.repo / "HEAD").is_file():
+            return
+        found = self._landing(self._take())
+        if found is None or self._ref(self.landed) == found[0]:
+            return
+        landing, turn, _ = found
+        try:
+            # First, and before anything is written: a copy that is not whole is its next open's to make.
+            index = self._copy("write-tree")
+            self._fetch(landing)
+            if index != self._tree(landing):
+                self._add_all(self._copy)
+                held = self._copy("write-tree")
+                if held not in {self._tree(commit) for commit in (landing, turn) if self._has(commit)}:
+                    self._set_aside(held, turn)
+                self._copy("read-tree", "-u", "--reset", landing)
+            if not told:
+                _replace(self.repo / _FINISHED, f"{landing} {turn}\n".encode())
+            for ref in (self.branch, self.base, self.synced, self.landed):
+                self._main("update-ref", ref, landing)
+        except HistoryError as why:
+            if why.code != FAILED:
+                raise
+            raise HistoryError(
+                "refused the request: a landing of this thread's is in the history, and its copy "
+                f"could not be made the landing's files: {why}", code=RECORD_UNFINISHED,
+            ) from None
+
+    def _set_aside(self, tree: str, turn: str) -> None:
+        """Keep *tree*, what the copy holds, on the ref of *turn*'s set-aside, before a record takes it away.
+
+        A snapshot the thread can be put back to (:meth:`restore`).  One
+        taken before for the same turn, by a try cut part way through the
+        copy's files, is its second parent: that one may hold a file this
+        one no longer does.  A thread keeps its last ``_ASIDE``, by the
+        order they were set aside in, which their names count.
+        """
+        kept = self._asides()
+        ref, earlier = kept.get(turn, (None, None))
+        if ref is None:
+            last = max((int(name.rpartition("/")[2].partition("-")[0]) for name, _ in kept.values()), default=0)
+            ref = f"{self.aside}/{last + 1:08d}-{turn}"
+        before = [commit for commit in (self._copy("rev-parse", "HEAD"), earlier) if commit]
+        self._main("update-ref", ref, self._copy(
+            *_as(_CHECKPOINT), "commit-tree", tree, *(arg for parent in before for arg in ("-p", parent)),
+            "-m", "Set aside before a landing's record",
+        ))
+        for old, _ in sorted({**kept, turn: (ref, None)}.values())[:-_ASIDE]:
+            self._main("update-ref", "-d", old)
+
+    def _asides(self) -> dict[str, tuple[str, str]]:
+        """What the thread's records set aside, by the turn: each its ref and its snapshot."""
+        kept = {}
+        for line in self._main("for-each-ref", "--format=%(objectname) %(refname)", f"{self.aside}/").splitlines():
+            commit, _, ref = line.partition(" ")
+            if re.fullmatch(r"[0-9]{8}-[0-9a-f]{40}", ref.rpartition("/")[2]):
+                kept[ref[-40:]] = (ref, commit)
+        return kept
+
+    def _said(self, only: str | None = None) -> dict | None:
+        """The record that was finished and not yet told of, with what it set aside; told once.  With *only*, that landing's alone."""
+        note = self.repo / _FINISHED
+        try:
+            landing, turn = note.read_text().split()
+        except (FileNotFoundError, ValueError):
+            return None
+        if not (_ID.fullmatch(landing) and _ID.fullmatch(turn)) or only not in (None, landing):
+            return None
+        said = {"landing": landing, "set_aside": self._asides().get(turn, (None, None))[1]}
+        note.unlink()
+        return said
 
     def _to_main(self) -> bool:
         """Move a copy with nothing unlanded, and its base, to ``main`` as the folder is now; whether it moved."""
