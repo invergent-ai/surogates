@@ -595,21 +595,16 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
           });
         }
       };
-      const acted = actOnBrowser(
-        action,
-        root,
-        desktop,
-        {
-          taken: () => {
-            answered();
-            return telling.taken();
-          },
-          handedBack: (confirmed) => {
-            answered();
-            return telling.handedBack(confirmed);
-          },
+      const acted = actOnBrowser(action, root, desktop, {
+        taken: () => {
+          answered();
+          return telling.taken();
         },
-      );
+        handedBack: (confirmed) => {
+          answered();
+          return telling.handedBack(confirmed);
+        },
+      });
       // What was said of the last press stays until the next, which starts clean.
       set({ asking: handingBack || state.asking, failure: null, said: null });
       return acted.then(
