@@ -116,6 +116,38 @@ describe("what an installed app reads as root's own", () => {
     }
   });
 
+  it("says to run the install script again where the record is not one it can take, as where the helper is not: updates do not stop with nothing on the line", async () => {
+    base.publish("1.2.4");
+    roots(base.helper, 0o755);
+    const LINE = { text: "Surogate cannot update itself. Run the install script again.", button: null };
+    const written = JSON.stringify({ base: base.url, channel: "stable" });
+    // Each record that is not root's own word, that names no base or no channel the helper installs, or that is not there.
+    const records: Array<[string, () => void, string]> = [
+      ["one its group may write", () => roots(base.record, 0o664), `${base.record} ${NOT_ROOTS}`],
+      ["another user's", () => roots(base.record, 0o644, own), `${base.record} ${NOT_ROOTS}`],
+      ["one that names no base", () => writeFileSync(base.record, JSON.stringify({ channel: "stable" })), `${base.record} names no web address to download the sandbox from`],
+      ["one that is no JSON", () => writeFileSync(base.record, "<html>"), `${base.record} names no web address to download the sandbox from`],
+      ["one that names no channel", () => writeFileSync(base.record, JSON.stringify({ base: base.url })), `${base.record} names no update channel`],
+      ["one of another channel than the helper installs", () => writeFileSync(base.record, JSON.stringify({ base: base.url, channel: "beta" })), `${base.record} names the channel beta, and ${base.helper} installs stable`],
+      ["none", () => (rmSync(base.record), told.paths.delete(base.record)), "Surogate was not installed by its install script"],
+    ];
+    for (const [name, make, why] of records) {
+      writeFileSync(base.record, written);
+      roots(base.record, 0o644);
+      make();
+      const states: string[] = [];
+      const found = base.updates({ rootOwned: true }, () => states.push(found.state.state));
+      base.heard = [];
+      await expect(found.check(), name).rejects.toThrow(why);
+      expect([name, found.state, updateLine(found.state), states, base.heard]).toEqual([name, { state: "broken" }, LINE, ["broken"], []]);
+      // Once the record is as an install leaves it the line goes, and the update is found.
+      writeFileSync(base.record, written);
+      roots(base.record, 0o644);
+      await found.check();
+      expect([name, found.state.state, updateLine(found.state)?.text]).toEqual([name, "available", "Update available: Surogate 1.2.4"]);
+    }
+  });
+
   it("reads neither through a link, wherever it leads: a link to a file of root's is not root's own word", () => {
     // /usr/bin/bash and /etc/passwd are root's, at the modes an install leaves its helper and its
     // record: by itself each passes as root's own.

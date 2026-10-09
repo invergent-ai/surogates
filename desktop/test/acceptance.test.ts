@@ -501,7 +501,7 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
         // of a helper or a record that is and that is not root's alone to write.
         expect((await ssh(`stat -c '%a %U:%G' ${HELPER} ${RECORD} /opt/surogate/current/release.json /opt/surogate/bin/release.json`)).stdout).toBe("755 root:root\n644 root:root\n644 root:root\n644 root:root\n");
         const kept = (path: string) => [`mv ${path} ${path}.kept && ln -s ${path}.kept ${path}`, `rm ${path} && mv ${path}.kept ${path}`] as const;
-        const forms: Array<[what: string, made: string, mended: string, found: "available" | "broken" | "none", why?: string]> = [
+        const forms: Array<[what: string, made: string, mended: string, found: "available" | "broken", why?: string]> = [
           ["as the install left them", "true", "true", "available"],
           ["the helper read-only, and a program", `chmod 0555 ${HELPER}`, `chmod 0755 ${HELPER}`, "available"],
           ["the helper, which its group may write", `chmod 0775 ${HELPER}`, `chmod 0755 ${HELPER}`, "broken", `${HELPER} is not the install script's: only root may write it`],
@@ -510,18 +510,18 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
           ["a link where the helper is", ...kept(HELPER), "broken", `${HELPER} is not the install script's: it is a link`],
           ["no helper", `mv ${HELPER} ${HELPER}.kept`, `mv ${HELPER}.kept ${HELPER}`, "broken", `ENOENT: no such file or directory, lstat '${HELPER}'`],
           ["the record read-only", `chmod 0444 ${RECORD}`, `chmod 0644 ${RECORD}`, "available"],
-          ["the record, which its group may write", `chmod 0664 ${RECORD}`, `chmod 0644 ${RECORD}`, "none", `${RECORD} is not the install script's: only root may write it`],
-          ["the record, the user's own", `chown tester ${RECORD}`, `chown root ${RECORD}`, "none", `${RECORD} is not the install script's: only root may write it`],
-          ["a link where the record is", ...kept(RECORD), "none", `${RECORD} is not the install script's: it is a link`],
+          ["the record, which its group may write", `chmod 0664 ${RECORD}`, `chmod 0644 ${RECORD}`, "broken", `${RECORD} is not the install script's: only root may write it`],
+          ["the record, the user's own", `chown tester ${RECORD}`, `chown root ${RECORD}`, "broken", `${RECORD} is not the install script's: only root may write it`],
+          ["a link where the record is", ...kept(RECORD), "broken", `${RECORD} is not the install script's: it is a link`],
         ];
         for (const [what, made, mended, found, why] of forms) {
           expect((await ssh(`sudo sh -c '${made}'`)).status, what).toBe(0);
           const checked = await started("tester", "--check", VERSION);
           expect((await ssh(`sudo sh -c '${mended}' && stat -c '%a %U' ${HELPER} ${RECORD}`)).stdout, what).toBe("755 root\n644 root\n");
-          // A helper the app cannot take has a line of its own, which says what to do; a record it
-          // cannot take has none. Why is in the app's log.
+          // A helper or a record that the app cannot take has a line of its own, which says what to
+          // do. Why is in the app's log.
           expect(checked, `${what}: ${JSON.stringify(checked)}`).toMatchObject({
-            version: VERSION, found, line: { available: AVAILABLE, broken: BROKEN, none: null }[found], logged: why === undefined ? [] : [`Error: ${why}`],
+            version: VERSION, found, line: { available: AVAILABLE, broken: BROKEN }[found], logged: why === undefined ? [] : [`Error: ${why}`],
           });
         }
 

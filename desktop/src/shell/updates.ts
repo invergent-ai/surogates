@@ -439,20 +439,24 @@ export class Updates {
     const installed = this.installedVersion();
     if (installed && newer(installed, this.options.version)) return this.set({ state: "installed", version: installed });
     const { record, rootOwned, helper } = this.options;
-    const base = installBase(record, rootOwned);
+    let base: string;
     let keys: KeyObject[];
+    let channel: string;
     try {
+      base = installBase(record, rootOwned);
       keys = releaseKeys(helper, rootOwned);
+      channel = channelOf(record, helper);
     } catch (error) {
-      // The helper is not one the app can take, and at an install it would say so itself, or
-      // pkexec would for it. The app is not silent meanwhile: its line says what to do, and its
-      // log, where this check's failure goes, says why.
+      // The record or the helper is not one the app can take. Of the helper, an install would say
+      // so itself, or pkexec would for it; of the record no one would, and updates would stop
+      // with nothing said. The app is not silent: its line says what to do, which is the same for
+      // both, since the install script writes each afresh; and its log, where this check's
+      // failure goes, says why.
       this.set({ state: "broken" });
       throw error;
     }
-    // Put right since, as the install script leaves it: the line goes.
+    // Put right since, as the install script leaves them: the line goes.
     if (this.state.state === "broken") this.set({ state: "none" });
-    const channel = channelOf(record, helper);
     const latest = `${base}/desktop/latest.json`;
     const manifest = await this.small(latest, MANIFEST_MAX);
     const signature = await this.small(`${latest}.sig`, SIGNATURE_MAX);
