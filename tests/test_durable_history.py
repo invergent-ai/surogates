@@ -2198,6 +2198,44 @@ def test_helpers_that_hand_back_one_after_the_other_onto_a_stopped_turns_hand_of
     assert not (project / "draft.md").exists() and all((project / name).exists() for name in kept)
 
 
+def a_hand_off_put_in_place_of(pod: History, tip: str, *, body: str | None = None, **said: str) -> str:
+    """A commit like *tip* whose trailers say *said*, or the raw commit *body*, as the thread's hand-off in the bucket's history."""
+    durable = pod.project / "_history"
+    raw = body or subprocess.run(["git", f"--git-dir={pod.repo}", "cat-file", "commit", tip], capture_output=True, text=True, check=True).stdout
+    for key, value in said.items():
+        raw = "\n".join(f"{key}: {value}" if line.startswith(f"{key}: ") else line for line in raw.split("\n"))
+    forged = subprocess.run(
+        ["git", f"--git-dir={pod.repo}", "hash-object", "-t", "commit", "-w", "--stdin"], input=raw, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", f"--git-dir={pod.repo}", "pack-objects", "-q", str(durable / "objects" / "pack" / "pack")],
+        input=f"{forged}\n", capture_output=True, text=True, check=True,
+    )
+    (durable / "packed-refs").write_text((durable / "packed-refs").read_text().replace(tip, forged))
+    return forged
+
+
+@pytest.mark.parametrize("unreadable", ["a hand-off it says it took that the history lacks", "more commits than are followed"])
+def test_a_hand_off_the_open_cannot_follow_gives_the_copy_none_of_its_own_files_and_the_helpers_work_found_above(
+    tmp_path, project, monkeypatch, caplog, unreadable,
+):
+    turn = a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    tip = git(project / "_history", "rev-parse", "refs/handoff/t1")
+    if unreadable == "more commits than are followed":
+        monkeypatch.setattr(history_module, "_HAND_BACKS", 2)
+    else:
+        a_hand_off_put_in_place_of(turn, tip, **{"Surogate-Took": "ab" * 20})
+    b = a_helper(tmp_path, project, "h-b")
+    (b.copy / "checked.md").write_text("checked by b")
+    b.hand_back(author=A, trailers=KEPT)
+    with caplog.at_level(logging.WARNING):
+        later = a_pod(tmp_path, project, turn="turn-3")
+    # It cannot tell what the stopped turn had found: it takes nothing of that turn's own, says so, and takes
+    # the helper's work it found on the way down.
+    assert "draft.md" not in names_in(later) and "checked.md" in names_in(later)
+    assert "Could not follow the hand-off of thread t1" in caplog.text and "none of its own files" in caplog.text
+
+
 def test_a_threads_pod_must_be_told_its_turn(tmp_path, project):
     pod = tmp_path / "pod-untold"
     (pod / "workspace").mkdir(parents=True)

@@ -763,7 +763,8 @@ class History:
         stop was not carried out among them: its own files are left out,
         as a stop leaves them, and what it found and what helpers kept
         since is taken up.  A hand-off that names no turn is taken for
-        another turn's.
+        another turn's, and one that cannot be followed gives none of its
+        own files: only the helpers' work found on the way down.
         """
         refs = self._take()
         durable, handed = refs.get(self.handoff), self._ref(self.handed)
@@ -774,7 +775,7 @@ class History:
         if handed is None:
             followed = self._followed(
                 durable, refs.get(self.handoff_from),
-                gone=lambda commit, said: said.get(_TURN) != self.turn,
+                gone=lambda commit, said: said.get(_TURN) != self.turn, partly=True,
             )
             if followed is not None and followed[0]:
                 _, taken, onto_none, _ = followed
@@ -840,7 +841,7 @@ class History:
         return {"dropped": True}
 
     def _followed(
-        self, top: str, floor: str | None, *, gone: Callable[[str, dict[str, str]], bool],
+        self, top: str, floor: str | None, *, gone: Callable[[str, dict[str, str]], bool], partly: bool = False,
     ) -> tuple[bool, str | None, str | None, str | None] | None:
         """The hand-off *top* without the own files of each of the thread's hand-offs that *gone* names.
 
@@ -856,16 +857,23 @@ class History:
         Answers whether any was gone; what is left, None for nothing; where
         that is taken up from when it is a helper's copy onto none; and,
         where the walk ended at a hand-off of the thread's, the base that
-        one was made on.  None when it cannot be followed: a commit the
-        history lacks, or more than ``_HAND_BACKS`` commits in all.
+        one was made on.
+
+        It cannot always be followed: a commit the history lacks, or more
+        than ``_HAND_BACKS`` commits in all.  Then the answer is None, and a stop changes
+        nothing.  With *partly*, for a copy's open, the answer is what
+        could be followed: none of the hand-offs' own files, since what
+        the last of them rests on cannot be told, and what helpers kept
+        above that point.  The log says so.
         """
         kept: list[str] = []
-        any_gone, found, rests = False, None, None
+        any_gone, found, rests, followed = False, None, None, False
         commit: str | None = top
         try:
             for _ in range(_HAND_BACKS):
                 if commit == floor:
                     found = commit
+                    followed = True
                     break
                 self._fetch(commit)
                 message, parents = self._message(commit), self._parents(commit)
@@ -875,6 +883,7 @@ class History:
                 elif message[:1] == ["Kept"] and len(parents) == 1:
                     if parents[0] == floor:
                         found = commit  # a helper's copy onto none: it is the hand-off, from where it started
+                        followed = True
                         break
                     # On the hand-off it started from, another helper's copy as well as a thread's hand-off.
                     kept.append(commit)
@@ -882,21 +891,32 @@ class History:
                 elif message[:1] == ["Handed on"] and parents:
                     said = dict(line.split(": ", 1) for line in message if ": " in line)
                     if not gone(commit, said):
-                        found, rests = commit, parents[0]
+                        found, rests, followed = commit, parents[0], True
                         break
                     any_gone = True
                     if said.get(_TOOK, "none") == "none":
+                        followed = True
                         break
                     commit = _checked_id(said[_TOOK], "a hand-off")
                 else:
-                    found = commit
+                    found, followed = commit, True
                     break
-            else:
+        except HistoryError:
+            logger.warning("Could not follow the hand-off of thread %s", self.thread, exc_info=True)
+        if not followed:
+            if not partly:
                 return None
-            if not any_gone:
-                return False, top, None, rests
-            onto_none = None
-            for tip in reversed(kept):
+            # What the hand-off rests on cannot be told: nothing below what was followed is taken.
+            logger.warning(
+                "Could not follow the hand-off of thread %s to its end: none of its own files are taken up, "
+                "and what helpers kept onto it is, as far as it could be followed", self.thread,
+            )
+            any_gone, found, rests = True, None, None
+        if not any_gone:
+            return False, top, None, rests
+        onto_none = None
+        for tip in reversed(kept):
+            try:
                 self._fetch(tip)
                 [since] = self._parents(tip)
                 # Where the helper started may be a hand-off this pod never held: an earlier turn's.
@@ -908,10 +928,11 @@ class History:
                 self._fetch(found)
                 tree, _ = self._merged(since, winner=found, loser=tip)
                 found = self._commit(tree, found, tip, _CHECKPOINT, "Kept", [["Surogate-Kind", "kept"]])
-            return True, found, onto_none, rests
-        except HistoryError:
-            logger.warning("Could not follow the hand-off of thread %s", self.thread, exc_info=True)
-            return None
+            except HistoryError:
+                logger.warning("Could not follow the hand-off of thread %s: a hand-back on it is left out", self.thread, exc_info=True)
+                if not partly:
+                    return None
+        return True, found, onto_none, rests
 
     def prune(self, *, keep: list[str], now: float, spare: float = _SPARE, old: list[str] | None = None) -> dict:
         """Cut the durable history back to its window, at most once a day, under the project's lock.
