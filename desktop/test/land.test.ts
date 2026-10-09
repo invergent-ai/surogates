@@ -836,3 +836,95 @@ describe("a folder that tells names apart less than the thread's copy does", () 
     expect(out.holds).toEqual({ "Notes.md": "yours", "Report.docx": "one", [composed]: "composed" });
   });
 });
+
+// A user's own attribute on a file, set and read by Python: Node has no call for either. Null where this computer's
+// filesystem keeps none.
+const attribute = (path: string, value?: string): string | null => {
+  const code = value === undefined
+    ? "import os,sys; print(os.getxattr(sys.argv[1], 'user.note').decode())"
+    : "import os,sys; os.setxattr(sys.argv[1], 'user.note', sys.argv[2].encode())";
+  const ran = spawnSync("python3", ["-c", code, path, ...(value === undefined ? [] : [value])], { encoding: "utf8", timeout: 10_000 });
+  return ran.status === 0 ? ran.stdout.trim() : null;
+};
+const attributed = (() => {
+  const at = mkdtempSync(join(tmpdir(), "land-attribute-"));
+  writeFileSync(join(at, "f"), "");
+  const kept = attribute(join(at, "f"), "x") !== null;
+  rmSync(at, { recursive: true, force: true });
+  return kept;
+})();
+
+describe("what a landing's file is, and what its put-back gives back", () => {
+  it("writes a new file as this user makes one, and a replacement with the mode of the file it replaces, and nothing else of it", async () => {
+    const umask = process.umask();
+    writeFileSync(join(folder, "run.sh"), "v1");
+    chmodSync(join(folder, "run.sh"), 0o750);
+    if (attributed) attribute(join(folder, "run.sh"), "yours");
+    const before = Date.now();
+    // A file the thread made executable in its copy: its mode there is no mode of the folder's.
+    const script = turn("new.sh", "#!/bin/sh\n");
+    chmodSync(join(copy, "new.sh"), 0o777);
+    const replaced = turn("run.sh", "the thread's");
+    chmodSync(join(copy, "run.sh"), 0o600);
+    const seen = await looked("run.sh");
+    await ok(apply(1, "new.sh", null, script, "absent"));
+    await ok(apply(2, "run.sh", blob("v1"), replaced, seen["run.sh"]!));
+    const [made, over] = [statSync(join(folder, "new.sh")), statSync(join(folder, "run.sh"))];
+    expect([made.mode & 0o7777, over.mode & 0o7777]).toEqual([0o666 & ~umask, 0o750]);
+    for (const st of [made, over]) {
+      expect([st.uid, st.gid, st.nlink]).toEqual([process.getuid!(), process.getgid!(), 1]);
+      // Written now: the copy's time is not the folder's.
+      expect(st.mtimeMs).toBeGreaterThanOrEqual(before - 1000);
+    }
+    if (attributed) expect(attribute(join(folder, "run.sh"))).toBeNull();
+  });
+
+  it("gives back the very file it replaced: its inode, its times to the nanosecond, its mode, its owner and its attributes", async () => {
+    const target = join(folder, "Report.docx");
+    writeFileSync(target, "the report, v1");
+    chmodSync(target, 0o4750);
+    if (attributed) attribute(target, "yours");
+    utimesSync(target, 1_600_000_000.123456, 1_500_000_000.654321);
+    const was = lstatSync(target, { bigint: true });
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    await ok(apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!));
+    expect(lstatSync(target, { bigint: true }).ino).not.toBe(was.ino);
+    expect(await ok(unapply(1, "Report.docx"))).toEqual({ path: "Report.docx", put_back: true });
+    const now = lstatSync(target, { bigint: true });
+    expect([now.ino, now.mtimeNs, now.atimeNs, now.mode, now.uid, now.gid, now.nlink, now.size])
+      .toEqual([was.ino, was.mtimeNs, was.atimeNs, was.mode, was.uid, was.gid, 1n, was.size]);
+    if (attributed) expect(attribute(target)).toBe("yours");
+  });
+
+  it("gives back a copy of it from another filesystem with its bytes, its mode and the time it was saved to the microsecond, and none of its attributes", async () => {
+    const other = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    try {
+      // Only where this computer has a second filesystem to keep it on.
+      if (statSync(other).dev === statSync(folder).dev) return;
+      context = { ...context, landing: { copy, kept: other } };
+      const target = join(folder, "Report.docx");
+      writeFileSync(target, "the report, v1");
+      chmodSync(target, 0o640);
+      if (attributed) attribute(target, "yours");
+      // A time whose seconds, as the float Node takes, fall just short of its microsecond.
+      utimesSync(target, 1_600_000_000, (1_500_000_000_654_321 + 0.5) / 1e6);
+      const was = lstatSync(target, { bigint: true });
+      expect(was.mtimeNs / 1000n).toBe(1_500_000_000_654_321n);
+      const after = turn("Report.docx", "the report, by the thread");
+      await ok(apply(1, "Report.docx", blob("the report, v1"), after, (await looked("Report.docx"))["Report.docx"]!));
+      expect(statSync(join(other, SAGA, "1")).mode & 0o777).toBe(0o600);
+      expect(await ok(unapply(1, "Report.docx"))).toEqual({ path: "Report.docx", put_back: true });
+      const now = lstatSync(target, { bigint: true });
+      expect([readFileSync(target, "utf8"), now.mode, now.uid, now.gid, now.nlink, now.mtimeNs / 1000n])
+        .toEqual(["the report, v1", was.mode, was.uid, was.gid, 1n, was.mtimeNs / 1000n]);
+      // A copy is a new file, and making it reads the old one: neither its attributes nor when it was last read come back with it.
+      expect(now.ino).not.toBe(was.ino);
+      if (attributed) expect(attribute(target)).toBeNull();
+      expect(leftovers()).toEqual([]);
+      expect(existsSync(join(other, SAGA))).toBe(false);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+});

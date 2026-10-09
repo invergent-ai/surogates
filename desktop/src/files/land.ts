@@ -224,9 +224,12 @@ function remove(path: string | null): void {
 
 // *fd*, a copy made across filesystems, given the times of the file at *from*, to the microsecond: a
 // move keeps a file's times, and a put-back's file is the one the user saved then, not one made now.
+// Node sets a time from seconds as a float, which at today's dates is exact to a quarter of a microsecond and is cut
+// down to one: half a microsecond past the one meant, so that the cut never lands on the one before it.
 function dated(fd: number, from: string): void {
   const { atimeNs, mtimeNs } = lstatSync(from, { bigint: true });
-  futimesSync(fd, Number(atimeNs) / 1e9, Number(mtimeNs) / 1e9);
+  const seconds = (ns: bigint) => (Number(ns / 1000n) + 0.5) / 1e6;
+  futimesSync(fd, seconds(atimeNs), seconds(mtimeNs));
 }
 
 // *name* with what it is said after its stem, short enough to be a name: "Report (kept by Surogate).docx".
