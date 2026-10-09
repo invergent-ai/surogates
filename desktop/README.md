@@ -74,15 +74,81 @@ and a Chromium that is not the Snap are detected, not verified), chosen in Setti
 Browser. The browser host, in a utility process of its own, launches it headed with its own
 sandbox, over a pipe, in a profile of the agent's own under `browser-profiles/` in the state
 root, and sends its every request through a pinning proxy that reaches nothing on this
-computer or its private networks. The browser dies with the host. Its tests drive the real
-browser, headed, so they run apart from your session: `test/isolated.sh` gives them a display
-of xvfb's own, an X11 session (else the browser finds your Wayland compositor), a dead session
-bus (else it reaches your keyring), and a scratch home, XDG folders and temp folder. They
-are behind `SUROGATE_BROWSER_TESTS=1`, which it sets, and refuse to launch a browser without
-all of it:
+computer or its private networks. The browser dies with the host.
+
+A file a page downloads waits in the browser host's own temporary folder, under
+`browser-profiles/` too, and is then saved under `Downloads` in the chat's folder through
+the chat's file host: under its own name, made one plain visible file name, or the next free
+one (`report (2).txt`), never over a file that is there. In a chat that asks every time you
+are asked first, by a prompt that says a page downloaded it; in a chat that works freely it
+is saved without asking. A page can start a download by itself, so there a file of a page's
+choosing can land in `Downloads` unasked, where a tool that searches the folder's tree, as a
+test runner does, finds it. The agent is told where the file was saved, or why it was not
+(over 50 MiB, not finished, denied), with its next answer that says what the page did: a
+navigation's, the mouse's, the keyboard's or an upload's.
+
+While the agent drives, a page gets a file only when the agent uploads one: up to ten files
+of the chat's folder, 50 MiB in all, read through the chat's file host and given to the file
+input the page last asked for a file for, by name, type and content, never a path. A file
+input opens no file dialog then. In a chat that asks every time you are asked first, by a
+prompt that names each file and the site that gets them: the one of the frame the input is
+in, which can be another than the tab shows. In a chat that works freely nothing is asked.
+
+You can take the browser over from the chat. Once the agent has opened an address in it,
+the chat's browser pane says "The browser is open on this computer", with Show browser and
+Take over (in Surogate Desktop on that computer: elsewhere it only names the computer).
+Show browser brings the chat's page to the front of the browser's window; whether that
+window comes above your others is your window manager's call. Take over shows the page too,
+and makes the agent wait. It is the agent's one browser here, so its browser tools answer
+that you have it in every one of its chats; what it was doing in a page is cut short, a
+download of its own still on its way is dropped, which it is told, and its open browser
+prompts close. A file input that asked before is given nothing after: the page must ask
+again. While you have the browser:
+
+- a page's own questions wait for your answer;
+- a file input you click opens the browser's own file chooser; in a page the agent had open,
+  only once that page has been quiet for five seconds: until then, and in one that keeps
+  asking for a file by itself, your click on a file input opens nothing;
+- a download that begins in a chat's page is yours: you are asked before it is saved, in
+  either mode, and the agent is told nothing of it.
+
+Hand back, in the pane, asks in a window of the desktop's own, "Hand the browser back to
+<agent>?". Keep control is its default, and Hand back takes no press in its first half
+second. The browser is handed back from the chat it was taken over from, or from any chat
+of the agent's once that one is deleted. Nothing the agent's page does by itself hands the
+browser back, shows it or opens Settings: each needs a click of yours in that page. It can
+take the browser over by itself, which only stops the agent. The pane tells the chat of a
+take-over and of a hand back, and at the hand back that chat's agent goes on; if the chat
+could not be told, its agent waits until you write to it, and the pane says so where it
+can. The agent's other chats are not told of either. A take-over lasts until you hand the
+browser back or quit the app, which closes the browser.
+
+For a minute after a hand back, a download the browser shows no request for (a `download`
+link to its page's own site, a `blob:` or a `data:` address) is still asked about as yours,
+since you may have started it; the agent is told where it was saved, or only that it was
+not. In a tab you opened yourself, a download that is yours by these rules is saved, asked
+the same way, in the chat you took the browser over from, unless that chat was deleted; any
+other download there is cancelled.
+
+Settings → Folders and permissions lists each chat that uses the browser here, with Take
+back: you are asked again, as at its first use, before the agent next opens, reads or acts
+in a page for that chat. The tabs it has open stay open.
+
+The browser's tests drive the real browser, headed, so they run apart from your session:
+`test/isolated.sh` gives them a display of xvfb's own, an X11 session (else the browser
+finds your Wayland compositor), a dead session bus (else it reaches your keyring), and a
+scratch home, XDG folders and temp folder. They are behind `SUROGATE_BROWSER_TESTS=1`, which
+it sets, and refuse to launch a browser without all of it:
 
     npm run test:browser -- test/browser-host.test.ts test/browser-client.test.ts
     npm run build && sh test/isolated.sh npx vitest run -c vitest.e2e.config.ts test/e2e/browser.e2e.ts
+
+Where a test acts as the person at the browser, with a click or a key, it sends X events to
+that display (`test/x-user.py`), which needs `python3`, libXtst, `xwininfo` and `xprop`. The
+last of `browser.e2e.ts`'s tests through the app runs all of the above together: a page's
+download saved and told, a file of the folder given to a page, the browser taken over, a
+download its user makes there asked as theirs, and the browser handed back. It saves and
+reads through the chat's file host, so it passes only where srt's sandbox starts.
 
 They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` names another:
 

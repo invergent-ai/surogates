@@ -4,15 +4,21 @@
 //   npm run build && sh test/isolated.sh npx vitest run -c vitest.e2e.config.ts test/e2e/browser.e2e.ts
 // with SUROGATE_TEST_BROWSER naming another browser to drive than Settings would choose.
 // Skipped where no supported browser is installed. Settings → Browser launches none, and runs anywhere.
+// The last of the tests through the app saves a download and reads an upload through the chat's file
+// host, so it needs the folder's sandbox to start; and it clicks in the browser as its user does, by
+// X events on that run's own display (x-user.py: python3 and libXtst), in the window xwininfo finds.
 
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { chosenBrowser, findBrowsers } from "../../src/browser/choose.js";
+import { FILE_ASKED, NOT_ASKED } from "../../src/browser/host.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { isolated } from "../isolated.js";
 import { handBack as handBackPrompt } from "../../src/shell/prompt-content.js";
@@ -109,6 +115,8 @@ async function alsoBound(client: Page, folder: string, chat = OTHER): Promise<vo
 
 // A browser operation while its user holds the agent's browser.
 const PAUSED = { error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" } };
+// A hand back the page's own code asks for, with no click of its user's.
+const HAND_BACK_AT_A_CLICK = "Surogate hands the agent's browser back only when its user asks, with a click";
 
 // One of the bridge's calls about a chat's browser, begun as the page's own button begins it, at its
 // user's click, each from a button of its own: what it answered, or why it was refused, once the page has heard.
@@ -143,6 +151,10 @@ async function prompted(): Promise<Page> {
   return prompt(app!);
 }
 
+// What a prompt names, each in its field: the label, and the value as it is drawn.
+const fields = (asked: Page) => asked.$$eval("#prompt-details .detail", (blocks) =>
+  blocks.map((block) => [block.querySelector(".label")!.textContent, block.querySelector(".value")!.textContent]));
+
 // A hand back asked at its user's click, and the desktop's confirmation answered with *button* once its
 // input protection lets it: what the page was told.
 async function handBackWith(client: Page, button: "hand_back" | "keep", chat = CHAT): Promise<unknown> {
@@ -174,6 +186,14 @@ function paged(): string {
   ].join("\n"));
   return script;
 }
+
+// The user's own hand on this run's Xvfb, as X events (x-user.py): a window given the keyboard, and a click
+// on the screen. What they do in the agent's browser while they hold it reaches a page no other way.
+const X_USER = fileURLToPath(new URL("../x-user.py", import.meta.url));
+const asUser = (...args: string[]) => void execFileSync("python3", [X_USER, ...args]);
+// The window of the agent's browser on that display, by the title of the tab in front, which its name begins with.
+const browserWindow = (title: string): string | undefined => execFileSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" }).split("\n")
+  .flatMap((line) => (line.includes(`"${title} - `) ? /^\s+(0x[0-9a-f]+) /.exec(line)?.[1] ?? [] : []))[0];
 
 // The browser's processes with a profile under the app's state.
 const profiles = () => join(home, "surogate", "browser-profiles");
@@ -255,6 +275,125 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     await new Promise((done) => setTimeout(done, 2_000));
     expect(readdirSync(profiles())).toEqual([]);
   });
+
+  it("saves a page's download in the chat's folder and tells the agent, gives the page's file input a file of the folder, and is taken over and handed back: a download its user makes meanwhile is asked as theirs, and the agent told nothing of it", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    const notes = join(folder, "notes.txt");
+    writeFileSync(notes, "the chat's notes");
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    const binding = () => client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT);
+    const saved = (name: string) => {
+      try {
+        return readFileSync(join(folder, "Downloads", name), "utf8");
+      } catch {
+        return null;
+      }
+    };
+    const buttons = (asked: Page) => asked.$$eval("#prompt-buttons button", (drawn) => drawn.map((button) => [button.dataset.id, button.textContent]));
+    // What the agent hears of what its page did, with its answers that say so: *first*, or its next ones, each a
+    // move of the mouse, until one says something.
+    const hears = async (first: string[] = []): Promise<string[]> => {
+      const said = [...first];
+      await expect.poll(async () => {
+        if (said.length === 0) said.push(...(await operation("browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices);
+        return said.length;
+      }, { timeout: 15_000 }).toBeGreaterThan(0);
+      return said;
+    };
+    // The chat works freely, as the folder's sheet offers first: once its user has let the agent use the browser
+    // here, nothing the agent does in it is asked about, a page's download and an upload among it.
+    expect(await binding()).toEqual({ folder, mode: "free", takenOver: false });
+    // The page needs no site: a script draws it in the chat's new tab, once the chat may use the browser. It has
+    // a file input, and a link to a file the page made, large enough for a person's click.
+    const drawn = operation("browser.evaluate", {
+      code: `document.title = "Statements";
+document.body.innerHTML = '<input id="file" type="file" style="position:fixed;left:10px;top:10px;width:200px;height:40px">'
+  + '<a id="theirs" download="statement.txt" style="position:fixed;left:10px;top:80px;width:400px;height:240px;background:silver">Statement</a>';
+document.getElementById("theirs").href = URL.createObjectURL(new Blob(["statement"]));
+return 1;`,
+    });
+    await press(await prompt(app!), "allow_session");
+    expect(await drawn).toEqual({ ok: { value: 1 } });
+
+    // A download the page starts while the agent drives, before anyone has held the browser: the agent's. The
+    // browser says no request of a file the page made, so this one is told from a user's own only by nobody
+    // having held the browser, now or in the last minute: it comes before the take-over. It is saved under
+    // Downloads in the chat's folder, unasked in a chat that works freely, and the agent hears where with its
+    // next answer that says what the page did, once the save has answered.
+    await operation("browser.evaluate", {
+      code: `const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob(["report"])); link.download = "report.txt";
+document.body.append(link); link.click(); return 1;`,
+    });
+    expect(await hears()).toEqual(['The page downloaded "report.txt". It is saved in the chat\'s folder as Downloads/report.txt.']);
+    expect(saved("report.txt")).toBe("report");
+    expect(await promptsShown(app!)).toBe(0);
+
+    // A file of the folder, given to the input the page asked for a file for: by its name, its type and what it holds.
+    const click = () => operation("browser.mouse", { action: "click", x: 50, y: 30, button: "left", clicks: 1 });
+    expect(await hears((await click()).ok.notices)).toEqual([FILE_ASKED]);
+    expect(await operation("browser.set_input_files", { paths: [notes] })).toEqual({ ok: { files: 1, notices: [] } });
+    const given = `const [file] = document.getElementById("file").files; return file ? [file.name, file.type, await file.text()] : null;`;
+    expect((await operation("browser.evaluate", { code: given })).ok.value).toEqual(["notes.txt", "text/plain", "the chat's notes"]);
+    expect(await promptsShown(app!)).toBe(0);
+    // The page asks again, as for one more file.
+    expect(await hears((await click()).ok.notices)).toEqual([FILE_ASKED]);
+    // Where the page's link is on the screen now, for its user's own click.
+    const [x, y] = (await operation("browser.evaluate", {
+      code: `const box = document.getElementById("theirs").getBoundingClientRect();
+return [
+  window.screenX + Math.round((window.outerWidth - window.innerWidth) / 2 + box.x + box.width / 2),
+  window.screenY + (window.outerHeight - window.innerHeight) + Math.round(box.y + box.height / 2),
+];`,
+    })).ok.value as [number, number];
+
+    // Taken over from the agent's page, at its user's click: the chat's page comes to the front, and the agent's
+    // browser waits, in whatever it is asked.
+    expect(await atClick(client, "takeOver")).toBeNull();
+    expect(await binding()).toMatchObject({ takenOver: true });
+    expect(await operation("browser.evaluate", { code: "return 2;" })).toEqual(PAUSED);
+    expect(await operation("browser.set_input_files", { paths: [notes] })).toEqual(PAUSED);
+    expect(await atClick(client, "show")).toBeNull();
+
+    // Its user clicks the page's link themselves, in the browser they hold. The download is theirs: asked in a
+    // chat that works freely too, in words that say when it came, with no "stop asking".
+    await expect.poll(() => browserWindow("Statements"), { timeout: 10_000 }).toBeDefined();
+    asUser("focus", browserWindow("Statements")!);
+    asUser("click", String(x), String(y));
+    const save = await prompted();
+    expect(await save.textContent("#prompt-title")).toBe("Save statement.txt?");
+    expect(await save.textContent("#prompt-lead")).toMatch(
+      /^This file was downloaded while you had control of (.+)'s browser, or just after you handed it back, 9 bytes\. Save it in project\? \1 can read what is saved there\.$/,
+    );
+    expect(await fields(save)).toEqual([["File", "Downloads/statement.txt"], ["New content, 9 bytes", "statement"]]);
+    expect(await buttons(save)).toEqual([["deny", "Deny"], ["allow", "Save"]]);
+    await press(save, "allow");
+    await expect.poll(() => saved("statement.txt"), { timeout: 15_000 }).toBe("statement");
+
+    // Handed back only at its user's click, and then at the desktop's own confirmation, Keep control where the
+    // keyboard starts and Hand back taken only once its input protection has passed: the page's own code hands
+    // nothing back.
+    await expect(client.evaluate((chat) => window.surogateDesktop!.browser!.handBack(chat), CHAT)).rejects.toThrow(HAND_BACK_AT_A_CLICK);
+    expect(await promptsShown(app!)).toBe(0);
+    const answer = await clicked(client, "handBack");
+    const confirmation = await prompted();
+    expect(await confirmation.textContent("#prompt-title")).toMatch(/^Hand the browser back to .+\?$/);
+    expect(await buttons(confirmation)).toEqual([["keep", "Keep control"], ["hand_back", "Hand back"]]);
+    expect(await confirmation.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
+    await press(confirmation, "hand_back");
+    expect(await answer()).toBe(true);
+    expect(await binding()).toMatchObject({ takenOver: false });
+
+    // The agent drives again. It hears nothing of its user's download; and the input that asked before they took
+    // the browser over is not the agent's to fill now: the page is given nothing until it asks again.
+    expect(await operation("browser.evaluate", { code: "return 2;" })).toEqual({ ok: { value: 2 } });
+    expect((await operation("browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices).toEqual([]);
+    expect(await operation("browser.set_input_files", { paths: [notes] })).toEqual({ error: { type: "browser", message: NOT_ASKED } });
+    expect((await operation("browser.evaluate", { code: given })).ok.value).toEqual(["notes.txt", "text/plain", "the chat's notes"]);
+    expect(readdirSync(join(folder, "Downloads")).sort()).toEqual(["report.txt", "statement.txt"]);
+    expect(await promptsShown(app!)).toBe(0);
+  }, 120_000);
 });
 
 // The app launched and signed in, its Settings open at Browser.
@@ -317,14 +456,10 @@ describe.skipIf(!run)("Custom… in Settings → Browser", () => {
 describe("a chat's browser taken over, and handed back", () => {
   const SHOW_AT_A_CLICK = "Surogate shows the agent's browser only when its user asks, with a click";
   const SETTINGS_AT_A_CLICK = "Surogate opens its Settings only when its user asks, with a click";
-  const HAND_BACK_AT_A_CLICK = "Surogate hands the agent's browser back only when its user asks, with a click";
   const LEAD = "It will act in its browser on this computer again, in every chat.";
   const HAND_BACK = '[data-id="hand_back"]';
   // The native boxes the desktop has opened: the hand back's confirmation is none of them.
   const boxes = () => app!.evaluate(() => (globalThis as unknown as { asked: unknown[] }).asked);
-  // What the confirmation names, each in its field: the label, and the value as it is drawn.
-  const fields = (asked: Page) => asked.$$eval("#prompt-details .detail", (blocks) =>
-    blocks.map((block) => [block.querySelector(".label")!.textContent, block.querySelector(".value")!.textContent]));
 
   it("answers the chat's browser operations paused while its user holds the browser, tells the page, and hands it back only at its user's click and the desktop's own confirmation", async () => {
     const folder = join(home, "project");
