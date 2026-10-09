@@ -1,10 +1,10 @@
-// The desktop's release (release/publish.sh): its manifest signed, then sent to a local S3
+// The desktop's release (release/publish.sh): its manifest written, then signed, then sent to a local S3
 // (SeaweedFS in Docker) in R2's place. Behind SUROGATE_S3_TESTS=1: it needs Docker and the
 // chrislusf/seaweedfs image.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, verify } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,26 +103,38 @@ const held = (dir: string, program: string) => [
 describe("the desktop's release manifest", () => {
   let dir: string;
   let out: string;
-  // The temporary folder each signing unpacks its tarball in: the test's own. The computer's is
-  // every signing's that runs on it at that moment, another test's among them.
+  // The temporary folder each run unpacks its tarball in: the test's own. The computer's is every
+  // run's on it at that moment, another test's among them.
   let tmp: string;
   const tarball = () => join(out, "surogate-desktop-1.2.3-linux-x64.tar.gz");
   // publish.sh and an install.sh that trusts the test's key, beside each other as in the repository.
-  const publish = (verb: string, version: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), [verb, version, out], {
-    encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, TMPDIR: tmp, ...env },
-  });
-  // Signed as the publish job signs: with the release key, and the hash the build's job gave for its tarball.
-  const sign = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())), ...env });
-  // A signing that goes on while the test sends it a signal: to the script's own shell alone, or,
-  // started in a group of its own, to all it runs too, as a terminal's signal goes. *exited* is
-  // the script's own end; *ended*, how it ended and what was said, once nothing of it still speaks.
-  const signing = (group = false) => {
-    const child = spawn(join(dir, "release", "publish.sh"), ["sign", "1.2.3", out], {
-      detached: group, stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, TMPDIR: tmp, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) },
+  // Its environment is the test's own, without a release key that this computer's might hold.
+  const steps = (env: Record<string, string>) => {
+    const { DESKTOP_RELEASE_KEY: _held, ...own } = process.env;
+    return { ...own, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, TMPDIR: tmp, ...env };
+  };
+  const publish = (verb: string, version: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), [verb, version, out], { encoding: "utf8", env: steps(env) });
+  // What the build's job says of its tarball: its hash, and its size in bytes.
+  const built = () => ({ DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())), DESKTOP_TARBALL_SIZE: String(statSync(tarball()).size) });
+  // The publish job's first step: the manifest written of the tarball, by the hash the build's job
+  // gave for it, with no release key anywhere.
+  const describes = (env: Record<string, string> = {}) => publish("describe", "1.2.3", { DESKTOP_TARBALL_SHA256: built().DESKTOP_TARBALL_SHA256, ...env });
+  // Its second: that manifest signed, with the release key and the build's two words.
+  const signs = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...built(), ...env });
+  // Both, as the job runs them: the second only once the first has ended 0. *env* is the second's.
+  const release = (env: Record<string, string> = {}) => {
+    const described = describes();
+    return described.status === 0 ? signs(env) : described;
+  };
+  // The first step, going on while the test sends it a signal: to the script's own shell alone,
+  // or, started in a group of its own, to all it runs too, as a terminal's signal goes. *exited*
+  // is the script's own end; *ended*, how it ended and what was said, once nothing of it still speaks.
+  const describing = (group = false) => {
+    const child = spawn(join(dir, "release", "publish.sh"), ["describe", "1.2.3", out], {
+      detached: group, stdio: ["ignore", "pipe", "pipe"], env: steps({ DESKTOP_TARBALL_SHA256: built().DESKTOP_TARBALL_SHA256 }),
     });
     const { pid } = child;
-    if (pid === undefined) throw new Error("the signing did not start");
+    if (pid === undefined) throw new Error("the step did not start");
     const said = { stdout: "", stderr: "" };
     child.stdout.on("data", (data: Buffer) => { said.stdout += data.toString(); });
     child.stderr.on("data", (data: Buffer) => { said.stderr += data.toString(); });
@@ -151,11 +163,11 @@ describe("the desktop's release manifest", () => {
   };
   // Lets the stand-in that waits go on, once a script that the signal ended at once would have
   // ended: one that waits for what it runs, or lets the signal by, is still there.
-  const letGo = async (run: ReturnType<typeof signing>) => {
+  const letGo = async (run: ReturnType<typeof describing>) => {
     await Promise.race([run.exited, new Promise((resolve) => setTimeout(resolve, 300))]);
     writeFileSync(join(dir, "go"), "");
   };
-  // Before another signing of one test: nothing of the one before it, nor of the stand-ins that held it.
+  // Before another run of one test: nothing of the one before it, nor of the stand-ins that held it.
   const again = (...programs: string[]) => {
     for (const file of [join(out, "manifest.json"), join(out, "manifest.json.sig"), join(dir, "go"), ...programs.map((program) => join(dir, `${program}-held`))]) rmSync(file, { force: true });
   };
@@ -174,19 +186,26 @@ describe("the desktop's release manifest", () => {
     recording(dir, "openssl");
   });
 
-  it("signs the exact bytes of a manifest that names the tarball by its hash and size, and the app's state schema", () => {
+  it("writes a manifest that names the tarball by its hash and size, and the app's state schema, and then signs its exact bytes", () => {
     packed(dir, out, "1.2.3", withApp({ version: "1.2.3", stateSchema: 3 }));
-    expect(sign()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
+    expect(describes()).toMatchObject({ status: 0, stdout: `wrote ${out}/manifest.json\n`, stderr: "" });
     const manifest = readFileSync(join(out, "manifest.json"));
     // The shape install.sh's --apply checks, field for field, on one line.
     expect(manifest.toString()).toBe(`${JSON.stringify({
       version: "1.2.3", channel: "stable", platform: "linux", arch: "x64", url: "releases/1.2.3/surogate-desktop-1.2.3-linux-x64.tar.gz",
       sha256: sha256(readFileSync(tarball())), size: statSync(tarball()).size, stateSchema: 3,
     })}\n`);
+    // Nothing is signed by the step that reads the tarball; the next signs the manifest as it is.
+    expect(readdirSync(out).sort()).toEqual(["manifest.json", "surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(signs()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    expect(readFileSync(join(out, "manifest.json")).equals(manifest)).toBe(true);
     expect(verify(null, manifest, keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
+    // Written again of the same tarball, the manifest has no signature beside it that is another's.
+    expect(describes().status).toBe(0);
+    expect(readdirSync(out).sort()).toEqual(["manifest.json", "surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
 
-  it("refuses to sign a tarball whose app names no state schema, as a release unpacks it", () => {
+  it("writes no manifest of a tarball whose app names no state schema, as a release unpacks it", () => {
     const app = (top: string) => join(top, "resources", "app", "package.json");
     const cases: Array<[string, (top: string) => void]> = [
       ...[{ version: "1.2.3" }, { version: "1.2.3", stateSchema: 0 }, { version: "1.2.3", stateSchema: "1" }, { version: "1.2.3", stateSchema: 1.5 }, { version: "1.2.3", stateSchema: 1e15 }]
@@ -205,8 +224,8 @@ describe("the desktop's release manifest", () => {
     ];
     for (const [what, change] of cases) {
       packed(dir, out, "1.2.3", change);
-      expect(sign(), what).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the tarball's resources/app/package.json names no stateSchema\n" });
-      // Nothing is signed, and nothing of the tarball's is left unpacked.
+      expect(describes(), what).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the tarball's resources/app/package.json names no stateSchema\n" });
+      // Nothing is written, and nothing of the tarball's is left unpacked.
       expect(readdirSync(out), what).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
       expect(readdirSync(tmp), what).toEqual([]);
     }
@@ -223,7 +242,7 @@ describe("the desktop's release manifest", () => {
       symlinkSync("resources/app", join(after, name, "other"));
       expect(spawnSync("tar", ["--owner=0", "--group=0", "-C", after, "-rf", archive, `${name}/other`, `${name}/other/package.json`]).status).toBe(0);
     });
-    expect(sign().status).toBe(0);
+    expect(describes().status).toBe(0);
     expect((JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema: number }).stateSchema).toBe(4);
     // The archive does hold the first under the package's own name.
     expect(spawnSync("tar", ["-xzOf", tarball(), app], { encoding: "utf8" }).stdout).toBe(JSON.stringify({ version: "1.2.3", stateSchema: 3 }));
@@ -234,7 +253,7 @@ describe("the desktop's release manifest", () => {
     expect(Number.isInteger(stateSchema) && (stateSchema as number) >= 1).toBe(true);
   });
 
-  it("signs the state schemas the install script's own check takes, and no other: to the last below 10^15, and none that reads as below it only as it is written", () => {
+  it("writes the state schemas the install script's own check takes, and no other: to the last below 10^15, and none that reads as below it only as it is written", () => {
     // The install script's check of a manifest's fields, from its functions without its last line.
     const taken = () => spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
     // The app's package with the number as it is written: this test's own JSON would round it first.
@@ -242,22 +261,22 @@ describe("the desktop's release manifest", () => {
     for (const [schema, signedAs] of [["1", 1], ["1.0", 1], ["999999999999999", 999999999999999]] as const) {
       again();
       packed(dir, out, "1.2.3", written(schema));
-      expect(sign().status, schema).toBe(0);
+      expect(describes().status, schema).toBe(0);
       expect((JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema: number }).stateSchema, schema).toBe(signedAs);
       expect(taken(), schema).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(tarball()))} ${statSync(tarball()).size}\n`, stderr: "" });
     }
     // A number is what it rounds to: 999999999999999.99 is 10^15. Compared as it is written, it
-    // would pass for less, and be signed as 1000000000000000, which no install takes.
+    // would pass for less, and be written as 1000000000000000, which no install takes.
     for (const schema of ["999999999999999.99", "1000000000000000", "1e15", "0", "0.5", "1.5", "-1"]) {
       again();
       packed(dir, out, "1.2.3", written(schema));
-      expect(sign(), schema).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the tarball's resources/app/package.json names no stateSchema\n" });
+      expect(describes(), schema).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the tarball's resources/app/package.json names no stateSchema\n" });
       expect(readdirSync(out), schema).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     }
   });
 
   it("signs a manifest that the install script's own checks take: its signature, and each of its fields", () => {
-    expect(sign().status).toBe(0);
+    expect(release().status).toBe(0);
     // What every install and every installed helper checks a release by, from the script's
     // functions without its last line, which runs it: the two cannot drift apart.
     // As on a computer with no helper yet, where the script's own list is the one that counts: never
@@ -268,7 +287,7 @@ describe("the desktop's release manifest", () => {
   });
 
   it("hands the release key to openssl through a pipe alone: never on a command line, where any process of the runner's could read it, and in no file", () => {
-    expect(sign().status).toBe(0);
+    expect(release().status).toBe(0);
     // The key's own line of its PEM: the rest is every such key's.
     const body = PRIVATE.split("\n")[1] ?? "";
     expect(body).toMatch(/^[A-Za-z0-9+/]{64}$/);
@@ -282,56 +301,98 @@ describe("the desktop's release manifest", () => {
     expect(spawnSync("grep", ["-rlF", body, dir], { encoding: "utf8" }).stdout).toBe("");
   });
 
-  it("unpacks the tarball, which is the build's, without the release key in what unpacks it", () => {
-    // tar as publish.sh calls it, which first writes down how many of its environment's variables
-    // are the key: a line for each call, so that none is written over by the one after it.
-    recording(dir, "tar", (real) => [`env | grep -c '^DESKTOP_RELEASE_KEY=' >> '${join(dir, "tar-key")}'`, `exec '${real}' "$@"`]);
-    expect(sign().status).toBe(0);
+  it("reads the build's tarball only where no release key is: with one in its environment, set or empty, it starts nothing and writes nothing", () => {
+    // Each program the step starts, as publish.sh calls it, written down.
+    const started = () => readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
+    for (const program of ["dirname", "sha256sum", "cut", "mktemp", "tar", "realpath", "cmp", "jq", "chmod", "rm", "stat"]) recording(dir, program);
+    for (const key of [PRIVATE, ""]) {
+      expect(describes({ DESKTOP_RELEASE_KEY: key }), key === "" ? "empty" : "set").toMatchObject({
+        status: 1, stdout: "", stderr: "publish.sh: describe reads the build's tarball, and runs only where no release key is: DESKTOP_RELEASE_KEY is in its environment\n",
+      });
+      expect(started()).toEqual([]);
+      expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+      expect(readdirSync(tmp)).toEqual([]);
+    }
+    // With none, it starts each of them, tar on the tarball among them.
+    expect(describes().status).toBe(0);
+    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "jq-argv", "mktemp-argv", "realpath-argv", "rm-argv", "sha256sum-argv", "stat-argv", "tar-argv"]);
     expect(readFileSync(join(dir, "tar-argv"), "utf8")).toContain(`${tarball()}\n`);
-    // Every tar the signing ran, and not its last alone: one that reads the build's tarball with
-    // the key before the unpack is as much a tar with the key.
-    const calls = readFileSync(join(dir, "tar-key"), "utf8").trimEnd().split("\n");
-    expect(calls).toEqual(calls.map(() => "0"));
   });
 
-  it("starts no program with the release key in its environment, whatever the program is and however it is started: the key is the script's own shell's, and reaches openssl alone, through a pipe", () => {
-    // A program's environment is what the shell that starts it exports, and what the command that
-    // starts it gives it by name. So the signing is run with every command that its shell, or a
-    // subshell of it, is about to run written down first (bash's DEBUG trap, which -T hands on to
-    // functions and subshells): once where a variable the shell exports then holds the key's own
-    // line, under whatever name, and once where the command names the key.
-    const seen = join(dir, "seen");
-    const watched = [
-      // The key's own line of its PEM, in a variable of the shell's that is not exported.
-      "watched=\"${DESKTOP_RELEASE_KEY#*$'\\n'}\"",
-      "watched=\"${watched%%$'\\n'*}\"",
-      "set -T",
-      `trap 'if [[ "$(export -p)" == *"$watched"* ]]; then printf "exported %s\\0" "$BASH_COMMAND" >>"${seen}"; fi; `
-        + `if [[ "$BASH_COMMAND" == *DESKTOP_RELEASE_KEY* ]]; then printf "named %s\\0" "$BASH_COMMAND" >>"${seen}"; fi' DEBUG`,
-      '. "$0" "$@"',
-    ].join("\n");
-    const signed = spawnSync("bash", ["-c", watched, join(dir, "release", "publish.sh"), "sign", "1.2.3", out], {
-      encoding: "utf8", env: { ...process.env, TMPDIR: tmp, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) },
-    });
-    expect(signed).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+  it("signs with no tarball there: it opens none, and starts no program that is handed one", () => {
+    expect(describes().status).toBe(0);
+    // What a signing needs of the tarball is in the manifest and in the build's two words: the tarball itself is away.
+    const said = built();
+    renameSync(tarball(), join(dir, "elsewhere"));
+    // Each program the step starts, as publish.sh calls it, written down: bash among them, which
+    // the script itself is run by. Each first counts the variables of its environment that hold
+    // the key's own line, under whatever name.
+    const body = PRIVATE.split("\n")[1] ?? "";
+    const counted = (real: string) => [`/usr/bin/env | /usr/bin/grep -cF '${body}' >> '${join(dir, "keyed")}'`, `exec '${real}' "$@"`];
+    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut"]) recording(dir, program, counted);
+    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...said })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
     expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
-    const commands = readFileSync(seen, "utf8").split("\0").filter(Boolean);
-    expect(commands.length).toBeGreaterThan(5);
-    // Exported, as the job gives it, only until the script's first lines take it out of the
-    // environment: the watch's own start of the script, and two commands of the shell's own.
-    expect(commands.filter((command) => command.startsWith("exported ")).map((command) => command.slice("exported ".length))).toEqual([
-      '. "$0" "$@"', "set -euo pipefail", "export -n DESKTOP_RELEASE_KEY",
-    ]);
-    // Named only there, where it is checked for, and where the shell itself writes it into a pipe
-    // that openssl reads: for its public half, and to sign.
-    expect([...new Set(commands.filter((command) => command.startsWith("named ")).map((command) => command.slice("named ".length)))]).toEqual([
-      "export -n DESKTOP_RELEASE_KEY",
-      ': "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}"',
-      `public="$(openssl pkey -pubout -in <(printf '%s\\n' "$DESKTOP_RELEASE_KEY"))"`,
-      `openssl pkey -pubout -in <(printf '%s\\n' "$DESKTOP_RELEASE_KEY")`,
-      `printf '%s\\n' "$DESKTOP_RELEASE_KEY"`,
-      `openssl pkeyutl -sign -inkey <(printf '%s\\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$OUT/manifest.json" -out "$OUT/manifest.json.sig"`,
-    ]);
+    // No tar, and nothing that would unpack, hash or measure one.
+    const started = readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
+    expect(started).toEqual(["bash-argv", "cmp-argv", "dirname-argv", "head-argv", "jq-argv", "openssl-argv", "sed-argv", "tail-argv"]);
+    // And none of what it starts is given the tarball's path, where it was or where it is: the manifest's alone.
+    const given = started.map((name) => readFileSync(join(dir, name), "utf8")).join("");
+    expect(given).toContain(`${join(out, "manifest.json")}\n`);
+    expect(given).not.toContain(tarball());
+    expect(given).not.toContain(join(dir, "elsewhere"));
+    // The key is in the environment of the script's own start alone, as the job gives it: of none
+    // of the programs the script starts. openssl has it from a pipe.
+    const keyed = readFileSync(join(dir, "keyed"), "utf8").trimEnd().split("\n");
+    expect(keyed.length).toBeGreaterThan(8);
+    expect(keyed).toEqual(["1", ...keyed.slice(1).map(() => "0")]);
+  });
+
+  it("signs no manifest but the one of its version and of the build's tarball, written as the first step writes one: it is a file that another step wrote", () => {
+    expect(describes().status).toBe(0);
+    const written = readFileSync(join(out, "manifest.json"), "utf8");
+    const fields = JSON.parse(written) as Record<string, unknown>;
+    const line = (manifest: unknown) => `${JSON.stringify(manifest)}\n`;
+    const noManifest = `publish.sh: ${out}/manifest.json is no manifest that install.sh takes: nothing is signed\n`;
+    const notIts = `publish.sh: ${out}/manifest.json is not the manifest of 1.2.3 and of the tarball the build made, of sha256 ${built().DESKTOP_TARBALL_SHA256} and ${built().DESKTOP_TARBALL_SIZE} bytes: nothing is signed\n`;
+    const others: Array<[string, string, string]> = [
+      // What no install takes for a manifest.
+      ["two documents", `${written}${written}`, noManifest],
+      ["an object over two lines", written.replace(",", ",\n"), noManifest],
+      ["an object without its newline", written.trimEnd(), noManifest],
+      ["no state schema", line({ ...fields, stateSchema: undefined }), noManifest],
+      ["another channel's", line({ ...fields, channel: "beta" }), noManifest],
+      ["nothing", "", noManifest],
+      // What an install would take, and is not this release's as the first step writes it.
+      ["another version's", line({ ...fields, version: "1.2.4", url: "releases/1.2.4/surogate-desktop-1.2.4-linux-x64.tar.gz" }), notIts],
+      ["another tarball's, by its hash", line({ ...fields, sha256: "0".repeat(64) }), notIts],
+      ["another tarball's, by its size", line({ ...fields, size: (fields.size as number) + 1 }), notIts],
+      ["with a field more", line({ ...fields, more: true }), notIts],
+      ["its fields in another order", line({ stateSchema: fields.stateSchema, ...fields }), notIts],
+      ["its schema written with a point", written.replace('"stateSchema":1}', '"stateSchema":1.0}'), notIts],
+    ];
+    for (const [what, manifest, said] of others) {
+      expect(manifest, what).not.toBe(written);
+      writeFileSync(join(out, "manifest.json"), manifest);
+      expect(signs(), what).toMatchObject({ status: 1, stdout: "", stderr: said });
+      expect(existsSync(join(out, "manifest.json.sig")), what).toBe(false);
+    }
+    // Nor one that is not there, or a link to one that is elsewhere.
+    const notThere = { status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json is not there: run publish.sh describe first\n` };
+    rmSync(join(out, "manifest.json"));
+    expect(signs()).toMatchObject(notThere);
+    writeFileSync(join(dir, "elsewhere.json"), written);
+    symlinkSync(join(dir, "elsewhere.json"), join(out, "manifest.json"));
+    expect(signs()).toMatchObject(notThere);
+    rmSync(join(out, "manifest.json"));
+    // Nor by a word for the tarball's size that is no size in bytes, as the build's job gives one.
+    writeFileSync(join(out, "manifest.json"), written);
+    for (const size of ["0", "12a", "1e3", " 12", "-12", "1000000000000000"]) {
+      expect(signs({ DESKTOP_TARBALL_SIZE: size }), size).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: DESKTOP_TARBALL_SIZE is not a size in bytes, as the build's job gives its tarball's\n" });
+    }
+    expect(signs({ DESKTOP_TARBALL_SIZE: "" })).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/DESKTOP_TARBALL_SIZE: parameter null or not set\n$/) });
+    expect(existsSync(join(out, "manifest.json.sig"))).toBe(false);
+    // The one the first step wrote is signed.
+    expect(signs()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
   });
 
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
@@ -339,11 +400,12 @@ describe("the desktop's release manifest", () => {
     writeFileSync(join(dir, "release", "install.sh"), trusting([PUBLIC, pem(next.publicKey)]));
     // The release of that install script: its root helper lists both.
     packed(dir, out, "1.2.3");
+    expect(describes().status).toBe(0);
     for (const { privateKey, publicKey } of [keys, next]) {
-      expect(sign({ DESKTOP_RELEASE_KEY: secret(privateKey) }).status).toBe(0);
+      expect(signs({ DESKTOP_RELEASE_KEY: secret(privateKey) }).status).toBe(0);
       expect(verify(null, readFileSync(join(out, "manifest.json")), publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
     }
-    expect(sign({ DESKTOP_RELEASE_KEY: secret(generateKeyPairSync("ed25519").privateKey) })).toMatchObject({
+    expect(signs({ DESKTOP_RELEASE_KEY: secret(generateKeyPairSync("ed25519").privateKey) })).toMatchObject({
       status: 1, stderr: "publish.sh: DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts\n",
     });
   });
@@ -354,22 +416,23 @@ describe("the desktop's release manifest", () => {
     const script = trusting().replace(/\nmain "\$@"\n$/, `\ntouch '${join(dir, "ran")}'\n\n`);
     expect(script.endsWith(`}\n\ntouch '${join(dir, "ran")}'\n\n`)).toBe(true);
     writeFileSync(join(dir, "release", "install.sh"), script);
-    expect(sign()).toMatchObject({
+    expect(signs()).toMatchObject({
       status: 1, stdout: "", stderr: 'publish.sh: install.sh does not end with the line that runs it (main "$@"): its release keys are not read\n',
     });
     expect(existsSync(join(dir, "ran"))).toBe(false);
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
 
-  it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there", () => {
+  it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there to describe, or the manifest to sign", () => {
     // A part with a zero before it is no version either: dpkg reads 1.2.03 as 1.2.3, a second spelling of one release.
-    for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["sign", "1.2.03"], ["sign", "01.2.3"], ["send", "1.02.3"], ["publish", "1.2.3"]] as const) {
-      expect(publish(verb, version, { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) }), `${verb} ${version}`)
-        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
+    for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["sign", "1.2.03"], ["describe", "01.2.3"], ["send", "1.02.3"], ["publish", "1.2.3"]] as const) {
+      expect(publish(verb, version, verb === "describe" ? built() : { DESKTOP_RELEASE_KEY: PRIVATE, ...built() }), `${verb} ${version}`)
+        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh describe|sign|send <x.y.z> <out>\n" });
     }
-    expect(publish("sign", "1.2.4", { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball())) })).toMatchObject({
+    expect(publish("describe", "1.2.4", built())).toMatchObject({
       status: 1, stdout: "", stderr: `publish.sh: ${out}/surogate-desktop-1.2.4-linux-x64.tar.gz is not there: run scripts/package.sh first\n`,
     });
+    expect(signs()).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json is not there: run publish.sh describe first\n` });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
 
@@ -413,8 +476,8 @@ describe("the desktop's release manifest", () => {
     ];
     for (const [what, said, change, then] of cases) {
       packed(dir, out, "1.2.3", change, then);
-      expect(sign(), what).toMatchObject({ status: 1, stdout: "", stderr: said });
-      // Nothing is signed, and nothing of the tarball's is left unpacked.
+      expect(describes(), what).toMatchObject({ status: 1, stdout: "", stderr: said });
+      // Nothing is written, and nothing of the tarball's is left unpacked.
       expect(readdirSync(out), what).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
       expect(readdirSync(tmp), what).toEqual([]);
     }
@@ -422,7 +485,7 @@ describe("the desktop's release manifest", () => {
     expect(spawnSync("tar", ["-xzOf", tarball(), helper], { encoding: "utf8" }).stdout).toBe(trusting());
     // What is no archive at all.
     writeFileSync(tarball(), randomBytes(4096));
-    expect(sign()).toMatchObject({ status: 1, stdout: "", stderr: broken });
+    expect(describes()).toMatchObject({ status: 1, stdout: "", stderr: broken });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     expect(readdirSync(tmp)).toEqual([]);
   });
@@ -437,18 +500,18 @@ describe("the desktop's release manifest", () => {
     for (const [what, then] of cases) {
       again();
       packed(dir, out, "1.2.3", undefined, then);
-      expect(sign(), what).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+      expect(release(), what).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
       expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig"))), what).toBe(true);
       expect(readdirSync(tmp), what).toEqual([]);
     }
   });
 
-  it("ends as a signal ends it, with nothing signed and nothing left unpacked, once what unpacks the tarball has ended: removed beside a tar that still writes, the folder keeps what tar writes after", { timeout: 60_000 }, async () => {
+  it("ends as a signal ends it, with no manifest written and nothing left unpacked, once what unpacks the tarball has ended: removed beside a tar that still writes, the folder keeps what tar writes after", { timeout: 60_000 }, async () => {
     recording(dir, "tar", unpacking);
     for (const [signal, status] of [["SIGHUP", 129], ["SIGINT", 130], ["SIGPIPE", 141], ["SIGTERM", 143]] as const) {
       again("tar");
       // To the script's own shell alone: tar goes on.
-      const run = signing();
+      const run = describing();
       await called("tar");
       run.signal(signal);
       await letGo(run);
@@ -461,7 +524,7 @@ describe("the desktop's release manifest", () => {
     // To all it runs too, tar among them, and with folders in the tarball that their owner may not write or open.
     again("tar");
     packed(dir, out, "1.2.3", undefined, added(dir, ["0555", ["closed/", "closed/file"]], ["0000", ["shut/", "shut/file"]]));
-    const run = signing(true);
+    const run = describing(true);
     await called("tar");
     run.signal("SIGTERM");
     await letGo(run);
@@ -470,7 +533,7 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it("lets a signal by while its folder is made, and from the removal of what it unpacked to its end: stopped there, it would leave a folder it has not named yet, or what its removal had not reached, or have said signed and not ended 0", { timeout: 60_000 }, async () => {
+  it("lets a signal by while its folder is made, and from the removal of what it unpacked to its end: stopped there, it would leave a folder it has not named yet, or what its removal had not reached, or a manifest half written", { timeout: 60_000 }, async () => {
     const stand = {
       // mktemp as publish.sh calls it: the folder is made, and its name not said yet.
       mktemp: (real: string) => [`made="$('${real}' "$@")" || exit`, ...held(dir, "mktemp"), 'printf \'%s\\n\' "$made"'],
@@ -484,18 +547,20 @@ describe("the desktop's release manifest", () => {
       // To the script alone, and to all it runs too, as Ctrl+C pressed again reaches rm.
       for (const [group, signal] of [[false, "SIGTERM"], [true, "SIGINT"]] as const) {
         again(program);
-        const run = signing(group);
+        const run = describing(group);
         await called(program);
         run.signal(signal);
         await letGo(run);
-        expect(await run.ended, `${program} ${signal}`).toEqual({ status: 0, signal: null, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+        expect(await run.ended, `${program} ${signal}`).toEqual({ status: 0, signal: null, stdout: `wrote ${out}/manifest.json\n`, stderr: "" });
+        // Whole: the next step takes it for the manifest of this version and this tarball, byte for byte.
+        expect(signs().status, `${program} ${signal}`).toBe(0);
         expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig"))), `${program} ${signal}`).toBe(true);
         expect(readdirSync(tmp), `${program} ${signal}`).toEqual([]);
       }
     }
   });
 
-  it("signs nothing, and says so, when what it unpacked cannot be removed; ends as a signal ends it even then; and says signed of no signing that does not end 0", { timeout: 60_000 }, async () => {
+  it("writes no manifest, and says so, when what it unpacked cannot be removed; ends as a signal ends it even then; and says signed of no signing that does not end 0", { timeout: 60_000 }, async () => {
     // rm as publish.sh calls it, which cannot remove what was unpacked. What it leaves is the stand-in's doing, and is removed here.
     recording(dir, "rm", (real) => ['case "$*" in *release-unpacked-*) echo "rm: cannot remove what was unpacked" >&2; exit 1 ;; esac', `exec '${real}' "$@"`]);
     const left = () => {
@@ -505,13 +570,13 @@ describe("the desktop's release manifest", () => {
       rmSync(unpacked, { recursive: true });
       return unpacked;
     };
-    const kept = sign();
+    const kept = describes();
     expect(kept).toMatchObject({ status: 1, stdout: "" });
-    expect(kept.stderr).toContain(`publish.sh: the unpacked tarball could not be removed from ${left()}: nothing is signed\n`);
+    expect(kept.stderr).toContain(`publish.sh: the unpacked tarball could not be removed from ${left()}: no manifest is written\n`);
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     // Stopped by a signal, its status is the signal's, and not that of the removal that failed as it ended.
     recording(dir, "tar", unpacking);
-    const run = signing();
+    const run = describing();
     await called("tar");
     run.signal("SIGTERM");
     await letGo(run);
@@ -519,16 +584,17 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     left();
     for (const program of ["rm", "tar"]) rmSync(join(dir, "bin", program));
-    // openssl as publish.sh calls it, which fails where it signs.
+    // openssl as publish.sh calls it, which fails where it signs the manifest that is written.
+    expect(describes().status).toBe(0);
     recording(dir, "openssl", (real) => ['case " $* " in *" -sign "*) exit 1 ;; esac', `exec '${real}' "$@"`]);
-    expect(sign()).toMatchObject({ status: 1, stdout: "" });
+    expect(signs()).toMatchObject({ status: 1, stdout: "" });
     expect(existsSync(join(out, "manifest.json.sig"))).toBe(false);
     expect(readdirSync(tmp)).toEqual([]);
   });
 
   it("holds one substitution to a command for as long as a signal ends it: Ubuntu 24.04's bash runs the signal's handler between the two of one command, and ends with an error of its own", () => {
     const lines = readFileSync(join(RELEASE, "publish.sh"), "utf8").split("\n");
-    // sign's commands from where a signal ends it to where it lets every signal by: its removal, and all that follows.
+    // describe's commands from where a signal ends it to where it lets every signal by: its removal, and all that follows.
     const from = lines.findIndex((line) => line.includes("trap 'exit 143' TERM"));
     const to = lines.findIndex((line, at) => at > from && /^\s+cleanup \|\| fail /.test(line));
     expect(from).toBeGreaterThan(0);
@@ -539,21 +605,21 @@ describe("the desktop's release manifest", () => {
   });
 
   it("refuses a tarball that is not the one the build's job made, by the hash that job gave: an artifact is its run's, and any job of the run may put another under its name", () => {
-    const built = sha256(readFileSync(tarball()));
+    const first = sha256(readFileSync(tarball()));
     // Another tarball under the build's name, whose helper is the install script too.
     packed(dir, out, "1.2.3", (top) => writeFileSync(join(top, "surogate"), "#!/bin/sh\n# another job's\n"));
     const found = sha256(readFileSync(tarball()));
-    expect(found).not.toBe(built);
-    expect(sign({ DESKTOP_TARBALL_SHA256: built })).toMatchObject({
-      status: 1, stdout: "", stderr: `publish.sh: ${tarball()} is not the tarball the build made: its sha256 is ${found}, and the build's ${built}\n`,
+    expect(found).not.toBe(first);
+    expect(describes({ DESKTOP_TARBALL_SHA256: first })).toMatchObject({
+      status: 1, stdout: "", stderr: `publish.sh: ${tarball()} is not the tarball the build made: its sha256 is ${found}, and the build's ${first}\n`,
     });
     // What is no sha256 names no tarball: nothing of it is compared, or said back.
     for (const hash of [found.toUpperCase(), found.slice(1), `${found} `, `${found}\n${found}`, "$(touch ran)"]) {
-      expect(sign({ DESKTOP_TARBALL_SHA256: hash }), hash).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's\n" });
+      for (const step of [describes, signs]) expect(step({ DESKTOP_TARBALL_SHA256: hash }), hash).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's\n" });
     }
-    expect(sign({ DESKTOP_TARBALL_SHA256: "" })).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/DESKTOP_TARBALL_SHA256: parameter null or not set\n$/) });
+    for (const step of [describes, signs]) expect(step({ DESKTOP_TARBALL_SHA256: "" })).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/DESKTOP_TARBALL_SHA256: parameter null or not set\n$/) });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
-    expect(sign({ DESKTOP_TARBALL_SHA256: found }).status).toBe(0);
+    expect(describes({ DESKTOP_TARBALL_SHA256: found }).status).toBe(0);
   });
 
   it("lists, in the repository, one release key: the public half in install.sh", () => {
@@ -599,9 +665,11 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     const out = mkdtempSync(join(dir, "out-"));
     // A megabyte that does not compress: a send takes as long as one of a megabyte.
     const tarball = packed(dir, out, version, (top) => writeFileSync(join(top, "large"), randomBytes(1024 * 1024)));
-    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], {
-      env: { ...process.env, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball)) },
-    }).status).toBe(0);
+    // As the publish job's two steps: the manifest written where no key is, then signed.
+    const { DESKTOP_RELEASE_KEY: _held, ...own } = process.env;
+    const built = { DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball)), DESKTOP_TARBALL_SIZE: String(statSync(tarball).size) };
+    expect(spawnSync(join(dir, "release", "publish.sh"), ["describe", version, out], { env: { ...own, DESKTOP_TARBALL_SHA256: built.DESKTOP_TARBALL_SHA256 } }).status).toBe(0);
+    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], { env: { ...own, DESKTOP_RELEASE_KEY: PRIVATE, ...built } }).status).toBe(0);
     return out;
   };
   const send = (version: string, out: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), ["send", version, out], {

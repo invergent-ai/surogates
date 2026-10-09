@@ -1457,7 +1457,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", PUBLISH, `${box.container}:/opt/surogate-test/publish.sh`]).status).toBe(0);
     for (const version of ["1.0.\u00b2", "1.\u0661.0", "\uff11.0.0"]) for (const verb of ["sign", "send"]) {
       expect(docker(["exec", "-e", "LC_ALL=en_US.UTF-8", "-e", "DESKTOP_RELEASE_KEY=none", box.container, "bash", "/opt/surogate-test/publish.sh", verb, version, "/tmp"]), `${verb} ${version}`)
-        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
+        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh describe|sign|send <x.y.z> <out>\n" });
     }
   });
 

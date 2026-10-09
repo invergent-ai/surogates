@@ -94,11 +94,12 @@ They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` nam
 
     SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts
 
-A release is a tarball (`scripts/package.sh`), its manifest signed with the release key
-(`release/publish.sh sign`), and both on the release bucket under `desktop/` with the
-install script (`release/publish.sh send`). In `.github/workflows/release.yml`, `desktop-build`
-makes the tarball, and `desktop-publish`, which alone holds the release key and runs no npm, signs and
-sends it. `release/install.sh` installs it into `/opt/surogate`, and is each version's root
+A release is a tarball (`scripts/package.sh`), its manifest (`release/publish.sh describe`, which
+reads the tarball and runs with no key) signed with the release key (`release/publish.sh sign`,
+which opens no tarball), and both on the release bucket under `desktop/` with the install script
+(`release/publish.sh send`). In `.github/workflows/release.yml`, `desktop-build` makes the
+tarball, and `desktop-publish`, which alone holds the release key and runs no npm, describes,
+signs and sends it: the key is in the signing step's environment alone. `release/install.sh` installs it into `/opt/surogate`, and is each version's root
 helper for updates (`--apply`):
 
     curl -fsSL https://surogate.ai/desktop/install.sh | bash

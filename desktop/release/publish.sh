@@ -7,22 +7,37 @@
 #   desktop/releases/<version>/surogate-desktop-<version>-linux-x64.tar.gz
 #
 # Usage, after scripts/package.sh <version> <vm manifest> <out>:
-#   release/publish.sh sign <version> <out>   # <out>/manifest.json and its Ed25519 signature,
-#                                             # with DESKTOP_RELEASE_KEY (its PEM), which must be
-#                                             # one of the keys whose public halves install.sh trusts,
-#                                             # of the tarball whose sha256 is DESKTOP_TARBALL_SHA256
-#                                             # (the build's own word for what it made), and whose
-#                                             # root helper is the install.sh beside this script
-#   release/publish.sh send <version> <out>   # the release, then the install script and latest.json
-#                                             # with its signature, each read back, then the release's
-#                                             # own manifest; never a release again, and latest.json
-#                                             # only for the newest version
+#   release/publish.sh describe <version> <out>   # <out>/manifest.json, of the tarball whose sha256
+#                                                 # is DESKTOP_TARBALL_SHA256 (the build's own word for
+#                                                 # what it made) and whose root helper is the
+#                                                 # install.sh beside this script. All that reads the
+#                                                 # build's bytes is here, and here is no release key:
+#                                                 # with DESKTOP_RELEASE_KEY in its environment, set or
+#                                                 # empty, it refuses
+#   release/publish.sh sign <version> <out>       # <out>/manifest.json.sig, that manifest's Ed25519
+#                                                 # signature, with DESKTOP_RELEASE_KEY (its PEM), which
+#                                                 # must be one of the keys whose public halves
+#                                                 # install.sh trusts. It opens no tarball: the manifest
+#                                                 # must be the one of this version and of the build's
+#                                                 # tarball, by DESKTOP_TARBALL_SHA256 and
+#                                                 # DESKTOP_TARBALL_SIZE, the build's own words for both
+#   release/publish.sh send <version> <out>       # the release, then the install script and latest.json
+#                                                 # with its signature, each read back, then the release's
+#                                                 # own manifest; never a release again, and latest.json
+#                                                 # only for the newest version
 # Environment for send: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
 set -euo pipefail
-# The release key is this shell's own from here on, and in the environment of no program it
-# starts: sign hands it to openssl alone, through a pipe. All that reads the build's tarball, or
-# what it unpacks to, would otherwise have it, and the build holds no key.
+# What reads the build's tarball, or what it unpacks to, runs where no release key is: a program
+# reads its parent's first environment whatever the parent takes out of its own later, so a key
+# that this shell was started with is one read away from every program it starts. Refused before
+# the first of them is started.
+if [ "${1:-}" = describe ] && [ -n "${DESKTOP_RELEASE_KEY+in}" ]; then
+  echo "publish.sh: describe reads the build's tarball, and runs only where no release key is: DESKTOP_RELEASE_KEY is in its environment" >&2
+  exit 1
+fi
+# In a signing the release key is this shell's own from here on, and in the environment of no
+# program it starts: it is handed to openssl alone, through a pipe.
 export -n DESKTOP_RELEASE_KEY
 # All it reads, it reads in no locale and no language of its caller's: in most locales, more than
 # ten characters are digits, and a version's are the ten.
@@ -35,16 +50,23 @@ VERSION="${2:-}"
 OUT="${3:-}"
 # A version is x.y.z with no zero before a part, as the install script takes one: dpkg reads
 # 1.2.03 as 1.2.3, and a release has one name.
-[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ -d "$OUT" ] || { echo "usage: publish.sh sign|send <x.y.z> <out>" >&2; exit 2; }
+[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ -d "$OUT" ] || { echo "usage: publish.sh describe|sign|send <x.y.z> <out>" >&2; exit 2; }
 TARBALL="surogate-desktop-$VERSION-linux-x64.tar.gz"
 fail() {
   echo "publish.sh: $*" >&2
   exit 1
 }
+# The manifest of release $1, whose tarball has sha256 $2 and is $3 bytes, and whose app keeps
+# state of schema $4: one line, as every install takes one, and the bytes that are signed.
+manifest() {
+  jq -cn --arg version "$1" --arg sha256 "$2" --argjson size "$3" --argjson schema "$4" \
+    '{version: $version, channel: "stable", platform: "linux", arch: "x64",
+      url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size, stateSchema: $schema}'
+}
 
 case "$VERB" in
-  sign)
-    : "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}"
+  describe)
+    : "${DESKTOP_TARBALL_SHA256:?}"
     [ -f "$OUT/$TARBALL" ] || fail "$OUT/$TARBALL is not there: run scripts/package.sh first"
     # The tarball is the one the build made, by the hash the build's job gave for it: an artifact
     # is its run's, and any job of the run may put another file under its name. What is no sha256 is
@@ -52,27 +74,17 @@ case "$VERB" in
     [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
     sha256="$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)"
     [ "$sha256" = "$DESKTOP_TARBALL_SHA256" ] || fail "$OUT/$TARBALL is not the tarball the build made: its sha256 is $sha256, and the build's $DESKTOP_TARBALL_SHA256"
-    # The release keys the installed apps and the install script trust: install.sh's RELEASE_KEYS,
-    # read as install.sh sets them, from its functions alone: its last line, which runs it, is left
-    # out. Were its last line any other, as after a blank line at its end, the line that runs it
-    # would be left in: handed this call's two arguments, the script stops at its own usage, and
-    # the key would be said not to be trusted. So the script's end is looked at first, and said.
-    [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
-    public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
-    bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \
-      || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
     # The tarball's root helper is the install script beside this one, byte for byte: installed,
     # it is what pkexec runs as root at the next update, and its release keys are the ones every
     # later update is checked against. The build holds no key, and a helper of its own would need
     # none. The helper is read from the tarball unpacked whole, as the helper that installs it
     # unpacks it: a member under the helper's own name may be replaced by a later one, or through
-    # a link to its folder. The tarball is the build's, and is unpacked, as it is read, without
-    # the key: no program this script starts has it.
-    # What is unpacked is gone however the signing ends, whatever the modes of its folders, which
-    # are the build's too. A signal ends the signing once the command it runs has ended, as the
-    # script would end by itself: removed beside a tar that still writes, the folder would keep
-    # what tar writes after. No signal comes between the folder's making and its name being kept,
-    # nor stops mktemp then; and none stops the removal, where a second one would end its rm.
+    # a link to its folder.
+    # What is unpacked is gone however this ends, whatever the modes of its folders, which are the
+    # build's too. A signal ends it once the command it runs has ended, as the script would end by
+    # itself: removed beside a tar that still writes, the folder would keep what tar writes after.
+    # No signal comes between the folder's making and its name being kept, nor stops mktemp then;
+    # and none stops the removal, where a second one would end its rm.
     trap '' HUP INT PIPE TERM
     unpacked="$(mktemp -d --tmpdir release-unpacked-XXXXXXXXXX)"
     cleanup() {
@@ -80,7 +92,7 @@ case "$VERB" in
       chmod -R u+rwX "$unpacked" 2>/dev/null || :
       rm -rf "$unpacked"
     }
-    # A removal that fails as the signing ends leaves its status as it was.
+    # A removal that fails as this ends leaves its status as it was.
     trap 'cleanup || :' EXIT
     trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 141' PIPE; trap 'exit 143' TERM
     tar -xzf "$OUT/$TARBALL" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$TARBALL could not be unpacked"
@@ -103,15 +115,43 @@ case "$VERB" in
     [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's resources/app/package.json names no stateSchema"
     schema="$(jq -es 'select(length == 1) | .[0].stateSchema | select(type == "number" and . == floor and (floor | . >= 1 and . < 1e15)) | floor' "$unpacked/$package" 2>/dev/null)" \
       || fail "the tarball's resources/app/package.json names no stateSchema"
-    # All that is read of the unpacked tarball is read by here. It is removed before anything is
-    # signed, and from its removal on no signal ends the signing: one would leave a manifest
-    # without its signature, or end a signing that has just said it signed.
-    cleanup || fail "the unpacked tarball could not be removed from $unpacked: nothing is signed"
+    # All that is read of the unpacked tarball is read by here. It is removed before the manifest is
+    # written, and from its removal on no signal ends this: one would leave a manifest half
+    # written, or end what has just said it wrote one.
+    cleanup || fail "the unpacked tarball could not be removed from $unpacked: no manifest is written"
+    # A signature that is here is of another manifest than the one written now.
+    rm -f "$OUT/manifest.json.sig"
     # The tarball by its hash and its size in bytes, a number: the root helper takes no manifest
     # without either, and copies no more of a tarball than the size its manifest names.
-    jq -cn --arg version "$VERSION" --arg sha256 "$sha256" --argjson size "$(stat -c %s "$OUT/$TARBALL")" --argjson schema "$schema" \
-      '{version: $version, channel: "stable", platform: "linux", arch: "x64",
-        url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size, stateSchema: $schema}' >"$OUT/manifest.json"
+    manifest "$VERSION" "$sha256" "$(stat -c %s "$OUT/$TARBALL")" "$schema" >"$OUT/manifest.json"
+    echo "wrote $OUT/manifest.json"
+    ;;
+  sign)
+    : "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}" "${DESKTOP_TARBALL_SIZE:?}"
+    # The build's own words for its tarball, each as the build's job gives it, and never said back
+    # where it is no such word.
+    [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
+    [[ "$DESKTOP_TARBALL_SIZE" =~ ^[1-9][0-9]{0,14}$ ]] || fail "DESKTOP_TARBALL_SIZE is not a size in bytes, as the build's job gives its tarball's"
+    # The release keys the installed apps and the install script trust: install.sh's RELEASE_KEYS,
+    # read as install.sh sets them, from its functions alone: its last line, which runs it, is left
+    # out. Were its last line any other, as after a blank line at its end, the line that runs it
+    # would be left in: handed this call's two arguments, the script stops at its own usage, and
+    # the key would be said not to be trusted. So the script's end is looked at first, and said.
+    [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
+    public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
+    bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \
+      || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
+    # The manifest is a file that another step wrote, where the build's tarball was read, and no
+    # tarball is opened here. So it is signed only where it is, byte for byte, the manifest of this
+    # version and of the tarball the build made, by the build's own words for its hash and its
+    # size. Its state schema alone is that step's word, read as the install script beside this one
+    # reads a manifest: one object on one line, of a manifest's size, whose every field is one an
+    # install takes.
+    [ -f "$OUT/manifest.json" ] && [ ! -L "$OUT/manifest.json" ] || fail "$OUT/manifest.json is not there: run publish.sh describe first"
+    schema="$(bash -c '. <(sed "\$d" "$1") && settings && release_of "$2" >/dev/null && one_object "$2" | jq -e ".stateSchema | floor"' _ "$HERE/install.sh" "$OUT/manifest.json" 2>/dev/null)" \
+      || fail "$OUT/manifest.json is no manifest that install.sh takes: nothing is signed"
+    manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$schema" | cmp -s - "$OUT/manifest.json" \
+      || fail "$OUT/manifest.json is not the manifest of $VERSION and of the tarball the build made, of sha256 $DESKTOP_TARBALL_SHA256 and $DESKTOP_TARBALL_SIZE bytes: nothing is signed"
     openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$OUT/manifest.json" -out "$OUT/manifest.json.sig"
     echo "signed $OUT/manifest.json"
     ;;
@@ -178,7 +218,7 @@ case "$VERB" in
     echo "$published"
     ;;
   *)
-    echo "usage: publish.sh sign|send <x.y.z> <out>" >&2
+    echo "usage: publish.sh describe|sign|send <x.y.z> <out>" >&2
     exit 2
     ;;
 esac

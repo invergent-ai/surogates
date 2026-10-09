@@ -18,7 +18,7 @@
 #   scripts/package.sh <version> <vm manifest.json> <out> [<install script>]
 # It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz. The install script it packs as the
 # root helper is release/install.sh, the only one a release is signed with (release/publish.sh
-# sign refuses a tarball with any other); a test names its own, which trusts a key of the test's.
+# describe refuses a tarball with any other); a test names its own, which trusts a key of the test's.
 set -euo pipefail
 
 VERSION="${1:-}"

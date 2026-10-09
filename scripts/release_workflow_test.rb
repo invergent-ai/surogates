@@ -206,13 +206,17 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_operator fakeroot, :<, package
     assert_equal "desktop-tarball", steps[keep].fetch("with").fetch("name")
     assert_equal "out/desktop/surogate-desktop-*-linux-x64.tar.gz", steps[keep].fetch("with").fetch("path")
-    # The tarball's hash is the job's own output, which no other job of the run can set: an
-    # artifact is the run's, and any of its jobs may put another file under the tarball's name.
-    assert_equal({ "sha256" => "${{ steps.tarball.outputs.sha256 }}" }, job.fetch("outputs"))
+    # The tarball's hash and its size are the job's own outputs, which no other job of the run can
+    # set: an artifact is the run's, and any of its jobs may put another file under the tarball's
+    # name. The signing opens no tarball, and has these two words for what it signs.
+    assert_equal({ "sha256" => "${{ steps.tarball.outputs.sha256 }}", "size" => "${{ steps.tarball.outputs.size }}" }, job.fetch("outputs"))
     hash = steps.index { |step| step["id"] == "tarball" }
     refute_nil hash
     assert_operator package, :<, hash
-    assert_equal 'echo "sha256=$(sha256sum <"out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz" | cut -d\' \' -f1)" >>"$GITHUB_OUTPUT"', steps[hash].fetch("run").strip
+    assert_equal [
+      'echo "sha256=$(sha256sum <"out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz" | cut -d\' \' -f1)" >>"$GITHUB_OUTPUT"',
+      'echo "size=$(stat -c %s "out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz")" >>"$GITHUB_OUTPUT"',
+    ], steps[hash].fetch("run").lines.map(&:strip)
   end
 
   def test_desktop_publish_signs_and_sends_the_built_tarball_one_release_at_a_time_in_its_environment
@@ -226,10 +230,14 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal({ "group" => "desktop-release", "cancel-in-progress" => false }, job.fetch("concurrency"))
     tarball = steps.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
     assert_equal({ "name" => "desktop-tarball", "path" => "out/desktop" }, steps[tarball].fetch("with"))
+    describe = runs.index { |run| run.include?('desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop') }
     sign = runs.index { |run| run.include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
     send = runs.index { |run| run.include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
+    refute_nil describe
     refute_nil sign
-    assert_operator tarball, :<, sign
+    # The manifest is written of the tarball before it is signed, and signed before it is sent.
+    assert_operator tarball, :<, describe
+    assert_operator describe, :<, sign
     assert_operator sign, :<, send
     %w[desktop/scripts/package.sh desktop/release/publish.sh desktop/release/install.sh].each do |script|
       assert File.executable?(script), "#{script} is not executable"
@@ -255,12 +263,21 @@ class ReleaseWorkflowTest < Minitest::Test
       run = step["run"].to_s
       refute_match(/\b(npm|npx|node)\b/, run, "#{step["name"] || step["uses"]} runs npm or node")
       refute_includes step["uses"].to_s, "setup-node"
-      if run.include?("publish.sh sign")
-        # With the key, the hash the build's job gave for its tarball: through the step's
-        # environment, never pasted into its script, where what the build says would be run.
+      if run.include?("publish.sh describe")
+        # The step that reads the build's tarball has no secret, and the release key by no name: a
+        # program reads what its step's shell was started with. It has the hash the build's job
+        # gave for its tarball, through the step's environment, never pasted into its script,
+        # where what the build says would be run.
+        assert_equal({ "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}" }, step.fetch("env"))
+        refute step.to_s.include?("secrets."), "the step that reads the build's tarball reads a secret"
+        refute step.to_s.include?("DESKTOP_RELEASE_KEY"), "the step that reads the build's tarball names the release key"
+      elsif run.include?("publish.sh sign")
+        # With the key, the build's own words for its tarball, its hash and its size: the signing
+        # opens no tarball.
         assert_equal({
           "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}",
           "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}",
+          "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-build.outputs.size }}",
         }, step.fetch("env"))
       elsif run.include?("publish.sh send")
         assert_equal r2, step.fetch("env")
@@ -269,6 +286,11 @@ class ReleaseWorkflowTest < Minitest::Test
       end
     end
     jobs.except("desktop-publish").each { |name, job| refute job.to_s.include?("DESKTOP_RELEASE_KEY"), "#{name} reads the release key" }
+    # The release key is in one step's environment, the signing's, and nowhere wider: not the
+    # job's, which the check above refuses, and not the workflow's.
+    keyed = jobs.fetch("desktop-publish").fetch("steps").select { |step| step.to_s.include?("DESKTOP_RELEASE_KEY") }
+    assert_equal ['desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop'], keyed.map { |step| step["run"].to_s.strip }
+    refute @workflow.except("jobs").to_s.include?("secrets."), "the workflow gives a secret to every job"
   end
 
   def test_no_workflow_turns_off_its_runner_s_restriction_of_user_namespaces
@@ -301,17 +323,18 @@ class ReleaseWorkflowTest < Minitest::Test
 
     # A step need not name npm to run it: package.sh does, and so may an action, a container's
     # image, or a runner that kept what an earlier job's npm left on it. The job that holds the
-    # keys is these four steps, each with these keys alone, on a runner of its own.
+    # keys is these five steps, each with these keys alone, on a runner of its own.
     # Its two actions are named by their commits (v4.4.0 and v4.3.0): a tag can be moved to other
     # code, and the job that holds the release key would run it.
     assert_equal [
       { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
       { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
+      { "run" => 'desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop' },
       { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
       { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
     ], steps.map { |step| step.slice("uses", "run") }
     # The checkout names no ref, repository or path: publish.sh and install.sh are the tag's.
-    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
+    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
     assert_equal %w[concurrency environment needs permissions runs-on steps timeout-minutes], job.keys.sort
     assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
   end
