@@ -467,6 +467,19 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     expect(readFileSync(join(folder, "given-path"), "utf8").split(":")[0]).toBe(tools);
   });
 
+  it("holds its working folder as it holds the chat's: an entry of its PATH inside it is dropped too, where srt keeps what the sandbox may write", async () => {
+    const tools = join(base, "tools");
+    mkdirSync(tools);
+    writeFileSync(join(tools, "rg"), `#!/bin/sh\necho "$PATH" > '${folder}/given-path'\nexec /usr/bin/rg "$@"\n`, { mode: 0o755 });
+    const working = join(start.tmp, "bin");
+    mkdirSync(working, { recursive: true });
+    const harness = host({ appDirs: [...start.appDirs, tools] }, undefined, { ...process.env, PATH: `${working}:${tools}:${process.env.PATH ?? ""}` });
+    await ready(harness);
+    expect(await harness.op("1", "ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 })).toEqual({ ok: `${folder}/a.txt\n` });
+    const given = readFileSync(join(folder, "given-path"), "utf8").trim().split(":");
+    expect([given[0], given.includes(working)]).toEqual([tools, false]);
+  });
+
   it("never runs a program from the folder through a relative entry of the host's PATH, wherever the host starts", async () => {
     const proof = join(folder, "ran-relative");
     mkdirSync(join(folder, "bin"));
