@@ -1074,6 +1074,21 @@ class AgentHarness(
             held = held_news(held, event)
         return held, max(event.id for event in events)
 
+    async def _answer_file_waits(self, session: Session, events: list) -> None:
+        """Retire the waits on you over its files that a project's thread
+        raised before the newest message of yours in *events*: the message
+        is your answer, typed words or a command.  Its coordinator's
+        follow-up is not yours, nor is a message the harness wrote, nor a
+        redo or a report."""
+        if not is_project_thread(session.config):
+            return
+        said = max((
+            event.id for event in events
+            if event.type == EventType.USER_MESSAGE.value and not (event.data or {}).get("synthetic")
+        ), default=0)
+        if said:
+            await self._store.answer_file_waits(session.id, before=said)
+
     async def _collect_steer_messages(
         self,
         session: Session,
@@ -1100,6 +1115,9 @@ class AgentHarness(
         if not events:
             return None, after_event_id
         new_cursor = max(event.id for event in events)
+        # A message of yours that joins a turn under way gets no wake of its
+        # own: it answers the thread's waits over its files here.
+        await self._answer_file_waits(session, events)
         # A command of the harness's is never the model's to read: the turn
         # leaves it, and its own wake answers it once the turn has ended.
         rendered = [
@@ -1762,16 +1780,9 @@ class AgentHarness(
                     return
 
             # 4''. A thread that waits on you over its files waits no more once
-            # a message of yours reaches it after the wait began: the message
-            # is your answer.  Its coordinator's follow-up is not yours, nor
-            # is a message the harness wrote.  Before the wake is streamed,
-            # so a client that reads the thread's row then sees it.
-            if is_project_thread(session.config):
-                said = max((
-                    e.id for e in all_events
-                    if e.type == EventType.USER_MESSAGE.value and not (e.data or {}).get("synthetic")
-                ), default=0)
-                await self._store.answer_file_waits(session_id, before=said)
+            # a message of yours reaches it.  Before the wake is streamed, so
+            # a client that reads the thread's row then sees it.
+            await self._answer_file_waits(session, all_events)
 
             # 5. Emit HARNESS_WAKE event.
             await self._store.emit_event(

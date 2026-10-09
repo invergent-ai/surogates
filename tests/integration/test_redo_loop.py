@@ -19,9 +19,11 @@ from surogates.runtime import SlashCommandConfig
 from surogates.sandbox.history import History
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
+from surogates.session.store import SessionStore
 from surogates.workstreams.stream import STREAM_TYPES
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
+from .test_command_placements import Model, calls
 from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
@@ -1035,3 +1037,58 @@ async def test_a_wait_answered_by_the_inboxs_own_button_gives_the_thread_one_tur
     await workers.says(thread.id, "And put a date on it.")
     await workers.wake(thread.id, SlashCommandConfig())
     assert len(workers.requests) == 2 and await workers.status(thread.id) == "completed"
+
+
+def answers_of(monkeypatch) -> list[int]:
+    """How many waits each look for an answer retired, from here on."""
+    retired: list[int] = []
+    answer = SessionStore.answer_file_waits
+
+    async def counted(self, session_id, *, before):
+        retired.append(await answer(self, session_id, before=before))
+        return retired[-1]
+
+    monkeypatch.setattr(SessionStore, "answer_file_waits", counted)
+    return retired
+
+
+async def settles(workers, thread) -> None:
+    """The thread is woken while it is queued, as its dispatcher wakes it."""
+    for _ in range(10):
+        if not await queued(workers.api, thread):
+            return
+        await workers.api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
+        await workers.wake(thread.id, SlashCommandConfig())
+    raise AssertionError("the thread is woken again and again")
+
+
+async def test_an_answer_typed_while_the_thread_works_ends_the_wait(workers, monkeypatch, pods):
+    api, store = workers.api, workers.store
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await a_thread(api, "Draft A", master)
+    workers.sandbox_pool = SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
+    await store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed"})
+    await store.update_session_status(thread.id, "completed")
+    await workers.nobody_is_queued()
+    model = Model()
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+    retired = answers_of(monkeypatch)
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    # Its coordinator's follow-up starts a turn, which is no answer of yours.
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Finish the report.")
+    model.script.append(calls("call_1"))
+
+    async def you_answer() -> None:
+        assert [w.status for w in await waits_of(api, thread)] == ["pending"]
+        await workers.says(thread.id, "Keep my version of Report.docx.")
+
+    workers.during_the_tool_call = you_answer
+    await settles(workers, thread)
+    # The turn under way read your answer, and no wake of its own follows: the wait is over all the same.
+    assert ["Keep my version" in str(request[-1].get("content")) for request in model.requests] == [False, True]
+    assert [w.status for w in await waits_of(api, thread)] == ["responded"]
+    row = await row_of(api, project, thread)
+    assert (row["group"], row["reason"]) == ("idle", None)
+    assert sum(retired) == 1 and await workers.status(thread.id) == "completed"
