@@ -427,7 +427,8 @@ describe("applyAgentChatEvent", () => {
     expect(theirs.browser).toEqual(open);
     expect(at(theirs, "browser.destroyed", 47, "child-1").browser).toBeNull();
 
-    // No supported browser there, found by a sub-agent's call: no tab is left, so one opened after is alone.
+    // No supported browser there, found by a sub-agent's call: its own tab goes, and the chat's own is
+    // the one left, told of again or not.
     const again = at(at(both, "browser.unavailable", 48, "child-1"), "browser.provisioned", 49, "s-1");
     expect(again.browser).toEqual(open);
     expect(at(again, "browser.destroyed", 50, "s-1").browser).toBeNull();
@@ -437,6 +438,35 @@ describe("applyAgentChatEvent", () => {
     const shown = at({ ...sub, browser: null }, "browser.provisioned", 51, "s-1");
     expect(shown.browser).toEqual(open);
     expect(said(shown)).toEqual(["Browser ready."]);
+  });
+
+  it("takes away only its own session's tab when a call finds no supported browser on the chat's computer, and says so once no tab is left", () => {
+    const at = (state: ReturnType<typeof createInitialAgentChatState>, type: string, eventId: number, session: string) =>
+      applyAgentChatEvent(state, { type, eventId, data: { session_id: session, computer: true } } as Parameters<typeof applyAgentChatEvent>[1]);
+    const said = (state: ReturnType<typeof createInitialAgentChatState>) => state.messages.map((message) => message.content);
+    const open = { status: "live", controlOwner: null, computer: true };
+    const none = { status: "unavailable", controlOwner: null, computer: true };
+    const both = at(at(createInitialAgentChatState(), "browser.provisioned", 71, "s-1"), "browser.provisioned", 72, "child-1");
+
+    // A sub-agent's call found none while the chat's own tab is open: the chat's browser is as it was,
+    // as the server's state answers it, and the chat says nothing.
+    const own = at(both, "browser.unavailable", 73, "child-1");
+    expect(own.browser).toEqual(open);
+    expect(own.browserTabs).toEqual(["s-1"]);
+    expect(said(own)).toEqual(["Browser ready."]);
+    // The chat's own call takes its own tab the same way, and leaves the sub-agent's.
+    const theirs = at(both, "browser.unavailable", 74, "s-1");
+    expect(theirs.browser).toEqual(open);
+    expect(theirs.browserTabs).toEqual(["child-1"]);
+    // One with no tab of its own open takes none.
+    const neither = at(both, "browser.unavailable", 75, "child-2");
+    expect(neither.browser).toEqual(open);
+    expect(neither.browserTabs).toEqual(["s-1", "child-1"]);
+    // The last tab's own session finds none: no tab is left, and the chat says there is no browser.
+    const gone = at(own, "browser.unavailable", 76, "s-1");
+    expect(gone.browser).toEqual(none);
+    expect(gone.browserTabs).toEqual([]);
+    expect(said(gone)).toEqual(["Browser ready.", "No supported browser on the chat's computer."]);
   });
 
   it("says that a chat's computer has no supported browser though the server's state said so first, and once", () => {

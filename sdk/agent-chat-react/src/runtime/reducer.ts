@@ -201,10 +201,15 @@ export function applyAgentChatEvent(
     }
 
     case "browser.unavailable": {
-      // No supported browser there: no tab either, whoever's call found it so.
+      // A call that found no supported browser there takes away its own session's tab, as its close
+      // does, and no other's: the chat's browser stays while a tab is left, as the server's state
+      // answers it, and the chat says there is none once no tab is.
+      const tab = computerTab(event);
+      const browserTabs = tab === null ? [] : nextState.browserTabs.filter((open) => open !== tab);
+      if (browserTabs.length > 0) return { ...nextState, browserTabs };
       const none: AgentChatState = {
         ...nextState,
-        browserTabs: [],
+        browserTabs,
         browser: { status: "unavailable", controlOwner: null, computer: true },
       };
       // Said once: an agent that tries the browser again and again adds no line for each try.
