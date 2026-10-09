@@ -193,6 +193,33 @@ describe("an update the helper says it installed", () => {
   });
 });
 
+describe("why an install failed, of all that was said", () => {
+  it("is the helper's own line, by its name, whatever was written after it; how the run ended where no exit says; and pkexec's first line for its own failure", async () => {
+    base.publish("1.2.4");
+    let answer: Applied = { code: 0, said: "" };
+    const found = base.updates({ apply: () => Promise.resolve(answer) });
+    await found.check();
+    const said: Array<[Applied, string]> = [
+      // A cleanup's complaint after the helper's own line is not the reason.
+      [{ code: 1, said: "tar: oops\nSurogate Desktop: the release's archive could not be unpacked\nrm: cannot remove '/opt/surogate/staging/apply.x': Directory not empty" }, "the release's archive could not be unpacked"],
+      // Its last line, of two of its own.
+      [{ code: 1, said: "Surogate Desktop: downloading\nSurogate Desktop: /opt/surogate needs 428 MB free to apply this release, and has 12 MB\n\n" }, "/opt/surogate needs 428 MB free to apply this release, and has 12 MB"],
+      // No line of its own: the last one said.
+      [{ code: 2, said: "bash: line 12: jq: command not found\nbash: line 14: unexpected end" }, "bash: line 14: unexpected end"],
+      // A signal ended it after it spoke: how it ended is the reason.
+      [{ code: null, said: "Surogate Desktop: it began\nits helper was stopped by SIGKILL" }, "its helper was stopped by SIGKILL"],
+      // pkexec's own failure, with a notice after it: its first line.
+      [{ code: 127, said: "Error getting authority: Error initializing authority: Could not connect: Connection refused\n\nThis incident has been reported." }, "Error getting authority: Error initializing authority: Could not connect: Connection refused"],
+      [{ code: 1, said: "   \n" }, "its helper exited 1"],
+    ];
+    for (const [given, why] of said) {
+      answer = given;
+      await found.install();
+      expect(found.state, JSON.stringify(given)).toMatchObject({ state: "failed", why });
+    }
+  });
+});
+
 describe("a helper that cannot be run", () => {
   it("ends in a failure that says why, and never in a line left at Installing: its run rejected, or thrown", async () => {
     base.publish("1.2.4");

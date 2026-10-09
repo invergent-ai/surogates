@@ -13,7 +13,7 @@ const asked = vi.hoisted(() => ({
   // How the next program started ends: its exit code, its signal, and what it says first. Or, with
   // *fails*, how it does not start: Node then gives it no output to read, and tells its error
   // later; or, with *throws*, spawn itself throws.
-  ends: { code: 0 as number | null, signal: null as string | null, says: "", fails: "", throws: "" },
+  ends: { code: 0 as number | null, signal: null as string | null, says: "" as string | Buffer[], fails: "", throws: "" },
 }));
 
 vi.mock("node:child_process", async (original) => {
@@ -31,7 +31,8 @@ vi.mock("node:child_process", async (original) => {
       }
       const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
       setImmediate(() => {
-        if (asked.ends.says) child.stderr.emit("data", Buffer.from(asked.ends.says));
+        // What it says, in the reads it comes in.
+        for (const read of typeof asked.ends.says === "string" ? [Buffer.from(asked.ends.says)] : asked.ends.says) if (read.length > 0) child.stderr.emit("data", read);
         child.emit("close", asked.ends.code, asked.ends.signal);
       });
       return child;
@@ -67,6 +68,18 @@ describe("an installed app's root helper", () => {
     expect([code, said.length, said.split("\n").at(-1)]).toEqual([1, 3999, "Surogate Desktop: the release's archive could not be unpacked"]);
     asked.ends = { code: null, signal: "SIGKILL", says: "", fails: "", throws: "" };
     expect(await installed().apply(files)).toEqual({ code: null, said: "its helper was stopped by SIGKILL" });
+  });
+
+  it("reads what is said as one stream: a letter that comes in two reads is one letter", async () => {
+    const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
+    const line = Buffer.from("Surogate Desktop: /home/zo\u00eb/.cache/surogate/updates/1.2.4/manifest.json is not a downloaded release's file \u2713\n");
+    // Cut inside the two bytes of its second letter outside ASCII, and inside the three of its last.
+    const first = line.indexOf(0xc3) + 1;
+    asked.ends = { code: 1, signal: null, says: [line.subarray(0, first), line.subarray(first, line.length - 3), line.subarray(line.length - 3)], fails: "", throws: "" };
+    expect(await installed().apply(files)).toEqual({ code: 1, said: line.toString().trim() });
+    // What ends inside a letter says the rest of it was not there.
+    asked.ends = { code: 1, signal: null, says: [line.subarray(0, first)], fails: "", throws: "" };
+    expect((await installed().apply(files)).said).toBe("Surogate Desktop: /home/zo\ufffd");
   });
 
   it("answers why where it cannot be started at all, as for want of file descriptors: with no output to read, and its error told later", async () => {

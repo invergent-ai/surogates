@@ -12,6 +12,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
 import { installBase, rootsOwn } from "../vm/image.js";
@@ -83,6 +84,20 @@ const DISMISSED = 126;
 const NOT_AUTHORIZED = 127;
 const AS_ANOTHER_USER = "Error executing command as another user:";
 const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.startsWith(AS_ANOTHER_USER));
+// How the helper begins each line it says (fail and say in release/install.sh).
+const HELPER_SAYS = "Surogate Desktop: ";
+
+// Why an install failed, of all that was said: one line. How the run ended, where no exit code
+// says: the system's words for a helper that could not be started, or a signal's name. Else the
+// helper's own last line, by its name, whatever was written after it, as a cleanup's complaint is.
+// Else pkexec's first line, for its own failure, or the last line said.
+function reason(code: number | null, said: string): string {
+  const lines = said.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  if (code === null) return lines.at(-1) ?? "its helper did not run";
+  const own = lines.findLast((line) => line.startsWith(HELPER_SAYS));
+  if (own !== undefined) return own.slice(HELPER_SAYS.length);
+  return (code === NOT_AUTHORIZED ? lines[0] : lines.at(-1)) ?? `its helper exited ${code}`;
+}
 // How an installed app runs the root helper: pkexec, by its whole path, on the helper at the path
 // with no link in it that the install script's polkit action names. Never with pkexec's own agent:
 // started from a terminal in a session with no polkit agent, pkexec would ask for a password on
@@ -135,12 +150,17 @@ export function helperRun(command: string[]): (files: Staged) => Promise<Applied
     // Before anything else is asked of it: one that could not be started, as for want of file
     // descriptors, tells its error later, and has no output to read.
     child.once("error", (error) => resolve({ code: null, said: error.message }));
+    // What it says is one stream, read as it comes: a letter may come in two reads.
+    const decoder = new StringDecoder("utf8");
     let said = "";
     child.stderr?.on("data", (chunk: Buffer) => {
-      said = (said + chunk.toString()).slice(-4000);
+      said = (said + decoder.write(chunk)).slice(-4000);
     });
     // One a signal ended has no exit code: how it ended is the last of what is said of it.
-    child.once("close", (code, signal) => resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() }));
+    child.once("close", (code, signal) => {
+      said = (said + decoder.end()).slice(-4000);
+      resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() });
+    });
   });
 }
 
@@ -356,9 +376,7 @@ export class Updates {
     // What was said goes to the log whole: the line shows one line of a failure, and of a refusal none.
     this.options.log?.(`Surogate ${version} was not installed${code === null ? "" : ` (exit ${code})`}: ${said}`);
     if (refusal(code, said)) return this.set({ state: "refused", version, files });
-    // The helper's last line, without its name: the why of the first failure it met.
-    const why = said.split("\n").at(-1)?.replace(/^Surogate Desktop: /, "") || `its helper exited ${code}`;
-    this.set({ state: "failed", version, files, why });
+    this.set({ state: "failed", version, files, why: reason(code, said) });
   }
 
   private async look(): Promise<void> {
