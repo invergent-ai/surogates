@@ -41,6 +41,9 @@ class Tools implements ToolLayer {
   // What an operation answers, where a test says; and what the stack gave it to save its downloads with.
   answer: ((operation: Operation) => Outcome) | null = null;
   save: ((download: StagedDownload, stop: AbortSignal) => Promise<string>) | null = null;
+  // The ports each chat's sandbox listens on, and each question the stack's approvals asked of it.
+  listens: number[] = [];
+  readonly probed: Array<[string, number]> = [];
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -69,6 +72,11 @@ class Tools implements ToolLayer {
 
   saveDownloadsWith(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void {
     this.save = save;
+  }
+
+  listening(root: string, port: number): Promise<boolean> {
+    this.probed.push([root, port]);
+    return Promise.resolve(this.listens.includes(port));
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -189,6 +197,34 @@ describe("one agent's device", () => {
     server.send(op("script-1", "browser.evaluate", { code: "return 1;" }, false, CHILD));
     await server.until(() => results("script-1").length === 1);
     expect(asked).toMatchObject([{ kind: "browser", action: "script", page: `https://bank.example/${CHILD}` }]);
+  });
+
+  it("asks its tools whether a chat's sandbox listens before its browser is sent to a port of the chat's own servers, and sends it to none nothing listens on", async () => {
+    const asked: ApprovalRequest[] = [];
+    const device = await start({
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("deny")), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    await server.until(() => statuses.includes("connected"));
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    tools.bindings?.allowBrowser(ROOT);
+    // Nothing listens there: the agent is told so, the tools run nothing, and the user is asked nothing.
+    server.send(op("nav-1", "browser.navigate", { url: "http://localhost:3000/", wait_until: "load" }));
+    await server.until(() => results("nav-1").length === 1);
+    expect(results("nav-1")[0]?.outcome).toEqual({
+      error: {
+        type: "browser",
+        message: "Nothing listens on port 3000 in this chat's sandbox. Start the server there as a background command, then open http://localhost:3000/ again.",
+      },
+    });
+    expect(tools.ran.filter((ran) => ran.kind === "browser.navigate")).toEqual([]);
+    tools.listens = [3000];
+    server.send(op("nav-2", "browser.navigate", { url: "http://127.0.0.1:3000/", wait_until: "load" }, false, CHILD));
+    await server.until(() => results("nav-2").length === 1);
+    expect(results("nav-2")[0]?.outcome).toEqual({ ok: "ran browser.navigate" });
+    // The sandbox is asked by the chat's root, whichever of its sessions navigates.
+    expect([tools.probed, asked]).toEqual([[[ROOT, 3000], [ROOT, 3000]], []]);
   });
 
   it("takes the agent's browser over through its tools, from the chat that asks first: every chat's open browser prompt dismissed and answered as its tools answer now", async () => {
@@ -402,6 +438,7 @@ describe("one agent's device", () => {
           bindingOf: (root) => bindings.get(root),
           launch: () => null,
           staging: join(base, "data", "browser-profiles", "tmp"),
+          vm: { listening: () => Promise.resolve(false) },
         });
       },
     });

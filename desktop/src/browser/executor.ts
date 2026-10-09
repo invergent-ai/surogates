@@ -9,6 +9,7 @@ import { MAX_WRITE_BYTES } from "../files/answers.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
+import type { VmClient } from "../vm/client.js";
 import { type BrowserClient, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, UNSAVED } from "./downloads.js";
 import type { Launch } from "./host.js";
@@ -74,6 +75,8 @@ export interface BrowsingOptions {
   // Where its browser host stages downloads: the host's own temporary folder, under the identity's profiles.
   // A staged file is read, and removed, only there.
   staging: string;
+  // The sandbox, asked whether a chat listens on a port of its own loopback.
+  vm: Pick<VmClient, "listening">;
 }
 
 export class Browsing implements ToolLayer {
@@ -251,6 +254,11 @@ export class Browsing implements ToolLayer {
   /** An upload the browser was asked about, by its operation's id, got no leave: it is not coming. */
   notComing(of: string): void {
     this.options.browser.notComing(of);
+  }
+
+  /** Whether something in *root*'s sandbox listens on *port* of its own loopback now: no sandbox is started to ask. */
+  listening(root: string, port: number): Promise<boolean> {
+    return this.options.vm.listening(root, port);
   }
 
   // Whether the browser is held from a chat that is gone: deleted, or its folder forgotten on this computer.

@@ -59,6 +59,8 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
   const files: Record<string, string> = { "/home/u/notes/report.pdf": "%PDF-1.7", "/home/u/notes/scan.png": "PNG" };
   // What happens while a file is read, as the test says: nothing unless it does.
   const reading = { then: (): void => {} };
+  // Each question the sandbox was asked: whether a chat listens on a port. It does on 3000 alone.
+  const probed: Array<[string, number]> = [];
   const tools: ToolLayer = {
     run: (operation, stop) => {
       ran.push(operation.kind);
@@ -102,8 +104,9 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
     bindingOf: (root) => (chats.has(root) ? {} : undefined),
     launch: () => launch,
     staging,
+    vm: { listening: (root, port) => (probed.push([root, port]), Promise.resolve(port === 3000)) },
   });
-  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, unasked, stage: (download: StagedDownload) => staged(download) };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, unasked, probed, stage: (download: StagedDownload) => staged(download) };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -618,6 +621,13 @@ describe("the browser's kinds beside the tools", () => {
       });
       expect(browsed).toEqual([]);
     }
+  });
+
+  it("asks the sandbox whether a chat listens on a port of its own, and answers as it does", async () => {
+    const { browsing, probed, browsed, ran } = rig();
+    expect([await browsing.listening(ROOT, 3000), await browsing.listening(OTHER, 9)]).toEqual([true, false]);
+    // The sandbox's own question: nothing of the browser's or the tools' is run for it.
+    expect([probed, browsed, ran]).toEqual([[[ROOT, 3000], [OTHER, 9]], [], []]);
   });
 
   it("tells the browser of an upload that ends before it reaches it, whatever it ends on, and of one the approvals say got no leave: the browser keeps nothing for either", async () => {
