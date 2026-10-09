@@ -1675,6 +1675,42 @@ async def test_the_sweeper_takes_a_paused_missions_chat_that_ends_on_a_follow_up
     assert await workers.looks_abandoned(chat)
 
 
+@pytest.mark.parametrize("kind, raised, answer, reads", [
+    (
+        EventType.INBOX_ACTION_REQUIRED,
+        {"title": "Log in", "instructions": "Log in to the site.", "context": "", "action_type": "browser", "target": "site"},
+        {"completed": True}, "[user action completed] browser.",
+    ),
+    (
+        EventType.INBOX_GOVERNANCE_GATE,
+        {"tool_name": "send_email", "tool_call_id": "tc-1", "arguments_excerpt": "to=ceo@example.com",
+         "deny_reason": "External recipient", "policy_id": "external-comms-v1"},
+        {"decision": "approve"}, "[governance decision] APPROVE for send_email",
+    ),
+], ids=["an action completed", "a governance decision"])
+async def test_an_inbox_items_answer_gives_its_chat_one_turn_and_its_users_next_message_still_works(workers, kind, raised, answer, reads):
+    chat = await workers.chat()
+    raised_at = await workers.store.emit_event(chat, kind, raised)
+    async with workers.api.app.state.session_factory() as db:
+        item = (await db.execute(text("SELECT id FROM inbox_items WHERE source_event_id = :id"), {"id": raised_at})).scalar_one()
+    answered_it = await workers.api.client.post(f"/v1/inbox/{item}/respond", json=answer, headers=workers.api.auth())
+    assert answered_it.status_code == 200, answered_it.text
+    assert await queued(workers.api, await workers.session(chat))
+    await workers.nobody_is_queued()
+
+    await workers.wake(chat)
+
+    # The route's message names its source in a word, where a channel's names a sender: replay takes both.
+    [conversation] = workers.requests
+    assert conversation[-1]["role"] == "user" and conversation[-1]["content"].startswith(reads)
+    assert await workers.status(chat) == "completed" and not await queued(workers.api, await workers.session(chat))
+    assert EventType.HARNESS_CRASH.value not in await workers.log(chat) and not await workers.looks_abandoned(chat)
+    await workers.says(chat, "Hello again?")
+    await workers.wake(chat)
+    assert [request[-1]["content"] for request in workers.requests[1:]] == ["Hello again?"]
+    assert await workers.status(chat) == "completed"
+
+
 async def test_a_wake_that_goes_on_to_the_model_behind_a_command_leaves_the_cursor_to_that_turn(workers):
     chat = await a_coordinator(workers)
     await workers.types(chat, "/mission status")

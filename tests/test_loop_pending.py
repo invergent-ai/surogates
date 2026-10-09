@@ -678,3 +678,18 @@ async def test_a_hand_backs_wake_expands_no_skill_for_a_follow_up_with_the_words
     messages = [{"role": "user", "content": command}, {"role": "user", "content": command}]
     await harness._expand_last_skill_again(session, messages, [*events, followed_up(3, command)])
     assert (expanded.await_count, [m["content"] for m in messages]) == (1, [command, command])
+
+
+@pytest.mark.parametrize("source, reads", [
+    (None, "Go on."),
+    # What the inbox's routes write for an item's answer: a word.
+    ("inbox_action_completed", "Go on."),
+    ("inbox_governance_decision", "Go on."),
+    # What a channel and a call write: the sender.
+    ({"platform": "slack", "chat_id": "C1", "chat_type": "dm", "user_id": "U1", "user_name": "Ada"}, "Go on."),
+    ({"platform": "slack", "chat_id": "C1", "chat_type": "group", "user_id": "U1", "user_name": "Ada", "files": []}, "Ada: Go on."),
+    ({"platform": "voice", "chat_id": "+40700000000", "chat_type": "dm", "user_id": "+40700000000"}, "Go on."),
+], ids=["none", "an action completed", "a governance decision", "a direct message", "a group's message", "a call"])
+def test_replay_takes_a_users_message_whatever_names_its_source(source, reads):
+    said_so = SimpleNamespace(id=1, type=EventType.USER_MESSAGE.value, data={"content": "Go on.", "source": source})
+    assert ContextReplayMixin._rebuild_messages(SimpleNamespace(), [said_so]) == [{"role": "user", "content": reads}]

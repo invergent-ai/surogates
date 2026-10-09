@@ -1005,3 +1005,33 @@ async def test_your_message_answers_the_waits_over_files_before_it_and_no_other(
         "Send it?": "expired", "Couldn't merge my changes to Report.docx": "responded",
         "Couldn't finish landing my changes": "pending",
     }
+
+
+async def a_thread_at_rest(workers, pods):
+    """A thread of a new project whose first turn has ended, nobody queued; its master with it."""
+    api, store = workers.api, workers.store
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    workers.sandbox_pool = SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
+    await store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed"})
+    await store.update_session_status(thread.id, "completed")
+    await workers.nobody_is_queued()
+    return thread, master
+
+
+async def test_a_wait_answered_by_the_inboxs_own_button_gives_the_thread_one_turn(workers, monkeypatch, pods):
+    api, store = workers.api, workers.store
+    thread, _ = await a_thread_at_rest(workers, pods)
+    await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    [wait] = await waits_of(api, thread)
+    done = await api.client.post(f"/v1/inbox/{wait.id}/respond", json={"completed": True}, headers=api.auth())
+    assert done.status_code == 200, done.text
+    await workers.wake(thread.id, SlashCommandConfig())
+    # The button's message is the user's answer: one turn reads it, and the thread rests.
+    [request] = workers.requests
+    assert any(str(m.get("content")).startswith("[user action completed] files.") for m in request if m["role"] == "user")
+    assert await workers.status(thread.id) == "completed" and [w.status for w in await waits_of(api, thread)] == ["responded"]
+    await workers.says(thread.id, "And put a date on it.")
+    await workers.wake(thread.id, SlashCommandConfig())
+    assert len(workers.requests) == 2 and await workers.status(thread.id) == "completed"

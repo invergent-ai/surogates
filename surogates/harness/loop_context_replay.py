@@ -66,7 +66,10 @@ def build_user_message_dict(
     # Attribute group messages so the model can tell participants apart
     # in a shared thread. Derived entirely from the durable event payload, so
     # the produced bytes are identical on every replay (prefix-cache stable).
-    _source = event_data.get("source") or {}
+    # A route's own message names its source in a word (the inbox's answer
+    # to an item), not as a channel's sender: it has no sender to attribute.
+    _source = event_data.get("source")
+    _source = _source if isinstance(_source, dict) else {}
     if _source.get("chat_type") == "group":
         _sender = sanitize_sender_name((_source.get("user_name") or "").strip())
         if _sender:

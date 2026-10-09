@@ -143,7 +143,9 @@ def _attachments_note_from_data(data: Any) -> str | None:
     # Section 2: channel file ids from source.files (additive, never raises).
     files_section: str | None = None
     try:
-        source_files = (data.get("source") or {}).get("files")
+        source = data.get("source")
+        # A word, where a route wrote the message: no channel, no files.
+        source_files = source.get("files") if isinstance(source, dict) else None
         if isinstance(source_files, list):
             file_lines = []
             for f in source_files:
