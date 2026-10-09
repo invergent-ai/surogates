@@ -20,8 +20,10 @@ import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
 from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import Mission as MissionRow
+from surogates.devices.browser import BROWSER_HAND_BACK
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
+from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.orchestrator.dispatcher import Orchestrator
@@ -2174,3 +2176,28 @@ async def test_a_routines_run_whose_prompt_is_a_command_ends_and_its_routine_goe
     # ... and its routine is given its next run.
     given = await routines.recover_stalled_dynamic_loops(agent_id=AGENT_ID, stale_seconds=0)
     assert routine.id in [r.id for r in given]
+
+
+@pytest.mark.parametrize("note", ["a helper's report", "a hand back of the browser"])
+async def test_a_skills_expansion_is_never_written_over_a_note_its_cut_off_turn_had_read(workers, monkeypatch, note):
+    chat, store = await workers.chat(), workers.store
+
+    async def a_skill(**_):
+        return "Follow the report-writer skill: tidy the notes.", "report-writer", None, "skill"
+
+    monkeypatch.setattr(loop_module, "expand_slash_skill", a_skill)
+    await workers.says(chat, "/report-writer Tidy the notes.")
+    if note == "a helper's report":
+        await workers.a_helper_reports(chat)
+    else:
+        await store.emit_event(chat, EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK})
+    # The turn's first request reads the skill and the note; its worker dies before the model's answer is written.
+    dying = DiesWriting(store, lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" not in data)
+    with pytest.raises(asyncio.CancelledError):
+        await workers.worker(store=dying).wake(chat)
+    await workers.wake(chat)
+    cut_off, recovered = workers.requests[-2:]
+    # The wake that goes on with the turn expands the skill in the user's own message: the note stays the newest.
+    assert recovered == cut_off
+    assert recovered[-2] == {"role": "user", "content": "Follow the report-writer skill: tidy the notes."}
+    assert recovered[-1]["content"].startswith("[Worker ") if note == "a helper's report" else recovered[-1]["content"] == BROWSER_HANDED_BACK
