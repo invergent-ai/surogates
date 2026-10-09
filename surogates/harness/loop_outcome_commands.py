@@ -26,6 +26,19 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
+#: The mission commands that are refused once done, with the event each writes and its answer.
+_MISSION_DONE = {
+    "pause": (EventType.MISSION_PAUSED, "Mission paused."),
+    "resume": (EventType.MISSION_RESUMED, "Mission resumed."),
+    "cancel": (EventType.MISSION_CANCELLED, "Mission cancelled."),
+}
+
+
+def _goal_defined(state: OutcomeState) -> str:
+    """The answer to the ``/goal <text>`` that set *state*."""
+    return f"Outcome defined ({state.max_iterations} iterations): {state.description}"
+
+
 class OutcomeCommandMixin:
     def _outcome_settings(self) -> Any:
         try:
@@ -120,12 +133,17 @@ class OutcomeCommandMixin:
         session: Session,
         content: str,
         lease: SessionLease,
+        *,
+        typed_on: datetime | None = None,
     ) -> None:
         """Dispatch ``/mission ...`` to the matching handler.
 
         Mirrors :meth:`_handle_goal_command`: parses args, calls into
         :mod:`surogates.missions.commands`, then emits an LLM_RESPONSE
-        carrying the operator-visible message.
+        carrying the operator-visible message.  *typed_on* is when the
+        user sent the command: a mission this session started since then
+        for the same words is the one a worker made for this very command
+        before it died, and is not refused as a second one.
         """
         from surogates.missions.commands import (
             MissionCommandParseError,
@@ -195,6 +213,7 @@ class OutcomeCommandMixin:
                             session_factory=self._session_factory,
                             mission_store=mission_store,
                             budget_tokens=command.budget_tokens,
+                            typed_on=typed_on,
                         )
                         message = result.message or result.error
                         if result.ok and result.mission_id is not None:
@@ -321,6 +340,15 @@ class OutcomeCommandMixin:
                         " | /mission resume | /mission cancel [--cascade] [reason]"
                         " | /mission accept | /mission reject [reason]"
                     )
+                message = await self._done_by_this_message(session, command.action, result) or message
+
+        # /mission create writes its synthetic kickoff message before its
+        # answer, as /goal does: an answered command is not run again, so an
+        # answer with no kickoff after it would leave the mission started
+        # and never worked on.
+        kicks_off = result is not None and result.ok and result.kickoff_content is not None
+        if kicks_off:
+            await self._kick_off(session, result)
 
         # The cursor is the turn's end's to move (``_end_command_turn``): it
         # must not pass what the user sent while this was being answered.
@@ -331,21 +359,7 @@ class OutcomeCommandMixin:
             lease_token=lease.lease_token,
         )
 
-        # /mission create writes its synthetic kickoff message after its
-        # answer: the next wake reads the kickoff as the last message.
-        # Mirrors the /goal flow.
-        if (
-            result is not None
-            and result.ok
-            and result.kickoff_content is not None
-        ):
-            await self._store.emit_event(
-                session.id, EventType.USER_MESSAGE,
-                {
-                    "content": result.kickoff_content,
-                    "synthetic": result.kickoff_synthetic,
-                },
-            )
+        if kicks_off:
             if redis_client is not None:
                 try:
                     from surogates.config import enqueue_session
@@ -361,11 +375,43 @@ class OutcomeCommandMixin:
                         "Failed to enqueue mission kickoff", exc_info=True,
                     )
 
+    async def _done_by_this_message(self, session: Session, action: str, result: Any) -> str | None:
+        """The answer to a mission command that is refused now because a
+        run of this very command did it before its worker died: what that
+        run would have said.  None when the command is not such a one.
+
+        The mission is found as the command left it, and the event the
+        first run wrote since the command was typed says whose doing it
+        is."""
+        answering = getattr(self, "_answering", None)
+        if answering is None or result is None or result.ok or action not in _MISSION_DONE:
+            return None
+        done, answer = _MISSION_DONE[action]
+        return answer if await self._store.has_event(session.id, done, after=answering) else None
+
+    async def _kick_off(self, session: Session, result: Any) -> None:
+        """Write the message that starts the work a mission command made,
+        unless a run of the command wrote it before its worker died."""
+        if await self._said_since_this_message(
+            session,
+            lambda data: (data.get("synthetic"), data.get("content")) == (result.kickoff_synthetic, result.kickoff_content),
+        ):
+            return
+        await self._store.emit_event(
+            session.id, EventType.USER_MESSAGE,
+            {
+                "content": result.kickoff_content,
+                "synthetic": result.kickoff_synthetic,
+            },
+        )
+
     async def _handle_auto_research_command(
         self,
         session: Session,
         content: str,
         lease: SessionLease,
+        *,
+        typed_on: datetime | None = None,
     ) -> None:
         """Dispatch ``/auto-research ...`` — an alias of /mission that
         creates a research-kind mission.
@@ -430,6 +476,7 @@ class OutcomeCommandMixin:
                             session_store=self._store,
                             session_factory=self._session_factory,
                             mission_store=mission_store,
+                            typed_on=typed_on,
                         )
                         message = result.message or result.error
                         if result.ok and result.mission_id is not None:
@@ -502,6 +549,12 @@ class OutcomeCommandMixin:
                         "<criterion> | /auto-research status | pause | "
                         "resume | cancel [--cascade]"
                     )
+                message = await self._done_by_this_message(session, command.action, result) or message
+
+        # The synthetic kickoff before the answer, as /mission and /goal.
+        kicks_off = result is not None and result.ok and result.kickoff_content is not None
+        if kicks_off:
+            await self._kick_off(session, result)
 
         # The cursor is the turn's end's to move (``_end_command_turn``): it
         # must not pass what the user sent while this was being answered.
@@ -512,19 +565,7 @@ class OutcomeCommandMixin:
             lease_token=lease.lease_token,
         )
 
-        # The synthetic kickoff after the answer, as /mission and /goal.
-        if (
-            result is not None
-            and result.ok
-            and result.kickoff_content is not None
-        ):
-            await self._store.emit_event(
-                session.id, EventType.USER_MESSAGE,
-                {
-                    "content": result.kickoff_content,
-                    "synthetic": result.kickoff_synthetic,
-                },
-            )
+        if kicks_off:
             if redis_client is not None:
                 try:
                     from surogates.config import enqueue_session
@@ -556,10 +597,15 @@ class OutcomeCommandMixin:
         if command.action == "status":
             message = self._format_outcome_status(current)
         elif command.action == "set":
+            if await self._goal_is_this_messages(session, current, command):
+                # Its worker died once it had set the goal: the goal is
+                # started, and answered for, as that run would have.
+                message = _goal_defined(current)
+                outcome_kickoff_needed = True
             # Reject setting a new outcome while one is active — a continuation
             # kickoff for the prior outcome may be pending in the event log,
             # and overwriting session.config["outcome"] would orphan it.
-            if current is not None and current.status == "active":
+            elif current is not None and current.status == "active":
                 message = (
                     f"Outcome already active ({current.iteration}/"
                     f"{current.max_iterations}): {current.description}. "
@@ -586,6 +632,26 @@ class OutcomeCommandMixin:
         else:
             message = "Usage: /goal <outcome>, /goal status, /goal pause, /goal resume, /goal clear."
 
+        # The goal's first message before the answer: an answered command is
+        # not run again, so an answer with no first message after it would
+        # leave the goal set and never worked on.  Replay shows the message
+        # after the answer all the same.
+        outcome = OutcomeState.from_config((session.config or {}).get("outcome")) if outcome_kickoff_needed else None
+        if outcome is not None and not await self._said_since_this_message(
+            session, lambda data: data.get("synthetic") == "outcome_kickoff" and data.get("outcome_id") == outcome.id,
+        ):
+            kickoff_id = await self._store.emit_synthetic_user_message(
+                session.id,
+                content=outcome.description,
+                synthetic="outcome_kickoff",
+                metadata={"outcome_id": outcome.id},
+            )
+            logger.debug(
+                "Session %s: emitted outcome kickoff user message %s",
+                session.id,
+                kickoff_id,
+            )
+
         # The cursor is the turn's end's to move (``_end_command_turn``): it
         # must not pass what the user sent while this was being answered.
         await self._store.emit_event(
@@ -595,22 +661,7 @@ class OutcomeCommandMixin:
             lease_token=lease.lease_token,
         )
 
-        if outcome_kickoff_needed:
-            outcome = OutcomeState.from_config((session.config or {}).get("outcome"))
-            if outcome is None:
-                return
-            outcome_id = outcome.id if outcome else None
-            kickoff_id = await self._store.emit_synthetic_user_message(
-                session.id,
-                content=outcome.description,
-                synthetic="outcome_kickoff",
-                metadata={"outcome_id": outcome_id},
-            )
-            logger.debug(
-                "Session %s: emitted outcome kickoff user message %s",
-                session.id,
-                kickoff_id,
-            )
+        if outcome is not None:
             if self._redis is not None:
                 try:
                     from surogates.config import enqueue_session
@@ -623,6 +674,30 @@ class OutcomeCommandMixin:
                     )
                 except Exception:
                     logger.debug("Failed to enqueue outcome kickoff", exc_info=True)
+
+    async def _said_since_this_message(self, session: Session, is_it: Any) -> bool:
+        """Whether a message the harness wrote since the command it answers
+        now was typed is the one *is_it* tells by its data: the one a run
+        of this command wrote before its worker died."""
+        answering = getattr(self, "_answering", None)
+        if answering is None:
+            return False
+        return any(
+            is_it(event.data or {})
+            for event in await self._store.get_events(session.id, after=answering, types=[EventType.USER_MESSAGE])
+        )
+
+    async def _goal_is_this_messages(self, session: Session, current: OutcomeState | None, command: Any) -> bool:
+        """Whether the session's goal in flight is the one a run of this
+        very command set before its worker died: it is recorded as defined
+        since the command was typed, with the command's words."""
+        answering = getattr(self, "_answering", None)
+        if answering is None or current is None or current.status != "active" or current.description != (command.text or "").strip():
+            return False
+        return any(
+            (event.data or {}).get("outcome_id") == current.id
+            for event in await self._store.get_events(session.id, after=answering, types=[EventType.OUTCOME_DEFINED])
+        )
 
     async def _define_goal_outcome(self, session: Session, command: Any) -> str:
         settings = self._outcome_settings()
@@ -641,12 +716,8 @@ class OutcomeCommandMixin:
         except ValueError:
             return "Usage: /goal <outcome>. Example: /goal Fix all failing tests."
 
-        await self._store.update_session_config_key(
-            session.id,
-            "outcome",
-            state.to_config(),
-        )
-        session.config = {**(session.config or {}), "outcome": state.to_config()}
+        # Recorded before it is set: a goal that is set and not recorded is
+        # one a second run of the command could not tell for its own.
         await self._store.emit_event(
             session.id,
             EventType.OUTCOME_DEFINED,
@@ -657,7 +728,13 @@ class OutcomeCommandMixin:
                 "max_iterations": state.max_iterations,
             },
         )
-        return f"Outcome defined ({state.max_iterations} iterations): {state.description}"
+        await self._store.update_session_config_key(
+            session.id,
+            "outcome",
+            state.to_config(),
+        )
+        session.config = {**(session.config or {}), "outcome": state.to_config()}
+        return _goal_defined(state)
 
     async def _pause_goal_outcome(
         self,

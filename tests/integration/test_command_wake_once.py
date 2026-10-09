@@ -91,6 +91,27 @@ class Meanwhile:
         return await self._store.advance_harness_cursor(*args, **kwargs)
 
 
+class DiesWriting:
+    """The store of a worker that dies as it writes the first event *of* a kind: ``of(type, data)`` says which."""
+
+    def __init__(self, store, of) -> None:
+        self._store, self._of, self._died = store, of, False
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+    async def emit_event(self, session_id, event_type, data, **kwargs):
+        if not self._died and self._of(event_type, data):
+            self._died = True
+            raise asyncio.CancelledError
+        return await self._store.emit_event(session_id, event_type, data, **kwargs)
+
+    async def emit_synthetic_user_message(self, session_id, *, content, synthetic, metadata=None):
+        return await self.emit_event(
+            session_id, EventType.USER_MESSAGE, {"content": content, "synthetic": synthetic, **(metadata or {})},
+        )
+
+
 class Workers:
     """The workers that wake the app's sessions, and what they ran."""
 
@@ -1213,8 +1234,10 @@ async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stoppe
 async def test_a_goal_set_by_a_command_is_worked_on_by_the_next_wake(workers):
     chat = await workers.chat()
     await workers.types(chat, "/goal Ship the Q3 report")
-    # The command queued its own first turn: the chat stays active for it.
-    assert (await workers.status(chat), (await workers.log(chat))[-1]) == ("active", EventType.USER_MESSAGE.value)
+    # The command queued its own first turn, and then answered: the chat stays active for that turn.
+    assert (await workers.status(chat), (await workers.log(chat))[-2:]) == (
+        "active", [EventType.USER_MESSAGE.value, EventType.LLM_RESPONSE.value],
+    )
 
     await workers.wake(chat)
 
@@ -1301,7 +1324,9 @@ MISSION = "/mission Audit the Q3 figures\n\nRubric:\n- every figure is sourced"
 async def test_a_mission_started_by_a_command_is_worked_on_by_the_next_wake(workers):
     chat = await workers.chat()
     await workers.types(chat, MISSION)
-    assert (await workers.status(chat), (await workers.log(chat))[-1]) == ("active", EventType.USER_MESSAGE.value)
+    assert (await workers.status(chat), (await workers.log(chat))[-2:]) == (
+        "active", [EventType.USER_MESSAGE.value, EventType.LLM_RESPONSE.value],
+    )
 
     await workers.wake(chat)
 
@@ -1309,6 +1334,47 @@ async def test_a_mission_started_by_a_command_is_worked_on_by_the_next_wake(work
     assert conversation[-1]["content"].startswith("[Mission kickoff]")
     # Its mission in flight, the coordinator's chat stays active for its helpers' reports.
     assert (workers.ran, await workers.status(chat)) == (["_handle_mission_command"], "active")
+
+
+#: Each command that starts work of its own: the event that records the work, the message that starts it, its answer.
+STARTS = {
+    "/goal Ship the Q3 report": (EventType.OUTCOME_DEFINED, "outcome_kickoff", "Outcome defined (20 iterations): Ship the Q3 report"),
+    MISSION: (EventType.MISSION_DEFINED, "mission_kickoff", "Mission "),
+}
+#: Where the worker that runs such a command dies.
+AS_IT = {
+    "records the work": lambda recorded, first: lambda kind, data: kind == recorded,
+    "writes the work's first message": lambda recorded, first: lambda kind, data: data.get("synthetic") == first,
+    "answers": lambda recorded, first: lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" in data,
+}
+
+
+@pytest.mark.parametrize("dies", list(AS_IT))
+@pytest.mark.parametrize("command", list(STARTS))
+async def test_work_a_command_started_as_its_worker_died_is_started_once_by_the_wake_that_recovers_it(workers, command, dies):
+    recorded, first, answer = STARTS[command]
+    chat = await workers.chat()
+    await workers.says(chat, command)
+    typed = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
+    with pytest.raises(asyncio.CancelledError):
+        await workers.worker(store=DiesWriting(workers.store, AS_IT[dies](recorded, first))).wake(chat)
+
+    assert await workers.swept(chat)
+    await workers.wake(chat)
+
+    # Run again, the command finds what its first run made: it starts the work once, and answers as it would have.
+    events = await workers.store.get_events(chat)
+    answers = [event for event in events if event.type == EventType.LLM_RESPONSE.value and event.data.get("answers") == typed]
+    started = [event for event in events if event.type == EventType.USER_MESSAGE.value and event.data.get("synthetic") == first]
+    assert ([event.data["message"]["content"].startswith(answer) for event in answers], len(started)) == ([True], 1)
+    # The first message before the answer: an answered command is not run again, and would never write it.
+    assert started[0].id < answers[0].id
+    async with workers.api.app.state.session_factory() as db:
+        missions = list((await db.execute(select(MissionRow).where(MissionRow.session_id == chat))).scalars())
+    assert len(missions) == (1 if command == MISSION else 0)
+
+    await workers.wake(chat)
+    assert workers.requests[0][-1] == {"role": "user", "content": started[0].data["content"]}
 
 
 async def a_coordinator(workers: Workers) -> UUID:
@@ -1319,6 +1385,27 @@ async def a_coordinator(workers: Workers) -> UUID:
     workers.ran.clear()
     workers.requests.clear()
     return chat
+
+
+@pytest.mark.parametrize("command, done, answer", [
+    ("/mission pause", EventType.MISSION_PAUSED, "Mission paused."),
+    ("/mission resume", EventType.MISSION_RESUMED, "Mission resumed."),
+    ("/mission cancel", EventType.MISSION_CANCELLED, "Mission cancelled."),
+])
+async def test_a_mission_command_that_took_effect_as_its_worker_died_is_answered_as_done(workers, command, done, answer):
+    chat = await a_coordinator(workers)
+    if command == "/mission resume":
+        await pause(workers, chat, "typed")
+    await workers.says(chat, command)
+    await workers.wake_of_a_worker_that_dies(chat, "answering")
+    await workers.swept(chat)
+
+    await workers.wake(chat)
+
+    # Run again, it finds the mission as its first run left it: it says what that run did, and does it no second time.
+    assert (await workers.said(chat))[-1] == answer
+    assert (await workers.log(chat)).count(done.value) == 1
+    assert workers.ran == ["_handle_mission_command"] * 2
 
 
 async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers):

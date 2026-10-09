@@ -4889,9 +4889,9 @@ class AgentHarness(
         elif command == "goal":
             await self._handle_goal_command(session, text, lease)
         elif command == "mission":
-            await self._handle_mission_command(session, text, lease)
+            await self._handle_mission_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
         elif command == "auto-research":
-            await self._handle_auto_research_command(session, text, lease)
+            await self._handle_auto_research_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
         elif command == "code":
             await self._handle_code_command(session, text, lease, all_events)
         elif command == "loop":

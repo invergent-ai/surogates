@@ -259,7 +259,7 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
 
 
 @pytest.mark.asyncio
-async def test_handle_mission_create_emits_kickoff_after_cursor_advance(
+async def test_handle_mission_create_emits_kickoff_before_its_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for PROD session 216e2577-…: the kickoff
@@ -269,11 +269,14 @@ async def test_handle_mission_create_emits_kickoff_after_cursor_advance(
 
     Verifies the temporal sequence:
 
+        emit USER_MESSAGE(kickoff content)
         emit LLM_RESPONSE("Mission … started.")
-        emit USER_MESSAGE(kickoff content)         # id > cursor
         enqueue session                            # next wake fires
 
-    and that the handler does not move the cursor.
+    and that the handler does not move the cursor.  The kickoff comes
+    first: once the answer is in the log the command is not run again,
+    and a worker that died between the two would leave the mission
+    started and never worked on.
     """
     from uuid import uuid4
 
@@ -315,11 +318,9 @@ async def test_handle_mission_create_emits_kickoff_after_cursor_advance(
         and d.get("synthetic") == "mission_kickoff"
     )
 
-    # Kickoff must come AFTER the LLM_RESPONSE (which is what the cursor
-    # advances through).  Reversing the order is the PROD bug.
-    assert response_idx < kickoff_idx, (
-        "kickoff user.message must be emitted after the slash response; "
-        "otherwise advance_harness_cursor races past it"
+    assert kickoff_idx < response_idx, (
+        "kickoff user.message must be emitted before the slash response; "
+        "otherwise a death between the two leaves the mission never worked on"
     )
 
     # The handler leaves the cursor alone, so it cannot pass the kickoff:
