@@ -229,6 +229,14 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z",
     resolved_at: "2026-10-07T12:00:00Z",
   }).place, { kind: "cloud" });
+  // A mark of a later server is no mark the page knows: the file is served with none, and every known mark as it is.
+  const marked = (landing) => threadRowOf({
+    id: "t-4", title: "Draft C", group: "idle", reason: null, status_line: null, progress: null,
+    files: [{ kind: "file", label: "c.md", ref: "c.md", thread_id: "t-4", landing }],
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).files[0].landing;
+  assert.deepEqual(["kept_apart", "toString", "", 7].map(marked), [null, null, null, null]);
+  assert.deepEqual(["landed", "redoing", "not_merged", "undone", null].map(marked), ["landed", "redoing", "not_merged", "undone", null]);
   // A server from before file history sends a file with no mark: the page serves none.
   assert.deepEqual(threadRowOf({
     id: "t-3", title: "Draft B", group: "idle", reason: null, status_line: null, progress: null,

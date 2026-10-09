@@ -17,12 +17,19 @@ export interface ThreadRowResponse {
   reason: ThreadRow["reason"];
   status_line: string | null;
   progress: { done: number; total: number } | null;
-  // A server from before file history sends a file with no landing.
+  // A server from before file history sends a file with no landing, and a later one may send a mark not known here.
   files: { kind: "file" | "artifact"; label: string; ref: string; thread_id: string; landing?: ProducedFile["landing"] }[];
   place: { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean };
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+}
+
+const MARKS: readonly unknown[] = ["landed", "redoing", "not_merged", "undone"];
+
+/** A file's mark when it is one the page knows, else none: the file is served either way. */
+function markOf(landing: unknown): NonNullable<ProducedFile["landing"]> | null {
+  return MARKS.includes(landing) ? (landing as NonNullable<ProducedFile["landing"]>) : null;
 }
 
 function placeOf(place: ThreadRowResponse["place"]): ThreadPlace {
@@ -39,7 +46,7 @@ export function threadRowOf(row: ThreadRowResponse): ThreadRow {
     reason: row.reason,
     statusLine: row.status_line,
     progress: row.progress,
-    files: row.files.map(({ kind, label, ref, thread_id, landing = null }) => ({ kind, label, ref, threadId: thread_id, landing })),
+    files: row.files.map(({ kind, label, ref, thread_id, landing }) => ({ kind, label, ref, threadId: thread_id, landing: markOf(landing) })),
     place: placeOf(row.place),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

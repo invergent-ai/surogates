@@ -120,7 +120,8 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
         <ul className="mt-1 flex flex-wrap gap-x-3 text-xs">
           {files.slice(0, FILES_SHOWN).map((file) => {
             // Only a live row's file has one: a report's files say nothing of the project's.
-            const landing = "landing" in file ? file.landing : null;
+            // A mark this card has no words for, as a later server may send, is no mark.
+            const landing = "landing" in file && file.landing && Object.hasOwn(MARKS, file.landing) ? file.landing : null;
             const mark = landing ? MARKS[landing] : null;
             return (
               // A long name is cut, its mark never.

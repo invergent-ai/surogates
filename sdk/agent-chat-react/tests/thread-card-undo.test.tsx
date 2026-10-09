@@ -82,6 +82,16 @@ describe("a project thread's card", () => {
     expect(lines(drawnCard)).toEqual(["Old.md", "Sales chart", "Plan.md · undone"]);
   });
 
+  it("shows a file whose mark it does not know with its name alone, and every mark it knows", () => {
+    // As a later server may send: a mark this card has no words for, and one that names something every object has.
+    const later = ["kept_apart", "toString"].map((landing, at) => (
+      { kind: "file", label: `Later-${at}.md`, ref: `Later-${at}.md`, landing } as unknown as AgentChatThreadRow["files"][number]
+    ));
+    const drawnCard = drawn({ ...ROW, files: [...later, ROW.files[0]!] });
+    expect(lines(drawnCard)).toEqual(["Later-0.md", "Later-1.md", "Budget.xlsx · not merged"]);
+    expect(drawnCard.querySelectorAll("[data-mark]")).toHaveLength(1);
+  });
+
   it("marks nothing on a card with no row, which shows what its reports said", () => {
     expect(drawn(null).querySelector("[data-mark]")).toBeNull();
   });
