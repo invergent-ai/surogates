@@ -254,6 +254,13 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
     expect(entries(own())).toEqual(["IT Root CT,C,C"]);
   });
 
+  it("takes for its own only an entry named as it names one, and leaves the user's whose name only begins so", () => {
+    added(own(), another, `${NICKNAME} of our old proxy`, "CT,C,C");
+    added(own(), company, `${nickname(company)}0`, "CT,C,C");
+    trustInChromium([], home, data());
+    expect(entries(own()).sort()).toEqual([`${NICKNAME} of our old proxy CT,C,C`, `${nickname(company)}0 CT,C,C`].sort());
+  });
+
   it("adds no certificate the database holds under a name of the user's, whose trust adding it would reset", () => {
     added(own(), company, "IT Root", "CT,C,C");
     trustInChromium([pem(company)], home, data());

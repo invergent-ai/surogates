@@ -24,6 +24,7 @@ export const COMPANY_CA = "/etc/surogate/ca.pem";
 // What the app names its entries in the user's NSS database, each followed by its certificate's
 // fingerprint: the install script's --uninstall takes them out by it.
 export const NICKNAME = "Surogate company CA";
+const OURS = new RegExp(`^${NICKNAME} [0-9a-f]{16}$`);
 // More than any company's certificate authorities take: hundreds of certificates.
 const MAX_BYTES = 1024 * 1024;
 const CERTUTIL = "/usr/bin/certutil";
@@ -162,7 +163,8 @@ export function trustInChromium(certificates: string[], home: string, dataHome: 
     const entry = /^(.+?)\s+(\S*),\S*,\S*\s*$/.exec(line);
     return entry ? [{ name: entry[1]!, trusted: entry[2]!.includes("C") }] : [];
   });
-  const ours = (name: string): boolean => name.startsWith(`${NICKNAME} `);
+  // The app's own are those named as it names one, to the letter: no other entry is ever removed.
+  const ours = (name: string): boolean => OURS.test(name);
   const wanted = new Map(certificates.map((pem) => [nicknameOf(pem), pem]));
   for (const { name, trusted } of entries) if (ours(name) && (!wanted.has(name) || !trusted)) run(["-D", "-n", name]);
   const missing = [...wanted].filter(([name]) => !entries.some((entry) => entry.name === name && entry.trusted));
