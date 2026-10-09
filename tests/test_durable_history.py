@@ -2021,3 +2021,33 @@ def test_a_stop_keeps_the_work_of_an_earlier_turns_helper_that_handed_back_durin
     after = a_pod(tmp_path, project)
     assert (after.copy / "sources.md").read_text() == "an hour of work" and not (after.copy / "draft.md").exists()
     assert git(project / "_history", "fsck", "--no-dangling") == ""
+
+
+def test_a_helper_whose_start_the_history_holds_only_in_part_sends_its_files_whole_and_the_thread_opens(tmp_path, project):
+    durable = project / "_history"
+    seed = a_pod(tmp_path, project, "t9")
+    (seed.copy / "seed.md").write_text("seed")
+    land(seed, "saga:0")
+    turn = a_pod(tmp_path, project)
+    (turn.copy / "big.bin").write_bytes(os.urandom(4096))
+    turn.hand_off(author=A, trailers=KEPT)
+    old = {p.name for p in (durable / "objects" / "pack").iterdir()}
+    for name in old:
+        os.utime(durable / "objects" / "pack" / name, (time.time() - 3600, time.time() - 3600))
+    # The turn hands on again, more than the fence later; a helper starts from that; the turn is stopped.
+    (turn.copy / "more.md").write_text("more")
+    second = turn.hand_off(author=A, trailers=KEPT)["commit"]
+    helper = a_helper(tmp_path, project, "h-b")
+    assert turn.drop_hand_off() == {"dropped": True} and handoffs(project) == {}
+    # The day's pruning: the stopped hand-offs are on no ref.  The first one's pack is old and goes; the
+    # second's is younger than the fence and stays, its commit there without the files the first sent.
+    keep = [f"refs/{kind}/{thread}" for thread in ("t1", "t9") for kind in ("heads/threads", "bases", "handoff", "handoff-from")]
+    a_pod(tmp_path, project, "t2").prune(keep=[*keep, "refs/helpers/t1/"], now=time.time() + 90_000, old=sorted({n.rpartition(".")[0] for n in old}))
+    assert subprocess.run(["git", f"--git-dir={durable}", "cat-file", "-e", f"{second}^{{commit}}"]).returncode == 0
+    (helper.copy / "b.md").write_text("b")
+    helper.hand_back(author=A, trailers=KEPT)
+    # Its start is not all there, so nothing of it is left out of what the helper sends.
+    assert git(durable, "fsck", "--no-dangling") == ""
+    git(durable, "rev-list", "--objects", "--no-walk", "refs/handoff/t1")
+    after = a_pod(tmp_path, project)
+    assert (after.copy / "b.md").read_text() == "b"

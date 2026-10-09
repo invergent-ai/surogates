@@ -1271,12 +1271,20 @@ class History:
         self._put_durable("packed-refs", _packed(refs))
 
     def _first_held(self, commit: str) -> str | None:
-        """*commit*'s first parent, where this pod holds it and the durable history did when last taken."""
+        """*commit*'s first parent, where this pod holds it and the durable history held all of it when last taken.
+
+        All of it: the commit with its files.  A pruning keeps a young pack
+        whole and repacks only what refs reach, so the history can hold a
+        commit no ref names without the files an older pack had sent.
+        """
         try:
             first = self._parents(commit)[:1]
+            if not first or not self._has(first[0]) or not self._in_durable(first[0]):
+                return None
+            self._git(["rev-list", "--objects", "--no-walk", first[0]], env={"GIT_DIR": str(self._taken)}, cwd=self.repo)
         except HistoryError:
-            return None  # not the platform's own: nothing is taken from it
-        return first[0] if first and self._has(first[0]) and self._in_durable(first[0]) else None
+            return None  # not the platform's own, or not whole: nothing is left out for it
+        return first[0]
 
     def _in_durable(self, commit: str) -> bool:
         """Whether the durable history held *commit* when last taken."""
