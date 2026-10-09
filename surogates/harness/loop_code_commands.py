@@ -24,10 +24,12 @@ from surogates.coding_agents.messages import (
     render_status,
 )
 from surogates.devices.binding import device_of
+from surogates.harness.loop_messages import _latest_user_event_id
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
 
+RUN_CUT_OFF = "The coding run was cut off. Type the command again to start it."
 _NO_VAULT = "Credential vault is not configured on this deployment."
 _NO_SANDBOX = "Coding agents need a sandbox, which isn't available on this deployment."
 
@@ -78,16 +80,18 @@ class CodeCommandMixin:
     # ------------------------------------------------------------------
 
     async def _emit_code_message(self, session, message: str, lease) -> None:
-        response_event_id = await self._store.emit_event(
+        # The cursor is the turn's end's to move (``_end_command_turn``).
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
-        )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=response_event_id,
+            {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
             lease_token=lease.lease_token,
         )
+
+    def _names_its_message(self) -> dict:
+        """What an answer carries to say which message it answers (the host's, when it has one)."""
+        answering = getattr(self, "_answering", None)
+        return {} if answering is None else {"answers": answering}
 
     def _code_credentials(self) -> CodingAgentCredentials | None:
         if getattr(self, "_credential_vault", None) is None:
@@ -149,10 +153,14 @@ class CodeCommandMixin:
 
         # Idempotency: a crash-recovery re-wake replays the same user.message;
         # if a run for this source event already started, do not relaunch.
-        source_event_id = _latest_user_event_id(all_events)
+        # The command's own message: another may have been typed since.
+        source_event_id = getattr(self, "_answering", None) or _latest_user_event_id(all_events)
         if source_event_id is not None and _code_run_already_started(
             all_events, source_event_id,
         ):
+            # Its worker died in the run.  The run is not started again, and
+            # the command gets its answer, so the chat goes on.
+            await self._emit_code_message(session, RUN_CUT_OFF, lease)
             return
 
         # Resolve the target repo from the wake-local config.  A specific
@@ -240,13 +248,8 @@ class CodeCommandMixin:
             )
             return
 
-        # The core already emitted CODE_RUN_RESULT — advance the cursor through
-        # it so this terminal slash turn is durably processed.
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=outcome.result_event_id,
-            lease_token=lease.lease_token,
-        )
+        # The core already emitted CODE_RUN_RESULT: it is this command's
+        # answer, and the turn's end moves the cursor (``_end_command_turn``).
 
     async def _ensure_code_sandbox(self, session, sandbox_owner: str) -> None:
         from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -256,20 +259,6 @@ class CodeCommandMixin:
             credential_vault=self._credential_vault,
         )
         await self._sandbox_pool.ensure(sandbox_owner, spec)
-
-
-def _latest_user_event_id(all_events) -> int | None:
-    if not all_events:
-        return None
-    latest: int | None = None
-    for event in all_events:
-        etype = getattr(event, "type", None)
-        etype = etype.value if hasattr(etype, "value") else str(etype)
-        eid = getattr(event, "id", None)
-        if etype == EventType.USER_MESSAGE.value and eid is not None:
-            if latest is None or eid > latest:
-                latest = eid
-    return latest
 
 
 def _code_run_already_started(all_events, source_event_id: int) -> bool:

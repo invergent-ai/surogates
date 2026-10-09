@@ -345,7 +345,7 @@ export function applyAgentChatEvent(
       if (event.data.strategy === "clear") {
         return {
           ...nextState,
-          messages: [],
+          messages: typedBehindTheClear(nextState.messages, event.data.answers),
           tokenUsage: EMPTY_TOKEN_USAGE,
         };
       }
@@ -468,6 +468,28 @@ function applyRetryIndicator(
     default:
       return state;
   }
+}
+
+/**
+ * What a `/clear` leaves in view: the messages its user typed behind the
+ * command that no turn has answered. The harness runs the command after
+ * them, and clears the model's conversation where the command stands, so
+ * the model answers them next. `answers` is the id of the command's own
+ * message; a clear that names none takes everything.
+ */
+function typedBehindTheClear(
+  messages: AgentChatMessage[],
+  answers: unknown,
+): AgentChatMessage[] {
+  if (typeof answers !== "number") return [];
+  let first = messages.length;
+  while (first > 0) {
+    const message = messages[first - 1]!;
+    const typedAt = /^evt-(\d+)$/.exec(message.id);
+    if (message.role !== "user" || !typedAt || Number(typedAt[1]) <= answers) break;
+    first -= 1;
+  }
+  return messages.slice(first);
 }
 
 function applyUserMessage(

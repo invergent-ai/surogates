@@ -1169,6 +1169,7 @@ class Orchestrator:
                 "attempts": attempts,
                 "recovered_by": reason,
                 "retryable": False,
+                **await self._command_it_could_not_run(session.id),
             },
         )
         await self._report_failure_to_parent(session.id, "recovery_loop")
@@ -1180,6 +1181,30 @@ class Orchestrator:
                 await DeviceOperations(self._session_factory, self.redis).cancel([session.id])
             except Exception:
                 logger.warning("could not cancel the operations of abandoned session %s", session.id, exc_info=True)
+
+    async def _command_it_could_not_run(self, session_id: UUID) -> dict[str, str]:
+        """What the failure of a session given up says of a command its
+        user typed and no wake could answer: without it the user sees a
+        failed chat and no word about the command.  Nothing when no
+        command waits, or the log cannot be read."""
+        from surogates.harness.loop import command_never_answered
+
+        try:
+            command = command_never_answered(
+                await self.session_store.get_events(session_id, exclude_types=[EventType.LLM_DELTA]),
+            )
+        except Exception:
+            logger.warning("could not read the log of abandoned session %s", session_id, exc_info=True)
+            return {}
+        if command is None:
+            return {}
+        return {
+            "error_title": f"{command} could not be run",
+            "error_detail": (
+                "Its worker stopped again and again while running it. "
+                "Retrying, or sending a message, runs it once more."
+            ),
+        }
 
     async def _sweep_orphans_on_boot(self) -> None:
         """One-shot aggressive sweep right after worker start.

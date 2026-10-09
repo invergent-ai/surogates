@@ -918,3 +918,49 @@ describe("insufficient credits (402 token-credit gate)", () => {
     });
   });
 });
+
+describe("a /clear the harness ran after its user had typed more", () => {
+  const said = (id: number, role: "user" | "assistant", content: string) => ({
+    id: `evt-${id}`,
+    role,
+    content,
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    status: "complete" as const,
+  });
+  const cleared = (state: AgentChatState, answers?: number) =>
+    applyAgentChatEvent(state, {
+      type: "context.compact",
+      eventId: 90,
+      data: { strategy: "clear", compacted_messages: [], ...(answers === undefined ? {} : { answers }) },
+    }).messages.map((message) => message.content);
+
+  it("keeps the question typed behind the command, which the model answers next", () => {
+    const state = withMessages([
+      said(1, "user", "Open the report."),
+      said(2, "assistant", "It is open."),
+      said(3, "user", "/clear"),
+      said(4, "user", "And Q1?"),
+    ]);
+
+    expect(cleared(state, 3)).toEqual(["And Q1?"]);
+  });
+
+  it("clears a message the turn under way read, with that turn", () => {
+    const state = withMessages([
+      said(1, "user", "Go on."),
+      said(3, "user", "/clear"),
+      said(4, "user", "Also check Q1."),
+      said(5, "assistant", "Both done."),
+      said(6, "user", "And Q2?"),
+    ]);
+
+    // The command waited for the turn: only what that turn did not read is left.
+    expect(cleared(state, 3)).toEqual(["And Q2?"]);
+  });
+
+  it("clears everything when the compaction names no message", () => {
+    const state = withMessages([said(1, "user", "Open the report."), said(2, "user", "And Q1?")]);
+
+    expect(cleared(state)).toEqual([]);
+  });
+});

@@ -946,10 +946,12 @@ async def test_a_report_wakes_a_master_whose_last_message_was_a_command(api, mon
     # The user's /loop was handled in its own turn; the report must not run it again.
     master = await master_of(api, await create(api))
     thread = await start(api, master)
-    await api.app.state.session_store.emit_event(
-        master.id, EventType.USER_MESSAGE, {"content": "/loop 1d Check the cash report"},
-    )
-    await turn_of_the_master_ends(api, master, "I will check the cash report daily.")
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": "/loop 1d Check the cash report"})
+    # Its own wake answered it, as the harness answers a command: with no request to the model.
+    await store.emit_event(master.id, EventType.HARNESS_WAKE, {"worker_id": "worker-threads", "cursor": 0})
+    await answered(api, master, "Loop scheduled.")
+    await turn_ends(api, master)
     await answered(api, thread, "Drafted the memo.")
     await turn_ends(api, thread)
 
