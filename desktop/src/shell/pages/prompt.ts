@@ -84,10 +84,15 @@ function down(event: Event): void {
   if (!acts) still(event);
 }
 // What a key or a press that does not act would do next does not happen either: its key coming up, its click.
-// A key does nothing at all: keys are what a person typing elsewhere sends here. A press of the mouse is made
-// where it lands, and one that does not act is held back from the buttons alone: a choice it lands on is taken.
+// A key does nothing at all: keys are what a person typing elsewhere sends here. But for the clipboard's and
+// the selection's own keys, which answer nothing and move nothing: what a prompt shows can be copied at any
+// time. A press of the mouse is made where it lands, and one that does not act is held back from the buttons
+// alone: a choice it lands on is taken.
+const CLIPBOARD = new Set(["a", "c", "v", "x"]);
 function still(event: Event): void {
-  if (!(event instanceof KeyboardEvent) && !(event.target instanceof Element && event.target.closest("#prompt-buttons"))) return;
+  if (event instanceof KeyboardEvent) {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && CLIPBOARD.has(event.key.toLowerCase())) return;
+  } else if (!(event.target instanceof Element && event.target.closest("#prompt-buttons"))) return;
   event.preventDefault();
   event.stopImmediatePropagation();
 }
