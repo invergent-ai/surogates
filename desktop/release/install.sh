@@ -788,11 +788,12 @@ notes() {
 roll_back() {
   local version="$1" base installed download release its size tarball=""
   # The record is root's own word for the server this computer installs from: a file of root's
-  # own at the mode an install writes it, one JSON document of 4096 bytes at most, and its base
+  # own that no one else may write, at whichever mode (an administrator may have closed it to
+  # others, and it is root's word no less), one JSON document of 4096 bytes at most, and its base
   # an http or https URL as --base takes one. curl is handed no other word of it: one that begins
   # with a dash would be options to curl, and name it a file to read and one to write.
   [ -e "$RECORD" ] || [ -L "$RECORD" ] || fail "Surogate Desktop is not installed: run its install script first"
-  roots_own "$RECORD" 81a4 || fail "$RECORD is not as Surogate Desktop's install leaves it: run its install script again"
+  roots_alone "$RECORD" || fail "$RECORD is not as Surogate Desktop's install leaves it: run its install script again"
   base="$(one_object "$RECORD" any | jq -er '.base | strings' 2>/dev/null)" && http_url "$base" \
     || fail "$RECORD names no server to roll back from: run Surogate Desktop's install script again"
   installed="$(installed_version)"

@@ -2512,11 +2512,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ["an empty record", `: >${record}`],
       ["a record of more than 4096 bytes", padded],
     ] as const) refused(what, made, noServer);
-    // Nor a record that is not root's own file at the mode an install writes it, whatever it names: here the base itself.
+    // Nor a record that is not root's own file, or that anyone else may write, whatever it names: here the base itself.
     for (const [what, made] of [
       ["a link to a user's file", `cp ${record} /home/tester/record.json && chown tester /home/tester/record.json && rm ${record} && ln -s /home/tester/record.json ${record}`],
       ["another user's", `chown tester ${record}`],
       ["one that all may write", `chmod 666 ${record}`],
+      ["one that its group may write", `chmod 664 ${record}`],
       ["a pipe", `rm ${record} && mkfifo ${record}`],
       ["a folder", `rm ${record} && mkdir ${record}`],
     ] as const) refused(what, made, notRoots);
@@ -2530,6 +2531,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ["one that others may write", `echo '{"stateSchema":1}' >${mark} && chmod 664 ${mark}`],
     ] as const) refused(`the installed mark: ${what}`, made, noSchema, "1.4.0");
     expect(root(`cmp /root/record ${record} && cmp /root/mark ${mark} && stat -c '%f %u' ${record} ${mark}`).stdout).toBe("81a4 0\n81a4 0\n");
+    // The record is root's own word at any mode that lets root alone write it, and not only at the
+    // one an install gives it: the base is asked, here for a version that is here whole.
+    for (const mode of ["444", "600", "640", "400", "755"]) {
+      const taken = rolled("1.6.0", `chmod ${mode} ${record}`, restored);
+      expect(taken.startsWith("0 2 ") && taken.endsWith("Surogate Desktop: 1.6.0 is installed\n"), `${mode}: ${taken}`).toBe(true);
+    }
   });
 
   it("rolls back with the system's own tools and into a folder of root's own, whatever PATH and TMPDIR root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
