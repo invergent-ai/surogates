@@ -308,12 +308,15 @@ function keep(path: string, data: Buffer): void {
   }
 }
 
-// Whether *files* are still as a check left them: each a regular file of one name, in the app's own
-// folders, with no link where a folder or a file was.
-function staged(files: Staged): boolean {
+// Whether *files* are still as a check left them in the updates folder *cache* names, by a check's
+// own rule (updatesFolder): the cache home may be a link, and its real path is taken again here;
+// below it, surogate, updates and the version's folder are each the user's own real folder, and
+// each file is a regular file of one name. Files that a cache home moved since now leads to
+// through a link are not these.
+function staged(cache: string, files: Staged): boolean {
+  const updates = updatesFolder(cache, false);
   const folder = dirname(files.tarball);
-  return [dirname(dirname(folder)), dirname(folder), folder].every((path) => ownFolder(path, false))
-    && [files.manifest, files.signature, files.tarball].every(regular);
+  return updates !== null && dirname(folder) === updates && ownFolder(folder, false) && [files.manifest, files.signature, files.tarball].every(regular);
 }
 
 export interface UpdatesOptions {
@@ -367,7 +370,7 @@ export class Updates {
     // no longer the app's own file, no helper is run: the offer goes, and the release is looked
     // for again, for another click. From here on the helper alone decides: it reads each file
     // once, as this user and through no link, and checks its own copies.
-    if (!staged(files)) {
+    if (!staged(this.options.cache, files)) {
       this.set({ state: "none" });
       return this.check();
     }

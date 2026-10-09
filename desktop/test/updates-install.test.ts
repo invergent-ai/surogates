@@ -63,6 +63,29 @@ describe("the files the root helper is handed", () => {
     expect(readFileSync(elsewhere).equals(tarball)).toBe(true);
   });
 
+  it("are named by the cache home as it is at the click: one moved since, with a link in its place, is followed as a check follows it, and its files are handed on by their real path", async () => {
+    const tarball = base.publish("1.2.4");
+    const { handed, apply } = helper();
+    const found = base.updates({ apply });
+    await found.check();
+    const before = (found.state as { files: Staged }).files;
+    // As a cache moved to another disk: the cache home itself may be a link, and nothing below it.
+    renameSync(join(base.dir, "cache"), join(base.dir, "disk"));
+    symlinkSync(join(base.dir, "disk"), join(base.dir, "cache"));
+    await found.install();
+    // The paths the app held now lead through that link: they are not handed on.
+    expect(handed).toEqual([]);
+    const moved = join(base.dir, "disk", "surogate", "updates", "1.2.4");
+    const files = { manifest: join(moved, "manifest.json"), signature: join(moved, "manifest.json.sig"), tarball: join(moved, "release.tar.gz") };
+    expect(found.state).toEqual({ state: "available", version: "1.2.4", files });
+    expect(files).not.toEqual(before);
+    expect(readFileSync(files.tarball).equals(tarball)).toBe(true);
+    // The release was there already, where the cache now is: nothing was downloaded again.
+    expect(base.heard.filter(({ url }) => url.endsWith(".tar.gz"))).toHaveLength(1);
+    await found.install();
+    expect(handed).toEqual([files]);
+  });
+
   it("are looked at again at each Try again, after a refusal and after a failure", async () => {
     const tarball = base.publish("1.2.4");
     for (const code of [126, 1]) {
