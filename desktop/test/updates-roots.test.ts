@@ -40,8 +40,9 @@ const roots = (path: string, mode: number, uid = 0) => void told.paths.set(path,
 describe("what an installed app reads as root's own", () => {
   it("takes the release keys of a helper that root owns, that no other may write and that can be run, at whatever mode", () => {
     expect(() => releaseKeys(base.helper, true)).toThrow(`${base.helper} ${NOT_ROOTS}`);
-    // Root's alone to write, and a program: as an install leaves it, read-only, root's alone to run, with a set-id bit.
-    for (const mode of [0o755, 0o555, 0o700, 0o500, 0o744, 0o711, 0o4755]) {
+    // Root's alone to write, and a program: as an install leaves it, read-only, root's alone to run, with a set-id bit;
+    // and one that only its group may run, or only others: root, whom pkexec runs it as, runs what anyone may.
+    for (const mode of [0o755, 0o555, 0o700, 0o500, 0o744, 0o711, 0o4755, 0o610, 0o601]) {
       roots(base.helper, mode);
       expect(releaseKeys(base.helper, true), mode.toString(8)).toHaveLength(1);
     }
