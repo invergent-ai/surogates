@@ -24,6 +24,7 @@ from surogates.coding_agents.messages import (
     render_status,
 )
 from surogates.devices.binding import device_of
+from surogates.harness.loop_messages import _latest_user_event_id
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -247,20 +248,6 @@ class CodeCommandMixin:
             credential_vault=self._credential_vault,
         )
         await self._sandbox_pool.ensure(sandbox_owner, spec)
-
-
-def _latest_user_event_id(all_events) -> int | None:
-    if not all_events:
-        return None
-    latest: int | None = None
-    for event in all_events:
-        etype = getattr(event, "type", None)
-        etype = etype.value if hasattr(etype, "value") else str(etype)
-        eid = getattr(event, "id", None)
-        if etype == EventType.USER_MESSAGE.value and eid is not None:
-            if latest is None or eid > latest:
-                latest = eid
-    return latest
 
 
 def _code_run_already_started(all_events, source_event_id: int) -> bool:

@@ -157,6 +157,7 @@ from surogates.harness.loop_deep_research import (
 from surogates.harness.loop_messages import (
     _initial_system_message,
     _latest_user_event_data,
+    _latest_user_event_id,
     _latest_user_event_text,
     _user_event_text,
     _latest_user_message_text,
@@ -196,7 +197,7 @@ from surogates.harness.loop_vision import (
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
-from surogates.harness.loop_code_commands import CodeCommandMixin, _latest_user_event_id
+from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
     WORKER_NEWS_TYPES,
     ContextReplayMixin,

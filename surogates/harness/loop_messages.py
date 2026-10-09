@@ -493,6 +493,19 @@ def _user_event_text(data: Any) -> str:
     return (raw or "").strip()
 
 
+def _latest_user_event_id(events: list[Any] | None) -> int | None:
+    """Return the id of the latest ``USER_MESSAGE`` event, or ``None`` when there is none."""
+    latest: int | None = None
+    for event in events or []:
+        event_type = getattr(event, "type", None)
+        type_value = event_type.value if hasattr(event_type, "value") else str(event_type)
+        event_id = getattr(event, "id", None)
+        if type_value == EventType.USER_MESSAGE.value and event_id is not None:
+            if latest is None or event_id > latest:
+                latest = event_id
+    return latest
+
+
 def _latest_user_event_data(events: list[Any]) -> dict | None:
     """Return the ``data`` payload of the latest ``USER_MESSAGE`` event.
 
