@@ -97,6 +97,8 @@ _READ_ALONE = 64
 #: turns can each take up one more hand-off before any of them lands.
 _PARENTS = 8
 _ZERO = "0" * 40
+#: The blob of a file with nothing in it, as an index entry holds it.
+_EMPTY = bytes.fromhex("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
 MAIN = "refs/heads/main"
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
 #: The pruning window: main's commits of this many days, never fewer than its last _PRUNE_LEAST.
@@ -1261,7 +1263,7 @@ class History:
         time, as git compares them here.  To read are a file whose size,
         time or kind is not the index's, one the index knows by no size and
         time, which a landing wrote, and one saved in the second the index
-        was written or since.  A file no longer there leaves the index.
+        was written or since.  An empty file is known as any other is.  A file no longer there leaves the index.
 
         The files to read are then read by sixteen gits at once, and a few
         by one: git's own look and read go one file at a time, a request or
@@ -1578,10 +1580,12 @@ def _known(entry: bytes, seen: os.stat_result, written: int) -> bool:
     """Whether an index *entry* is its file as *seen* now, by what git compares with ``core.checkStat=minimal``.
 
     The file's kind and whether it is to be run, its size and the whole
-    second it was saved.  Not known, so read: an entry with no size, which
-    is one git never looked at (a landing wrote the file) or an empty file;
-    and a file saved in the second the index was *written* or since, which
-    may have been saved again unseen.  The index holds 32 bits of each.
+    second it was saved.  Not known, so read: an entry with no size whose
+    file is not the empty one, which git never looked at (a landing wrote
+    the file) or marked to be read again; and a file saved in the second
+    the index was *written* or since, which may have been saved again
+    unseen.  An empty file's entry has no size and is known by its time,
+    as git takes it.  The index holds 32 bits of each.
     """
     mode = int.from_bytes(entry[24:28], "big")
     saved, size = int.from_bytes(entry[8:12], "big"), int.from_bytes(entry[36:40], "big")
@@ -1589,7 +1593,9 @@ def _known(entry: bytes, seen: os.stat_result, written: int) -> bool:
         return False
     if stat.S_ISREG(mode) and (mode ^ seen.st_mode) & 0o100:
         return False
-    return size != 0 and size == seen.st_size & 0xFFFFFFFF and saved == int(seen.st_mtime) & 0xFFFFFFFF and saved < written
+    if size == 0 and entry[40:60] != _EMPTY:
+        return False
+    return size == seen.st_size & 0xFFFFFFFF and saved == int(seen.st_mtime) & 0xFFFFFFFF and saved < written
 
 
 def _environ(env: dict[str, str]) -> dict[str, str]:

@@ -144,6 +144,26 @@ def test_a_pod_reads_only_the_real_files_whose_size_or_time_changed(tmp_path, pr
     assert (pod.copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v2"
 
 
+def test_an_empty_file_the_index_knows_is_not_read_again_at_every_open(tmp_path, project, monkeypatch):
+    for n in range(100):
+        (project / f"empty {n:03}.md").write_bytes(b"")
+        os.utime(project / f"empty {n:03}.md", (time.time() - 60, time.time() - 60))
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    (first.copy / "made empty.md").write_bytes(b"")
+    land(first)
+    (project / "empty 007.md").write_text("no longer empty\n")
+    os.utime(project / "empty 008.md", (time.time() - 30, time.time() - 30))  # saved again, and still empty
+    time.sleep(1.1)
+    seen = read_by(monkeypatch)
+    pod = a_pod(tmp_path, project)
+    # An empty file is known by its time, as any file is: read are the two the landing wrote, which the
+    # index knows by no time, the one that has bytes now and the one saved again.
+    assert sorted(name for names in seen["readers"] for name in names) == ["a.md", "empty 007.md", "empty 008.md", "made empty.md"]
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+    assert (pod.copy / "empty 007.md").read_text() == "no longer empty\n" and (pod.copy / "empty 009.md").read_bytes() == b""
+
+
 def a_messy_project(project: Path) -> None:
     """Files of every kind an open meets: names git must not misread, files it leaves out, a link, a repository."""
     (project / "Annual report 2025.docx").write_bytes(b"PK\x03\x04 annual")
@@ -289,15 +309,15 @@ def test_an_open_decides_what_to_read_after_its_look_and_reads_a_few_files_with_
     time.sleep(1.1)
     seen = read_by(monkeypatch)
     again = a_pod(tmp_path, project)
-    # A file the landing wrote is one the history's index does not know by size and time, as an empty
-    # file is, to git too: one git reads the two, and no git looks at the rest.
-    assert (seen["readers"], seen["alone"]) == ([["a.md", "empty.md"]], 0)
+    # A file the landing wrote is one the history's index does not know by size and time: one git
+    # reads it, and no git looks at the rest, the empty file among them.
+    assert (seen["readers"], seen["alone"]) == ([["a.md"]], 0)
     seen["readers"].clear()
     (project / "notes.txt").write_text("v2 notes, saved by you\n")
     (project / "uploads" / "scan 07.pdf").unlink()
     time.sleep(1.1)
     pod = a_pod(tmp_path, project)
-    assert (seen["readers"], seen["alone"]) == ([["a.md", "empty.md", "notes.txt"]], 0)
+    assert (seen["readers"], seen["alone"]) == ([["a.md", "notes.txt"]], 0)
     assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path) != mains_tree(again)
     assert not (pod.copy / "uploads" / "scan 07.pdf").exists() and (pod.copy / "notes.txt").read_text() == "v2 notes, saved by you\n"
 
