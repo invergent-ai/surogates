@@ -111,8 +111,7 @@ class OutcomeCommandMixin:
 
         Mirrors :meth:`_handle_goal_command`: parses args, calls into
         :mod:`surogates.missions.commands`, then emits an LLM_RESPONSE
-        carrying the operator-visible message and advances the harness
-        cursor so the same wake does not re-process the command.
+        carrying the operator-visible message.
         """
         from surogates.missions.commands import (
             MissionCommandParseError,
@@ -309,21 +308,17 @@ class OutcomeCommandMixin:
                         " | /mission accept | /mission reject [reason]"
                     )
 
-        response_event_id = await self._store.emit_event(
+        # The cursor is the turn's end's to move (``_end_command_turn``): it
+        # must not pass what the user sent while this was being answered.
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}},
         )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=response_event_id,
-            lease_token=lease.lease_token,
-        )
 
-        # /mission create defers its synthetic kickoff message until after
-        # the slash response's cursor advance — otherwise the cursor races
-        # past the kickoff's event id and the next wake bails with
-        # "no actionable pending events".  Mirrors the /goal flow above.
+        # /mission create writes its synthetic kickoff message after its
+        # answer: the next wake reads the kickoff as the last message.
+        # Mirrors the /goal flow.
         if (
             result is not None
             and result.ok
@@ -493,19 +488,15 @@ class OutcomeCommandMixin:
                         "resume | cancel [--cascade]"
                     )
 
-        response_event_id = await self._store.emit_event(
+        # The cursor is the turn's end's to move (``_end_command_turn``): it
+        # must not pass what the user sent while this was being answered.
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}},
         )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=response_event_id,
-            lease_token=lease.lease_token,
-        )
 
-        # Defer the synthetic kickoff until after the cursor advance — same
-        # cursor-race contract as /mission and /goal.
+        # The synthetic kickoff after the answer, as /mission and /goal.
         if (
             result is not None
             and result.ok
@@ -579,15 +570,12 @@ class OutcomeCommandMixin:
         else:
             message = "Usage: /goal <outcome>, /goal status, /goal pause, /goal resume, /goal clear."
 
-        response_event_id = await self._store.emit_event(
+        # The cursor is the turn's end's to move (``_end_command_turn``): it
+        # must not pass what the user sent while this was being answered.
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}},
-        )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=response_event_id,
-            lease_token=lease.lease_token,
         )
 
         if outcome_kickoff_needed:

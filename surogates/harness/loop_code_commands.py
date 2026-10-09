@@ -78,15 +78,11 @@ class CodeCommandMixin:
     # ------------------------------------------------------------------
 
     async def _emit_code_message(self, session, message: str, lease) -> None:
-        response_event_id = await self._store.emit_event(
+        # The cursor is the turn's end's to move (``_end_command_turn``).
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}},
-        )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=response_event_id,
-            lease_token=lease.lease_token,
         )
 
     def _code_credentials(self) -> CodingAgentCredentials | None:
@@ -240,13 +236,8 @@ class CodeCommandMixin:
             )
             return
 
-        # The core already emitted CODE_RUN_RESULT — advance the cursor through
-        # it so this terminal slash turn is durably processed.
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=outcome.result_event_id,
-            lease_token=lease.lease_token,
-        )
+        # The core already emitted CODE_RUN_RESULT: it is this command's
+        # answer, and the turn's end moves the cursor (``_end_command_turn``).
 
     async def _ensure_code_sandbox(self, session, sandbox_owner: str) -> None:
         from surogates.harness.tool_exec import _build_session_sandbox_spec

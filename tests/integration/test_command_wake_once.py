@@ -59,17 +59,23 @@ class Meanwhile:
     (``ending``).  *then*: what happens right after the answer is written.
     """
 
-    def __init__(self, store, dies: str | None = None, then=None) -> None:
+    def __init__(self, store, dies: str | None = None, then=None, before=None, as_it_wakes=None) -> None:
         self._store, self._dies, self._then, self._answered = store, dies, then, False
+        #: What happens right before the answer is written, and right before the wake says it began.
+        self._before, self._as_it_wakes = before, as_it_wakes
 
     def __getattr__(self, name: str):
         return getattr(self._store, name)
 
     async def emit_event(self, session_id, event_type, data, **kwargs):
+        if event_type == EventType.HARNESS_WAKE and self._as_it_wakes is not None:
+            await self._as_it_wakes()
         if event_type != EventType.LLM_RESPONSE:
             return await self._store.emit_event(session_id, event_type, data, **kwargs)
         if self._dies == "answering":
             raise asyncio.CancelledError
+        if self._before is not None:
+            await self._before()
         event_id = await self._store.emit_event(session_id, event_type, data, **kwargs)
         self._answered = True
         if self._then is not None:
@@ -628,6 +634,43 @@ async def test_a_message_sent_as_a_command_is_answered_is_answered_too(workers, 
     assert (workers.ran, await workers.status(chat)) == ([ANSWERED[command]], "completed")
 
 
+@pytest.mark.parametrize("command", ["/goal status", "/loop list", "/mission status", "/code status"])
+async def test_a_message_sent_before_a_commands_answer_is_written_is_answered_too(workers, command):
+    chat = await workers.chat()
+
+    async def the_user_goes_on():
+        await workers.says(chat, "And Q1?")
+
+    await workers.says(chat, command)
+    await workers.worker(store=Meanwhile(workers.store, before=the_user_goes_on)).wake(chat)
+    # No turn read the message: the cursor stays behind it, and the chat does not rest.
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
+
+    await workers.wake(chat)
+
+    # One turn of the model's, which reads the message where its user sent it.
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "And Q1?"} in conversation
+    assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == ([ANSWERED[command]], "Noted.", "completed")
+
+
+async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_not_taken_for_answered(workers):
+    chat = await workers.chat()
+
+    async def the_user_sets_a_goal():
+        await workers.says(chat, "/goal Ship the Q3 report")
+
+    await workers.says(chat, "/goal status")
+    # The second command lands after the wake read the log and before it says it began.
+    await workers.worker(store=Meanwhile(workers.store, as_it_wakes=the_user_sets_a_goal)).wake(chat)
+    await workers.wake(chat)
+
+    # Whichever wake finds it runs it: no answer to another command counts as its own.
+    assert "Outcome defined (20 iterations): Ship the Q3 report" in await workers.said(chat)
+    assert ((await workers.session(chat)).config.get("outcome") or {}).get("description") == "Ship the Q3 report"
+    assert workers.requests[0][-1] == {"role": "user", "content": "Ship the Q3 report"}
+
+
 async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stopped(workers):
     chat = await workers.chat()
 
@@ -850,6 +893,36 @@ async def test_a_coding_run_that_finished_leaves_its_chat_at_rest(workers, monke
     assert recovered == [False] * 4
     assert (at_rest, await workers.status(chat)) == ("completed", "completed")
     assert EventType.SESSION_FAIL.value not in await workers.log(chat)
+
+
+async def test_a_message_sent_during_a_coding_run_is_answered_and_the_sweeper_does_not_fail_the_chat(workers, monkeypatch):
+    chat = await workers.chat()
+
+    async def run(*, store, session, agent, started_metadata, **_):
+        await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})
+        await workers.says(chat, "And Q1?")
+        result = await store.emit_event(
+            session.id, EventType.CODE_RUN_RESULT,
+            {"run_id": "run-1", "agent": agent, "final_message": "The totals are fixed.", "error": None},
+        )
+        return CodingRunOutcome(status="ok", result_event_id=result)
+
+    monkeypatch.setattr("surogates.coding_agents.run_core.execute_coding_run", run)
+    workers.sandbox_pool = SimpleNamespace()
+    await workers.says(chat, '/code claude "Fix the totals"')
+    await workers.wake(chat)
+
+    # The wake the message queued is lost: every pass of the sweeper, and the wake it would queue.
+    recovered = []
+    for _ in range(4):
+        recovered.append(await workers.swept(chat))
+        await workers.wake(chat)
+
+    assert recovered == [True, False, False, False]
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "And Q1?"} in conversation
+    assert (await workers.status(chat), EventType.SESSION_FAIL.value in await workers.log(chat)) == ("completed", False)
+    assert workers.ran == ["_handle_code_command"]
 
 
 async def test_a_coding_run_whose_worker_died_is_left_as_its_death_left_it(workers, monkeypatch):

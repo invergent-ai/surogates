@@ -1396,11 +1396,22 @@ class AgentHarness(
                     return
 
             # 5. Emit HARNESS_WAKE event.
-            await self._store.emit_event(
+            woke_at = await self._store.emit_event(
                 session_id,
                 EventType.HARNESS_WAKE,
                 {"worker_id": self._worker_id, "cursor": cursor},
             )
+            # What was written between the load above and this event is this
+            # wake's to read too: a wake in the log after a message then
+            # always means that wake read the message.
+            loaded = all_events[-1].id if all_events else 0
+            all_events = all_events + [
+                event
+                for event in await self._store.get_events(
+                    session_id, after=loaded, exclude_types=[EventType.LLM_DELTA],
+                )
+                if loaded < event.id < woke_at
+            ]
 
             # 5'. Another worker woke a local-folder session since this one
             # did: it may have compacted or cleared the history, and reset
@@ -4977,16 +4988,13 @@ class AgentHarness(
         *,
         user_content: str | None = None,
     ) -> None:
+        # The cursor is the turn's end's to move (``_end_command_turn``): it
+        # must not pass what the user sent while this was being answered.
         assistant_message = {"role": "assistant", "content": message}
-        event_id = await self._store.emit_event(
+        await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
             {"message": assistant_message},
-        )
-        await self._store.advance_harness_cursor(
-            session.id,
-            through_event_id=event_id,
-            lease_token=lease.lease_token,
         )
 
     async def _handle_compress_command(
