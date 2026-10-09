@@ -14,17 +14,19 @@
 #                                                 # build's bytes is here, and here is no release key:
 #                                                 # with DESKTOP_RELEASE_KEY in its environment, set or
 #                                                 # empty, it refuses
-#   release/publish.sh sign <version> <out>       # <out>/manifest.json.sig, that manifest's Ed25519
-#                                                 # signature, with DESKTOP_RELEASE_KEY (its PEM), which
-#                                                 # must be one of the keys whose public halves
-#                                                 # install.sh trusts. It opens no tarball: the manifest
-#                                                 # must be the one of this version and of the build's
-#                                                 # tarball, by DESKTOP_TARBALL_SHA256 and
-#                                                 # DESKTOP_TARBALL_SIZE, the build's own words for both
-#   release/publish.sh send <version> <out>       # the release, whose tarball is the one its manifest
-#                                                 # names by its hash, then the install script and
-#                                                 # latest.json with its signature, each read back, then
-#                                                 # the release's own manifest; never a release again,
+#   release/publish.sh sign <version> <out>       # <out>/manifest.json and <out>/manifest.json.sig:
+#                                                 # the release's manifest, written here from four
+#                                                 # words, and its Ed25519 signature, with
+#                                                 # DESKTOP_RELEASE_KEY (its PEM), which must be one of
+#                                                 # the keys install.sh lists. The words: the version;
+#                                                 # DESKTOP_TARBALL_SHA256 and DESKTOP_TARBALL_SIZE, the
+#                                                 # build's own for its tarball; and
+#                                                 # DESKTOP_STATE_SCHEMA, which describe read. It opens
+#                                                 # no tarball, and reads no file that another wrote
+#   release/publish.sh send <version> <out>       # the release, once its manifest and signature are a
+#                                                 # pair by install.sh's keys and its tarball the one
+#                                                 # the manifest names: each object sent and read back,
+#                                                 # in the order said at send; never a release again,
 #                                                 # and latest.json only for the newest version
 # Environment for send: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
@@ -146,6 +148,11 @@ case "$VERB" in
     reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e ".stateSchema | select(type == \"number\" and . == floor and (floor | . >= 1 and . < 1e15)) | floor"'
     schema="$(bash -c "$reader" _ "$HERE/install.sh" "$unpacked/$package" 2>/dev/null)" \
       || fail "the tarball's resources/app/package.json names no stateSchema"
+    # And the app in it is the version this release is: the app says its own version from that
+    # package, and one that named another would be offered its own release as an update.
+    reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e --arg version "$3" ".version == \$version" >/dev/null'
+    bash -c "$reader" _ "$HERE/install.sh" "$unpacked/$package" "$VERSION" 2>/dev/null \
+      || fail "the tarball's app is not version $VERSION, by its resources/app/package.json"
     # All that is read of the unpacked tarball is read by here. It is removed before the manifest is
     # written, and from its removal on no signal ends this: one would leave a manifest half
     # written, or end what has just said it wrote one.
@@ -158,57 +165,64 @@ case "$VERB" in
     echo "wrote $OUT/manifest.json"
     ;;
   sign)
-    : "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}" "${DESKTOP_TARBALL_SIZE:?}"
-    # The build's own words for its tarball, each as the build's job gives it, and never said back
-    # where it is no such word.
+    : "${DESKTOP_RELEASE_KEY:?}" "${DESKTOP_TARBALL_SHA256:?}" "${DESKTOP_TARBALL_SIZE:?}" "${DESKTOP_STATE_SCHEMA:?}"
+    # The build's own words for its tarball, and the state schema that the job which read the
+    # tarball says: each as its job gives it, and never said back where it is no such word.
     [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
     [[ "$DESKTOP_TARBALL_SIZE" =~ ^[1-9][0-9]{0,14}$ ]] || fail "DESKTOP_TARBALL_SIZE is not a size in bytes, as the build's job gives its tarball's"
+    [[ "$DESKTOP_STATE_SCHEMA" =~ ^[1-9][0-9]{0,14}$ ]] || fail "DESKTOP_STATE_SCHEMA is not a state schema, a whole number from 1 and below 10^15, as describe reads one"
     # The release keys the installed apps and the install script trust: install.sh's list, read as
     # every install reads a helper's (keys_listed), from its functions alone: its last line, which
-    # runs it, is left out. Were its last line any other, as after a blank line at its end, the line that runs it
-    # would be left in: handed this call's two arguments, the script stops at its own usage, and
-    # the key would be said not to be trusted. So the script's end is looked at first, and said.
+    # runs it, is left out. Were its last line any other, as after a blank line at its end, the
+    # line that runs it would be left in: handed this call's two arguments, the script stops at
+    # its own usage, and the key would be said not to be trusted. So the script's end is looked
+    # at first, and said.
     [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
     public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
     keys_listed "$public" && listing=0 || listing="$?"
     [ "$listing" -ne 3 ] || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
     [ "$listing" -eq 0 ] || fail "$NOT_LISTED"
-    # The manifest is a file that another job wrote, where the build's tarball was read, and no
-    # tarball is opened here. So it is signed only where it is, byte for byte, the manifest of this
-    # version and of the tarball the build made, by the build's own words for its hash and its
-    # size. Its state schema alone is that job's word, read as the install script beside this one
-    # reads a manifest: one object on one line, of a manifest's size, whose every field is one an
-    # install takes.
-    [ -f "$OUT/manifest.json" ] && [ ! -L "$OUT/manifest.json" ] || fail "$OUT/manifest.json is not there: run publish.sh describe first"
-    schema="$(bash -c '. <(sed "\$d" "$1") && settings && release_of "$2" >/dev/null && one_object "$2" | jq -e ".stateSchema | floor"' _ "$HERE/install.sh" "$OUT/manifest.json" 2>/dev/null)" \
-      || fail "$OUT/manifest.json is no manifest that install.sh takes: nothing is signed"
-    # What is signed is the line written here, of those four words, in a folder of this signing's
-    # own: the file that came is compared with it, and is not opened again. Were the file itself
-    # handed to openssl after the comparison, what is signed would be whatever stood under its
-    # name by then. openssl signs a file, and no pipe: it asks a file's size first. The folder
-    # goes however this ends.
+    # What is signed is a line written here, of four words, and no file that another wrote: the
+    # tag's version, the build's own two words for its tarball, and the state schema, which is
+    # all that is taken from the job that read the tarball, as a number. No tarball is opened.
+    # The line is written into a folder of this signing's own, where no one else has a name for
+    # it, is one that the install script beside this one takes for this release, and is signed
+    # there: openssl signs a file, and no pipe, as it asks a file's size first. Only then do the
+    # two have their names beside the tarball, the signature first: whatever stood under either
+    # name is replaced, a link too, and never written through. The folder goes however this ends.
     signing="$(mktemp -d --tmpdir release-signing-XXXXXXXXXX)"
     trap 'rm -rf "$signing"' EXIT
-    manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$schema" >"$signing/manifest.json"
-    cmp -s "$signing/manifest.json" "$OUT/manifest.json" \
-      || fail "$OUT/manifest.json is not the manifest of $VERSION and of the tarball the build made, of sha256 $DESKTOP_TARBALL_SHA256 and $DESKTOP_TARBALL_SIZE bytes: nothing is signed"
-    openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$signing/manifest.json" -out "$OUT/manifest.json.sig"
+    manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$DESKTOP_STATE_SCHEMA" >"$signing/manifest.json"
+    taken="$(bash -c '. <(sed "\$d" "$1") && settings && release_of "$2"' _ "$HERE/install.sh" "$signing/manifest.json" 2>/dev/null)" || taken=
+    [ "$taken" = "$VERSION $DESKTOP_TARBALL_SHA256 $DESKTOP_TARBALL_SIZE" ] || fail "the manifest of $VERSION is none that install.sh takes for it: nothing is signed"
+    openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$signing/manifest.json" -out "$signing/manifest.json.sig"
+    rm -f "$OUT/manifest.json.sig"
+    mv -T "$signing/manifest.json" "$OUT/manifest.json"
+    mv -T "$signing/manifest.json.sig" "$OUT/manifest.json.sig"
     echo "signed $OUT/manifest.json"
     ;;
   send)
     : "${S3_ENDPOINT:?}" "${S3_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
     bucket="${S3_ENDPOINT%/}/$S3_BUCKET/desktop"
-    # What is sent is one release: the tarball is the one its manifest names, by its hash. The
-    # manifest was signed for the build's own word of that hash, where no tarball was opened, and
-    # the tarball here is this job's own download of the build's artifact, which is the run's:
-    # any job of the run may put another file under its name. Sent with another, the release
-    # would be one that no install takes, under a version that is never sent again. Asked before
-    # anything is asked of the bucket.
+    # What a send keeps beside the release while it runs goes however it ends.
+    trap 'rm -f "$OUT/sent" "$OUT/latest.json"' EXIT
+    # What is sent is one release, asked before anything is asked of the bucket.
+    # Its manifest and its signature are a pair: the signature is of that manifest, by a key that
+    # the install script beside this one lists, as every install will ask; and the manifest is
+    # this version's. That needs no key. Sent with another release's signature, the release
+    # would be one that no install takes, under a version that is never sent again.
+    [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
+    keys_listed || fail "$NOT_LISTED"
+    pair='. <(sed "\$d" "$1") && settings && listed keys "$1" && signed_by "$2" "$2.sig" "${keys[@]}" && release="$(release_of "$2")" && [ "${release%% *}" = "$3" ]'
+    [ -f "$OUT/manifest.json" ] && [ -f "$OUT/manifest.json.sig" ] && bash -c "$pair" _ "$HERE/install.sh" "$OUT/manifest.json" "$VERSION" 2>/dev/null \
+      || fail "$OUT/manifest.json and $OUT/manifest.json.sig are not the manifest of $VERSION and its signature by a key that install.sh lists: nothing is sent"
+    # And its tarball is the one that manifest names, by its hash. The manifest was signed for the
+    # build's own word of that hash, where no tarball was opened, and the tarball here is this
+    # job's own download of the build's artifact, which is the run's: any job of the run may put
+    # another file under its name.
     named="$(jq -r '.sha256 | strings' "$OUT/manifest.json" 2>/dev/null)" || named=
     [ -n "$named" ] && [ -f "$OUT/$TARBALL" ] && [ "$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)" = "$named" ] \
       || fail "$OUT/$TARBALL is not the tarball that $OUT/manifest.json names, by its sha256: nothing is sent"
-    # What a send keeps beside the release while it runs goes however it ends.
-    trap 'rm -f "$OUT/sent" "$OUT/latest.json"' EXIT
     # A request to the bucket, signed; its HTTP status on stdout. One that cannot connect in half a
     # minute, or that stalls for a minute, stops, and is said: the job's time limit would otherwise
     # be what ends it. The secret reaches curl through a pipe from printf, a builtin, never its
@@ -245,24 +259,37 @@ case "$VERB" in
       *) fail "looking for desktop/latest.json got $status" ;;
     esac
     rm -f "$OUT/latest.json"
+    # The order, by who reads what first. Nothing that a reader reads first is sent before what
+    # it then asks for, and what a send that is cut short leaves is said at each step: the next
+    # send finds the release unpublished, by its own manifest, and sends it whole again.
+    # 1. The tarball, and the release's own signature. Nothing names them yet.
     put "$OUT/$TARBALL" "releases/$VERSION/$TARBALL" application/gzip
     put "$OUT/manifest.json.sig" "releases/$VERSION/manifest.json.sig" application/octet-stream
     if [ -n "$newest" ] && dpkg --compare-versions "$VERSION" lt "$newest"; then
       published="published desktop/releases/$VERSION; desktop/latest.json stays $newest"
     else
-      # What changes from release to release is never a cache's: one could pair a manifest with
-      # another's signature, or serve an older install script.
-      put "$HERE/install.sh" install.sh text/x-shellscript no-cache
-      # Its manifest, then its signature: a reader between the two finds a manifest whose signature
-      # does not verify, and tries again later. A send that stopped between the two would leave
-      # them so until it is run again: each of these two, which are small, is tried again when
-      # the bucket or the way to it fails for a moment.
+      # 2. latest.json, then its signature, which every app and every install reads first and
+      #    which name the tarball: an installed computer's own keys check them, and the install
+      #    script that the bucket has check them for a first install. That script is the release
+      #    before's, and lists the key that signs this one: a key signs only once a release that
+      #    lists it is out. Cut here, the script is still the older one, and installs this release.
+      #    Between the manifest and its signature a reader finds a manifest whose signature does
+      #    not verify, and tries again later; the other order would have the same moment. A send
+      #    that stopped between the two would leave them so until it is run again: each of these
+      #    two, which are small, is tried again when the bucket or the way to it fails for a moment.
+      #    What changes from release to release is never a cache's: one could pair a manifest with
+      #    another's signature, or serve an older install script.
       put "$OUT/manifest.json" latest.json application/json no-cache --retry 3
       put "$OUT/manifest.json.sig" latest.json.sig application/octet-stream no-cache --retry 3
+      # 3. The install script, after the pair it will check. Sent before it, a script that has
+      #    dropped the key before's would refuse the latest.json that the key before signed, and
+      #    every first install would end there until the send was run again.
+      put "$HERE/install.sh" install.sh text/x-shellscript no-cache
       published="published desktop/releases/$VERSION as desktop/latest.json"
     fi
-    # Last, the release's own manifest: the mark that it is published, so a send cut short is sent
-    # again whole.
+    # 4. Last, the release's own manifest: the mark that it is published, so a send cut short at
+    #    any step above is sent again whole. Until it is there, --version of this release finds
+    #    no manifest, and says so.
     put "$OUT/manifest.json" "releases/$VERSION/manifest.json" application/json
     echo "$published"
     ;;

@@ -3,7 +3,7 @@
 // chrislusf/seaweedfs image.
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, generateKeyPairSync, type KeyObject, randomBytes, verify } from "node:crypto";
+import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign, verify } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -122,7 +122,9 @@ describe("the desktop's release manifest", () => {
   // gave for it, with no release key anywhere.
   const describes = (env: Record<string, string> = {}) => publish("describe", "1.2.3", { DESKTOP_TARBALL_SHA256: built().DESKTOP_TARBALL_SHA256, ...env });
   // Its second: that manifest signed, with the release key and the build's two words.
-  const signs = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...built(), ...env });
+  // The state schema that the first step read, as its job says it to the signing's: its manifest's, and 1 where it wrote none.
+  const schemaRead = () => (existsSync(join(out, "manifest.json")) ? String((JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema?: number }).stateSchema ?? 1) : "1");
+  const signs = (env: Record<string, string> = {}) => publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...built(), DESKTOP_STATE_SCHEMA: schemaRead(), ...env });
   // Both, as the job runs them: the second only once the first has ended 0. *env* is the second's.
   const release = (env: Record<string, string> = {}) => {
     const described = describes();
@@ -256,6 +258,16 @@ describe("the desktop's release manifest", () => {
     expect(spawnSync("tar", ["-xzOf", tarball(), app], { encoding: "utf8" }).stdout).toBe(JSON.stringify({ version: "1.2.3", stateSchema: 3 }));
   });
 
+  it("writes no manifest of a tarball whose app is another version than the release: the app says its own version from its package, and would be offered its own release as an update", () => {
+    const notIts = { status: 1, stdout: "", stderr: "publish.sh: the tarball's app is not version 1.2.3, by its resources/app/package.json\n" };
+    for (const app of [{ version: "9.9.9", stateSchema: 1 }, { version: "1.2.30", stateSchema: 1 }, { version: 123, stateSchema: 1 }, { stateSchema: 1 }]) {
+      packed(dir, out, "1.2.3", withApp(app));
+      expect(describes(), JSON.stringify(app)).toMatchObject(notIts);
+      expect(readdirSync(out), JSON.stringify(app)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+      expect(readdirSync(tmp), JSON.stringify(app)).toEqual([]);
+    }
+  });
+
   it("names the state schema of this package in each release it makes", () => {
     const { stateSchema } = JSON.parse(readFileSync(join(RELEASE, "..", "package.json"), "utf8")) as { stateSchema: unknown };
     expect(Number.isInteger(stateSchema) && (stateSchema as number) >= 1).toBe(true);
@@ -309,9 +321,9 @@ describe("the desktop's release manifest", () => {
     const argv = readFileSync(join(dir, "openssl-argv"), "utf8");
     expect(argv).toContain("-sign");
     expect(argv).not.toContain(body);
-    // Every file openssl is given is a pipe, but the line it signs, in the signing's own folder, and the signature it writes.
+    // Every file openssl is given is a pipe, but the line it signs and the signature it writes, each in the signing's own folder.
     expect(argv.split("\n").filter((arg) => arg.startsWith("/") && !/^\/dev\/fd\/\d+$/.test(arg)))
-      .toEqual([expect.stringMatching(new RegExp(`^${tmp}/release-signing-\\w{10}/manifest\\.json$`)), join(out, "manifest.json.sig")]);
+      .toEqual(["", ".sig"].map((end) => expect.stringMatching(new RegExp(`^${tmp}/release-signing-\\w{10}/manifest\\.json${end.replace(".", "\\.")}$`))));
     expect(readdirSync(tmp)).toEqual([]);
     // Beside the tarball, the manifest and its signature, and nothing else.
     expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig", "surogate-desktop-1.2.3-linux-x64.tar.gz"]);
@@ -338,20 +350,21 @@ describe("the desktop's release manifest", () => {
 
   it("signs with no tarball there: it opens none, and starts no program that is handed one", () => {
     expect(describes().status).toBe(0);
-    // What a signing needs of the tarball is in the manifest and in the build's two words: the tarball itself is away.
-    const said = built();
+    // What a signing needs of the tarball is in the build's two words, and of the app in the first step's one: the tarball itself is away, and so is the first step's manifest.
+    const said = { ...built(), DESKTOP_STATE_SCHEMA: schemaRead() };
+    rmSync(join(out, "manifest.json"));
     renameSync(tarball(), join(dir, "elsewhere"));
     // Each program the step starts, as publish.sh calls it, written down: bash among them, which
     // the script itself is run by. Each first counts the variables of its environment that hold
     // the key's own line, under whatever name.
     const body = PRIVATE.split("\n")[1] ?? "";
     const counted = (real: string) => [`/usr/bin/env | /usr/bin/grep -cF '${body}' >> '${join(dir, "keyed")}'`, `exec '${real}' "$@"`];
-    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut", "rm", "chmod"]) recording(dir, program, counted);
+    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut", "rm", "chmod", "mv"]) recording(dir, program, counted);
     expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...said })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
     expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
     // No tar, and nothing that would unpack, hash or measure one.
     const started = readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
-    expect(started).toEqual(["bash-argv", "cmp-argv", "dirname-argv", "head-argv", "jq-argv", "mktemp-argv", "openssl-argv", "rm-argv", "sed-argv", "tail-argv"]);
+    expect(started).toEqual(["bash-argv", "dirname-argv", "head-argv", "jq-argv", "mktemp-argv", "mv-argv", "openssl-argv", "rm-argv", "sed-argv", "tail-argv"]);
     // And none of what it starts is given the tarball's path, where it was or where it is: the manifest's alone.
     const given = started.map((name) => readFileSync(join(dir, name), "utf8")).join("");
     expect(given).toContain(`${join(out, "manifest.json")}\n`);
@@ -364,52 +377,56 @@ describe("the desktop's release manifest", () => {
     expect(keyed).toEqual(["1", ...keyed.slice(1).map(() => "0")]);
   });
 
-  it("signs no manifest but the one of its version and of the build's tarball, written as the first step writes one: it is a file that another step wrote", () => {
+  it("signs a manifest of four words, which it writes itself: the tag's version, the build's two for its tarball, and the state schema that the first step read; and no file that another wrote", () => {
     expect(describes().status).toBe(0);
-    const written = readFileSync(join(out, "manifest.json"), "utf8");
-    const fields = JSON.parse(written) as Record<string, unknown>;
-    const line = (manifest: unknown) => `${JSON.stringify(manifest)}\n`;
-    const noManifest = `publish.sh: ${out}/manifest.json is no manifest that install.sh takes: nothing is signed\n`;
-    const notIts = `publish.sh: ${out}/manifest.json is not the manifest of 1.2.3 and of the tarball the build made, of sha256 ${built().DESKTOP_TARBALL_SHA256} and ${built().DESKTOP_TARBALL_SIZE} bytes: nothing is signed\n`;
-    const others: Array<[string, string, string]> = [
-      // What no install takes for a manifest.
-      ["two documents", `${written}${written}`, noManifest],
-      ["an object over two lines", written.replace(",", ",\n"), noManifest],
-      ["an object without its newline", written.trimEnd(), noManifest],
-      ["no state schema", line({ ...fields, stateSchema: undefined }), noManifest],
-      ["another channel's", line({ ...fields, channel: "beta" }), noManifest],
-      ["nothing", "", noManifest],
-      // What an install would take, and is not this release's as the first step writes it.
-      ["another version's", line({ ...fields, version: "1.2.4", url: "releases/1.2.4/surogate-desktop-1.2.4-linux-x64.tar.gz" }), notIts],
-      ["another tarball's, by its hash", line({ ...fields, sha256: "0".repeat(64) }), notIts],
-      ["another tarball's, by its size", line({ ...fields, size: (fields.size as number) + 1 }), notIts],
-      ["with a field more", line({ ...fields, more: true }), notIts],
-      ["its fields in another order", line({ stateSchema: fields.stateSchema, ...fields }), notIts],
-      ["its schema written with a point", written.replace('"stateSchema":1}', '"stateSchema":1.0}'), notIts],
-    ];
-    for (const [what, manifest, said] of others) {
-      expect(manifest, what).not.toBe(written);
-      writeFileSync(join(out, "manifest.json"), manifest);
-      expect(signs(), what).toMatchObject({ status: 1, stdout: "", stderr: said });
-      expect(existsSync(join(out, "manifest.json.sig")), what).toBe(false);
+    const described = readFileSync(join(out, "manifest.json"));
+    const said = { DESKTOP_RELEASE_KEY: PRIVATE, ...built(), DESKTOP_STATE_SCHEMA: "1" };
+    const signedAs = () => {
+      const manifest = readFileSync(join(out, "manifest.json"));
+      expect(verify(null, manifest, keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
+      return manifest.toString();
+    };
+    // Whatever stands where the manifest goes is not read, and is replaced by the signing's own
+    // line, which is the first step's: another manifest that an install would take, what is none,
+    // nothing, and a link to a file elsewhere, which is left as it was.
+    const fields = JSON.parse(described.toString()) as Record<string, unknown>;
+    for (const [what, there] of [
+      ["the first step's own", described.toString()],
+      ["another release's", `${JSON.stringify({ ...fields, version: "9.9.9", url: "releases/9.9.9/surogate-desktop-9.9.9-linux-x64.tar.gz" })}\n`],
+      ["another tarball's", `${JSON.stringify({ ...fields, sha256: "0".repeat(64), size: 1 })}\n`],
+      ["another state schema's", `${JSON.stringify({ ...fields, stateSchema: 7 })}\n`],
+      ["no manifest", "<html>\n"],
+      ["none", null],
+    ] as const) {
+      again();
+      if (there !== null) writeFileSync(join(out, "manifest.json"), there);
+      expect(publish("sign", "1.2.3", said), what).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+      expect(signedAs(), what).toBe(described.toString());
     }
-    // Nor one that is not there, or a link to one that is elsewhere.
-    const notThere = { status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json is not there: run publish.sh describe first\n` };
-    rmSync(join(out, "manifest.json"));
-    expect(signs()).toMatchObject(notThere);
-    writeFileSync(join(dir, "elsewhere.json"), written);
+    again();
+    writeFileSync(join(dir, "elsewhere.json"), "theirs\n");
     symlinkSync(join(dir, "elsewhere.json"), join(out, "manifest.json"));
-    expect(signs()).toMatchObject(notThere);
-    rmSync(join(out, "manifest.json"));
-    // Nor by a word for the tarball's size that is no size in bytes, as the build's job gives one.
-    writeFileSync(join(out, "manifest.json"), written);
-    for (const size of ["0", "12a", "1e3", " 12", "-12", "1000000000000000"]) {
-      expect(signs({ DESKTOP_TARBALL_SIZE: size }), size).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: DESKTOP_TARBALL_SIZE is not a size in bytes, as the build's job gives its tarball's\n" });
+    writeFileSync(join(dir, "elsewhere.sig"), "theirs\n");
+    symlinkSync(join(dir, "elsewhere.sig"), join(out, "manifest.json.sig"));
+    expect(publish("sign", "1.2.3", said).status).toBe(0);
+    expect(signedAs()).toBe(described.toString());
+    expect([readFileSync(join(dir, "elsewhere.json"), "utf8"), readFileSync(join(dir, "elsewhere.sig"), "utf8")]).toEqual(["theirs\n", "theirs\n"]);
+    // The state schema is the one word of the four that the build does not say: signed as it is given.
+    again();
+    expect(publish("sign", "1.2.3", { ...said, DESKTOP_STATE_SCHEMA: "7" }).status).toBe(0);
+    expect(signedAs()).toBe(`${JSON.stringify({ ...fields, stateSchema: 7 })}\n`);
+    // Each word in its own form, or nothing is signed and nothing written.
+    again();
+    for (const [word, values, saidOf] of [
+      ["DESKTOP_TARBALL_SIZE", ["0", "12a", "1e3", " 12", "-12", "1000000000000000"], "DESKTOP_TARBALL_SIZE is not a size in bytes, as the build's job gives its tarball's"],
+      ["DESKTOP_STATE_SCHEMA", ["0", "01", "+1", "1.0", "1e3", " 1", "-1", "1000000000000000", '1,"more":true'], "DESKTOP_STATE_SCHEMA is not a state schema, a whole number from 1 and below 10^15, as describe reads one"],
+      ["DESKTOP_TARBALL_SHA256", ["0", "A".repeat(64), `${"a".repeat(64)}\n`], "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"],
+    ] as const) {
+      for (const value of values) expect(publish("sign", "1.2.3", { ...said, [word]: value }), `${word}=${value}`).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${saidOf}\n` });
+      expect(publish("sign", "1.2.3", { ...said, [word]: "" }), word).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(new RegExp(`${word}: parameter null or not set\\n$`)) });
     }
-    expect(signs({ DESKTOP_TARBALL_SIZE: "" })).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/DESKTOP_TARBALL_SIZE: parameter null or not set\n$/) });
-    expect(existsSync(join(out, "manifest.json.sig"))).toBe(false);
-    // The one the first step wrote is signed.
-    expect(signs()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(readdirSync(tmp)).toEqual([]);
   });
 
   it("writes, signs and takes a release's manifest by one rule, on every form that its readers are asked about: the first step writes none that an apply refuses, the second signs none, and what the second refuses for its form is what an apply's own reader refuses", { timeout: 180_000 }, () => {
@@ -422,23 +439,30 @@ describe("the desktop's release manifest", () => {
       const read = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", install, join(dir, "form.json")], { encoding: "utf8" });
       return read.status === 0 ? read.stdout.trim() : null;
     };
-    // What the signing step says of it, as the manifest another step wrote, by the build's words
-    // for release *named*: "signed"; "no manifest", where it is none by its form; "another's",
-    // where it is one and not the one of that release as the first step writes it.
+    // What the signing step makes of *manifest*, a form that an apply takes for release *named*:
+    // it reads no manifest, and writes its own of the four words that this one says, the version,
+    // the hash, the size and the state schema as it rounds. "signed", where this form is that
+    // line byte for byte, and "another's" where it is not: no other spelling of a release is ever signed.
     const signed = (manifest: Buffer, named: string) => {
       const [version = "", sha = "", size = ""] = named.split(" ");
       rmSync(signature, { force: true });
-      writeFileSync(join(out, "manifest.json"), manifest);
-      const step = publish("sign", version, { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha, DESKTOP_TARBALL_SIZE: size });
-      if (existsSync(signature) !== (step.status === 0)) return `ended ${step.status}, and a signature is ${existsSync(signature) ? "" : "not "}there`;
-      if (step.status === 0) return "signed";
-      if (step.stderr === `publish.sh: ${out}/manifest.json is no manifest that install.sh takes: nothing is signed\n`) return "no manifest";
-      if (step.stderr === `publish.sh: ${out}/manifest.json is not the manifest of ${version} and of the tarball the build made, of sha256 ${sha} and ${size} bytes: nothing is signed\n`) return "another's";
-      return step.stderr;
+      rmSync(join(out, "manifest.json"), { force: true });
+      const schema = String(Math.floor((JSON.parse(manifest.toString()) as { stateSchema: number }).stateSchema));
+      const step = publish("sign", version, { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha, DESKTOP_TARBALL_SIZE: size, DESKTOP_STATE_SCHEMA: schema });
+      if (step.status !== 0) return step.stderr;
+      const line = readFileSync(join(out, "manifest.json"));
+      if (!verify(null, line, keys.publicKey, readFileSync(signature))) return "a signature of something else";
+      if (applied(line) !== named) return "a line that an apply does not take for that release";
+      return line.equals(manifest) ? "signed" : "another's";
     };
     // What the first step writes of release *named*, whose app keeps state of schema *schema*. Its
     // tarball is a small one of that version. No tarball has a hash that one chooses: the hash and
     // the size are said by stand-ins for the two tools that measure it, and are the build's words.
+    // The line the signing writes of the release that *manifest* says, read back.
+    const lineOf = (manifest: Buffer, named: string) => {
+      signed(manifest, named);
+      return readFileSync(join(out, "manifest.json"));
+    };
     const packedAt = new Map<string, number>();
     const written = (named: string, schema: number) => {
       const [version = "", sha = "", size = ""] = named.split(" ");
@@ -451,12 +475,11 @@ describe("the desktop's release manifest", () => {
       for (const tool of ["sha256sum", "stat"]) rmSync(join(dir, "bin", tool));
       return step.status === 0 ? readFileSync(join(out, "manifest.json")) : null;
     };
-    const base = `1.2.4 ${SHA} 171199516`;
     const said = FORMS.map(([name, form]) => {
       const manifest = Buffer.from(form);
       const taken = applied(manifest);
-      // Refused by an apply: the signing refuses it for its form, whatever release the build names.
-      if (taken === null) return { name, apply: "refuses", sign: signed(manifest, base) };
+      // Refused by an apply: no signing has it to read, and none writes it.
+      if (taken === null) return { name, apply: "refuses" };
       // Taken by an apply, for a release: what the first step writes of that release is taken for
       // the same one, and signed; and the form itself is signed where it is that writing, byte
       // for byte, and nowhere else.
@@ -466,11 +489,13 @@ describe("the desktop's release manifest", () => {
         name, apply: "takes", sign: signed(manifest, taken),
         writes: own === null ? "nothing" : own.equals(manifest) ? "this" : "another",
         itsWriting: own === null ? null : { apply: applied(own) === taken ? "takes" : "refuses", sign: signed(own, taken) },
+        // The two steps write one line of one release.
+        one: own !== null && own.equals(lineOf(manifest, taken)),
       };
     });
     expect(said).toEqual(FORMS.map(([name, , helper], at) => (helper
-      ? { name, apply: "takes", sign: said[at]?.writes === "this" ? "signed" : "another's", writes: said[at]?.writes === "this" ? "this" : "another", itsWriting: { apply: "takes", sign: "signed" } }
-      : { name, apply: "refuses", sign: "no manifest" })));
+      ? { name, apply: "takes", sign: said[at]?.writes === "this" ? "signed" : "another's", writes: said[at]?.writes === "this" ? "this" : "another", itsWriting: { apply: "takes", sign: "signed" }, one: true }
+      : { name, apply: "refuses" })));
     // The forms that are the first step's own writing, and so are signed: the release job's line, of each version and size it may have.
     expect(said.filter(({ sign }) => sign === "signed").map(({ name }) => name))
       .toEqual(["as the release job writes it", "of version 0.0.1", "of version 10.20.30", "with a size one below 10^15"]);
@@ -517,7 +542,7 @@ describe("the desktop's release manifest", () => {
     const seen = join(dir, "seen");
     mkdirSync(only);
     mkdirSync(seen);
-    const programs = ["bash", "cmp", "dirname", "head", "jq", "mktemp", "openssl", "rm", "sed", "tail"];
+    const programs = ["bash", "dirname", "head", "jq", "mktemp", "mv", "openssl", "rm", "sed", "tail"];
     for (const program of programs) {
       const real = spawnSync("sh", ["-c", `command -v ${program}`], { encoding: "utf8" }).stdout.trim();
       expect(real, program).toMatch(/^\/.+/);
@@ -541,7 +566,7 @@ describe("the desktop's release manifest", () => {
         "",
       ].join("\n"), { mode: 0o755 });
     }
-    const { PATH: _path, ...env } = steps({ DESKTOP_RELEASE_KEY: PRIVATE, ...built() });
+    const { PATH: _path, ...env } = steps({ DESKTOP_RELEASE_KEY: PRIVATE, ...built(), DESKTOP_STATE_SCHEMA: schemaRead() });
     const signing = spawnSync(join(dir, "release", "publish.sh"), ["sign", "1.2.3", out], { encoding: "utf8", env: { ...env, PATH: only } });
     expect(signing).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
     expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
@@ -579,34 +604,19 @@ describe("the desktop's release manifest", () => {
     expect(lines.filter((line) => /\bPATH\b/.test(line))).toEqual([]);
   });
 
-  it("signs the line it wrote and compared, and no file that another could change after: a manifest swapped between the comparison and the signing is not what is signed", () => {
-    // Another manifest that a signing would take for its form: the same release, at another state schema.
-    const other = (written: Buffer) => Buffer.from(written.toString().replace('"stateSchema":1}', '"stateSchema":7}'));
-    const swapped = join(dir, "swapped.json");
-    // The swap, by a stand-in for each of the two programs it can come between: cmp, once it has
-    // compared and found the two the same; and openssl, as it is started to sign.
-    const swapping: Array<[program: string, lines: (real: string) => string[]]> = [
-      ["cmp", (real) => [`'${real}' "$@"`, "same=$?", `[ "$same" != 0 ] || /usr/bin/cp '${swapped}' '${join(out, "manifest.json")}'`, 'exit "$same"']],
-      ["openssl", (real) => [`case " $* " in *" -sign "*) /usr/bin/cp '${swapped}' '${join(out, "manifest.json")}' ;; esac`, `exec '${real}' "$@"`]],
-    ];
-    for (const [program, lines] of swapping) {
-      again();
-      expect(describes().status, program).toBe(0);
-      const compared = readFileSync(join(out, "manifest.json"));
-      writeFileSync(swapped, other(compared));
-      expect(other(compared).equals(compared), program).toBe(false);
-      recording(dir, program, lines);
-      expect(signs(), program).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
-      rmSync(join(dir, "bin", program));
-      // The swap was made: the file is the other manifest now.
-      expect(readFileSync(join(out, "manifest.json")).equals(other(compared)), program).toBe(true);
-      // And the signature is of what was compared, and of nothing else.
-      const signature = readFileSync(join(out, "manifest.json.sig"));
-      expect(verify(null, compared, keys.publicKey, signature), program).toBe(true);
-      expect(verify(null, other(compared), keys.publicKey, signature), program).toBe(false);
-      // Nothing of the signing's own is left where it kept its line.
-      expect(readdirSync(tmp), program).toEqual([]);
-    }
+  it("signs the line it wrote, in a folder of its own: what another puts under the manifest's name while it signs is not what is signed, and is not left there", () => {
+    expect(describes().status).toBe(0);
+    const described = readFileSync(join(out, "manifest.json"));
+    const other = Buffer.from(described.toString().replace('"stateSchema":1}', '"stateSchema":7}'));
+    writeFileSync(join(dir, "swapped.json"), other);
+    // Put there by a stand-in for openssl, as it is started to sign: after every check the signing makes.
+    recording(dir, "openssl", (real) => [`case " $* " in *" -sign "*) /usr/bin/cp '${join(dir, "swapped.json")}' '${join(out, "manifest.json")}' ;; esac`, `exec '${real}' "$@"`]);
+    expect(signs()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    const signature = readFileSync(join(out, "manifest.json.sig"));
+    expect(readFileSync(join(out, "manifest.json")).equals(described)).toBe(true);
+    expect(verify(null, described, keys.publicKey, signature)).toBe(true);
+    expect(verify(null, other, keys.publicKey, signature)).toBe(false);
+    expect(readdirSync(tmp)).toEqual([]);
     recording(dir, "openssl");
   });
 
@@ -621,14 +631,32 @@ describe("the desktop's release manifest", () => {
     packed(dir, out, "1.2.3", withApp({ version: "1.2.3", stateSchema: 9 }));
     expect((JSON.parse(signed.toString()) as { sha256: string }).sha256).not.toBe(sha256(readFileSync(tarball())));
     expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
-    // Nor with a manifest that names no hash, or none there, or no tarball.
-    writeFileSync(join(out, "manifest.json"), "{}\n");
-    expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
-    rmSync(join(out, "manifest.json"));
-    expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
-    writeFileSync(join(out, "manifest.json"), signed);
+    // Nor with no tarball.
     rmSync(tarball());
     expect(publish("send", "1.2.3", bucket)).toMatchObject(notIts);
+    // Nor a manifest and a signature that are no pair by the install script's keys, whatever the
+    // tarball: another release's signature beside the manifest, a signature by a key the script
+    // does not list, another version's manifest with its own signature, no manifest, and neither.
+    const notAPair = { status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json and ${out}/manifest.json.sig are not the manifest of 1.2.3 and its signature by a key that install.sh lists: nothing is sent\n` };
+    const pair = [signed, readFileSync(join(out, "manifest.json.sig"))] as const;
+    const others = generateKeyPairSync("ed25519");
+    const elsewhere = Buffer.from(signed.toString().replaceAll("1.2.3", "1.2.4"));
+    for (const [what, manifest, signature] of [
+      ["another manifest's signature", signed, sign(null, elsewhere, keys.privateKey)],
+      ["a signature by another key", signed, sign(null, signed, others.privateKey)],
+      ["another version's pair", elsewhere, sign(null, elsewhere, keys.privateKey)],
+      ["what is no manifest", Buffer.from("{}\n"), sign(null, Buffer.from("{}\n"), keys.privateKey)],
+      ["no signature", signed, null],
+      ["no manifest", null, pair[1]],
+    ] as const) {
+      for (const [file, bytes] of [["manifest.json", manifest], ["manifest.json.sig", signature]] as const) {
+        rmSync(join(out, file), { force: true });
+        if (bytes !== null) writeFileSync(join(out, file), bytes);
+      }
+      expect(publish("send", "1.2.3", bucket), what).toMatchObject(notAPair);
+    }
+    writeFileSync(join(out, "manifest.json"), pair[0]);
+    writeFileSync(join(out, "manifest.json.sig"), pair[1]);
     expect(existsSync(join(dir, "curl-argv"))).toBe(false);
     expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig"]);
   });
@@ -673,7 +701,7 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there to describe, or the manifest to sign", () => {
+  it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there to describe", () => {
     // A part with a zero before it is no version either: dpkg reads 1.2.03 as 1.2.3, a second spelling of one release.
     for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["sign", "1.2.03"], ["describe", "01.2.3"], ["send", "1.02.3"], ["publish", "1.2.3"]] as const) {
       expect(publish(verb, version, verb === "describe" ? built() : { DESKTOP_RELEASE_KEY: PRIVATE, ...built() }), `${verb} ${version}`)
@@ -682,7 +710,6 @@ describe("the desktop's release manifest", () => {
     expect(publish("describe", "1.2.4", built())).toMatchObject({
       status: 1, stdout: "", stderr: `publish.sh: ${out}/surogate-desktop-1.2.4-linux-x64.tar.gz is not there: run scripts/package.sh first\n`,
     });
-    expect(signs()).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json is not there: run publish.sh describe first\n` });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
 
@@ -919,7 +946,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     const { DESKTOP_RELEASE_KEY: _held, ...own } = process.env;
     const built = { DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball)), DESKTOP_TARBALL_SIZE: String(statSync(tarball).size) };
     expect(spawnSync(join(dir, "release", "publish.sh"), ["describe", version, out], { env: { ...own, DESKTOP_TARBALL_SHA256: built.DESKTOP_TARBALL_SHA256 } }).status).toBe(0);
-    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], { env: { ...own, DESKTOP_RELEASE_KEY: PRIVATE, ...built } }).status).toBe(0);
+    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], { env: { ...own, DESKTOP_RELEASE_KEY: PRIVATE, ...built, DESKTOP_STATE_SCHEMA: "1" } }).status).toBe(0);
     return out;
   };
   const send = (version: string, out: string, env: Record<string, string> = {}) => spawnSync(join(dir, "release", "publish.sh"), ["send", version, out], {
@@ -1002,6 +1029,48 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     }
     expect(object("install.sh")?.equals(script)).toBe(true);
     expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
+  });
+
+  it("sends nothing that a reader reads first before what it then asks for: cut short at each object in turn, a send leaves the release before's latest.json, signature and install script whole, or this one's", () => {
+    const before = released("1.0.0");
+    expect(send("1.0.0", before).status).toBe(0);
+    const script = readFileSync(join(dir, "release", "install.sh"), "utf8");
+    try {
+      // The next release, with another install script, as a rotation's last has.
+      writeFileSync(join(dir, "release", "install.sh"), script.replace("\nsettings() {\n", "\n# The next release's.\nsettings() {\n"));
+      const out = released("1.1.0");
+      const [older, newer] = [before, out].map((folder) => ({
+        "latest.json": readFileSync(join(folder, "manifest.json")), "latest.json.sig": readFileSync(join(folder, "manifest.json.sig")),
+      }));
+      const scripts = [Buffer.from(script), readFileSync(join(dir, "release", "install.sh"))] as const;
+      // Each object of a send, in the order it is sent.
+      const order = ["releases/1.1.0/surogate-desktop-1.1.0-linux-x64.tar.gz", "releases/1.1.0/manifest.json.sig", "latest.json", "latest.json.sig", "install.sh", "releases/1.1.0/manifest.json"];
+      const seen = order.map((cut) => {
+        expect(send("1.1.0", out, { FAULT: `refused ${cut}` }), cut).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: sending desktop/${cut} got 503\n` });
+        const which = (name: "latest.json" | "latest.json.sig") => (object(name)?.equals(newer![name]) ? "this release's" : object(name)?.equals(older![name]) ? "the one before's" : "neither");
+        return {
+          cut, manifest: which("latest.json"), signature: which("latest.json.sig"),
+          script: object("install.sh")?.equals(scripts[1]) ? "this release's" : object("install.sh")?.equals(scripts[0]) ? "the one before's" : "neither",
+          published: object("releases/1.1.0/manifest.json") !== null,
+        };
+      });
+      const [was, is] = ["the one before's", "this release's"];
+      expect(seen).toEqual([
+        { cut: order[0], manifest: was, signature: was, script: was, published: false },
+        { cut: order[1], manifest: was, signature: was, script: was, published: false },
+        { cut: order[2], manifest: was, signature: was, script: was, published: false },
+        // The one moment a reader finds a manifest whose signature is another's: it tries again.
+        { cut: order[3], manifest: is, signature: was, script: was, published: false },
+        // The pair is the new one, and the script that checks it for a first install is still the one before's, which lists its key.
+        { cut: order[4], manifest: is, signature: is, script: was, published: false },
+        { cut: order[5], manifest: is, signature: is, script: is, published: false },
+      ]);
+      // And the same send, run again, sends it whole.
+      expect(send("1.1.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.1.0 as desktop/latest.json\n" });
+      expect(object("releases/1.1.0/manifest.json")?.equals(newer!["latest.json"])).toBe(true);
+    } finally {
+      writeFileSync(join(dir, "release", "install.sh"), script);
+    }
   });
 
   it("leaves a release unpublished when its send stops part-way, so that the next send sends it whole", () => {

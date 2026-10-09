@@ -169,8 +169,9 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
 
   // The release in *out* signed as the release job signs one, in its two steps. The first writes
   // the manifest of the tarball, by the hash the build's job says of it, where no release key is:
-  // it refuses to run with one in its environment. The second signs that manifest with the key, by
-  // the build's own words for the tarball's hash and its size, and opens no tarball.
+  // it refuses to run with one in its environment, and its job says the app's state schema on. The
+  // second writes the manifest itself and signs it with the key, of the build's own words for the
+  // tarball's hash and its size and of that schema, and opens no tarball.
   const signed = async (version: string, out: string) => {
     const tarball = join(out, tarballOf(version));
     const hashed = await run("sha256sum", [tarball]);
@@ -179,8 +180,12 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     const built = { DESKTOP_TARBALL_SHA256: hashed.stdout.slice(0, 64) };
     const described = await run(join(dir, "release", "publish.sh"), ["describe", version, out], { env: { ...own, ...built } });
     expect(described.status, described.stderr).toBe(0);
+    const { stateSchema } = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema: number };
     const signing = await run(join(dir, "release", "publish.sh"), ["sign", version, out], {
-      env: { ...own, ...built, DESKTOP_TARBALL_SIZE: String(statSync(tarball).size), DESKTOP_RELEASE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString() },
+      env: {
+        ...own, ...built, DESKTOP_TARBALL_SIZE: String(statSync(tarball).size), DESKTOP_STATE_SCHEMA: String(stateSchema),
+        DESKTOP_RELEASE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      },
     });
     expect(signing.status, signing.stderr).toBe(0);
   };
