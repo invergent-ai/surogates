@@ -4917,9 +4917,11 @@ class AgentHarness(
         that dies before that write leaves a turn the next wake ends: the
         answer in the log says the command was run.
 
-        Not when more was said since, by the user or by the command itself to
-        start its work (a goal's or a mission's first message): the wake that
-        message queued goes on from here.  Nor when the harness did not
+        Not when more was said since that still waits: a message no request
+        has read, the user's own or the command's to start its work (a
+        goal's or a mission's first message), or another command.  The wake
+        that message queued goes on from here.  A message the turn under way
+        has read is not more to do.  Nor when the harness did not
         answer the command: a coding run whose worker died stays as the
         sweeper expects it.  A session whose mission is in flight stays active
         for its helpers' reports, as at the end of its coordinator's turns;
@@ -4927,12 +4929,17 @@ class AgentHarness(
         of its user's no turn has read, and one whose turn a dead worker cut
         off; and one its user stopped meanwhile stays stopped.
         """
+        if not _command_answered(events, typed_at):
+            return False
+        asked = max((event.id for event in events if event.type == EventType.LLM_REQUEST.value), default=0)
+        commands = {id(event) for event in self._waiting_commands(session, events)}
         if any(
-            event.type == EventType.USER_MESSAGE.value and event.id > typed_at
+            event.type == EventType.USER_MESSAGE.value and event.id > typed_at and (
+                id(event) in commands
+                or event.id > asked and ((event.data or {}).get("synthetic") or self._is_plain_message(session, event))
+            )
             for event in events
         ):
-            return False
-        if not _command_answered(events, typed_at):
             return False
         goal_waits = self._goal_waits(session, events)
         # What no turn has read: a helper's report, a goal's next turn, a

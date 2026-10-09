@@ -788,6 +788,28 @@ async def test_a_message_sent_before_a_commands_answer_is_written_is_answered_to
     assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == ([ANSWERED[command]], "Noted.", "completed")
 
 
+async def test_a_message_typed_behind_a_command_and_read_by_the_turn_under_way_brings_no_second_turn(workers):
+    chat = await workers.chat()
+
+    async def the_user_types_both():
+        await workers.says(chat, "/goal status")
+        await workers.says(chat, "Also check Q1.")
+
+    workers.replies.append(TODO_CALL)
+    workers.during_the_tool_call = the_user_types_both
+    await workers.says(chat, "Go on.")
+    await workers.wake(chat)
+    # The turn read the message, and left the command for its own wake.
+    assert workers.requests[1][-1] == {"role": "user", "content": "Also check Q1."}
+    await workers.nobody_is_queued()
+
+    await workers.wake(chat)
+
+    # Nothing is left for the model: the chat rests on the command's answer, and nobody is queued.
+    assert (workers.ran, len(workers.requests), await workers.status(chat)) == (["_handle_goal_command"], 2, "completed")
+    assert (await workers.nothing_waits(chat), await queued(workers.api, await workers.session(chat))) == (True, False)
+
+
 async def test_a_second_command_sent_before_the_first_ones_answer_is_written_is_run_by_its_own_wake(workers):
     chat = await workers.chat()
 
