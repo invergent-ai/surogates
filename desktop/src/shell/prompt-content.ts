@@ -276,13 +276,16 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
   if (request.action === "port") {
     // The browser's one private destination (spec, Section 5): a port of the chat's own servers, for the chat or not at
     // all, since one page load makes many connections. What it says of who else reaches it is the proxy's rule (browser/proxy.ts).
-    const held = request.held === undefined
-      ? []
-      : [`Another chat's server has port ${request.detail} in the browser now. Allowing this gives the port to this chat.`];
+    // Which chat is asked for, and which has the port now, each by the folder it works on.
+    const holder = request.held === undefined || request.held.folder === null
+      ? "Another chat"
+      : request.held.folder === chat.folder ? "Another chat on this folder" : `A chat on ${request.held.folder}`;
+    const held = request.held === undefined ? [] : [`${holder} has port ${request.detail} in the browser now. Allowing this moves the port to this chat.`];
+    const lines = (text: string) => Math.ceil(text.length / 60);
     return {
       title: `Let ${chat.agent}'s browser open port ${request.detail} of this chat's servers?`,
       lead: `${asker(chat)} wants to open a server it started for this chat, in the chat's sandbox, in its browser on this computer.`,
-      details: [code("Address", `http://localhost:${request.detail}/`)],
+      details: [code("Address", `http://localhost:${request.detail}/`), code("Folder", chat.folder)],
       notes: [
         ...held,
         `Its browser is shared by all of ${chat.agent}'s chats: while this is allowed, a page open in any of them can reach this port too.`,
@@ -293,7 +296,7 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
       focus: "deny",
       cancel: "deny",
-      height: 470 + held.length * 50,
+      height: Math.min(MAX_HEIGHT, 500 + lines(chat.folder) * 19 + held.reduce((sum, note) => sum + 30 + lines(note) * 19, 0)),
     };
   }
   if (request.action === "open") {

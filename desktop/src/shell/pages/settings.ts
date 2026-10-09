@@ -28,7 +28,8 @@ interface State {
 interface Folder {
   folder: string;
   chats: Array<{
-    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; processes: Array<{ id: string; command: string }>;
+    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; ports: number[];
+    processes: Array<{ id: string; command: string }>;
   }>;
 }
 
@@ -38,6 +39,7 @@ interface Settings {
   takeBack(root: string, host: string): Promise<void>;
   takeBrowserBack(root: string): Promise<void>;
   handBrowserBack(): Promise<boolean>;
+  takePortBack(root: string, port: number): Promise<void>;
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
@@ -124,8 +126,8 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   return held;
 }
 
-// A chat's row: its title, as text, its mode, each host its user let it reach, the browser if it may use it, and
-// each background process it runs.
+// A chat's row: its title, as text, its mode, each host its user let it reach, the browser if it may use it, each
+// port of its own servers that browser may open, and each background process it runs.
 // Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
   // Each line's button, named by its chat and what it ends: a redraw gives the keyboard back to it.
@@ -150,6 +152,10 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
     ...(chat.browser
       ? [keyed(line("Uses the browser on this computer", "Take back", "the browser on this computer", () => settings.takeBrowserBack(chat.root)), "browser")]
       : []),
+    ...chat.ports.map((port) => keyed(
+      line(`Its browser opens port ${port} of this chat's servers`, "Take back", `port ${port} of this chat's servers`, () => settings.takePortBack(chat.root, port)),
+      `port ${port}`,
+    )),
     ...chat.processes.map(({ id, command }) => keyed(line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id)), `process ${id}`)),
   );
   row.append(label);

@@ -357,18 +357,28 @@ describe("a connection into the root", () => {
   let inward: Server;
   let brought: string[];
   let path: string;
+  // What the runner sent the agent after its line, and when the runner's end of each connection ended, since the agent ended its own.
+  let answered: string;
+  let ended: number[];
 
   beforeEach(async () => {
     brought = [];
+    answered = "";
+    ended = [];
     path = join(dir, "in.sock");
     inward = createServer({ allowHalfOpen: true }, (socket) => {
       let said = "";
+      let left = 0;
       socket.on("error", () => {});
+      socket.on("end", () => ended.push(performance.now() - left));
       socket.on("data", (chunk: Buffer) => {
+        if (left > 0) return void (answered += chunk.toString("latin1"));
         said += chunk.toString("latin1");
         const end = said.indexOf("\n");
         if (end < 0 || brought.includes(said.slice(0, end))) return;
         brought.push(said.slice(0, end));
+        answered += said.slice(end + 1);
+        left = performance.now();
         socket.end("hello from the browser");
       });
     });
@@ -391,6 +401,44 @@ describe("a connection into the root", () => {
       expect(brought, host).toEqual([`/in/${ID}`]);
       await new Promise<void>((done) => server.close(() => done()));
     }
+  });
+
+  it("lets go of a server that never ends its half once the agent's end has ended, at its bound and not before: both ends, and nothing more is carried", async () => {
+    // A server that reads, keeps its own half open whatever its peer does, and says something long after.
+    const taken: Array<{ closed: boolean }> = [];
+    const server = createServer({ allowHalfOpen: true }, (socket) => {
+      const state = { closed: false };
+      taken.push(state);
+      socket.on("error", () => {}).on("close", () => (state.closed = true)).resume();
+      setTimeout(() => socket.write("too late"), 600);
+      setTimeout(() => socket.write("later still"), 700);
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    await carryIn(path, ID, portOf(server), 4, 300);
+    await vi.waitFor(() => expect(brought).toEqual([`/in/${ID}`]));
+    // Within the bound it is the server's to end: nothing is destroyed.
+    await new Promise((done) => setTimeout(done, 200));
+    expect([ended, taken.map(({ closed }) => closed)]).toEqual([[], [false]]);
+    // At the bound the runner's end of the agent's connection goes, and the server's: its next words reach nobody.
+    await vi.waitFor(() => expect(ended).toHaveLength(1));
+    expect(ended[0]).toBeGreaterThanOrEqual(290);
+    expect(ended[0]).toBeLessThan(600);
+    await vi.waitFor(() => expect(taken[0]?.closed).toBe(true), { timeout: 2_000 });
+    expect(answered).toBe("");
+    await new Promise<void>((done) => server.close(() => done()));
+  });
+
+  it("gives the agent the last bytes of a server that ends late but inside the bound, and is done then, not at the bound", async () => {
+    const server = createServer({ allowHalfOpen: true }, (socket) => {
+      socket.on("error", () => {}).resume();
+      socket.once("end", () => setTimeout(() => socket.end("x".repeat(256 * 1024) + " its last words"), 150));
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    await carryIn(path, ID, portOf(server), 4, 2_000);
+    await vi.waitFor(() => expect(ended).toHaveLength(1));
+    expect([answered.length, answered.endsWith(" its last words")]).toEqual([256 * 1024 + 15, true]);
+    expect(ended[0]).toBeLessThan(1_000);
+    await new Promise<void>((done) => server.close(() => done()));
   });
 
   it("tries the family it is told first, then the other", async () => {

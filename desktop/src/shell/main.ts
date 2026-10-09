@@ -2201,6 +2201,15 @@ function showSettings(section?: "browser"): void {
       if (!bindings || typeof root !== "string" || !bindings.browsing(root)) throw new Error("This chat does not use the browser on this computer");
       bindings.disallowBrowser(root);
     });
+    // A port of a chat's own servers taken back by its user: the browser reaches it no more, what it has open there
+    // ends, and the chat's next navigation to it asks again.
+    handle("settings:take-back-port", (root, port) => {
+      const bindings = openStack()?.bindings;
+      if (!bindings || typeof root !== "string" || typeof port !== "number" || !bindings.ports(root).includes(port)) {
+        throw new Error("This chat's servers are not open to the browser on that port");
+      }
+      bindings.disallowPort(root, port);
+    });
     // The agent's browser handed back from here, where it is held from a chat that is gone: such a chat has no
     // page to hand it back in, and another chat has a pane for it only where its own browser is open. Through the
     // same confirmation as from a chat's page, at its user's click in the desktop's own page; one at a time, and
