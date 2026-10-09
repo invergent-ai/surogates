@@ -96,25 +96,29 @@ class StubSessions:
         # What the chats were told, as (session, type, data): the list a test's emitter records in.
         self.told: list[tuple[str, str, dict]] = []
 
-    async def tell_browser_control(self, session_id: UUID, event_type: Any, data: dict) -> int | None:
-        """As the store tells it: a take-over only while none stands, a hand back only while one does."""
+    async def tell_browser_control(
+        self, session_id: UUID, event_type: Any, data: dict, *, gives_a_turn: bool = False,
+    ) -> bool | None:
+        """As the store tells it: a take-over only while none stands, a hand back only while one does,
+        and with a hand back that gives a turn, where the chat can take one, the chat made active and
+        its resume."""
         log = self.events.setdefault(session_id, [])
         said = [kind for kind in (entry if isinstance(entry, str) else entry[0] for entry in log)
                 if kind in ("browser.control_granted", "browser.control_returned")]
         if (said[-1:] == ["browser.control_granted"]) is not (event_type.value == "browser.control_returned"):
             return None
+        session = self.sessions[session_id]
+        resumes = gives_a_turn and session.status in ("active", "completed")
         log.append(event_type.value)
-        self.told.append((str(session_id), event_type.value, data))
-        return len(log)
+        self.told.append((str(session_id), event_type.value, {**data, "resumes": True} if resumes else data))
+        if resumes:
+            session.status = "active"
+            log.append("session.resume")
+            self.told.append((str(session_id), "session.resume", {"source": "browser_hand_back"}))
+        return resumes
 
     async def has_live_lease(self, session_id: UUID) -> bool:
         return session_id in self.busy
-
-    async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
-        """As the store resumes one: active again, and its log says why."""
-        self.sessions[session_id].status = "active"
-        self.events.setdefault(session_id, []).append("session.resume")
-        self.told.append((str(session_id), "session.resume", {"source": source}))
 
     async def get_session(self, session_id: UUID) -> Any:
         if session_id not in self.sessions:
@@ -145,9 +149,12 @@ class StubSessions:
         events = [entry if isinstance(entry, tuple) else (entry, session_id) for entry in self.events.get(session_id, [])]
         # An event's id is its place in the log, counted from one.
         return [
-            SimpleNamespace(id=at, type=kind, data={"session_id": str(of), "computer": True})
+            SimpleNamespace(id=at, type=kind, data={"session_id": str(of), "computer": True, **self.SAID.get(kind, {})})
             for at, (kind, of) in enumerate(events, start=1) if kind in wanted
         ]
+
+    # What an event of the log says beyond whose it is.
+    SAID = {"session.resume": {"source": "browser_hand_back"}}
 
     def emitter(self, events: list[tuple[str, str, dict]]):
         """The app's emitter in a test: what it emits is recorded, and is in its session's log for the routes to read back.
@@ -790,7 +797,16 @@ class TestControlEndpoint:
         told = [_taken_over(sid), _handed_back(sid, resumes=True), _resumed(sid)]
         assert (desk.events, desk.wakes) == (told, [str(sid)])
 
-        # Handed back already: a repeat is answered as done, gives no second turn, and tells and wakes no more.
+        # Handed back already: a repeat is answered as the hand back was, gives no second turn, and
+        # tells and wakes no more. One that is no confirmed hand back is answered that nobody goes on for it.
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": True})
+        assert await desk.control(sid, "release") == (200, {**RELEASED, "resumes": False})
+        assert (desk.events, desk.wakes) == (told, [str(sid)])
+        # Once a request of the model's has read the hand back, or the chat is stopped, no turn is to come.
+        desk.store.events[sid].append("llm.request")
+        assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": False})
+        desk.store.events[sid].pop()
+        desk.store.sessions[sid].status = "paused"
         assert await desk.control(sid, "release", handed_back=True) == (200, {**RELEASED, "resumes": False})
         assert (desk.events, desk.wakes) == (told, [str(sid)])
 

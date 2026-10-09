@@ -18,9 +18,10 @@ from pydantic import BaseModel
 from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.browser.control import BROWSER_HAND_BACK, HANDED_BACK_FROM, RESUMES, AcquireOutcome
+from surogates.browser.control import HANDED_BACK_FROM, RESUMES, AcquireOutcome
 from surogates.browser.shell import ShellSession
 from surogates.devices.binding import device_of, is_binding_root
+from surogates.harness.loop_pending import _hand_back_unread
 from surogates.session.events import EventType
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.auth.middleware import (
@@ -233,8 +234,8 @@ async def _chat_of(app_state: Any, session: Any, tenant: TenantContext) -> Any:
     return chat
 
 
-async def _goes_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
-    """Whether a hand back its user confirmed gives the chat's agent a turn now.
+async def _may_go_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
+    """Whether a hand back its user confirmed may give the chat's agent a turn.
 
     The confirmation is the desktop's own window, and it leaves the page nothing but a yes: the
     pane's word is all the server has of it.  It is taken only from the web client in the window of
@@ -245,6 +246,10 @@ async def _goes_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
     Then the chat must be able to take a turn: not stopped by its user or failed, with no turn
     under way, and within its user's limit, held as a typed message's turn is.  Where it cannot,
     the hand back is told for the pane alone: nothing is kept to be read with some later message.
+
+    The chat is as it was read when the post arrived, and holding the turn asks ops: its user can
+    stop it, or delete it, meanwhile.  Whether the turn is given is the store's to say, as it tells
+    the hand back (``tell_browser_control``).
     """
     sign_in = tenant.oauth_family_id
     factory = getattr(app_state, "session_factory", None)
@@ -265,6 +270,24 @@ async def _goes_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
         logger.warning("Session %s: a hand back gives no turn while ops is unreachable", chat.id, exc_info=True)
         return False
     return refused is None
+
+
+# What says whether the turn a hand back gave a chat is still to come.
+_A_HAND_BACKS_TURN = [EventType.LLM_REQUEST, EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
+
+
+async def _goes_on_already(app_state: Any, session_id: UUID) -> bool:
+    """Whether a chat with no take-over standing has a hand back's turn still to come.
+
+    What a repeat of a confirmed hand back is answered, as the one it repeats was: the chat open
+    in two windows, or a post whose answer was lost.  Only while that turn is to come: once a
+    request of the model's has read the hand back, or the chat was stopped, a release posted then
+    hands nothing back and nobody goes on for it.
+    """
+    store = app_state.session_store
+    if (await store.get_session(session_id)).status != "active":
+        return False
+    return _hand_back_unread(await store.get_events(session_id, types=_A_HAND_BACKS_TURN))
 
 
 async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserStateResponse:
@@ -438,23 +461,25 @@ async def post_browser_control(
                 return {"outcome": "refreshed", "owner_user_id": owner_user_id}
             return {"outcome": "granted", "owner_user_id": owner_user_id}
         # A release answers whether the agent goes on by itself: only at a hand back its user
-        # confirmed, of a take-over that stands, to a chat that can take a turn now.
+        # confirmed, of a take-over that stands, to a chat that can take a turn as it is told.
         if not await _told_taken_over(request.app.state, chat.id):
-            return {"outcome": "released", RESUMES: False}
-        goes_on = body.handed_back and await _goes_on(request.app.state, chat, tenant)
+            return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}
+        confirmed = body.handed_back and await _may_go_on(request.app.state, chat, tenant)
         told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
-        if goes_on:
-            told[RESUMES] = True
-        # None when another post handed it back meanwhile: that one told the chat, and gave what it gave.
-        if await store.tell_browser_control(chat.id, EventType.BROWSER_CONTROL_RETURNED, told) is None:
-            return {"outcome": "released", RESUMES: False}
-        if goes_on:
-            # As a typed message does to a chat whose turn had ended: active again, and queued.
-            # The resume is the turn, and what the agent reads the hand back from.
-            await store.resume_session(chat.id, source=BROWSER_HAND_BACK)
-            await wake(sid)
+        # The turn is given with the telling, or not at all: the chat is made active as a typed
+        # message makes one whose turn had ended, and the resume written is the turn, and what the
+        # agent reads the hand back from.
+        goes_on = await store.tell_browser_control(
+            chat.id, EventType.BROWSER_CONTROL_RETURNED, told, gives_a_turn=confirmed,
+        )
+        if goes_on is None:
+            # Another post handed it back meanwhile: that one told the chat, and gave what it gave.
+            return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}
         # The agent's other chats there that still said their user held the browser are told too.
         await _tell_the_agents_other_chats_handed_back(request.app.state, chat.id, tenant, emit, owner_user_id)
+        if goes_on:
+            # All that can still be lost is this, and the sweeper finds a chat left so.
+            await wake(sid)
         return {"outcome": "released", RESUMES: goes_on}
 
     if body.action == "acquire":

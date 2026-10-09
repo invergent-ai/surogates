@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 import hashlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -22,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from surogates.browser.control import BROWSER_HAND_BACK, RESUMES
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -74,8 +76,19 @@ class SessionNotFoundError(Exception):
     """Raised when a session lookup finds no matching row."""
 
 
-class _NothingToTell(Exception):
-    """An event whose condition did not hold was not written (``SessionStore.emit_event``'s *only_if*)."""
+@dataclass(slots=True)
+class _EventWrite:
+    """An event on its way into a session's log: made ready before its
+    transaction, written in it, and announced once that has committed."""
+
+    session_id: UUID
+    event_type: EventType
+    data: dict  # as it is written: redacted
+    row: EventRow
+    inbox_row: Any  # None for an event no inbox is told of
+    id: int = 0
+    stamped: Any = None
+    inbox_publish: tuple[int, str, UUID] | None = None
 
 
 class LeaseNotHeldError(Exception):
@@ -1097,7 +1110,6 @@ class SessionStore:
         data: dict,
         *,
         lease_token: UUID | None = None,
-        only_if: Callable[[AsyncSession], Awaitable[bool]] | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
@@ -1112,14 +1124,32 @@ class SessionStore:
         contextvar.  If no trace is active the ``trace_id`` / ``span_id``
         columns are left ``NULL``.
 
-        *only_if* is asked in the event's own transaction, on its own
-        connection, before anything is written: when it answers no, nothing
-        is written and nothing is announced (``tell_browser_control``).
-
         Counter updates use raw SQL for atomic increment expressions
         (``message_count = message_count + 1``) which can't be expressed
         cleanly in ORM ``update().values()``.
         """
+        event = await self._ready_event(session_id, event_type, data)
+        async with self._sf() as db:
+            if lease_token is not None:
+                held = (await db.execute(
+                    text(
+                        "SELECT 1 FROM session_leases "
+                        "WHERE session_id = :id AND lease_token = :token FOR SHARE"
+                    ),
+                    {"id": session_id, "token": lease_token},
+                )).first()
+                if held is None:
+                    raise LeaseNotHeldError(
+                        f"Session {session_id}: lease {lease_token} is no longer held"
+                    )
+            await self._write_event(db, event)
+            await db.commit()
+        await self._announce_event(event)
+        return event.id
+
+    async def _ready_event(self, session_id: UUID, event_type: EventType, data: dict) -> _EventWrite:
+        """Make an event ready to be written: all of it that asks nothing of
+        the database, done before the transaction that writes it opens."""
         from surogates.trace import get_trace
 
         trace = get_trace()
@@ -1137,11 +1167,9 @@ class SessionStore:
             trace_id=trace.trace_id if trace else None,
             span_id=trace.span_id if trace else None,
         )
-        counter_clause = _build_counter_update_clause(event_type, redacted_data)
-        inbox_publish: tuple[int, str, UUID] | None = None
 
         # Build the inbox row and run the presence check up front, before the
-        # DB transaction below, so the Redis NUMSUB round-trip doesn't hold a
+        # DB transaction, so the Redis NUMSUB round-trip doesn't hold a
         # pooled DB connection open. Acknowledge-only notifications are skipped
         # while the operator is actively watching the session (a live viewer);
         # kinds that need a response are always created.
@@ -1159,113 +1187,108 @@ class SessionStore:
             and inbox_row.kind in ACKNOWLEDGE_ONLY_KINDS
             and await self._session_has_live_viewer(session_id)
         )
+        return _EventWrite(
+            session_id=session_id, event_type=event_type, data=redacted_data, row=row,
+            inbox_row=None if suppress_for_viewer else inbox_row,
+        )
 
-        async with self._sf() as db:
-            if only_if is not None and not await only_if(db):
-                raise _NothingToTell
-            if lease_token is not None:
-                held = (await db.execute(
-                    text(
-                        "SELECT 1 FROM session_leases "
-                        "WHERE session_id = :id AND lease_token = :token FOR SHARE"
-                    ),
-                    {"id": session_id, "token": lease_token},
-                )).first()
-                if held is None:
-                    raise LeaseNotHeldError(
-                        f"Session {session_id}: lease {lease_token} is no longer held"
-                    )
-            db.add(row)
-            await db.flush()  # assigns row.id via BIGSERIAL
-            event_id: int = row.id
+    async def _write_event(self, db: AsyncSession, event: _EventWrite) -> None:
+        """Write a ready event in *db*'s transaction, which the caller commits."""
+        session_id, event_type = event.session_id, event.event_type
+        db.add(event.row)
+        await db.flush()  # assigns row.id via BIGSERIAL
+        event.id = event.row.id
 
-            # Atomic counter update (raw SQL — ORM can't do col = col + 1).
-            #
-            # LLM_DELTA fires once per streamed token and increments no
-            # counter, so its only effect here is bumping ``updated_at`` on a
-            # single hot row -- hundreds of dead tuples and WAL records for
-            # one response, multiplied by every streaming session on the
-            # fleet.  ``updated_at`` is a liveness signal for the orphan
-            # sweeper, which uses a 60s threshold, so a bump every few
-            # seconds is as good as a bump per token: the guard makes the
-            # statement match no row and write nothing the rest of the time.
-            params: dict[str, Any] = {"id": session_id}
-            touch_guard = ""
-            if event_type == EventType.LLM_DELTA:
-                touch_guard = (
-                    " AND updated_at < now() - "
-                    "make_interval(secs => :touch_window)"
-                )
-                params["touch_window"] = _DELTA_TOUCH_THROTTLE_SECONDS
-            # For an event a project's stream may name, the session's
-            # workspace boundary names its project, and its role whether it
-            # is a thread, with no query of their own.
-            streamed = event_type.value in project_stream.STREAM_TYPES
-            result = await db.execute(
-                text(  # noqa: S608
-                    f"UPDATE sessions SET {counter_clause} "
-                    f"WHERE id = :id{touch_guard}"
-                    + (" RETURNING config->>'workspace_boundary', config->>'workstream_role'" if streamed else "")
-                ),
-                params,
+        # Atomic counter update (raw SQL — ORM can't do col = col + 1).
+        #
+        # LLM_DELTA fires once per streamed token and increments no
+        # counter, so its only effect here is bumping ``updated_at`` on a
+        # single hot row -- hundreds of dead tuples and WAL records for
+        # one response, multiplied by every streaming session on the
+        # fleet.  ``updated_at`` is a liveness signal for the orphan
+        # sweeper, which uses a 60s threshold, so a bump every few
+        # seconds is as good as a bump per token: the guard makes the
+        # statement match no row and write nothing the rest of the time.
+        counter_clause = _build_counter_update_clause(event_type, event.data)
+        params: dict[str, Any] = {"id": session_id}
+        touch_guard = ""
+        if event_type == EventType.LLM_DELTA:
+            touch_guard = (
+                " AND updated_at < now() - "
+                "make_interval(secs => :touch_window)"
             )
-            stamped = result.one_or_none() if streamed else None
+            params["touch_window"] = _DELTA_TOUCH_THROTTLE_SECONDS
+        # For an event a project's stream may name, the session's
+        # workspace boundary names its project, and its role whether it
+        # is a thread, with no query of their own.
+        streamed = event_type.value in project_stream.STREAM_TYPES
+        result = await db.execute(
+            text(  # noqa: S608
+                f"UPDATE sessions SET {counter_clause} "
+                f"WHERE id = :id{touch_guard}"
+                + (" RETURNING config->>'workspace_boundary', config->>'workstream_role'" if streamed else "")
+            ),
+            params,
+        )
+        event.stamped = result.one_or_none() if streamed else None
 
-            if inbox_row is not None and not suppress_for_viewer:
-                session_row = await db.get(SessionRow, session_id)
-                # Target the turn's acting principal (the participant who
-                # triggered this event), not the frozen session owner — in a
-                # shared thread they differ. Resolved in this same transaction
-                # so the event row and inbox target agree; falls back to the
-                # session owner when the triggering message is unstamped.
-                acting = (
-                    await self._resolve_acting_principal_in(db, session_row)
-                    if session_row is not None
-                    else ActingPrincipal(user_id=None, service_account_id=None)
+        inbox_row = event.inbox_row
+        if inbox_row is not None:
+            session_row = await db.get(SessionRow, session_id)
+            # Target the turn's acting principal (the participant who
+            # triggered this event), not the frozen session owner — in a
+            # shared thread they differ. Resolved in this same transaction
+            # so the event row and inbox target agree; falls back to the
+            # session owner when the triggering message is unstamped.
+            acting = (
+                await self._resolve_acting_principal_in(db, session_row)
+                if session_row is not None
+                else ActingPrincipal(user_id=None, service_account_id=None)
+            )
+            if acting.user_id is not None or acting.service_account_id is not None:
+                item = InboxItem(
+                    org_id=session_row.org_id,
+                    user_id=acting.user_id,
+                    service_account_id=acting.service_account_id,
+                    session_id=session_id,
+                    source_event_id=event.id,
+                    kind=inbox_row.kind,
+                    title=inbox_row.title,
+                    body=inbox_row.body,
+                    payload=inbox_row.payload,
+                    action_ref=inbox_row.action_ref,
                 )
-                if acting.user_id is not None or acting.service_account_id is not None:
-                    item = InboxItem(
-                        org_id=session_row.org_id,
-                        user_id=acting.user_id,
-                        service_account_id=acting.service_account_id,
-                        session_id=session_id,
-                        source_event_id=event_id,
-                        kind=inbox_row.kind,
-                        title=inbox_row.title,
-                        body=inbox_row.body,
-                        payload=inbox_row.payload,
-                        action_ref=inbox_row.action_ref,
-                    )
-                    db.add(item)
-                    await db.flush()
-                    # Publish to the acting principal's inbox channel (a user,
-                    # or a service account for ops chats) so the live unread
-                    # badge updates. The one-principal CHECK guarantees this is
-                    # non-null.
-                    principal_id = acting.user_id or acting.service_account_id
-                    inbox_publish = (item.id, inbox_row.kind, principal_id)
+                db.add(item)
+                await db.flush()
+                # Publish to the acting principal's inbox channel (a user,
+                # or a service account for ops chats) so the live unread
+                # badge updates. The one-principal CHECK guarantees this is
+                # non-null.
+                principal_id = acting.user_id or acting.service_account_id
+                event.inbox_publish = (item.id, inbox_row.kind, principal_id)
 
-            await db.commit()
-
+    async def _announce_event(self, event: _EventWrite) -> None:
+        """Tell those who listen of an event its transaction has committed."""
+        session_id, event_type = event.session_id, event.event_type
         # Notify SSE subscribers via Redis pub/sub (best-effort).
         if self._redis is not None:
             try:
                 await self._redis.publish(
                     f"surogates:session:{session_id}",
-                    f"{event_id}:{event_type.value}",
+                    f"{event.id}:{event_type.value}",
                 )
             except Exception:
                 pass
 
         # The project's stream, for a master, its threads and every session
         # under them.
-        project = project_stream.heard(*stamped, event_type.value) if stamped is not None else None
+        project = project_stream.heard(*event.stamped, event_type.value) if event.stamped is not None else None
         if project is not None:
             await project_stream.publish(self._redis, project, session_id, event_type.value)
 
         # Notify inbox subscribers after commit so consumers can read the row.
-        if inbox_publish is not None and self._redis is not None:
-            item_id, kind, principal_id = inbox_publish
+        if event.inbox_publish is not None and self._redis is not None:
+            item_id, kind, principal_id = event.inbox_publish
             try:
                 await self._redis.publish(
                     f"surogates:inbox:{principal_id}",
@@ -1279,12 +1302,10 @@ class SessionStore:
         if event_type in _DELIVERABLE_EVENTS:
             await self._enqueue_channel_delivery(
                 session_id,
-                event_id,
+                event.id,
                 event_type,
-                redacted_data,
+                event.data,
             )
-
-        return event_id
 
     async def _enqueue_channel_delivery(
         self,
@@ -2561,7 +2582,9 @@ class SessionStore:
         async with self._sf() as db:
             return list((await db.execute(stmt)).scalars())
 
-    async def tell_browser_control(self, session_id: UUID, event_type: EventType, data: dict) -> int | None:
+    async def tell_browser_control(
+        self, session_id: UUID, event_type: EventType, data: dict, *, gives_a_turn: bool = False,
+    ) -> bool | None:
         """Tell a chat on its user's computer of a take-over, or of a hand back, unless it was told already.
 
         A take-over is told only while none stands, and a hand back only
@@ -2572,11 +2595,21 @@ class SessionStore:
         asked the pool for a second would leave none once as many posts came
         together as the pool is wide.
 
-        Returns the event's id, or None when there was nothing to tell.
+        A hand back that *gives_a_turn* gives the chat's agent one in that
+        same transaction, where the chat can take it then: one still active,
+        or whose turn had ended, is made active as a typed message makes it,
+        the hand back says so (``resumes``), and the resume that is the turn
+        is written after it.  A chat its user stopped or deleted meanwhile,
+        or that failed, is told the hand back and given nothing.  So the log
+        never says of a turn that it was given when it was not, nor the
+        reverse.
+
+        Returns None when there was nothing to tell; otherwise whether the
+        chat's agent was given a turn.
         """
         handing_back = event_type is EventType.BROWSER_CONTROL_RETURNED
-
-        async def untold(db: AsyncSession) -> bool:
+        written: list[_EventWrite] = []
+        async with self._sf() as db:
             await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
             last = (await db.execute(
                 select(EventRow.type)
@@ -2590,12 +2623,24 @@ class SessionStore:
                 .order_by(EventRow.id.desc())
                 .limit(1)
             )).scalar_one_or_none()
-            return (last == EventType.BROWSER_CONTROL_GRANTED.value) is handing_back
-
-        try:
-            return await self.emit_event(session_id, event_type, data, only_if=untold)
-        except _NothingToTell:
-            return None
+            if (last == EventType.BROWSER_CONTROL_GRANTED.value) is not handing_back:
+                return None
+            resumes = handing_back and gives_a_turn and (await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status.in_(("active", "completed")))
+                .values(status="active", updated_at=func.now())
+            )).rowcount == 1
+            telling = [(event_type, {**data, RESUMES: True} if resumes else data)]
+            if resumes:
+                telling.append((EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK}))
+            # Neither is for an inbox, so making them ready here asks nothing of Redis under the lock.
+            for kind, said in telling:
+                written.append(await self._ready_event(session_id, kind, said))
+                await self._write_event(db, written[-1])
+            await db.commit()
+        for event in written:
+            await self._announce_event(event)
+        return resumes
 
 
 # ---------------------------------------------------------------------------

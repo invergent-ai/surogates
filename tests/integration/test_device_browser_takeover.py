@@ -300,11 +300,18 @@ async def test_a_hand_back_its_user_confirmed_gives_the_chats_agent_one_turn(com
         assert computer.wakes == [str(chat)]
         assert await computer.queued(chat)
         assert await computer.work(chat) == ["session.resume"]
-        # Handed back already: a repeat is answered as made, tells the chat nothing more, and gives no second turn.
-        assert await computer.hands_back(chat) == FOR_THE_PANE
+        # Handed back already: a repeat is answered as the hand back was, tells the chat nothing more,
+        # and gives no second turn.
+        assert await computer.hands_back(chat) == GOES_ON
         assert computer.wakes == [str(chat)]
         log = await computer.log(chat)
         assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
+        # A release that is no confirmed hand back is answered that nobody goes on for it.
+        assert await computer.control(chat, "release") == FOR_THE_PANE
+        # Once the turn was read, there is none to come: one posted then hands nothing back.
+        await computer.store.emit_event(chat, EventType.LLM_REQUEST, {})
+        assert await computer.hands_back(chat) == FOR_THE_PANE
+        assert computer.wakes == [str(chat)]
     finally:
         await computer.unqueue(chat)
 
@@ -477,6 +484,100 @@ async def test_a_session_that_names_another_users_chat_as_the_one_it_works_under
 
 # As many connections as posts arrive at once, and no long wait for one: a telling that needed a second
 # connection while it held its first would leave none, and every post would wait this out and fail.
+@pytest.mark.parametrize("status", ["paused", "failed", "archived"])
+async def test_a_chat_stopped_failed_or_deleted_as_its_hand_back_is_posted_is_given_no_turn(computer, monkeypatch, status):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    tell = computer.store.tell_browser_control
+
+    # The route has looked at the chat, and held its turn against its user's limit, when the stop lands.
+    async def stopped_meanwhile(session_id, event_type, *args, **kwargs):
+        if event_type is EventType.BROWSER_CONTROL_RETURNED:
+            await computer.store.update_session_status(session_id, status)
+        return await tell(session_id, event_type, *args, **kwargs)
+
+    monkeypatch.setattr(computer.store, "tell_browser_control", stopped_meanwhile)
+
+    assert await computer.hands_back(chat) == FOR_THE_PANE
+
+    # The hand back is made and told, and says no turn was given: the stop is not undone.
+    assert (await computer.log(chat))[-1] == "browser.control_returned"
+    assert "resumes" not in await computer.handed_back(chat)
+    assert (await computer.store.get_session(chat)).status == status
+    assert (computer.wakes, await computer.resumed(chat), await computer.work(chat)) == ([], [], [])
+    assert not await computer.queued(chat)
+    # A repeat is answered the same.
+    assert await computer.hands_back(chat) == FOR_THE_PANE
+
+
+async def test_a_hand_back_whose_wake_could_not_be_queued_has_given_its_turn_and_a_repeat_says_so(computer, monkeypatch):
+    chat = await computer.idle()
+    await computer.control(chat, "acquire")
+    served = computer.served
+
+    def with_the_queue_away(**who) -> FastAPI:
+        app = served(**who)
+
+        async def no_queue(session_id: str) -> None:
+            raise RuntimeError("the queue is away")
+
+        app.state.session_wake = no_queue
+        return app
+
+    monkeypatch.setattr(computer, "served", with_the_queue_away)
+    with pytest.raises(RuntimeError, match="the queue is away"):
+        await computer.hands_back(chat)
+    monkeypatch.undo()
+    await computer.left(chat)
+
+    try:
+        # What the log says is what happened: the turn was given, and only its wake is missing.
+        assert (await computer.handed_back(chat))["resumes"] is True
+        assert await computer.resumed(chat) == [{"source": "browser_hand_back"}]
+        assert (await computer.store.get_session(chat)).status == "active"
+        assert not await computer.queued(chat)
+        # A repeat is answered that the agent goes on, and gives no second turn.
+        assert await computer.hands_back(chat) == GOES_ON
+        log = await computer.log(chat)
+        assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
+        # The sweeper finds the chat, and queues the wake.
+        assert await computer.orphans() == {chat}
+        assert await computer.sweep() == 1
+        assert await computer.queued(chat)
+    finally:
+        await computer.unqueue(chat)
+
+
+async def test_a_hand_back_whose_turn_cannot_be_written_is_not_told_and_can_be_made_again(computer, monkeypatch):
+    chat = await computer.idle()
+    await computer.store.update_session_status(chat, "completed")
+    await computer.control(chat, "acquire")
+    write = SessionStore._write_event
+
+    async def no_resume(self, db, event) -> None:
+        if event.event_type is EventType.SESSION_RESUME:
+            raise RuntimeError("the database went away")
+        await write(self, db, event)
+
+    monkeypatch.setattr(SessionStore, "_write_event", no_resume, raising=False)
+    with pytest.raises(RuntimeError, match="the database went away"):
+        await computer.hands_back(chat)
+    monkeypatch.undo()
+
+    try:
+        # The telling, the chat made active and its resume are written together or not at all: the
+        # take-over still stands, and no hand back says it gave a turn that was never written.
+        assert (await computer.log(chat))[-1] == "browser.control_granted"
+        assert (await computer.store.get_session(chat)).status == "completed"
+        assert (computer.wakes, await computer.resumed(chat)) == ([], [])
+        # Made again, it gives the turn.
+        assert await computer.hands_back(chat) == GOES_ON
+        assert (await computer.log(chat))[-2:] == ["browser.control_returned", "session.resume"]
+        assert computer.wakes == [str(chat)]
+    finally:
+        await computer.unqueue(chat)
+
+
 POOL, POOL_WAIT_S = 4, 3.0
 
 
@@ -548,8 +649,8 @@ async def test_as_many_hand_backs_of_one_chat_at_once_as_the_pool_is_wide_give_i
 
     try:
         *answers, read_after = await asyncio.gather(*(narrow.hands_back(chat) for _ in range(POOL)), an_unrelated_read())
-        # Each is answered as made, and one of them as the one the agent goes on for.
-        assert sorted(answers, key=lambda answer: answer["resumes"]) == [FOR_THE_PANE] * (POOL - 1) + [GOES_ON]
+        # Each is answered that the agent goes on, as it does, for the one of them that was told.
+        assert answers == [GOES_ON] * POOL
         assert read_after < POOL_WAIT_S / 2
         assert time.monotonic() - started < POOL_WAIT_S / 2
         log = await narrow.log(chat)
@@ -563,19 +664,19 @@ async def test_two_hand_backs_posted_together_tell_the_chat_one_and_give_its_age
     chat = await computer.idle()
     await computer.control(chat, "acquire")
     # The chat is open in two windows, and each posts the hand back. The first is slow to be written:
-    # time enough for the second to read what the chat was last told.
-    emit = computer.store.emit_event
+    # time enough for the second to read what the chat was last told, were it not made to wait.
+    write = SessionStore._write_event
 
-    async def slow_to_tell(session_id, event_type, *args, **kwargs):
-        if event_type is EventType.BROWSER_CONTROL_RETURNED:
+    async def slow_to_tell(self, db, event) -> None:
+        if event.event_type is EventType.BROWSER_CONTROL_RETURNED:
             await asyncio.sleep(0.3)
-        return await emit(session_id, event_type, *args, **kwargs)
+        await write(self, db, event)
 
-    monkeypatch.setattr(computer.store, "emit_event", slow_to_tell)
+    monkeypatch.setattr(SessionStore, "_write_event", slow_to_tell)
 
     try:
         answers = await asyncio.gather(computer.hands_back(chat), computer.hands_back(chat))
-        assert sorted(answers, key=lambda answer: answer["resumes"]) == [FOR_THE_PANE, GOES_ON]
+        assert answers == [GOES_ON, GOES_ON]
         log = await computer.log(chat)
         assert (log.count("browser.control_returned"), log.count("session.resume")) == (1, 1)
         assert computer.wakes == [str(chat)]
@@ -1354,8 +1455,8 @@ async def test_a_hand_back_a_turn_ended_over_without_reading_is_read_at_the_wake
 async def test_a_hand_back_gives_one_turn_however_often_it_is_posted_and_the_chat_is_woken(asking, monkeypatch):
     chat = await asking.stopped_while_held()
     await asking.hands_back(chat)
-    # The pane posts the hand back again, as a second window of the chat does.
-    await asking.hands_back(chat, goes_on=False)
+    # The pane posts the hand back again, as a second window of the chat does: answered as the first.
+    await asking.hands_back(chat)
 
     try:
         assert asking.wakes == [str(chat)]
