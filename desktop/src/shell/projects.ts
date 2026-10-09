@@ -63,10 +63,13 @@ function placeOf(value: unknown): ThreadPlace {
   return { kind: "device", deviceId, deviceName, online } as ThreadPlace;
 }
 
+// A page of an agent older than this app serves a file with no landing: it is taken as null, so
+// its projects still show their threads.
 function fileOf(value: unknown): ProducedFile {
-  const { kind, label, ref, threadId } = fields(value);
-  need(one(kind, ["file", "artifact"]) && text(label, 500) && text(ref, 4096) && named(threadId));
-  return { kind, label, ref, threadId } as ProducedFile;
+  const { kind, label, ref, threadId, landing = null } = fields(value);
+  need(one(kind, ["file", "artifact"]) && text(label, 500) && text(ref, 4096) && named(threadId)
+    && one(landing, ["landed", "redoing", "not_merged", "undone", null]));
+  return { kind, label, ref, threadId, landing } as ProducedFile;
 }
 
 function threadOf(value: unknown): ThreadRow {

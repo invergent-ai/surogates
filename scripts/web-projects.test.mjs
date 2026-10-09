@@ -214,13 +214,13 @@ test("a row maps to the shell's ThreadRow field by field", () => {
   assert.deepEqual(threadRowOf({
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     status_line: "Waiting for thinkpad", progress: { done: 1, total: 2 },
-    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", thread_id: "t-1" }],
+    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", thread_id: "t-1", landing: "redoing" }],
     place: { kind: "device", device_id: "d-1", device_name: "thinkpad", online: false },
     created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }), {
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     statusLine: "Waiting for thinkpad", progress: { done: 1, total: 2 },
-    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1" }],
+    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1", landing: "redoing" }],
     place: { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false },
     createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z", resolvedAt: null,
   });
@@ -229,6 +229,12 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z",
     resolved_at: "2026-10-07T12:00:00Z",
   }).place, { kind: "cloud" });
+  // A server from before file history sends a file with no mark: the page serves none.
+  assert.deepEqual(threadRowOf({
+    id: "t-3", title: "Draft B", group: "idle", reason: null, status_line: null, progress: null,
+    files: [{ kind: "file", label: "b.md", ref: "b.md", thread_id: "t-3" }],
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).files, [{ kind: "file", label: "b.md", ref: "b.md", threadId: "t-3", landing: null }]);
 });
 
 // The project routes over a fake fetch: *answer* gives each request's response, and every
