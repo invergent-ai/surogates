@@ -4,7 +4,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign, verify } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -644,6 +644,18 @@ describe("the desktop's release manifest", () => {
     expect(verify(null, other, keys.publicKey, signature)).toBe(false);
     expect(readdirSync(tmp)).toEqual([]);
     recording(dir, "openssl");
+    // Each of the two takes its name by a rename: a link that stood under either goes, and what it led to is not written.
+    for (const name of ["manifest.json", "manifest.json.sig"]) {
+      writeFileSync(join(dir, `kept-${name}`), "another's");
+      rmSync(join(out, name));
+      symlinkSync(join(dir, `kept-${name}`), join(out, name));
+    }
+    expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...built(), DESKTOP_STATE_SCHEMA: "1" })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    for (const name of ["manifest.json", "manifest.json.sig"]) {
+      expect([name, lstatSync(join(out, name)).isFile(), readFileSync(join(dir, `kept-${name}`), "utf8")]).toEqual([name, true, "another's"]);
+    }
+    expect(readFileSync(join(out, "manifest.json.sig"))).toHaveLength(64);
+    expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
   });
 
   it("sends no tarball but the one its signed manifest names, by its hash: the job that sends has a download of its own of the build's tarball, and nothing else in that job reads one", () => {

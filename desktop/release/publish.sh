@@ -189,15 +189,15 @@ case "$VERB" in
     # The line is written into a folder of this signing's own, where no one else has a name for
     # it, is one that the install script beside this one takes for this release, and is signed
     # there: openssl signs a file, and no pipe, as it asks a file's size first. Only then do the
-    # two have their names beside the tarball, the signature first: whatever stood under either
-    # name is replaced, a link too, and never written through. The folder goes however this ends.
+    # two have their names beside the tarball, the manifest and then its signature, each by a
+    # rename: whatever stood under either name is replaced, a link too, and never written
+    # through. The folder goes however this ends.
     signing="$(mktemp -d --tmpdir release-signing-XXXXXXXXXX)"
     trap 'rm -rf "$signing"' EXIT
     manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$DESKTOP_STATE_SCHEMA" >"$signing/manifest.json"
     taken="$(bash -c '. <(sed "\$d" "$1") && settings && release_of "$2"' _ "$HERE/install.sh" "$signing/manifest.json" 2>/dev/null)" || taken=
     [ "$taken" = "$VERSION $DESKTOP_TARBALL_SHA256 $DESKTOP_TARBALL_SIZE" ] || fail "the manifest of $VERSION is none that install.sh takes for it: nothing is signed"
     openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$signing/manifest.json" -out "$signing/manifest.json.sig"
-    rm -f "$OUT/manifest.json.sig"
     mv -T "$signing/manifest.json" "$OUT/manifest.json"
     mv -T "$signing/manifest.json.sig" "$OUT/manifest.json.sig"
     echo "signed $OUT/manifest.json"

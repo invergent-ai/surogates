@@ -2091,6 +2091,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
         });
       }
     }
+    // The record's own writing refuses one too, whoever calls it: asked by itself, from the
+    // script's functions without its last line, it writes no record, and no file beside one.
+    expect(root(`bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && record http://user:secret@surogate.example'; echo "ended $?"; ls -A /etc/surogate 2>/dev/null`)).toMatchObject({
+      stdout: "ended 1\n", stderr: "Surogate Desktop: a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone\n",
+    });
     // A base names its server right behind its two slashes. With a third slash there, the script
     // would find no server and so no user, and curl, which takes the third for a slip, would send
     // the login: it is no URL here, as it is none to the app. Nor is one with no server at all.
