@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 import hashlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -22,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from surogates.browser.control import HANDED_BACK_FROM
+from surogates.browser.control import RESUMES, paused_by_user_result
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -2424,11 +2425,15 @@ class SessionStore:
             "browser.unavailable",
             "browser.control_granted",
         )
-        # A hand back made from another chat is told to this one as the
-        # take-over was, for its pane: it wakes nobody here.
-        handed_back_elsewhere = and_(
+        # A hand back of the browser on the user's computer is work only
+        # when the take-over had stopped the chat's agent, which the event
+        # says (``resumes``).  Any other is told for the chat's pane, as the
+        # take-over was.  The cloud's names no computer, and is as it was:
+        # the wake at a release.
+        hand_back_for_the_pane = and_(
             EventRow.type == "browser.control_returned",
-            EventRow.data.has_key(HANDED_BACK_FROM),
+            EventRow.data["computer"].astext.is_not_distinct_from("true"),
+            EventRow.data[RESUMES].astext.is_distinct_from("true"),
         )
 
         # Correlated scalar subqueries: latest event for the session
@@ -2442,7 +2447,7 @@ class SessionStore:
                 .where(
                     EventRow.session_id == SessionRow.id,
                     EventRow.type.notin_(trailing_async_event_types),
-                    not_(handed_back_elsewhere),
+                    not_(hand_back_for_the_pane),
                 )
                 .order_by(EventRow.id.desc())
                 .limit(1)
@@ -2548,6 +2553,53 @@ class SessionStore:
         )
         async with self._sf() as db:
             return list((await db.execute(stmt)).scalars())
+
+    @asynccontextmanager
+    async def telling_browser_control(self, session_id: UUID) -> AsyncIterator[None]:
+        """Hold the telling of a chat's take-overs and hand backs to one at a time, in every process.
+
+        The control route reads what the chat was last told and then tells it
+        the next.  Two hand backs posted together, as from a chat open in two
+        windows, would both read the take-over and both tell the chat, and its
+        agent would be given two turns.  A Postgres advisory lock, held by a
+        transaction of its own until the block ends.
+        """
+        async with self._sf() as db:
+            await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
+            yield
+
+    async def browser_call_paused_since(self, session_id: UUID, after_event_id: int) -> bool:
+        """Whether a browser tool of a chat answered that its user holds the browser, after *after_event_id*.
+
+        That is its agent stopped and told to wait.  A call counts when made
+        by the chat's own session or by one working under it, a sub-agent's:
+        the chat's browser is theirs alike.  Its result is the pause's own
+        answer whole, under a browser tool's name: a result that only quotes
+        it, as a page's text can, is none.
+        """
+        owner = select(SessionRow.user_id).where(SessionRow.id == session_id).scalar_subquery()
+        under_the_chat = or_(
+            SessionRow.id == session_id,
+            and_(
+                # Made under a chat, a session is its user's too: found among theirs.
+                SessionRow.user_id == owner,
+                SessionRow.config["sandbox_root_session_id"].astext == str(session_id),
+            ),
+        )
+        stmt = (
+            select(EventRow.id)
+            .join(SessionRow, SessionRow.id == EventRow.session_id)
+            .where(
+                under_the_chat,
+                EventRow.id > after_event_id,
+                EventRow.type == EventType.TOOL_RESULT.value,
+                EventRow.data["name"].astext.startswith("browser_", autoescape=True),
+                EventRow.data["content"].astext == paused_by_user_result(),
+            )
+            .limit(1)
+        )
+        async with self._sf() as db:
+            return (await db.execute(stmt)).first() is not None
 
 
 # ---------------------------------------------------------------------------

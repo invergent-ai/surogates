@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 import surogates.harness.loop as loop_module
-from surogates.harness.loop_pending import _actionable_pending_events
+from surogates.harness.loop_pending import _actionable_pending_events, _turn_for_a_hand_back
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive, _session, _stub_store
 
@@ -41,20 +41,88 @@ def test_a_browsers_take_over_and_its_opening_and_closing_give_a_wake_no_work(to
     assert _actionable_pending_events([event(5, told)], cursor=4) == []
 
 
-def test_a_browsers_hand_back_still_does():
-    # Handed back, the agent goes on: the hand back is what wakes it.
-    events = [event(5, EventType.BROWSER_CONTROL_GRANTED), event(6, EventType.BROWSER_CONTROL_RETURNED)]
+def handed_back(id_: int, **said) -> SimpleNamespace:
+    """A hand back as the control route writes it: a computer's says it is one, the cloud's does not."""
+    return SimpleNamespace(id=id_, type=EventType.BROWSER_CONTROL_RETURNED.value, data={"released_by": "user-1", **said})
+
+
+# A hand back on the user's computer after a take-over that had stopped the chat's agent.
+STOPPED = {"computer": True, "resumes": True}
+
+
+def test_the_clouds_hand_back_still_gives_a_wake_work():
+    # As it was: a release of the cloud's browser is the session's wake.
+    events = [event(5, EventType.BROWSER_CONTROL_GRANTED), handed_back(6)]
     assert [e.id for e in _actionable_pending_events(events, cursor=4)] == [6]
 
 
-def test_a_hand_back_made_from_another_chat_gives_this_chats_wake_no_work():
-    # Told to a chat that still said its user held the browser, for its pane: its agent goes on in the
-    # chat the browser was handed back from.
-    elsewhere = SimpleNamespace(id=5, type=EventType.BROWSER_CONTROL_RETURNED, data={"handed_back_from": str(uuid4())})
-    own = SimpleNamespace(id=6, type=EventType.BROWSER_CONTROL_RETURNED, data={"computer": True})
+def test_a_computers_hand_back_gives_a_wake_work_only_when_the_take_over_had_stopped_the_agent():
+    stopped = handed_back(5, **STOPPED)
+    # Nothing was stopped, or it was made from another chat: told for the pane, as the take-over was.
+    nothing_stopped = handed_back(6, computer=True)
+    elsewhere = handed_back(7, computer=True, handed_back_from=str(uuid4()))
     # Only a hand back is read so: nothing a message carries takes its turn away.
-    message = SimpleNamespace(id=7, type=EventType.USER_MESSAGE, data={"content": "Go on.", "handed_back_from": str(uuid4())})
-    assert [e.id for e in _actionable_pending_events([elsewhere, own, message], cursor=4)] == [6, 7]
+    message = SimpleNamespace(id=8, type=EventType.USER_MESSAGE.value, data={"content": "Go on.", "computer": True})
+    events = [stopped, nothing_stopped, elsewhere, message]
+    assert [e.id for e in _actionable_pending_events(events, cursor=4)] == [5, 8]
+
+
+def said(id_: int, text: str = "Open the report.") -> SimpleNamespace:
+    return SimpleNamespace(id=id_, type=EventType.USER_MESSAGE.value, data={"content": text})
+
+
+def answered(id_: int, *, calls: bool = False) -> SimpleNamespace:
+    """The model's response: its answer, which ends a turn, or its *calls* for tools, which does not."""
+    message = {"role": "assistant", "content": "" if calls else "Done."}
+    if calls:
+        message["tool_calls"] = [{"id": "call-1", "type": "function", "function": {"name": "browser_click", "arguments": "{}"}}]
+    return SimpleNamespace(id=id_, type=EventType.LLM_RESPONSE.value, data={"message": message})
+
+
+def ended(id_: int) -> SimpleNamespace:
+    return SimpleNamespace(id=id_, type=EventType.SESSION_COMPLETE.value, data={"reason": "tool_loop_halt"})
+
+
+def asked(id_: int) -> SimpleNamespace:
+    """A request to the model, which reads the hand backs written before it."""
+    return SimpleNamespace(id=id_, type=EventType.LLM_REQUEST.value, data={})
+
+
+@pytest.mark.parametrize(("log", "the_hand_backs"), [
+    # The user's message was answered, then the browser handed back: the turn is the hand back's.
+    ([said(1), answered(2), handed_back(3, **STOPPED)], True),
+    # A turn that ended with no answer of the model's ended all the same.
+    ([said(1), answered(2, calls=True), ended(3), handed_back(4, **STOPPED)], True),
+    # The hand back's turn was begun and cut off: it is still the hand back's.
+    ([said(1), answered(2), handed_back(3, **STOPPED), asked(4), answered(5, calls=True)], True),
+    # Handed back as the turn before was ending, between its answer and its end: that end is not the hand back's.
+    ([said(1), answered(2), handed_back(3, **STOPPED), ended(4)], True),
+    # The hand back's own turn ran and ended with no answer of the model's.
+    ([said(1), answered(2), handed_back(3, **STOPPED), asked(4), answered(5, calls=True), ended(6)], False),
+    # The message has no answer yet, or its turn is still under way: the turn is the message's.
+    ([said(1), handed_back(2, **STOPPED)], False),
+    ([said(1), answered(2, calls=True), handed_back(3, **STOPPED)], False),
+    # The user typed since the hand back.
+    ([said(1), answered(2), handed_back(3, **STOPPED), said(4, "/compress")], False),
+    # The hand back was read and answered: a later wake is not its turn.
+    ([said(1), answered(2), handed_back(3, **STOPPED), asked(4), answered(5)], False),
+    # Handed back while a command's own wake was answering it: read by no request, it is the next turn's.
+    ([said(1, "/goal status"), handed_back(2, **STOPPED), answered(3)], True),
+    # Handed back while the message's turn was under way, and read in it at its next request.
+    ([said(1), asked(2), answered(3, calls=True), handed_back(4, **STOPPED), asked(5), answered(6)], False),
+    # A hand back that stopped nothing, one made from another chat, and the cloud's give no turn of their own.
+    ([said(1), answered(2), handed_back(3, computer=True)], False),
+    ([said(1), answered(2), handed_back(3, computer=True, handed_back_from="another")], False),
+    ([said(1), answered(2), handed_back(3)], False),
+    ([], False),
+], ids=[
+    "answered-then-handed-back", "ended-then-handed-back", "its-turn-cut-off", "as-the-turn-before-ended",
+    "its-turn-ended-unanswered", "message-unanswered",
+    "message-under-way", "typed-since", "hand-back-answered", "during-a-commands-wake", "read-in-the-messages-turn",
+    "nothing-stopped", "another-chats", "the-clouds", "empty",
+])
+def test_a_turn_is_a_hand_backs_once_the_users_last_message_was_answered_and_until_it_is(log, the_hand_backs):
+    assert _turn_for_a_hand_back(log) is the_hand_backs
 
 
 async def _wake(monkeypatch, *since_the_turn: EventType, **told: str) -> tuple[int, list[EventType]]:
@@ -89,12 +157,15 @@ async def test_a_wake_that_finds_only_a_take_over_or_the_browsers_opening_or_clo
 
 
 @pytest.mark.asyncio
-async def test_a_wake_at_a_hand_back_runs_the_agents_turn(monkeypatch):
-    turns, wrote = await _wake(monkeypatch, EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED)
+async def test_a_wake_at_a_hand_back_runs_the_turn_of_an_agent_the_take_over_had_stopped(monkeypatch):
+    turns, wrote = await _wake(
+        monkeypatch, EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED, resumes=True,
+    )
     assert turns == 1
     assert wrote == [EventType.HARNESS_WAKE]
 
 
 @pytest.mark.asyncio
-async def test_a_wake_that_finds_only_a_hand_back_made_from_another_chat_runs_no_turn(monkeypatch):
-    assert await _wake(monkeypatch, EventType.BROWSER_CONTROL_RETURNED, handed_back_from=str(uuid4())) == (0, [])
+@pytest.mark.parametrize("told", [{}, {"handed_back_from": str(uuid4())}], ids=["nothing-stopped", "another-chats"])
+async def test_a_wake_that_finds_only_a_hand_back_for_the_pane_runs_no_turn(monkeypatch, told):
+    assert await _wake(monkeypatch, EventType.BROWSER_CONTROL_GRANTED, EventType.BROWSER_CONTROL_RETURNED, **told) == (0, [])

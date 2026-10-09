@@ -79,7 +79,7 @@ from typing import Any, Self
 from uuid import UUID
 
 from surogates.browser.client import BrowserClientBase
-from surogates.browser.control import paused_by_user_result
+from surogates.browser.control import RESUMES, paused_by_user_result
 from surogates.devices.binding import is_binding_root
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
@@ -146,6 +146,30 @@ def of_a_sub_agent(event: Any) -> bool:
     its root chat's log for the chat's pane.  One with no data names none."""
     named = (event.data or {}).get("session_id")
     return named is not None and str(named) != str(event.session_id)
+
+
+def _handed_back_on_computer(event: Any) -> dict[str, Any] | None:
+    """What an event says when it is a hand back of the browser on the user's computer; None for any
+    other event, the cloud's browser handed back among them, which names no computer."""
+    data = getattr(event, "data", None) or {}
+    kind = str(getattr(event.type, "value", event.type))
+    if kind != EventType.BROWSER_CONTROL_RETURNED.value or data.get("computer") is not True:
+        return None
+    return data
+
+
+def resumes_the_agent(event: Any) -> bool:
+    """Whether an event is the hand back that gives a chat's agent a turn: the take-over had stopped
+    it, as the control route found when it told the chat (``resumes``)."""
+    said = _handed_back_on_computer(event)
+    return said is not None and said.get(RESUMES) is True
+
+
+def for_the_pane_alone(event: Any) -> bool:
+    """Whether an event is a hand back on the user's computer that stopped no agent of the chat's:
+    told for its pane, as the take-over was, and no work for anyone."""
+    said = _handed_back_on_computer(event)
+    return said is not None and said.get(RESUMES) is not True
 
 
 def answering_refusals(handler: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:

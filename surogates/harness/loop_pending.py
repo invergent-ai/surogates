@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from surogates.browser.control import HANDED_BACK_FROM
+from surogates.devices.browser import for_the_pane_alone, resumes_the_agent
 from surogates.session.events import EventType
 
 _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
@@ -14,21 +14,13 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
     EventType.DEVICE_WAITING.value,
     EventType.DEVICE_RESUMED.value,
     # These tell a chat's browser pane that its browser opened, closed or is not there, and that its
-    # user took it over, which is to stop the agent.  The hand back is not among them: it is what
-    # wakes the agent to go on.
+    # user took it over, which is to stop the agent.  The hand back is not among them: the cloud's
+    # wakes the agent, and a computer's does when the take-over had stopped it (for_the_pane_alone).
     EventType.BROWSER_PROVISIONED.value,
     EventType.BROWSER_DESTROYED.value,
     EventType.BROWSER_UNAVAILABLE.value,
     EventType.BROWSER_CONTROL_GRANTED.value,
 })
-
-
-def _handed_back_elsewhere(event_type: str, event: Any) -> bool:
-    """Whether an event tells a chat that its browser was handed back from another chat: told for its
-    pane, as the take-over was.  The agent goes on in the chat its user handed it back from."""
-    return event_type == EventType.BROWSER_CONTROL_RETURNED.value and HANDED_BACK_FROM in (
-        getattr(event, "data", None) or {}
-    )
 
 
 def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
@@ -44,10 +36,64 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
             event.id is not None
             and event.id > cursor
             and event_type not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
-            and not _handed_back_elsewhere(event_type, event)
+            and not for_the_pane_alone(event)
         ):
             pending.append(event)
     return pending
+
+
+def _hand_back_unread(events: list[Any]) -> bool:
+    """Whether the hand back of the browser that had stopped the agent waits to be read: none of the
+    model's requests came after it.
+
+    The cursor cannot tell: a hand back that lands while a turn, or a
+    command's wake, is under way is behind the cursor once that moves.  Every
+    model request reads the hand backs written before it, live and in replay
+    alike (surogates.harness.loop_context_replay.unread_reports).
+    """
+    unread = False
+    for event in events:
+        if str(getattr(event.type, "value", event.type)) == EventType.LLM_REQUEST.value:
+            unread = False
+        elif resumes_the_agent(event):
+            unread = True
+    return unread
+
+
+def _turn_for_a_hand_back(events: list[Any]) -> bool:
+    """Whether the turn a wake is about to run is one a hand back of the browser gives the agent.
+
+    No message of the user's waits for its answer, and a hand back of the
+    browser that had stopped the agent has not been answered.  A wake reads
+    the user's last message to run its command; in such a turn that message
+    is not what the wake is for, and its command must not run again.
+
+    A hand back opens a turn when it lands with none under way; one that
+    lands in a turn, a command's own wake included, opens the next unless a
+    model request of that turn read it.  A turn it opened and a dead worker
+    cut off is still its own.
+    """
+    opened_by: str | None = None
+    # A hand back no model request has read yet.
+    unread = False
+    for event in events:
+        kind = str(getattr(event.type, "value", event.type))
+        ends_a_turn = kind == EventType.SESSION_COMPLETE.value or (
+            # The model's answer ends a turn; its calls for tools do not.
+            kind == EventType.LLM_RESPONSE.value
+            and not ((getattr(event, "data", None) or {}).get("message") or {}).get("tool_calls")
+        )
+        if kind == EventType.USER_MESSAGE.value:
+            opened_by = "message"
+        elif kind == EventType.LLM_REQUEST.value:
+            unread = False
+        elif ends_a_turn:
+            opened_by = "hand back" if unread else None
+        elif resumes_the_agent(event):
+            unread = True
+            if opened_by is None:
+                opened_by = "hand back"
+    return opened_by == "hand back"
 
 
 def _slash_loop_already_processed(events: list[Any]) -> bool:

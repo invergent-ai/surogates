@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -91,6 +92,17 @@ class StubSessions:
     def __init__(self) -> None:
         self.sessions: dict[UUID, Any] = {}
         self.events: dict[UUID, list[str | tuple[str, UUID]]] = {}
+        # The chats whose agent was stopped: a browser call of theirs answered paused since their take-over.
+        self.stopped: set[UUID] = set()
+        self.asked_since: list[tuple[UUID, int]] = []
+
+    @asynccontextmanager
+    async def telling_browser_control(self, session_id: UUID):
+        yield
+
+    async def browser_call_paused_since(self, session_id: UUID, after_event_id: int) -> bool:
+        self.asked_since.append((session_id, after_event_id))
+        return session_id in self.stopped
 
     async def get_session(self, session_id: UUID) -> Any:
         if session_id not in self.sessions:
@@ -117,9 +129,10 @@ class StubSessions:
     async def get_events(self, session_id: UUID, *, types: list[Any] | None = None, **_: Any) -> list[Any]:
         wanted = {kind.value for kind in types or []}
         events = [entry if isinstance(entry, tuple) else (entry, session_id) for entry in self.events.get(session_id, [])]
+        # An event's id is its place in the log, counted from one.
         return [
-            SimpleNamespace(type=kind, data={"session_id": str(of), "computer": True})
-            for kind, of in events if kind in wanted
+            SimpleNamespace(id=at, type=kind, data={"session_id": str(of), "computer": True})
+            for at, (kind, of) in enumerate(events, start=1) if kind in wanted
         ]
 
     def emitter(self, events: list[tuple[str, str, dict]]):
@@ -569,6 +582,8 @@ class TestControlEndpoint:
         store.sessions[sid] = SimpleNamespace(
             org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
         )
+        # Its agent met the pause: a browser call of the chat's answered paused since the take-over.
+        store.stopped.add(sid)
         events: list[tuple[str, str, dict]] = []
         wakes: list[str] = []
 
@@ -590,9 +605,13 @@ class TestControlEndpoint:
 
         assert events == [
             (str(sid), "browser.control_granted", {"session_id": str(sid), "owner_user_id": str(USER_1), "computer": True}),
-            (str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True}),
+            (str(sid), "browser.control_returned", {
+                "session_id": str(sid), "released_by": str(USER_1), "computer": True, "resumes": True,
+            }),
         ]
-        # Handed back: its agent goes on, as it does once a user hands the cloud's browser back.
+        # Asked of what the chat's browser calls answered since that take-over, the first event of its log.
+        assert store.asked_since == [(sid, 1)]
+        # Handed back: its agent, which was stopped, goes on.
         assert wakes == [str(sid)]
 
         # Another organisation's chat is not known here.
@@ -600,6 +619,33 @@ class TestControlEndpoint:
             response = await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": "release"})
         assert response.status_code == 404
         assert len(events) == 2
+
+    async def test_a_local_folder_chats_hand_back_is_for_its_pane_alone_when_its_agent_was_not_stopped(
+        self, app_factory,
+    ) -> None:
+        build, _resolver, _control = app_factory
+        sid = uuid4()
+        store = StubSessions()
+        store.sessions[sid] = SimpleNamespace(
+            org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+        )
+        events: list[tuple[str, str, dict]] = []
+        wakes: list[str] = []
+        app = build()
+        app.state.session_store = store
+        app.state.session_event_emitter = store.emitter(events)
+        app.state.session_wake = _wake_recorder(wakes)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            for action in ("acquire", "release"):
+                await client.post(f"/v1/sessions/{sid}/browser/control", json={"action": action})
+
+        # No browser call of the chat's answered paused while its user held the browser: nothing was
+        # stopped, so the hand back says so to nobody but the pane, and nobody is woken.
+        assert events[1] == (
+            str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True},
+        )
+        assert wakes == []
 
     async def test_a_token_for_another_session_tells_a_local_folder_chat_nothing(self, app_factory) -> None:
         build, _resolver, _control = app_factory
@@ -639,6 +685,7 @@ class TestControlEndpoint:
         store.sessions[sid] = SimpleNamespace(
             org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
         )
+        store.stopped.add(sid)
         events: list[tuple[str, str, dict]] = []
         wakes: list[str] = []
         app = build()
@@ -674,6 +721,7 @@ class TestControlEndpoint:
         store.sessions[sid] = SimpleNamespace(
             org_id=ORG_1, agent_id="agent", config={"execution": {"kind": "device", "device_id": str(uuid4())}},
         )
+        store.stopped.add(sid)
         events: list[tuple[str, str, dict]] = []
         wakes: list[str] = []
         app = build()
@@ -713,6 +761,8 @@ class TestControlEndpoint:
         # Two more chats of the agent on the computer still say their user holds its browser.
         store.events[away] = ["browser.control_granted"]
         store.events[told] = ["browser.control_granted"]
+        # All three met the pause. Only the chat the browser is handed back from goes on.
+        store.stopped.update((sid, away, told))
         events: list[tuple[str, str, dict]] = []
         wakes: list[str] = []
         emit = store.emitter(events)
@@ -737,7 +787,9 @@ class TestControlEndpoint:
             # One could not be told: the hand back is made all the same, and the next chat is told.
             assert (handed_back.status_code, handed_back.json()) == (200, {"outcome": "released"})
             assert events[1:] == [
-                (str(sid), "browser.control_returned", {"session_id": str(sid), "released_by": str(USER_1), "computer": True}),
+                (str(sid), "browser.control_returned", {
+                    "session_id": str(sid), "released_by": str(USER_1), "computer": True, "resumes": True,
+                }),
                 (str(told), "browser.control_returned", {
                     "session_id": str(told), "released_by": str(USER_1), "computer": True, "handed_back_from": str(sid),
                 }),
