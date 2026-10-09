@@ -923,6 +923,10 @@ main() {
       apply "$2" "$3" "$4"
       ;;
     --base | "")
+      # What installs as root is the system's own tools, wherever its caller's PATH points, from
+      # before it runs the first of them, as an apply's are: an openssl of another's there would
+      # call any release signed.
+      [ "$EUID" -ne 0 ] || export PATH=/usr/sbin:/usr/bin:/sbin:/bin
       local base=https://surogate.ai
       if [ "${1:-}" = --base ]; then
         [ "$#" -eq 2 ] && http_url "$2" || fail "usage: install.sh --base <http or https URL>"

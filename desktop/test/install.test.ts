@@ -1598,7 +1598,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
     "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
-    `RUN echo '#!/bin/sh' >/usr/local/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/local/sbin/apparmor_parser && chmod 755 /usr/local/sbin/apparmor_parser`,
+    // In the system's own place, the system's parser kept beside it: the install runs the tools of the system's four folders, and no other.
+    `RUN mv /usr/sbin/apparmor_parser /usr/sbin/apparmor_parser.own && echo '#!/bin/sh' >/usr/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser.own --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/sbin/apparmor_parser && chmod 755 /usr/sbin/apparmor_parser`,
     "RUN apt-get update && apt-get install -y --no-install-recommends language-pack-de strace",
   ], ["--network", "host"]);
   let server: ChildProcess;
@@ -2405,17 +2406,36 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   it("rolls back with the system's own tools and into a folder of root's own, whatever PATH and TMPDIR root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
     expect(current()).toBe("/opt/surogate/versions/1.6.0");
     const installed = standing();
-    // First on root's PATH, an openssl that calls every signature good, and a dpkg and a uname
-    // that write down that they ran before they run the system's: none of the three is run, by
-    // the script started by its name or read by bash, about a release that no release key signed.
-    expect(root("mkdir -p /tmp/caller && printf '#!/bin/sh\\nexit 0\\n' >/tmp/caller/openssl "
-      + "&& for tool in dpkg uname; do printf '#!/bin/sh\\necho %s >>/tmp/caller/ran\\nexec /usr/bin/%s \"$@\"\\n' \"$tool\" \"$tool\" >/tmp/caller/$tool; done && chmod 755 /tmp/caller/*").status).toBe(0);
-    for (const started of ["/opt/surogate-test/install.sh --version 1.6.1", "bash -s -- --version 1.6.1 </opt/surogate-test/install.sh"]) {
-      expect(root(`PATH=/tmp/caller:$PATH ${started}`), started)
-        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json is not signed by Surogate's release key\n` });
+    // First on root's PATH, a folder with a tool under every name of the system's four folders:
+    // each writes down that it ran, and then runs the system's own by its whole path. Its openssl
+    // calls every signature good. None of them is run, by the script started by its name or read
+    // by bash: not by a rollback to a release that no release key signed, and not by an install
+    // of one.
+    const standIns = [
+      "mkdir -p /tmp/caller",
+      'for tool in /usr/sbin/* /usr/bin/* /sbin/* /bin/*; do',
+      '  [ -f "$tool" ] && [ -x "$tool" ] || continue',
+      '  [ -e "/tmp/caller/$(basename "$tool")" ] || printf \'#!/bin/sh\\necho %s >>/tmp/caller/ran\\nexec %s "$@"\\n\' "$(basename "$tool")" "$tool" >"/tmp/caller/$(basename "$tool")"',
+      "done",
+      "printf '#!/bin/sh\\necho openssl >>/tmp/caller/ran\\nexit 0\\n' >/tmp/caller/openssl",
+      "chmod 755 /tmp/caller/*",
+      "ls /tmp/caller | wc -l",
+    ].join("\n");
+    expect(Number(root(standIns).stdout)).toBeGreaterThan(300);
+    const unsigned = (started: string, said: string) => {
+      const refused = root(`PATH=/tmp/caller:$PATH ${started}`);
+      expect(refused.status, started).toBe(1);
+      expect(refused.stderr.endsWith(`Surogate Desktop: ${said} is not signed by Surogate's release key\n`), `${started}: ${refused.stderr}`).toBe(true);
       expect(root("cat /tmp/caller/ran 2>/dev/null").stdout, started).toBe("");
       expect(standing(), started).toBe(installed);
-    }
+    };
+    unsigned("/opt/surogate-test/install.sh --version 1.6.1", `${base}/desktop/releases/1.6.1/manifest.json`);
+    unsigned("/bin/bash -s -- --version 1.6.1 </opt/surogate-test/install.sh", `${base}/desktop/releases/1.6.1/manifest.json`);
+    // The base's newest release is that one: the install's own root part asks the system's openssl too.
+    latest("1.6.1");
+    unsigned(`/opt/surogate-test/install.sh --base ${base}`, `${base}/desktop/latest.json`);
+    unsigned(`/bin/bash -s -- --base ${base} </opt/surogate-test/install.sh`, `${base}/desktop/latest.json`);
+    latest("1.6.0");
     // Nor is what it downloads put where root's own TMPDIR says, in a folder that is another's:
     // whoever owns that one could put a folder of their own in the download's name. Each folder a
     // rollback makes, and each the install makes, as mktemp was asked for it: one in /tmp, which
