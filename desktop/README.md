@@ -85,7 +85,13 @@ is saved without asking. A page can start a download by itself, so there a file 
 choosing can land in `Downloads` unasked, where a tool that searches the folder's tree, as a
 test runner does, finds it. The agent is told where the file was saved, or why it was not
 (over 50 MiB, not finished, denied), with its next answer that says what the page did: a
-navigation's, the mouse's, the keyboard's or an upload's.
+navigation's, the mouse's, the keyboard's or an upload's. One answer carries at most twenty
+notes of what its downloads came to and twenty of what else its pages did; more than that is
+not told. A download that begins and never ends is dropped, and told as not finished, once no
+byte of any download has come for a minute. One that never ends and keeps coming is not
+stopped: it is kept in the temporary folder as it comes, past the 50 MiB a saved file may be
+(141 MiB in 7 s was measured), and the agent is told nothing of it, until you take the
+browser over, which stops the agent's own, or the browser closes.
 
 While the agent drives, a page gets a file only when the agent uploads one: up to ten files
 of the chat's folder, 50 MiB in all, read through the chat's file host and given to the file
@@ -103,25 +109,46 @@ and makes the agent wait. It is the agent's one browser here, so its browser too
 that you have it in every one of its chats; what it was doing in a page is cut short, a
 download of its own still on its way is dropped, which it is told, and its open browser
 prompts close. A file input that asked before is given nothing after: the page must ask
-again. While you have the browser:
+again. One upload can still reach its page: a step that was already sent when you took the
+browser over gives the files if the page takes it within a quarter of a second, and the
+agent is then told that the page has them. While you have the browser:
 
 - a page's own questions wait for your answer;
 - a file input you click opens the browser's own file chooser; in a page the agent had open,
-  only once that page has been quiet for five seconds: until then, and in one that keeps
-  asking for a file by itself, your click on a file input opens nothing;
-- a download that begins in a chat's page is yours: you are asked before it is saved, in
-  either mode, and the agent is told nothing of it.
+  only once that page has been quiet for five seconds and answers: until then, in one that
+  keeps asking for a file by itself, and in one a frame of which is stuck, your click on a
+  file input opens nothing;
+- a download that comes in a chat's page is yours: you are asked before it is saved, in
+  either mode, and the agent is told nothing of it. One you start that comes only after you
+  have handed the browser back is not covered by this: the paragraph on the minute after a
+  hand back, below, says what the agent is told of it then, and after that minute it is
+  taken for the agent's own, saved as the agent's are and told to it by name.
+
+One limit of that last rule. Where the agent had clicked a link whose site had not answered
+when you took the browser over, the browser does not say that its navigation stopped. If
+you then download that same address yourself by a link marked `download`, your download is
+taken for the agent's answer: it is dropped without asking you, and the agent is told its
+name, as of a download of its own that your take-over interrupted. It was measured 8 s
+after a take-over, and nothing bounds it in time while the site leaves the first request
+open. It costs you that one download; a second click works.
 
 Hand back, in the pane, asks in a window of the desktop's own, "Hand the browser back to
 <agent>?". Keep control is its default, and Hand back takes no press in its first half
 second. The browser is handed back from the chat it was taken over from, or from any chat
 of the agent's once that one is deleted. Nothing the agent's page does by itself hands the
 browser back, shows it or opens Settings: each needs a click of yours in that page. It can
-take the browser over by itself, which only stops the agent. The pane tells the chat of a
-take-over and of a hand back, and at the hand back that chat's agent goes on; if the chat
-could not be told, its agent waits until you write to it, and the pane says so where it
-can. The agent's other chats are not told of either. A take-over lasts until you hand the
-browser back or quit the app, which closes the browser.
+take the browser over by itself, with no click of yours, and that does all your own
+take-over does, not only stop the agent: the agent's downloads on their way are dropped; no
+file input that had asked, in any of its chats, is given a file after; each download that
+comes meanwhile is asked about as yours, as one downloaded while you had control, and the
+agent is told nothing of it; and five seconds on, a file input in the agent's pages opens
+the browser's own file chooser at a click. It stays so until you hand the browser back.
+The pane tells the chat of a take-over and of a hand back, and at the hand back that chat's
+agent goes on; if the chat could not be told, its agent waits until you write to it, and
+the pane says so where it can. The agent's other chats are not told of either. A take-over
+lasts until you hand the browser back or quit the app, which closes the browser. A hand
+back gives no page anything a click of yours would: no page can open a window, fill the
+screen or ask for a file on it.
 
 For a minute after a hand back, a download the browser shows no request for (a `download`
 link to its page's own site, a `blob:` or a `data:` address) is still asked about as yours,
