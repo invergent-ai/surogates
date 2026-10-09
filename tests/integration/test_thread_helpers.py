@@ -1252,6 +1252,7 @@ def test_every_maker_of_a_sessions_pod_is_one_whose_session_is_known_to_carry_it
         "harness/loop.py:_build_session_sandbox_spec",                   # a stop's take-back: the turn's session
         "harness/loop.py:_build_session_sandbox_spec",                   # a stop's put-back: the turn's session
         "harness/loop_artifact_completion.py:_build_session_sandbox_spec",  # a turn's end, to land: the turn's session
+        "harness/loop_artifact_completion.py:_build_session_sandbox_spec",  # a routine run's pickup: a master's run, never a thread's
         "harness/loop_code_commands.py:_build_session_sandbox_spec",     # /code: refused in a thread and under one
         "tools/builtin/coding_agent.py:_build_session_sandbox_spec",     # run_coding_agent: the turn's config
     ])
