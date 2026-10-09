@@ -934,6 +934,42 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await binding()).toMatchObject({ takenOver: false });
   });
 
+  it("asks nothing about a browser nobody holds any more: a chat's hand back that waits behind Settings' confirmation is closed when Settings' hands the browser back, and the chat's page told that nothing was handed back by it", async () => {
+    const { client, settings, binding } = await heldFromGone();
+    // Settings' confirmation is up, and the other chat's Hand back is clicked: its confirmation waits.
+    await settings.click("#browser-hand-back");
+    const asked = await prompted();
+    const answer = await clicked(client, "handBack", OTHER);
+    await expect.poll(() => asked.textContent("#prompt-waiting")).toBe("More prompts wait after this one.");
+    await press(asked, "hand_back");
+    await stays(0);
+    expect([await answer(), await binding()]).toEqual([false, expect.objectContaining({ takenOver: false })]);
+  });
+
+  it("closes Settings' hand back confirmation, waiting behind a chat's, when the chat's hands the browser back: Settings is answered that nothing was handed back by it", async () => {
+    const { client, settings, binding, asks } = await heldFromGone();
+    const first = await clicked(client, "handBack", OTHER);
+    const asked = await prompted();
+    const second = settings.evaluate(() => (window as unknown as { surogateSettings: { handBrowserBack(): Promise<boolean> } }).surogateSettings.handBrowserBack());
+    await expect.poll(() => asked.textContent("#prompt-waiting")).toBe("More prompts wait after this one.");
+    void asks;
+    await press(asked, "hand_back");
+    await stays(0);
+    expect([await first(), await second, await binding()]).toEqual(["released", false, expect.objectContaining({ takenOver: false })]);
+  });
+
+  it("answers a chat's hand back by what the chat holds when the confirmation is answered: one that took the browser over itself while a confirmation about a chat that is gone was up handed back its own hold", async () => {
+    const { client, binding } = await heldFromGone();
+    const answer = await clicked(client, "handBack", OTHER);
+    const asked = await prompted();
+    expect(await asked.textContent("#prompt-lead")).toBe(`${LEAD} The chat it was taken over from is gone.`);
+    // Its page takes the browser over for this chat, as a page can by itself.
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), OTHER);
+    expect(await binding()).toMatchObject({ takenOver: true });
+    await press(asked, "hand_back");
+    expect([await answer(), await binding()]).toEqual(["confirmed", expect.objectContaining({ takenOver: false })]);
+  });
+
   it("tells the page nothing was handed back when the browser was taken over from another chat while the confirmation was up", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);

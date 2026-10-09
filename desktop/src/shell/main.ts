@@ -1265,15 +1265,24 @@ function bridge(contents: WebContents, agent: Agent): void {
       const title = held === true ? await titleSoon(sessionId) : null;
       // The window first, where it was hidden since the click: the confirmation opens over it.
       main?.show();
-      if (!(await prompts.confirmHandBack({ agent: agent.name, gone: held !== true, title }, signal))) return false;
-      // Whether anything was handed back: the browser may have been taken over from another chat while the
-      // confirmation was up, and is that chat's to hand back then.
-      if (!stack.handBack(sessionId)) return false;
-      contents.send("desktop:binding-changed", sessionId);
-      // Which hand back it was, for the page to tell the server: only of the browser this chat held is it the
-      // one its user confirmed for this chat, which gives its agent a turn. Held from a chat that is gone,
-      // their confirmation handed back nobody's hold.
-      return held === true ? "confirmed" : "released";
+      const asked = new AbortController();
+      handBacks.add(asked);
+      try {
+        if (!(await prompts.confirmHandBack({ agent: agent.name, gone: held !== true, title }, AbortSignal.any([signal, asked.signal])))) return false;
+        // Who holds it now, and not when the confirmation opened: it can have changed while it was up.
+        const now = stack.tools.takenOver?.(sessionId) ?? false;
+        // Whether anything was handed back: the browser may have been taken over from another chat while the
+        // confirmation was up, and is that chat's to hand back then.
+        if (!stack.handBack(sessionId)) return false;
+        handedBack(asked);
+        contents.send("desktop:binding-changed", sessionId);
+        // Which hand back it was, for the page to tell the server: only of the browser this chat held is it the
+        // one its user confirmed for this chat, which gives its agent a turn. Held from a chat that is gone,
+        // their confirmation handed back nobody's hold.
+        return now === true ? "confirmed" : "released";
+      } finally {
+        handBacks.delete(asked);
+      }
     }),
     openSettings: async (section) => {
       // A project's dialog is over the window: Settings does not open over it.
@@ -1658,6 +1667,13 @@ const menuActions = {
 let browserFailure: string | null = null;
 // Whether Settings is asking to hand the agent's browser back: one confirmation at a time.
 let handingBack = false;
+// The hand back confirmations asked and not answered yet, from a chat's page or from Settings, and what closes
+// each: once the browser is handed back by one, the others ask about a hold that is gone.
+const handBacks = new Set<AbortController>();
+// The browser was handed back through *by*: every other confirmation is closed, and nothing is asked after it.
+const handedBack = (by: AbortController): void => {
+  for (const other of handBacks) if (other !== by) other.abort();
+};
 
 // Settings → Browser's rows: what is found here, each named with the version it says.
 async function browserState() {
@@ -2009,15 +2025,18 @@ function showSettings(section?: "browser"): void {
       const closed = new AbortController();
       const gone = () => closed.abort();
       contents.once("destroyed", gone);
+      handBacks.add(closed);
       try {
         if (!(await prompts.confirmHandBack({ agent: agent.name, gone: true, title: null }, closed.signal))) return false;
         // Whether anything was handed back: a chat may have taken the browser over while the confirmation was up.
         if (!stack.handBackGone()) return false;
+        handedBack(closed);
         // Every chat's page is told: none of them holds it, and each may use it again.
         for (const { root } of stack.bindings.all()) main?.webContents()?.send("desktop:binding-changed", root);
         return true;
       } finally {
         handingBack = false;
+        handBacks.delete(closed);
         contents.off("destroyed", gone);
         if (!contents.isDestroyed()) contents.send("settings:changed");
       }
