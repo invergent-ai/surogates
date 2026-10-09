@@ -1187,6 +1187,59 @@ describe("a page's download, as the host stages it", () => {
     expect([kept.ids.size, kept.unnamed.length, kept.said.length]).toEqual([0, 0, 0]);
   });
 
+  it("tells the agent, of its own download stopped beside one that may be its user's, that such a one was among them: not that its own alone were too large; where one of those ended and waits, the same of one of its own that ends past the bound", async () => {
+    const { folder, grow, begin } = staging({ stagedBytes: 1_000 });
+    const doubted = (id: string) => {
+      const ends = Promise.withResolvers<string>();
+      const url = `blob:http://fixture.test/${id}`;
+      host.begins(id, url, `${id}.bin`);
+      const arrived = arrives({
+        ...downloadOf(`${id}.bin`, join(folder, id), ends.promise, url),
+        cancel: () => (did.push(`cancel ${id}.bin`), rmSync(join(folder, `${id}.crdownload`), { force: true }), ends.reject(new Error("canceled")), Promise.resolve()),
+      });
+      return { arrived, ends: (bytes: number) => (grow(id, bytes, true), ends.resolve(join(folder, id))) };
+    };
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    expect(await host.perform({ executable: join(profile, "no-browser-here"), profile }, "chat-1", SESSION, "browser.nothing", {}, new AbortController().signal)).toMatchObject({ error: {} });
+    // The agent's own, small, and one that may be its user's, past the bound: both are stopped.
+    const own = begin("own", "own.bin");
+    grow("own", 4);
+    const large = doubted("large");
+    grow("large", 1_001);
+    await Promise.all([own.arrived, large.arrived]);
+    expect(did.sort()).toEqual(["cancel large.bin", "cancel own.bin"]);
+    expect(state().unseen.get(SESSION)?.sort()).toEqual([LEFT_TO_USER, tooMuch("own.bin", 1_000, true)].sort());
+    expect(tooMuch("own.bin", 1_000, true)).toBe(
+      'The page\'s download of "own.bin" was not saved: the downloads on their way and waiting to be saved in the agent\'s browser on this computer, the agent\'s own and one that began just after the user handed the browser back and may be the user\'s, were together more than 1000 bytes, too large to save. If it is not the large one, the agent may start it again once the others are saved.',
+    );
+    // One that may be its user's ends within the bound, and waits to be saved: one of the agent's own that ends
+    // past the bound with it is told the same.
+    state().unseen.delete(SESSION);
+    const waits = doubted("waits");
+    waits.ends(600);
+    await waits.arrived;
+    const second = begin("second", "second.bin");
+    second.ends(401);
+    await second.arrived;
+    expect(state().unseen.get(SESSION)).toEqual([tooMuch("second.bin", 1_000, true)]);
+    expect(staged.map(({ name, user }) => [name, user])).toEqual([["waits.bin", true]]);
+    // And one that may be its user's, which ends past the bound with what waits, is not handed on either: its
+    // agent is told only that a download was not saved.
+    const over = doubted("over");
+    over.ends(401);
+    await over.arrived;
+    expect([staged.length, existsSync(join(folder, "over")), state().unseen.get(SESSION)]).toEqual([1, false, [tooMuch("second.bin", 1_000, true), LEFT_TO_USER]]);
+    // With none such among them, the agent's own are spoken of alone, as before.
+    rmSync(join(folder, "waits"));
+    state().unseen.delete(SESSION);
+    const [one, two] = [begin("one", "one.bin"), begin("two", "two.bin")];
+    grow("one", 600);
+    grow("two", 401);
+    await Promise.all([one.arrived, two.arrived]);
+    expect(state().unseen.get(SESSION)?.sort()).toEqual([tooMuch("one.bin", 1_000), tooMuch("two.bin", 1_000)]);
+  }, 30_000);
+
   it("hands on one of exactly what a write may carry, and none a byte over, which it removes and says", async () => {
     const most = fileOf(MAX_WRITE_BYTES);
     await arrives(downloadOf("most.bin", most, Promise.resolve(most)));

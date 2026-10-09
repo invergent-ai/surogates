@@ -112,10 +112,16 @@ export const tooLarge = (name: string, bytes: number, most = MAX_WRITE_BYTES): s
 /**
  * What the agent is told of one of its own that was stopped, or not handed on, because the agent's own
  * downloads, on their way and waiting to be saved, were together more than may be staged. It speaks of the
- * agent's own alone: nothing of its user's is counted, or said. *most*: the limit in force.
+ * agent's own alone where nothing else was counted: nothing of its user's is, or is said. *doubted*: one that
+ * began just after a hand back, and may be its user's, was counted among them; the large one may be that
+ * one, so the words do not say the agent's own were too large. *most*: the limit in force.
  */
-export const tooMuch = (name: string, most: number): string =>
-  `The page's download of ${quoted(name)} was not saved: the agent's own downloads in its browser on this computer, those on their way and those waiting to be saved, were together more than ${most} bytes, too large to save. If it is not the large one, the agent may start it again once the others are saved.`;
+export const tooMuch = (name: string, most: number, doubted = false): string =>
+  `The page's download of ${quoted(name)} was not saved: ${
+    doubted
+      ? "the downloads on their way and waiting to be saved in the agent's browser on this computer, the agent's own and one that began just after the user handed the browser back and may be the user's,"
+      : "the agent's own downloads in its browser on this computer, those on their way and those waiting to be saved,"
+  } were together more than ${most} bytes, too large to save. If it is not the large one, the agent may start it again once the others are saved.`;
 /** What the agent is told of one of its own that its user's take-over of the browser stopped. */
 export const interrupted = (name: string): string =>
   `The page's download of ${quoted(name)} was interrupted when the user took over the agent's browser on this computer, so it was not saved.`;

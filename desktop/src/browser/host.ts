@@ -655,7 +655,10 @@ export class BrowserHost {
   // agent's own until it is gone from there.
   private readonly waiting = new Set<string>();
   // The downloads stopped because more was staged than may be.
-  private readonly overfull = new WeakSet<Download>();
+  // Each with whether one that may be its user's was counted among them (whose).
+  private readonly overfull = new WeakMap<Download, boolean>();
+  // Of those waiting to be saved, the ones that may be its user's.
+  private readonly doubtful = new Set<string>();
   // The chat that last handed the browser back, and when.
   // *acted*: whether an operation of the agent's has had its turn since.
   private handed: { by: string; at: number; acted: boolean } | null = null;
@@ -913,7 +916,7 @@ export class BrowserHost {
   ): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     // The agent acts again: from here on a download nobody is known to have asked for may be its own (whose).
-    if (this.held === null && this.handed !== null) this.handed.acted = true;
+    if (this.handed !== null) this.handed.acted = true;
     if (kind === "browser.set_input_files") return this.upload(session, args, signal, stop, id);
     // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming, or, allowed
     // and still having its files read, comes to nothing (upload).
@@ -1647,7 +1650,7 @@ export class BrowserHost {
         this.endedIn(download, basename(path));
       } catch {
         if (stop?.aborted) tell(interrupted(name));
-        else if (this.overfull.has(download)) tell(tooMuch(name, this.options.stagedBytes ?? STAGED_MOST_BYTES));
+        else if (this.overfull.has(download)) tell(tooMuch(name, this.options.stagedBytes ?? STAGED_MOST_BYTES, this.overfull.get(download)));
         else if (this.unsaid.has(download)) tell(notFinished(name, NO_ID_SAID));
         else if (this.stalled.has(download)) tell(notFinished(name, stalledFor(this.options.stalledMs ?? STALLED_MS)));
         else tell(notFinished(name, unfinished(await download.failure().catch(() => null))));
@@ -1663,11 +1666,12 @@ export class BrowserHost {
       // One of the agent's that ends is handed on only where the agent's own, with it, are no more than may be staged.
       const bound = this.options.stagedBytes ?? STAGED_MOST_BYTES;
       if (counted && (await this.staged({ download, path })).own + size > bound) {
-        tell(tooMuch(name, bound));
+        tell(tooMuch(name, bound, this.doubt()));
         await download.delete().catch(() => {});
         return;
       }
       if (counted) this.waiting.add(path);
+      if (counted && user) this.doubtful.add(path);
       this.options.downloaded({ root, session, name, path, user, ...(user && of.after === true ? { afterHandBack: true as const } : {}) });
     } finally {
       this.arriving.delete(download);
@@ -1732,6 +1736,7 @@ export class BrowserHost {
   private async staged(ending?: { download: Download; path: string }): Promise<{ own: number; each: Map<Download, number> }> {
     const files = await this.sizes();
     for (const path of this.waiting) if (!files.has(basename(path))) this.waiting.delete(path);
+    for (const path of this.doubtful) if (!this.waiting.has(path)) this.doubtful.delete(path);
     const waits = [...this.waiting].map((path) => basename(path));
     // A download's file is named by its id once it has ended, and by its id with an ending of the browser's
     // own (.crdownload) while it is on its way.
@@ -1763,19 +1768,27 @@ export class BrowserHost {
         looking = false;
         if (this.watching !== mine) return;
         const overfull = own > (this.options.stagedBytes ?? STAGED_MOST_BYTES);
+        const doubt = this.doubt();
         for (const download of this.arriving) {
           const bytes = each.get(download) ?? 0;
           const kept = this.grew.get(download);
           if (!kept || bytes > kept.bytes) this.grew.set(download, { bytes, at: this.now() });
           const unsaid = !this.ids.has(download) && this.now() - (this.announced.get(download) ?? this.now()) >= UNSAID_MS;
-          const why = overfull ? this.overfull : unsaid ? this.unsaid : kept && bytes <= kept.bytes && this.now() - kept.at >= limit ? this.stalled : null;
-          if (why === null) continue;
-          why.add(download);
+          const still = kept !== undefined && bytes <= kept.bytes && this.now() - kept.at >= limit;
+          if (overfull) this.overfull.set(download, doubt);
+          else if (unsaid) this.unsaid.add(download);
+          else if (still) this.stalled.add(download);
+          else continue;
           void download.cancel().catch(() => {});
         }
       });
     }, Math.min(STAGED_LOOK_MS, limit / 4));
     this.watching = mine;
+  }
+
+  // Whether one that may be its user's is among what is counted now, on its way or waiting to be saved.
+  private doubt(): boolean {
+    return this.doubted.size > 0 || this.doubtful.size > 0;
   }
 
   private unwatch(): void {
