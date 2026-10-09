@@ -17,10 +17,23 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     stored,
     turn_ends,
 )
-from .test_thread_copies import a_thread, git, pods  # noqa: F401  (pods is a fixture)
+from .test_thread_copies import a_thread, git, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+def outcomes_of(monkeypatch) -> list[dict]:
+    """Each landing's outcome from here on, as its turn's end is answered it."""
+    outcomes: list[dict] = []
+    land_turn = landing_module.land_turn
+
+    async def landed(**arguments):
+        outcomes.append(await land_turn(**arguments))
+        return outcomes[-1]
+
+    monkeypatch.setattr(loop_artifact_completion, "land_turn", landed)
+    return outcomes
 
 
 async def test_your_upload_during_a_turn_is_its_landings_pickup_by_you(api, monkeypatch, pods):
@@ -29,6 +42,7 @@ async def test_your_upload_during_a_turn_is_its_landings_pickup_by_you(api, monk
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo a > a.md")
     (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded while the thread worked")
+    outcomes = outcomes_of(monkeypatch)
     await ends(api, pool, thread)
     durable = pods.project / "_history"
     [row] = await rows(api, thread)
@@ -38,6 +52,26 @@ async def test_your_upload_during_a_turn_is_its_landings_pickup_by_you(api, monk
     assert git(durable, "log", "-1", "--format=%(trailers:key=Surogate-Saga,valueonly)", pickup) == row.saga_id
     assert [(f["path"], f["before"]) for f in row.picked_up] == [("brief.pdf", None)]
     assert row.steps[0]["tool_name"] == "history.pickup"
+    assert [o["picked_up"] for o in outcomes] == [row.picked_up]
+
+
+async def test_a_file_a_landing_left_out_names_who_changed_it_in_its_rows_commit_step(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md && echo 'a file where you made a folder' > Plans && printf ' by A' >> notes.txt")
+    (pods.project / "Plans").mkdir()
+    (pods.project / "Plans" / "q1.md").write_text("q1, uploaded by you")
+    (pods.project / "notes.txt").write_text("v2 notes, saved by you\n")
+    await ends(api, pool, thread)
+    [row] = await rows(api, thread)
+    commit = row.steps[1]
+    # Your folder is in no history but this landing's own pickup, which the commit step is told.
+    assert commit["tool_name"] == "history.commit"
+    assert {o["path"]: (o["reason"], o.get("by")) for o in commit["result"]["overlapped"]} == {
+        "Plans": ("shape", {"kind": "you"}), "notes.txt": ("changed", {"kind": "you"}),
+    }
+    assert sorted((f["path"], f["merged"]) for f in row.files) == [("Plans", False), ("a.md", True), ("notes.txt", False)]
 
 
 async def test_a_turn_that_changed_nothing_records_none_of_your_edits(api, monkeypatch, pods):
@@ -62,8 +96,7 @@ async def test_a_landing_whose_push_answer_was_lost_lists_your_edits_all_the_sam
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo a > a.md")
     (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded while the thread worked")
-    call, land_turn = landing_module._call, landing_module.land_turn
-    outcomes: list[dict] = []
+    call = landing_module._call
 
     async def the_push_answer_is_lost(sandbox_pool, owner, action, **arguments):
         result = await call(sandbox_pool, owner, action, **arguments)
@@ -71,12 +104,8 @@ async def test_a_landing_whose_push_answer_was_lost_lists_your_edits_all_the_sam
             raise landing_module.LandingStepError("the pod's step timed out")
         return result
 
-    async def landed(**arguments):
-        outcomes.append(await land_turn(**arguments))
-        return outcomes[-1]
-
     monkeypatch.setattr(landing_module, "_call", the_push_answer_is_lost)
-    monkeypatch.setattr(loop_artifact_completion, "land_turn", landed)
+    outcomes = outcomes_of(monkeypatch)
     await ends(api, pool, thread)
     # The push happened: the landing counts, and the row it is settled into names your upload as one that ended well does.
     [row] = await rows(api, thread)
@@ -108,5 +137,7 @@ async def test_a_landing_whose_pickup_failed_keeps_the_turn_on_its_branch(api, m
     assert pods.real_names() == ["Report.docx", "notes.txt"]
     [row] = await rows(api, thread)
     assert (row.saga_state, [(s["tool_name"], s["state"]) for s in row.steps]) == ("compensated", [("history.pickup", "failed")])
+    # The landing answered, as one whose commit step failed does: nothing of it reached the real files.
+    assert [report["landing"] for report in await reports(api, master)] == ["compensated"]
     await ends(api, SandboxPool(pods), thread)  # its next turn, with no tool
     assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
