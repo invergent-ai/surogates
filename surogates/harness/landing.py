@@ -1314,14 +1314,16 @@ async def _prune_after_pickup(
 
 async def pick_up_routine(
     *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, yours: bool = False,
-    storage: Any = None, bucket: str | None = None, prefix: str = "",
+    storage: Any = None, bucket: str | None = None, prefix: str = "", redis: Any = None,
 ) -> dict | None:
     """Record what a master's routine run changed in the real files as the routine's: its pickup, or None.
 
     A pickup alone, pushed under the project's lock in the master's pod the
     run worked in, once the landings a killed worker left running are
     settled: what they applied is put back first, so it is no change of
-    the routine's.  One try: a pickup that fails, and one in a project
+    the routine's, and one that had pushed is completed and told to the
+    project's stream over *redis*, as any lock holder's settle tells it.
+    One try: a pickup that fails, and one in a project
     with no history yet, record nothing, and the next landing picks the
     changes up as yours.
 
@@ -1361,7 +1363,7 @@ async def pick_up_routine(
         },
     )
     async with project_lock(session_factory, workstream) as held:
-        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held)
+        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, redis=redis)
         if yours and await routines_at_work(session_factory, session):
             return None
         await held()

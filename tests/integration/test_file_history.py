@@ -13,7 +13,7 @@ from surogates.harness import landing as landing_module
 from surogates.session.store import SessionStore
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.store import WorkstreamStore
-from surogates.sandbox.pool import SandboxPool
+from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
 
@@ -27,7 +27,7 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     rows_stand,
     stored,
 )
-from .test_redo_loop import a_clash
+from .test_redo_loop import a_clash, a_routine_run, in_its_pod, pickups_of
 from .test_thread_copies import a_thread, open_pod, pods  # noqa: F401  (pods is a fixture)
 from .test_thread_helpers import a_coordinating_thread, helpers_of
 from .test_turn_sagas import a_turn, calling, stop
@@ -253,6 +253,37 @@ async def test_a_threads_landing_another_threads_landing_settles_is_announced_to
     assert await marks_of(api, project, second) == [("b.md", "landed")]
 
 
+async def test_a_threads_landing_a_routines_pickup_settles_is_announced_too(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    run, _ = await a_routine_run(api, await master_of(api, project), "Tidy up")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
+
+    async def act():
+        await ends(api, pool, run)
+
+    # The routine's run holds the lock next, through the master's pod: it completes B's landing first.
+    sent = await streamed(api, monkeypatch, project, 1, act)
+    assert sent[:2] == [("ready", {}), ("change", {"thread_id": str(second.id), "type": "history.landed"})]
+    assert await marks_of(api, project, second) == [("b.md", "landed")]
+
+
+async def test_a_routines_own_pickup_adds_nothing_to_any_threads_files(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    master = await master_of(api, project)
+    before = [(found["id"], found["files"]) for found in await thread_rows(api, project)]
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(api, pool, run, "true")
+    # As its calls wrote them.
+    (pods.project / "notes.txt").write_text("tidied\n")
+    (pods.project / "Report.docx").write_bytes(b"PK\x03\x04 report v1 by A checked")
+    await ends(api, pool, run)
+    # Its record is the project's, of no thread: the file A landed is still A's landed file, and no row lists the routine's.
+    [picked] = await pickups_of(api, master)
+    assert (picked.thread_id, sorted(f["path"] for f in picked.picked_up)) == (None, ["Report.docx", "notes.txt"])
+    assert [(found["id"], found["files"]) for found in await thread_rows(api, project)] == before
+    assert await marks_of(api, project, thread) == [("Report.docx", "landed")]
+
+
 async def test_a_settled_landing_is_announced_once_and_only_after_its_row_says_it_landed(api, monkeypatch, tmp_path):
     project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
     told = announced(api, monkeypatch, second)
@@ -367,12 +398,14 @@ async def test_the_wait_a_settled_escalation_puts_on_its_thread_reaches_the_proj
 
 
 async def test_every_holder_of_the_lock_in_a_threads_work_settles_with_its_workers_redis(api, monkeypatch, tmp_path):
-    thread = await a_coordinating_thread(api, await master_of(api, await create(api)))
+    master = await master_of(api, await create(api))
+    thread = await a_coordinating_thread(api, master)
     pods = stored(api, thread, tmp_path)
     store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
     #: Each of the pod's actions made under a lock whose holder settled first, and whether it settled with Redis.
     settled_for: dict[str, bool] = {}
     with_redis: list[bool] = []
+    helpers: set[str] = set()
     settle, call = landing_module.settle_running, landing_module._call
 
     async def settled(session_factory, sandbox_pool, *args, **kwargs):
@@ -385,7 +418,8 @@ async def test_every_holder_of_the_lock_in_a_threads_work_settles_with_its_worke
 
     async def called(sandbox_pool, owner, action, **arguments):
         if with_redis:
-            settled_for.setdefault(action, with_redis.pop())
+            # The master's pod is asked by its routine's run alone.
+            settled_for.setdefault(action if owner == str(thread.id) or owner in helpers else f"a routine's {action}", with_redis.pop())
         return await call(sandbox_pool, owner, action, **arguments)
 
     monkeypatch.setattr(landing_module, "settle_running", settled)
@@ -405,6 +439,7 @@ async def test_every_holder_of_the_lock_in_a_threads_work_settles_with_its_worke
     ], pool=mine, during=stopped_while_the_helper_works), 120)
     # The helper hands back at its end; the thread's next turn lands, and the day's pruning follows it.
     [helper] = await helpers_of(api, thread)
+    helpers.add(str(helper.id))
     await ends(api, theirs, helper)
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Something else."})
     await a_turn(api, monkeypatch, thread, [
@@ -415,4 +450,11 @@ async def test_every_holder_of_the_lock_in_a_threads_work_settles_with_its_worke
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo half > half.md")
     await ends(api, pool, thread, failed=True)
-    assert settled_for == {"hand_off": True, "drop_hand_off": True, "hand_back": True, "pickup": True, "prune": True, "keep": True}
+    # A routine's run picks up what it changed, through the master's pod.
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(api, pool, run, "echo tidied > notes.txt")
+    await ends(api, pool, run)
+    assert settled_for == {
+        "hand_off": True, "drop_hand_off": True, "hand_back": True, "pickup": True, "prune": True, "keep": True,
+        "a routine's pickup": True,
+    }

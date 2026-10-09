@@ -1475,7 +1475,7 @@ class ArtifactCompletionMixin:
                 session=session, saga_settings=self._saga_settings, yours=yours,
                 # For the day's pruning after it: the bucket itself says whether it is due, and which packs are old.
                 storage=self._storage, bucket=session.config.get("storage_bucket"),
-                prefix=boundary_workspace_prefix(session.config, session, owner),
+                prefix=boundary_workspace_prefix(session.config, session, owner), redis=self._redis,
             )
         except Exception:
             # The changes are picked up at the next landing, as yours.
