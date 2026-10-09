@@ -1846,6 +1846,39 @@ async def test_a_chat_that_scheduled_a_routine_is_not_failed_by_the_sweeper_afte
     assert (workers.ran, len(await workers.routines())) == (["_handle_loop_command"], 1)
 
 
+async def test_a_chat_the_sweeper_gives_up_as_its_command_is_run_says_which_command_could_not_be_run(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/goal status")
+    # The worker dies as it answers, at the command's own wake and at each wake a recovery queues.
+    for _ in range(5):
+        await workers.wake_of_a_worker_that_dies(chat, "answering")
+        await workers.swept(chat)
+    assert await workers.status(chat) == "failed"
+
+    [failure] = await workers.store.get_events(chat, types=[EventType.SESSION_FAIL])
+    assert (failure.data["reason"], failure.data["error_title"]) == ("recovery_loop", "/goal could not be run")
+    assert failure.data["error_detail"] == (
+        "Its worker stopped again and again while running it. Retrying, or sending a message, runs it once more."
+    )
+    # A chat given up over a turn of the model's says nothing of a command.
+    other = await workers.chat()
+    await a_turn_cut_off(workers, other, at="in the call", command=None)
+    dying = AsyncMock(side_effect=asyncio.CancelledError)
+    for _ in range(5):
+        await workers.swept(other)
+        if await workers.status(other) == "failed":
+            break
+        worker = workers.worker()
+        worker._run_loop = dying
+        with pytest.raises(asyncio.CancelledError):
+            await worker.wake(other)
+    given_up = [
+        failure.data for failure in await workers.store.get_events(other, types=[EventType.SESSION_FAIL])
+        if failure.data["reason"] == "recovery_loop"
+    ]
+    assert len(given_up) == 1 and "error_title" not in given_up[0]
+
+
 async def test_a_coding_run_that_finished_leaves_its_chat_at_rest(workers, monkeypatch):
     async def run(*, store, session, agent, started_metadata, **_):
         await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})

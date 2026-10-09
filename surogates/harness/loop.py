@@ -387,6 +387,24 @@ def _cut_off_before_its_answer(typed: str) -> str:
     return f"{typed.split()[0]} was cut off before it could answer. Check {look} before typing it again."
 
 
+def command_never_answered(events: list) -> str | None:
+    """The oldest command of the harness's in *events*, a session's log,
+    that has no answer, as the word its user typed (``/goal``); None when
+    there is none.  For whoever gives the session up to say which command
+    could not be run."""
+    for event in events:
+        if event.type != EventType.USER_MESSAGE.value or (event.data or {}).get("synthetic"):
+            continue
+        typed = _user_event_text(event.data)
+        if (
+            _slash_command_name(typed) not in (None, _COMMAND_FOR_THE_MODEL)
+            and not _command_answered(events, event.id)
+            and not _read_as_words(events, event.id)
+        ):
+            return typed.split()[0]
+    return None
+
+
 #: The one built-in command the model answers: the wake rewrites its message
 #: and runs the model's turn on it.  The harness answers every other built-in
 #: command itself, with no model turn.
