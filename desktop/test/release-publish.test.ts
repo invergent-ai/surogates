@@ -503,6 +503,82 @@ describe("the desktop's release manifest", () => {
     expect(wrote).toEqual(given.map(({ name, takes }) => ({ name, writes: takes })));
   });
 
+  it("gives the release key to no program that a signing starts but openssl, and to openssl by a pipe that the script names: each program writes down its environment, its arguments and its input as it got them", () => {
+    expect(describes().status).toBe(0);
+    // The key's own line of its PEM: the rest is every such key's.
+    const body = PRIVATE.split("\n")[1] ?? "";
+    expect(body).toMatch(/^[A-Za-z0-9+/]{64}$/);
+    // Every program the signing finds by its name is a stand-in, in a folder that is all of its
+    // PATH: a name with no stand-in is not found, and ends the signing. Each writes down, under
+    // its own process number, its environment and its arguments as it got them, what each pipe
+    // it is handed by name holds, and what comes on its input; and then runs the program itself,
+    // by its whole path, with a copy of each pipe.
+    const only = join(dir, "only");
+    const seen = join(dir, "seen");
+    mkdirSync(only);
+    mkdirSync(seen);
+    const programs = ["bash", "cmp", "dirname", "head", "jq", "mktemp", "openssl", "rm", "sed", "tail"];
+    for (const program of programs) {
+      const real = spawnSync("sh", ["-c", `command -v ${program}`], { encoding: "utf8" }).stdout.trim();
+      expect(real, program).toMatch(/^\/.+/);
+      writeFileSync(join(only, program), [
+        "#!/bin/sh",
+        `seen='${seen}'/$$-${program}`,
+        '/usr/bin/env >"$seen.env"',
+        ': >"$seen.argv"',
+        "count=$#; at=0",
+        "for arg do",
+        "  at=$((at + 1))",
+        '  /usr/bin/printf \'%s\\n\' "$arg" >>"$seen.argv"',
+        '  case "$arg" in /dev/fd/*)',
+        '    if [ -p "$arg" ]; then /usr/bin/printf \'pipe\\n\' >"$seen.$at.kind"; else /usr/bin/printf \'file\\n\' >"$seen.$at.kind"; fi',
+        '    /usr/bin/cat "$arg" >"$seen.$at.handed"; arg="$seen.$at.handed" ;;',
+        "  esac",
+        '  set -- "$@" "$arg"',
+        "done",
+        'shift "$count"',
+        `/usr/bin/tee "$seen.input" | '${real}' "$@"`,
+        "",
+      ].join("\n"), { mode: 0o755 });
+    }
+    const { PATH: _path, ...env } = steps({ DESKTOP_RELEASE_KEY: PRIVATE, ...built() });
+    const signing = spawnSync(join(dir, "release", "publish.sh"), ["sign", "1.2.3", out], { encoding: "utf8", env: { ...env, PATH: only } });
+    expect(signing).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
+    // What each wrote down.
+    const files = readdirSync(seen);
+    const started = files.filter((file) => file.endsWith(".argv")).map((file) => file.slice(0, -".argv".length)).map((run) => ({
+      program: run.replace(/^\d+-/, ""),
+      argv: readFileSync(join(seen, `${run}.argv`), "utf8").split("\n").slice(0, -1),
+      env: readFileSync(join(seen, `${run}.env`), "utf8"),
+      input: readFileSync(join(seen, `${run}.input`), "utf8"),
+      handed: files.filter((file) => file.startsWith(`${run}.`) && file.endsWith(".handed")).map((file) => {
+        const at = Number(file.slice(run.length + 1, -".handed".length));
+        return { at, kind: readFileSync(join(seen, `${run}.${at}.kind`), "utf8").trim(), holds: readFileSync(join(seen, file), "utf8") };
+      }),
+    }));
+    expect([...new Set(started.map(({ program }) => program))].sort()).toEqual(programs);
+    expect(started.length).toBeGreaterThan(15);
+    // The key is in the environment of the script's own start alone, where the job puts it, under
+    // its one name: of no program the script starts, whatever a variable there is called.
+    const keyed = started.filter(({ env: its }) => its.includes(body));
+    expect(keyed.map(({ program, argv }) => [program, argv])).toEqual([["bash", [join(dir, "release", "publish.sh"), "sign", "1.2.3", out]]]);
+    expect(keyed[0]?.env.split(body).length).toBe(2);
+    expect(keyed[0]?.env).toContain(`\nDESKTOP_RELEASE_KEY=-----BEGIN PRIVATE KEY-----\n${body}\n`);
+    // It is in no program's arguments, which every process of the runner's could read, and comes on none's input.
+    expect(started.filter(({ argv }) => argv.join("\n").includes(body)).map(({ program, argv }) => [program, argv])).toEqual([]);
+    expect(started.filter(({ input }) => input.includes(body)).map(({ program, argv }) => [program, argv])).toEqual([]);
+    // It is handed to openssl alone, twice, each time in a pipe that the script names: to say the
+    // key's public half, and to sign.
+    const given = started.flatMap(({ program, argv, handed }) => handed.filter(({ holds }) => holds.includes(body)).map(({ at, kind }) => [program, argv.slice(0, 2).join(" "), argv[at - 2], kind]));
+    expect(given.sort()).toEqual([["openssl", "pkey -pubout", "-in", "pipe"], ["openssl", "pkeyutl -sign", "-inkey", "pipe"]]);
+    // And no program is started but by its name, which is how each of them is a stand-in here:
+    // the script names none by a path, and never says where names are looked for.
+    const lines = readFileSync(join(RELEASE, "publish.sh"), "utf8").split("\n").slice(1).filter((line) => !line.trim().startsWith("#"));
+    expect(lines.filter((line) => /(^|[\s;|&(`"'=])\/(usr|bin|sbin|opt|snap|nix|home|root|var|tmp)\//.test(line))).toEqual([]);
+    expect(lines.filter((line) => /\bPATH\b/.test(line))).toEqual([]);
+  });
+
   it("signs the line it wrote and compared, and no file that another could change after: a manifest swapped between the comparison and the signing is not what is signed", () => {
     // Another manifest that a signing would take for its form: the same release, at another state schema.
     const other = (written: Buffer) => Buffer.from(written.toString().replace('"stateSchema":1}', '"stateSchema":7}'));
