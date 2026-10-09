@@ -165,7 +165,7 @@ describe("keyInFolder", () => {
     }
   });
 
-  it("refuses a NUL byte as Python does", () => {
+  it("refuses a key with a NUL in the cloud's sentence", () => {
     expect(refusal(() => keyInFolder(folder, `${folder}/a\0`)).type).toBe("value");
   });
 });
