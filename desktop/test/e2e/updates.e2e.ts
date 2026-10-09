@@ -4,7 +4,7 @@
 // base is a local HTTP server; the release key is the test's own.
 
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -14,6 +14,8 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
+import { NOT_SIGNED } from "../../src/shell/updates.js";
+
 import { dataHome, ELECTRON, launch, MAIN, quit, shellPage, stubNative } from "./launch.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
@@ -70,7 +72,7 @@ afterEach(async () => {
 });
 
 // Release *version* on the base, as the release job publishes it: its tarball, its manifest's signature by the test's key, and latest.json.
-function publish(version: string): Buffer {
+function publish(version: string, key = keys.privateKey): Buffer {
   const tarball = gzipSync(Buffer.from(`Surogate ${version}\n`.repeat(10_000)));
   const url = `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`;
   const manifest = Buffer.from(`${JSON.stringify({
@@ -78,7 +80,7 @@ function publish(version: string): Buffer {
   })}\n`);
   served.set(`/desktop/${url}`, tarball);
   served.set("/desktop/latest.json", manifest);
-  served.set(`/desktop/releases/${version}/manifest.json.sig`, sign(null, manifest, keys.privateKey));
+  served.set(`/desktop/releases/${version}/manifest.json.sig`, sign(null, manifest, key));
   return tarball;
 }
 
@@ -258,6 +260,77 @@ describe("updates, through the app", () => {
     });
     expect(sandbox).toEqual({ wider: false, inside: true });
   });
+
+  // The update's longest lines, in a window of 1100 by 700 beside two other notices.
+  // What was drawn of the update's line: whether its first and its last pixel rows are its own on
+  // the screen, and not under another element or cut by one that scrolls; and where the user's row is.
+  const drawn = (page: Page) => page.evaluate(() => {
+    const line = document.querySelector("#update")!.getBoundingClientRect();
+    const user = document.querySelector("#user")!.getBoundingClientRect();
+    const own = (y: number) => document.querySelector("#update")!.contains(document.elementFromPoint(line.left + line.width / 2, y));
+    const others = [...document.querySelectorAll<HTMLElement>("#sidebar .warn")].filter((warn) => warn.id !== "update" && warn.getBoundingClientRect().height > 0).length;
+    return { top: own(line.top + 2), bottom: own(line.bottom - 2), user: user.top >= line.bottom && user.bottom <= window.innerHeight, others, window: [window.innerWidth, window.innerHeight] };
+  });
+  // Two notices beside it, as a computer with no sandbox has, and the test's app: the page's own.
+  // Were one missing, a notice of the test's would stand in, drawn as the page draws its own. With
+  // *tall*, one more of the test's, of many lines: the notices then fill their room whatever else shows.
+  const noticed = (page: Page, tall = false) => page.evaluate((tall) => {
+    const others = () => [...document.querySelectorAll<HTMLElement>("#sidebar .warn")].filter((warn) => warn.id !== "update" && warn.getBoundingClientRect().height > 0).length;
+    const put = (words: string): void => {
+      const notice = document.createElement("p");
+      notice.className = "warn";
+      notice.textContent = words;
+      document.querySelector("#notices")!.prepend(notice);
+    };
+    while (others() < 2) put("Surogate could not reach your agent. It will try again in a moment.");
+    if (tall) put("This computer's sandbox is starting. Commands wait until it is ready. ".repeat(14));
+  }, tall);
+  // The sidebar is 240 wide there, and the three notices are taller than what its fixed rows leave:
+  // they scroll among themselves, the update's line is the one in sight, whole, and the user's row is below it.
+  const whole = { top: true, bottom: true, user: true, others: 2, window: [1100, 700] };
+
+  it("draws the line for a release no trusted key signed whole in a window of 1100 by 700 beside two other notices, with the user's row in the window", async () => {
+    // A newest release that the helper's key did not sign, and has not for two days of failed checks, as the app keeps it.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "update-unsigned.json"), JSON.stringify({ since: Date.now() - 2 * 24 * 60 * 60 * 1000, count: 9 }));
+    publish("0.0.1", generateKeyPairSync("ed25519").privateKey);
+    const page = await launched();
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 30_000 }).toBe(`Surogate's newest release${NOT_SIGNED}`);
+    expect(await page.isVisible("#update-button")).toBe(false);
+    // The window made short once the line is there, and the notices come after.
+    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1100, 700));
+    await noticed(page);
+    await expect.poll(() => drawn(page), { timeout: 10_000 }).toEqual(whole);
+  });
+
+  it("brings that line into sight when it speaks beside notices that already fill their room, with no one's hand on the page", { timeout: 180_000 }, async () => {
+    // A base with no release yet: the start's check fails, and the next is a minute later.
+    const page = await launched();
+    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1100, 700));
+    await noticed(page, true);
+    await expect.poll(() => page.evaluate(() => window.innerHeight === 700 && document.querySelector("#notices")!.scrollHeight > document.querySelector("#notices")!.clientHeight), { timeout: 10_000 }).toBe(true);
+    await page.evaluate(() => void (document.querySelector("#notices")!.scrollTop = 0));
+    writeFileSync(join(home, "surogate", "update-unsigned.json"), JSON.stringify({ since: Date.now() - 2 * 24 * 60 * 60 * 1000, count: 9 }));
+    publish("0.0.1", generateKeyPairSync("ed25519").privateKey);
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 100_000, interval: 1_000 }).toBe(`Surogate's newest release${NOT_SIGNED}`);
+    await expect.poll(() => drawn(page), { timeout: 10_000 }).toEqual({ ...whole, others: 3 });
+  });
+
+  // A failure of 240 characters, and the helper's own refusal of an unsigned release, which is longer and shown whole.
+  for (const [what, said] of [["a failure's 240 characters", "word ".repeat(48).trim()], ["the helper's refusal of a release no trusted key signed", `the release's manifest${NOT_SIGNED}`]] as const) {
+    it(`draws ${what} whole in a window of 1100 by 700 beside two other notices, with the user's row in the window`, async () => {
+      publish("0.0.1");
+      writeFileSync(join(home, "answer"), `1 ${said}\n`);
+      const page = await launched();
+      // The window short from the start, and the notices there before the line speaks.
+      await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1100, 700));
+      await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+      await noticed(page);
+      await page.click("#update-button");
+      await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe(`Surogate could not install its update: ${said}`);
+      await expect.poll(() => drawn(page), { timeout: 10_000 }).toEqual(whole);
+    });
+  }
 
   it("says to run the install script again where its helper is not one it can take, and offers nothing", async () => {
     publish("0.0.1");

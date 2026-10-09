@@ -57,13 +57,15 @@
       </ul>
       <div class="group-head" id="projects-head"><span>Projects</span></div>
       <div class="projects" id="projects"></div>
-      <p class="warn" id="failure" role="alert" hidden></p>
-      <p class="warn" id="notice" hidden></p>
-      <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
-      <span id="sandbox-said" role="status"></span>
-      <p class="warn" id="sandbox" hidden><span id="sandbox-text"></span> <button class="link" id="sandbox-log" type="button" hidden>Show log</button> <button class="link" id="sandbox-retry" type="button" hidden>Retry</button> <button class="link" id="sandbox-check" type="button" hidden>Check again</button></p>
-      <p class="warn" id="update"><span id="update-text" role="status"></span> <button class="link" id="update-button" type="button" hidden></button></p>
-      <p class="warn" id="quitting"><span id="quitting-text" role="status"></span> <button class="link" id="quit-now" type="button" hidden>Quit now</button></p>
+      <div class="notices" id="notices">
+        <p class="warn" id="failure" role="alert" hidden></p>
+        <p class="warn" id="notice" hidden></p>
+        <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
+        <span id="sandbox-said" role="status"></span>
+        <p class="warn" id="sandbox" hidden><span id="sandbox-text"></span> <button class="link" id="sandbox-log" type="button" hidden>Show log</button> <button class="link" id="sandbox-retry" type="button" hidden>Retry</button> <button class="link" id="sandbox-check" type="button" hidden>Check again</button></p>
+        <p class="warn" id="update"><span id="update-text" role="status"></span> <button class="link" id="update-button" type="button" hidden></button></p>
+        <p class="warn" id="quitting"><span id="quitting-text" role="status"></span> <button class="link" id="quit-now" type="button" hidden>Quit now</button></p>
+      </div>
       <div class="user">
         <button class="user-row" id="user" type="button" aria-haspopup="menu" aria-expanded="false">
           <span class="avatar" id="avatar"></span><span class="who" id="user-name"></span><span data-icon="chevron-up"></span>

@@ -350,6 +350,9 @@ async function render(): Promise<void> {
   if (byId("update-text").dataset.said !== words) {
     byId("update-text").dataset.said = words;
     showText(byId("update-text"), words);
+    // Its longest words, with the notices beside it, are more than a short window's sidebar holds:
+    // the notices then scroll among themselves, and the line that has just spoken is the one in sight.
+    if (words !== "") byId("update").scrollIntoView({ block: "nearest" });
   }
   // While an update installs the line has no button. The one its user pressed stays where it is,
   // without its use, so that the keyboard is still on it when the line has one again.
@@ -369,6 +372,11 @@ async function render(): Promise<void> {
   byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
   byId("why").textContent = state.unreachable ?? "";
 }
+
+// And it stays in sight when the notices' room changes, as when the window is made shorter.
+new ResizeObserver(() => {
+  if (byId("update-text").textContent) byId("update").scrollIntoView({ block: "nearest" });
+}).observe(byId("notices"));
 
 // One connection at a time: the form waits for the answer.
 byId<HTMLFormElement>("connect").addEventListener("submit", (event) => {

@@ -384,6 +384,15 @@ body.main.first {
   background: var(--accent);
 }
 
+/* The sidebar's notices, between its projects and its user's row. The projects give them their
+   room, to the last pixel; in a window too short for all of them even so, they scroll among
+   themselves, and the user's row below stays where it is. */
+.notices {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .warn {
   margin: 8px;
   padding: 9px 11px;
