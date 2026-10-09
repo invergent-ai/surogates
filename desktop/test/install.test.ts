@@ -227,6 +227,8 @@ const next = generateKeyPairSync("ed25519");
 const other = generateKeyPairSync("ed25519");
 const pem = (key: KeyObject) => key.export({ type: "spki", format: "pem" }).toString().trim();
 const PUBLIC = pem(keys.publicKey);
+// What an install or a rollback adds, on a computer that has a helper, where no key of the helper's signed the base's release.
+const MISSED = ", as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again";
 const withKeys = (script: string, trusted = [PUBLIC]) =>
   script.replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
 
@@ -2052,7 +2054,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(install().status).toBe(0);
     expect(versions()).toEqual(["1.0.0", "1.1.0"]);
     publish("1.2.0", other.privateKey);
-    expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n` });
+    expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key${MISSED}\n` });
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
     // Its download's folder goes, whether it finished or not.
     expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'").stdout).toBe("");
@@ -2546,7 +2548,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     unchanged("another release's manifest under the version's name");
     // Nor is one that no release key signed.
     publish("1.6.1", other.privateKey, { stateSchema: 2 });
-    expect(rollBack("1.6.1")).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json is not signed by Surogate's release key\n` });
+    expect(rollBack("1.6.1")).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json is not signed by Surogate's release key${MISSED}\n` });
     unchanged("a release no release key signed");
     // No more of a tarball is downloaded than its manifest names: curl's own words, then the script's.
     publish("1.6.2", undefined, { stateSchema: 2 });
@@ -2754,7 +2756,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const unsigned = (started: string, said: string) => {
       const refused = root(`PATH=/tmp/caller:$PATH ${started}`);
       expect(refused.status, started).toBe(1);
-      expect(refused.stderr.endsWith(`Surogate Desktop: ${said} is not signed by Surogate's release key\n`), `${started}: ${refused.stderr}`).toBe(true);
+      expect(refused.stderr.endsWith(`Surogate Desktop: ${said} is not signed by Surogate's release key${MISSED}\n`), `${started}: ${refused.stderr}`).toBe(true);
       expect(root("cat /tmp/caller/ran 2>/dev/null").stdout, started).toBe("");
       expect(standing(), started).toBe(installed);
     };
@@ -2840,10 +2842,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const retired = (when: string) => {
       latest("3.9.0");
       expect(handed("3.9.0"), when).toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
-      expect(install(), when).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n` });
+      expect(install(), when).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key${MISSED}\n` });
       for (const version of ["3.9.0", "3.0.0"]) {
         expect(rollBack(version), `${when}: ${version}`)
-          .toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/${version}/manifest.json is not signed by Surogate's release key\n` });
+          .toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/${version}/manifest.json is not signed by Surogate's release key${MISSED}\n` });
       }
       expect(helper(), when).toBe(newest);
     };
@@ -2938,7 +2940,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const stopped = standing();
     const first = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is signed by a release key that the update to 3.5.0 brings, and that update was stopped before its end: `
       + "run Surogate Desktop's install script with --version 3.5.0 first\n";
-    const plain = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is not signed by Surogate's release key\n`;
+    const plain = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is not signed by Surogate's release key${MISSED}\n`;
     const refused = (ran: { status: number | null; stderr: string }, said: string) => {
       expect(ran.status, ran.stderr).toBe(1);
       expect(ran.stderr.endsWith(said), ran.stderr).toBe(true);
@@ -2966,6 +2968,44 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const newest = install();
     expect(newest.status, newest.stderr).toBe(0);
     expect(current()).toBe("/opt/surogate/versions/3.6.0");
+  });
+  it("tells a computer that missed the release which brought a new key what mends it: that release by --version, or a removal and a fresh install", () => {
+    // From nothing, whatever the tests before it left.
+    expect(uninstall().status).toBe(0);
+    const schema = { stateSchema: 2 };
+    const [old, both, fresh] = [[PUBLIC], [PUBLIC, pem(other.publicKey)], [pem(other.publicKey)]];
+    publish("5.0.0", keys.privateKey, schema, old);
+    expect(install().status).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/5.0.0");
+    // A rotation, which this computer sleeps through: the release that lists the new key beside
+    // the old, and then the first that the new key alone signs. The newest script lists the new.
+    publish("5.1.0", keys.privateKey, schema, both);
+    publish("5.2.0", other.privateKey, schema, fresh);
+    const script = readFileSync(join(www(), "desktop", "install.sh"), "utf8");
+    writeFileSync(join(www(), "desktop", "install.sh"), withKeys(script, fresh));
+    try {
+      const before = standing();
+      const said = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is not signed by Surogate's release key${MISSED}\n`;
+      expect(install()).toMatchObject({ status: 1, stderr: said("latest.json") });
+      expect(rollBack("5.2.0")).toMatchObject({ status: 1, stderr: said("releases/5.2.0/manifest.json") });
+      expect(standing()).toBe(before);
+      // The first way on: the release that brought the key, which the computer's own key signed.
+      const brought = rollBack("5.1.0");
+      expect(brought.status, brought.stderr).toBe(0);
+      expect(install().status).toBe(0);
+      expect(current()).toBe("/opt/surogate/versions/5.2.0");
+      // The second: a removal, and an install from the newest script, by its own list. And a
+      // computer with nothing installed is told nothing of a key that changed: no key of the
+      // script's own signed what the old key signs.
+      expect(uninstall().status).toBe(0);
+      latest("5.1.0");
+      expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n` });
+      latest("5.2.0");
+      expect(install().status).toBe(0);
+      expect(current()).toBe("/opt/surogate/versions/5.2.0");
+    } finally {
+      writeFileSync(join(www(), "desktop", "install.sh"), script);
+    }
   });
 });
 

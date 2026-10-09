@@ -173,3 +173,19 @@ An update that was only stopped half way is none of these: the next update, or t
 script, finishes it. And a line that ends "run Surogate Desktop's install script again" means
 what it says: the install script mends a version's folder that has lost its program or its
 `release.json`.
+
+A different line, with two ways on, is said where the release key changed while this computer
+took no update:
+
+    <base>/desktop/latest.json is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
+
+A key is changed over two releases: one that the old key signs and that lists the new key beside
+it, and then the first that the new key alone signs. A computer that never installed the first
+of the two knows the old key alone, and takes nothing that the new one signs. Either install
+that first release, which its own key signed, and then update as ever:
+
+    curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --version <that release>
+    curl -fsSL https://surogate.ai/desktop/install.sh | bash
+
+or remove Surogate Desktop and install it again, as above. Which release that is, the line
+cannot say: it is the one whose notes say that the release key changes.

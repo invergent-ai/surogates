@@ -400,6 +400,13 @@ unsigned() {
     ! signed_by "$2" "$3" "${keys[@]}" \
       || fail "$1 is signed by a release key that the update to $half brings, and that update was stopped before its end: run Surogate Desktop's install script with --version $half first"
   fi
+  # On a computer that has a helper, the keys asked were its helper's, and a release that lists a
+  # new key beside the old is signed by the old: a computer that never took that release does not
+  # know the new one, and takes nothing the new one signs. What mends it is said, as no one at
+  # that computer can know it: that release itself, which its keys do take, or a fresh install,
+  # which starts from the newest script's own list.
+  [ ! -e "$HELPER" ] && [ ! -L "$HELPER" ] \
+    || fail "$1 is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again"
   fail "$1 is not signed by Surogate's release key"
 }
 
