@@ -170,12 +170,26 @@ async def _require_session_agent(
 _COMPUTER_BROWSER = [EventType.BROWSER_PROVISIONED, EventType.BROWSER_DESTROYED, EventType.BROWSER_UNAVAILABLE]
 
 
+def _its_own(tenant: TenantContext, org_id: UUID, user_id: UUID | None, session_id: UUID) -> bool:
+    """Whether the caller is a local-folder chat's own user, or holds that session's own token.
+
+    The chat's browser is on its user's own computer.  Nobody else of the organisation takes it
+    over, hands it back or reads its state, an administrator and a service's token included: a
+    session's routes answer on the organisation, and these two say what a person does at their
+    own screen.  A token for one session, as a worker holds, answers for that session alone.
+    """
+    if org_id != tenant.org_id:
+        return False
+    if tenant.session_scope_id is not None:
+        return tenant.session_scope_id == session_id
+    return tenant.user_id is not None and tenant.user_id == user_id
+
+
 async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) -> bool:
     """Whether the session is a local-folder chat, whose browser is on the user's computer.
 
-    404 for another organisation's, and for a token that is another session's own, as every route
-    of a session answers them.  The server keeps no browser, no live view and no lease for it: the
-    desktop holds it.
+    404, as for a chat that does not exist, for anyone but its own user and its own session's
+    token.  The server keeps no browser, no live view and no lease for it: the desktop holds it.
     """
     store = getattr(app_state, "session_store", None)
     if store is None:
@@ -186,7 +200,7 @@ async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) 
         return False
     if device_of(session.config) is None:
         return False
-    if not tenant.owns_session(session.org_id, session_id):
+    if not _its_own(tenant, session.org_id, session.user_id, session_id):
         raise HTTPException(status_code=404, detail="No browser for session")
     return True
 
@@ -243,8 +257,8 @@ async def _tell_the_agents_other_chats_handed_back(
     chats were told of.  Each is told once, naming the chat it was made from, for its pane: its agent
     is not woken there, and goes on in the chat the browser was handed back from.
 
-    Only chats the caller's token covers, as every route of a session answers; and a chat that
-    cannot be told leaves the hand back made.
+    Only chats the caller may ask of themselves: a token for one session tells that one alone.  A
+    chat that cannot be told leaves the hand back made.
     """
     try:
         session = await app_state.session_store.get_session(session_id)
@@ -259,7 +273,7 @@ async def _tell_the_agents_other_chats_handed_back(
         )
         return
     for other in others:
-        if not tenant.owns_session(session.org_id, other):
+        if not _its_own(tenant, session.org_id, session.user_id, other):
             continue
         try:
             await emit(str(other), EventType.BROWSER_CONTROL_RETURNED, {

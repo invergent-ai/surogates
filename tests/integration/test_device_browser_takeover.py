@@ -6,6 +6,9 @@ one of its passes, and what a wake would find past the chat's cursor.
 
 from __future__ import annotations
 
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -17,16 +20,19 @@ from sqlalchemy import text
 
 from surogates.api.app import _install_browser_api_dependencies
 from surogates.api.routes import browser as browser_routes
+from surogates.browser.registry import BrowserEntry
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.devices.browser import tell_pane
 from surogates.harness.loop_messages import maybe_inject_browser_pause
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
+from surogates.tenant.auth.jwt import create_access_token, create_service_account_session_token
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
-from .conftest import create_org, create_user
+from .conftest import create_org, create_user, issue_service_account_token
+from .test_devices import AGENT_ID, add_user, api  # noqa: F401  (api is a fixture)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -51,9 +57,9 @@ class Computer:
             agent_id=self.agent_id, queue_key=SHARED_WORK_QUEUE_KEY,
         )
 
-    def api(self, *, as_user: bool = True, session_scope_id: UUID | None = None) -> FastAPI:
+    def api(self, *, session_scope_id: UUID | None = None) -> FastAPI:
         """The browser routes with the API's own emitter and wake, which enqueues on the real queue,
-        for a caller who is the computer's user, or a service that names them."""
+        for a caller who is the computer's user, or a worker with a token for one session."""
         app = FastAPI()
         app.include_router(browser_routes.router, prefix="/v1")
         app.state.redis, app.state.session_store = self.redis, self.store
@@ -68,7 +74,7 @@ class Computer:
 
         async def tenant() -> TenantContext:
             return TenantContext(
-                org_id=self.org_id, user_id=self.user_id if as_user else None, org_config={},
+                org_id=self.org_id, user_id=None if session_scope_id else self.user_id, org_config={},
                 user_preferences={}, permissions=frozenset(), asset_root="/tmp/surogates-test",
                 session_scope_id=session_scope_id,
             )
@@ -121,14 +127,12 @@ class Computer:
                 )
             await db.commit()
 
-    async def control(self, chat: UUID, action: str, *, service: bool = False, token_of: UUID | None = None) -> dict:
-        """Post *action* to the chat's control route: as its user; as a *service* of the organisation
-        that names the user it speaks for, as the control plane posts it; or so with a worker's token,
-        which covers the one session *token_of*."""
-        named = service or token_of is not None
-        said = {"action": action, **({"owner_user_id": str(self.user_id)} if named else {})}
-        path = f"/v1{'/api' if named else ''}/sessions/{chat}/browser/control"
-        app = self.api(as_user=not named, session_scope_id=token_of)
+    async def control(self, chat: UUID, action: str, *, token_of: UUID | None = None) -> dict:
+        """Post *action* to the chat's control route: as its user, or with a worker's token, which
+        covers the one session *token_of* and names the user it speaks for."""
+        said = {"action": action, **({"owner_user_id": str(self.user_id)} if token_of else {})}
+        path = f"/v1{'/api' if token_of else ''}/sessions/{chat}/browser/control"
+        app = self.api(session_scope_id=token_of)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(path, json=said)
         assert response.status_code == 200, response.text
@@ -392,22 +396,6 @@ async def test_a_hand_back_with_no_take_over_standing_in_its_chat_tells_no_other
     assert computer.wakes == []
 
 
-async def test_a_hand_back_a_service_posts_for_the_user_is_told_to_that_users_other_chats(computer):
-    first, other = await computer.told_taken_over(), await computer.idle()
-
-    # The service has no user of its own: the chats told are those of the user whose chat it is.
-    await computer.control(other, "acquire", service=True)
-    await computer.control(other, "release", service=True)
-
-    try:
-        told = (await computer.store.get_events(first))[-1]
-        assert (told.type, told.data["released_by"], told.data["handed_back_from"]) == (
-            "browser.control_returned", str(computer.user_id), str(other),
-        )
-    finally:
-        await computer.unqueue(other)
-
-
 async def test_a_token_for_one_chat_hands_back_no_other_chats_take_over(computer):
     first, other = await computer.told_taken_over(), await computer.idle()
 
@@ -446,3 +434,174 @@ async def test_only_a_hand_back_is_passed_over_for_naming_the_chat_it_was_made_f
 
     assert await computer.orphans() == {chat}
     assert await computer.work(chat) == ["user.message"]
+
+
+# -- Who may take a chat's browser over, hand it back, or read its state: the app's own sign-in check --
+
+NO_SUCH_CHAT = (404, {"detail": "No browser for session"})
+
+
+class Asking:
+    """The real app, each caller with a real token: a user's chats on a folder of their computer,
+    their browser routes told through the API's own emitter, and each wake recorded."""
+
+    def __init__(self, api, session_factory) -> None:
+        self.api, self.factory = api, session_factory
+        self.store = api.app.state.session_store
+        self.device_id = uuid4()
+        self.wakes: list[str] = []
+        _install_browser_api_dependencies(api.app, SimpleNamespace(browser=SimpleNamespace(backend=None)))
+        enqueue = api.app.state.session_wake
+
+        async def wake(session_id: str) -> None:
+            self.wakes.append(session_id)
+            await enqueue(session_id)
+
+        api.app.state.session_wake = wake
+
+    async def chat(self, *, taken_over: bool = False) -> UUID:
+        """A chat of the app's user on a folder of their computer, its agent's tab open there."""
+        session = await self.store.create_session(
+            user_id=self.api.user_id, org_id=self.api.org_id, agent_id=AGENT_ID,
+            config={"execution": {"kind": "device", "device_id": str(self.device_id)}},
+        )
+        await tell_pane(self.store, session.id, EventType.BROWSER_PROVISIONED)
+        if taken_over:
+            await self.store.emit_event(session.id, EventType.BROWSER_CONTROL_GRANTED, {
+                "session_id": str(session.id), "owner_user_id": str(self.api.user_id), "computer": True,
+            })
+        return session.id
+
+    async def callers(self, chat: UUID, another_chat: UUID) -> dict[str, tuple[str, dict[str, str]]]:
+        """Each caller of *chat*'s routes: the path its token is taken on, and its sign-in."""
+        org = self.api.org_id
+        _, another_user = await add_user(self.factory, org)
+        administrator = create_access_token(
+            org, await create_user(self.factory, org), {"admin", "sessions:read", "sessions:write"},
+            auth_time=int(time.time()),
+        )
+        service = await issue_service_account_token(self.factory, org)
+
+        def bearer(token: str) -> dict[str, str]:
+            return {"Authorization": f"Bearer {token}"}
+
+        return {
+            "its user": ("/v1", self.api.auth()),
+            "its own session's token": ("/v1/api", bearer(create_service_account_session_token(org, service.id, chat))),
+            "another user of the organisation": ("/v1", bearer(another_user)),
+            "an administrator of the organisation": ("/v1", bearer(administrator)),
+            "another chat's token": ("/v1/api", bearer(create_service_account_session_token(org, service.id, another_chat))),
+            "a service of the organisation": ("/v1/api", bearer(service.token)),
+        }
+
+    async def state(self, chat: UUID, caller: tuple[str, dict[str, str]]) -> tuple[int, dict]:
+        prefix, sign_in = caller
+        response = await self.api.client.get(f"{prefix}/sessions/{chat}/browser/state", headers=sign_in)
+        return response.status_code, response.json()
+
+    async def control(self, chat: UUID, action: str, caller: tuple[str, dict[str, str]]) -> tuple[int, dict]:
+        prefix, sign_in = caller
+        # On the service path a caller names the user it speaks for: here always the chat's own.
+        said = {"action": action, **({"owner_user_id": str(self.api.user_id)} if prefix == "/v1/api" else {})}
+        response = await self.api.client.post(f"{prefix}/sessions/{chat}/browser/control", json=said, headers=sign_in)
+        return response.status_code, response.json()
+
+    async def log(self, chat: UUID) -> list[str]:
+        return [event.type for event in await self.store.get_events(chat)]
+
+    async def unqueue(self, *chats: UUID) -> None:
+        for chat in chats:
+            member = encode_queue_member(org_id=str(self.api.org_id), agent_id=AGENT_ID, session_id=str(chat))
+            await self.api.app.state.redis.zrem(SHARED_WORK_QUEUE_KEY, member)
+
+    @asynccontextmanager
+    async def a_clouds_browser_under(self, *chats: UUID):
+        """A cloud browser's entry under each chat's id, which the cloud's routes answer the whole
+        organisation from: no chat on a computer has one, and a refusal must not come to depend on that."""
+        registry = self.api.app.state.browser_registry
+        for chat in chats:
+            await registry.set(BrowserEntry(
+                session_id=str(chat), org_id=str(self.api.org_id), user_id=str(self.api.user_id),
+                rest_url="http://browser.test:10001", cdp_url="ws://browser.test:9222",
+                live_view_url="ws://browser.test:443", provisioned_at=datetime.now(timezone.utc),
+            ))
+        try:
+            yield
+        finally:
+            for chat in chats:
+                await registry.delete(str(chat))
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def asking(api, session_factory):  # noqa: F811  (the fixture, by its name)
+    return Asking(api, session_factory)
+
+
+THEIRS = ["its user", "its own session's token"]
+NOT_THEIRS = [
+    "another user of the organisation", "an administrator of the organisation", "another chat's token",
+    "a service of the organisation",
+]
+
+
+async def test_only_a_chats_own_user_or_its_own_sessions_token_reads_its_browsers_state(asking):
+    chat, another = await asking.chat(), await asking.chat()
+    callers = await asking.callers(chat, another)
+    on_computer = {"status": "live", "control_owner": None, "live_view_path": "", "computer": True}
+
+    async with asking.a_clouds_browser_under(chat):
+        answers = {who: await asking.state(chat, caller) for who, caller in callers.items()}
+
+    assert {who: answers[who] for who in THEIRS} == {who: (200, on_computer) for who in THEIRS}
+    # Anyone else is answered as for a chat that does not exist.
+    assert await asking.state(uuid4(), callers["its user"]) == NO_SUCH_CHAT
+    assert {who: answers[who] for who in NOT_THEIRS} == {who: NO_SUCH_CHAT for who in NOT_THEIRS}
+
+
+@pytest.mark.parametrize("who", NOT_THEIRS)
+async def test_nobody_but_a_chats_own_user_takes_its_browser_over_or_hands_it_back(asking, who):
+    chat, held, another = await asking.chat(), await asking.chat(taken_over=True), await asking.chat()
+    caller = (await asking.callers(chat, another))[who]
+    before = {of: await asking.log(of) for of in (chat, held)}
+
+    async with asking.a_clouds_browser_under(chat, held):
+        answers = [
+            await asking.control(chat, "acquire", caller), await asking.control(chat, "release", caller),
+            # A chat its user holds the browser from: nobody else hands it back either.
+            await asking.control(held, "acquire", caller), await asking.control(held, "release", caller),
+        ]
+
+    assert answers == [NO_SUCH_CHAT] * 4
+    assert await asking.control(uuid4(), "acquire", (await asking.callers(chat, another))["its user"]) == NO_SUCH_CHAT
+    # Neither chat is told anything, and nobody is woken.
+    assert {of: await asking.log(of) for of in (chat, held)} == before
+    assert asking.wakes == []
+
+
+async def test_a_chats_own_user_takes_its_browser_over_and_hands_it_back_and_ends_their_other_chats_take_overs(asking):
+    chat, held, another = await asking.chat(), await asking.chat(taken_over=True), await asking.chat()
+    user = (await asking.callers(chat, another))["its user"]
+
+    try:
+        assert await asking.control(chat, "acquire", user) == (200, {"outcome": "granted", "owner_user_id": str(asking.api.user_id)})
+        assert await asking.control(chat, "release", user) == (200, {"outcome": "released"})
+        assert (await asking.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
+        # Their other chat on the computer that still said they held the browser is told too.
+        assert (await asking.log(held))[-2:] == ["browser.control_granted", "browser.control_returned"]
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_a_chats_own_sessions_token_tells_that_chat_and_no_other_of_its_users(asking):
+    chat, held, another = await asking.chat(), await asking.chat(taken_over=True), await asking.chat()
+    token = (await asking.callers(chat, another))["its own session's token"]
+    before = await asking.log(held)
+
+    try:
+        assert (await asking.control(chat, "acquire", token))[0] == 200
+        assert await asking.control(chat, "release", token) == (200, {"outcome": "released"})
+        assert (await asking.log(chat))[-2:] == ["browser.control_granted", "browser.control_returned"]
+        # The token is for one session: the user's other chat keeps what it said.
+        assert await asking.log(held) == before
+    finally:
+        await asking.unqueue(chat)
