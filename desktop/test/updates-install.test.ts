@@ -220,6 +220,49 @@ describe("why an install failed, of all that was said", () => {
   });
 });
 
+describe("a release that was refused, or whose install failed", () => {
+  it("is not offered afresh by the check that finds it again: its line stays until its user tries again, or a newer release is found", async () => {
+    const tarball = base.publish("1.2.4");
+    let answer: Applied = { code: 126, said: "" };
+    const states: string[] = [];
+    const found = base.updates({ apply: () => Promise.resolve(answer) }, () => states.push(found.state.state));
+    await found.check();
+    await found.install();
+    const refused = found.state;
+    expect(refused.state).toBe("refused");
+    // Six hours on, and six more.
+    await found.check();
+    await found.check();
+    expect(found.state).toEqual(refused);
+    answer = { code: 1, said: "Surogate Desktop: the release's archive could not be unpacked" };
+    await found.install();
+    const failed = found.state;
+    await found.check();
+    expect(found.state).toEqual(failed);
+    expect(failed).toMatchObject({ state: "failed", why: "the release's archive could not be unpacked" });
+    expect(states).toEqual(["available", "installing", "refused", "installing", "failed"]);
+    // The check still looks after its files: one changed meanwhile is downloaded again, for the next try.
+    writeFileSync(join(version(), "release.tar.gz"), "changed\n");
+    await found.check();
+    expect(found.state).toEqual(failed);
+    downloaded(tarball);
+    // A newer release is news: it is offered.
+    base.publish("1.2.5");
+    await found.check();
+    expect(found.state).toMatchObject({ state: "available", version: "1.2.5" });
+  });
+
+  it("goes from the line once the base names nothing newer", async () => {
+    base.publish("1.2.4");
+    const found = base.updates({ apply: () => Promise.resolve({ code: 126, said: "" }) });
+    await found.check();
+    await found.install();
+    base.publish("1.2.3");
+    await found.check();
+    expect(found.state).toEqual({ state: "none" });
+  });
+});
+
 describe("the reason the line shows", () => {
   it("is no longer than some eight lines of the sidebar at its narrowest, 240 characters, and the whole of it is in the log", async () => {
     base.publish("1.2.4");

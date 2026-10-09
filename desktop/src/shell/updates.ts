@@ -466,6 +466,10 @@ export class Updates {
     if (this.settled()) return;
     // One release's download is kept: an older offer's goes once this one is here.
     for (const name of readdirSync(cache)) if (name !== release.version) rmSync(join(cache, name), { recursive: true, force: true });
+    // A release that was refused, or whose install failed, is not offered afresh for being found
+    // again: its line stays until its user tries again, or a newer release is found.
+    const shown = this.state;
+    if ((shown.state === "refused" || shown.state === "failed") && shown.version === release.version) return;
     this.set({ state: "available", version: release.version, files });
   }
 
