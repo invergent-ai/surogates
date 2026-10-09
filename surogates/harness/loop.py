@@ -1516,7 +1516,7 @@ class AgentHarness(
             command = _slash_command_name(last_user_content)
             if slash_block is not None or command not in (None, _COMMAND_FOR_THE_MODEL):
                 typed_at = _latest_user_event_id(all_events) or 0
-                is_new = typed_at > cursor or not _command_answered(all_events, typed_at)
+                is_new = not _command_answered(all_events, typed_at)
                 # What was written since the command: as this wake found
                 # the log, or with the answer this wake writes.
                 written = all_events
@@ -1529,7 +1529,7 @@ class AgentHarness(
                         await self._run_command(
                             command, session, last_user_content, lease,
                             messages=messages, system_prompt=system_prompt,
-                            all_events=all_events, typed_at=typed_at,
+                            all_events=all_events,
                         )
                     written = await self._store.get_events(
                         session_id, after=typed_at, exclude_types=[EventType.LLM_DELTA],
@@ -4742,9 +4742,8 @@ class AgentHarness(
         messages: list[dict],
         system_prompt: str,
         all_events: list,
-        typed_at: int,
     ) -> None:
-        """Run the handler of the built-in *command* the user *typed* at event *typed_at*."""
+        """Run the handler of the built-in *command* the user *typed*."""
         if command == "compress":
             await self._handle_compress_command(session, messages, system_prompt, lease)
         elif command == "clear":
@@ -4757,11 +4756,7 @@ class AgentHarness(
             await self._handle_auto_research_command(session, typed, lease)
         elif command == "code":
             await self._handle_code_command(session, typed, lease, all_events)
-        # A worker that dies once it has answered, before it moves the cursor,
-        # leaves a command the next wake runs once more.  Not ``/loop``: a
-        # second run is a second routine, and its answer in the log says the
-        # first was made.
-        elif command == "loop" and not _command_answered(all_events, typed_at):
+        elif command == "loop":
             await self._handle_loop_command(session, typed, lease)
 
     async def _end_command_turn(
@@ -4777,8 +4772,8 @@ class AgentHarness(
         A model's last answer ends its turn: the cursor moves past it and the
         session comes to rest, so a later wake finds nothing to do.  A
         command's answer ends its turn the same way, in one write.  A worker
-        that dies before the cursor is past the answer leaves a command the
-        next wake runs once more.
+        that dies before that write leaves a turn the next wake ends: the
+        answer in the log says the command was run.
 
         Not when more was said since, by the user or by the command itself to
         start its work (a goal's or a mission's first message): the wake that

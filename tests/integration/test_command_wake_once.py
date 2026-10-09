@@ -408,34 +408,25 @@ async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_w
 DIED = ["/compress", "/clear", "/goal status", "/mission status", "/code status", "/loop 1d Check the cash report"]
 
 
+@pytest.mark.parametrize("later", list(LATER))
 @pytest.mark.parametrize("command", DIED)
-async def test_a_command_whose_worker_died_before_the_cursor_moved_is_run_once_more_and_a_routine_is_never_made_twice(
-    workers, command,
-):
+async def test_a_command_whose_worker_died_once_it_had_answered_is_not_run_again(workers, command, later):
     chat = await workers.chat()
     await workers.says(chat, command)
-    # Its answer is written; the worker stops before the cursor says so.
+    # Its answer is written; the worker stops before the cursor moves.  It is also how every chat
+    # was left whose last message was /compress or /clear, before a command's answer ended its turn.
     await workers.wake_of_a_worker_that_dies(chat, "answered")
     answers = len(await workers.said(chat))
-    assert workers.ran == [ANSWERED[command]]
+    assert (workers.ran, await workers.status(chat)) == ([ANSWERED[command]], "active")
 
-    await workers.its_browser_is_handed_back(chat)
+    await LATER[later](workers, chat)
     await workers.wake(chat)
 
-    # The cursor is what says a command was answered.  Behind it, the command runs once more, as a
-    # turn does whose worker died before its end was written: all but /loop, whose answer in the log
-    # says its routine was made.
-    again = 0 if command.startswith("/loop") else 1
-    assert workers.ran == [ANSWERED[command]] * (1 + again)
-    assert len(await workers.said(chat)) == answers + again
+    # The answer in the log is what says a command was answered: the wake only ends the turn left open.
+    assert workers.ran == [ANSWERED[command]]
+    assert (len(await workers.said(chat)), workers.requests) == (answers, [])
     assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
     assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("completed", True)
-
-    # And then by no wake.
-    await workers.a_helper_reports(chat)
-    await workers.wake(chat)
-    assert workers.ran == [ANSWERED[command]] * (1 + again)
-    assert (len(await workers.said(chat)), workers.requests) == (answers + again, [])
 
 
 @pytest.mark.parametrize("later", list(LATER))
