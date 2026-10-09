@@ -37,24 +37,6 @@ def _event_type(event: Any) -> str:
     return event.type.value if isinstance(event.type, EventType) else str(event.type)
 
 
-def _taken_up(events: list[Any], typed_at: int, cursor: int) -> bool:
-    """Return True if a wake has taken up the message the user typed at event *typed_at*.
-
-    The cursor is at or past the message, and after it a wake began or the
-    model was asked.  The cursor alone cannot tell: a turn refused or failed
-    before any wake read the message moves the cursor past it too, and what
-    the message asked for is still to do.
-    """
-    if typed_at > cursor:
-        return False
-    return any(
-        event.id is not None
-        and event.id > typed_at
-        and _event_type(event) in (EventType.HARNESS_WAKE.value, EventType.LLM_REQUEST.value)
-        for event in events
-    )
-
-
 #: What the harness writes to answer a command of the user's itself, with no
 #: model turn: its own words, or the result of the coding run the command was.
 _COMMAND_ANSWER_EVENT_TYPES = frozenset({
@@ -72,6 +54,11 @@ def _command_answered(events: list[Any], typed_at: int) -> bool:
     with no wake before it belongs to an earlier command, still being
     answered when this one was typed, and one after a model's request is
     the model's word in a turn of its own.
+
+    Nothing else says a command was answered.  Not the cursor: a tool's
+    result, or a turn that was refused or failed, moves it past a message
+    nobody read.  Not a model's request after it: a command is never the
+    model's to read.
     """
     taken_up = False
     for event in events:

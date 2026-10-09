@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from surogates.harness.loop_pending import _actionable_pending_events, _command_answered, _taken_up
+from surogates.harness.loop_pending import _actionable_pending_events, _command_answered
 from surogates.session.events import EventType
 
 
@@ -25,25 +25,6 @@ def test_device_wait_events_give_a_wake_no_work():
 def test_a_user_message_still_does():
     events = [event(5, EventType.DEVICE_WAITING), event(6, EventType.USER_MESSAGE)]
     assert [e.id for e in _actionable_pending_events(events, cursor=4)] == [6]
-
-
-def test_a_message_past_the_cursor_is_taken_up_by_no_wake_yet():
-    # Its wake began and died: the cursor is what says a wake has done with a message.
-    events = log(EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.CONTEXT_COMPACT)
-    assert _taken_up(events, typed_at=1, cursor=0) is False
-
-
-@pytest.mark.parametrize("since", [EventType.HARNESS_WAKE, EventType.LLM_REQUEST], ids=["a wake began", "the model was asked"])
-def test_a_message_at_or_behind_the_cursor_is_taken_up_once_a_wake_or_a_request_followed_it(since):
-    events = log(EventType.USER_MESSAGE, since, EventType.LLM_RESPONSE)
-    assert [_taken_up(events, typed_at=1, cursor=cursor) for cursor in (1, 3)] == [True, True]
-    assert _taken_up([event(e.id, e.type.value) for e in events], typed_at=1, cursor=3) is True
-
-
-def test_a_message_a_failed_turn_moved_the_cursor_past_is_not_taken_up():
-    # The turn was refused before any wake read the message: what it asked for is still to do.
-    events = log(EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.USER_MESSAGE, EventType.SESSION_FAIL, EventType.SESSION_RESUME)
-    assert _taken_up(events, typed_at=3, cursor=4) is False
 
 
 @pytest.mark.parametrize("answer", [EventType.LLM_RESPONSE, EventType.CODE_RUN_RESULT])

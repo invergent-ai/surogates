@@ -475,18 +475,22 @@ def _latest_user_event_text(events: list[Any]) -> str:
         )
         if type_value != EventType.USER_MESSAGE.value:
             continue
-        data = event.data if isinstance(event.data, dict) else {}
-        raw = data.get("content", "")
-        if isinstance(raw, list):
-            raw = next(
-                (
-                    p["text"] for p in raw
-                    if isinstance(p, dict) and p.get("type") == "text"
-                ),
-                "",
-            )
-        return (raw or "").strip()
+        return _user_event_text(event.data)
     return ""
+
+
+def _user_event_text(data: Any) -> str:
+    """The raw text of one ``USER_MESSAGE`` event's payload, as the user typed it."""
+    raw = data.get("content", "") if isinstance(data, dict) else ""
+    if isinstance(raw, list):
+        raw = next(
+            (
+                p["text"] for p in raw
+                if isinstance(p, dict) and p.get("type") == "text"
+            ),
+            "",
+        )
+    return (raw or "").strip()
 
 
 def _latest_user_event_data(events: list[Any]) -> dict | None:

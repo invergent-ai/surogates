@@ -146,3 +146,19 @@ async def test_resolve_skips_emit_when_no_pending_row_claimed():
 
     assert ok is None
     assert store.emitted == []
+
+
+async def test_a_command_typed_while_a_question_waits_is_not_its_answer():
+    from uuid import uuid4
+
+    import pytest
+
+    from surogates.session.interactive_input import try_resolve_text_answer
+
+    # The store is never asked: the command goes on as a message, for the harness to answer.
+    for command in ("/mission cancel", "/compress", " /goal status", "/loop 5m Check the cash report"):
+        assert await try_resolve_text_answer(None, session_id=uuid4(), text=command) is None
+    # Any other words, a path among them, are looked up as an answer.
+    for words in ("/tmp/report.pdf", "Yes, go on."):
+        with pytest.raises(AttributeError):
+            await try_resolve_text_answer(None, session_id=uuid4(), text=words)

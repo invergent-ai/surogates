@@ -13,11 +13,12 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
 from surogates.config import SHARED_WORK_QUEUE_KEY
+from surogates.db.models import Mission as MissionRow
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_pending import _actionable_pending_events
@@ -30,10 +31,11 @@ from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
+from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
 
 from .test_devices import AGENT_ID, api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import answered, start, turn_ends
+from .test_workstream_threads import TODO_CALL, answered, start, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -94,6 +96,11 @@ class Workers:
         self.title: str | None = None
         #: A stand-in for the sandbox pool, where a test's command needs one.
         self.sandbox_pool = None
+        #: What the model answers next, in order; "Noted." once it runs out.
+        self.replies: list[tuple[dict, dict]] = []
+        #: What happens while the model writes its next answer, and while its tool call runs.
+        self.during_the_request = None
+        self.during_the_tool_call = None
         self._workers = 0
         self._work_done = asyncio.Event()
         monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
@@ -106,7 +113,14 @@ class Workers:
 
         async def model(**kwargs):
             self.requests.append(kwargs["create_kwargs"]["messages"][1:])  # after the system prompt
-            return _final_response("Noted.")
+            meanwhile, self.during_the_request = self.during_the_request, None
+            if meanwhile is not None:
+                await meanwhile()
+            message, usage = self.replies.pop(0) if self.replies else _final_response("Noted.")
+            if kwargs.get("on_tool_call_complete") is not None:
+                for call in message.get("tool_calls") or []:
+                    kwargs["on_tool_call_complete"](call)
+            return message, usage
 
         monkeypatch.setattr(loop_module, "maybe_generate_session_title", title)
         monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
@@ -120,9 +134,19 @@ class Workers:
             kept = list(messages[-2:])
             return kept, {"strategy": "summary", "original_message_count": len(messages), "compressed_message_count": len(kept)}
 
+        registry = ToolRegistry()
+        ToolRuntime(registry).register_builtins()
+
+        async def tool(name, arguments, **_):
+            meanwhile, self.during_the_tool_call = self.during_the_tool_call, None
+            if meanwhile is not None:
+                await meanwhile()
+            return '{"ok": true}'
+
+        registry.dispatch = tool
         harness = AgentHarness(
             session_store=store or self.store,
-            tool_registry=ToolRegistry(),
+            tool_registry=registry,
             llm_client=AsyncMock(),
             tenant=TenantContext(
                 org_id=self.api.org_id, user_id=self.api.user_id, org_config={}, user_preferences={},
@@ -247,6 +271,15 @@ class Workers:
         )
         await sweeper._sweep_orphans_once(stale_seconds=QUIET_FOR_NINE_YEARS, reason="orchestrator_sweeper")
         return (await self.log(chat)).count(EventType.HARNESS_RECOVERED.value) > before
+
+    async def missions(self, chat: UUID, mission_id=None) -> list:
+        """The chat's mission in flight; or mission *mission_id*, whatever its state."""
+        async with self.api.app.state.session_factory() as db:
+            if mission_id is not None:
+                return [await db.get(MissionRow, mission_id)]
+            return list((await db.execute(select(MissionRow).where(
+                MissionRow.session_id == chat, MissionRow.status.in_(("active", "paused")),
+            ))).scalars())
 
     async def routines(self) -> list:
         return await ScheduledSessionStore(self.api.app.state.session_factory).list_for_user(
@@ -444,12 +477,66 @@ async def test_a_chat_resumed_after_a_stop_that_landed_on_a_command_takes_no_tur
     assert (workers.requests, await workers.status(chat)) == ([], "completed")
 
 
-async def test_a_command_typed_during_a_turn_is_that_turns_to_read_also_after_its_worker_died(workers):
+MOMENTS = ["the model's request", "a tool call"]
+
+
+async def in_a_turn(workers: Workers, chat: UUID, moment: str, command: str) -> None:
+    """The chat's turn on "Go on." runs, the model calling a tool in it; its user sends *command* at *moment* of it."""
+
+    async def the_user_types_it():
+        await workers.says(chat, command)
+
+    workers.replies.append(TODO_CALL)
+    if moment == "a tool call":
+        workers.during_the_tool_call = the_user_types_it
+    else:
+        workers.during_the_request = the_user_types_it
+    await workers.says(chat, "Go on.")
+    await workers.wake(chat)
+
+
+@pytest.mark.parametrize("moment", MOMENTS)
+@pytest.mark.parametrize("command, done", [("/mission cancel", "cancelled"), ("/mission pause", "paused")])
+async def test_a_command_typed_during_a_coordinators_turn_is_run_by_its_own_wake(workers, command, done, moment):
+    chat = await a_coordinator(workers)
+    [mission] = await workers.missions(chat)
+    await in_a_turn(workers, chat, moment, command)
+    # The turn went on to its end without it: a command is the harness's to answer, never the model's to read.
+    assert (workers.ran, len(workers.requests)) == ([], 2)
+    assert all(message.get("content") != command for request in workers.requests for message in request)
+
+    await workers.wake(chat)
+
+    assert workers.ran == ["_handle_mission_command"]
+    assert ((await workers.missions(chat, mission.id))[0].status, len(workers.requests)) == (done, 2)
+    # Once: a helper's report does not run it again.
+    await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+    assert workers.ran == ["_handle_mission_command"]
+
+
+@pytest.mark.parametrize("moment", MOMENTS)
+@pytest.mark.parametrize("command", ["/compress", "/clear", "/goal status", "/code status", "/loop list"])
+async def test_a_command_typed_during_a_chats_turn_is_run_by_its_own_wake_once_the_turn_has_ended(workers, command, moment):
+    chat = await workers.chat()
+    await in_a_turn(workers, chat, moment, command)
+    assert (workers.ran, len(workers.requests), await workers.status(chat)) == ([], 2, "completed")
+    assert all(message.get("content") != command for request in workers.requests for message in request)
+
+    await workers.wake(chat)
+
+    assert (workers.ran, len(workers.requests)) == ([ANSWERED[command]], 2)
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("completed", True)
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert (workers.ran, len(workers.requests)) == ([ANSWERED[command]], 2)
+
+
+async def test_a_command_typed_during_a_turn_whose_worker_died_is_run_by_the_wake_that_recovers_the_chat(workers):
     chat = await workers.chat()
     await workers.says(chat, "Open the report.")
-    # A worker is in the model's turn: a tool call is under way when the user types a command.  The
-    # turn reads what its user says meanwhile as their words; the call's result moves the cursor past
-    # it, the model is asked again, and the worker dies.
+    # A tool call is under way when the user types a command; its result moves the cursor past the
+    # message, the model is asked again, and the worker dies.
     lease = await workers.store.try_acquire_lease(chat, "a-worker-that-dies", ttl_seconds=60)
     await workers.store.emit_event(chat, EventType.HARNESS_WAKE, {"worker_id": "a-worker-that-dies", "cursor": 0})
     await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
@@ -469,11 +556,29 @@ async def test_a_command_typed_during_a_turn_is_that_turns_to_read_also_after_it
 
     await workers.wake(chat)
 
-    # The wake that recovers the chat goes on with the turn; it does not start the command instead.
+    # The model was asked after the message, but no wake has answered the command: it is still to run.
+    assert (workers.ran, workers.requests) == (["_handle_compress_command"], [])
+
+
+async def test_a_command_refused_by_its_users_limit_is_run_at_the_retry_also_when_the_retrys_first_wake_crashes(api, workers):
+    master = await master_of(api, await create(api))
+    await workers.says(master.id, "/compress")
+    refusing = workers.worker()
+    refusing._admit_turn = AsyncMock(return_value="You have reached your limit.")
+    await refusing.wake(master.id)
+    retried = await api.client.post(f"/v1/sessions/{master.id}/retry", headers=api.auth())
+    assert retried.status_code == 200, retried.text
+    # The retry's wake says it began, and crashes before it reaches the command.
+    crashing = workers.worker()
+    crashing._build_system_prompt = AsyncMock(side_effect=TimeoutError("the hub timed out"))
+    with pytest.raises(TimeoutError):
+        await crashing.wake(master.id)
     assert workers.ran == []
-    [conversation] = workers.requests
-    assert {"role": "user", "content": "/compress"} in conversation
-    assert (await workers.said(chat))[-1] == "Noted."
+
+    await workers.wake(master.id)
+
+    assert (workers.ran, workers.requests) == (["_handle_compress_command"], [])
+    assert await workers.status(master.id) == "completed"
 
 
 # -- The chat after a command --
