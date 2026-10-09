@@ -638,15 +638,28 @@ export class Updates {
 
   // A small file of the base's, whole, within *max* bytes: a page in its place is refused unread.
   private async small(url: string, max: number): Promise<Buffer> {
-    const response = await this.options.fetch(url, { headers: {}, signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(this.options.askMs ?? ASK_MS)]) });
+    const { host } = new URL(url);
+    const ms = this.options.askMs ?? ASK_MS;
+    const late = AbortSignal.timeout(ms);
+    // What the base did not do, in the app's own words and with what was asked of it: the system's
+    // words for a timeout or a lost connection name neither. The app's quit is said as it is.
+    const asked = async <Answer>(answer: Promise<Answer>): Promise<Answer> => {
+      try {
+        return await answer;
+      } catch (error) {
+        if (this.options.signal.aborted) throw error;
+        throw new Error(late.aborted ? `${host} did not answer for ${url} in ${ms / 1000} s` : `could not reach ${host}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    const response = await asked(this.options.fetch(url, { headers: {}, signal: AbortSignal.any([this.options.signal, late]) }));
     if (response.status !== 200) {
       void response.body?.cancel().catch(() => {});
-      throw new Error(`${new URL(url).host} answered ${response.status} for ${url}`);
+      throw new Error(`${host} answered ${response.status} for ${url}`);
     }
     const chunks: Buffer[] = [];
     let size = 0;
     const reader = response.body?.getReader();
-    for (let read = await reader?.read(); read && !read.done; read = await reader!.read()) {
+    for (let read = reader && await asked(reader.read()); read && !read.done; read = await asked(reader!.read())) {
       size += read.value.length;
       if (size > max) {
         void reader!.cancel().catch(() => {});

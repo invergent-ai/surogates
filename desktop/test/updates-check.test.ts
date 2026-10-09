@@ -196,12 +196,27 @@ describe("a check", () => {
     // A base that takes the request, and never answers it.
     base.answer = () => {};
     const began = Date.now();
-    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow("The operation was aborted due to timeout");
+    // Said in the app's own words, with what did not answer: the log's line says what failed.
+    const host = new URL(base.url).host;
+    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(`${host} did not answer for ${base.url}/desktop/latest.json in 0.3 s`);
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json"]);
     base.answer = (request, response, body) => (request.url?.endsWith(".sig") ? undefined : ranged(request, response, body));
-    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow("The operation was aborted due to timeout");
+    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(`${host} did not answer for ${base.url}/desktop/latest.json.sig in 0.3 s`);
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json", "/desktop/latest.json.sig"]);
     expect(Date.now() - began).toBeLessThan(5_000);
+    // One that sends its answer's first bytes and then nothing; one that drops the connection; and one that cannot be reached.
+    base.answer = (_request, response) => void response.writeHead(200, { "content-length": 500 }).write("{");
+    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(`${host} did not answer for ${base.url}/desktop/latest.json in 0.3 s`);
+    base.answer = (request) => void request.socket.destroy();
+    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(new RegExp(`^could not reach ${host}: `));
+    const gone = base.updates({ fetch: () => Promise.reject(new Error("net::ERR_NAME_NOT_RESOLVED")) });
+    await expect(gone.check()).rejects.toThrow(`could not reach ${host}: net::ERR_NAME_NOT_RESOLVED`);
+    // The app's quit is no failure of the base's, and is said as it is.
+    const quit = new AbortController();
+    base.answer = () => {};
+    const asking = base.updates({ signal: quit.signal }).check();
+    setTimeout(() => quit.abort(new Error("Surogate quit")), 50);
+    await expect(asking).rejects.toThrow("Surogate quit");
   });
 
   it("stops a release's download when the app quits, and keeps what came for the next start", { timeout: 8_000 }, async () => {
