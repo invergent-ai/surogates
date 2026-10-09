@@ -4843,7 +4843,7 @@ class AgentHarness(
         if not _command_answered(events, typed_at):
             return False
         goal_waits = self._goal_waits(session, events)
-        at_rest = not goal_waits and not await self._mission_has_pending_work(session)
+        at_rest = not goal_waits and not await self._mission_has_pending_work(session, or_raise=True)
         # Never past a helper's report, or a goal's next turn, that no turn
         # has read: behind the cursor it would wake nobody, and it is
         # still to be read.

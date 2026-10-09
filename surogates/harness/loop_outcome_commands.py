@@ -60,7 +60,7 @@ class OutcomeCommandMixin:
             )
             return False
 
-    async def _mission_has_pending_work(self, session: Session) -> bool:
+    async def _mission_has_pending_work(self, session: Session, *, or_raise: bool = False) -> bool:
         """True iff the session's mission is in a non-terminal status.
 
         The session is owned by the mission's lifecycle: while the
@@ -79,7 +79,10 @@ class OutcomeCommandMixin:
         normally on the next no-tool-call response.
 
         Returns ``False`` (allow completion) on any failure path so a
-        bug in the mission layer can't strand sessions forever.
+        bug in the mission layer can't strand sessions forever.  With
+        *or_raise* the failure is raised instead: a command's end is
+        written again by the wake that is retried, so there not knowing
+        must not be taken for "no mission".
         """
         if self._session_factory is None:
             return False
@@ -94,6 +97,8 @@ class OutcomeCommandMixin:
             active = await store.get_active_for_session(session.id)
             return active is not None
         except Exception:
+            if or_raise:
+                raise
             logger.debug(
                 "Mission pending-work check failed for session %s; "
                 "falling back to completing session",

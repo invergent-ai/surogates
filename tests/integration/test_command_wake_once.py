@@ -835,6 +835,24 @@ async def test_a_paused_missions_coordinator_takes_no_turn_on_a_report_and_reads
     assert workers.ran == ["_handle_mission_command"] * 2
 
 
+async def test_a_coordinators_chat_is_not_brought_to_rest_when_its_mission_cannot_be_read(workers, monkeypatch):
+    from surogates.missions.store import MissionStore
+
+    chat = await a_coordinator(workers)
+    await workers.says(chat, "/compress")
+    with monkeypatch.context() as down:
+        down.setattr(MissionStore, "get_active_for_session", AsyncMock(side_effect=ConnectionError("the database is away")))
+        with pytest.raises(ConnectionError):
+            await workers.wake(chat)
+    # Not knowing is not "no mission": at rest, its helpers' reports would wake nobody.
+    assert (workers.ran, await workers.status(chat)) == (["_handle_compress_command"], "active")
+
+    # The wake the dispatcher retries does not run the command again, and the chat is its mission's still.
+    await workers.wake(chat)
+    assert (workers.ran, await workers.status(chat)) == (["_handle_compress_command"], "active")
+    assert (await workers.said(chat)).count("Context is too small to compress — only 4 messages.") <= 1
+
+
 async def test_a_report_no_turn_has_read_is_not_passed_over_by_a_commands_end(workers):
     chat = await a_coordinator(workers)
     # A helper reports, and before any wake reads the report the user types a command.
