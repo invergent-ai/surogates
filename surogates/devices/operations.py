@@ -331,10 +331,13 @@ async def _keep_payload(db: AsyncSession, operation_id: UUID, transfer: dict[str
     ))
     # Views, not slices: a slice of bytes is a copy, and the chunks would hold a second one of the data.
     view = memoryview(data)
-    await db.execute(insert(DeviceTransferChunk), [
-        {"operation_id": operation_id, "seq": seq, "data": view[at:at + CHUNK_BYTES]}
-        for seq, at in enumerate(range(0, len(data), CHUNK_BYTES))
-    ])
+    chunk = insert(DeviceTransferChunk)
+    for seq, at in enumerate(range(0, len(data), CHUNK_BYTES)):
+        # One statement a chunk, as the link stores a read's, never one of many
+        # rows: the driver writes that in parts, and a stop that comes between
+        # two of them is lost there.  The call then waits for ever on a
+        # statement it never finished sending, and keeps its connection.
+        await db.execute(chunk, {"operation_id": operation_id, "seq": seq, "data": view[at:at + CHUNK_BYTES]})
 
 
 @dataclass(frozen=True, slots=True)

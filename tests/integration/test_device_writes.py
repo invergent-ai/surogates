@@ -111,7 +111,9 @@ async def test_a_writes_data_is_kept_without_a_second_copy_of_it():
 
     class Recording:
         async def execute(self, statement, parameters=None):
-            rows.extend(parameters or [])
+            if parameters is not None:
+                # One chunk a statement.
+                rows.append(parameters)
 
     transfer = named(BIG)
     tracemalloc.start()
@@ -171,6 +173,38 @@ async def test_a_write_whose_data_cannot_be_kept_is_not_recorded(laptop_rig, eng
             .where(DeviceOperation.invocation_id == request.invocation_id)
         )).scalar_one() == 0
     assert await transfers_of(session_factory, rig.device_id) == 0
+
+
+# The smallest write whose chunks, sent as one statement of many rows, the driver writes in parts:
+# asyncpg puts the rows in packets of 32 KiB or more and writes four packets at a time.  Four chunks,
+# the last of them a packet's worth, fill the four, and it waits before it writes what ends the statement.
+IN_PARTS = os.urandom(CHUNK_BYTES * 3 + 32 * 1024)
+
+
+async def test_a_write_stopped_at_any_wait_of_its_recording_ends_with_all_of_it_recorded_or_none(
+    laptop_rig, stopping, session_factory, redis_client,
+):
+    rig = laptop_rig
+    ops = DeviceOperations(stopping.session_factory, redis_client)
+    for at in range(500):
+        request = write_request(rig, IN_PARTS)
+        # No computer answers: the call waits until it is stopped.
+        assert await stopping.stop_at(at, ops.run(request))
+        async with session_factory() as db:
+            operation = (await db.execute(
+                select(DeviceOperation.id, DeviceOperation.outcome)
+                .where(DeviceOperation.invocation_id == request.invocation_id)
+            )).one_or_none()
+        if operation is None:
+            # Stopped before its commit: nothing of the write, so the same call asks for it afresh.
+            assert await transfers_of(session_factory, rig.device_id) == 0
+            continue
+        # Stopped once committed: all of it, and closed, so its computer is never sent it.
+        assert operation.outcome == CANCELLED_OUTCOME
+        assert await stored(session_factory, str(operation.id)) == IN_PARTS
+        break
+    else:
+        pytest.fail("the write was never recorded")
 
 
 async def test_a_resumed_write_asks_for_the_same_operation_and_its_data_is_kept_once(laptop_rig, session_factory):

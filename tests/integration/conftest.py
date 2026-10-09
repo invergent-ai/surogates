@@ -6,6 +6,7 @@ and provides async engine, session factory, and store fixtures.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import uuid
@@ -191,6 +192,96 @@ async def inbox_client(inbox_app):
         base_url="http://test",
     ) as client:
         yield client
+
+
+# ---------------------------------------------------------------------------
+# Calls stopped at a wait of the test's choosing
+# ---------------------------------------------------------------------------
+
+class _StoppedAt:
+    """Awaits a call, asking for its task's cancellation as the call reaches one of its waits."""
+
+    def __init__(self, call, at: int) -> None:
+        self._call, self._at = call, at
+
+    def __await__(self):
+        call = self._call.__await__()
+        waits, send, throw = 0, None, None
+        while True:
+            try:
+                waited = call.send(send) if throw is None else call.throw(throw)
+            except StopIteration as ended:
+                return ended.value
+            if waits == self._at:
+                # Asked for by the task itself as it suspends: the stop lands at this
+                # wait and no other, as one from outside does when it comes during it.
+                asyncio.current_task().cancel()
+            waits += 1
+            send = throw = None
+            try:
+                send = yield waited
+            except BaseException as raised:
+                throw = raised
+
+
+class Stopping:
+    """An engine of a test's own, set as the worker's is, and calls on it stopped at one of their waits.
+
+    Its connections carry a name of their own: those a stopped call still
+    holds are then the test's to count, and to end.
+    """
+
+    def __init__(self, pg_url: str, session_factory: async_sessionmaker) -> None:
+        self._name = f"stopping-{uuid.uuid4()}"
+        self._others = session_factory
+        self.engine = create_async_engine(pg_url, connect_args={
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+            "server_settings": {"application_name": self._name},
+        })
+        self.session_factory = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def stop_at(self, at: int, call, *, within: float = 10.0) -> bool:
+        """Run *call* in a task of its own, stopped at its wait number *at*, counted from 0.
+
+        Returns once the task ended with its connections given back: True when
+        it was stopped, False when the call ended before that wait.  A sweep of
+        *at* from 0 stops a call at each of its waits in turn.
+        """
+        async def stopped():
+            return await _StoppedAt(call, at)
+
+        # A connection in the pool first: the waits counted are the call's own, not those of connecting.
+        async with self.engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        task = asyncio.create_task(stopped())
+        try:
+            ended, _ = await asyncio.wait({task}, timeout=within)
+            assert ended, f"stopped at its wait {at}, the call did not end"
+        finally:
+            if not task.done():
+                # Not left behind: a task that never ends keeps the run's loop from closing.  Stopped
+                # again, and its connections ended under it, it has nothing left to wait for.
+                task.cancel()
+                async with self._others() as db:
+                    await db.execute(
+                        text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = :name"),
+                        {"name": self._name},
+                    )
+                await asyncio.wait({task}, timeout=within)
+        assert self.engine.pool.checkedout() == 0, "the stopped call kept a connection"
+        if task.cancelled():
+            return True
+        task.result()
+        return False
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def stopping(pg_url, session_factory):
+    """Calls on the test database stopped at one of their waits (see Stopping)."""
+    stopping = Stopping(pg_url, session_factory)
+    yield stopping
+    await stopping.engine.dispose()
 
 
 # ---------------------------------------------------------------------------
