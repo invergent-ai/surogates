@@ -8,6 +8,7 @@ so that the routes and the desktop draw the same rows.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,7 +67,8 @@ def row(thread_id: str, title: str, minutes: float, *, group: str, reason=None, 
     return {
         "id": thread_id, "title": title, "group": group, "reason": reason,
         "status_line": status_line, "progress": progress,
-        "files": [{"kind": kind, "label": label, "ref": ref, "thread_id": thread_id} for kind, label, ref in files],
+        # A thread with no landing: its files are its turn summaries', with no mark.
+        "files": [{"kind": kind, "label": label, "ref": ref, "thread_id": thread_id, "landing": None} for kind, label, ref in files],
         "place": place, "created_at": wire(ago(minutes + 60)), "updated_at": wire(ago(minutes)),
         "resolved_at": resolved_at and wire(resolved_at),
     }
@@ -268,7 +270,7 @@ def test_a_row_lists_its_newest_files_and_leaves_out_what_the_shell_refuses():
     assert not {"threads/sales/chart.png", "threads/sales/" + "a" * 4083} & {f["ref"] for f in files}
     assert files[0]["ref"] == "threads/sales/week-0.csv"
     assert files[60] == {
-        "kind": "file", "label": "threads/sales/total.csv", "ref": "threads/sales/total.csv", "thread_id": IDLE,
+        "kind": "file", "label": "threads/sales/total.csv", "ref": "threads/sales/total.csv", "thread_id": IDLE, "landing": None,
     }
     assert files[-1]["ref"] == "threads/sales/day-138.csv"
 
@@ -306,3 +308,80 @@ def test_a_thread_whose_files_did_not_merge_waits_on_you_with_the_reason_files()
     assert (derived["group"], derived["reason"], derived["status_line"]) == (
         "waiting", "files", "Couldn't merge my changes to Report.docx",
     )
+
+
+def landing(row_id: int, *files: tuple[str, str | None, str | None, bool]) -> dict:
+    """A landing's row as the store reads it: each file ``(path, before, after, merged)``."""
+    return {"id": row_id, "files": [{"path": p, "before": b, "after": a, "merged": m} for p, b, a, m in files]}
+
+
+def marks(given: ThreadFacts) -> list[tuple[str, str | None]]:
+    return [(f["ref"], f["landing"]) for f in derive_thread(given, now=NOW)["files"]]
+
+
+def test_a_threads_files_are_what_its_landings_changed_each_with_its_mark():
+    given = replace(facts(IDLE, "Draft A", 5, "completed", events=[
+        summary(8, "Done.", ("artifact", "Sales chart", "art-1"), ("file", "old.md", "old.md")),
+    ]), landings=(
+        landing(40, ("report.docx", None, "b1", True), ("plan.md", None, "p1", True), ("budget.xlsx", None, "c1", True)),
+        landing(41, ("report.docx", "b1", "b2", True), ("budget.xlsx", "c1", "c2", False),
+                ("notes.md", "n1", "n2", False), ("gone.md", "g1", None, True), ("kept.md", "k1", None, False)),
+    ), redoing=frozenset({"budget.xlsx", "report.docx"}))
+    # What did not land comes first, where a row and a card show it.  A file is marked by its newest
+    # landing, so one that landed is not being redone whatever a redo names.  A deletion that landed
+    # is no file to open; one left out is still there.  A summary's files are a thread's that works
+    # on the real files: here only its artifact is taken.
+    assert marks(given) == [
+        ("budget.xlsx", "redoing"), ("notes.md", "not_merged"), ("kept.md", "not_merged"),
+        ("report.docx", "landed"), ("plan.md", "landed"), ("art-1", None),
+    ]
+    assert derive_thread(given, now=NOW)["files"][0] == {
+        "kind": "file", "label": "budget.xlsx", "ref": "budget.xlsx", "thread_id": IDLE, "landing": "redoing",
+    }
+    # No redo waits for the thread's next turn: the file its landing left out is not merged.
+    assert marks(replace(given, redoing=frozenset()))[0] == ("budget.xlsx", "not_merged")
+
+
+def test_a_file_that_landed_since_is_not_marked_not_merged():
+    given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(
+        landing(42, ("budget.xlsx", "c1", "c3", True)),
+        landing(41, ("budget.xlsx", "c1", "c2", False), ("notes.md", "n1", "n2", False)),
+    ), redoing=frozenset({"budget.xlsx"}))
+    assert marks(given) == [("notes.md", "not_merged"), ("budget.xlsx", "landed")]
+
+
+@pytest.mark.parametrize("ended", [
+    {"resolved_at": ago(1)},
+    # Quiet for longer than a week: resolved by the quiet rule.
+    {"minutes": 8 * 24 * 60},
+], ids=["resolved", "quiet"])
+def test_a_resolved_threads_file_is_not_being_redone(ended):
+    given = replace(
+        facts(IDLE, "Draft A", ended.get("minutes", 5), "completed", resolved_at=ended.get("resolved_at")),
+        landings=(landing(41, ("budget.xlsx", "c1", "c2", False)),), redoing=frozenset({"budget.xlsx"}),
+    )
+    derived = derive_thread(given, now=NOW)
+    assert (derived["group"], marks(given)) == ("resolved", [("budget.xlsx", "not_merged")])
+
+
+def test_a_landing_of_two_thousand_files_lists_the_shells_limit_those_left_out_first():
+    changed = [(f"data/part-{i:04}.csv", None, f"v{i}", i % 500 != 499) for i in range(2000)]
+    given = replace(facts(IDLE, "Draft A", 5, "completed", events=[
+        summary(8, "Done.", ("artifact", "Sales chart", "art-1")),
+    ]), landings=(landing(41, *changed),))
+    files = derive_thread(given, now=NOW)["files"]
+    assert len(files) == SHELL_LIMITS["files"]
+    assert [f["ref"] for f in files[:5]] == [
+        "data/part-0499.csv", "data/part-0999.csv", "data/part-1499.csv", "data/part-1999.csv", "data/part-0000.csv",
+    ]
+    assert [f["landing"] for f in files[:5]] == ["not_merged"] * 4 + ["landed"]
+
+
+def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_it_is():
+    markup = '<img src=x onerror="alert(1)">.md'
+    given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(
+        landing(41, ("a" * (SHELL_LIMITS["label"] + 1), None, "v1", True), (markup, None, "v2", False)),
+    ))
+    assert derive_thread(given, now=NOW)["files"] == [
+        {"kind": "file", "label": markup, "ref": markup, "thread_id": IDLE, "landing": "not_merged"},
+    ]

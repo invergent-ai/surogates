@@ -32,6 +32,10 @@ export interface ProducedFile {
   label: string;
   ref: string; // workspace-relative path, or artifact id
   threadId: string;
+  // A file's state in the project's files, from the thread's landings; null for an artifact,
+  // and for a file of a thread that works on the real files (a project over the file cap).
+  // Optional: a page built before file history serves none, and the shell takes that as null.
+  landing?: "landed" | "redoing" | "not_merged" | "undone" | null;
 }
 
 export interface ThreadRow {

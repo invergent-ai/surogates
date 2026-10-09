@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Event, InboxItem, Workstream, WorkstreamThread
+from surogates.db.models import Event, InboxItem, Workstream, WorkstreamHistory, WorkstreamThread
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import master_instructions
@@ -152,7 +152,8 @@ class WorkstreamStore:
 
         Without files, only each thread's newest turn summary is read, for
         its status line, and a row's files are that turn's alone: reading
-        every summary is most of the cost of a project's rows.
+        every summary is most of the cost of a project's rows.  Nor are its
+        landings read then, which mark its files.
         """
         query = (
             select(WorkstreamThread, SessionRow.status, SessionRow.updated_at, SessionRow.config["execution"])
@@ -196,20 +197,49 @@ class WorkstreamStore:
             summaries = await db.scalars(select(Event).where(
                 Event.session_id == _any(ids), Event.type == EventType.TURN_SUMMARY.value,
             )) if with_files else ()
-            items_of, events_of = defaultdict(list), defaultdict(list)
+            # The files each landing recorded, which mark a row's: the cloud's
+            # records, asked by project, which the table's index is on.
+            landings = (await db.execute(
+                select(WorkstreamHistory.thread_id, WorkstreamHistory.id, WorkstreamHistory.files).where(
+                    WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None),
+                    WorkstreamHistory.thread_id == _any(ids), WorkstreamHistory.kind == "landing",
+                    WorkstreamHistory.saga_state == "completed", func.jsonb_array_length(WorkstreamHistory.files) > 0,
+                )
+            )).all() if with_files else ()
+            items_of, events_of, landings_of = defaultdict(list), defaultdict(list), defaultdict(list)
             for item in items:
                 items_of[thread_of[item.session_id]].append(item)
             for event in (*latest, *summaries):
                 events_of[event.session_id].append(event)
+            for landed_by, row_id, files in landings:
+                landings_of[landed_by].append({"id": row_id, "files": files})
+        redoing = await self._redoing(landings_of)
         return [
             ThreadFacts(
                 id=thread.session_id, title=thread.title, status=status,
                 created_at=thread.created_at, updated_at=updated_at, resolved_at=thread.resolved_at,
                 place=place_of(execution),
                 items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
+                landings=tuple(landings_of[thread.session_id]), redoing=redoing.get(thread.session_id, frozenset()),
             )
             for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]
+
+    async def _redoing(self, landings_of: dict[UUID, list[dict[str, Any]]]) -> dict[UUID, frozenset[str]]:
+        """The files each thread's next turn is told to redo, by the landing's
+        own rule (``landing.redo_files``), so that a row says a file is being
+        redone exactly while that turn would redo it.  Asked only of a thread
+        with a file a landing left out: no other has one to mark.
+        """
+        from surogates.harness.landing import redo_files
+        from surogates.session.store import SessionStore
+
+        sessions = SessionStore(self._sf)
+        return {
+            thread_id: frozenset(await redo_files(sessions, thread_id))
+            for thread_id, landings in landings_of.items()
+            if any(not f["merged"] for landing in landings for f in landing["files"])
+        }
 
     async def thread_counts(self, workstream_ids: list[UUID]) -> dict[UUID, tuple[datetime, int, int]]:
         """Each project's latest thread activity, and its threads waiting on
