@@ -580,10 +580,12 @@ unread() {
 
 # Copies file $1, which an apply was handed, to $2 in root's staging: read once, as the user who
 # asked, for $4 seconds at most, never through a link and never waiting on a pipe, whatever it has
-# become since it was named. A pipe gives an empty copy at once. No more than $3 bytes and one are
-# copied, whatever the file holds: root's end of the pipe counts them, and closes it. The reader
-# counts nothing: a count of its own would bound only a reader that kept to it. Whether the file
-# held no more than $3.
+# become since it was named. A pipe that no one writes gives an empty copy at once; one that has
+# a writer is refused at once, or gives what was written first, as dd reads one without waiting.
+# Neither is a release's file, and what is copied is checked as any copy is. No more than $3
+# bytes and one are copied, whatever the file holds: root's end of the pipe counts them, and
+# closes it. The reader counts nothing: a count of its own would bound only a reader that kept to
+# it. Whether the file held no more than $3.
 taken() {
   local file="$1" copy="$2" most="$3" wait="$4" ends
   as_reader "$wait" dd if="$file" iflag=nofollow,nonblock bs=64K status=none 2>/dev/null \
