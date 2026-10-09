@@ -18,6 +18,12 @@ export interface ControlRoots {
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
 }
 
+// What the control asks of the folders' places (places.ts).
+export interface ControlPlaces {
+  mount(key: string, history: Share, real: Share): Promise<void>;
+  unmount(key: string): Promise<void>;
+}
+
 // What the control asks of the guest itself (root.ts): its clock, its runs' backstops, and its power.
 export interface ControlMachine {
   // The guest's clock set to *now*, milliseconds since the epoch.
@@ -50,8 +56,11 @@ export class Control {
   // The operations still running, by id.
   private readonly running = new Map<number, AbortController>();
 
-  // Without *machine*, as in the tests, the guest's clock and power are left alone.
-  constructor(private readonly send: (message: FromAgent) => void, private readonly roots: ControlRoots, private readonly machine?: ControlMachine) {}
+  // Without *machine*, as in the tests, the guest's clock and power are left alone; without *places*, no folder's history is mounted.
+  constructor(
+    private readonly send: (message: FromAgent) => void, private readonly roots: ControlRoots, private readonly machine?: ControlMachine,
+    private readonly places?: ControlPlaces,
+  ) {}
 
   hello(): void {
     this.send({ type: "hello", id: 0 });
@@ -108,6 +117,15 @@ export class Control {
     } else if (message.type === "teardown") {
       if (!isText(message.root) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("teardown") });
       this.roots.teardown(message.root, message.share).then(
+        () => this.send({ type: "done", id }),
+        (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
+      );
+    } else if (message.type === "place" || message.type === "unplace") {
+      const { type } = message;
+      const shared = type === "unplace" || (isShare(message.history) && isShare(message.real));
+      if (!isText(message.key) || !shared) return this.send({ type: "failed", id, message: malformed(type) });
+      if (!this.places) return this.send({ type: "failed", id, message: "The agent keeps no folder's history" });
+      (type === "place" ? this.places.mount(message.key, message.history, message.real) : this.places.unmount(message.key)).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
