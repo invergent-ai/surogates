@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
@@ -757,5 +757,58 @@ describe("what a landing keeps, and how much", () => {
     expect(modes).toEqual({ "": 0o700, [`/${SAGA}`]: 0o700, [`/${SAGA}/1`]: 0o600, [`/${SAGA}/1.json`]: 0o600 });
     await ok(unapply(1, "Report.docx"));
     expect(statSync(join(folder, "Report.docx")).mode & 0o777).toBe(0o664);
+  });
+});
+
+// A filesystem that takes "Report.docx" and "report.docx", and two spellings of one "é", for one name, as a Mac's or
+// a Windows disk does: tmpfs can, mounted in a user namespace of the test's own. *run* is a shell line given the
+// mount's path as $1; null where this computer gives no such mount.
+function folding(at: string, run: string, ...more: string[]) {
+  return spawnSync("bwrap", [
+    "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "ALL", "--bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--",
+    "sh", "-c", `mount -t tmpfs -o casefold none "$1" && mkdir "$1/Documents" && chattr +F "$1/Documents" && ${run}`, "sh", at, ...more,
+  ], { encoding: "utf8", timeout: 30_000 });
+}
+const probe = mkdtempSync(join(tmpdir(), "land-folding-"));
+const folds = folding(probe, 'touch "$1/Documents/A" && test -e "$1/Documents/a"').status === 0;
+rmSync(probe, { recursive: true, force: true });
+
+describe("a folder that tells names apart less than the thread's copy does", () => {
+  it.skipIf(!folds)("never writes one file twice for two names of a landing, by their case or by how their letters are composed, and says which two", () => {
+    const mount = join(base, "mount");
+    mkdirSync(mount);
+    const [composed, decomposed] = ["café.txt", "café.txt"];
+    const data = { "Report.docx": "one", "report.docx": "another", [composed]: "composed", [decomposed]: "decomposed" };
+    for (const [name, text] of Object.entries(data)) turn(name, text);
+    // The landing runs where the mount is, and says what it was answered and what the folder then holds.
+    const script = `
+      import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      const { perform } = await import(${JSON.stringify(new URL("../dist/files/operations.js", import.meta.url).href)});
+      const folder = join(process.argv[1], "Documents");
+      const context = { folder, home: "/nowhere", env: {}, landing: { copy: ${JSON.stringify(copy)}, kept: ${JSON.stringify(kept)} } };
+      const land = (args) => perform("land", args, context, new AbortController().signal);
+      writeFileSync(join(folder, "Notes.md"), "yours");
+      const out = { looked: await land({ action: "revisions", paths: ["Notes.md", "notes.md", "Notes.md", "new.txt"] }), applied: [] };
+      for (const [step, [path, after]] of ${JSON.stringify(Object.entries(data).map(([name, text]) => [name, blob(text)]))}.entries()) {
+        out.applied.push(await land({ action: "apply", saga: ${JSON.stringify(SAGA)}, step, path, before: null, after, expected: "absent" }));
+      }
+      out.holds = Object.fromEntries(readdirSync(folder).map((name) => [name, readFileSync(join(folder, name), "utf8")]));
+      console.log(JSON.stringify(out));
+    `;
+    const ran = folding(mount, '"$2" --input-type=module -e "$3" "$1"', process.execPath, script);
+    expect(ran.stderr).toBe("");
+    const out = JSON.parse(ran.stdout) as { looked: { ok: { revisions: Array<[string, string]> } }; applied: unknown[]; holds: Record<string, string> };
+    // Two names of a look that are one file are neither of them replaced; a name asked twice is one name.
+    expect(out.looked.ok.revisions.map(([path, token]) => [path, token === "other" ? token : token === "absent" ? token : "a revision"]))
+      .toEqual([["Notes.md", "other"], ["notes.md", "other"], ["Notes.md", "other"], ["new.txt", "absent"]]);
+    const twice = (path: string, first: string) => ({
+      error: { type: "os", code: "EEXIST", message: `${path} and ${first} are one file in this folder, which tells names apart less than the thread's copy does, so it was not written twice` },
+    });
+    expect(out.applied).toEqual([
+      { ok: expect.objectContaining({ path: "Report.docx" }) }, twice("report.docx", "Report.docx"),
+      { ok: expect.objectContaining({ path: composed }) }, twice(decomposed, composed),
+    ]);
+    expect(out.holds).toEqual({ "Notes.md": "yours", "Report.docx": "one", [composed]: "composed" });
   });
 });

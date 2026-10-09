@@ -428,6 +428,28 @@ class Landing {
     }
   }
 
+  // The refusal of a file this landing wrote already, under another of its names: a folder that tells names apart
+  // less than git does, by their case or by how their letters are composed, holds one file where the copy holds two.
+  private twice(found: BigIntStats | null, path: string): Failure | null {
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.kept);
+    } catch {
+      // It has written nothing yet.
+    }
+    for (const name of found === null ? [] : names) {
+      const step = /^(0|[1-9][0-9]*)\.json$/.exec(name)?.[1];
+      const did = step === undefined ? null : this.read(Number(step));
+      if (did !== null && did.path !== path && did.wrote !== null && same(found, did.wrote)) {
+        return new Failure({
+          type: "os", code: "EEXIST",
+          message: `${path} and ${did.path} are one file in this folder, which tells names apart less than the thread's copy does, so it was not written twice`,
+        });
+      }
+    }
+    return null;
+  }
+
   // The folder itself, held: the app gave it resolved, and a link in its stead since is no folder of the chat's.
   private root(path: string): Held {
     return new Held(io(path, () => openSync(this.folder, HOLD)));
@@ -485,7 +507,7 @@ class Landing {
         throw conflict(path);
       }
       // The look, again, before anything is made: a file saved since is no file of this landing's.
-      if (tokenOf(found) !== expected) throw conflict(path);
+      if (tokenOf(found) !== expected) throw this.twice(found, path) ?? conflict(path);
       if (after === null && found === null) return { ...done, made: [] };
       // A landing deletes only what its thread deleted: a name its copy still holds is not the turn's
       // deletion, whoever asks for it.
@@ -830,7 +852,12 @@ export function land(args: Record<string, unknown>, context: Context): unknown {
   if (action === "recover") return report;
   if (action === "revisions") {
     if (!Array.isArray(paths) || paths.length > MAX_LOOKED) throw valueError(BAD);
-    return { revisions: paths.map((one) => [one, revision(context.folder, partsOf(one), one as string)]) };
+    const revisions = paths.map((one): [string, string] => [one as string, revision(context.folder, partsOf(one), one as string)]);
+    // Two names of the look that are one file, in a folder that tells names apart less than git does: neither is
+    // replaced. A revision names one file, so two names with one revision are that.
+    const named = new Map<string, Set<string>>();
+    for (const [one, token] of revisions) named.set(token, (named.get(token) ?? new Set()).add(one));
+    return { revisions: revisions.map(([one, token]) => [one, REVISION.test(token) && named.get(token)!.size > 1 ? "other" : token]) };
   }
   if (typeof saga !== "string" || !SAGA.test(saga)) throw valueError(BAD);
   const landing = new Landing(context, saga);
