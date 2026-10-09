@@ -54,6 +54,20 @@ async def operations_of(session_factory, root: UUID) -> int:
         )).scalar_one()
 
 
+async def ended(task: asyncio.Task | None, within: float = 30.0) -> None:
+    """Stop *task* if it still runs, and wait until it has ended, *within* seconds at most.
+
+    For a test's ``finally``, so that a test that failed leaves no task behind
+    either: a task still pending when the run's loop closes is cancelled there
+    once, and waited for without a bound.
+    """
+    if task is None or task.done():
+        return
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=within)
+    assert done, "stopped, the task did not end"
+
+
 async def test_a_worker_stopped_after_the_app_sent_a_30_mib_pdf_resumes_with_the_same_bytes(
     built_client, laptop_rig, link_url, session_factory, redis_client, journal_dir,
 ):
@@ -125,6 +139,7 @@ async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
     data = os.urandom(MAX_READ_BYTES)
     (folder / "most.bin").write_bytes(data)
     app = await client(built_client, link_url, rig.token, journal_dir / "journal.sqlite", folder=folder)
+    reading = None
     try:
         await app.until(connected)
         alone = []
@@ -145,7 +160,10 @@ async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
         outcome = await reading
         elapsed = time.monotonic() - started
     finally:
-        await app.close()
+        try:
+            await ended(reading)
+        finally:
+            await app.close()
 
     assert outcome["ok"]["transfer"]["size"] == MAX_READ_BYTES
     async with session_factory() as db:
@@ -229,6 +247,7 @@ async def test_a_50_mib_write_crosses_the_link_and_small_operations_are_answered
     folder.mkdir()
     data = os.urandom(MAX_WRITE_BYTES)
     app = await client(built_client, link_url, rig.token, journal_dir / "journal.sqlite", folder=folder)
+    writing = None
     try:
         await app.until(connected)
         wio = device_io(rig.ops, rig.device_id, rig.root, folder)
@@ -243,7 +262,10 @@ async def test_a_50_mib_write_crosses_the_link_and_small_operations_are_answered
             await writing
         elapsed = time.monotonic() - started
     finally:
-        await app.close()
+        try:
+            await ended(writing)
+        finally:
+            await app.close()
 
     assert (folder / "most.bin").read_bytes() == data
     # The API's own line for the write's transfer: from its op to the app's last acknowledgement.
