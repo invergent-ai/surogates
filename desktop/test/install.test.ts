@@ -15,6 +15,10 @@ import { promisify } from "node:util";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { AS_ROOT } from "../src/shell/updates.js";
+
+import { HELPER_MODES } from "./helper-modes.js";
+
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const PUBLISH = fileURLToPath(new URL("../release/publish.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
@@ -41,9 +45,12 @@ createServer((request, response) => {
 }).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
 `;
 
-// The helper stopped (SIGKILL) before each command it runs, in turn, each time from the install
-// kept in /opt/pristine. A line for each stop: what current names and whether that folder is
-// whole, then how the same apply, run again to its end, exits and what it leaves.
+// The helper stopped (SIGKILL) before each command its own shell runs, in turn, each time from the
+// install kept in /opt/pristine. A line for each stop: what current names and whether that folder
+// is whole, then how the same apply, run again to its end, exits and what it leaves. Counted in
+// the helper's own shell alone, as SIGNALS counts: what a $( ) runs counts on from where it
+// began, and would stop the helper at a number before its own shell came to that number, so
+// that the commands just after a long $( ) were never stopped at. Its renames are among them.
 const STATE = String.raw`
 state() {
   local now
@@ -58,7 +65,7 @@ const STOPS = String.raw`${STATE}
 for stop in $(seq 1000); do
   find /opt/surogate -mindepth 1 -delete
   cp -a /opt/pristine/. /opt/surogate/
-  STOP="$stop" bash -T -c 'n=0; trap "(( ++n == STOP )) && kill -KILL \$\$" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
+  STOP="$stop" bash -T -c 'n=0; trap "(( BASHPID == \$\$ )) && (( ++n == STOP )) && kill -KILL \$\$" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
   [ "$?" -eq 137 ] || { echo "end $stop"; exit 0; }
   stopped="$(state)"
   /opt/surogate-test/install.sh --apply "$@" >/dev/null 2>&1
@@ -78,6 +85,28 @@ for stop in $(seq 1000); do
   ended="$?"
   [ -e /tmp/sent ] || { echo "end $stop"; exit 0; }
   echo "$stop: $ended $(state), staging $(ls -A /opt/surogate/staging 2>/dev/null | wc -l)"
+done
+`;
+
+// The helper stopped (SIGKILL) before each rename it makes, in turn, each time from the install
+// kept in /opt/pristine. A line for each stop: what current names, the release the helper's mark
+// names and whose the helper pkexec runs is, the release's before or the update's; then how the
+// same apply, run again to its end, exits and what it leaves of the three.
+const RENAMES = String.raw`
+seen() {
+  local helper=neither
+  ! cmp -s /opt/surogate/bin/surogate-apply-update /opt/pristine/bin/surogate-apply-update || helper="the release's before"
+  ! cmp -s /opt/surogate/bin/surogate-apply-update /opt/surogate/versions/1.1.0/bin/surogate-apply-update || helper="the update's"
+  echo "current $(basename "$(readlink /opt/surogate/current)"), mark $(jq -r .version /opt/surogate/bin/release.json), helper $helper"
+}
+for stop in $(seq 100); do
+  find /opt/surogate -mindepth 1 -delete
+  cp -a /opt/pristine/. /opt/surogate/
+  STOP="$stop" bash -T -c 'n=0; trap "[[ \$BASH_COMMAND == mv\ -T\ * ]] && (( ++n == STOP )) && kill -KILL \$\$" DEBUG; . /opt/surogate-test/install.sh "$@"' stopped --apply "$@" >/dev/null 2>&1
+  [ "$?" -eq 137 ] || { echo "end"; exit 0; }
+  stopped="$(seen)"
+  /opt/surogate-test/install.sh --apply "$@" >/dev/null 2>&1
+  echo "$stopped; again $?: $(seen)"
 done
 `;
 
@@ -160,6 +189,20 @@ const NOT_ROOTS_OWN_SAID = `Surogate Desktop: ${LOCKS} must be a folder of root'
 const linked = (then = "remove the link, and run this again") =>
   `Surogate Desktop: /opt/surogate is a link, where Surogate Desktop keeps a folder of its own or a disk mounted there: ${then}\n`;
 const LINKED_NOTHING_REMOVED = linked("nothing was removed. Remove the link, and run this again: what it names is then yours to remove");
+// What stands installed, all that a refusal leaves as it was: what current names, each version
+// and its mark, and the helper pkexec runs and its mark, with whatever else is beside them: each
+// by its place on the disk, its kind and mode, its owner, its size, its time and its bytes. The
+// tree's own folders are not among it: an apply makes them before it refuses anything.
+const STANDING = String.raw`
+readlink /opt/surogate/current 2>/dev/null
+ls /opt/surogate/versions 2>/dev/null
+for mark in /opt/surogate/versions/*/release.json; do [ ! -e "$mark" ] || echo "$mark $(sha256sum <"$mark")"; done
+for file in /opt/surogate/bin/*; do
+  [ -e "$file" ] || [ -L "$file" ] || continue
+  stat -c '%n %i %f %u %g %s %y' -- "$file"
+  if [ -L "$file" ]; then readlink "$file"; elif [ -f "$file" ]; then sha256sum <"$file"; fi
+done
+`;
 // What --apply needs, on a desktop's baseline: openssl, jq and bubblewrap, which the install
 // script installs, and nothing of Surogate's; strace, for the tests that read the helper's system
 // calls; and a locale as a desktop's user has one, en_US.UTF-8.
@@ -186,6 +229,13 @@ const next = generateKeyPairSync("ed25519");
 const other = generateKeyPairSync("ed25519");
 const pem = (key: KeyObject) => key.export({ type: "spki", format: "pem" }).toString().trim();
 const PUBLIC = pem(keys.publicKey);
+// What an install or a rollback adds, on a computer that has a helper, where no key of the helper's signed the base's release.
+// What the script says of a release that no key this computer trusts has signed, behind the
+// release's name: plainly, as of a rollback; with the one way on that this computer's own keys
+// check, as of an install or an apply; and of one that a key signed which a later release retired.
+const UNSIGNED = " is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version";
+const MISSED = `${UNSIGNED}. If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key`;
+const RETIRED = " is signed by a release key that Surogate has retired, which this computer no longer trusts: nothing was installed, and Surogate Desktop stays at its version";
 const withKeys = (script: string, trusted = [PUBLIC]) =>
   script.replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
 
@@ -220,7 +270,8 @@ function lab(release: string, setup: string[], run: string[] = []) {
   const manifestOf = (version: string, tarball: string, fields: Record<string, unknown> = {}, key: KeyObject = keys.privateKey) => {
     const manifest = Buffer.from(`${JSON.stringify({
       version, channel: "stable", platform: "linux", arch: "x64",
-      url: `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`, sha256: sha256(readFileSync(tarball)), size: statSync(tarball).size, ...fields,
+      url: `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`, sha256: sha256(readFileSync(tarball)), size: statSync(tarball).size, stateSchema: 1,
+      ...fields,
     })}\n`);
     writeFileSync(join(it.dir, "manifest.json"), manifest);
     writeFileSync(join(it.dir, "manifest.json.sig"), sign(null, manifest, key));
@@ -228,6 +279,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
   };
   const current = () => root("readlink /opt/surogate/current").stdout.trim();
   const versions = () => root("ls /opt/surogate/versions").stdout.trim().split("\n").filter(Boolean);
+  const standing = () => root(STANDING).stdout;
   // The system's *tool* with *standIn* in its place, which finds the tool itself as
   // /opt/hold/<tool>, for the one docker call that runs *lines*.
   const swapped = (tool: string, standIn: string, lines: string[]) => {
@@ -279,7 +331,7 @@ function lab(release: string, setup: string[], run: string[] = []) {
     }
   };
 
-  return { it, docker, root, as, releaseOf, manifestOf, current, versions, swapped, elsewhere };
+  return { it, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped, elsewhere };
 }
 
 describe("the install script's release keys", () => {
@@ -298,6 +350,13 @@ describe("the install script's release keys", () => {
   });
 });
 
+describe("the install script's packages", () => {
+  it("names each program that the app starts by a path of the system's: pkexec, for an update, and perl, with which it starts a child that has none of its descriptors", () => {
+    const asked = /apt-get install [^\n]*/.exec(readFileSync(SCRIPT, "utf8"))?.[0].split(" ") ?? [];
+    expect(asked).toEqual(expect.arrayContaining(["pkexec", "perl-base"]));
+  });
+});
+
 describe("the install script's waits", () => {
   it("are shorter for all an apply reads with the lock held than for the lock: one who was let apply once keeps no other waiting until it gives up", () => {
     const script = readFileSync(SCRIPT, "utf8");
@@ -307,8 +366,63 @@ describe("the install script's waits", () => {
   });
 });
 
+describe("the install script's refusals that only a removal mends", () => {
+  it("are each said in the README as the script says them, and the README says none that the script does not", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+    // The two files that these refusals name, as the script's own settings place them.
+    const placed = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && echo "$HELPER" && echo "$HELPER_MARK"`, "_", SCRIPT], { encoding: "utf8" }).stdout.trim().split("\n");
+    expect(placed).toEqual(["/opt/surogate/bin/surogate-apply-update", "/opt/surogate/bin/release.json"]);
+    const [helper = "", mark = ""] = placed;
+    // Each sentence of the script's that ends in the removal, with those two files' names in it.
+    const said = [...new Set([...script.matchAll(/"([^"\n]*: remove Surogate Desktop with --uninstall, and install it again)"/g)]
+      .map((match) => (match[1] ?? "").replaceAll("$HELPER_MARK", mark).replaceAll("$HELPER", helper)))].sort();
+    expect(said.length).toBe(4);
+    for (const sentence of said) expect(sentence).not.toContain("$");
+    // The README's section quotes each on a line of its own, and no other line of that kind.
+    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    const section = readme.slice(readme.indexOf("\n## When Surogate Desktop says to remove it and install it again\n"));
+    expect(section.startsWith("\n## ")).toBe(true);
+    const quoted = [...new Set(section.split("\n").filter((line) => line.startsWith("    /opt/") && line.includes("--uninstall")).map((line) => line.trim()))].sort();
+    expect(quoted).toEqual(said);
+    // And it says what to do, in the install script's own two commands.
+    expect(section).toContain("    curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall\n    curl -fsSL https://surogate.ai/desktop/install.sh | bash\n");
+  });
+});
+
+describe("the install script's reader of one JSON object", () => {
+  it("reads by no bound but a number of bytes in the ten digits, from 1 to a megabyte: its bound goes into the shell's own arithmetic, where any other word is a command", () => {
+    const dir = mkdtempSync(join(tmpdir(), "install-test-"));
+    try {
+      const object = join(dir, "object.json");
+      writeFileSync(object, '{"a":1}\n');
+      // A locale of this computer's in which bash takes other characters than the ten for digits, where it has one.
+      const locales = spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout.trim().split("\n");
+      const wide = locales.find((locale) => spawnSync("bash", ["-c", '[[ "$1" =~ ^[0-9]$ ]]', "_", "٣"], { env: { ...process.env, LC_ALL: locale } }).status === 0) ?? "C";
+      // The reader, from the script's functions without its last line, with *bound* as its third argument where one is given.
+      const read = (...bound: string[]) => spawnSync("bash", ["-c", `cd "$3" && . <(sed '$d' "$1") && settings && one_object "$2" one "\${@:4}"`, "_", SCRIPT, object, dir, ...bound], {
+        encoding: "utf8", env: { ...process.env, LC_ALL: wide },
+      });
+      // With none, a manifest's 4096 bytes; and each bound from the object's own 8 bytes to a megabyte.
+      for (const bound of [[], ["8"], ["4096"], ["1048576"]]) expect(read(...bound), bound.join()).toMatchObject({ status: 0, stdout: '{"a":1}\n', stderr: "" });
+      // A bound below the object's bytes is a bound, and the object is longer.
+      for (const bound of ["1", "7"]) expect(read(bound), bound).toMatchObject({ stdout: "", stderr: "" });
+      expect(read("7").status).not.toBe(0);
+      // What is no such number is refused before it is reckoned with: in arithmetic a name is a
+      // variable's, and what stands in its brackets is run.
+      const ran = join(dir, "ran");
+      for (const bound of ["0", "08", "+8", "-8", " 8", "8 ", "8.0", "1e3", "0x10", "4096+1", "1048577", "9999999", "99999999999999999999", "٨", "4٠٩٦",
+        "most", "x[$(touch ran)]", "a[`touch ran`]", "$(touch ran)", "8;touch ran"]) {
+        expect(read(bound), bound).toMatchObject({ status: 1, stdout: "", stderr: "" });
+        expect(existsSync(ran), bound).toBe(false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's --apply, on Ubuntu ${release}`, { timeout: 120_000 }, () => {
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped, elsewhere } = lab(release, APPLY_LAB, OWN_DISK);
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped, elsewhere } = lab(release, APPLY_LAB, OWN_DISK);
   // The files as the app leaves them for the helper: in the user's cache, copied into the container.
   const files = (manifest = "/home/tester/manifest.json", tarball = "/home/tester/release.tar.gz") => `${manifest} /home/tester/manifest.json.sig ${tarball}`;
   const stage = (tarball: string) => {
@@ -339,7 +453,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", join(box.dir, "stops.sh"), `${box.container}:/opt/surogate-test/stops.sh`]).status).toBe(0);
     expect(root("rm -rf /opt/pristine && cp -a /opt/surogate /opt/pristine").status).toBe(0);
     const lines = root(`bash /opt/surogate-test/stops.sh ${these}`).stdout.trim().split("\n");
-    expect(lines.pop()).toMatch(/^end \d{2,}$/);
+    // Its last line is where no stop was made any more. How far the stops reach is not read from
+    // that number: each test that uses them asks for the states it must have seen.
+    expect(lines.pop()).toMatch(/^end \d+$/);
+    expect(lines.length).toBeGreaterThan(0);
     return lines;
   };
 
@@ -377,8 +494,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const hash = sha256(readFileSync(tarball));
     for (const fields of [{ arch: "arm64" }, { platform: "darwin" }, { channel: "beta" }, { url: "https://elsewhere.example/r.tar.gz" }, { version: "1.0" },
       { version: "1.0.0\n", url: "releases/1.0.0\n/surogate-desktop-1.0.0\n-linux-x64.tar.gz" }, { sha256: `${hash}\n` },
+      // A part with a zero before it is no version: dpkg reads 1.0.00 as 1.0.0, a second spelling of one release.
+      { version: "1.0.00", url: "releases/1.0.00/surogate-desktop-1.0.00-linux-x64.tar.gz" }, { version: "01.0.0", url: "releases/01.0.0/surogate-desktop-01.0.0-linux-x64.tar.gz" },
       // Its tarball's size is a whole number of bytes, above 0 and below 10^15, or it is no release: undefined leaves the field out.
-      { size: undefined }, { size: null }, { size: 0 }, { size: -1 }, { size: 1.5 }, { size: "4096" }, { size: [4096] }, { size: 1e15 }, { size: 1e300 }]) {
+      { size: undefined }, { size: null }, { size: 0 }, { size: -1 }, { size: 1.5 }, { size: "4096" }, { size: [4096] }, { size: 1e15 }, { size: 1e300 },
+      // Its state schema is a whole number from 1 and below 10^15, or it is no release.
+      { stateSchema: undefined }, { stateSchema: null }, { stateSchema: 0 }, { stateSchema: -1 }, { stateSchema: 1.5 }, { stateSchema: "1" }, { stateSchema: [1] }, { stateSchema: 1e15 }]) {
       manifestOf("1.0.0", tarball, fields);
       expect(apply(tarball), JSON.stringify(fields)).toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
     }
@@ -581,28 +702,36 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(root(`PKEXEC_UID=${past} /opt/surogate-test/install.sh --apply ${files()}`), past)
         .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
     }
-    // And digits are a user's name first, where a user is so named, as a company's directory may name one.
+    // Digits are a number, and never a user's name, where a user is so named, as a company's
+    // directory may name one: the reader is the user of that number, who is refused the files of
+    // the user of that name, as their own login is.
     expect(root(`echo "${user}:x:1600:1600::/nonexistent:/bin/sh" >>/etc/passwd && mkdir -m 700 /srv/numbered && cp ${files()} /srv/numbered/ && chown -R 1600 /srv/numbered`).status).toBe(0);
     const numbered = root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/numbered/manifest.json /srv/numbered/manifest.json.sig /srv/numbered/release.tar.gz; said=$?; sed -i '$d' /etc/passwd; exit $said`);
-    expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /srv/numbered/manifest.json cannot be read by tester: name it by its whole path, in a folder of that user's own\n" });
     expect(root("test -e /opt/surogate/current").status).toBe(1);
     // So it is with a release kept in root's home, as a root shell that sudo started would name one;
-    // with a name that is no whole path, which under pkexec is looked for in root's home; with a
-    // file that is there for root and missing for the user; and with one the user reads only as a
-    // member of another group.
-    expect(root(`rm -rf /root/kept /srv/shared && mkdir -m 700 /root/kept && cp ${files()} /root/kept/ && (getent group shared >/dev/null || groupadd shared) && gpasswd -a tester shared >/dev/null`
-      + ` && mkdir -m 750 /srv/shared && cp ${files()} /srv/shared/ && chgrp -R shared /srv/shared`).status).toBe(0);
+    // with a name that is no whole path, which under pkexec is looked for in root's home; and with
+    // a file that is there for root and missing for the user.
+    expect(root(`rm -rf /root/kept && mkdir -m 700 /root/kept && cp ${files()} /root/kept/`).status).toBe(0);
     expect(root(`SUDO_UID=${user} /opt/surogate-test/install.sh --apply /root/kept/manifest.json /root/kept/manifest.json.sig /root/kept/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json ${theirs}` });
     expect(root(`cd /root/kept && PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply manifest.json manifest.json.sig release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: manifest.json ${theirs}` });
     expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /home/tester/manifest.json /root/kept/manifest.json.sig /home/tester/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /root/kept/manifest.json.sig ${theirs}` });
-    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/shared/manifest.json /srv/shared/manifest.json.sig /srv/shared/release.tar.gz`))
-      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/shared/manifest.json ${theirs}` });
+    // Nor does who reads have a group that the system's own list does not give that user: a
+    // folder for a group the user is not in, root's shadow file, and a file of root's alone.
+    expect(root(`rm -rf /srv/closed && (getent group closed >/dev/null || groupadd closed) && mkdir -m 770 /srv/closed && cp ${files()} /srv/closed/ && chgrp -R closed /srv/closed && chmod 640 /srv/closed/*`
+      + " && ! id -Gn tester | grep -qw closed").status).toBe(0);
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/closed/manifest.json /srv/closed/manifest.json.sig /srv/closed/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/closed/manifest.json ${theirs}` });
+    expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /etc/shadow /home/tester/manifest.json.sig /home/tester/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /etc/shadow ${theirs}` });
     // A file of root's that root's own group reads: who reads has the user's group, and none of root's.
     expect(root(`rm -rf /srv/roots && mkdir -m 755 /srv/roots && cp ${files()} /srv/roots/ && chown -R root:root /srv/roots && chmod 640 /srv/roots/* && id -G`).stdout).toBe("0\n");
     expect(root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/roots/manifest.json /srv/roots/manifest.json.sig /srv/roots/release.tar.gz`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/roots/manifest.json ${theirs}` });
+    expect(root(`chmod 600 /srv/roots/* && PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/roots/manifest.json /srv/roots/manifest.json.sig /srv/roots/release.tar.gz`))
       .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: /srv/roots/manifest.json ${theirs}` });
     // What the user cannot read is refused before anything is made: no folder of the tree's, and none for the lock.
     expect(root(`find /opt/surogate -mindepth 1 -delete; rm -rf ${LOCKS}`).status).toBe(0);
@@ -677,14 +806,21 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(root("ls -A /opt/surogate/staging 2>/dev/null").stdout).toBe("");
     }
     // All that root has the asking user's processes do, in order, and for how many seconds each at
-    // most: as that user alone, in their own group and no other.
+    // most: as that user alone, in their own group and the others the system's list gives them.
     const user = Number(root("id -u tester").stdout);
     const traced = root(`PKEXEC_UID=${user} strace -f -qq -v -s 300 -o /tmp/trace -e trace=execve /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F 'execve("/usr/bin/timeout"' /tmp/trace`);
     expect(traced.status, traced.stderr).toBe(0);
     const asked = traced.stdout.trim().split("\n").map((line) => [...(/\[(.*)\], \[/.exec(line)?.[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).join(" "));
-    const as = `setpriv --reuid ${user} --regid ${user} --clear-groups`;
+    // The reader's own line of perl, as the script's settings have it, handed the user's number, their group's and their groups'.
+    const line = /^ {2}AS_READER='([^'\n]+)'$/m.exec(readFileSync(SCRIPT, "utf8"))?.[1];
+    expect(line).toMatch(/^use POSIX \(\); /);
+    const as = `/usr/bin/perl -e ${line} ${user} ${user} ${root("id -G tester").stdout.trim().replaceAll(" ", ",")}`;
     const read = "iflag=nofollow,nonblock bs=64K status=none";
     expect(asked).toEqual([
+      // Root's own three questions to the system's list of users and groups, each under the same bound.
+      `timeout --foreground -s KILL 5 getent passwd ${user}`,
+      "timeout --foreground -s KILL 5 id -u -- tester",
+      "timeout --foreground -s KILL 5 id -G -- tester",
       `timeout --foreground -s KILL 5 ${as} id -u`,
       `timeout --foreground -s KILL 5 ${as} id -g`,
       `timeout --foreground -s KILL 5 ${as} test -f /home/tester/manifest.json`,
@@ -696,6 +832,128 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     ]);
   });
 
+  it("reads as the asking user's own login would, with the groups the system's own list gives that user and no other: an update is applied from a cache home that the user reaches through one of them", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    const user = "$(id -u tester)";
+    const noUser = { status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" };
+    // A department's folder, which its group alone may enter, and the user's home in it: their
+    // cache home is their own, and they reach it as a member of that group and in no other way.
+    const updates = "/data/shared/tester/.cache/surogate/updates";
+    expect(root("(getent group shared >/dev/null || groupadd shared) && gpasswd -a tester shared >/dev/null && rm -rf /data && mkdir -p /data/shared && chown root:shared /data/shared && chmod 770 /data/shared"
+      + ` && mkdir -p ${updates} && cp ${files()} ${updates}/ && chown -R tester: /data/shared/tester && chmod -R go= /data/shared/tester`).status).toBe(0);
+    const shared = `${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz`;
+    // The user reads the file themselves, as their login does; and one who is in no such group does not.
+    expect(root(`(id other >/dev/null 2>&1 || useradd -m other) && runuser -u tester -- cat ${updates}/manifest.json >/dev/null && ! runuser -u other -- cat ${updates}/manifest.json 2>/dev/null`).status).toBe(0);
+    for (const asked of [`PKEXEC_UID=${user}`, `SUDO_UID=${user}`]) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status, asked).toBe(0);
+      expect(root(`${asked} /opt/surogate-test/install.sh --apply ${shared}`), asked).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+    }
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    // A user of the computer who is not in the group is refused the same files, in the same words as ever.
+    expect(root(`PKEXEC_UID=$(id -u other) /opt/surogate-test/install.sh --apply ${shared}`))
+      .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${updates}/manifest.json cannot be read by other: name it by its whole path, in a folder of that user's own\n` });
+    // Who reads, by the script's own functions without its last line: the user, their own group, and that group; none of root's.
+    const reader = (asked: string) => root(`${asked} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 id -G'`);
+    expect(reader(`PKEXEC_UID=${user}`).stdout).toBe(root("id -G tester").stdout);
+    expect(root("id -G tester").stdout.trim().split(" ")).toEqual([root("id -u tester").stdout.trim(), root("getent group shared | cut -d: -f3").stdout.trim()]);
+    // Started by a root that has groups of its own, as sudo's root has: none of them is the reader's.
+    expect(root(`(getent group closed >/dev/null || groupadd closed) && PKEXEC_UID=${user} setpriv --groups 0,$(getent group closed | cut -d: -f3),$(getent group shadow | cut -d: -f3) `
+      + `bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 id -G'`).stdout).toBe(root("id -G tester").stdout);
+    // The groups are handed on as numbers and set as numbers. A group may be named in digits, as a
+    // directory may hold one, and that name be another group's number: the reader is in the group
+    // of that number, which the user is in, and not in the group of that name, which they are not.
+    expect(root("groupadd -g 4242 wing && gpasswd -a tester wing >/dev/null && echo '4242:x:5555:' >>/etc/group && getent group 4242 5555 | cut -d: -f1,3 | tr '\n' ' '").stdout).toBe("wing:4242 4242:5555 ");
+    try {
+      expect(root("id -G tester").stdout.trim().split(" ")).toContain("4242");
+      expect(reader(`PKEXEC_UID=${user}`).stdout).toBe(root("id -G tester").stdout);
+      // What the group of that name alone may read is not the reader's to read, as it is not the user's own login's.
+      expect(root("printf closed >/srv/five && chown root:5555 /srv/five && chmod 640 /srv/five && ! runuser -u tester -- cat /srv/five 2>/dev/null").status).toBe(0);
+      expect(root(`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 cat /srv/five'`)).toMatchObject({ status: 1, stdout: "" });
+      // And what the group of that number alone may read is.
+      expect(root(`chgrp wing /srv/five && PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 cat /srv/five'`)).toMatchObject({ status: 0, stdout: "closed" });
+      // The reader is that user in all three of a process's numbers and all three of its groups': nothing of root's is kept to go back to.
+      expect(root(`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 grep -E "^[UG]id:" /proc/self/status' | tr -s '\t ' ' '`).stdout)
+        .toBe(`Uid: ${Array(4).fill(root("id -u tester").stdout.trim()).join(" ")}\nGid: ${Array(4).fill(root("id -g tester").stdout.trim()).join(" ")}\n`);
+    } finally {
+      root("sed -i '/^4242:x:5555:$/d' /etc/group; gpasswd -d tester wing >/dev/null; groupdel wing; rm -f /srv/five");
+    }
+    // The groups the reader has are the ones root was told, handed on, and never ones looked up
+    // again as the reader is made: here an id that tells root of the user's own group alone.
+    // The reader is then in that group alone, by the system's own id.
+    const fewer = '#!/bin/sh\n[ "$1" != -G ] || exec /opt/hold/id -g -- "$3"\nexec /opt/hold/id "$@"\n';
+    expect(swapped("id", fewer, [`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 /opt/hold/id -G'`]).stdout).toBe(root("id -g tester").stdout);
+    expect(root("id -G tester").stdout).not.toBe(root("id -g tester").stdout);
+    // Two names of one number, as a directory may have: the list gives the first name for the
+    // number, and the reader is in that name's groups, whichever of the two asked. What the second
+    // name's own group alone may read is not read; to the kernel the two are one user.
+    expect(root(`echo "twin:x:${user}:${user}::/nonexistent:/bin/sh" >>/etc/passwd && groupadd twins && gpasswd -a twin twins >/dev/null && printf closed >/srv/twins && chgrp twins /srv/twins && chmod 640 /srv/twins`).status).toBe(0);
+    try {
+      expect(root("getent passwd $(id -u tester) | cut -d: -f1; id -Gn twin | tr ' ' '\n' | grep -c twins").stdout).toBe("tester\n1\n");
+      expect(reader(`PKEXEC_UID=${user}`).stdout).toBe(root("id -G tester").stdout);
+      expect(root(`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 cat /srv/twins'`)).toMatchObject({ status: 1, stdout: "" });
+    } finally {
+      root("sed -i '/^twin:x:/d' /etc/passwd; groupdel twins; rm -f /srv/twins");
+    }
+    // Where the reader's groups cannot be asked at all, here with an id that answers nothing of
+    // groups, none is taken on trust: the reader is refused.
+    const silent = '#!/bin/sh\n[ "$1" != -G ] || exit 1\nexec /opt/hold/id "$@"\n';
+    expect(swapped("id", silent, [`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply ${shared}; echo "ended $?"`]))
+      .toMatchObject({ stdout: "ended 1\n", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    expect(root("test ! -e /opt/surogate/current").status).toBe(0);
+    // A number with no user of the computer, and one with a user under another's name, as a
+    // directory gone wrong may have: that one's list would give the second user the first's groups.
+    // Each is refused in the script's own words, and reads nothing.
+    expect(root(`PKEXEC_UID=4242 /opt/surogate-test/install.sh --apply ${shared}`)).toMatchObject(noUser);
+    expect(root(`echo "tester:x:1700:1700::/nonexistent:/bin/sh" >>/etc/passwd && chmod -R g+rX /data/shared/tester && chgrp -R shared /data/shared/tester`).status).toBe(0);
+    try {
+      // Read by setpriv alone, the second user does read the first's group's file.
+      expect(root(`setpriv --reuid 1700 --regid 1700 --init-groups cat ${updates}/manifest.json >/dev/null`).status).toBe(0);
+      expect(root(`PKEXEC_UID=1700 /opt/surogate-test/install.sh --apply ${shared}`)).toMatchObject(noUser);
+      expect(reader("PKEXEC_UID=1700")).toMatchObject({ ...noUser, stdout: "" });
+    } finally {
+      root("sed -i '$d' /etc/passwd");
+    }
+    // Nor is the second user taken where its own group is the first's, or one of the first's
+    // others: the name's number is the first's, whatever its groups.
+    for (const group of ["$(id -g tester)", "$(getent group shared | cut -d: -f3)"]) {
+      expect(root(`echo "tester:x:1700:${group}::/nonexistent:/bin/sh" >>/etc/passwd`).status, group).toBe(0);
+      try {
+        expect(root(`PKEXEC_UID=1700 /opt/surogate-test/install.sh --apply ${shared}`), group).toMatchObject(noUser);
+        expect(reader("PKEXEC_UID=1700"), group).toMatchObject({ ...noUser, stdout: "" });
+      } finally {
+        root("sed -i '$d' /etc/passwd");
+      }
+    }
+    // A list that is slow to say a user's groups is said to be that, within its own bound, and
+    // is no user that does not exist; and it takes nothing from the time a reader has to read.
+    const slow = (asked: string) => `#!/bin/sh\n[ "$1" != ${asked} ] || exec /opt/hold/sleep 8\nexec /opt/hold/id "$@"\n`;
+    expect(root("mkdir -p /opt/hold && cp -L /usr/bin/sleep /opt/hold/sleep").status).toBe(0);
+    const number = root("id -u tester").stdout.trim();
+    for (const asked of ["-G", "-u"]) {
+      const began = Date.now();
+      expect(swapped("id", slow(asked), [`PKEXEC_UID=${number} /opt/surogate-test/install.sh --apply ${shared}; echo "ended $?"`]), asked)
+        .toMatchObject({ stdout: "ended 1\n", stderr: "Surogate Desktop: this computer's list of users and groups did not answer within 5 seconds: try again\n" });
+      expect(Date.now() - began, asked).toBeLessThan(7_500);
+    }
+    expect(root("test ! -e /opt/surogate/current").status).toBe(0);
+    // A user and a group whose names have a space in them are a user and a group: read as that
+    // user, in that group, and in no other.
+    expect(root(`echo "o dd:x:1701:1701::/nonexistent:/bin/sh" >>/etc/passwd && echo "sha red:x:1801:o dd" >>/etc/group && rm -rf /srv/odd && mkdir -m 750 /srv/odd && cp ${files()} /srv/odd/ && chgrp -R 1801 /srv/odd && chmod 640 /srv/odd/*`).status).toBe(0);
+    try {
+      expect(reader("PKEXEC_UID=1701").stdout).toBe("1701 1801\n");
+      expect(root("PKEXEC_UID=1701 /opt/surogate-test/install.sh --apply /srv/odd/manifest.json /srv/odd/manifest.json.sig /srv/odd/release.tar.gz"))
+        .toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root(`PKEXEC_UID=1701 /opt/surogate-test/install.sh --apply ${shared}`))
+        .toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${updates}/manifest.json cannot be read by o\\ dd: name it by its whole path, in a folder of that user's own\n` });
+    } finally {
+      root("sed -i '$d' /etc/passwd /etc/group");
+    }
+    // The removal's own parts that run as the user have that user's groups too, as runuser gives them.
+    expect(root("runuser -u tester -- id -G").stdout).toBe(root("id -G tester").stdout);
+  });
+
   it("clears what a killed apply left in staging before it measures the room", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);
@@ -703,6 +961,34 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("mkdir -p /opt/surogate/staging/apply.killed && head -c 1G /dev/zero >/opt/surogate/staging/apply.killed/release.tar.gz; df --output=avail -k /opt/surogate | tail -n 1").stdout.trim()).toBe("0");
     expect(apply(tarball)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
     expect(root("ls -A /opt/surogate/staging").stdout).toBe("");
+  });
+
+  it("says that a release is installed, and ends 0, only once nothing it started is still running as root: the app starts again at that", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    expect(root("find /opt/surogate -mindepth 1 -delete 2>/dev/null; rm -f /tmp/left /tmp/ended").status).toBe(0);
+    // A tool of the system's that leaves a program of its own behind, with all the helper had open:
+    // here sync, which then goes on for three seconds, as a package's hook or a tool's own helper may.
+    const leaving = (seconds: number) => `#!/bin/sh
+/opt/hold/sync "$@" || exit
+[ -e /tmp/left ] || { : >/tmp/left; (/usr/bin/sleep ${seconds}; : >/tmp/ended) 2>/dev/null & }
+exit 0
+`;
+    const waited = swapped("sync", leaving(3), [`/opt/surogate-test/install.sh --apply ${files()}; echo "ended $? $(test -e /tmp/ended && echo after || echo before)"`]);
+    expect(waited).toMatchObject({ stdout: "Surogate Desktop: 1.0.0 is installed\nended 0 after\n", stderr: "" });
+    // One that does not end is waited for a bounded while, and the helper then does not end 0: the
+    // release is in place, and whoever started the helper is told what still runs.
+    expect(root("rm -f /tmp/left /tmp/ended").status).toBe(0);
+    const bound = Number(root(`bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && echo "$LEFT_WAIT"'`).stdout);
+    expect(bound).toBe(30);
+    const began = Date.now();
+    const left = swapped("sync", leaving(300), [`/opt/surogate-test/install.sh --apply ${files()}; echo "ended $?"; pkill -x sleep; true`]);
+    expect(left).toMatchObject({ stdout: "ended 1\n", stderr: "Surogate Desktop: 1.0.0 is in place, and something that its update started as root is still running after 30 seconds: start Surogate again once that has ended\n" });
+    expect(Date.now() - began).toBeGreaterThan(29_000);
+    expect(current()).toBe("/opt/surogate/versions/1.0.0");
+    // And the next apply is not held by what an earlier one left, once that has ended.
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
   });
 
   it("runs the system's own tools, and no script that its caller's environment names", () => {
@@ -717,19 +1003,281 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("test -e /opt/surogate/current").status).toBe(1);
   });
 
-  it("applies a release signed by either key it lists, as a rotation needs, and refuses one signed by neither", () => {
-    // A rotating release's script: the old key and the new.
-    writeFileSync(join(box.dir, "rotating.sh"), withKeys(readFileSync(SCRIPT, "utf8"), [PUBLIC, pem(next.publicKey)]), { mode: 0o755 });
+  it("applies a release signed by either key of a rotation's list, the script's own at a first install and the computer's helper's after it, and refuses one signed by neither", () => {
+    // A rotating release's script, and its helper: the old key and the new.
+    const rotating = withKeys(readFileSync(SCRIPT, "utf8"), [PUBLIC, pem(next.publicKey)]);
+    writeFileSync(join(box.dir, "rotating.sh"), rotating, { mode: 0o755 });
     expect(docker(["cp", join(box.dir, "rotating.sh"), `${box.container}:/opt/surogate-test/rotating.sh`]).status).toBe(0);
-    for (const [version, key] of [["1.0.0", keys], ["1.1.0", next]] as const) {
-      const tarball = releaseOf(version);
+    const both = (top: string) => writeFileSync(join(top, "bin", "surogate-apply-update"), rotating, { mode: 0o755 });
+    // The first by the script's own list, on a computer with no helper yet. The second by the list of
+    // the helper the first left, though the script that applies it lists the old key alone.
+    for (const [version, key, script] of [["1.0.0", keys, "rotating.sh"], ["1.1.0", next, "install.sh"]] as const) {
+      const tarball = releaseOf(version, both);
       manifestOf(version, tarball, {}, key.privateKey);
-      expect(apply(tarball, "rotating.sh")).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n` });
+      expect(apply(tarball, script), version).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n` });
     }
     const tarball = releaseOf("1.2.0");
     manifestOf("1.2.0", tarball, {}, other.privateKey);
-    expect(apply(tarball, "rotating.sh")).toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(apply(tarball, "rotating.sh")).toMatchObject({ status: 1, stderr: `Surogate Desktop: the release's manifest${MISSED}\n` });
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
+  });
+
+  it("takes the release keys of no helper that is not as an apply leaves it, and puts none in the place of one whose mark is gone", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    expect(apply(tarball).status).toBe(0);
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const again = "remove Surogate Desktop with --uninstall, and install it again\n";
+    const damaged: Array<[string, string]> = [
+      // One that others may write, one that is a link, and one that is another user's: none is root's own word.
+      [`chmod 775 ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      [`mv ${helper} /root/helper && ln -s /root/helper ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      [`chown tester ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      // One that no one may run, and a folder in its place: pkexec could run neither.
+      [`chmod 644 ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      [`rm ${helper} && mkdir ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      // One that lists no key: this script's own list does not stand in for it.
+      [`sed -i '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/d' ${helper}`, `Surogate Desktop: ${helper} lists no release key: ${again}`],
+      // One whose mark is gone, or names no release: which release it is of is not known, so nothing replaces it.
+      ["rm /opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
+      ["echo '{}' >/opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
+      // A link to nothing in the helper's place is no computer without a helper, where this script's own list would count.
+      [`rm ${helper} && ln -s /nowhere ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      // Nor is a version that has lost its helper, or the helper's folder with it, at its first
+      // install: an apply puts the helper in before it switches to a version, so only root can
+      // have left one so, and the list of whichever script asks next is trusted for nothing.
+      [`rm ${helper}`, `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      ["rm -rf /opt/surogate/bin", `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}`],
+      // A mark that is another user's, or that others may write, is not root's own word for which release.
+      ["chown tester /opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
+      ["chmod 664 /opt/surogate/bin/release.json", `Surogate Desktop: /opt/surogate/bin/release.json does not say which release ${helper} is of: ${again}`],
+    ];
+    // The installed release again, and an update: each is refused, and leaves the installed
+    // version, the helper, its mark and the keys it lists the bytes they were.
+    const update = releaseOf("1.1.0");
+    manifestOf("1.1.0", update);
+    expect(root("mkdir /home/tester/update").status).toBe(0);
+    for (const [from, to] of [[join(box.dir, "manifest.json"), "manifest.json"], [join(box.dir, "manifest.json.sig"), "manifest.json.sig"], [update, "release.tar.gz"]] as const) {
+      expect(docker(["cp", from, `${box.container}:/home/tester/update/${to}`]).status).toBe(0);
+    }
+    const updated = "/home/tester/update/manifest.json /home/tester/update/manifest.json.sig /home/tester/update/release.tar.gz";
+    for (const [damage, said] of damaged) {
+      expect(root(`rm -rf /opt/kept && cp -a /opt/surogate/bin /opt/kept && ${damage}`).status, damage).toBe(0);
+      const before = standing();
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), damage).toMatchObject({ status: 1, stdout: "", stderr: said });
+      expect(root(`/opt/surogate-test/install.sh --apply ${updated}`), `an update: ${damage}`).toMatchObject({ status: 1, stdout: "", stderr: said });
+      expect(standing(), damage).toBe(before);
+      expect(root("ls -A /opt/surogate/staging").stdout, damage).toBe("");
+      expect(root("rm -rf /opt/surogate/bin && cp -a /opt/kept /opt/surogate/bin").status, damage).toBe(0);
+    }
+    // At any mode that leaves it root's alone to write, and a program, the helper is root's own
+    // word, as it is to the app, which offers an update by the same rule: an administrator may
+    // have closed it to others. The same release again is applied, and the helper is as an apply
+    // leaves one.
+    // Every mode of the list that the app's own rule is asked with (helper-modes.ts), with each
+    // set-id and sticky bit, in one run of the container: who may write the helper and whether
+    // it is a program, and no more.
+    const asked = HELPER_MODES.map(([mode]) => mode.toString(8));
+    const answers = root(`for mode in ${asked.join(" ")}; do chmod 755 ${helper} && chmod "$mode" ${helper} || exit 9; [ "$(stat -c %a ${helper})" = "$mode" ] || exit 8; /opt/surogate-test/install.sh --apply ${files()} >/tmp/said 2>&1; echo "$mode $? $(cat /tmp/said) $(stat -c '%a %U' ${helper})"; done`);
+    expect(answers.status, answers.stderr).toBe(0);
+    const NOT_LEFT = `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again`;
+    expect(answers.stdout.trimEnd().split("\n")).toEqual(HELPER_MODES.map(([mode, answer]) =>
+      answer === "taken" ? `${mode.toString(8)} 0 Surogate Desktop: 1.0.0 is installed 755 root` : `${mode.toString(8)} 1 ${NOT_LEFT} ${mode.toString(8)} root`));
+    expect(root(`chmod 755 ${helper}`).status).toBe(0);
+    // Nor is a link to nothing no helper where the release it is of is asked by itself, from the
+    // script's functions without its last line: it is a helper, and here one with no mark.
+    expect(root(`rm ${helper} /opt/surogate/bin/release.json && ln -s /nowhere ${helper} && bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && helper_release'`))
+      .toMatchObject({ status: 1, stdout: "" });
+    expect(root("rm -rf /opt/surogate/bin && cp -a /opt/kept /opt/surogate/bin").status).toBe(0);
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+  });
+
+  it("takes a manifest, the helper's mark and the installed version's only as one JSON object on one line, of 4096 bytes at most: of two documents, each would name a version", () => {
+    const tarball = releaseOf("1.0.0");
+    const object = manifestOf("1.0.0", tarball).toString().trimEnd();
+    expect(apply(tarball).status).toBe(0);
+    // The object with more in it, to *size* bytes in all with its newline.
+    const padded = (size: number) => `${object.slice(0, -1)},"more":"${"x".repeat(size - object.length - 11)}"}\n`;
+    expect(Buffer.byteLength(padded(4096))).toBe(4096);
+    const notOne: Array<[string, string]> = [
+      ["two documents on one line", `${object}${object}\n`],
+      ["two documents, a line each", `${object}\n${object}\n`],
+      ["an array", `[${object}]\n`],
+      ["a number", "1\n"],
+      ["an object over two lines", `${object.replace(",", ",\n")}\n`],
+      ["an object without its newline", object],
+      ["an empty file", ""],
+      ["a byte more than the bound", padded(4097)],
+    ];
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    // A manifest the release key signed, handed to the helper with the release's tarball.
+    const handed = (manifest: string) => {
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, Buffer.from(manifest), keys.privateKey));
+      return apply(tarball);
+    };
+    // Each is refused as no release. But for two: the longest, as it is copied, in the words of a
+    // file that is no manifest's size; and the empty one, which no key's signature is taken for.
+    const said = (manifest: string) => {
+      if (Buffer.byteLength(manifest) > 4096) return "/home/tester/manifest.json is not a downloaded release's file";
+      return manifest === "" ? `the release's manifest${MISSED}` : "the release's manifest is not a release of Surogate Desktop for this computer";
+    };
+    for (const [what, manifest] of notOne) {
+      const before = standing();
+      expect(handed(manifest), what).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${said(manifest)}\n` });
+      expect(standing(), what).toBe(before);
+    }
+    // One of the bound's own size is a release, and then the helper's mark and the version's.
+    expect(handed(padded(4096))).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+    expect(root(`cmp /home/tester/manifest.json ${mark} && cmp /home/tester/manifest.json /opt/surogate/current/release.json && stat -c %s ${mark}`).stdout).toBe("4096\n");
+
+    // The helper's mark, as only root can leave it: root's own, and no release's manifest. The
+    // release is handed again as it was signed; nothing is compared with what such a mark names.
+    const marked = (path: string, written: string) => {
+      writeFileSync(join(box.dir, "mark"), written);
+      expect(docker(["cp", join(box.dir, "mark"), `${box.container}:/root/mark`]).status).toBe(0);
+      expect(root(`install -m 0644 /root/mark ${path}`).status).toBe(0);
+    };
+    for (const [what, written] of [...notOne, ["an object that names no x.y.z", '{"version":"1.1"}\n'], ["a version with a zero before a part", '{"version":"1.0.00"}\n']] as const) {
+      marked(mark, written);
+      const before = standing();
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), what).toMatchObject({
+        status: 1, stdout: "", stderr: `Surogate Desktop: ${mark} does not say which release ${helper} is of: remove Surogate Desktop with --uninstall, and install it again\n`,
+      });
+      expect(standing(), what).toBe(before);
+    }
+    // One of the bound's own size that names the release is its mark.
+    marked(mark, padded(4096));
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+
+    // The installed version's own mark, where a rollback asks what the installed version keeps:
+    // that question by itself, from the script's functions without its last line.
+    const keeps = () => root(`bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && reads_state /home/tester/manifest.json 1.0.0'`);
+    expect(keeps()).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    for (const [what, written] of notOne) {
+      marked("/opt/surogate/versions/1.0.0/release.json", written);
+      expect(keeps(), what).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the installed 1.0.0 names no state schema: run Surogate Desktop's install script again\n" });
+    }
+  });
+
+  it("takes a state schema to the last below 10^15, and none that reads as below it only as it is written: a number is what it rounds to, and a signing writes it so", () => {
+    const tarball = releaseOf("1.0.0");
+    const object = manifestOf("1.0.0", tarball).toString().trimEnd();
+    expect(object.endsWith('"stateSchema":1}')).toBe(true);
+    // A manifest with the number as it is written, signed: this test's own JSON would round it first.
+    const withSchema = (schema: string) => {
+      const manifest = `${object.slice(0, -2)}${schema}}\n`;
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, Buffer.from(manifest), keys.privateKey));
+      return apply(tarball);
+    };
+    // 999999999999999.99 is 10^15: compared as written, it passed for less.
+    for (const schema of ["999999999999999.99", "1000000000000000", "1e15", "0.5", "1.5", "0"]) {
+      expect(withSchema(schema), schema).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+    for (const schema of ["999999999999999", "1.0"]) {
+      expect(withSchema(schema), schema).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    }
+  });
+
+  it("takes a manifest as JSON is written, and no more of what jq reads besides: the app reads one with another reader, and takes what the helper takes and nothing else", () => {
+    const tarball = releaseOf("1.0.0");
+    const object = manifestOf("1.0.0", tarball).toString().trimEnd();
+    const size = String(statSync(tarball).size);
+    expect(object.endsWith(`"size":${size},"stateSchema":1}`)).toBe(true);
+    // A manifest as it is written here, signed: this test's own JSON would write none of these.
+    const handed = (manifest: string | Buffer) => {
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, Buffer.from(manifest), keys.privateKey));
+      return apply(tarball);
+    };
+    // The release's manifest with one more field, *text* as it is where its value goes; and with
+    // its size as *written*.
+    const more = (...text: Array<string | Buffer>) => Buffer.concat([`${object.slice(0, -1)},"more":`, ...text, "}\n"].map((part) => Buffer.from(part)));
+    const sized = (written: string) => `${object.replace(`"size":${size},`, `"size":${written},`)}\n`;
+    const refused: Array<[string, string | Buffer]> = [
+      ["a byte order mark before it", `\uFEFF${object}\n`],
+      ["a byte that is no UTF-8", more('"', Buffer.from([0xff]), '"')],
+      ["a replacement character", more('"\uFFFD"')],
+      ...["+1", "01", "1.", ".5", "nan", "infinity"].map((number): [string, Buffer] => [`a number written ${number}`, more(number)]),
+      ["a number in 18 digits", more("123456789012345678")],
+      ["a number 65 fields and places down", more("[".repeat(64), "1", "]".repeat(64))],
+      // A field named twice, whatever its two values: jq keeps the last, and cannot read a first that is deeper than it reads at all.
+      ["a field named twice", more('1,"more":2')],
+      ["a field named twice, the first 300 down", more("[".repeat(299), "1", "]".repeat(299), ',"more":1')],
+      ["its version named twice", `${object.replace('{"version"', '{"version":"9.9.9","version"')}\n`],
+      ["its size with a zero before it", sized(`0${size}`)],
+      ["its size with a plus before it", sized(`+${size}`)],
+      ["its size in 18 digits", sized(`${size}.${"0".repeat(18 - size.length)}`)],
+      // As they are written, the one is above nothing and the other below 10^15.
+      ["a size that rounds to nothing", sized("1e-400")],
+      ["a size that rounds to 10^15", sized("999999999999999.99")],
+    ];
+    for (const [what, manifest] of refused) {
+      expect(handed(manifest), what).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+    const taken: Array<[string, string | Buffer]> = [
+      ["a replacement character's escape", more('"\\ufffd"')],
+      ["a number in 17 digits", more("12345678901234567")],
+      ["a number 64 fields and places down", more("[".repeat(63), "1", "]".repeat(63))],
+      ["its size in 17 digits", sized(`${size}.${"0".repeat(17 - size.length)}`)],
+    ];
+    for (const [what, manifest] of taken) {
+      expect(handed(manifest), what).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    }
+  });
+
+  it("refuses what is no file where the helper's mark goes, on a computer with no helper and on one that has one, before it switches to any version: a first install is never left with a version and no helper", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    const again = "remove Surogate Desktop with --uninstall, and install it again\n";
+    // A rename replaces a file, and no folder; a link or a pipe there is no mark an apply left.
+    const notFiles: Array<[string, string]> = [
+      ["a folder", `mkdir ${mark}`],
+      ["a link to a file of root's own", `echo kept >/root/elsewhere && ln -s /root/elsewhere ${mark}`],
+      ["a link to nothing", `ln -s /nowhere ${mark}`],
+      ["a pipe", `mkfifo ${mark}`],
+    ];
+    // Bounded: none of them is opened, and a pipe that was would be waited on for good.
+    const applied = () => root(`timeout 30 /opt/surogate-test/install.sh --apply ${files()}`);
+    // With no helper, as at a first install: nothing is installed, and what stands there is left.
+    for (const [what, made] of notFiles) {
+      expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && ${made}`).status, what).toBe(0);
+      const before = standing();
+      expect(applied(), what).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${mark} is not as Surogate Desktop's install leaves it: ${again}` });
+      expect(standing(), what).toBe(before);
+      expect(root(`test ! -e /opt/surogate/current && test ! -e ${helper} && find /opt/surogate/versions /opt/surogate/staging -mindepth 1`), what).toMatchObject({ status: 0, stdout: "" });
+    }
+    // Nor is a link to nothing where the helper itself goes a computer at its first install,
+    // which would take this script's own list of keys: it is no helper an apply left.
+    expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && ln -s /nowhere ${helper}`).status).toBe(0);
+    const linked = standing();
+    expect(applied()).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: ${again}` });
+    expect(standing()).toBe(linked);
+    expect(root("test ! -e /opt/surogate/current && find /opt/surogate/versions /opt/surogate/staging -mindepth 1")).toMatchObject({ status: 0, stdout: "" });
+    // With a helper: its mark does not say which release it is of, and neither is replaced.
+    for (const [what, made] of notFiles) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status, what).toBe(0);
+      expect(applied(), what).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+      expect(root(`rm ${mark} && ${made}`).status, what).toBe(0);
+      const before = standing();
+      expect(applied(), what).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: ${mark} does not say which release ${helper} is of: ${again}` });
+      expect(standing(), what).toBe(before);
+      expect(root("ls -A /opt/surogate/staging").stdout, what).toBe("");
+    }
+    // Nothing was written through a link.
+    expect(root("cat /root/elsewhere").stdout).toBe("kept\n");
+    // A file there with no helper that is not root's own, as anyone left one before the folder
+    // was root's: replaced, and never read.
+    expect(root(`find /opt/surogate -mindepth 1 -delete; mkdir /opt/surogate/bin && echo '{"version":"9.9.9"}' >${mark} && chown tester ${mark}`).status).toBe(0);
+    expect(applied()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root(`cmp /home/tester/manifest.json ${mark} && stat -c '%a %U' ${mark}`).stdout).toBe("644 root\n");
   });
 
   it("refuses an archive that holds anything outside its folder, a link out of it, a special file or a hard link", () => {
@@ -885,6 +1433,17 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
   });
 
+  it("puts the helper pkexec runs back as its release has it, when that release is applied again: a repair mends a helper that only root could have changed", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    expect(apply(tarball).status).toBe(0);
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    // A line more in it: still a file of root's own at its mode, and its list of keys as it was.
+    expect(root(`echo '# changed' >>${helper} && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && cmp /opt/surogate/bin/release.json /home/tester/manifest.json`).status).toBe(0);
+  });
+
   it("keeps the version before the installed one, when the installed one is applied again", () => {
     const first = releaseOf("1.0.0");
     manifestOf("1.0.0", first);
@@ -912,22 +1471,284 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(seen).toEqual(new Set(["1.0.0 whole", "1.1.0 whole"]));
   }, 300_000);
 
-  it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename", () => {
+  it("puts the helper's mark in before the helper, and both before it switches to the version, wherever an update stops between its renames: the helper is never of a newer release than its mark names, and no version is installed before its helper", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    // The update's own helper lists a second key: it is not the release's before, byte for byte.
+    const second = releaseOf("1.1.0", (top) => writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(readFileSync(SCRIPT, "utf8"), [PUBLIC, pem(next.publicKey)]), { mode: 0o755 }));
+    manifestOf("1.1.0", second);
+    stage(second);
+    writeFileSync(join(box.dir, "renames.sh"), RENAMES);
+    expect(docker(["cp", join(box.dir, "renames.sh"), `${box.container}:/opt/surogate-test/renames.sh`]).status).toBe(0);
+    expect(root("rm -rf /opt/pristine && cp -a /opt/surogate /opt/pristine").status).toBe(0);
+    const lines = root(`bash /opt/surogate-test/renames.sh ${files()}`).stdout.trim().split("\n");
+    expect(lines.pop()).toBe("end");
+    // Which release the helper may be replaced by is its mark's word: no older one than it names.
+    // So the mark is never behind the helper. With the helper first, a stop between the two would
+    // leave the update's helper under a mark that still names the release before, and a release
+    // between the two could then put an older helper, and its older list of keys, in its place.
+    // As it is, a stop between the two leaves the helper the computer had under a mark no older
+    // release passes, and the next apply, whatever it is of, puts the mark's own helper in first.
+    // And current is switched last: a version that is installed has its helper, so that one with
+    // none is no first install stopped half way, and the update is not installed until its keys are.
+    const again = "again 0: current 1.1.0, mark 1.1.0, helper the update's";
+    expect([...new Set(lines)]).toEqual([
+      `current 1.0.0, mark 1.0.0, helper the release's before; ${again}`,
+      `current 1.0.0, mark 1.1.0, helper the release's before; ${again}`,
+      `current 1.0.0, mark 1.1.0, helper the update's; ${again}`,
+    ]);
+  });
+
+  // The script, killed where it would make one of its last three renames, the mark's, the helper's
+  // or current's: the name of that copy of it in the container.
+  const stoppedBefore = (rename: "mark" | "helper" | "current") => {
+    const killed = {
+      mark: String.raw`s|^    mv -T "\$work/helper.json" "\$HELPER_MARK"$|    kill -KILL $$|`,
+      helper: String.raw`s|^    mv -T "\$work/helper" "\$HELPER"$|    kill -KILL $$|`,
+      current: String.raw`s|^  mv -T "\$work/current" "\$ROOT/current"$|  kill -KILL $$|`,
+    }[rename];
+    expect(root(`sed '${killed}' /opt/surogate-test/install.sh >/opt/surogate-test/stopped-${rename}.sh && chmod 755 /opt/surogate-test/stopped-${rename}.sh `
+      + `&& ! cmp -s /opt/surogate-test/install.sh /opt/surogate-test/stopped-${rename}.sh`).status, rename).toBe(0);
+    return `stopped-${rename}.sh`;
+  };
+  // A change of a release's tree: its own helper lists *trusted*, at *mode*.
+  const listing = (trusted: string[], mode = 0o755) => (top: string) => {
+    writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(readFileSync(SCRIPT, "utf8"), trusted));
+    chmodSync(join(top, "bin", "surogate-apply-update"), mode);
+  };
+
+  it("finishes a helper's pair that an apply left half done before it asks the helper's keys about anything, at an update and at a first install: a release that dropped a key is not left trusting it", () => {
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    // A rotation's first release: the old key signs it, and its helper lists the old key and the new.
+    const first = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.0", first);
+    // A first install stopped at each of the three: the same apply, run again, finishes it, pair and all.
+    for (const at of ["mark", "helper", "current"] as const) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status, at).toBe(0);
+      expect(apply(first, stoppedBefore(at)).status, at).toBe(137);
+      expect(root("test ! -e /opt/surogate/current").status, at).toBe(0);
+      expect(root(`/opt/surogate-test/install.sh --apply ${files()}`), at).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root(`cmp ${helper} /opt/surogate/current/bin/surogate-apply-update && cmp ${mark} /opt/surogate/current/release.json`).status, at).toBe(0);
+    }
+    // Stopped before the helper's rename, a first install has its mark and no helper: the next
+    // apply, of whatever, puts that release's own helper in first. The keys asked are then its
+    // helper's, and not the list of the script that asks, which here lists the old key alone: what
+    // a third key signs is refused, and what the new key signs is taken.
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    expect(apply(first, stoppedBefore("helper")).status).toBe(137);
+    expect(root(`test ! -e ${helper} && test ! -L ${helper} && test ! -e /opt/surogate/current && cmp ${mark} /opt/surogate/versions/1.0.0/release.json`).status).toBe(0);
+    const patch = releaseOf("1.0.1", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.1", patch, {}, other.privateKey);
+    expect(apply(patch)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's manifest${MISSED}\n` });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && stat -c '%a %U' ${helper} && test ! -e /opt/surogate/current && ls /opt/surogate/versions`).stdout).toBe("755 root\n1.0.0\n");
+    manifestOf("1.0.1", patch, {}, next.privateKey);
+    expect(apply(patch)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.1 is installed\n" });
+    // What stands installed but for the helper pkexec runs, and that helper's place on the disk.
+    const helperLine = (snapshot: string) => snapshot.split("\n").findIndex((line) => line.startsWith(`${helper} `));
+    const butHelper = (snapshot: string) => snapshot.split("\n").filter((_, at) => at !== helperLine(snapshot) && at !== helperLine(snapshot) + 1).join("\n");
+    const inode = (snapshot: string) => snapshot.split("\n")[helperLine(snapshot)]?.split(" ")[1];
+    // The release that drops the old key: the new key signs it, and its helper lists the new key
+    // alone. Its update is stopped between the mark's rename and the helper's. Its own helper as
+    // package.sh packs one, and as one that root alone may run, which an apply takes too.
+    for (const mode of [0o755, 0o700]) {
+      expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+      manifestOf("1.0.0", first);
+      expect(apply(first).status).toBe(0);
+      const second = releaseOf("1.1.0", listing([pem(next.publicKey)], mode));
+      manifestOf("1.1.0", second, {}, next.privateKey);
+      expect(apply(second, stoppedBefore("helper")).status).toBe(137);
+      expect(root(`cmp ${mark} /home/tester/manifest.json && cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && stat -c %a /opt/surogate/versions/1.1.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout)
+        .toBe(`${mode.toString(8)}\n/opt/surogate/versions/1.0.0\n`);
+      // What the old key signs then, newer than both, is no release to this computer: the pair is
+      // finished first, and the keys asked are the ones of the release the mark names.
+      const before = standing();
+      const third = releaseOf("1.2.0", listing([PUBLIC]));
+      manifestOf("1.2.0", third);
+      // Told as what it is: the version that is still here lists the key that signed it.
+      expect(apply(third)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's manifest${RETIRED}\n` });
+      // This is the one refusal that does not leave all as it was: the helper is the release's
+      // that its mark names, and nothing else is changed.
+      const after = standing();
+      expect(butHelper(after)).toBe(butHelper(before));
+      expect(root(`cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update && stat -c '%a %U' ${helper} && readlink /opt/surogate/current && ls -A /opt/surogate/staging`).stdout)
+        .toBe("755 root\n/opt/surogate/versions/1.0.0\n");
+      // Put there by a rename, and never written into: pkexec may be running the one that was there.
+      expect(inode(after)).not.toBe(inode(before));
+      // The update itself, applied again, is installed.
+      manifestOf("1.1.0", second, {}, next.privateKey);
+      expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+      expect(current()).toBe("/opt/surogate/versions/1.1.0");
+    }
+    // The helper has its name by one rename, of a copy in the apply's own folder that is on the
+    // disk first, as the apply's own renames are: it is not taken away and made again, which would
+    // leave pkexec none between the two.
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    const second = releaseOf("1.1.0", listing([pem(next.publicKey)]));
+    manifestOf("1.1.0", second, {}, next.privateKey);
+    expect(apply(second, stoppedBefore("helper")).status).toBe(137);
+    const at = traced();
+    const renamed = at(/^\d+ +rename\w*\(.*"\/opt\/surogate\/staging\/apply\.\w+\/paired", .*"\/opt\/surogate\/bin\/surogate-apply-update".*\) += 0$/);
+    expect(renamed).toBeGreaterThan(-1);
+    const synced = at(/^\d+ +syncfs\(\d+\) += 0$/);
+    expect(synced).toBeGreaterThan(-1);
+    expect(synced).toBeLessThan(renamed);
+    expect(current()).toBe("/opt/surogate/versions/1.1.0");
+  });
+
+  it("refuses a helper's pair that it finds half done and cannot finish, and one whose mark is behind its helper: none is passed over, and none is finished toward an older release", () => {
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    const refusal = { status: 1, stdout: "", stderr: `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again\n` };
+    const applying = () => root(`/opt/surogate-test/install.sh --apply ${files()}`);
+    // The finishing by itself, from the script's functions without its last line.
+    const finishing = () => root(`rm -rf /root/paired && mkdir /root/paired && bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && paired /root/paired'`);
+    const first = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    // Half done: the update that drops the old key, stopped between its mark's rename and its helper's. Kept, to start each case from.
+    const second = releaseOf("1.1.0", listing([pem(next.publicKey)]));
+    manifestOf("1.1.0", second, {}, next.privateKey);
+    expect(apply(second, stoppedBefore("helper")).status).toBe(137);
+    expect(root("rm -rf /opt/half && cp -a /opt/surogate /opt/half").status).toBe(0);
+    const halfDone = (then = ":") => expect(root(`find /opt/surogate -mindepth 1 -delete; cp -a /opt/half/. /opt/surogate/ && ${then}`).status, then).toBe(0);
+    // What only root can have made of the release that the mark names: the helper is not finished
+    // from it, and the apply does not go on with the keys of the release before. Whatever is
+    // applied: here the update itself again, which those keys would take.
+    const own = "/opt/surogate/versions/1.1.0";
+    for (const [what, made] of [
+      ["its own helper another user's", `chown tester ${own}/bin/surogate-apply-update`],
+      ["its own helper for others to write", `chmod 775 ${own}/bin/surogate-apply-update`],
+      ["its own helper with a set-id bit, which no apply leaves in a version", `chmod 4755 ${own}/bin/surogate-apply-update`],
+      ["its own helper no program", `chmod 644 ${own}/bin/surogate-apply-update`],
+      ["its own mark another user's", `chown tester ${own}/release.json`],
+      ["its folder without its program", `rm ${own}/surogate`],
+      // Nor a folder that cannot give its helper at all: with none to compare, nothing shows the
+      // helper there to be this release's, and the keys of the release before are not asked.
+      ["its folder without a helper of its own", `rm ${own}/bin/surogate-apply-update`],
+      ["a link where its own helper is", `ln -sf /usr/bin/true ${own}/bin/surogate-apply-update`],
+    ] as const) {
+      halfDone(made);
+      const before = standing();
+      expect(applying(), what).toMatchObject(refusal);
+      expect(standing(), what).toBe(before);
+      expect(root("ls -A /opt/surogate/staging").stdout, what).toBe("");
+    }
+    // A mark behind its helper, as only root's own hand leaves one: the helper is not finished to
+    // the older release that such a mark names. On a computer that runs the newer one:
+    halfDone();
+    expect(applying()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(root(`install -m 0644 /opt/surogate/versions/1.0.0/release.json ${mark} && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    let before = standing();
+    expect(applying()).toMatchObject(refusal);
+    expect(standing()).toBe(before);
+    // And on one that was rolled back to the older, whose helper is still the newer version's own.
+    expect(root("ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current").status).toBe(0);
+    before = standing();
+    expect(applying()).toMatchObject(refusal);
+    expect(standing()).toBe(before);
+    expect(root(`cmp ${helper} ${own}/bin/surogate-apply-update`).status).toBe(0);
+    // And where the helper is the own one of no version that is here: the installed version is
+    // newer than the mark names, and that alone says the mark is behind.
+    expect(root(`ln -sfn /opt/surogate/versions/1.1.0 /opt/surogate/current && install -m 0755 /opt/surogate-test/install.sh ${helper} `
+      + `&& ! cmp -s ${helper} ${own}/bin/surogate-apply-update && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    before = standing();
+    expect(applying()).toMatchObject(refusal);
+    expect(standing()).toBe(before);
+
+    // Nothing is half done where the folder of the version that the mark names is another build's
+    // than the mark's: the installed version built again, stopped before its mark's rename. That
+    // is passed over, and the same apply, run again, ends it.
+    expect(root("find /opt/surogate -mindepth 1 -delete").status).toBe(0);
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    const again = releaseOf("1.0.0", listing([PUBLIC]));
+    manifestOf("1.0.0", again);
+    expect(apply(again, stoppedBefore("mark")).status).toBe(137);
+    expect(root(`! cmp -s ${mark} /opt/surogate/versions/1.0.0/release.json && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+    before = standing();
+    expect(finishing()).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    expect(standing()).toBe(before);
+    expect(applying()).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && cmp ${mark} /opt/surogate/versions/1.0.0/release.json`).status).toBe(0);
+    // Stopped after its mark's rename, the mark is that build's, of the version that runs: no
+    // older release's, and its helper is put in. A third build, as a tarball has its version's name.
+    const third = releaseOf("1.0.0", listing([PUBLIC, pem(next.publicKey)]));
+    manifestOf("1.0.0", third);
+    expect(apply(third, stoppedBefore("helper")).status).toBe(137);
+    expect(root(`cmp ${mark} /opt/surogate/versions/1.0.0/release.json && ! cmp -s ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/1.0.0\n");
+    expect(finishing()).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update`).status).toBe(0);
+  });
+
+  it("ends at the step that failed where a folder stands in current's place, with the update's helper and mark in already: a state that names no removal, and that only one mends", () => {
+    const first = releaseOf("1.0.0");
+    manifestOf("1.0.0", first);
+    expect(apply(first).status).toBe(0);
+    expect(root("rm /opt/surogate/current && mkdir /opt/surogate/current").status).toBe(0);
+    const second = releaseOf("1.1.0");
+    manifestOf("1.1.0", second);
+    const ended = apply(second);
+    expect(ended).toMatchObject({ status: 1, stdout: "" });
+    expect(ended.stderr).toMatch(/^(mv: [^\n]*\n)?Surogate Desktop: stopped, as this step failed: mv -T [^\n]*\n$/);
+    expect(root("cmp /opt/surogate/bin/release.json /opt/surogate/versions/1.1.0/release.json && cmp /opt/surogate/bin/surogate-apply-update /opt/surogate/versions/1.1.0/bin/surogate-apply-update && test -d /opt/surogate/current && ls -A /opt/surogate/staging").stdout).toBe("");
+    // The same again says the same; a removal, and the release applied anew, mend it.
+    expect(apply(second).stderr).toMatch(/Surogate Desktop: stopped, as this step failed: mv -T [^\n]*\n$/);
+    expect(root("/opt/surogate-test/install.sh --uninstall").status).toBe(0);
+    expect(apply(second)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.1.0 is installed\n" });
+    expect(current()).toBe("/opt/surogate/versions/1.1.0");
+  });
+
+  it("unpacks the installed version again when its folder has lost a program, and takes an older version out of versions by one rename: but for the helper of the release that the helper's mark names, whose loss leaves a pair that cannot be shown whole", () => {
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const mark = "/opt/surogate/bin/release.json";
+    // The two ways a folder is without a program of its own: it is gone, or a link is there, here to one that runs.
+    const losses = (program: string) => [`rm ${program}`, `ln -sf /usr/bin/true ${program}`];
+    const tarballs: Record<string, string> = {};
     for (const version of ["1.0.0", "1.1.0"]) {
       const tarball = releaseOf(version);
+      tarballs[version] = tarball;
       manifestOf(version, tarball);
       expect(apply(tarball).status).toBe(0);
-      // Its mark is there, and a program is not: the folder is not whole.
-      for (const program of ["surogate", "bin/surogate-apply-update"]) {
-        expect(root(`rm /opt/surogate/versions/${version}/${program}`).status).toBe(0);
-        expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
-        expect(root(`test -x /opt/surogate/versions/${version}/${program}`).status).toBe(0);
-        // Nor when the program is a link, here to one that runs: it is no file of the folder's own.
-        expect(root(`ln -sf /usr/bin/true /opt/surogate/versions/${version}/${program}`).status).toBe(0);
-        expect(apply(tarball), program).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
-        expect(root(`test -x /opt/surogate/versions/${version}/${program} && test ! -L /opt/surogate/versions/${version}/${program}`).status, program).toBe(0);
+      // Its mark is there, and the app is not: the folder is not whole, and is unpacked again.
+      for (const lost of losses(`/opt/surogate/versions/${version}/surogate`)) {
+        expect(root(lost).status, lost).toBe(0);
+        expect(apply(tarball), lost).toMatchObject({ status: 0, stdout: `Surogate Desktop: ${version} is installed\n`, stderr: "" });
+        expect(root(`test -x /opt/surogate/versions/${version}/surogate && test ! -L /opt/surogate/versions/${version}/surogate`).status, lost).toBe(0);
+      }
+      // Its own helper is not, and it is the release that the helper's mark names: with no helper
+      // of the folder's own, nothing shows that the one pkexec runs is this release's and not the
+      // one before's, left there by an update that stopped. That pair cannot be finished, and no
+      // apply goes on with keys this release may have dropped.
+      const own = `/opt/surogate/versions/${version}/bin/surogate-apply-update`;
+      for (const lost of losses(own)) {
+        expect(root(`cmp ${mark} /opt/surogate/versions/${version}/release.json && ${lost}`).status, lost).toBe(0);
+        const before = standing();
+        expect(apply(tarball), lost).toMatchObject({
+          status: 1, stdout: "", stderr: `Surogate Desktop: ${helper} is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again\n`,
+        });
+        expect(standing(), lost).toBe(before);
+        expect(root("ls -A /opt/surogate/staging").stdout, lost).toBe("");
+        // Put back by hand, for what follows.
+        expect(root(`rm -f ${own} && install -m 0755 ${helper} ${own}`).status, lost).toBe(0);
       }
     }
+    // Beside it, where no pair is half done: the same loss in the folder of a version that the
+    // mark does not name is unpacked again, as before. As a rollback leaves a computer, put so by
+    // hand: the helper and its mark are the newer release's, whose folder is whole, and the
+    // version that runs is the one before.
+    expect(root(`ln -sfn /opt/surogate/versions/1.0.0 /opt/surogate/current && cmp ${mark} /opt/surogate/versions/1.1.0/release.json && cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update`).status).toBe(0);
+    manifestOf("1.0.0", tarballs["1.0.0"]!);
+    for (const lost of losses("/opt/surogate/versions/1.0.0/bin/surogate-apply-update")) {
+      expect(root(lost).status, lost).toBe(0);
+      expect(apply(tarballs["1.0.0"]!), lost).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+      expect(root("test -x /opt/surogate/versions/1.0.0/bin/surogate-apply-update && test ! -L /opt/surogate/versions/1.0.0/bin/surogate-apply-update "
+        + `&& cmp ${mark} /opt/surogate/versions/1.1.0/release.json && cmp ${helper} /opt/surogate/versions/1.1.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout, lost).toBe("/opt/surogate/versions/1.0.0\n");
+    }
+    expect(root("ln -sfn /opt/surogate/versions/1.1.0 /opt/surogate/current").status).toBe(0);
     // An update removes the version before the last: it leaves versions whole, by a rename into staging.
     const tarball = releaseOf("1.2.0");
     manifestOf("1.2.0", tarball);
@@ -1083,7 +1904,15 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", PUBLISH, `${box.container}:/opt/surogate-test/publish.sh`]).status).toBe(0);
     for (const version of ["1.0.\u00b2", "1.\u0661.0", "\uff11.0.0"]) for (const verb of ["sign", "send"]) {
       expect(docker(["exec", "-e", "LC_ALL=en_US.UTF-8", "-e", "DESKTOP_RELEASE_KEY=none", box.container, "bash", "/opt/surogate-test/publish.sh", verb, version, "/tmp"]), `${verb} ${version}`)
-        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh sign|send <x.y.z> <out>\n" });
+        .toMatchObject({ status: 2, stdout: "", stderr: "usage: publish.sh describe|sign|send <x.y.z> <out>\n" });
+    }
+  });
+
+  it("takes for a version to roll back to only the ten digits, in a locale that has more: as the user who asks, before sudo, and as root", () => {
+    // Nor a part with a zero before it, in any locale: dpkg reads 1.2.03 as 1.2.3.
+    for (const version of ["1.2.\u0663", "1.2.\u00b3", "\uff11.\uff12.\uff10", "1.2.03", "01.2.3", "1.02.3"]) for (const user of ["tester", "root"]) {
+      expect(docker(["exec", "-u", user, "-e", "LC_ALL=en_US.UTF-8", box.container, "/opt/surogate-test/install.sh", "--version", version]), `${version} as ${user}`)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --version <x.y.z>\n" });
     }
   });
 
@@ -1143,7 +1972,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", join(box.dir, "signalling"), `${box.container}:/opt/surogate-test/signalling`]).status).toBe(0);
     const twice = root("mkdir -p /opt/hold && cp -L /usr/bin/rm /opt/hold/rm && mv /usr/bin/rm /usr/bin/rm.away && cp /opt/surogate-test/signalling /usr/bin/rm"
       + `; setsid -w /opt/surogate-test/install.sh --apply ${files()}; said=$?; mv -f /usr/bin/rm.away /usr/bin/rm; echo "$said $(ls -A /opt/surogate/staging | wc -l)"`);
-    expect(twice).toMatchObject({ stdout: "1 0\n", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(twice).toMatchObject({ stdout: "1 0\n", stderr: `Surogate Desktop: the release's manifest${MISSED}\n` });
   }, 300_000);
 
   it("leaves no folder of its own when a signal comes as the folder is made, before the script has its name: the signal is let by, and the apply goes on", () => {
@@ -1213,27 +2042,55 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   // stops there. With them, Ubuntu's German language pack, in which the system's tools say what
   // they say in German to whoever's desktop is; and strace, for the test that reads what the
   // script starts.
-  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, swapped } = lab(release, [
+  const { it: box, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped } = lab(release, [
     "RUN apt-get update && apt-get install -y --no-install-recommends sudo curl ca-certificates apparmor polkitd pkexec dbus",
     "RUN groupadd --system kvm && useradd -m -s /bin/bash -G sudo tester && useradd -m -s /bin/bash other && echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester",
-    `RUN echo '#!/bin/sh' >/usr/local/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/local/sbin/apparmor_parser && chmod 755 /usr/local/sbin/apparmor_parser`,
+    // In the system's own place, the system's parser kept beside it: the install runs the tools of the system's four folders, and no other.
+    `RUN mv /usr/sbin/apparmor_parser /usr/sbin/apparmor_parser.own && echo '#!/bin/sh' >/usr/sbin/apparmor_parser && echo 'said=$(/usr/sbin/apparmor_parser.own --skip-kernel-load "$@" 2>&1) || { echo "$said" >&2; exit 1; }' >>/usr/sbin/apparmor_parser && chmod 755 /usr/sbin/apparmor_parser`,
     "RUN apt-get update && apt-get install -y --no-install-recommends language-pack-de strace",
   ], ["--network", "host"]);
   let server: ChildProcess;
   let base: string;
-  // What the base serves: desktop/install.sh, latest.json and its signature, and each release.
+  // What the base serves: desktop/install.sh, latest.json, and each release with its own manifest
+  // and signature. latest.json has no signature of its own: its release's is the one asked for.
   const www = () => join(box.dir, "www");
-  const publish = (version: string, key?: KeyObject) => {
-    const tarball = releaseOf(version);
-    const manifest = manifestOf(version, tarball, {}, key);
+  // Release *version* on the base, signed by *key*, with *fields* in its manifest's place; its own
+  // helper lists *trusted*, where a rotation's release lists other keys than the test's one.
+  const publish = (version: string, key?: KeyObject, fields: Record<string, unknown> = {}, trusted?: string[]) => {
+    const tarball = releaseOf(version, (top) => {
+      if (trusted) writeFileSync(join(top, "bin", "surogate-apply-update"), withKeys(readFileSync(SCRIPT, "utf8"), trusted), { mode: 0o755 });
+    });
+    const manifest = manifestOf(version, tarball, fields, key);
     const folder = join(www(), "desktop", "releases", version);
     mkdirSync(folder, { recursive: true });
     copyFileSync(tarball, join(folder, `surogate-desktop-${version}-linux-x64.tar.gz`));
+    // Each release's own manifest, kept beside its tarball, as the release job sends it.
+    copyFileSync(join(box.dir, "manifest.json"), join(folder, "manifest.json"));
+    copyFileSync(join(box.dir, "manifest.json.sig"), join(folder, "manifest.json.sig"));
     writeFileSync(join(www(), "desktop", "latest.json"), manifest);
-    copyFileSync(join(box.dir, "manifest.json.sig"), join(www(), "desktop", "latest.json.sig"));
   };
   const install = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --base ${base}`);
   const uninstall = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --uninstall`);
+  const rollBack = (version: string) => as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --version ${version}`);
+  // The base's newest release named again: *version*'s own manifest as latest.json.
+  const latest = (version: string) => {
+    copyFileSync(join(www(), "desktop", "releases", version, "manifest.json"), join(www(), "desktop", "latest.json"));
+  };
+  // The computer as a test that stands alone begins: nothing of a test before it, then each of
+  // *releases* published in turn, with *fields* in its manifest's place, and installed.
+  const starting = (...releases: Array<[version: string, fields?: Record<string, unknown>]>) => {
+    const removed = uninstall();
+    expect(removed.status, removed.stderr).toBe(0);
+    for (const [version, fields] of releases) {
+      publish(version, undefined, fields);
+      const installed = install();
+      expect(installed.status, `${version}: ${installed.stderr}`).toBe(0);
+    }
+    expect(current()).toBe(`/opt/surogate/versions/${releases.at(-1)?.[0]}`);
+  };
+  // The files of the base's release *version* handed to the helper pkexec runs, as the app downloads them.
+  const handed = (version: string) => root(`cd /home/tester && curl -fsSLO ${base}/desktop/releases/${version}/manifest.json -O ${base}/desktop/releases/${version}/manifest.json.sig `
+    + `-o release.tar.gz ${base}/desktop/releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz && /opt/surogate/bin/surogate-apply-update --apply manifest.json manifest.json.sig release.tar.gz`);
 
   beforeAll(async () => {
     mkdirSync(join(www(), "desktop"), { recursive: true });
@@ -1253,6 +2110,32 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       expect(as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- ${args}`), args)
         .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
     }
+    // Nor a base with a user or a password in it, said as what it is, before sudo is asked: the
+    // base is written where every user reads it, and the app takes no such base.
+    for (const named of ["http://user:secret@127.0.0.1:9", "https://user@surogate.example/", "http://:secret@surogate.example", `http://user:secret@${base.slice("http://".length)}`]) {
+      for (const started of [as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base ${named}`), root(`/opt/surogate-test/install.sh --base ${named}`)]) {
+        expect(started, named).toMatchObject({
+          status: 1, stdout: "", stderr: "Surogate Desktop: a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone\n",
+        });
+      }
+    }
+    // The record's own writing refuses one too, whoever calls it: asked by itself, from the
+    // script's functions without its last line, it writes no record, and no file beside one.
+    expect(root(`bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && record http://user:secret@surogate.example'; echo "ended $?"; ls -A /etc/surogate 2>/dev/null`)).toMatchObject({
+      stdout: "ended 1\n", stderr: "Surogate Desktop: a base with a user or a password in it is not taken: it would be written where every user of this computer reads it. Name the server alone\n",
+    });
+    // A base names its server right behind its two slashes. With a third slash there, the script
+    // would find no server and so no user, and curl, which takes the third for a slip, would send
+    // the login: it is no URL here, as it is none to the app. Nor is one with no server at all.
+    // The refusal says nothing of what was typed, and comes before sudo is asked, whose log keeps
+    // its command line.
+    for (const named of ["http:///user:secret@127.0.0.1:9", `http:///user:secret@${base.slice("http://".length)}`, "https:////user:secret@surogate.example", "http://", "https://?user:secret@surogate.example", "http://#user:secret@surogate.example"]) {
+      for (const started of [as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --base '${named}'`), root(`/opt/surogate-test/install.sh --base '${named}'`)]) {
+        expect(started, named).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --base <http or https URL>\n" });
+      }
+    }
+    // An at sign after the server's name is no user's: such a base is read on, to this computer's own refusal or its install.
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
     expect(root("cp /etc/os-release /root/os-release").status).toBe(0);
     const others = [
       'ID=ubuntu\nVERSION_ID="25.10"\nVERSION="25.10 (Questing Quokka)"',
@@ -1275,7 +2158,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     // computer, which it does not support, a base it takes gets as far as that refusal.
     for (const locale of ["C", "C.UTF-8", "de_DE.UTF-8"]) {
       const based = (url: string) => as("tester", `curl -fsSL ${base}/desktop/install.sh | LC_ALL=${locale} bash -s -- --base ${url}`);
-      for (const url of ["$'http://b\\303\\274cher.example'", "$'http://surogate.example/\\343\\200\\200'", "$'http://surogate.example/\\377\\376'"]) {
+      for (const url of ["$'http://b\\303\\274cher.example'", "$'http://surogate.example/\\343\\200\\200'", "$'http://surogate.example/\\377\\376'", "'http://surogate.example/a@b'", "'http://surogate.example?to=a@b'", "'http://surogate.example#a@b'"]) {
         expect(based(url), `${locale} ${url}`).toMatchObject({ status: 1, stdout: "", stderr: unsupported });
       }
       for (const url of ["'http://surogate.example/a b'", "$'http://surogate.example/a\\tb'", "$'http://surogate.example\\n'"]) {
@@ -1317,7 +2200,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(current()).toBe("/opt/surogate/versions/1.0.0");
 
     // The packages, QEMU's without its recommends, and its firmware for q35.
-    expect(root("dpkg-query -W -f='${Status}\\n' bubblewrap socat ripgrep virtiofsd uidmap zstd openssl jq qemu-system-x86 | sort -u").stdout).toBe("install ok installed\n");
+    expect(root("dpkg-query -W -f='${Status}\\n' bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec perl-base openssl jq qemu-system-x86 | sort -u").stdout).toBe("install ok installed\n");
     expect(root("dpkg-query -W -f='${Status}\\n' qemu-system-gui 2>/dev/null").stdout).not.toBe("install ok installed\n");
     expect(root("timeout 3 qemu-system-x86_64 -machine q35,accel=tcg -display none -nodefaults -S").status).toBe(124);
     expect(root("getent group kvm").stdout).toMatch(/\btester\b/);
@@ -1356,7 +2239,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(install().status).toBe(0);
     expect(versions()).toEqual(["1.0.0", "1.1.0"]);
     publish("1.2.0", other.privateKey);
-    expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n` });
+    expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json${MISSED}\n` });
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
     // Its download's folder goes, whether it finished or not.
     expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'").stdout).toBe("");
@@ -1387,6 +2270,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("lets an administrator approve through polkit the update a user downloaded, and nothing else of the helper", () => {
+    starting(["1.1.0"]);
     // The system bus and polkit, as a desktop runs them, and an administrator who has just approved.
     expect(root("mkdir -p /run/dbus && dbus-daemon --system --fork && (/usr/lib/polkit-1/polkitd --no-debug >/dev/null 2>&1 &) && sleep 2").status).toBe(0);
     expect(root(`echo 'polkit.addRule(function (action, subject) { if (action.id == "ai.invergent.surogate.update" && subject.user == "tester") return polkit.Result.YES; });' >/etc/polkit-1/rules.d/10-test.rules && sleep 2`).status).toBe(0);
@@ -1415,6 +2299,25 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const other = as("tester", "pkexec /opt/surogate/bin/surogate-apply-update --uninstall; exit $?");
     expect(other).toMatchObject({ status: 127, stderr: expect.stringContaining("Error creating textual authentication agent") });
     expect(root("test -e /opt/surogate/current").status).toBe(0);
+    // As the app runs it, started from a terminal in a session with no polkit agent, for a user no
+    // rule lets update: pkexec asks nothing on the terminal, and ends at once with 127, which the
+    // app says as an administrator being needed. With an agent of its own it would wait there for
+    // a password: the terminal is closed on it after 20 s, as nothing less ends 26.04's.
+    const asked = as("other", `timeout -s KILL 20 script -qec "${AS_ROOT.join(" ")} --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; echo ended \\$?" /dev/null`);
+    expect(asked.stdout).toContain("ended 127");
+    expect(asked.stdout).not.toContain("AUTHENTICATING");
+    // The words the app reads that 127 by: pkexec's own, in no locale, for a command it could not
+    // run as another user. Its 127 with any other words is a failure, which the app says as it is.
+    expect(asked.stdout).toContain("Error executing command as another user: No authentication agent found.");
+    // Such a failure, for the user the rule lets update: the helper is not there for pkexec to run.
+    expect(root("mv /opt/surogate/bin/surogate-apply-update /opt/surogate/bin/aside").status).toBe(0);
+    try {
+      const gone = as("tester", `${AS_ROOT.join(" ")} --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; exit $?`);
+      expect(gone).toMatchObject({ status: 127, stdout: "" });
+      expect(gone.stderr.trim()).toBe("Error accessing /opt/surogate/bin/surogate-apply-update: No such file or directory");
+    } finally {
+      expect(root("mv /opt/surogate/bin/aside /opt/surogate/bin/surogate-apply-update").status).toBe(0);
+    }
     root("rm /etc/polkit-1/rules.d/10-test.rules");
   });
 
@@ -1430,7 +2333,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   });
 
   it("uninstalls for every user, and asks before deleting the user's own data, as that user, under the folders their session names", () => {
-    expect(root("/opt/surogate-test/install.sh --remove")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh [--base <url>] [--uninstall]\n" });
+    expect(root("/opt/surogate-test/install.sh --remove")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh [--base <url>] [--version <x.y.z>] [--uninstall]\n" });
     expect(root("/opt/surogate-test/install.sh --uninstall now")).toMatchObject({ status: 1, stderr: "Surogate Desktop: usage: install.sh --uninstall\n" });
     const folders = "XDG_CONFIG_HOME=/home/tester/cfg XDG_DATA_HOME=/home/tester/dat XDG_CACHE_HOME=/home/tester/cch";
     expect(as("tester", "mkdir -p cfg/autostart dat/surogate/electron cch/surogate/updates Surogate/agent/2026-10-08 && touch cfg/autostart/surogate.desktop Surogate/agent/2026-10-08/report.docx").status).toBe(0);
@@ -1708,7 +2611,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     publish("2.3.0");
     const desktop = join(www(), "desktop");
     const tarball = join(desktop, "releases", "2.3.0", "surogate-desktop-2.3.0-linux-x64.tar.gz");
-    const kept = Object.fromEntries(["latest.json", "latest.json.sig"].map((name) => [name, readFileSync(join(desktop, name))]));
+    const kept = Object.fromEntries(["latest.json", "releases/2.3.0/manifest.json.sig"].map((name) => [name, readFileSync(join(desktop, name))]));
     const release = readFileSync(tarball);
     // What the install says last: curl's own words for a download past its bound, then the script's line.
     const stopped = (line: string) => {
@@ -1726,9 +2629,24 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       stopped(`could not download ${base}/desktop/latest.json`);
       writeFileSync(join(desktop, "latest.json"), kept["latest.json"]!);
       // Its signature is Ed25519's 64 bytes.
-      writeFileSync(join(desktop, "latest.json.sig"), Buffer.concat([kept["latest.json.sig"]!, Buffer.alloc(2)]));
-      stopped(`could not download ${base}/desktop/latest.json.sig`);
-      writeFileSync(join(desktop, "latest.json.sig"), kept["latest.json.sig"]!);
+      writeFileSync(join(desktop, "releases/2.3.0/manifest.json.sig"), Buffer.concat([kept["releases/2.3.0/manifest.json.sig"]!, Buffer.alloc(2)]));
+      stopped(`could not download ${base}/desktop/releases/2.3.0/manifest.json.sig`);
+      writeFileSync(join(desktop, "releases/2.3.0/manifest.json.sig"), kept["releases/2.3.0/manifest.json.sig"]!);
+      // The signature asked for is the release's own, which is never sent a second time: the
+      // version is the manifest's, read before any key is asked, and only a version names a place.
+      // One that is none is no release, and nothing more is asked of the base.
+      for (const named of ["2.3.0/../../../unsized#", "", "2.3", "02.3.0", " 2.3.0", 230]) {
+        writeFileSync(join(desktop, "latest.json"), `${JSON.stringify({ ...JSON.parse(kept["latest.json"]!.toString()), version: named })}\n`);
+        expect(install(), String(named)).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not a release of Surogate Desktop for this computer\n` });
+      }
+      writeFileSync(join(desktop, "latest.json"), kept["latest.json"]!);
+      // And there is no other place for it: a signature beside latest.json is not looked for.
+      writeFileSync(join(desktop, "latest.json.sig"), kept["releases/2.3.0/manifest.json.sig"]!);
+      rmSync(join(desktop, "releases/2.3.0/manifest.json.sig"));
+      expect(install()).toMatchObject({ status: 1 });
+      expect(install().stderr.trimEnd().split("\n").at(-1)).toBe(`Surogate Desktop: could not download ${base}/desktop/releases/2.3.0/manifest.json.sig`);
+      rmSync(join(desktop, "latest.json.sig"));
+      writeFileSync(join(desktop, "releases/2.3.0/manifest.json.sig"), kept["releases/2.3.0/manifest.json.sig"]!);
       // The tarball is the size its signed manifest names, and here a megabyte more.
       writeFileSync(tarball, Buffer.concat([release, Buffer.alloc(1024 * 1024)]));
       stopped(`could not download Surogate Desktop 2.3.0 from ${base}`);
@@ -1758,6 +2676,551 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       ]);
     }
     expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
+  });
+
+  it("rolls back, at an administrator's word, to a release that reads what the installed one keeps, and to none that cannot", () => {
+    publish("1.4.0");
+    // Nothing to roll back on a computer it is not installed on: said once, by the half that runs as root.
+    expect(rollBack("1.4.0")).toMatchObject({ status: 1, stderr: "Surogate Desktop: Surogate Desktop is not installed: run its install script first\n" });
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
+    // Nor does it follow an /opt/surogate that is a link, as a user or as root's part by itself: refused as the install refuses it.
+    expect(root("ln -sfn /nowhere /opt/surogate").status).toBe(0);
+    try {
+      expect(rollBack("1.4.0")).toMatchObject({ status: 1, stdout: "", stderr: linked() });
+      expect(root("/opt/surogate-test/install.sh --version 1.4.0")).toMatchObject({ status: 1, stdout: "", stderr: linked() });
+      expect(root("test -L /opt/surogate && test ! -e /nowhere && test ! -e /etc/surogate").status).toBe(0);
+    } finally {
+      root("rm /opt/surogate");
+    }
+    expect(install().status).toBe(0);
+    publish("1.5.0");
+    expect(install().status).toBe(0);
+    const back = rollBack("1.4.0");
+    expect(back.status, back.stderr).toBe(0);
+    expect(back.stdout).toContain("Surogate Desktop: rolling back needs administrator rights: sudo asks for your password once\n");
+    expect(back.stdout).toContain("Surogate Desktop: 1.4.0 is installed\n");
+    // Here whole, as the version before an update is: only its manifest and signature are asked of the base.
+    expect(back.stdout).not.toContain("downloading");
+    expect(current()).toBe("/opt/surogate/versions/1.4.0");
+    // Kept: the version rolled back to, and the one it replaced.
+    expect(versions()).toEqual(["1.4.0", "1.5.0"]);
+    // The helper pkexec runs is still the newer release's, as its mark says.
+    expect(root("cmp /opt/surogate/bin/release.json /opt/surogate/versions/1.5.0/release.json").status).toBe(0);
+    // A release that changes what the app keeps in each user's home: no earlier one reads it.
+    publish("1.6.0", undefined, { stateSchema: 2 });
+    expect(install().status).toBe(0);
+    // From here on every rollback is refused: each leaves the installed version, the helper, its
+    // mark and the keys it lists the bytes they are now.
+    const installed = standing();
+    const unchanged = (after: string) => expect(standing(), after).toBe(installed);
+    expect(rollBack("1.5.0")).toMatchObject({
+      status: 1, stderr: "Surogate Desktop: 1.5.0 cannot read what the installed 1.6.0 keeps for its users: its state schema is 1, and 1.6.0's 2\n",
+    });
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    unchanged("a release whose state schema is below the installed one's");
+    // The apply compares the two itself, with the lock held, whatever was compared before it: an
+    // apply of an older release by itself, from the script's functions without its last line.
+    expect(root(`cd /home/tester && curl -fsSO ${base}/desktop/releases/1.4.0/manifest.json -O ${base}/desktop/releases/1.4.0/manifest.json.sig `
+      + `&& bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && trap cleanup EXIT && apply manifest.json manifest.json.sig "" older'`))
+      .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: 1.4.0 cannot read what the installed 1.6.0 keeps for its users: its state schema is 1, and 1.6.0's 2\n" });
+    unchanged("the same, compared by the apply itself");
+    // curl's own words first, then the script's.
+    const missing = rollBack("1.9.9");
+    expect(missing.status).toBe(1);
+    expect(missing.stderr.endsWith(`Surogate Desktop: could not download ${base}/desktop/releases/1.9.9/manifest.json\n`)).toBe(true);
+    unchanged("a release its base does not have");
+    // A base whose name has a letter outside ASCII is looked up, as the install looks one up: root's
+    // part reads its letters as UTF-8, where in its own locale curl refuses the name before it asks.
+    expect(root(`cp /etc/surogate/install.json /root/install.json && jq -c '.base = "http://b\u00fccher.invalid"' /root/install.json >/etc/surogate/install.json`).status).toBe(0);
+    const named = rollBack("1.4.0");
+    expect(root("cp /root/install.json /etc/surogate/install.json").status).toBe(0);
+    expect(named.stderr.trimEnd().split("\n").slice(-2)).toEqual([
+      expect.stringMatching(/^curl: \(6\) Could not resolve host: /),
+      "Surogate Desktop: could not download http://b\u00fccher.invalid/desktop/releases/1.4.0/manifest.json",
+    ]);
+    unchanged("a base that no resolver has");
+    // Another release's signed manifest, served under this one's name, is not this release.
+    const releases = join(www(), "desktop", "releases");
+    mkdirSync(join(releases, "1.5.5"));
+    for (const end of ["", ".sig"]) copyFileSync(join(releases, "1.6.0", `manifest.json${end}`), join(releases, "1.5.5", `manifest.json${end}`));
+    expect(rollBack("1.5.5")).toMatchObject({
+      status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/1.5.5/manifest.json is not release 1.5.5 of Surogate Desktop for this computer\n`,
+    });
+    unchanged("another release's manifest under the version's name");
+    // Nor is one that no release key signed.
+    publish("1.6.1", other.privateKey, { stateSchema: 2 });
+    expect(rollBack("1.6.1")).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/1.6.1/manifest.json${UNSIGNED}\n` });
+    unchanged("a release no release key signed");
+    // No more of a tarball is downloaded than its manifest names: curl's own words, then the script's.
+    publish("1.6.2", undefined, { stateSchema: 2 });
+    const tarball = join(releases, "1.6.2", "surogate-desktop-1.6.2-linux-x64.tar.gz");
+    const signedBytes = readFileSync(tarball);
+    writeFileSync(tarball, Buffer.concat([signedBytes, randomBytes(4096)]));
+    const longer = rollBack("1.6.2");
+    expect(longer.status).toBe(1);
+    expect(longer.stderr.endsWith(`Surogate Desktop: could not download Surogate Desktop 1.6.2 from ${base}\n`)).toBe(true);
+    unchanged("a tarball longer than its manifest names");
+    // One of that size that is not its manifest's is refused by the apply, which leaves nothing of it in staging.
+    writeFileSync(tarball, randomBytes(signedBytes.length));
+    const swapped = rollBack("1.6.2");
+    expect(swapped.status).toBe(1);
+    expect(swapped.stderr.endsWith("Surogate Desktop: the downloaded release is not the one its manifest names\n")).toBe(true);
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    unchanged("a tarball that is not its manifest's");
+    latest("1.6.0");
+    for (const args of ["--version", "--version 1.4", "--version 1.4.0 again", "--version v1.4.0"]) {
+      expect(as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- ${args}`), args)
+        .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: usage: install.sh --version <x.y.z>\n" });
+      unchanged(args);
+    }
+    // On a computer the script does not support, it is refused as the install is, before sudo is asked.
+    expect(root(`cp /etc/os-release /root/os-release && printf '%s\\n' 'ID=debian' 'VERSION_ID="12"' 'VERSION="12 (bookworm)"' >/etc/os-release`).status).toBe(0);
+    expect(rollBack("1.4.0")).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop supports Ubuntu 24.04 LTS or a later LTS release (x64)\n" });
+    expect(root("cp /root/os-release /etc/os-release").status).toBe(0);
+    unchanged("a computer the script does not support");
+    // Its download's folder goes, and what its apply copied, whether it was applied or refused.
+    expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'; ls -A /opt/surogate/staging").stdout).toBe("");
+    // The update the app downloads still never goes back: only an administrator's --version does.
+    expect(handed("1.5.0")).toMatchObject({ status: 1, stderr: "Surogate Desktop: 1.5.0 is older than the installed 1.6.0\n" });
+    unchanged("an older release handed to the helper");
+  });
+
+  it("rolls back to no release whose manifest or signature its base does not serve, or serves longer than one is, and from no installed version whose mark names no state schema: each leaves all as it was", () => {
+    const releases = join(www(), "desktop", "releases");
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    const installed = standing();
+    // What a rollback to *version* says last, of *file*: curl's own words, then the script's.
+    const stopped = (version: string, file: string, curl: RegExp) => {
+      const back = rollBack(version);
+      expect(back.status, file).toBe(1);
+      expect(back.stderr.trimEnd().split("\n").slice(-2), file).toEqual([expect.stringMatching(curl), `Surogate Desktop: could not download ${base}/desktop/releases/${version}/${file}`]);
+      expect(standing(), file).toBe(installed);
+    };
+    const tooLong = /^curl: \(63\) .*[Mm]aximum (allowed )?file size/;
+    // A release whose manifest is there, and no signature of it.
+    mkdirSync(join(releases, "1.6.3"));
+    copyFileSync(join(releases, "1.6.0", "manifest.json"), join(releases, "1.6.3", "manifest.json"));
+    stopped("1.6.3", "manifest.json.sig", /^curl: \(22\) .* 404/);
+    // A signature of two bytes more than Ed25519's 64: no more of it is asked for than 65.
+    writeFileSync(join(releases, "1.6.3", "manifest.json.sig"), Buffer.alloc(66));
+    stopped("1.6.3", "manifest.json.sig", tooLong);
+    // A manifest of a byte more than a line of 4096.
+    writeFileSync(join(releases, "1.6.3", "manifest.json"), Buffer.alloc(4097, " "));
+    stopped("1.6.3", "manifest.json", tooLong);
+
+    // The installed version's own mark without its state schema, as only root can leave it: what
+    // it keeps for its users is not known, so no release is taken for one that reads it.
+    expect(root("jq -c 'del(.stateSchema)' /opt/surogate/versions/1.6.0/release.json >/root/release.json && cp /root/release.json /opt/surogate/versions/1.6.0/release.json").status).toBe(0);
+    const unmarked = standing();
+    expect(unmarked).not.toBe(installed);
+    for (const version of ["1.6.0", "1.4.0"]) {
+      expect(rollBack(version), version).toMatchObject({ status: 1, stderr: "Surogate Desktop: the installed 1.6.0 names no state schema: run Surogate Desktop's install script again\n" });
+      expect(standing(), version).toBe(unmarked);
+    }
+    expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'; ls -A /opt/surogate/staging").stdout).toBe("");
+    // The install script, run again as that says, takes the release from its base again, mark and all.
+    const mended = install();
+    expect(mended.status, mended.stderr).toBe(0);
+    expect(root(`curl -fsS ${base}/desktop/releases/1.6.0/manifest.json | cmp - /opt/surogate/current/release.json`).status).toBe(0);
+    expect(versions()).toEqual(["1.4.0", "1.6.0"]);
+  });
+
+  it("rolls back from no base that its record does not name as an install wrote it, and to no release while the installed version's mark is not root's own: curl is handed no word of a record's but an http or https URL, and nothing is asked of any base", () => {
+    starting(["1.4.0"], ["1.6.0", { stateSchema: 2 }]);
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    const record = "/etc/surogate/install.json";
+    const mark = "/opt/surogate/versions/1.6.0/release.json";
+    // curl, kept as /opt/hold/curl, which first writes down what it was asked for.
+    const asking = '#!/bin/sh\necho "$*" >>/tmp/curled\nexec /opt/hold/curl "$@"\n';
+    // A rollback by root's own part, after *first* and before *last*: how it ended, how many times
+    // it ran curl, and what it said. Bounded: a record that is a pipe would be waited on for good.
+    const rolled = (version: string, first = ":", last = ":") => swapped("curl", asking, [
+      first, ": >/tmp/curled",
+      `timeout 60 /opt/surogate-test/install.sh --version ${version} >/tmp/said 2>&1; echo "$? $(wc -l </tmp/curled) $(cat /tmp/said)"`,
+      last,
+    ]).stdout;
+    // As an install wrote the record, the base is asked: three times for a version whose folder
+    // has lost its program, for its manifest, its signature and its tarball. And each time for no
+    // longer than a bound: a base that takes the connection and never answers, or stops in the
+    // middle of an answer, would otherwise hold the rollback for good. The install's own three are
+    // asked the same way.
+    expect(root(`stat -c '%f %u' ${record} ${mark} && cp -p ${record} /root/record && cp -p ${mark} /root/mark`).stdout).toBe("81a4 0\n81a4 0\n");
+    const bounded = (files: string[]) => {
+      const requests = root("cat /tmp/curled").stdout.trim().split("\n");
+      expect(requests.map((request) => request.replace(/^.* [^ ]*\/desktop\//, ""))).toEqual(files);
+      for (const request of requests) expect(request).toContain("--connect-timeout 30 --speed-limit 1024 --speed-time 60");
+    };
+    const tarball = "releases/1.6.0/surogate-desktop-1.6.0-linux-x64.tar.gz";
+    const asked = rolled("1.6.0", "rm /opt/surogate/versions/1.6.0/surogate");
+    expect(asked.startsWith("0 3 ") && asked.endsWith("Surogate Desktop: 1.6.0 is installed\n"), asked).toBe(true);
+    bounded(["releases/1.6.0/manifest.json", "releases/1.6.0/manifest.json.sig", tarball]);
+    expect(swapped("curl", asking, ["rm /opt/surogate/versions/1.6.0/surogate", ": >/tmp/curled", `/opt/surogate-test/install.sh --base ${base} >/dev/null 2>&1; echo "$?"`]).stdout).toBe("0\n");
+    bounded(["latest.json", "releases/1.6.0/manifest.json.sig", tarball]);
+    const installed = standing();
+    const restored = `rm -rf ${record} ${mark}; cp -p /root/record ${record}; cp -p /root/mark ${mark}`;
+    const refused = (what: string, made: string, said: string, version = "1.6.0") => {
+      expect(rolled(version, made, restored), what).toBe(`1 0 Surogate Desktop: ${said}\n`);
+      expect(standing(), what).toBe(installed);
+      expect(root("find /tmp -mindepth 1 -maxdepth 1 -name 'tmp.*'; ls -A /opt/surogate/staging").stdout, what).toBe("");
+    };
+    const noServer = `${record} names no server to roll back from: run Surogate Desktop's install script again`;
+    const notRoots = `${record} is not as Surogate Desktop's install leaves it: run its install script again`;
+    const noSchema = "the installed 1.6.0 names no state schema: run Surogate Desktop's install script again";
+    // A base that begins with a dash is options to curl: here a file of a user's own for it to
+    // read its options from, which have it write a file of that user's bytes as root.
+    const options = `url = "${base}/desktop/releases/1.6.0/manifest.json"\\nnext\\nurl = "file:///home/tester/payload"\\noutput = "/etc/written-by-root"\\n`;
+    expect(root(`mkdir -p /home/tester/x/desktop/releases/1.6.0 && printf '${options}' >/home/tester/x/desktop/releases/1.6.0/manifest.json && echo theirs >/home/tester/payload && chown -R tester: /home/tester/x /home/tester/payload`).status).toBe(0);
+    refused("a base that is options to curl", `echo '{"base":"-K/home/tester/x","channel":"stable"}' >${record}`, noServer);
+    expect(root("test ! -e /etc/written-by-root").status).toBe(0);
+    // Nor any other word that is no http or https URL as --base takes one, and no record that is more than one JSON document of a manifest's size.
+    const padded = `printf '{"base":"${base}","more":"%s"}\\n' "$(head -c 4096 /dev/zero | tr '\\0' x)" >${record}`;
+    for (const [what, made] of [
+      ["a base with a new line in it", `printf '{"base":"${base}\\\\n/elsewhere"}\\n' >${record}`],
+      ["a base that is no URL", `echo '{"base":"${base.replace("http://", "ftp://")}"}' >${record}`],
+      ["a base that is a number", `echo '{"base":7}' >${record}`],
+      ["a base that is a list", `echo '{"base":["${base}"]}' >${record}`],
+      ["no base", `echo '{"channel":"stable"}' >${record}`],
+      ["two documents", `printf '{"base":"${base}"}\\n{"base":"${base}"}\\n' >${record}`],
+      ["no JSON", `echo '${base}' >${record}`],
+      ["an empty record", `: >${record}`],
+      ["a record of more than 4096 bytes", padded],
+    ] as const) refused(what, made, noServer);
+    // Nor from one with a slash more before its server, which curl would read a login from.
+    refused("a base with a third slash before a login", `echo '{"base":"${base.replace("http://", "http:///user:secret@")}","channel":"stable"}' >${record}`,
+      `${record} names no server to roll back from: run Surogate Desktop's install script again`);
+    // Nor from a base with a user or a password in it, which no install writes: said as what it is.
+    refused("a base with a password in it", `echo '{"base":"${base.replace("http://", "http://user:secret@")}","channel":"stable"}' >${record}`,
+      `${record} names a base with a user or a password in it: run Surogate Desktop's install script again, with a base that names its server alone`);
+    // Nor a record that is not root's own file, or that anyone else may write, whatever it names: here the base itself.
+    for (const [what, made] of [
+      ["a link to a user's file", `cp ${record} /home/tester/record.json && chown tester /home/tester/record.json && rm ${record} && ln -s /home/tester/record.json ${record}`],
+      ["another user's", `chown tester ${record}`],
+      ["one that all may write", `chmod 666 ${record}`],
+      ["one that its group may write", `chmod 664 ${record}`],
+      // Nor one with a set-id or a sticky bit, which no install gives it.
+      ["one with the set-user-id bit", `chmod 4644 ${record}`],
+      ["one with the set-group-id bit", `chmod 2644 ${record}`],
+      ["one with the sticky bit", `chmod 1644 ${record}`],
+      ["a pipe", `rm ${record} && mkfifo ${record}`],
+      ["a folder", `rm ${record} && mkdir ${record}`],
+    ] as const) refused(what, made, notRoots);
+    refused("no record", `rm ${record}`, "Surogate Desktop is not installed: run its install script first");
+    // Nor is a computer with a record and no version one that has an installed version's state to
+    // compare: it is told the same, and not that a version with no name names no schema.
+    expect(rolled("1.6.0", "mv -T /opt/surogate/current /root/current", "mv -T /root/current /opt/surogate/current")).toBe("1 0 Surogate Desktop: Surogate Desktop is not installed: run its install script first\n");
+    expect(standing()).toBe(installed);
+    // The installed version's mark says what it keeps for its users, and so which releases read
+    // it: one that is not root's own file says nothing. Here each would have a release of an
+    // earlier state schema taken.
+    for (const [what, made] of [
+      ["a link to a user's file", `echo '{"stateSchema":1}' >/home/tester/mark.json && chown tester /home/tester/mark.json && rm ${mark} && ln -s /home/tester/mark.json ${mark}`],
+      ["another user's", `echo '{"stateSchema":1}' >${mark} && chown tester ${mark}`],
+      ["one that others may write", `echo '{"stateSchema":1}' >${mark} && chmod 664 ${mark}`],
+    ] as const) refused(`the installed mark: ${what}`, made, noSchema, "1.4.0");
+    expect(root(`cmp /root/record ${record} && cmp /root/mark ${mark} && stat -c '%f %u' ${record} ${mark}`).stdout).toBe("81a4 0\n81a4 0\n");
+    // The record is root's own word at any mode that lets root alone write it, and not only at the
+    // one an install gives it: the base is asked, here for a version that is here whole.
+    for (const mode of ["444", "600", "640", "400", "755"]) {
+      const taken = rolled("1.6.0", `chmod ${mode} ${record}`, restored);
+      expect(taken.startsWith("0 2 ") && taken.endsWith("Surogate Desktop: 1.6.0 is installed\n"), `${mode}: ${taken}`).toBe(true);
+    }
+    // A mark of the release's own bytes that is not root's own file at the mode an apply gives it
+    // says nothing either, and what its refusal names mends it: to the install script, run again,
+    // a folder with such a mark is not whole, and its release is unpacked again.
+    for (const [what, made] of [
+      ["closed to others", `chmod 600 ${mark}`],
+      ["one that its group may write", `chmod 664 ${mark}`],
+      ["a link to its own bytes", `cp ${mark} /root/same.json && rm ${mark} && ln -s /root/same.json ${mark}`],
+      ["another user's", `chown tester ${mark}`],
+    ] as const) {
+      expect(rolled("1.6.0", made), what).toBe(`1 0 Surogate Desktop: ${noSchema}\n`);
+      const again = install();
+      expect(again.status, `${what}: ${again.stderr}`).toBe(0);
+      expect(root(`stat -c '%f %u' ${mark} && cmp ${mark} /root/mark`).stdout, what).toBe("81a4 0\n");
+      const taken = rolled("1.6.0");
+      expect(taken.startsWith("0 2 ") && taken.endsWith("Surogate Desktop: 1.6.0 is installed\n"), `${what}: ${taken}`).toBe(true);
+    }
+  });
+
+  it("rolls back with the system's own tools and into a folder of root's own, whatever PATH and TMPDIR root's own shell has, and through the user's proxy from a base whose name has a letter outside ASCII, for each of its three downloads", () => {
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    const installed = standing();
+    // First on root's PATH, a folder with a tool under every name of the system's four folders:
+    // each writes down that it ran, and then runs the system's own by its whole path. Its openssl
+    // calls every signature good. None of them is run, by the script started by its name or read
+    // by bash: not by a rollback to a release that no release key signed, and not by an install
+    // of one.
+    const standIns = [
+      "mkdir -p /tmp/caller",
+      'for tool in /usr/sbin/* /usr/bin/* /sbin/* /bin/*; do',
+      '  [ -f "$tool" ] && [ -x "$tool" ] || continue',
+      '  [ -e "/tmp/caller/$(basename "$tool")" ] || printf \'#!/bin/sh\\necho %s >>/tmp/caller/ran\\nexec %s "$@"\\n\' "$(basename "$tool")" "$tool" >"/tmp/caller/$(basename "$tool")"',
+      "done",
+      "printf '#!/bin/sh\\necho openssl >>/tmp/caller/ran\\nexit 0\\n' >/tmp/caller/openssl",
+      "chmod 755 /tmp/caller/*",
+      "ls /tmp/caller | wc -l",
+    ].join("\n");
+    expect(Number(root(standIns).stdout)).toBeGreaterThan(300);
+    const unsigned = (started: string, said: string) => {
+      const refused = root(`PATH=/tmp/caller:$PATH ${started}`);
+      expect(refused.status, started).toBe(1);
+      expect(refused.stderr.endsWith(`Surogate Desktop: ${said}${started.includes("--version") ? UNSIGNED : MISSED}\n`), `${started}: ${refused.stderr}`).toBe(true);
+      expect(root("cat /tmp/caller/ran 2>/dev/null").stdout, started).toBe("");
+      expect(standing(), started).toBe(installed);
+    };
+    unsigned("/opt/surogate-test/install.sh --version 1.6.1", `${base}/desktop/releases/1.6.1/manifest.json`);
+    unsigned("/bin/bash -s -- --version 1.6.1 </opt/surogate-test/install.sh", `${base}/desktop/releases/1.6.1/manifest.json`);
+    // The base's newest release is that one: the install's own root part asks the system's openssl too.
+    latest("1.6.1");
+    unsigned(`/opt/surogate-test/install.sh --base ${base}`, `${base}/desktop/latest.json`);
+    unsigned(`/bin/bash -s -- --base ${base} </opt/surogate-test/install.sh`, `${base}/desktop/latest.json`);
+    latest("1.6.0");
+    // Nor is what it downloads put where root's own TMPDIR says, in a folder that is another's:
+    // whoever owns that one could put a folder of their own in the download's name. Each folder a
+    // rollback makes, and each the install makes, as mktemp was asked for it: one in /tmp, which
+    // is root's and where no one renames what is another's, and one in root's own staging.
+    const making = '#!/bin/sh\nmade="$(/opt/hold/mktemp "$@")" || exit\necho "$made" >>/tmp/made\necho "$made"\n';
+    expect(root("mkdir -p /home/tester/tmp && chown tester: /home/tester/tmp").status).toBe(0);
+    for (const started of ["--version 1.6.0", `--base ${base}`]) {
+      const made = swapped("mktemp", making, [": >/tmp/made", `TMPDIR=/home/tester/tmp /opt/surogate-test/install.sh ${started} >/dev/null 2>&1; echo "$?"; cat /tmp/made`]).stdout.trim().split("\n");
+      expect(made, started).toEqual(["0", expect.stringMatching(/^\/tmp\/tmp\.\w{10}$/), expect.stringMatching(/^\/opt\/surogate\/staging\/apply\.\w{6}$/)]);
+    }
+    expect(root("ls -A /home/tester/tmp").stdout).toBe("");
+    // A release that is not here, from a base that no resolver has: all three of its files are
+    // asked of the proxy the user's shell names, which sudo's own environment does not have, and
+    // the base's letters are read as UTF-8 for each, or curl refuses the name before it asks.
+    publish("1.5.9", undefined, { stateSchema: 2 });
+    expect(root(`cp /etc/surogate/install.json /root/install.json && jq -c '.base = "http://b\u00fccher.invalid"' /root/install.json >/etc/surogate/install.json`).status).toBe(0);
+    const proxied = as("tester", `curl -fsSL ${base}/desktop/install.sh | http_proxy=${base} bash -s -- --version 1.5.9`);
+    expect(root("cp /root/install.json /etc/surogate/install.json").status).toBe(0);
+    expect(proxied.status, proxied.stderr).toBe(0);
+    expect(proxied.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.5.9\n");
+    expect(proxied.stdout).toContain("Surogate Desktop: 1.5.9 is installed\n");
+    expect(root(`curl -fsS ${base}/desktop/releases/1.5.9/manifest.json | cmp - /opt/surogate/current/release.json`).status).toBe(0);
+    expect(versions()).toEqual(["1.5.9", "1.6.0"]);
+    // And to the version it replaced, which is here whole and later than the installed one: only the state schema and the keys refuse a version.
+    const forward = rollBack("1.6.0");
+    expect(forward.status, forward.stderr).toBe(0);
+    expect(forward.stdout).not.toContain("downloading");
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    expect(versions()).toEqual(["1.5.9", "1.6.0"]);
+  });
+
+  it("rolls back to a version whose folder a later update removed, taking the release from its base again", () => {
+    publish("1.7.0", undefined, { stateSchema: 2 });
+    expect(install().status).toBe(0);
+    expect(versions()).toEqual(["1.6.0", "1.7.0"]);
+    // The update after it keeps 1.7.0 as the version before, and 1.6.0's folder goes.
+    publish("1.8.0", undefined, { stateSchema: 2 });
+    expect(install().status).toBe(0);
+    expect(versions()).toEqual(["1.7.0", "1.8.0"]);
+    const back = rollBack("1.6.0");
+    expect(back.status, back.stderr).toBe(0);
+    expect(back.stdout).toContain("Surogate Desktop: downloading Surogate Desktop 1.6.0\n");
+    expect(back.stdout).toContain("Surogate Desktop: 1.6.0 is installed\n");
+    expect(current()).toBe("/opt/surogate/versions/1.6.0");
+    expect(versions()).toEqual(["1.6.0", "1.8.0"]);
+    // Whole again: its mark, its program and its bwrap copy. The helper pkexec runs is still 1.8.0's.
+    expect(root(`curl -fsS ${base}/desktop/releases/1.6.0/manifest.json | cmp - /opt/surogate/current/release.json && test -x /opt/surogate/current/surogate `
+      + "&& cmp /usr/bin/bwrap /opt/surogate/current/bin/bwrap && cmp /opt/surogate/bin/release.json /opt/surogate/versions/1.8.0/release.json").status).toBe(0);
+  });
+
+  it("trusts the release keys of the newest release it has installed, whichever script asks and whatever is installed now: a key that release dropped signs nothing it takes again", () => {
+    const [both, fresh] = [[PUBLIC, pem(next.publicKey)], [pem(next.publicKey)]];
+    const schema = { stateSchema: 2 };
+    const helper = () => root("sha256sum </opt/surogate/bin/surogate-apply-update; cat /opt/surogate/bin/release.json").stdout;
+    // A rotation, release by release. The old key signs a release whose helper lists the old and the new.
+    publish("3.0.0", keys.privateKey, schema, both);
+    expect(install().status).toBe(0);
+    // The new key signs the next. The base's install script lists the old key alone: the computer's
+    // helper lists the new one too, and its list is the one that counts.
+    publish("3.1.0", next.privateKey, schema, both);
+    expect(install().status).toBe(0);
+    // The release after it drops the old key.
+    publish("3.2.0", next.privateKey, schema, fresh);
+    expect(install().status).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/3.2.0");
+    const newest = helper();
+    expect(root("cmp /opt/surogate/bin/surogate-apply-update /opt/surogate/versions/3.2.0/bin/surogate-apply-update && cmp /opt/surogate/bin/release.json /opt/surogate/versions/3.2.0/release.json").status).toBe(0);
+
+    // What the old key signs from now on is no release to this computer: handed to the helper as the
+    // app's update is, taken from the base by an install script that lists that key, as an old one
+    // does, or asked for by its version.
+    publish("3.9.0", keys.privateKey, schema, [PUBLIC]);
+    // Each is told what is so for it, and not what mends a computer that missed a change of key:
+    // this one has the new key, and the versions that are still here list the one that signed.
+    const retired = (when: string) => {
+      latest("3.9.0");
+      expect(handed("3.9.0"), when).toMatchObject({ status: 1, stderr: `Surogate Desktop: the release's manifest${RETIRED}\n` });
+      expect(install(), when).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json${RETIRED}\n` });
+      for (const version of ["3.9.0", "3.0.0"]) {
+        expect(rollBack(version), `${when}: ${version}`)
+          .toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/${version}/manifest.json${RETIRED}\n` });
+      }
+      expect(helper(), when).toBe(newest);
+    };
+    retired("on the release that dropped it");
+
+    // A rollback to the release before, whose own helper still lists the old key: the helper pkexec
+    // runs, and its list, stay the newest release's.
+    const back = rollBack("3.1.0");
+    expect(back.status, back.stderr).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/3.1.0");
+    // How many keys each lists: the version's own helper two, and the one pkexec runs the new key alone.
+    expect(root(`grep -c "^ *'-----BEGIN PUBLIC KEY-----$" /opt/surogate/current/bin/surogate-apply-update /opt/surogate/bin/surogate-apply-update`).stdout)
+      .toBe("/opt/surogate/current/bin/surogate-apply-update:2\n/opt/surogate/bin/surogate-apply-update:1\n");
+    retired("after a rollback");
+
+    // A repair of the version rolled back to, by the helper and by the install script.
+    expect(handed("3.1.0")).toMatchObject({ status: 0, stdout: "Surogate Desktop: 3.1.0 is installed\n" });
+    latest("3.1.0");
+    const repaired = install();
+    expect(repaired.status, repaired.stderr).toBe(0);
+    expect(repaired.stdout).toContain("Surogate Desktop: 3.1.0 is installed\n");
+    expect(helper()).toBe(newest);
+
+    // An update from there to a release that is still below the newest, and lists both keys: its
+    // update removes the newest release's folder, and the helper stays that release's.
+    publish("3.1.5", next.privateKey, schema, both);
+    expect(install().status).toBe(0);
+    expect(versions()).toEqual(["3.1.0", "3.1.5"]);
+    retired("after a rollback and an update below the newest");
+
+    // A release newer than the newest brings its own helper, and its mark.
+    publish("3.3.0", next.privateKey, schema, fresh);
+    expect(install().status).toBe(0);
+    expect(root("cmp /opt/surogate/bin/surogate-apply-update /opt/surogate/versions/3.3.0/bin/surogate-apply-update && cmp /opt/surogate/bin/release.json /opt/surogate/versions/3.3.0/release.json").status).toBe(0);
+  });
+
+  it("runs none of its caller's tools as root where sudo keeps its caller's PATH: the shell that reads its root part is named by its whole path, and each root part's tools are the system's own", () => {
+    expect(current()).toBe("/opt/surogate/versions/3.3.0");
+    // A folder with a tool under every name of the system's four folders, first on the user's
+    // PATH: each writes down that it ran where it runs as root, and then runs the system's own by
+    // its whole path. As the user, whose tools they are, each only runs the system's.
+    const standIns = [
+      "mkdir -p /tmp/sudoer",
+      'for tool in /usr/sbin/* /usr/bin/* /sbin/* /bin/*; do',
+      '  [ -f "$tool" ] && [ -x "$tool" ] || continue',
+      '  [ -e "/tmp/sudoer/$(basename "$tool")" ] || printf \'#!/bin/sh\\n[ "$(/usr/bin/id -u)" != 0 ] || echo %s >>/tmp/sudoer/ran\\nexec %s "$@"\\n\' "$(basename "$tool")" "$tool" >"/tmp/sudoer/$(basename "$tool")"',
+      "done",
+      "chmod 755 /tmp/sudoer/*",
+      "ls /tmp/sudoer | wc -l",
+    ].join("\n");
+    expect(Number(root(standIns).stdout)).toBeGreaterThan(300);
+    // A sudo with no secure_path: what it runs has its caller's PATH, and it looks there for what it is told to run.
+    expect(root("echo 'Defaults !secure_path' >/etc/sudoers.d/callers-path && chmod 440 /etc/sudoers.d/callers-path").status).toBe(0);
+    try {
+      expect(as("tester", "PATH=/tmp/sudoer:$PATH /usr/bin/sudo /usr/bin/printenv PATH").stdout).toMatch(/^\/tmp\/sudoer:/);
+      const asked = (args: string) => as("tester", `PATH=/tmp/sudoer:$PATH; /usr/bin/curl -fsSL ${base}/desktop/install.sh | /bin/bash -s -- ${args}`);
+      // The install, a rollback and the removal: each has its root part read by a shell, through sudo.
+      for (const [args, said] of [[`--base ${base}`, "3.3.0 is installed"], ["--version 3.3.0", "3.3.0 is installed"], ["--uninstall", "removed from this computer"]] as const) {
+        const ran = asked(args);
+        expect(ran.status, `${args}: ${ran.stderr}`).toBe(0);
+        expect(ran.stdout, args).toContain(`Surogate Desktop: ${said}\n`);
+        expect(root("cat /tmp/sudoer/ran 2>/dev/null").stdout, args).toBe("");
+      }
+    } finally {
+      root("rm -f /etc/sudoers.d/callers-path");
+    }
+    expect(root("test ! -e /opt/surogate && test ! -e /etc/surogate").status).toBe(0);
+    // Installed again, at a first install: by the list of the base's own script.
+    publish("3.4.0", undefined, { stateSchema: 2 });
+    expect(install().status).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/3.4.0");
+  });
+
+  it("says what mends it where the base's release is signed by a key that an update stopped before its end brings: to run --version of that update first", () => {
+    starting(["3.4.0", { stateSchema: 2 }]);
+    expect(current()).toBe("/opt/surogate/versions/3.4.0");
+    const helper = "/opt/surogate/bin/surogate-apply-update";
+    const schema = { stateSchema: 2 };
+    const added = [PUBLIC, pem(next.publicKey)];
+    // An update that adds a key: the key the computer trusts signs it, and its helper lists that
+    // key and the new one. It is stopped between its mark's rename and its helper's.
+    publish("3.5.0", keys.privateKey, schema, added);
+    const killed = String.raw`s|^    mv -T "\$work/helper" "\$HELPER"$|    kill -KILL $$|`;
+    expect(root(`sed '${killed}' /opt/surogate-test/install.sh >/opt/surogate-test/stopped.sh && chmod 755 /opt/surogate-test/stopped.sh && ! cmp -s /opt/surogate-test/install.sh /opt/surogate-test/stopped.sh`).status).toBe(0);
+    expect(root(`cd /home/tester && curl -fsSLO ${base}/desktop/releases/3.5.0/manifest.json -O ${base}/desktop/releases/3.5.0/manifest.json.sig `
+      + `-o release.tar.gz ${base}/desktop/releases/3.5.0/surogate-desktop-3.5.0-linux-x64.tar.gz && /opt/surogate-test/stopped.sh --apply manifest.json manifest.json.sig release.tar.gz`).status).toBe(137);
+    expect(root(`cmp /opt/surogate/bin/release.json /opt/surogate/versions/3.5.0/release.json && ! cmp -s ${helper} /opt/surogate/versions/3.5.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout)
+      .toBe("/opt/surogate/versions/3.4.0\n");
+    // The base's newest then, which the added key alone signs. Before any lock, the keys asked are
+    // still the helper's that is there, and the release is none to them: what is said names the
+    // update to end first, to an install and to a rollback, and each leaves all as it was.
+    publish("3.6.0", next.privateKey, schema, added);
+    const stopped = standing();
+    const first = (file: string) => `Surogate Desktop: ${base}/desktop/${file} is signed by a release key that the update to 3.5.0 brings, and that update was stopped before its end: `
+      + "run Surogate Desktop's install script with --version 3.5.0 first\n";
+    const plain = (file: string) => `Surogate Desktop: ${base}/desktop/${file}${MISSED}\n`;
+    // A rollback is told no way on: which release an administrator asked for is theirs to know.
+    const back = (file: string) => `Surogate Desktop: ${base}/desktop/${file}${UNSIGNED}\n`;
+    const refused = (ran: { status: number | null; stderr: string }, said: string) => {
+      expect(ran.status, ran.stderr).toBe(1);
+      expect(ran.stderr.endsWith(said), ran.stderr).toBe(true);
+      expect(standing()).toBe(stopped);
+    };
+    refused(install(), first("latest.json"));
+    refused(rollBack("3.6.0"), first("releases/3.6.0/manifest.json"));
+    // One that no key of either list signed is not signed, and no update's end would make it so.
+    publish("3.7.0", other.privateKey, schema, added);
+    refused(install(), plain("latest.json"));
+    refused(rollBack("3.7.0"), back("releases/3.7.0/manifest.json"));
+    latest("3.6.0");
+    // Nor is the stopped update itself asked for first, where the base now serves it under the
+    // added key's signature: that would send a person round in a circle.
+    const signature = join(www(), "desktop", "releases", "3.5.0", "manifest.json.sig");
+    const signedByOld = readFileSync(signature);
+    writeFileSync(signature, sign(null, readFileSync(join(www(), "desktop", "releases", "3.5.0", "manifest.json")), next.privateKey));
+    refused(rollBack("3.5.0"), back("releases/3.5.0/manifest.json"));
+    writeFileSync(signature, signedByOld);
+    // As it says: the update is ended by its --version, and the base's newest is then installed.
+    const ended = rollBack("3.5.0");
+    expect(ended.status, ended.stderr).toBe(0);
+    expect(ended.stdout).toContain("Surogate Desktop: 3.5.0 is installed\n");
+    expect(root(`cmp ${helper} /opt/surogate/versions/3.5.0/bin/surogate-apply-update && readlink /opt/surogate/current`).stdout).toBe("/opt/surogate/versions/3.5.0\n");
+    const newest = install();
+    expect(newest.status, newest.stderr).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/3.6.0");
+  });
+  it("tells a computer that missed the release which brought a new key the one way on that its own keys check, that release by --version, and never to remove Surogate Desktop", () => {
+    // From nothing, whatever the tests before it left.
+    expect(uninstall().status).toBe(0);
+    const schema = { stateSchema: 2 };
+    const [old, both, fresh] = [[PUBLIC], [PUBLIC, pem(other.publicKey)], [pem(other.publicKey)]];
+    publish("5.0.0", keys.privateKey, schema, old);
+    expect(install().status).toBe(0);
+    expect(current()).toBe("/opt/surogate/versions/5.0.0");
+    // A rotation, which this computer sleeps through: the release that lists the new key beside
+    // the old, and then the first that the new key alone signs. The newest script lists the new.
+    publish("5.1.0", keys.privateKey, schema, both);
+    publish("5.2.0", other.privateKey, schema, fresh);
+    const script = readFileSync(join(www(), "desktop", "install.sh"), "utf8");
+    writeFileSync(join(www(), "desktop", "install.sh"), withKeys(script, fresh));
+    try {
+      const before = standing();
+      expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json${MISSED}\n` });
+      // A rollback to it is told plainly that it is not signed, and no more.
+      expect(rollBack("5.2.0")).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/releases/5.2.0/manifest.json${UNSIGNED}\n` });
+      // No word of any of them names a removal: that would throw this computer's keys away, and
+      // what its keys did not sign may be a forgery as well as a release after a change of key.
+      for (const words of [MISSED, UNSIGNED, RETIRED]) expect(words).not.toMatch(/uninstall|remove|install it again/);
+      expect(standing()).toBe(before);
+      // The way on: the release that brought the key, which the computer's own key signed.
+      const brought = rollBack("5.1.0");
+      expect(brought.status, brought.stderr).toBe(0);
+      expect(install().status).toBe(0);
+      expect(current()).toBe("/opt/surogate/versions/5.2.0");
+      // A computer with nothing installed is told nothing of a key that changed: no key of the
+      // script's own signed what the old key signs.
+      expect(uninstall().status).toBe(0);
+      latest("5.1.0");
+      expect(install()).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key\n` });
+      latest("5.2.0");
+      expect(install().status).toBe(0);
+      expect(current()).toBe("/opt/surogate/versions/5.2.0");
+    } finally {
+      writeFileSync(join(www(), "desktop", "install.sh"), script);
+    }
   });
 });
 

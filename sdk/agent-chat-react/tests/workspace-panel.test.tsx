@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WorkspacePanel } from "../src/components/workspace/workspace-panel";
 import { forgetChatFiles } from "../src/components/workspace/chat-files";
+import { forgetChatFiles as forgetOnSignOut } from "../src";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import type { AgentChatAdapter } from "../src/types";
 
@@ -321,10 +322,15 @@ describe("WorkspacePanel", () => {
     expect(notice()).toBe("Local access revoked");
   });
 
-  it("says nothing of a chat's tree wait over the tree of the chat it moves to, on its way", async () => {
+  it("says nothing of a chat's tree wait over the tree of the chat it moves to, on its way, or over its own on the way back", async () => {
+    let told = false;
     const adapter = {
+      // Chat one's first read waits for its computer; its read on the way back is still on its way, and waits for nothing.
       getWorkspaceTree: vi.fn(({ sessionId, onWaiting }: { sessionId: string; onWaiting?: (said: string) => void }) => {
-        if (sessionId === "s-1") onWaiting?.("Waiting for chat one's ThinkPad");
+        if (sessionId === "s-1" && !told) {
+          told = true;
+          onWaiting?.("Waiting for chat one's ThinkPad");
+        }
         return new Promise(() => {});
       }),
       uploadWorkspaceFile: vi.fn(),
@@ -347,10 +353,15 @@ describe("WorkspacePanel", () => {
       root?.render(panel("s-2"));
     });
     expect(waiting()).toBeNull();
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(waiting()).toBeNull();
   });
 
-  it("asks a delete only over its own chat, and its end leaves the chat it moved to alone", async () => {
+  it("asks a delete only over its own chat, and its wait and its end leave the chat it moved to alone", async () => {
     let deleted: () => void = () => {};
+    let deleteWaiting: ((said: string) => void) | undefined;
     const adapter = {
       getWorkspaceTree: vi.fn().mockResolvedValue({
         root: "r",
@@ -358,9 +369,12 @@ describe("WorkspacePanel", () => {
         truncated: false,
       }),
       uploadWorkspaceFile: vi.fn(),
-      deleteWorkspaceFile: vi.fn(() => new Promise<void>((resolve) => {
-        deleted = resolve;
-      })),
+      deleteWorkspaceFile: vi.fn(({ onWaiting }: { onWaiting?: (said: string) => void }) => {
+        deleteWaiting ??= onWaiting;
+        return new Promise<void>((resolve) => {
+          deleted = resolve;
+        });
+      }),
       getWorkspaceDownloadUrl: vi.fn(() => "#"),
     } as unknown as AgentChatAdapter;
     const selected = vi.fn();
@@ -398,11 +412,154 @@ describe("WorkspacePanel", () => {
     await act(async () => {
       button("Cancel")?.click();
     });
+    // Chat one's delete waits for its computer, said over chat one alone.
+    act(() => deleteWaiting?.("Waiting for you to allow this on chat one's ThinkPad"));
+    expect(container.querySelector('[data-testid="workspace-notice"]')).toBeNull();
     await act(async () => {
       deleted();
     });
     expect(selected).not.toHaveBeenCalledWith(null);
     expect(container.querySelector('[data-testid="workspace-notice"]')).toBeNull();
+    // Ended, chat one's dialog is gone with it, and holds nothing on the way back.
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(dialog()).toBeNull();
+  });
+
+  it("drops a delete the user left unanswered as it leaves the chat, and keeps one under way to its end", async () => {
+    let deleted: () => void = () => {};
+    const adapter = {
+      getWorkspaceTree: vi.fn().mockResolvedValue({
+        root: "r",
+        entries: [{ name: "notes.txt", path: "notes.txt", kind: "file" }],
+        truncated: false,
+      }),
+      uploadWorkspaceFile: vi.fn(),
+      deleteWorkspaceFile: vi.fn(() => new Promise<void>((resolve) => {
+        deleted = resolve;
+      })),
+      getWorkspaceDownloadUrl: vi.fn(() => "#"),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const panel = (sessionId: string) => (
+      <TooltipProvider>
+        <WorkspacePanel adapter={adapter} sessionId={sessionId} selectedPath={null} onSelectedPathChange={() => {}} />
+      </TooltipProvider>
+    );
+    const dialog = () => document.body.querySelector('[role="dialog"]');
+    const button = (name: string) =>
+      [...(dialog()?.querySelectorAll("button") ?? [])].find((each) => each.textContent?.trim() === name);
+    const ask = () => act(async () => {
+      container!.querySelector<HTMLButtonElement>('button[aria-label="Delete notes.txt"]')?.click();
+    });
+    // The panel shows *sessionId* again, made anew, as AgentChat unfolds Files on a chat.
+    const remount = async (sessionId: string) => {
+      act(() => root?.unmount());
+      root = createRoot(container!);
+      await act(async () => {
+        root?.render(panel(sessionId));
+      });
+    };
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    // Asked, and left open as the panel shows another chat, and this one again.
+    await ask();
+    expect(dialog()).not.toBeNull();
+    await act(async () => {
+      root?.render(panel("s-2"));
+    });
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(dialog()).toBeNull();
+    // Asked, and left open as the panel folds away with its chat, unfolds on another, and on this one again.
+    await ask();
+    expect(dialog()).not.toBeNull();
+    await remount("s-2");
+    await remount("s-1");
+    expect(dialog()).toBeNull();
+    // Under way, it is shown again, locked, until it ends.
+    await ask();
+    await act(async () => {
+      button("Delete")?.click();
+    });
+    await remount("s-2");
+    await remount("s-1");
+    expect(button("Delete")?.disabled).toBe(true);
+    await act(async () => {
+      deleted();
+    });
+    expect(dialog()).toBeNull();
+  });
+
+  it("keeps no chat's tree once it leaves that chat: on the way back, only the tree it reads again", async () => {
+    let reads = 0;
+    const adapter = {
+      // Chat one's first read finds its notes; its read on the way back is still on its way.
+      getWorkspaceTree: vi.fn(({ sessionId }: { sessionId: string }) => {
+        if (sessionId === "s-1" && reads++ === 0) {
+          return Promise.resolve({ root: "r", entries: [{ name: "notes.txt", path: "notes.txt", kind: "file" }], truncated: true });
+        }
+        return new Promise(() => {});
+      }),
+      uploadWorkspaceFile: vi.fn(),
+      deleteWorkspaceFile: vi.fn(),
+      getWorkspaceDownloadUrl: vi.fn(() => "#"),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const panel = (sessionId: string) => (
+      <TooltipProvider>
+        <WorkspacePanel adapter={adapter} sessionId={sessionId} selectedPath={null} onSelectedPathChange={() => {}} />
+      </TooltipProvider>
+    );
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(container.textContent).toContain("notes.txt");
+    await act(async () => {
+      root?.render(panel("s-2"));
+    });
+    await act(async () => {
+      root?.render(panel("s-1"));
+    });
+    expect(container.textContent).not.toContain("notes.txt");
+    expect(container.textContent).not.toContain("Some files are not shown.");
+  });
+
+  it("forgets what it said of every chat as the account signs out, the chat it shows included", async () => {
+    const adapter = {
+      getWorkspaceTree: vi.fn().mockResolvedValue({ root: "r", entries: [], truncated: false }),
+      uploadWorkspaceFile: vi.fn(({ onWaiting }: { onWaiting?: (said: string) => void }) => {
+        onWaiting?.("Waiting for you to allow this on Flavius's ThinkPad");
+        return new Promise(() => {});
+      }),
+      deleteWorkspaceFile: vi.fn(),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <TooltipProvider>
+          <WorkspacePanel adapter={adapter} sessionId="s-1" selectedPath={null} onSelectedPathChange={() => {}} />
+        </TooltipProvider>,
+      );
+    });
+    const input = container.querySelector("input[type=file]") as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File(["draft"], "notes.txt")] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="workspace-notice"]')).not.toBeNull();
+    act(() => forgetOnSignOut());
+    expect(container.querySelector('[data-testid="workspace-notice"]')).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Upload files"]')?.disabled).toBe(false);
   });
 
   it("says what a change waits for on the computer while it is sent again", async () => {

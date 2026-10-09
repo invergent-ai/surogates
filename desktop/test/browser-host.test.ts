@@ -20,11 +20,11 @@ import type { BrowserContext, Download, FileChooser, Frame, JSHandle, Page } fro
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ADDRESS_MS } from "../src/binding/approvals.js";
-import { CANCELLED, PAUSED } from "../src/browser/client.js";
+import { CANCELLED, type Launch, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
+  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";

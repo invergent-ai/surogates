@@ -3,7 +3,8 @@
 // the main process and is set with textContent, or with showText where it may hold the
 // user's paths or QEMU's words.
 
-import { asShown, byId, fillIcons, markTheme, showText } from "./ui.js";
+import { asShown } from "../text.js";
+import { byId, fillIcons, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";

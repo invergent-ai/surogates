@@ -18,6 +18,7 @@ export {
   useAgentChatRuntime,
   useChatViewMode,
 } from "./runtime/use-agent-chat-runtime";
+export { forgetChatFiles } from "./components/workspace/chat-files";
 export { FetchSseEventStream } from "./runtime/fetch-sse-stream";
 export type { FetchSseEventStreamOptions } from "./runtime/fetch-sse-stream";
 export {

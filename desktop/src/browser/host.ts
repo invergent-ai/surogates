@@ -15,16 +15,10 @@ import { type BrowserContext, type CDPSession, chromium, type Dialog, type Downl
 import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
-import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
+import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
-
-// What to launch: the browser the user chose, and the identity's profile for it.
-export interface Launch {
-  executable: string;
-  profile: string;
-}
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
 const PLAYWRIGHT_FEATURES =

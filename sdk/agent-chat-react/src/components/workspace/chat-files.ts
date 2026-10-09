@@ -6,6 +6,7 @@ import { useSyncExternalStore } from "react";
 import type { AgentChatWorkspaceEntry } from "../../types";
 
 export interface ChatFiles {
+  // The tree, kept only while the panel shows the chat: it is read again on the way back.
   entries?: AgentChatWorkspaceEntry[];
   // The tree stopped short of the whole folder: at its caps, or a computer out of handles.
   truncated?: boolean;
@@ -22,19 +23,36 @@ export interface ChatFiles {
 }
 
 const NONE: ChatFiles = {};
-// ponytail: kept for the page's life, one small entry per chat whose files were shown; forget an
-// account's on sign-out if that ever grows.
+// ponytail: one entry per chat whose files were shown, until the account signs out: a few flags and
+// a line each, with no tree once the panel leaves it. Bound the map if a page ever shows thousands.
 const chats = new Map<string, ChatFiles>();
 const listeners = new Set<() => void>();
 
-export function changeChatFiles(chat: string, changes: ChatFiles): void {
-  chats.set(chat, { ...chats.get(chat), ...changes });
+function changed(): void {
   for (const listener of listeners) listener();
 }
 
-/** Every chat's entry gone: a test starts from none. */
+export function changeChatFiles(chat: string, changes: ChatFiles): void {
+  chats.set(chat, { ...chats.get(chat), ...changes });
+  changed();
+}
+
+/**
+ * The panel leaves *chat*, folded away or moved on: its tree goes, and so does a delete it asked and
+ * the user left unanswered; one under way keeps its dialog to its end.
+ */
+export function leaveChatFiles(chat: string): void {
+  const was = chats.get(chat);
+  if (!was) return;
+  const { entries: _tree, truncated: _cut, ...kept } = was;
+  chats.set(chat, was.deleting ? kept : { ...kept, deleteTarget: null });
+  changed();
+}
+
+/** Every chat's entry gone, as the account signs out, and as a test starts. */
 export function forgetChatFiles(): void {
   chats.clear();
+  changed();
 }
 
 function subscribe(listener: () => void): () => void {
