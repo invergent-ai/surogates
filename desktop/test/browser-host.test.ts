@@ -23,7 +23,7 @@ import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PROXY_BYPASSED, WEAKENING,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PROXY_BYPASSED, SETTLE_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -3163,6 +3163,26 @@ await navigator.serviceWorker.ready;`);
     }, { timeout: 10_000 }).toBe(true);
     expect(await upload()).toMatchObject({ ok: { files: 1 } });
     expect(await framed.evaluate(filed)).toEqual([["report.pdf"]]);
+  }, 60_000);
+
+  it("waits no longer than ten seconds for a page to answer after a hand back: a frame of another site that is stuck keeps the agent out of the page no longer, and what the page asks for then is kept", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://other.test/fileframe" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const framed = page.frames().find((frame) => frame.url() === "http://fixture.test/fileinput")!;
+    // The framed site, drawn by a process of its own, is stuck for a long while; the page that frames it is not.
+    await framed.evaluate("void setTimeout(() => { const until = Date.now() + 25000; while (Date.now() < until) {} }, 0)");
+    await new Promise((done) => setTimeout(done, 100));
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    const started = performance.now();
+    // The agent's click on the page's own file input waits for the page to answer, and no longer than the ten seconds.
+    await asksFor(a, () => op(a, "browser.mouse", { action: "click", x: 60, y: 240, button: "left", clicks: 1 }, "chat-1"));
+    const waited = performance.now() - started;
+    expect(waited).toBeGreaterThan(SETTLE_MS - 1_000);
+    expect(waited).toBeLessThan(SETTLE_MS + 5_000);
+    expect(await op(a, "browser.set_input_files", { files: [REPORT] }, "chat-1")).toMatchObject({ ok: { files: 1 } });
+    expect(await page.evaluate(() => [...(document.getElementById("top") as HTMLInputElement).files!].map((file) => file.name))).toEqual(["report.pdf"]);
   }, 60_000);
 
   it("counts a page's quiet from the end of this host's own reading of it too: handed back and taken over again at once, a busy page that the reading gives leave to ask opens no chooser of the browser's own", async () => {

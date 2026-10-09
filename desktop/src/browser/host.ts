@@ -76,6 +76,10 @@ export const OWN_CHOOSER_MS = 5_000;
 // prompt waits for this host's answer (the approvals' ADDRESS_MS), which then gives the upload up. Its
 // session's line is held no longer for it.
 export const LOOK_MS = 800;
+// How long a page may take to answer once the browser is handed back (settle), before the agent acts in it
+// all the same and what it asks for is kept again: a frame of it that is stuck would else keep the agent
+// out of the page for good.
+export const SETTLE_MS = 10_000;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
@@ -888,10 +892,16 @@ export class BrowserHost {
   // heard of only after the hand back. That reading was sent before these, so it is heard of before they
   // answer; until they have, what the page asks for is kept for no one (asks) and nothing of the agent's
   // acts in it (act). Twice: what the page still had to do when the first was sent, as a click that waited
-  // on it, is heard of before the second answers.
+  // on it, is heard of before the second answers. And for SETTLE_MS at most: a page one of whose frames is
+  // stuck is the agent's again then, and what it asked for before, if it says so only after, is kept.
   private settle(page: Page): void {
     const read = () => Promise.allSettled(page.frames().map((frame) => frame.evaluate("1")));
-    const settled: Promise<void> = this.doing(page, read().then(read)).then(() => {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SETTLE_MS);
+    });
+    const settled: Promise<void> = this.doing(page, Promise.race([read().then(read), late])).then(() => {
+      clearTimeout(timer);
       if (this.settling.get(page) === settled) this.settling.delete(page);
     });
     this.settling.set(page, settled);
