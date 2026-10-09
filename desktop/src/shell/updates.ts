@@ -2,9 +2,11 @@
 // the signed latest.json of the base the install script recorded, checked here against the
 // release keys this computer trusts, the ones the helper pkexec runs lists; a newer release for
 // this computer and the recorded channel downloaded as the user into their cache, resumed; then
-// Update available. The root helper checks all of it again before it applies anything.
+// Update available. Installing it runs the root helper on the downloaded files, under polkit in
+// an installed app; the helper checks all of them again before it applies anything.
 // Electron-free.
 
+import { spawn } from "node:child_process";
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 import {
   closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
@@ -53,8 +55,29 @@ export interface Staged {
 export type UpdateState =
   | { state: "none" }
   | { state: "available"; version: string; files: Staged }
+  // The root helper runs, after the administrator's approval it waits for.
+  | { state: "installing"; version: string }
+  // Polkit refused it: the user is no administrator, or none approved.
+  | { state: "refused"; version: string; files: Staged }
+  | { state: "failed"; version: string; files: Staged; why: string }
   // Installed for every user of this computer: the app runs it once it restarts.
   | { state: "installed"; version: string };
+
+// What the root helper's run came to: its exit code, null when it did not run or a signal ended
+// it; and the last of what it said, with how it ended where no exit code says.
+export interface Applied {
+  code: number | null;
+  said: string;
+}
+
+// pkexec's own exit codes: authorization was refused or dismissed (126), or could not be obtained (127).
+const NOT_AUTHORIZED = [126, 127];
+// How an installed app runs the root helper: pkexec, by its whole path, on the helper at the path
+// with no link in it that the install script's polkit action names. Never with pkexec's own agent:
+// started from a terminal in a session with no polkit agent, pkexec would ask for a password on
+// that terminal and wait there, with the app's line at "Installing". Without it, pkexec ends at
+// once with 127, and the line says an administrator is needed.
+export const AS_ROOT = ["/usr/bin/pkexec", "--disable-internal-agent", ROOT_HELPER];
 
 // The update's line in the sidebar: what the user is told, and the button they act on it with.
 export interface UpdateLine {
@@ -64,9 +87,41 @@ export interface UpdateLine {
 
 /** The sidebar's line for *state*, or null for none. */
 export function updateLine(state: UpdateState | null): UpdateLine | null {
-  if (state?.state === "available") return { text: `Update available: Surogate ${state.version}`, button: null };
-  if (state?.state === "installed") return { text: `Surogate ${state.version} is installed`, button: null };
-  return null;
+  switch (state?.state) {
+    case "available":
+      return { text: `Update available: Surogate ${state.version}`, button: "Restart to update" };
+    case "installing":
+      return { text: `Installing Surogate ${state.version}…`, button: null };
+    case "refused":
+      return { text: "An administrator needs to install this update.", button: "Try again" };
+    case "failed":
+      return { text: `Surogate could not install its update: ${state.why}`, button: "Try again" };
+    case "installed":
+      return { text: `Surogate ${state.version} is installed.`, button: "Restart" };
+    default:
+      return null;
+  }
+}
+
+/**
+ * What runs the root helper on a downloaded release: *command*, then --apply and the files'
+ * paths, with no more of the app's environment than a PATH. In an installed app, pkexec and
+ * the helper's path; polkit asks an administrator, and the helper checks the files again as root.
+ */
+export function helperRun(command: string[]): (files: Staged) => Promise<Applied> {
+  return (files) => new Promise((resolve) => {
+    const [program, ...args] = command;
+    const child = spawn(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
+      stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" },
+    });
+    let said = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      said = (said + chunk.toString()).slice(-4000);
+    });
+    child.once("error", (error) => resolve({ code: null, said: error.message }));
+    // One a signal ended has no exit code: how it ended is the last of what is said of it.
+    child.once("close", (code, signal) => resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() }));
+  });
 }
 
 /** Whether version *a* comes after *b*, each x.y.z, compared part by part as numbers. */
@@ -203,11 +258,15 @@ export interface UpdatesOptions {
   cache: string; // <cache>/surogate/updates
   fetch: Fetch;
   signal: AbortSignal; // the quit: a check or a download under way stops with the app
+  apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's
 }
 
-/** An installed app's updates: what the install script left it, and where the user's downloads go. */
+/**
+ * An installed app's updates: what the install script left it, where the user's downloads go, and
+ * the root helper run under polkit.
+ */
 export function installedUpdates(version: string, cache: string, fetch: Fetch, signal: AbortSignal): UpdatesOptions {
-  return { version, record: ROOT_RECORD, rootOwned: true, helper: ROOT_HELPER, installed: INSTALLED, cache, fetch, signal };
+  return { version, record: ROOT_RECORD, rootOwned: true, helper: ROOT_HELPER, installed: INSTALLED, cache, fetch, signal, apply: helperRun(AS_ROOT) };
 }
 
 /** The app's updates: one check at a time, each change told. */
@@ -225,10 +284,29 @@ export class Updates {
     return this.checking;
   }
 
+  /**
+   * Installs the release downloaded: the root helper applies it for every user of this computer.
+   * Refused by polkit, or failed, it can be asked again; the files stay.
+   */
+  async install(): Promise<void> {
+    const shown = this.state;
+    if (shown.state !== "available" && shown.state !== "refused" && shown.state !== "failed") return;
+    const { version, files } = shown;
+    this.set({ state: "installing", version });
+    const { code, said } = await this.options.apply(files);
+    if (code === 0) return this.set({ state: "installed", version });
+    if (code !== null && NOT_AUTHORIZED.includes(code)) return this.set({ state: "refused", version, files });
+    // The helper's last line, without its name: the why of the first failure it met.
+    const why = said.split("\n").at(-1)?.replace(/^Surogate Desktop: /, "") || `its helper exited ${code}`;
+    this.set({ state: "failed", version, files, why });
+  }
+
   private async look(): Promise<void> {
     // Installed for every user already, as another user's update leaves it: a restart runs it.
     const installed = this.installedVersion();
     if (installed && newer(installed, this.options.version)) return this.set({ state: "installed", version: installed });
+    // An install under way, or done, is not undone by a later check.
+    if (this.settled()) return;
     const { record, rootOwned, helper } = this.options;
     const base = installBase(record, rootOwned);
     const keys = releaseKeys(helper, rootOwned);
@@ -237,6 +315,9 @@ export class Updates {
     const manifest = await this.small(latest, MANIFEST_MAX);
     const signature = await this.small(`${latest}.sig`, SIGNATURE_MAX);
     const release = signedRelease(latest, manifest, signature, keys, channel);
+    // Nor by one that was asking its base when the install began: the root helper reads the cache
+    // while it runs, and nothing in it is changed or removed under it.
+    if (this.settled()) return;
     if (!newer(release.version, this.options.version)) {
       // Nothing newer, as once updated to it: what was downloaded for an earlier offer goes.
       const earlier = updatesFolder(this.options.cache, false);
@@ -278,9 +359,17 @@ export class Updates {
     // What replaces it takes its name by one rename, once it is all here and is the manifest's: a
     // rename replaces a link, and follows none.
     if (!here) renameSync(`${files.tarball}.partial`, files.tarball);
+    // An install that began while this one downloaded keeps its line and the files it was handed:
+    // what was downloaded stays in its own folder, for the check after the restart.
+    if (this.settled()) return;
     // One release's download is kept: an older offer's goes once this one is here.
     for (const name of readdirSync(cache)) if (name !== release.version) rmSync(join(cache, name), { recursive: true, force: true });
     this.set({ state: "available", version: release.version, files });
+  }
+
+  // Whether an install runs, or is done: from then on a check changes neither the line nor the cache.
+  private settled(): boolean {
+    return this.state.state === "installing" || this.state.state === "installed";
   }
 
   // The version installed for every user now, as its root helper recorded it; null when none can be read.

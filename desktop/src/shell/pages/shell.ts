@@ -82,6 +82,7 @@ interface Shell {
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
   sandbox(action: "retry" | "log" | "check"): Promise<void>;
+  update(): Promise<void>;
   onChanged(listener: () => void): () => void;
   focusPane(): Promise<void>;
   onPaneLeft(listener: (to: string) => void): () => void;
@@ -382,6 +383,7 @@ byId("quit-now").addEventListener("click", () => void shell.quitNow());
 byId("sandbox-log").addEventListener("click", () => void shell.sandbox("log"));
 byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"));
 byId("sandbox-check").addEventListener("click", () => void shell.sandbox("check"));
+byId("update-button").addEventListener("click", () => void shell.update());
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);

@@ -3,7 +3,7 @@
 // downloaded into the user's cache, resumed. A local HTTP server serves the base.
 
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -13,7 +13,7 @@ import { gzipSync } from "node:zlib";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { installedUpdates, newer, releaseKeys, Updates, type UpdatesOptions } from "../src/shell/updates.js";
+import { type Applied, AS_ROOT, helperRun, installedUpdates, newer, releaseKeys, updateLine, Updates, type UpdatesOptions } from "../src/shell/updates.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const keys = generateKeyPairSync("ed25519");
@@ -79,7 +79,7 @@ afterEach(async () => {
 const cache = () => join(dir, "cache", "surogate", "updates");
 const updates = (options: Partial<UpdatesOptions> = {}, changed = () => {}) => new Updates({
   version: "1.2.3", record: join(dir, "install.json"), rootOwned: false, helper: join(dir, "surogate-apply-update"), installed: null,
-  cache: cache(), fetch: (url, init) => fetch(url, init), signal: new AbortController().signal, ...options,
+  cache: cache(), fetch: (url, init) => fetch(url, init), signal: new AbortController().signal, apply: () => Promise.resolve({ code: 0, said: "" }), ...options,
 }, changed);
 
 describe("an update", () => {
@@ -271,12 +271,166 @@ describe("the install record an update reads", () => {
 describe("an installed app's updates", () => {
   it("read what the install script leaves, each root's alone: its record, the helper pkexec runs, and the installed version's mark", () => {
     const { signal } = new AbortController();
-    expect(installedUpdates("1.2.3", "/home/user/.cache/surogate/updates", fetch, signal)).toEqual({
+    expect(installedUpdates("1.2.3", "/home/user/.cache/surogate/updates", fetch, signal)).toMatchObject({
       version: "1.2.3", record: "/etc/surogate/install.json", rootOwned: true, helper: "/opt/surogate/bin/surogate-apply-update",
       installed: "/opt/surogate/current/release.json", cache: "/home/user/.cache/surogate/updates", fetch, signal,
     });
     // Where the install script itself puts each.
     const script = readFileSync(SCRIPT, "utf8").split("\n");
     for (const line of ["  ROOT=/opt/surogate", "  RECORD=/etc/surogate/install.json", '  HELPER="$ROOT/bin/surogate-apply-update"']) expect(script).toContain(line);
+  });
+});
+
+describe("installing an update", () => {
+  it("hands the root helper the files as downloaded, and once it has applied them the update is installed", async () => {
+    publish("1.2.4");
+    const handed: unknown[] = [];
+    const told: string[] = [];
+    const found: Updates = updates({ apply: (files) => {
+      handed.push(files);
+      told.push(found.state.state);
+      return Promise.resolve({ code: 0, said: "Surogate Desktop: 1.2.4 is installed" });
+    } });
+    await found.check();
+    const { files } = found.state as { files: unknown };
+    await found.install();
+    expect(handed).toEqual([files]);
+    expect(told).toEqual(["installing"]);
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+    // Installed, a later check offers nothing more, and asks its base nothing: the restart runs it.
+    heard = [];
+    await found.check();
+    expect(heard).toEqual([]);
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+
+  it("says an administrator is needed when polkit refuses, and the helper's words when it fails; the files stay for another try", async () => {
+    publish("1.2.4");
+    let answer = { code: 126 as number | null, said: "" };
+    const found = updates({ apply: () => Promise.resolve(answer) });
+    await found.check();
+    const { files } = found.state as { files: unknown };
+    await found.install();
+    expect(found.state).toEqual({ state: "refused", version: "1.2.4", files });
+    // No authentication agent, or none who could answer: as pkexec says it.
+    answer = { code: 127, said: "Error executing command as another user: Not authorized" };
+    await found.install();
+    expect(found.state).toEqual({ state: "refused", version: "1.2.4", files });
+    answer = { code: 1, said: "tar: oops\nSurogate Desktop: the release's archive could not be unpacked" };
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "the release's archive could not be unpacked" });
+    answer = { code: null, said: "spawn /usr/bin/pkexec ENOENT" };
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "spawn /usr/bin/pkexec ENOENT" });
+    // One that said nothing is said by how it ended.
+    answer = { code: 3, said: "" };
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "its helper exited 3" });
+    answer = { code: null, said: "tar: oops\nits helper was stopped by SIGTERM" };
+    await found.install();
+    expect(found.state).toEqual({ state: "failed", version: "1.2.4", files, why: "its helper was stopped by SIGTERM" });
+    expect(existsSync((files as { tarball: string }).tarball)).toBe(true);
+    answer = { code: 0, said: "" };
+    await found.install();
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+
+  it("runs the helper as it is given, with --apply and the files' paths, and none of the app's environment but a PATH", async () => {
+    const log = join(dir, "ran");
+    writeFileSync(join(dir, "helper"), `#!/bin/sh\nprintf '%s\\n' "$@" >${log}\nenv | sort >>${log}\necho 'Surogate Desktop: it said this' >&2\nexit 3\n`);
+    chmodSync(join(dir, "helper"), 0o755);
+    const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
+    expect(await helperRun([join(dir, "helper"), "--first"])(files)).toEqual({ code: 3, said: "Surogate Desktop: it said this" });
+    const ran = readFileSync(log, "utf8").split("\n");
+    expect(ran.slice(0, 5)).toEqual(["--first", "--apply", "/c/m.json", "/c/m.json.sig", "/c/r.tar.gz"]);
+    expect(ran.slice(5).filter((line) => /^[A-Z_]+=/.test(line) && !/^(PWD|SHLVL|_)=/.test(line))).toEqual(["PATH=/usr/bin:/bin"]);
+    expect(await helperRun([join(dir, "missing")])(files)).toMatchObject({ code: null, said: expect.stringContaining("ENOENT") });
+    // One that a signal ends has no exit code: how it ended is the last of what is said of it.
+    writeFileSync(join(dir, "stopped"), "#!/bin/sh\necho 'Surogate Desktop: it began' >&2\nkill -KILL $$\n");
+    chmodSync(join(dir, "stopped"), 0o755);
+    expect(await helperRun([join(dir, "stopped")])(files)).toEqual({ code: null, said: "Surogate Desktop: it began\nits helper was stopped by SIGKILL" });
+  });
+
+  it("runs the helper under polkit in an installed app: pkexec by its whole path, with no agent of its own on a terminal, on the helper the install script's action names", () => {
+    expect(AS_ROOT).toEqual(["/usr/bin/pkexec", "--disable-internal-agent", "/opt/surogate/bin/surogate-apply-update"]);
+    expect(readFileSync(SCRIPT, "utf8")).toContain('<annotate key="org.freedesktop.policykit.exec.path">/opt/surogate/bin/surogate-apply-update</annotate>');
+  });
+
+  it("leaves an install alone that began while a check was still downloading a later release: its line, and the files its helper reads", async () => {
+    publish("1.2.4");
+    let applied!: (answer: Applied) => void;
+    const told: string[] = [];
+    const found: Updates = updates({ apply: () => new Promise((resolve) => {
+      applied = resolve;
+    }) }, () => told.push(`${found.state.state} ${"version" in found.state ? found.state.version : ""}`.trim()));
+    await found.check();
+    // A later release, whose tarball the base is slow to send.
+    publish("1.2.5");
+    let send!: () => void;
+    const held = new Promise<void>((resolve) => {
+      send = resolve;
+    });
+    answer = (request, response, body) => {
+      if (request.url?.endsWith(".tar.gz")) void held.then(() => ranged(request, response, body));
+      else ranged(request, response, body);
+    };
+    const checked = found.check();
+    await expect.poll(() => heard.some(({ url }) => url === "/desktop/releases/1.2.5/surogate-desktop-1.2.5-linux-x64.tar.gz"), { timeout: 5_000 }).toBe(true);
+    const installing = found.install();
+    send();
+    await checked;
+    // The check ended while the helper ran: the line still says what installs, and that release's files are where the helper was handed them.
+    expect(found.state).toEqual({ state: "installing", version: "1.2.4" });
+    expect(readdirSync(cache()).sort()).toEqual(["1.2.4", "1.2.5"]);
+    expect(readdirSync(join(cache(), "1.2.4")).sort()).toEqual(["manifest.json", "manifest.json.sig", "release.tar.gz"]);
+    applied({ code: 0, said: "" });
+    await installing;
+    expect(told).toEqual(["available 1.2.4", "installing 1.2.4", "installed 1.2.4"]);
+  });
+
+  it("leaves an install alone that began while a check was still asking its base: the files its helper reads stay, whatever the base then answers", async () => {
+    publish("1.2.4");
+    let applied!: (answer: Applied) => void;
+    const found = updates({ apply: () => new Promise((resolve) => {
+      applied = resolve;
+    }) });
+    await found.check();
+    // The base is slow to answer, and then names nothing newer: such a check clears the cache.
+    publish("1.2.3");
+    let send!: () => void;
+    const held = new Promise<void>((resolve) => {
+      send = resolve;
+    });
+    answer = (request, response, body) => void held.then(() => ranged(request, response, body));
+    heard = [];
+    const checked = found.check();
+    await expect.poll(() => heard.length, { timeout: 5_000 }).toBe(1);
+    const installing = found.install();
+    send();
+    await checked;
+    expect(found.state).toEqual({ state: "installing", version: "1.2.4" });
+    expect(readdirSync(join(cache(), "1.2.4")).sort()).toEqual(["manifest.json", "manifest.json.sig", "release.tar.gz"]);
+    applied({ code: 0, said: "" });
+    await installing;
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+
+  it("says each state in the sidebar, with the button that acts on it", () => {
+    const files = { manifest: "m", signature: "s", tarball: "t" };
+    expect([
+      updateLine({ state: "none" }),
+      updateLine({ state: "available", version: "1.2.4", files }),
+      updateLine({ state: "installing", version: "1.2.4" }),
+      updateLine({ state: "refused", version: "1.2.4", files }),
+      updateLine({ state: "failed", version: "1.2.4", files, why: "the release's archive could not be unpacked" }),
+      updateLine({ state: "installed", version: "1.2.4" }),
+    ]).toEqual([
+      null,
+      { text: "Update available: Surogate 1.2.4", button: "Restart to update" },
+      { text: "Installing Surogate 1.2.4…", button: null },
+      { text: "An administrator needs to install this update.", button: "Try again" },
+      { text: "Surogate could not install its update: the release's archive could not be unpacked", button: "Try again" },
+      { text: "Surogate 1.2.4 is installed.", button: "Restart" },
+    ]);
   });
 });

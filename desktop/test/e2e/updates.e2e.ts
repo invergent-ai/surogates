@@ -4,7 +4,7 @@
 // base is a local HTTP server; the release key is the test's own.
 
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, ELECTRON, launch, MAIN, quit, shellPage, stubNative } from "./launch.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const keys = generateKeyPairSync("ed25519");
@@ -39,13 +39,27 @@ beforeEach(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   writeFileSync(join(home, "install.json"), JSON.stringify({ base, channel: "stable" }));
-  // The test's root helper: its channel and its release keys, written as install.sh writes them.
-  writeFileSync(join(home, "surogate-apply-update"), ["#!/usr/bin/env bash", "CHANNEL=stable", "RELEASE_KEYS=(", `    '${PUBLIC}'`, "  )", ""].join("\n"), { mode: 0o755 });
+  // The test's root helper: its release keys, listed as install.sh lists them; and, run with --apply,
+  // what it was given in <home>/applied, then the exit code and the words <home>/answer holds.
+  writeFileSync(join(home, "surogate-apply-update"), [
+    "#!/usr/bin/env bash", "CHANNEL=stable", "RELEASE_KEYS=(", `    '${PUBLIC}'`, "  )", `printf '%s\\n' "$@" >${join(home, "applied")}`, `read -r code words <${join(home, "answer")}`,
+    `[ -z "$words" ] || echo "Surogate Desktop: $words" >&2`, `exit "$code"`, "",
+  ].join("\n"), { mode: 0o755 });
+  writeFileSync(join(home, "answer"), "0\n");
 });
 
 afterEach(async () => {
   await quit(app);
   app = undefined;
+  // An app the test's restart started, outside Playwright, goes with the test.
+  for (const { pid } of relaunched()) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // gone meanwhile
+    }
+  }
+  await expect.poll(() => relaunched(), { timeout: 10_000 }).toEqual([]);
   await agent.stop();
   await agent.link.stop();
   server.closeAllConnections();
@@ -64,6 +78,21 @@ function publish(version: string): Buffer {
   served.set("/desktop/latest.json", manifest);
   served.set("/desktop/latest.json.sig", sign(null, manifest, keys.privateKey));
   return tarball;
+}
+
+// The app a restart started, outside Playwright: its main, this package's Electron on this main and
+// nothing more, as Playwright never starts it; and Chromium's processes for the test's data home.
+// Chromium writes its command line back joined by spaces.
+function relaunched(): Array<{ pid: number; argv: string[] }> {
+  return readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).flatMap((entry) => {
+    try {
+      const argv = readFileSync(`/proc/${entry}/cmdline`, "utf8").split(/[\0 ]/).filter(Boolean);
+      const main = argv.length === 2 && argv[0] === ELECTRON && argv[1] === MAIN;
+      return main || argv.includes(`--user-data-dir=${join(home, "surogate", "electron")}`) ? [{ pid: Number(entry), argv }] : [];
+    } catch {
+      return []; // gone meanwhile
+    }
+  });
 }
 
 // The app launched with the test's install record and helper, signed in to the fake agent: the sidebar,
@@ -87,5 +116,39 @@ describe("updates, through the app", () => {
     await expect.poll(() => page.isVisible("#update"), { timeout: 10_000 }).toBe(true);
     // The test's session puts XDG_CACHE_HOME at <home>/k.
     expect(readFileSync(join(home, "k", "surogate", "updates", "0.0.1", "release.tar.gz")).equals(tarball)).toBe(true);
+  });
+
+  it("installs the update by its root helper at Restart to update, then quits as the app quits and starts again from its launcher", async () => {
+    publish("0.0.1");
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    const first = app!.process().pid;
+    const closed = app!.waitForEvent("close", { timeout: 30_000 });
+    // The app goes while the click is still answered.
+    await page.click("#update-button").catch(() => {});
+    await closed;
+    app = undefined;
+    // The helper was handed the files as the user downloaded them.
+    const updates = join(home, "k", "surogate", "updates", "0.0.1");
+    expect(readFileSync(join(home, "applied"), "utf8")).toBe(["--apply", join(updates, "manifest.json"), join(updates, "manifest.json.sig"), join(updates, "release.tar.gz"), ""].join("\n"));
+    // Started again as Start at login starts a development build: its Electron on this main, the update's.
+    await expect.poll(() => relaunched().filter(({ pid, argv }) => pid !== first && !argv.some((arg) => arg.startsWith("--type=")))
+      .map(({ argv }) => argv), { timeout: 30_000 }).toEqual([[ELECTRON, MAIN]]);
+  });
+
+  it("keeps running when no administrator approves, and says so; and says why when the helper fails, with Try again", async () => {
+    publish("0.0.1");
+    writeFileSync(join(home, "answer"), "126\n");
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    await page.click("#update-button");
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("An administrator needs to install this update.");
+    await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Try again");
+    writeFileSync(join(home, "answer"), "1 the release's archive could not be unpacked\n");
+    await page.click("#update-button");
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("Surogate could not install its update: the release's archive could not be unpacked");
+    await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Try again");
+    // Still the running app, its window up.
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible())), { timeout: 10_000 }).toBe(true);
   });
 });

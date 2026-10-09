@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { AS_ROOT } from "../src/shell/updates.js";
+
 const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const PUBLISH = fileURLToPath(new URL("../release/publish.sh", import.meta.url));
 const RELEASES = ["24.04", "26.04"] as const;
@@ -1766,6 +1768,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     const other = as("tester", "pkexec /opt/surogate/bin/surogate-apply-update --uninstall; exit $?");
     expect(other).toMatchObject({ status: 127, stderr: expect.stringContaining("Error creating textual authentication agent") });
     expect(root("test -e /opt/surogate/current").status).toBe(0);
+    // As the app runs it, started from a terminal in a session with no polkit agent, for a user no
+    // rule lets update: pkexec asks nothing on the terminal, and ends at once with 127, which the
+    // app says as an administrator being needed. With an agent of its own it would wait there for
+    // a password: the terminal is closed on it after 20 s, as nothing less ends 26.04's.
+    const asked = as("other", `timeout -s KILL 20 script -qec "${AS_ROOT.join(" ")} --apply ${updates}/manifest.json ${updates}/manifest.json.sig ${updates}/release.tar.gz; echo ended \\$?" /dev/null`);
+    expect(asked.stdout).toContain("ended 127");
+    expect(asked.stdout).not.toContain("AUTHENTICATING");
     root("rm /etc/polkit-1/rules.d/10-test.rules");
   });
 

@@ -80,7 +80,7 @@ export function servedBase(): Base {
     },
     updates: (options = {}, changed = () => {}) => new Updates({
       version: "1.2.3", record: base.record, rootOwned: false, helper: base.helper, installed: null,
-      cache: base.cache(), fetch: (url, init) => fetch(url, init), signal: new AbortController().signal, ...options,
+      cache: base.cache(), fetch: (url, init) => fetch(url, init), signal: new AbortController().signal, apply: () => Promise.resolve({ code: 0, said: "" }), ...options,
     }, changed),
   };
   beforeEach(async () => {

@@ -50,7 +50,7 @@ import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
-import { CHECK_MS, installedUpdates, ROOT_RECORD, updateLine, Updates } from "./updates.js";
+import { CHECK_MS, helperRun, installedUpdates, ROOT_RECORD, updateLine, Updates } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -332,7 +332,11 @@ function startUpdates(): void {
   if (app.isPackaged) {
     updates = new Updates(installedUpdates(VERSION, cache, fromBase, stopDelivery.signal), changed);
   } else if (INSTALL_RECORD && helper) {
-    updates = new Updates({ version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal }, changed);
+    // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
+    updates = new Updates({
+      version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
+      apply: helperRun([helper]),
+    }, changed);
   } else {
     return;
   }
@@ -340,6 +344,14 @@ function startUpdates(): void {
   const check = () => void updates?.check().catch(report);
   check();
   setInterval(check, CHECK_MS).unref();
+}
+
+// The update line's button: the update downloaded installed by the root helper, then the app restarted
+// into it; or, installed already, the restart alone. Only while the line shows a button.
+async function updateAction(): Promise<void> {
+  if (!updates || !updateLine(updates.state)?.button) return;
+  await updates.install();
+  if (updates.state.state === "installed") restart();
 }
 
 // The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
@@ -2151,6 +2163,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
   handle("shell:sandbox", sandboxAction);
+  handle("shell:update", updateAction);
 }
 
 // Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
@@ -2176,6 +2189,14 @@ let askingAgain = false;
 let stopped = false;
 // Once the quit goes on: nothing shows the window again while the device stops.
 let leaving = false;
+// A quit that restarts the app into its update once it is done: the installed app started again from
+// its launcher, never process.execPath, which is the old version's own folder.
+let restarting = false;
+
+function restart(): void {
+  restarting = true;
+  app.quit();
+}
 
 // A quit asked again while the first waits for the threads: quit now, or keep waiting.
 async function quitNow(): Promise<void> {
@@ -2196,7 +2217,11 @@ async function quit(): Promise<void> {
   const working = device?.stack?.working() ?? 0;
   if (working > 0) {
     const answer = await confirmQuit(working);
-    if (answer === "cancel") return;
+    if (answer === "cancel") {
+      // The update stays installed: the line's Restart asks again.
+      restarting = false;
+      return;
+    }
     if (answer === "wait" && (device?.stack?.working() ?? 0) > 0) {
       await new Promise<void>((resume) => {
         waiting = resume;
@@ -2230,6 +2255,10 @@ async function quit(): Promise<void> {
     await stopDevice(device?.started, vm);
   } finally {
     stopped = true;
+    if (restarting) {
+      const [execPath, ...args] = loginCommand();
+      app.relaunch({ execPath: execPath!, args });
+    }
     app.quit();
   }
 }
