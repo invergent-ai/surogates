@@ -45,20 +45,24 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 #: none of them; the fence a killed worker's landing is waited out for is two seconds all the same
 #: (see ``a_short_fence``), so no test waits five minutes for one.
 FENCED = SimpleNamespace(default_step_timeout=29, default_max_retries=0, retry_delay=0)
-#: A step timeout of a second, for the tests that are about a step running out of time.
-ONE_SECOND = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0)
 
 
-def _fenced(settings) -> bool:
-    return settings is not None and (settings.default_step_timeout, settings.default_max_retries, settings.retry_delay) == (29, 0, 0)
+def _as_if_a_second(settings):
+    """*settings* whose step has these tests' bound, with a step of one second in its place; any other as it is."""
+    if settings is None or settings.default_step_timeout != FENCED.default_step_timeout:
+        return settings
+    return SimpleNamespace(default_step_timeout=1, default_max_retries=settings.default_max_retries, retry_delay=settings.retry_delay)
 
 
 @pytest.fixture(autouse=True)
 def a_short_fence(monkeypatch):
-    """With ``FENCED``, the fence and a landing's life are what a one-second step gives: 2 s and 3 s."""
+    """Settings whose step has ``FENCED``'s bound keep the fence and a landing's life a one-second step gives.
+
+    So a test's own retries and pauses count in them as they would, and only the step's bound is a landing's.
+    """
     fence, life = landing_module._fence, landing_module._life
-    monkeypatch.setattr(landing_module, "_fence", lambda settings: 2 if _fenced(settings) else fence(settings))
-    monkeypatch.setattr(landing_module, "_life", lambda settings: 3 if _fenced(settings) else life(settings))
+    monkeypatch.setattr(landing_module, "_fence", lambda settings: fence(_as_if_a_second(settings)))
+    monkeypatch.setattr(landing_module, "_life", lambda settings: life(_as_if_a_second(settings)))
     monkeypatch.setattr(loop_artifact_completion, "_fence", landing_module._fence)
 
 
@@ -560,6 +564,8 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
 
 
 #: Both workers' saga settings: tries of a second, three retries; a fence of two seconds.
+# A step of one second on purpose: the stalled apply of the test below is cut off by the step's own timeout,
+# three times, and that is what it is about.
 RETRYING = SimpleNamespace(default_step_timeout=1, default_max_retries=3, retry_delay=0)
 #: Both workers' saga settings: one try of three seconds; a fence of four.
 SLOW = SimpleNamespace(default_step_timeout=3, default_max_retries=0, retry_delay=0)
@@ -1345,7 +1351,7 @@ async def test_a_look_of_the_settle_the_pod_did_not_answer_is_tried_again_as_a_s
     monkeypatch.setattr(landing_module, "_call", the_pod_times_out_once)
     monkeypatch.setattr(landing_module, "touch_landing", marked)
     monkeypatch.setattr(landing_module, "compensate_history", put_back)
-    await ends(api, pool, second, settings=SimpleNamespace(default_step_timeout=1, default_max_retries=1, retry_delay=0))
+    await ends(api, pool, second, settings=SimpleNamespace(default_step_timeout=FENCED.default_step_timeout, default_max_retries=1, retry_delay=0))
     # One timeout of another thread's settle fails no landing: the look is made again, the dead
     # landing's row marked alive before each try, as a step's is, for the next lock holder's fence.
     assert did[:4] == ["mark", "look", "mark", "look"]
@@ -1462,7 +1468,7 @@ async def test_a_landing_left_escalated_whose_row_cannot_be_written_is_told_to_t
 
 
 async def test_a_landing_left_running_is_not_given_up_while_the_history_is_only_slow_to_show_its_commits(api, monkeypatch, pods):
-    paused = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0.25)
+    paused = SimpleNamespace(default_step_timeout=FENCED.default_step_timeout, default_max_retries=0, retry_delay=0.25)
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
     pool = SandboxPool(pods)
