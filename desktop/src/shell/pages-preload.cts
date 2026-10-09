@@ -38,6 +38,7 @@ if (location.protocol === "file:") {
     quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
     sandbox: (action: string) => ipcRenderer.invoke("shell:sandbox", action),
+    update: () => ipcRenderer.invoke("shell:update"),
     onChanged: listen("shell:changed"),
     // Where the keyboard comes back to from the pane's transcript: its head's Open or Back.
     onPaneLeft: (listener: (to: string) => void) => {

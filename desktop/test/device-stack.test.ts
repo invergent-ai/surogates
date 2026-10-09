@@ -45,7 +45,7 @@ class Tools implements ToolLayer {
   constructor(private readonly base: string, private readonly order: string[]) {}
 
   guards(): FolderGuards {
-    return { home: join(this.base, "home"), dataDir: join(this.base, "data"), appDirs: [] };
+    return { home: join(this.base, "home"), dataDir: join(this.base, "data"), cacheDir: join(this.base, "cache"), appDirs: [] };
   }
 
   live(): string[] {

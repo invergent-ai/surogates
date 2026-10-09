@@ -79,7 +79,7 @@ const network: NetworkApprovals = {
 const bindingOf = (root: string) => everyRoot ?? journal.bindings.get(root);
 const host = userInfo();
 const vm = values.folder || values.confirm ? new VmClient({ vm: vmOptions(dataDir, { uid: host.uid, gid: host.gid, name: host.username, home: env.HOME ?? host.homedir }) }) : null;
-const hosts = vm ? new VmExecutor({ bindingOf, dataDir, env, network, vm }) : null;
+const hosts = vm ? new VmExecutor({ bindingOf, dataDir, cacheDir: join(homedir(), ".cache", "surogate"), env, network, vm }) : null;
 const { confirm, ask } = values;
 let refusal: string | null = null;
 const binder = confirm && hosts
