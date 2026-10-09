@@ -32,11 +32,15 @@ export function confirmedFolder(expect: { dev: number; ino: number; boot?: strin
   return found.ino === expect.ino && (rebooted || found.dev === expect.dev);
 }
 
-// What a chat's folder must keep clear of: the home folder, the app's own data
-// and files (which run outside the sandbox), and the credential folders.
+// What a chat's folder must keep clear of: the home folder, the app's own data,
+// cache and files (which run outside the sandbox), and the credential folders.
 export interface FolderGuards {
   home: string;
   dataDir: string;
+  // The app's own cache folder, <cache home>/surogate, where it downloads an update. The app,
+  // which is not confined, moves and removes what is there: nothing a chat's commands can write
+  // may hold it or lie in it, or a link they put there would be the app's to follow.
+  cacheDir: string;
   appDirs: string[];
 }
 
@@ -47,9 +51,12 @@ export type FolderCheck =
 
 // A path as spelled, and as the file system resolves it. Where it does not exist yet, or cannot be
 // read, the part that exists is still resolved: a guard that is not there yet is still where its links lead.
-function spellings(path: string): string[] {
+// *links* gets each link the way to it goes through, by where that link is.
+function spellings(path: string, links: string[] = []): string[] {
   const plain = resolve(path);
-  const { path: real } = realpath(plain);
+  const through = new Map<string, string | null>();
+  const { path: real } = realpath(plain, through);
+  links.push(...through.keys());
   return real === plain ? [plain] : [plain, real];
 }
 
@@ -71,15 +78,18 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
   const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));
   if (tools) return refused(`the sandbox keeps its own tools in ${tools}, so the folder ${path} cannot be a chat's`);
-  // A sandbox whose writable folder held the home folder, the app's own data or
+  // A sandbox whose writable folder held the home folder, the app's own data, cache or
   // files or a credential folder would hand all of it to the agent. Each is
   // compared as spelled and as resolved: a link would otherwise walk around the check.
-  const homes = spellings(guards.home);
-  const guarded = [guards.dataDir, ...guards.appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
-    .flatMap(spellings);
+  // And every link on the way to one of them is guarded where it is: a folder that held such a
+  // link would let a command point it elsewhere, and the app would follow it there.
+  const links: string[] = [];
+  const homes = spellings(guards.home, links);
+  const guarded = [guards.dataDir, guards.cacheDir, ...guards.appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
+    .flatMap((dir) => spellings(dir, links));
   const held = [...new Set([resolve(folder), path])].some(
     (candidate) => candidate === "/" || homes.some((dir) => inside(dir, candidate)) ||
-      guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)),
+      guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)) || links.some((link) => inside(link, candidate)),
   );
   if (held) return refused(`the folder ${path} holds this computer's home folder or the app's own data`);
   return { ok: true, path, dev: stats.dev, ino: stats.ino };

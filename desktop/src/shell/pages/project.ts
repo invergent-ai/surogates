@@ -102,7 +102,8 @@ byId<HTMLFormElement>("form").addEventListener("submit", (event) => {
 byId("archive").addEventListener("click", () => void asked(() => dialog.archive()));
 byId("cancel").addEventListener("click", () => void dialog.close());
 byId("backdrop").addEventListener("click", () => void dialog.close());
+// An Escape that cancels an input method's composition is the composition's: the dialog stays, with what was typed.
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") void dialog.close();
+  if (event.key === "Escape" && !event.isComposing) void dialog.close();
 });
 void render();

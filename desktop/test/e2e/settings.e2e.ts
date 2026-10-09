@@ -82,6 +82,17 @@ describe("the user menu", () => {
     expect(await page.$$eval("#user-menu hr", (found) => found.filter((hr) => (hr as HTMLElement).offsetParent !== null).length)).toBe(1);
     expect(await page.isDisabled('[data-action="logout"]')).toBe(false);
     expect(await page.isDisabled('[data-action="language"]')).toBe(true);
+    // A menu holds its rows and the lines between them, and nothing else: the email is over it, in the popover.
+    expect(await page.$eval("#user-menu", (found) => {
+      const rows = found.querySelector('[role="menu"]');
+      return {
+        popover: found.getAttribute("role"),
+        named: rows?.getAttribute("aria-labelledby") ?? null,
+        holds: [...new Set([...(rows?.children ?? [])].map((child) => child.getAttribute("role") ?? child.tagName))],
+        email: rows?.contains(document.getElementById("user-email")) ?? null,
+        outside: [...found.querySelectorAll('[role="menuitem"]')].filter((row) => !rows?.contains(row)).length,
+      };
+    })).toEqual({ popover: null, named: "user", holds: ["menuitem", "HR"], email: false, outside: 0 });
     const menu = await page.$eval("#user-menu", (found) => found.getBoundingClientRect().bottom);
     const row = await page.$eval("#user", (found) => found.getBoundingClientRect().top);
     expect(menu).toBeLessThanOrEqual(row);
@@ -90,6 +101,46 @@ describe("the user menu", () => {
     await page.click("#user");
     await page.click("#title");
     expect(await page.isVisible("#user-menu")).toBe(false);
+  });
+
+  it("takes the keyboard into its rows, moves along them with the arrows, and gives it back to the user row on Escape", async () => {
+    const { page } = await signedIn();
+    const focused = () => page.evaluate(() => (document.activeElement as HTMLElement).id || document.activeElement?.textContent?.trim());
+    await page.focus("#user");
+    await page.keyboard.press("Enter");
+    expect(await page.isVisible("#user-menu")).toBe(true);
+    expect(await focused()).toBe("SettingsCtrl+Shift+,");
+    // Account settings and Devices come next; Usage is hidden off surogate.ai, and Language comes later, so is passed over.
+    for (const row of ["Account settings", "Devices", "Get help"]) {
+      await page.keyboard.press("ArrowDown");
+      expect(await focused()).toBe(row);
+    }
+    await page.keyboard.press("End");
+    expect(await focused()).toBe("Remove this agent…");
+    await page.keyboard.press("ArrowDown");
+    expect(await focused()).toBe("SettingsCtrl+Shift+,");
+    await page.keyboard.press("ArrowUp");
+    expect(await focused()).toBe("Remove this agent…");
+    await page.keyboard.press("Escape");
+    expect(await page.isVisible("#user-menu")).toBe(false);
+    expect(await focused()).toBe("user");
+    // The arrows are the menu's only while the keyboard is in it: on another control, with the menu open, they move nothing.
+    await page.keyboard.press("Enter");
+    expect(await focused()).toBe("SettingsCtrl+Shift+,");
+    await page.evaluate(() => document.getElementById("open-settings")!.focus());
+    await page.keyboard.press("ArrowDown");
+    expect(await page.isVisible("#user-menu")).toBe(true);
+    expect(await focused()).toBe("open-settings");
+    await page.keyboard.press("Escape");
+    expect(await focused()).toBe("user");
+    // Tab leaves it, closed, for what comes next that shows, outside the menu.
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Tab");
+    expect(await page.isVisible("#user-menu")).toBe(false);
+    expect(await page.evaluate(() => {
+      const now = document.activeElement as HTMLElement | null;
+      return now !== null && now !== document.body && now.checkVisibility() && !document.getElementById("user-menu")!.contains(now);
+    })).toBe(true);
   });
 
   it("closes once the conversation takes the focus", async () => {
@@ -193,7 +244,8 @@ describe("Settings", () => {
       await expect.poll(() => settings.getAttribute(`[data-setting="theme"] [data-value="${theme}"]`, "aria-pressed")).toBe("true");
     }
     const overlays = await shell.evaluate(() => (globalThis as unknown as { overlays: Array<{ color: string }> }).overlays);
-    expect(overlays.slice(-2).map((overlay) => overlay.color)).toEqual(["#1a1a19", "#f5f4ed"]);
+    // Under Settings, dimmed with the window.
+    expect(overlays.slice(-2).map((overlay) => overlay.color)).toEqual(["#0c0c0b", "#6e6e6b"]);
     await expect.poll(() => client.evaluate(() => (window as unknown as { themes: string[] }).themes.slice(-2))).toEqual(["dark", "light"]);
     await settings.click('[data-setting="textSize"] [data-value="large"]');
     const saved = () => JSON.parse(readFileSync(join(home, "surogate", "settings.json"), "utf8")) as Record<string, string>;
@@ -232,6 +284,74 @@ describe("Settings", () => {
       "General", "Account", "This computer", "Browser", "Folders and permissions", "SkillsLater", "ConnectorsLater",
     ]);
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
+  });
+
+  it("dims the system's controls with the window while it is open, and fills the window as Claude's does", async () => {
+    const { shell, page } = await signedIn();
+    await shell.evaluate(({ BrowserWindow, nativeTheme }) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      window.setBounds({ x: 0, y: 0, width: 1600, height: 1000 });
+      const set = window.setTitleBarOverlay.bind(window);
+      const overlays: unknown[] = [];
+      Object.assign(globalThis, { overlays });
+      window.setTitleBarOverlay = (overlay) => {
+        overlays.push(overlay);
+        set(overlay);
+      };
+      nativeTheme.themeSource = "dark";
+    });
+    const colours = () => shell.evaluate(() => (globalThis as unknown as { overlays: Array<{ color: string }> }).overlays.map((overlay) => overlay.color));
+    await expect.poll(colours).toEqual(["#1a1a19"]);
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await expect.poll(colours).toEqual(["#1a1a19", "#0c0c0b"]);
+    const { width, height } = await settings.$eval(".dialog", (found) => found.getBoundingClientRect().toJSON() as DOMRect);
+    const content = await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.getContentBounds());
+    expect([width, height]).toEqual([content.width - 96, content.height - 96]);
+    await settings.click("#close");
+    await expect.poll(colours).toEqual(["#1a1a19", "#0c0c0b", "#1a1a19"]);
+  });
+
+  it("names each segmented control as a group, by its row, for a screen reader", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    const groups = await settings.$$eval(".segmented", (found) => found.map((control) =>
+      [control.getAttribute("role"), control.getAttribute("aria-label"), control.closest<HTMLElement>(".row")!.dataset.label]));
+    expect(groups.filter(([role, label, row]) => role !== "group" || label !== row)).toEqual([]);
+    expect(groups.map(([, label]) => label)).toEqual(expect.arrayContaining(["Theme", "Transcript text size", "Transcript width", "Motion"]));
+  });
+
+  it("clears its search on Escape, and closes on the next", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    const nav = await texts(settings, ".settings-nav .item");
+    await settings.fill("#settings-search", "width");
+    await settings.press("#settings-search", "Escape");
+    expect(await settings.inputValue("#settings-search")).toBe("");
+    expect(await texts(settings, ".settings-nav .item")).toEqual(nav);
+    expect(await settingsOpen(shell)).toBe(true);
+    // Settings can close before the key is acknowledged: that it closed is what tells.
+    await settings.press("#settings-search", "Escape").catch(() => {});
+    await expect.poll(() => settingsOpen(shell)).toBe(false);
+  });
+
+  it("leaves an Escape that cancels an input method's composition to the composition: its search keeps its text, and it stays open", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    const cancelled = () => settings.evaluate(() => {
+      document.getElementById("settings-search")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", isComposing: true, bubbles: true }));
+    });
+    await settings.fill("#settings-search", "width");
+    await cancelled();
+    expect(await settings.inputValue("#settings-search")).toBe("width");
+    // In an empty search too, where an Escape of the user's own closes Settings.
+    await settings.fill("#settings-search", "");
+    await cancelled();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await settingsOpen(shell)).toBe(true);
   });
 
   it("keeps its own page: a dropped file cannot replace it", async () => {
@@ -415,6 +535,93 @@ describe("Settings → General", () => {
       .surogateSettings.set("startAtLogin", "on"));
     await expect(set).rejects.toThrow("which misreads a $, a ` or a \\ in its path");
     expect(existsSync(join(home, "c", "autostart"))).toBe(false);
+  });
+
+  it("draws each setting as it is after a choice that failed, and says why in its row, as unchanged only where the choice is not in place, until one goes through", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await settings.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    // What a row says of its last choice: null where it has no place to say it.
+    const refused = (label: string) =>
+      settings.evaluate((row) => document.querySelector(`.row[data-label="${row}"] .label [role="alert"]`)?.textContent ?? null, label);
+    // The text size is kept, and then telling the agent's page of it fails: the control shows the size kept,
+    // and its row says what failed, not that the size did not change.
+    const kept = "Transcript text size is as you chose, but something failed: The agent's page is gone.";
+    await shell.evaluate(({ webContents }, at) => {
+      const view = webContents.getAllWebContents().find((contents) => contents.getURL().startsWith(at))!;
+      const send = view.send.bind(view);
+      view.send = (channel: string, ...args: unknown[]) => {
+        if (channel === "desktop:appearance") throw new Error("The agent's page is gone");
+        send(channel, ...args);
+      };
+    }, origin);
+    await expect.poll(() => pressed(settings, "textSize")).toBe("medium");
+    await settings.click('[data-setting="textSize"] [data-value="large"]');
+    await expect.poll(() => pressed(settings, "textSize")).toBe("large");
+    await expect.poll(() => refused("Transcript text size"), { timeout: 5_000 }).toBe(kept);
+    expect(await pressed(settings, "textSize")).toBe("large");
+    // The autostart folder cannot be made, as a file has its name: refused, with nothing changed, and its row says so.
+    const blocked = join(home, "c", "autostart");
+    writeFileSync(blocked, "");
+    await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
+    await expect.poll(() => refused("Start at login"), { timeout: 5_000 })
+      .toBe(`Surogate did not change Start at login: EEXIST: file already exists, mkdir '${blocked}'.`);
+    expect(await pressed(settings, "startAtLogin")).toBe("off");
+    // One that goes through takes its row's words away, and no other row's.
+    rmSync(blocked);
+    await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
+    await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
+    expect(await refused("Start at login")).toBe("");
+    expect(await refused("Transcript text size")).toBe(kept);
+    expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
+  });
+
+  it("says in a setting's row what failed, as unchanged, though Settings' state cannot be read after it", async () => {
+    app = await launch(home);
+    await shellPage(app);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
+    const settings = await settingsPage(app);
+    await expect.poll(() => pressed(settings, "textSize")).toBe("medium");
+    await settings.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    const refused = (label: string) =>
+      settings.evaluate((row) => document.querySelector(`.row[data-label="${row}"] .label [role="alert"]`)?.textContent ?? null, label);
+    // The main process's answers as the test's own: each choice is refused with nothing changed, and
+    // the state Settings reads next, to draw itself again, cannot be read.
+    const state = await settings.evaluate(() => (globalThis as unknown as { surogateSettings: { state(): Promise<unknown> } }).surogateSettings.state());
+    await app.evaluate(({ webContents }, asItIs) => {
+      const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
+      let unread = false;
+      for (const channel of ["settings:set", "settings:state"]) contents.ipc.removeHandler(channel);
+      contents.ipc.handle("settings:set", (_event, _key, value) => {
+        unread = true;
+        throw new Error(`The disk is full, so ${String(value)} was not kept`);
+      });
+      contents.ipc.handle("settings:state", () => {
+        if (!unread) return asItIs;
+        unread = false;
+        throw new Error("Settings' state cannot be read");
+      });
+    }, state);
+    // The row says why the choice failed, by the choice's own reason, over the control as it was.
+    await settings.click('[data-setting="textSize"] [data-value="large"]');
+    await expect.poll(() => refused("Transcript text size"), { timeout: 5_000 })
+      .toBe("Surogate did not change Transcript text size: The disk is full, so large was not kept.");
+    expect(await pressed(settings, "textSize")).toBe("medium");
+    // The option already chosen, refused the same way: a control that was not drawn again does not say the choice is in place.
+    await settings.click('[data-setting="textSize"] [data-value="medium"]');
+    await expect.poll(() => refused("Transcript text size"), { timeout: 5_000 })
+      .toBe("Surogate did not change Transcript text size: The disk is full, so medium was not kept.");
+    // Neither the choice's failure nor the read's is left unhandled.
+    expect(await settings.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
   });
 
   it("quits when the window is closed once Keep running is off, and keeps the choice", async () => {

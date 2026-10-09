@@ -3,7 +3,8 @@
 // its own. All text comes from the main process and is set with textContent, or with showText
 // where it may hold the user's paths or QEMU's words.
 
-import { ago, byId, fillIcons, icon, markTheme, showText } from "./ui.js";
+import { ago } from "../text.js";
+import { aged, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
 interface ProjectRow {
@@ -52,6 +53,7 @@ interface State {
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
   sandbox: { text: string; said: string; actions: Array<"retry" | "log" | "check">; ready: boolean }; // what stops the agent's commands, or slows them
+  update: { text: string; button: string | null } | null; // a newer Surogate, and what the user can do about it
 }
 
 interface Shell {
@@ -80,6 +82,7 @@ interface Shell {
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
   sandbox(action: "retry" | "log" | "check"): Promise<void>;
+  update(): Promise<void>;
   onChanged(listener: () => void): () => void;
   focusPane(): Promise<void>;
   onPaneLeft(listener: (to: string) => void): () => void;
@@ -113,9 +116,12 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
   const wrapper = element("div", "group");
   wrapper.dataset.project = project.id;
   const open = button(selected ? "item project selected" : "item project", "", () => void shell.project(project.id));
-  open.append(icon("folder"), element("span", "name", project.name));
+  open.dataset.focus = `project:${project.id}`;
+  const mark = projectMark(project.id);
+  open.append(mark, element("span", "name", project.name));
   if (project.waiting > 0) {
-    open.append(element("span", "waiting"));
+    // On the mark, as Claude Desktop puts it.
+    mark.append(element("span", "waiting"));
     open.setAttribute("aria-label", `${project.name}, waiting on you`);
   }
   if (selected) open.setAttribute("aria-current", "page");
@@ -126,9 +132,8 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
 function card(project: ProjectRow): HTMLElement {
   const made = button("card", "", () => void shell.project(project.id));
   made.dataset.project = project.id;
-  const badge = element("span", "badge");
-  badge.append(icon("folder"));
-  made.append(badge, element("span", "name", project.name), element("span", "age", ago(project.updatedAt, Date.now(), "long")));
+  made.dataset.focus = `card:${project.id}`;
+  made.append(projectMark(project.id, 18), element("span", "name", project.name), aged(element("span", "age"), project.updatedAt, "long"));
   return made;
 }
 
@@ -183,12 +188,13 @@ function threadRow(thread: ThreadRow): HTMLElement {
   const row = button("thread", "", () => void shell.read(thread.id));
   row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
+  row.dataset.focus = `thread:${thread.id}`;
   const title = element("span", "title", thread.title);
   title.append(...laptop(thread.place));
   const words = thread.reason ? REASONS[thread.reason] : GROUPS[thread.group];
   const side = element("span", "side");
   if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
-  side.append(element("span", "age", ago(thread.updatedAt)));
+  side.append(aged(element("span", "age"), thread.updatedAt));
   row.append(element("span", "mark"), title, element("span", "status", thread.statusLine ? `${words} · ${thread.statusLine}` : words), side);
   if (thread.files.length > 0) {
     const chips = element("span", "chips");
@@ -200,6 +206,7 @@ function threadRow(thread: ThreadRow): HTMLElement {
   const resolved = thread.group === "resolved";
   const act = button("act", resolved ? "Reopen" : "Resolve", () => void (resolved ? shell.reopen(thread.id) : shell.resolve(thread.id)));
   act.dataset.act = thread.id;
+  act.dataset.focus = `act:${thread.id}`;
   act.setAttribute("aria-label", `${resolved ? "Reopen" : "Resolve"} ${thread.title}`);
   const item = element("li", "");
   item.append(row, act);
@@ -274,8 +281,13 @@ function showTab(): void {
   else document.querySelector<HTMLElement>(`[data-thread="${CSS.escape(was ?? "")}"]`)?.focus();
 }
 
+// Drawn anew, the lists keep the keyboard where it was.
 async function render(): Promise<void> {
   const state = await shell.state();
+  keepFocus(() => draw(state));
+}
+
+function draw(state: State): void {
   state.projects.sort(byActivity);
   last = state;
   renderOverview(state);
@@ -292,6 +304,7 @@ async function render(): Promise<void> {
   const name = state.projects.find((project) => project.id === open?.id)?.name ?? open?.name;
   const thread = open?.thread ? (state.overview?.threads.find((found) => found.id === open.thread?.id)?.title ?? open.thread.title) : undefined;
   byId("title").textContent = thread ?? name ?? (state.view.kind === "projects" ? "Projects" : state.agent?.name ?? "");
+  byId("project-icon").replaceChildren(open ? projectMark(open.id) : icon("folder"));
   // A thread open in the centre: its project, as the way back.
   byId("to-project").hidden = !open?.thread;
   byId("to-project").textContent = open?.thread ? (name ?? "") : "";
@@ -340,6 +353,27 @@ async function render(): Promise<void> {
   byId("sandbox-log").hidden = !state.sandbox.actions.includes("log");
   byId("sandbox-retry").hidden = !state.sandbox.actions.includes("retry");
   byId("sandbox-check").hidden = !state.sandbox.actions.includes("check");
+  // The update's line is a live region that stays, empty, as the quit's does. Written only when its
+  // words change, so that it speaks once a state.
+  // Shown as text is: it may hold the root helper's own words, and the user's paths.
+  const words = state.update?.text ?? "";
+  if (byId("update-text").dataset.said !== words) {
+    byId("update-text").dataset.said = words;
+    showText(byId("update-text"), words);
+    // Its longest words, with the notices beside it, are more than a short window's sidebar holds:
+    // the notices then scroll among themselves, and the line that has just spoken is the one in sight.
+    if (words !== "") byId("update").scrollIntoView({ block: "nearest" });
+  }
+  // While an update installs the line has no button. The one its user pressed stays where it is,
+  // without its use, so that the keyboard is still on it when the line has one again.
+  const button = byId("update-button");
+  const label = state.update?.button ?? null;
+  const pressed = label === null && state.update !== null && state.update !== undefined && document.activeElement === button;
+  if (label !== null) button.textContent = label;
+  else if (!pressed) button.textContent = "";
+  button.hidden = label === null && !pressed;
+  if (pressed) button.setAttribute("aria-disabled", "true");
+  else button.removeAttribute("aria-disabled");
   // The quit's line is a live region that stays, empty, so that a screen reader hears it when it speaks.
   byId("quit-now").hidden = state.quitting === null;
   byId("quitting-text").textContent = state.quitting === null ? ""
@@ -348,6 +382,11 @@ async function render(): Promise<void> {
   byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
   byId("why").textContent = state.unreachable ?? "";
 }
+
+// And it stays in sight when the notices' room changes, as when the window is made shorter.
+new ResizeObserver(() => {
+  if (byId("update-text").textContent) byId("update").scrollIntoView({ block: "nearest" });
+}).observe(byId("notices"));
 
 // One connection at a time: the form waits for the answer.
 byId<HTMLFormElement>("connect").addEventListener("submit", (event) => {
@@ -375,6 +414,7 @@ byId("quit-now").addEventListener("click", () => void shell.quitNow());
 byId("sandbox-log").addEventListener("click", () => void shell.sandbox("log"));
 byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"));
 byId("sandbox-check").addEventListener("click", () => void shell.sandbox("check"));
+byId("update-button").addEventListener("click", () => void shell.update());
 byId("search").addEventListener("input", filterSidebar);
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
@@ -413,10 +453,15 @@ byId("menu").addEventListener("click", () => void shell.menu("app"));
 byId("project-menu").addEventListener("click", () => void shell.menu("project"));
 byId("open-settings").addEventListener("click", () => void shell.settings());
 
-// The user menu: a popover over the user row, closed by Escape, by a click elsewhere, and by its own rows.
+// The user menu: a popover over the user row, as a menu button's menu. Opened, the keyboard is on
+// its first row, and the arrows, Home and End move along the rows it offers now. Escape closes it and
+// gives the keyboard back to the user row; Tab, a click elsewhere and its own rows close it.
+const menuRows = () => [...document.querySelectorAll<HTMLButtonElement>("#user-menu [role=menuitem]")]
+  .filter((row) => !row.disabled && row.checkVisibility());
 const menu = (open: boolean) => {
   byId("user-menu").hidden = !open;
   byId("user").setAttribute("aria-expanded", String(open));
+  if (open) menuRows()[0]?.focus();
 };
 byId("user").addEventListener("click", (event) => {
   event.stopPropagation();
@@ -425,8 +470,25 @@ byId("user").addEventListener("click", (event) => {
 document.addEventListener("click", (event) => {
   if (!byId("user-menu").contains(event.target as Node)) menu(false);
 });
+const MOVES = new Map<string, (at: number, count: number) => number>([
+  ["ArrowDown", (at) => at + 1], ["ArrowUp", (at) => at - 1], ["Home", () => 0], ["End", (_at, count) => count - 1],
+]);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") menu(false);
+  if (byId("user-menu").hidden) return;
+  if (event.key === "Escape") {
+    menu(false);
+    byId("user").focus();
+    return;
+  }
+  if (event.key === "Tab") return menu(false);
+  // The arrows are the menu's only while the keyboard is in it.
+  if (!byId("user-menu").contains(document.activeElement)) return;
+  const move = MOVES.get(event.key);
+  if (!move) return;
+  event.preventDefault();
+  const rows = menuRows();
+  const to = move(rows.indexOf(document.activeElement as HTMLButtonElement), rows.length);
+  rows[(to + rows.length) % rows.length]?.focus();
 });
 // The conversation and Settings are views of their own: a click there reaches this page as its blur.
 addEventListener("blur", () => menu(false));
@@ -458,7 +520,11 @@ const pane = (open: boolean) => {
   byId("overview").setAttribute("aria-pressed", String(open));
 };
 byId("overview").addEventListener("click", () => pane(document.body.classList.contains("no-panel")));
-byId("close-panel").addEventListener("click", () => pane(false));
+// Closed by its own button, the pane gives the keyboard to the one that opens it again.
+byId("close-panel").addEventListener("click", () => {
+  pane(false);
+  byId("overview").focus();
+});
 
 // The web client is placed over the hole, wherever the layout puts it, and a thread read in the
 // pane over the pane's: none while the pane is folded away or shows something else. Each is
@@ -474,6 +540,9 @@ function placed(hole: string, place: (bounds: { x: number; y: number; width: num
 }
 placed("hole", shell.place);
 placed("pane-hole", shell.placePane);
+
+// Ages tell the time gone by, between redraws too.
+setInterval(freshen, 60_000);
 
 shell.onChanged(() => void render());
 void render();

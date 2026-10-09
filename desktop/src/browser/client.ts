@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { StagedDownload } from "./downloads.js";
-import type { Launch } from "./host.js";
 
 // The same from src/browser and from dist/browser.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -35,6 +34,12 @@ export const BROWSER_STOPPED: Outcome = {
     message: "interrupted: the computer's browser stopped while this ran. Check the page before repeating it.",
   },
 };
+
+// What to launch: the browser the user chose, and the identity's profile for it.
+export interface Launch {
+  executable: string;
+  profile: string;
+}
 
 // The address of a tab a session's next operation would open.
 export const NEW_TAB = "about:blank";

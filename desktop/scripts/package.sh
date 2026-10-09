@@ -18,13 +18,21 @@
 #   scripts/package.sh <version> <vm manifest.json> <out> [<install script>]
 # It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz. The install script it packs as the
 # root helper is release/install.sh, the only one a release is signed with (release/publish.sh
-# sign refuses a tarball with any other); a test names its own, which trusts a key of the test's.
+# describe refuses a tarball with any other); a test names its own, which trusts a key of the test's.
 set -euo pipefail
 
 VERSION="${1:-}"
 VM_MANIFEST="${2:-}"
 OUT="${3:-}"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -f "$VM_MANIFEST" ] && [ -n "$OUT" ] && [ "$#" -le 4 ] && { [ "$#" -lt 4 ] || [ -f "$4" ]; } \
+# Whether $1 is a version as the install script takes one (its a_version), and the signing: x.y.z
+# in the ten digits, read in no locale of its caller's, where in most more than ten characters are
+# digits, and with no zero before a part. dpkg reads 1.2.03 as 1.2.3, and a version has one
+# spelling: a tag of another would build for the job's whole length, and be refused at its signing.
+a_version() {
+  local LC_ALL=C
+  [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+}
+a_version "$VERSION" && [ -f "$VM_MANIFEST" ] && [ -n "$OUT" ] && [ "$#" -le 4 ] && { [ "$#" -lt 4 ] || [ -f "$4" ]; } \
   || { echo "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out> [<install script>]" >&2; exit 2; }
 # Its paths are its caller's, and are read from where it was called, before it works from this
 # package's folder: the release's job calls it from the repository's root.

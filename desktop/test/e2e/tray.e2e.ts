@@ -80,7 +80,7 @@ describe("the tray", () => {
     const page = await shellPage(app);
     await connect(page, origin);
     await signedInAndAdded(app, page, agent);
-    await expect.poll(() => trayLabels(app!)).toEqual(["Show Surogate", "Connected as Laptop", "", "Settings…", "Quit Surogate"]);
+    await expect.poll(() => trayLabels(app!)).toEqual(["Show Surogate", "Quick entry", "Connected as Laptop", "", "Settings…", "Quit Surogate"]);
     const shown = () => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isVisible());
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.hide());
     await pickInTray(app, "Show Surogate");

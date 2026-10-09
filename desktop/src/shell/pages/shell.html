@@ -56,32 +56,38 @@
         <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
       </ul>
       <div class="group-head" id="projects-head"><span>Projects</span></div>
-      <div class="projects" id="projects"></div>
-      <p class="warn" id="failure" role="alert" hidden></p>
-      <p class="warn" id="notice" hidden></p>
-      <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
-      <span id="sandbox-said" role="status"></span>
-      <p class="warn" id="sandbox" hidden><span id="sandbox-text"></span> <button class="link" id="sandbox-log" type="button" hidden>Show log</button> <button class="link" id="sandbox-retry" type="button" hidden>Retry</button> <button class="link" id="sandbox-check" type="button" hidden>Check again</button></p>
-      <p class="warn" id="quitting"><span id="quitting-text" role="status"></span> <button class="link" id="quit-now" type="button" hidden>Quit now</button></p>
+      <div class="projects" id="projects" data-focus-list="projects"></div>
+      <div class="notices" id="notices">
+        <p class="warn" id="failure" role="alert" hidden></p>
+        <p class="warn" id="notice" hidden></p>
+        <p class="warn" id="device-action" hidden><span id="device-action-text"></span> <button class="link" id="device-action-button" type="button"></button></p>
+        <span id="sandbox-said" role="status"></span>
+        <p class="warn" id="sandbox" hidden><span id="sandbox-text"></span> <button class="link" id="sandbox-log" type="button" hidden>Show log</button> <button class="link" id="sandbox-retry" type="button" hidden>Retry</button> <button class="link" id="sandbox-check" type="button" hidden>Check again</button></p>
+        <p class="warn" id="update"><span id="update-text" role="status"></span> <button class="link" id="update-button" type="button" hidden></button></p>
+        <p class="warn" id="quitting"><span id="quitting-text" role="status"></span> <button class="link" id="quit-now" type="button" hidden>Quit now</button></p>
+      </div>
       <div class="user">
         <button class="user-row" id="user" type="button" aria-haspopup="menu" aria-expanded="false">
           <span class="avatar" id="avatar"></span><span class="who" id="user-name"></span><span data-icon="chevron-up"></span>
         </button>
         <button class="icon" id="open-settings" type="button" title="Settings" data-icon="settings"></button>
       </div>
-      <div class="popover" id="user-menu" role="menu" hidden>
+      <div class="popover" id="user-menu" hidden>
         <p class="menu-head" id="user-email"></p>
-        <button class="menu-item" type="button" role="menuitem" data-action="settings" data-icon="settings">Settings<span class="shortcut">Ctrl+Shift+,</span></button>
-        <button class="menu-item" type="button" role="menuitem" data-action="account" data-icon="circle-user-round">Account settings</button>
-        <button class="menu-item" type="button" role="menuitem" data-action="devices" data-icon="laptop">Devices</button>
-        <button class="menu-item" type="button" role="menuitem" data-action="usage" data-icon="gauge">Usage</button>
-        <button class="menu-item" type="button" role="menuitem" data-action="language" data-icon="languages" disabled title="Comes in a later version">Language</button>
-        <button class="menu-item" type="button" role="menuitem" data-action="help" data-icon="circle-help">Get help</button>
-        <hr />
-        <button class="menu-item" type="button" role="menuitem" data-action="billing" data-icon="credit-card">Plans and billing</button>
-        <hr />
-        <button class="menu-item" type="button" role="menuitem" data-action="logout" data-icon="log-out">Log out</button>
-        <button class="menu-item" type="button" role="menuitem" data-action="remove" data-icon="x">Remove this agent…</button>
+        <!-- The menu itself holds its rows and the lines between them only: the email is the popover's, over it. -->
+        <div role="menu" aria-labelledby="user">
+          <button class="menu-item" type="button" role="menuitem" data-action="settings" data-icon="settings">Settings<span class="shortcut">Ctrl+Shift+,</span></button>
+          <button class="menu-item" type="button" role="menuitem" data-action="account" data-icon="circle-user-round">Account settings</button>
+          <button class="menu-item" type="button" role="menuitem" data-action="devices" data-icon="laptop">Devices</button>
+          <button class="menu-item" type="button" role="menuitem" data-action="usage" data-icon="gauge">Usage</button>
+          <button class="menu-item" type="button" role="menuitem" data-action="language" data-icon="languages" disabled title="Comes in a later version">Language</button>
+          <button class="menu-item" type="button" role="menuitem" data-action="help" data-icon="circle-help">Get help</button>
+          <hr />
+          <button class="menu-item" type="button" role="menuitem" data-action="billing" data-icon="credit-card">Plans and billing</button>
+          <hr />
+          <button class="menu-item" type="button" role="menuitem" data-action="logout" data-icon="log-out">Log out</button>
+          <button class="menu-item" type="button" role="menuitem" data-action="remove" data-icon="x">Remove this agent…</button>
+        </div>
       </div>
     </nav>
     <main class="centre" id="centre">
@@ -89,7 +95,7 @@
         <button class="icon" id="show-sidebar" type="button" title="Show the sidebar" data-icon="panel-left" hidden></button>
       </div>
       <header class="head">
-        <span class="project-icon" data-icon="folder"></span>
+        <span class="project-icon" id="project-icon"></span>
         <button class="crumb" id="to-project" type="button" title="Back to the project's conversation" hidden></button>
         <h1 id="title"></h1>
         <span class="spacer"></span>
@@ -110,7 +116,7 @@
           <label class="search wide" data-icon="search">
             <input id="project-search" type="search" placeholder="Search projects…" aria-label="Search projects" autocomplete="off" spellcheck="false" />
           </label>
-          <div class="cards" id="cards"></div>
+          <div class="cards" id="cards" data-focus-list="cards"></div>
           <p class="desc" id="no-projects">No projects yet. Start one with New project: its conversation coordinates the threads that do the work.</p>
           <p class="desc" id="no-match" hidden>No projects match.</p>
         </section>
@@ -135,10 +141,10 @@
       <div class="threads" id="threads">
         <h2 class="greeting" id="greeting">Welcome back.</h2>
         <p class="desc" id="greeting-line"></p>
-        <details class="section" data-group="waiting" open><summary data-icon="chevron-down">Waiting on you <span class="count">0</span></summary><p class="desc">Threads that need your reply or approval, or that failed.</p><ul></ul></details>
-        <details class="section" data-group="working" open><summary data-icon="chevron-down">Working <span class="count">0</span></summary><ul></ul></details>
-        <details class="section" data-group="idle" open><summary data-icon="chevron-down">Idle <span class="count">0</span></summary><ul></ul></details>
-        <details class="section" data-group="resolved"><summary data-icon="chevron-down">Resolved <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="waiting" data-focus-list="waiting" open><summary data-icon="chevron-down" data-focus="summary:waiting">Waiting on you <span class="count">0</span></summary><p class="desc">Threads that need your reply or approval, or that failed.</p><ul></ul></details>
+        <details class="section" data-group="working" data-focus-list="working" open><summary data-icon="chevron-down" data-focus="summary:working">Working <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="idle" data-focus-list="idle" open><summary data-icon="chevron-down" data-focus="summary:idle">Idle <span class="count">0</span></summary><ul></ul></details>
+        <details class="section" data-group="resolved" data-focus-list="resolved"><summary data-icon="chevron-down" data-focus="summary:resolved">Resolved <span class="count">0</span></summary><ul></ul></details>
       </div>
       <div class="library" id="library" hidden>
         <ul id="files"></ul>

@@ -1382,4 +1382,38 @@ describe("Settings → Browser", () => {
       await expect.poll(() => readFileSync(join(home, "surogate", "browser.json"), "utf8")).toContain(`"choice": "${found[0].id}"`);
     }
   });
+
+  it("leaves its list as drawn across a redraw while its rows are the same, on the choice kept and with the keyboard, and draws it anew once they change", async () => {
+    const settings = await browserSettings();
+    await expect.poll(() => settings.$$eval("#browser option", (options) => options.length)).toBeGreaterThan(1);
+    await settings.focus("#browser");
+    await settings.$eval("#browser option", (option) => Object.assign(option, { drawnBefore: true }));
+    const asDrawn = () => settings.$eval("#browser option", (option) => "drawnBefore" in option);
+    // Custom…, and the system's dialog cancelled: nothing is kept and the rows are the same, so the redraw
+    // puts the list back on the choice kept, in the options it had.
+    await settings.selectOption("#browser", "pick");
+    await expect.poll(() => settings.inputValue("#browser"), { timeout: 5_000 }).toBe("auto");
+    expect(await asDrawn()).toBe(true);
+    expect(kept()).not.toContain("custom");
+    // Settings drawn again, as each change of the app's state draws it: a text size chosen meanwhile shows that it was.
+    const redrawn = async (size: string) => {
+      await settings.evaluate((chosen) => (window as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
+        .surogateSettings.set("textSize", chosen), size);
+      await app!.evaluate(({ webContents }) => {
+        webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/settings.html"))!.send("settings:changed");
+      });
+      await expect.poll(() => settings.getAttribute(`[data-setting="textSize"] [data-value="${size}"]`, "aria-pressed")).toBe("true");
+    };
+    await redrawn("large");
+    expect(await asDrawn()).toBe(true);
+    expect(await settings.inputValue("#browser")).toBe("auto");
+    expect(await settings.evaluate(() => document.activeElement?.id)).toBe("browser");
+    // A browser kept meanwhile is one more row: the list is drawn anew, with it chosen.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: "custom", executable: "/opt/own/chrome", version: "130.0" }));
+    await redrawn("small");
+    expect(await asDrawn()).toBe(false);
+    expect(await settings.$$eval("#browser option", (options) => options.map((option) => option.textContent))).toContain("/opt/own/chrome 130.0");
+    expect(await settings.inputValue("#browser")).toBe("custom");
+  });
 });

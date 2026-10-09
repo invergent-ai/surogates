@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, UNSAVED } from "../src/browser/downloads.js";
 import { Browsing, NO_BROWSER } from "../src/browser/executor.js";
-import type { Launch } from "../src/browser/host.js";
+import type { Launch } from "../src/browser/client.js";
 import { MAX_READ_BYTES, MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { perform } from "../src/files/operations.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
@@ -73,7 +73,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
         : { ok: Buffer.from(data).toString("base64") });
     },
     refusal: () => ({ error: { type: "other", message: "from the tools" } }),
-    guards: () => ({ home: "/home/u", dataDir: "/data", appDirs: [] }),
+    guards: () => ({ home: "/home/u", dataDir: "/data", cacheDir: "/home/u/.cache/surogate", appDirs: [] }),
     live: () => [],
     stop: () => (stopped.push("tools"), Promise.resolve()),
     end: () => (stopped.push("tools ended"), Promise.resolve()),

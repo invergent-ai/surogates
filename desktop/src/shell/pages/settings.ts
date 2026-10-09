@@ -3,7 +3,8 @@
 // the main process and is set with textContent, or with showText where it may hold the
 // user's paths or QEMU's words.
 
-import { asShown, byId, fillIcons, markTheme, showText } from "./ui.js";
+import { asShown } from "../text.js";
+import { byId, fillIcons, keepFocus, markTheme, showText } from "./ui.js";
 
 interface Appearance {
   theme: "system" | "light" | "dark";
@@ -93,6 +94,9 @@ const said = (error: unknown): string => (error instanceof Error ? error.message
 
 // Why the user's last Take back or Stop failed: null once one goes through.
 let failure: string | null = null;
+// What the section's alert says now: it is set only when that changes, or at a new refusal, so a screen
+// reader says it once for each, not at each redraw.
+let failedShown = "";
 
 // A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
 function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
@@ -104,11 +108,17 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   button.type = "button";
   button.textContent = action;
   button.setAttribute("aria-label", `${action} ${asShown(name)}`);
+  // A held Enter ends this line only, not the next one's, whose button takes the keyboard after it.
+  button.addEventListener("keydown", (event) => {
+    if (event.repeat) event.preventDefault();
+  });
   // Drawn again either way: a list that changed meanwhile shows what holds, and a refusal is said above it.
   button.addEventListener("click", () => void act().then(() => {
     failure = null;
   }, (error: unknown) => {
     failure = `Surogate did not ${action.toLowerCase()} ${name}: ${said(error)}.`;
+    // A refusal answers a new press: the alert is set again, though it says the same words.
+    failedShown = "";
   }).finally(render));
   held.append(what, button);
   return held;
@@ -118,6 +128,11 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
 // each background process it runs.
 // Its title is what a search finds it by.
 function chatRow(chat: Folder["chats"][number]): HTMLElement {
+  // Each line's button, named by its chat and what it ends: a redraw gives the keyboard back to it.
+  const keyed = (made: HTMLElement, what: string) => {
+    made.querySelector("button")!.dataset.focus = `${chat.root} ${what}`;
+    return made;
+  };
   const row = document.createElement("div");
   row.className = "row";
   row.dataset.label = chat.title;
@@ -131,11 +146,11 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
   label.append(
     title,
     mode,
-    ...chat.hosts.map((host) => line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host))),
+    ...chat.hosts.map((host) => keyed(line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host)), `host ${host}`)),
     ...(chat.browser
-      ? [line("Uses the browser on this computer", "Take back", "the browser on this computer", () => settings.takeBrowserBack(chat.root))]
+      ? [keyed(line("Uses the browser on this computer", "Take back", "the browser on this computer", () => settings.takeBrowserBack(chat.root)), "browser")]
       : []),
-    ...chat.processes.map(({ id, command }) => line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id))),
+    ...chat.processes.map(({ id, command }) => keyed(line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id)), `process ${id}`)),
   );
   row.append(label);
   return row;
@@ -150,20 +165,31 @@ async function renderFolders(): Promise<void> {
   } catch (error) {
     unread = said(error);
   }
-  showText(byId("folders-failed"), unread ?? failure ?? "");
-  byId("folders-none").hidden = folders.length > 0 || unread !== null;
-  byId("folders").replaceChildren(...folders.map((folder) => {
-    const group = document.createElement("div");
-    group.className = "folder";
-    const path = document.createElement("h3");
-    path.className = "folder-path";
-    showText(path, folder.folder);
-    group.append(path, ...folder.chats.map(chatRow));
-    return group;
-  }));
-  // Rows drawn since the search was typed are searched too.
-  search();
+  const failed = unread ?? failure ?? "";
+  if (failed !== failedShown) {
+    failedShown = failed;
+    showText(byId("folders-failed"), failed);
+  }
+  // A Take back or Stop that had the keyboard keeps it, or gives it to the line that took its place.
+  keepFocus(() => {
+    byId("folders-none").hidden = folders.length > 0 || unread !== null;
+    byId("folders").replaceChildren(...folders.map((folder) => {
+      const group = document.createElement("div");
+      group.className = "folder";
+      const path = document.createElement("h3");
+      path.className = "folder-path";
+      showText(path, folder.folder);
+      group.append(path, ...folder.chats.map(chatRow));
+      return group;
+    }));
+    // Rows drawn since the search was typed are searched too, before the keyboard is placed among what shows.
+    search();
+  });
 }
+
+// The Browser list's rows as its options were last made from them: they are made again only once the
+// rows change, so a redraw leaves a list its user has open as it is.
+let browserRows = "";
 
 async function render(): Promise<void> {
   void renderFolders();
@@ -175,13 +201,17 @@ async function render(): Promise<void> {
     }
   }
   const browser = byId<HTMLSelectElement>("browser");
-  browser.replaceChildren(...state.browser.rows.map(({ value, label, disabled }) => {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    option.disabled = disabled;
-    return option;
-  }));
+  const rows = JSON.stringify(state.browser.rows);
+  if (rows !== browserRows) {
+    browserRows = rows;
+    browser.replaceChildren(...state.browser.rows.map(({ value, label, disabled }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.disabled = disabled;
+      return option;
+    }));
+  }
   browser.value = state.browser.choice;
   const note = byId("browser-note");
   note.textContent = state.browser.failure
@@ -221,8 +251,29 @@ for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
   link.addEventListener("click", () => void settings.link(link.dataset.link as "usage"));
 }
 for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {
+  // A group named by its row, so a screen reader says what its buttons choose.
+  const row = control.closest<HTMLElement>(".row");
+  const label = row?.dataset.label ?? "";
+  control.setAttribute("role", "group");
+  control.setAttribute("aria-label", label);
+  // Why its last choice failed, under its row's label: gone once one goes through.
+  const refused = document.createElement("span");
+  refused.className = "error";
+  refused.setAttribute("role", "alert");
+  row?.querySelector(".label")?.append(refused);
   for (const option of control.querySelectorAll<HTMLElement>("[data-value]")) {
-    option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(render));
+    // Drawn again either way: the control shows the setting as it is, whatever of the choice was kept before it failed.
+    option.addEventListener("click", () => void settings.set(control.dataset.setting ?? "", option.dataset.value ?? "").then(() => {
+      refused.textContent = "";
+      return render();
+    }, async (error: unknown) => {
+      // The row says what failed whether or not Settings can be drawn again: a state that cannot be read
+      // leaves the control as it was, which says nothing of the choice.
+      const drawn = await render().then(() => true, () => false);
+      // Said of the setting as its control now shows it: only a choice that is not in place did not change.
+      const kept = drawn && option.getAttribute("aria-pressed") === "true";
+      showText(refused, kept ? `${label} is as you chose, but something failed: ${said(error)}.` : `Surogate did not change ${label}: ${said(error)}.`);
+    }));
   }
 }
 // The main process acts only on a button its line shows.
@@ -242,8 +293,18 @@ byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
 byId("settings-search").addEventListener("input", search);
 byId("close").addEventListener("click", () => void settings.close());
 byId("backdrop").addEventListener("click", () => void settings.close());
+// Escape in a search with text clears it, as a search field's does; any other closes Settings.
+// One that cancels an input method's composition is the composition's.
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") void settings.close();
+  if (event.key !== "Escape" || event.isComposing) return;
+  const query = byId<HTMLInputElement>("settings-search");
+  if (event.target === query && query.value !== "") {
+    event.preventDefault();
+    query.value = "";
+    search();
+    return;
+  }
+  void settings.close();
 });
 settings.onChanged(() => void render());
 // Opened on a section, or shown one while open, as the agent's page opens Browser: one the nav has, or none.

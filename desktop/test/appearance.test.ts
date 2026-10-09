@@ -79,9 +79,16 @@ describe("the appearance settings", () => {
 });
 
 describe("the theme", () => {
-  it("paints the window and the controls over the title bar in the theme's colours", () => {
-    expect(chrome(true)).toEqual({ background: "#151515", overlay: { color: "#1a1a19", symbolColor: "#c2c0b6", height: 40 } });
-    expect(chrome(false)).toEqual({ background: "#faf9f5", overlay: { color: "#f5f4ed", symbolColor: "#3d3d3a", height: 40 } });
+  it("paints the window and the controls over the title bar in the theme's colours, 36 px high as Claude Desktop's", () => {
+    expect(chrome(true)).toEqual({ background: "#151515", overlay: { color: "#1a1a19", symbolColor: "#c2c0b6", height: 36 } });
+    expect(chrome(false)).toEqual({ background: "#faf9f5", overlay: { color: "#f5f4ed", symbolColor: "#3d3d3a", height: 36 } });
+  });
+
+  it("dims the controls' strip as Settings' backdrop dims the window, its symbols left to read", () => {
+    // Black over the strip's colour at the backdrop's 0.55; the light theme's symbols turn light on it.
+    expect(chrome(true, true).overlay).toEqual({ color: "#0c0c0b", symbolColor: "#c2c0b6", height: 36 });
+    expect(chrome(false, true).overlay).toEqual({ color: "#6e6e6b", symbolColor: "#faf9f5", height: 36 });
+    expect(chrome(true, true).background).toBe("#151515");
   });
 
   it("is the saved choice from the start, and follows the system's under Match system", () => {

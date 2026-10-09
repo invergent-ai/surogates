@@ -10,9 +10,8 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { ToolLayer } from "../shell/device-stack.js";
 import type { VmClient } from "../vm/client.js";
-import { type BrowserClient, PAUSED } from "./client.js";
+import { type BrowserClient, type Launch, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, UNSAVED } from "./downloads.js";
-import type { Launch } from "./host.js";
 
 export const BROWSER_KINDS = "browser.";
 

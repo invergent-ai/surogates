@@ -8,7 +8,13 @@ import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { type DesktopDeviceState, getDesktop } from "@/lib/desktop-bridge";
-import { createChat, newChatPlace } from "@/lib/local-chat";
+import {
+  type HandedMessage,
+  PRE_SESSION_KEY,
+  createChat,
+  handedNow,
+  newChatPlace,
+} from "@/lib/local-chat";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
 import {
@@ -29,8 +35,6 @@ import {
   surogatesWebChatAdapter,
   toAgentChatSession,
 } from "./surogates-web-chat-adapter";
-
-const PRE_SESSION_KEY = "__pre_session__";
 
 export function ChatPage() {
   const navigate = useNavigate();
@@ -184,6 +188,33 @@ export function ChatPage() {
     composer.current = { folderChoice, shown: place };
   });
 
+  // What Surogate Desktop's quick entry handed this page, for the new chat it opened: held until
+  // the page may send it as that chat's first message (handedNow), then the chat's to send. The
+  // desktop hears what became of it, sent or why not: its box keeps the text until then.
+  const [handed, setHanded] = useState<HandedMessage | null>(null);
+  const [given, setGiven] = useState<HandedMessage | null>(null);
+  const held = useRef<HandedMessage | null>(null);
+  useEffect(() => {
+    held.current = handed;
+  });
+  useEffect(() => {
+    const desktop = getDesktop();
+    const stop = desktop?.onQuickEntry?.(setHanded);
+    return () => {
+      stop?.();
+      if (held.current) {
+        desktop?.answerQuickEntry?.(
+          held.current.id,
+          "The agent's page left the new chat before it was made, so nothing was sent.",
+        );
+      }
+    };
+  }, []);
+  const answerGiven = useCallback((id: string, error: string | null) => {
+    getDesktop()?.answerQuickEntry?.(id, error);
+    setGiven((sent) => (sent?.id === id ? null : sent));
+  }, []);
+
   // Show disclosure banner when transparency is enabled and the user has not
   // yet accepted.  This covers two states:
   //   1. No session yet (landing screen) — keyed by PRE_SESSION_KEY
@@ -196,6 +227,24 @@ export function ChatPage() {
     !sessionDisclosure
   );
   const sessionDeclined = sessionDisclosure === "declined";
+  const handing = handedNow(handed, {
+    sessionId,
+    multiSession,
+    transparency: transparencyConfig,
+    disclosures: disclosureState,
+    place,
+  });
+  useEffect(() => {
+    if (!handed || handing === null) {
+      return;
+    }
+    if (typeof handing === "string") {
+      getDesktop()?.answerQuickEntry?.(handed.id, handing);
+    } else {
+      setGiven(handing);
+    }
+    setHanded(null);
+  }, [handed, handing]);
 
   // Sync checkpoint hashes from tool calls into the workspace store.
   useEffect(() => {
@@ -342,6 +391,8 @@ export function ChatPage() {
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
+              firstMessage={given}
+              onFirstMessageSent={answerGiven}
               // A local-folder chat's browser is on its computer: the pane says where, with the desktop's buttons there.
               computerBrowser={
                 sessionId
