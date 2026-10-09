@@ -37,7 +37,7 @@ from surogates.runtime.governance import floor_gate
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
-from surogates.workstreams import is_project_thread, thread_refusal
+from surogates.workstreams import is_project_thread, thread_refusal, under_a_thread
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -1747,7 +1747,7 @@ async def _run_single_tool(
 
         if image_dispatched:
             pass  # result_content already set by the image branch.
-        elif tool_name in THREAD_REFUSED_TOOLS and is_project_thread(session.config):
+        elif tool_name in THREAD_REFUSED_TOOLS and under_a_thread(session.config):
             result_content = json.dumps({"error": thread_refusal(tool_name)})
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)

@@ -249,6 +249,12 @@ async def create_child_session(
     # folder there, through its binding, as a local chat's helper does.
     merged_config.pop("history_thread", None)
     merged_config.pop("history_project", None)
+    # Every session under a thread says which, on the user's computer too, where it has no copy:
+    # it is refused what its thread is refused.  Never from *config*.
+    merged_config.pop("under_thread", None)
+    under = str(parent.id) if is_project_thread(parent_config) else parent_config.get("under_thread")
+    if under:
+        merged_config["under_thread"] = under
     thread = str(parent.id) if is_project_thread(parent_config) else parent_config.get("history_thread")
     if thread and "execution" not in parent_config:
         session_id = session_id or uuid4()

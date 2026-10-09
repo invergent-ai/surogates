@@ -32,6 +32,15 @@ def is_project_thread(config: dict[str, Any] | None) -> bool:
     return (config or {}).get("workstream_role") == THREAD
 
 
+def under_a_thread(config: dict[str, Any] | None) -> bool:
+    """Whether a session is a project's thread, or works under one: its helper, or a helper's helper.
+
+    What a thread may not start, none of them may: a helper's goal is the
+    model's to write, and is read as its first message, a command included.
+    """
+    return is_project_thread(config) or bool((config or {}).get("under_thread"))
+
+
 def thread_refusal(name: str) -> str:
     """What a project's thread answers to a command (``/name``) or tool *name*
     it cannot start yet.  A routine's runs would work on old files, and

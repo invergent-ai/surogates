@@ -80,7 +80,7 @@ from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal
+from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -1127,7 +1127,8 @@ class AgentHarness(
         if (
             name in _PROJECT_THREAD_REFUSED_COMMANDS
             and session is not None
-            and is_project_thread(session.config)
+            # A thread's helper too, and a helper's: its goal is read as its first message.
+            and under_a_thread(session.config)
         ):
             return thread_refusal(f"/{name}")
         if (

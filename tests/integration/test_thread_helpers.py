@@ -25,14 +25,17 @@ from surogates.harness import landing as landing_module
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 from surogates.tasks import service as task_service
 from surogates.tools.builtin import delegate as delegate_module
+from surogates.workstreams import thread_refusal
 from tests.test_steer_loop import _final_response
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import FENCED, edited, ends, stored
 from .test_thread_copies import a_thread, a_waking_thread_harness, git, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_looping_harness, a_turn, calling, stop
+from .test_workstream_threads import call_tool
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -652,3 +655,66 @@ async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_th
     assert [(pods.project / f"{part}.md").read_text() for part in "abc"] == ["part a\n", "part b\n", "part c\n"]
     landed = {f["ref"] for report in await reports(api, master) for f in report.get("files", []) if f.get("landing") == "landed"}
     assert {"a.md", "b.md", "c.md"} <= landed
+
+
+COMMANDS_A_THREAD_REFUSES = {
+    "loop": "/loop 5m Add a line to notes.txt.",
+    "code": "/code claude Add a line to notes.txt.",
+    "auto-research": "/auto-research repo=/workspace/app Raise the score.\n\nRubric:\n- the dev score is higher",
+    "deep-research": "/deep-research Heat pumps in cold climates",
+}
+
+
+async def woken_with_nothing_started(api, monkeypatch, pool, helper) -> list[str]:
+    """*helper* woken for real; what it answered, having run no turn, no coding agent, no schedule and no research run."""
+    ran: list = []
+
+    async def a_turn_of_it(*args, **kwargs):
+        ran.append("a turn")
+
+    harness = a_worker_waking(api, monkeypatch, pool, helper, a_turn_of_it)
+    harness._run_code_agent = AsyncMock(side_effect=lambda *args, **kwargs: ran.append("the coding agent"))
+    await asyncio.wait_for(harness.wake(helper.id), 60)
+    store = api.app.state.session_store
+    async with api.app.state.session_factory() as db:
+        schedules = (await db.execute(
+            text("SELECT count(*) FROM scheduled_sessions WHERE created_from_session_id = :id"), {"id": helper.id},
+        )).scalar()
+    made = set((await store.get_session(helper.id)).config) & {"active_research_run_id", "active_mission_id", "coordinator"}
+    assert (ran, schedules, made, await helpers_of(api, helper)) == ([], 0, set(), [])
+    return [e.data["message"]["content"] for e in await store.get_events(helper.id, types=[EventType.LLM_RESPONSE])]
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS_A_THREAD_REFUSES))
+@pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker"])
+async def test_a_threads_helper_whose_goal_is_a_command_its_thread_may_not_run_is_refused_it_too(api, monkeypatch, pods, command, tool):
+    thread = await a_coordinating_thread(api)
+    mine, theirs = SandboxPool(pods), SandboxPool(pods)
+    # A helper that is waited for: its outcome, without its turn.  It is woken below, as a worker wakes it.
+    monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling((tool, {"goal": COMMANDS_A_THREAD_REFUSES[command]})), _final_response("Done."),
+    ], pool=mine, saga_settings=FENCED), 120)
+    # Its goal is its first message, word for word: read as a command, it gets the answer its thread gets.
+    [helper] = await helpers_of(api, thread)
+    assert await woken_with_nothing_started(api, monkeypatch, theirs, helper) == [thread_refusal(f"/{command}")]
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS_A_THREAD_REFUSES))
+async def test_a_helper_of_a_threads_helper_is_refused_the_commands_too(api, monkeypatch, pods, command):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    its_own = await create_child_session(store=store, parent=helper, channel="worker")
+    await store.emit_event(its_own.id, EventType.USER_MESSAGE, {"content": COMMANDS_A_THREAD_REFUSES[command]})
+    assert await woken_with_nothing_started(api, monkeypatch, SandboxPool(pods), its_own) == [thread_refusal(f"/{command}")]
+
+
+@pytest.mark.parametrize("tool", ["cron_create", "dispatch_experiments"])
+async def test_a_threads_helper_and_its_own_are_refused_the_tools_their_thread_is(api, tool):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+    helper = await create_child_session(store=store, parent=thread, channel="delegation")
+    its_own = await create_child_session(store=store, parent=helper, channel="worker")
+    for session in (helper, its_own):
+        assert await call_tool(api, session, tool) == {"error": thread_refusal(tool)}

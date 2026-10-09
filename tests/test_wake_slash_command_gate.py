@@ -204,6 +204,20 @@ def test_a_project_thread_on_the_users_computer_runs_the_commands_its_folder_can
     assert harness._slash_command_block_reason(f"/{command} Go.", thread) == answer
 
 
+@pytest.mark.parametrize("command", ["loop", "auto-research", "deep-research", "code"])
+@pytest.mark.parametrize("where", ["in the cloud", "on the user's computer"])
+def test_a_session_under_a_project_thread_is_refused_the_commands_its_thread_is(command, where):
+    harness = _harness(AsyncMock(), _permissive())
+    helper = _session()
+    # A helper, or a helper's helper: neither is a thread, and each says which thread it is under.
+    helper.config["under_thread"] = "00000000-0000-0000-0000-0000000000aa"
+    if where == "on the user's computer":
+        helper.config["execution"] = {"kind": "device", "device_id": "00000000-0000-0000-0000-0000000000d1"}
+    assert harness._slash_command_block_reason(f"/{command} Go.", helper) == thread_refusal(f"/{command}")
+    # What a thread may run, they may.
+    assert harness._slash_command_block_reason("/mission Go.", helper) is None
+
+
 @pytest.mark.asyncio
 async def test_a_project_threads_loop_never_schedules_a_run(monkeypatch):
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))

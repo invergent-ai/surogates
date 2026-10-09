@@ -592,3 +592,22 @@ async def test_a_read_is_ended_before_what_a_step_set_runs_and_left_alone_when_n
     assert order == ["read ended", "handed on"]
     await before_child(reading)
     assert order == ["read ended", "handed on"]
+
+
+@pytest.mark.asyncio
+async def test_every_session_under_a_project_thread_says_which_thread_and_no_caller_can_say_so_for_it():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    device = {"kind": "device", "device_id": str(uuid4())}
+    for thread in (
+        _make_session(config={**_workspace_config(), "workstream_role": "thread", "workstream_id": "w-1"}),
+        # On the user's computer a helper has no copy and names no thread to hand back to: it says this all the same.
+        _make_session(config={**_workspace_config(), "workstream_role": "thread", "workstream_id": "w-1", "execution": device}),
+    ):
+        await create_child_session(store=store, parent=thread, channel="delegation")
+        helper = _make_session(config=store.create_session.await_args.kwargs["config"], parent_id=thread.id)
+        await create_child_session(store=store, parent=helper, channel="worker")
+        its_own = store.create_session.await_args.kwargs["config"]
+        assert helper.config["under_thread"] == its_own["under_thread"] == str(thread.id)
+    # A child of any other session does not, whatever its caller passes.
+    await create_child_session(store=store, parent=_make_session(), channel="delegation", config={"under_thread": "t-1"})
+    assert "under_thread" not in store.create_session.await_args.kwargs["config"]
