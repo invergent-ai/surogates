@@ -601,6 +601,10 @@ async def test_a_command_refused_by_its_users_limit_is_run_at_the_retry_also_whe
     refusing = workers.worker()
     refusing._admit_turn = AsyncMock(return_value="You have reached your limit.")
     await refusing.wake(master.id)
+    # A failed session is its user's to retry: no wake for something else runs the command meanwhile.
+    await workers.its_browser_is_handed_back(master.id)
+    await workers.wake(master.id)
+    assert (workers.ran, await workers.status(master.id)) == ([], "failed")
     retried = await api.client.post(f"/v1/sessions/{master.id}/retry", headers=api.auth())
     assert retried.status_code == 200, retried.text
     # The retry's wake says it began, and crashes before it reaches the command.
@@ -801,6 +805,19 @@ async def test_a_goal_in_flight_goes_on_after_a_command_typed_between_its_turns(
     assert workers.ran == ["_handle_goal_command", ANSWERED[command]]
 
 
+async def test_a_goal_just_set_is_worked_on_though_a_command_was_typed_before_its_first_turn(workers):
+    chat = await workers.chat()
+    await workers.types(chat, "/goal Ship the Q3 report")
+    await workers.types(chat, "/goal status")
+    # The goal's first turn is still queued: the chat does not rest on the second command's answer.
+    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
+
+    await workers.wake(chat)
+
+    assert {"role": "user", "content": "Ship the Q3 report"} in workers.requests[0]
+    assert workers.ran == ["_handle_goal_command"] * 2
+
+
 @pytest.mark.parametrize("moment", MOMENTS)
 async def test_a_command_typed_during_a_goals_turn_is_run_though_the_goals_next_turn_was_queued_after_it(workers, moment):
     chat = await workers.chat()
@@ -888,8 +905,20 @@ async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers)
 async def test_a_coordinators_command_is_answered_once_and_a_wake_with_nothing_new_takes_no_turn(workers, command):
     chat = await a_coordinator(workers)
     handler = "_handle_compress_command" if command == "/compress" else "_handle_mission_command"
+    # A report the coordinator has read is nothing the cursor waits before.
+    await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+    workers.requests.clear()
+    released = []
+
+    async def release_for_session(session_id, **_):
+        released.append(session_id)
+
+    workers.sandbox_pool = SimpleNamespace(release_for_session=release_for_session)
     await workers.types(chat, command)
     written = await workers.log(chat)
+    # Its mission in flight, the chat's turn has not ended: nothing it holds is let go.
+    assert released == []
     # The mission's chat stays active, with nothing waiting: the cursor is past the command's answer.
     assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", True)
 
@@ -924,6 +953,35 @@ async def test_a_paused_missions_coordinator_takes_no_turn_on_a_report_and_reads
     for helper in helpers:
         assert {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} in conversation
     assert workers.ran == ["_handle_mission_command"] * 2
+
+
+async def test_a_helpers_failure_no_turn_has_read_is_not_passed_over_either(workers):
+    chat = await a_coordinator(workers)
+    await workers.store.emit_event(chat, EventType.WORKER_FAILED, {"worker_id": "a-helper", "error": "the hub timed out"})
+    await workers.types(chat, "/mission status")
+    assert not await workers.nothing_waits(chat)
+
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "[Worker a-helper failed: the hub timed out]"} in conversation
+
+
+async def test_a_report_written_right_after_a_commands_answer_still_wakes_its_coordinator(workers):
+    chat = await a_coordinator(workers)
+    reported = []
+
+    async def a_helper_reports():
+        reported.append(await workers.a_helper_reports(chat))
+
+    await workers.says(chat, "/mission status")
+    await workers.worker(store=Meanwhile(workers.store, then=a_helper_reports)).wake(chat)
+    # The report is the log's last event: the cursor stops before it, not on it.
+    assert not await workers.nothing_waits(chat)
+
+    await workers.wake(chat)
+    [conversation] = workers.requests
+    assert conversation[-1] == {"role": "user", "content": f"[Worker {reported[0]} completed]\nChecked the figures."}
 
 
 async def test_a_coordinators_chat_is_not_brought_to_rest_when_its_mission_cannot_be_read(workers, monkeypatch):
@@ -984,6 +1042,16 @@ async def test_a_research_command_is_the_models_to_answer(workers):
     [conversation] = workers.requests
     assert conversation[-1] == {"role": "user", "content": build_deep_research_message(topic="The Q3 market")}
     assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == ([], "Noted.", "completed")
+
+
+async def test_a_research_command_typed_during_a_turn_is_that_turns_to_read(workers):
+    chat = await workers.chat()
+    await in_a_turn(workers, chat, "a tool call", "/deep-research The Q3 market")
+    # It is the model's to answer, so the turn under way reads it, as it reads anything its user says.
+    assert workers.requests[1][-1] == {"role": "user", "content": "/deep-research The Q3 market"}
+    assert await workers.status(chat) == "completed"
+    await workers.wake(chat)
+    assert (workers.ran, len(workers.requests)) == ([], 2)
 
 
 async def test_a_research_command_cut_off_in_its_turn_is_read_again_as_the_research_it_asked_for(workers):

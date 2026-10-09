@@ -1407,7 +1407,7 @@ class AgentHarness(
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending and not resumable(session, all_events) and self._waiting_command(session, all_events) is None:
+            if not pending and not resumable(session, all_events):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,

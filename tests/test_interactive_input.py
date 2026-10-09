@@ -159,6 +159,6 @@ async def test_a_command_typed_while_a_question_waits_is_not_its_answer():
     for command in ("/mission cancel", "/compress", " /goal status", "/loop 5m Check the cash report"):
         assert await try_resolve_text_answer(None, session_id=uuid4(), text=command) is None
     # Any other words, a path among them, are looked up as an answer.
-    for words in ("/tmp/report.pdf", "Yes, go on."):
+    for words in ("/tmp/report.pdf", "/yes please", "Yes, go on."):
         with pytest.raises(AttributeError):
             await try_resolve_text_answer(None, session_id=uuid4(), text=words)
