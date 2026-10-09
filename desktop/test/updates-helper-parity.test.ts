@@ -81,7 +81,10 @@ const FORMS: Array<[name: string, manifest: string | Buffer, helper: boolean | n
   ["nothing", "", false, false],
   ["a newline alone", "\n", false, false],
   ["with a byte order mark before it", `\uFEFF${line()}`, null, false],
-  ["with a NUL in it", line().replace("stable", "sta\0ble"), false, false],
+  // A NUL where the release's own fields refuse nothing: only the reading of the NUL itself does.
+  ["with a NUL in a field of its own", line({ note: "@" }).replace("@", "a\0b"), false, false],
+  ["with a NUL after it", `${line().trimEnd()}\0\n`, false, false],
+  ["with a NUL and then a second release", `${line({}, "9.9.9").trimEnd()}\0${line()}`, false, false],
   ["with a byte that is no UTF-8 in a field of its own", Buffer.concat([Buffer.from(line().trimEnd().slice(0, -1)), Buffer.from(',"note":"'), Buffer.from([0xff]), Buffer.from('"}\n')]), null, false],
   // A version: x.y.z in the ten digits, no part with a zero before it.
   ["of version 0.0.1", line({}, "0.0.1"), true, true],
