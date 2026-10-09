@@ -571,34 +571,6 @@ async def test_a_command_typed_during_a_chats_turn_is_run_by_its_own_wake_once_t
     assert (workers.ran, len(workers.requests)) == ([ANSWERED[command]], 2)
 
 
-async def test_a_command_typed_during_a_turn_whose_worker_died_is_run_by_the_wake_that_recovers_the_chat(workers):
-    chat = await workers.chat()
-    await workers.says(chat, "Open the report.")
-    # A tool call is under way when the user types a command; its result moves the cursor past the
-    # message, the model is asked again, and the worker dies.
-    lease = await workers.store.try_acquire_lease(chat, "a-worker-that-dies", ttl_seconds=60)
-    await workers.store.emit_event(chat, EventType.HARNESS_WAKE, {"worker_id": "a-worker-that-dies", "cursor": 0})
-    await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
-    call = {"id": "call_todo", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
-    await workers.store.emit_event(
-        chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}},
-    )
-    await workers.store.emit_event(chat, EventType.TOOL_CALL, {"tool_call_id": "call_todo", "name": "todo", "arguments": "{}"})
-    await workers.says(chat, "/compress")
-    result = await workers.store.emit_event(
-        chat, EventType.TOOL_RESULT, {"tool_call_id": "call_todo", "name": "todo", "content": '{"ok": true}'},
-    )
-    await workers.store.advance_harness_cursor(chat, result, lease.lease_token)
-    await workers.store.emit_event(chat, EventType.LLM_REQUEST, {})
-    await workers.store.release_lease(chat, lease.lease_token)
-    assert await workers.swept(chat)
-
-    await workers.wake(chat)
-
-    # The model was asked after the message, but no wake has answered the command: it is still to run.
-    assert (workers.ran, workers.requests) == (["_handle_compress_command"], [])
-
-
 async def test_a_command_refused_by_its_users_limit_is_run_at_the_retry_also_when_the_retrys_first_wake_crashes(api, workers):
     master = await master_of(api, await create(api))
     await workers.says(master.id, "/compress")
@@ -827,6 +799,86 @@ async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_no
     assert (said.count(first), said.count(second), said.index(first) < said.index(second)) == (1, 1, True)
     assert ((await workers.session(chat)).config.get("outcome") or {}).get("description") == "Ship the Q3 report"
     assert workers.requests[0][-1] == {"role": "user", "content": "Ship the Q3 report"}
+
+
+async def test_a_question_asked_before_a_command_gets_its_turn_after_it(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "And Q1?")
+    await workers.says(chat, "/goal status")
+    await workers.nobody_is_queued()
+
+    await workers.wake(chat)
+    # The command is answered; the chat does not rest over the question, and is queued for it.
+    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_goal_command"], [], "active")
+    assert not await workers.nothing_waits(chat)
+    assert await queued(workers.api, await workers.session(chat))
+
+    await workers.wake(chat)
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "And Q1?"} in conversation
+    assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == (["_handle_goal_command"], "Noted.", "completed")
+
+
+async def test_a_question_and_a_command_sent_while_a_command_is_answered_are_each_taken_up(workers):
+    chat = await workers.chat()
+
+    async def the_user_goes_on():
+        await workers.says(chat, "And Q1?")
+        await workers.says(chat, "/loop list")
+
+    await workers.says(chat, "/goal status")
+    await workers.worker(store=Meanwhile(workers.store, before=the_user_goes_on)).wake(chat)
+    for _ in range(3):
+        await workers.wake(chat)
+
+    assert workers.ran == ["_handle_goal_command", "_handle_loop_command"]
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "And Q1?"} in conversation
+    assert await workers.status(chat) == "completed"
+
+
+async def a_turn_cut_off(workers: Workers, chat: UUID, *, at: str, command: str | None) -> None:
+    """The chat's turn on "Open the report." is cut off by its worker's death, in a tool call or
+    right after the call's result moved the cursor; *command* is typed during the call."""
+    store = workers.store
+    await workers.says(chat, "Open the report.")
+    lease = await store.try_acquire_lease(chat, "a-worker-that-dies", ttl_seconds=60)
+    await store.emit_event(chat, EventType.HARNESS_WAKE, {"worker_id": "a-worker-that-dies", "cursor": 0})
+    await store.emit_event(chat, EventType.LLM_REQUEST, {})
+    call = {"id": "call_todo", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
+    await store.emit_event(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}})
+    await store.emit_event(chat, EventType.TOOL_CALL, {"tool_call_id": "call_todo", "name": "todo", "arguments": "{}"})
+    if command is not None:
+        await workers.says(chat, command)
+    if at == "after the call's result":
+        result = await store.emit_event(
+            chat, EventType.TOOL_RESULT, {"tool_call_id": "call_todo", "name": "todo", "content": '{"ok": true}'},
+        )
+        await store.advance_harness_cursor(chat, result, lease.lease_token)
+    await store.release_lease(chat, lease.lease_token)
+
+
+@pytest.mark.parametrize("at", ["in the call", "after the call's result"])
+async def test_a_turn_cut_off_with_a_command_waiting_is_resumed_once_the_command_is_run(workers, at):
+    chat = await workers.chat()
+    await a_turn_cut_off(workers, chat, at=at, command="/goal status")
+    assert await workers.swept(chat)
+
+    await workers.wake(chat)
+    # The command first, and the chat does not rest over the turn that was cut off.
+    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_goal_command"], [], "active")
+
+    await workers.wake(chat)
+    assert (workers.ran, len(workers.requests), (await workers.said(chat))[-1]) == (["_handle_goal_command"], 1, "Noted.")
+    assert (await workers.status(chat), EventType.SESSION_FAIL.value in await workers.log(chat)) == ("completed", False)
+
+
+async def test_a_turn_cut_off_with_no_command_is_resumed_as_before(workers):
+    chat = await workers.chat()
+    await a_turn_cut_off(workers, chat, at="in the call", command=None)
+    assert await workers.swept(chat)
+    await workers.wake(chat)
+    assert (workers.ran, len(workers.requests), await workers.status(chat)) == ([], 1, "completed")
 
 
 async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stopped(workers):

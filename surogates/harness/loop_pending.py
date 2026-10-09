@@ -88,12 +88,14 @@ _REPORT_EVENT_TYPES = frozenset({
 _GOAL_TURN_MESSAGES = frozenset({"outcome_kickoff", "outcome_continuation"})
 
 
-def _first_unread(events: list[Any], *, goal_in_flight: bool) -> int | None:
+def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: Any) -> int | None:
     """Return the id of the first event in *events* that still waits for the model to read it.
 
-    A worker's report, and, while a goal is in flight, the message that
-    gives the goal its next turn.  A request reads what was written before
-    it, so the unread ones are those after the log's last ``llm.request``.
+    A worker's report; a message of the user's own that is no command
+    (*is_plain_message* says which); and, while a goal is in flight, the
+    message that gives the goal its next turn.  A request reads what was
+    written before it, so the unread ones are those after the log's last
+    ``llm.request``.
     """
     first: int | None = None
     for event in events:
@@ -102,10 +104,41 @@ def _first_unread(events: list[Any], *, goal_in_flight: bool) -> int | None:
             first = None
         elif first is None and (
             event_type in _REPORT_EVENT_TYPES
+            or is_plain_message(event)
             or goal_in_flight and _gives_a_goal_its_turn(event)
         ):
             first = event.id
     return first
+
+
+#: What ends a turn of the model's for good: after one of these the turn is not one to go on with.
+_TURN_END_EVENT_TYPES = frozenset({
+    EventType.SESSION_COMPLETE.value,
+    EventType.SESSION_FAIL.value,
+    EventType.SESSION_PAUSE.value,
+    EventType.SESSION_STOPPED.value,
+})
+
+
+def _turn_cut_off(events: list[Any]) -> bool:
+    """Return True if *events* end in a turn of the model's that its worker's death cut off.
+
+    The model was asked and has not answered, or its last answer called
+    tools: the turn is to be gone on with.  An answer of the harness's to a
+    command is no word of the model's and leaves the turn as it was.
+    """
+    cut_off = False
+    for event in events:
+        event_type = _event_type(event)
+        if event_type == EventType.LLM_REQUEST.value:
+            cut_off = True
+        elif event_type == EventType.LLM_RESPONSE.value:
+            data = getattr(event, "data", None) or {}
+            if "answers" not in data:
+                cut_off = bool((data.get("message") or {}).get("tool_calls"))
+        elif event_type in _TURN_END_EVENT_TYPES:
+            cut_off = False
+    return cut_off
 
 
 def _gives_a_goal_its_turn(event: Any) -> bool:

@@ -179,6 +179,7 @@ from surogates.harness.loop_pending import (
     _command_answered,
     _first_unread,
     _goal_turn_waits,
+    _turn_cut_off,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -1416,7 +1417,7 @@ class AgentHarness(
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending and not resumable(session, all_events):
+            if not pending and not resumable(session, all_events) and self._waiting_command(session, all_events) is None:
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -1593,16 +1594,15 @@ class AgentHarness(
                     written = all_events + await self._store.get_events(
                         session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
-                at_rest = await self._end_command_turn(session, lease, typed_at, written)
+                at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
                 if is_new and self._redis is not None and (
-                    self._waiting_command(session, written) is not None
-                    or self._goal_waits(session, written)
-                    or is_project_master(session.config) and unread_reports(written)
+                    not at_rest or is_project_master(session.config) and unread_reports(written)
                 ):
-                    # What still waits, another command, a goal's next turn
-                    # or a thread's report to its master, gets its wake: the
-                    # one it queued may have come and gone, for nothing,
-                    # while this command was the session's work.
+                    # What still waits, another command, a message, a turn
+                    # cut off, a goal's next turn or a thread's report to
+                    # its master, gets its wake: the one it queued may have
+                    # come and gone, for nothing, while this command was the
+                    # session's work.
                     from surogates.config import enqueue_session
 
                     await enqueue_session(
@@ -4855,10 +4855,13 @@ class AgentHarness(
         lease: SessionLease,
         typed_at: int,
         events: list,
+        *,
+        ends_here: bool,
     ) -> bool:
         """End the turn of the command the user typed at event *typed_at*, once the
         harness has answered it in *events*, the session's log: whether the
-        session is at rest.
+        session is at rest.  *ends_here* when this wake stops at the command;
+        a later wake that goes on to the model leaves the cursor to that turn.
 
         A model's last answer ends its turn: the cursor moves past it and the
         session comes to rest, so a later wake finds nothing to do.  A
@@ -4872,8 +4875,9 @@ class AgentHarness(
         answer the command: a coding run whose worker died stays as the
         sweeper expects it.  A session whose mission is in flight stays active
         for its helpers' reports, as at the end of its coordinator's turns;
-        so does one whose goal has its next turn queued; and one its user
-        stopped meanwhile stays stopped.
+        so does one whose goal has its next turn queued, one with a message
+        of its user's no turn has read, and one whose turn a dead worker cut
+        off; and one its user stopped meanwhile stays stopped.
         """
         if any(
             event.type == EventType.USER_MESSAGE.value and event.id > typed_at
@@ -4883,11 +4887,30 @@ class AgentHarness(
         if not _command_answered(events, typed_at):
             return False
         goal_waits = self._goal_waits(session, events)
-        at_rest = not goal_waits and not await self._mission_has_pending_work(session, or_raise=True)
-        # Never past a helper's report, or a goal's next turn, that no turn
-        # has read: behind the cursor it would wake nobody, and it is
-        # still to be read.
-        unread = _first_unread(events, goal_in_flight=goal_waits)
+        # What no turn has read: a helper's report, a goal's next turn, a
+        # message of the user's own.  The cursor never moves past it, since
+        # behind the cursor it would wake nobody, and the session does not
+        # rest over it.
+        unread = _first_unread(
+            events, goal_in_flight=goal_waits,
+            is_plain_message=lambda event: (
+                event.type == EventType.USER_MESSAGE.value
+                and not (event.data or {}).get("synthetic")
+                and not self._answers_itself(_user_event_text(event.data), session)
+            ),
+        )
+        unread_message = unread is not None and any(
+            event.id == unread and event.type == EventType.USER_MESSAGE.value for event in events
+        )
+        # Nor does it rest over a turn of the model's a dead worker cut off.
+        cut_off = _turn_cut_off(events)
+        at_rest = (
+            not goal_waits and not unread_message and not cut_off
+            and not await self._mission_has_pending_work(session, or_raise=True)
+        )
+        if not at_rest and (cut_off or not ends_here):
+            # The turn that goes on moves the cursor itself.
+            return False
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=events[-1].id if unread is None else unread - 1,
