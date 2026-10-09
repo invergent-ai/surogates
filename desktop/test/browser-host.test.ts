@@ -1473,11 +1473,97 @@ describe("a page's download, as the host stages it", () => {
       expect(await uploads("op-6")).toEqual({ ok: { files: 1, notices: ["A download was saved"] } });
       host.unanswered("op-6");
       expect(state().unseen.get(SESSION)).toEqual(["A download was saved"]);
+      // An upload cancelled while its files are given takes nothing with it either.
+      const slow: { takes?: (came: string) => void } = {};
+      tab.input({ evaluate: () => new Promise((done) => {
+        slow.takes = done;
+      }), dispose: () => Promise.resolve() });
+      const stop = new AbortController();
+      const giving = host.perform(launch, "chat-1", SESSION, "browser.set_input_files", { files: [REPORT] }, stop.signal, "op-upload");
+      await vi.waitFor(() => expect(slow.takes).toBeDefined());
+      stop.abort();
+      expect(await giving).toEqual(CANCELLED);
+      slow.takes!("given");
+      await turn();
+      expect(state().unseen.get(SESSION)).toEqual(["A download was saved"]);
       // And nothing for a session whose tab has closed since: no page of its is left to say it of.
       expect(await moved("op-7")).toEqual({ ok: { notices: ["A download was saved"] } });
       state().tabs.delete(SESSION);
       host.unanswered("op-7");
       expect(state().unseen.get(SESSION)).toBeUndefined();
+    });
+
+    it("begins the five seconds of a page that asks for a file while something of the agent's is still on its way to it only when that has reached the page", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const tab = taken();
+        const moves: Array<() => void> = [];
+        Object.assign(tab.page, { mouse: { move: () => new Promise<void>((done) => moves.push(done)) } });
+        const moving = host.perform({ executable: join(profile, "no-browser-here"), profile }, "chat-1", SESSION, "browser.mouse", { action: "move", x: 1, y: 1 }, new AbortController().signal, "op-1");
+        for (let n = 0; n < 10 && moves.length === 0; n += 1) await turn();
+        expect(moves).toHaveLength(1);
+        // Taken over while the move is on its way to a busy page: answered paused at once, and the page asks meanwhile.
+        host.pause("chat-2", true);
+        expect(await moving).toEqual(PAUSED);
+        tab.input();
+        vi.advanceTimersByTime(OWN_CHOOSER_MS + 1_000);
+        await turn();
+        expect(tab.heard()).toBe(1);
+        // The move reaches the page: its five seconds begin then.
+        moves.shift()!();
+        await turn();
+        vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        await turn();
+        expect(tab.heard()).toBe(1);
+        vi.advanceTimersByTime(1);
+        await turn();
+        expect(tab.heard()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does nothing in a page for an operation that was cancelled, or whose browser was taken over, while it waited for the page to answer after a hand back", async () => {
+      const tab = taken();
+      const moves: Array<() => void> = [];
+      Object.assign(tab.page, { mouse: { move: () => new Promise<void>((done) => moves.push(done)) } });
+      const move = (id: string, signal = new AbortController().signal) =>
+        host.perform({ executable: join(profile, "no-browser-here"), profile }, "chat-1", SESSION, "browser.mouse", { action: "move", x: 1, y: 1 }, signal, id);
+      const answers = async () => {
+        await turn();
+        while (tab.reads.length > 0) {
+          tab.reads.shift()!();
+          await turn();
+        }
+        await turn();
+      };
+      // Handed back, the page has not answered yet: an operation waits for it, and is cancelled meanwhile.
+      tab.answering.slow = true;
+      host.pause("chat-2", true);
+      host.pause("chat-2", false);
+      const cancel = new AbortController();
+      const cancelled = move("op-1", cancel.signal);
+      await turn();
+      cancel.abort();
+      expect(await cancelled).toEqual(CANCELLED);
+      await answers();
+      expect(moves).toHaveLength(0);
+      // Handed back again, and one waits: its user takes the browser over before the page has answered.
+      host.pause("chat-2", true);
+      host.pause("chat-2", false);
+      const waiting = move("op-2");
+      await turn();
+      host.pause("chat-2", true);
+      expect(await waiting).toEqual(PAUSED);
+      await answers();
+      expect(moves).toHaveLength(0);
+      // One sent once the page has answered after the hand back acts in it.
+      host.pause("chat-2", false);
+      await answers();
+      const acting = move("op-3");
+      for (let n = 0; n < 10 && moves.length === 0; n += 1) await turn();
+      moves.shift()!();
+      expect(await acting).toEqual({ ok: { notices: [] } });
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
