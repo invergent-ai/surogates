@@ -1204,6 +1204,16 @@ describe("the browser on this computer", () => {
       const COULD_NOT = { error: { type: "denied", message: "This computer could not ask its user about this: disk I/O error" } };
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(COULD_NOT);
       expect([errors.length, user.asked.length, journal.bindings.ports(ROOT)]).toEqual([1, 1, []]);
+      // Read as the navigation comes and as its turn comes, and not when its user is about to be asked: nobody is asked about a port whose holder is not
+      // known, though the port could be kept now.
+      bindings.allowPort = (root, port) => journal.bindings.allowPort(root, port);
+      let reads = 0;
+      bindings.portOwner = (port) => {
+        if ((reads += 1) > 2) throw new Error("disk I/O error");
+        return journal.bindings.portOwner(port);
+      };
+      expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(COULD_NOT);
+      expect([user.asked.length, reads, journal.bindings.ports(ROOT)]).toEqual([1, 3, []]);
       bindings.portOwner = () => {
         throw new Error("disk I/O error");
       };

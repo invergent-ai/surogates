@@ -829,14 +829,31 @@ describe("a chat's own servers, through the manager's door", () => {
     expect(await knock(KEY, "3000 6")).toBe("200\nserved hello");
     expect(await knock(KEY, 8000)).toBe("502 ECONNREFUSED\n");
     expect(reached).toEqual([["root-1", 3000, 4], ["root-1", 3000, 6], ["root-1", 8000, 4]]);
+    // A connection held through the door when its guest stops ends with the guest, and the door goes too.
+    const held = connect({ path: door() });
+    held.on("error", () => {});
+    const ended = new Promise<void>((done) => held.once("close", () => done()));
+    held.write(`${KEY} 3000\n`);
+    await new Promise((done) => held.once("data", done));
+    // So does one that has not knocked yet.
+    const silent = connect({ path: door() });
+    silent.on("error", () => {});
+    const dropped = new Promise<void>((done) => silent.once("close", () => done()));
+    await new Promise((done) => silent.once("connect", done));
+    const door0 = door();
+    const stopped = performance.now();
     await manager.stop();
-    // The door goes with its guest.
+    await Promise.all([ended, dropped]);
+    // At the stop, not when a knock's time is up.
+    expect(performance.now() - stopped).toBeLessThan(2_000);
+    expect(existsSync(door0)).toBe(false);
     expect(await knock(KEY, 3000)).toBe("ENOENT");
   });
 
   it("opens the door to no key but a device's own, no port but one forwarded for it, neither of the sandbox's own proxies' ports, and nothing that is not a knock", async () => {
     const manager = new VmManager(options(), fakeVm(roots));
-    manager.forwards(KEY, [[3000, "root-1"], [3128, "root-1"], [1080, "root-1"]]);
+    // A port past the last, forwarded by mistake, is no port either.
+    manager.forwards(KEY, [[3000, "root-1"], [3128, "root-1"], [1080, "root-1"], [65_536, "root-1"]]);
     manager.forwards(OTHER_KEY, [[9000, "root-1"]]);
     await run(manager);
     await until(() => existsSync(door()));
@@ -851,8 +868,10 @@ describe("a chat's own servers, through the manager's door", () => {
     ] as const) {
       expect(await knock(key, to), `${key} ${to}`).toBe("403 refused\n");
     }
-    // A line that never ends, and bytes sent before the door answers, are dropped unheard.
+    // A line that never ends, and bytes sent before the door answers, are dropped unheard: one past a knock's size at once, not when its time is up.
+    const begun = performance.now();
     expect(await knocking("x".repeat(300))).toBe("");
+    expect(performance.now() - begun).toBeLessThan(2_000);
     expect(await knocking(`${KEY} 3000\nGET / HTTP/1.1\r\n\r\n`)).toBe("");
     expect(reached).toEqual([]);
     await manager.stop();
@@ -953,6 +972,8 @@ describe("a chat's own servers, through the manager's door", () => {
       const [ours, theirs] = duplexPair();
       theirs.end(whole);
       theirs.resume();
+      // Gone as soon as it has ended, as the guest's stream is once the root's server has closed.
+      ours.once("end", () => ours.destroy());
       return ours;
     });
     await until(() => existsSync(door()));
@@ -973,20 +994,26 @@ describe("a chat's own servers, through the manager's door", () => {
     own.close();
   });
 
-  // A door of its own with small bounds, into roots whose every connection is held open: each connection's far
-  // end, by the order it was made.
+  // A door of its own with small bounds, into roots whose every connection is held open: each connection's ends
+  // towards the guest, by the order it was made, what the far one heard, and which were let go when each was asked for.
   const bounded = async (bounds: { perRoot?: number; perKey?: number; open?: number }) => {
     const forwarded = new Forwarded();
     forwarded.set(KEY, [[3000, "root-1"], [3001, "root-1"], [4000, "root-2"]]);
     forwarded.set(OTHER_KEY, [[5000, "root-3"]]);
     const far: Duplex[] = [];
     const near: Duplex[] = [];
+    const heard: string[] = [];
+    const gone: boolean[][] = [];
     mkdirSync(join(dir, "run"));
     const own = new Door(door(), forwarded, async (root, to) => {
       reached.push([root, to, 4]);
+      gone.push(near.map((end) => end.destroyed));
       const [ours, theirs] = duplexPair();
-      theirs.on("data", (chunk: Buffer) => theirs.write(chunk));
-      far.push(theirs);
+      const at = far.push(theirs) - 1;
+      heard[at] = "";
+      theirs.on("data", (chunk: Buffer) => {
+        heard[at] += chunk.toString();
+      });
       near.push(ours);
       return ours;
     }, bounds);
@@ -1006,31 +1033,32 @@ describe("a chat's own servers, through the manager's door", () => {
       await vi.waitFor(() => expect(held.said !== "" || !held.open).toBe(true));
       return held;
     };
-    return { own, far, near, hold };
+    return { own, far, near, heard, gone, hold };
   };
 
-  it("ends the connection idle longest to admit a new one at a root's bound, and none while there is room", async () => {
-    const { own, far, near, hold } = await bounded({ perRoot: 3 });
+  it("ends the connection idle longest to admit a new one at a root's bound, a byte either way counted, and none while there is room", async () => {
+    const { own, far, near, heard, gone, hold } = await bounded({ perRoot: 3 });
     const first = await hold(KEY, 3000);
     const second = await hold(KEY, 3001);
     // With two of three held, nothing is ended for the third.
     const third = await hold(KEY, 3000);
     expect([first, second, third].map(({ said, open }) => [said, open])).toEqual([["200\n", true], ["200\n", true], ["200\n", true]]);
-    // A byte either way counts: the first hears from the browser, the third from its server; the second carries none.
+    // A byte either way counts: the first hears from the browser alone, the second from its server alone; the third carries none.
     first.socket.write("x");
-    far[2]?.write("y");
-    await vi.waitFor(() => expect([first.said, third.said]).toEqual(["200\nx", "200\ny"]));
+    far[1]?.write("y");
+    await vi.waitFor(() => expect([heard[0], second.said]).toEqual(["x", "200\ny"]));
     const fourth = await hold(KEY, 3000);
-    await vi.waitFor(() => expect(second.open).toBe(false));
-    expect([first.open, third.open, fourth.said, fourth.open]).toEqual([true, true, "200\n", true]);
-    // Let go towards the guest too: the one ended, and no other.
-    await vi.waitFor(() => expect(near.map((end) => end.destroyed)).toEqual([false, true, false, false]));
-    // And again: now the third is the one that carried nothing for longest.
+    await vi.waitFor(() => expect(third.open).toBe(false));
+    expect([first.open, second.open, fourth.said, fourth.open]).toEqual([true, true, "200\n", true]);
+    // Let go towards the guest before the new one is asked for there, so that the guest has room for it: that one, and no other.
+    expect(gone[3]).toEqual([false, false, true]);
+    expect(near.map((end) => end.destroyed)).toEqual([false, false, true, false]);
+    // And again: the server's byte is older than the browser's now, so the second goes.
     first.socket.write("x");
     fourth.socket.write("z");
-    await vi.waitFor(() => expect([first.said, fourth.said]).toEqual(["200\nxx", "200\nz"]));
+    await vi.waitFor(() => expect([heard[0], heard[3]]).toEqual(["xx", "z"]));
     const fifth = await hold(KEY, 3001);
-    await vi.waitFor(() => expect(third.open).toBe(false));
+    await vi.waitFor(() => expect(second.open).toBe(false));
     expect([first.open, fourth.open, fifth.open, reached.length]).toEqual([true, true, true, 5]);
     own.close();
     await vi.waitFor(() => expect([first.open, fourth.open, fifth.open]).toEqual([false, false, false]));

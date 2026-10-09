@@ -520,6 +520,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
   let door: Server;
   let knocks: string[];
   let behind: Set<Socket>;
+  // How long the door takes to answer a knock it carries.
+  let slow: number;
   const path = () => join(folder, "browser.sock");
   // What the browser itself says of its own navigation, and its user's.
   const own = { "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
@@ -555,6 +557,7 @@ describe("a chat's own servers, through the browser's proxy", () => {
     folder = mkdtempSync(join(tmpdir(), "browser-door-"));
     knocks = [];
     behind = new Set();
+    slow = 0;
     door = createServer((socket) => {
       socket.on("error", () => {});
       socket.once("data", (chunk: Buffer) => {
@@ -565,7 +568,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
         const upstream = connectTcp({ host: "127.0.0.1", port: ports.web });
         behind.add(upstream.once("close", () => behind.delete(upstream)));
         upstream.on("error", () => socket.destroy());
-        upstream.once("connect", () => {
+        upstream.once("connect", async () => {
+          await sleep(slow);
           socket.write("200\n");
           socket.pipe(upstream);
           upstream.pipe(socket);
@@ -588,7 +592,7 @@ describe("a chat's own servers, through the browser's proxy", () => {
     const service = await ownService();
     try {
       proxy.forwards([3000, service.port], path(), KEY);
-      for (const at of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", `localhost:${service.port}`, `127.0.0.1:${service.port}`, `[::1]:${service.port}`]) {
+      for (const at of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "LOCALHOST:3000", "localhost.:3000", `localhost:${service.port}`, `127.0.0.1:${service.port}`, `[::1]:${service.port}`]) {
         for (const written of [
           `GET http://${at}/ HTTP/1.1\r\nHost: ${at}\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\r\n`,
           // A browser's own headers, written by hand: a page's own request, forged.
@@ -603,7 +607,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
           expect(await raw(written), written).toMatch(CHALLENGED);
         }
       }
-      expect([knocks, seen, dialed, service.hits]).toEqual([[], [], [], 0]);
+      // Nor is a name of a chat's server looked up for it.
+      expect([knocks, seen, dialed, service.hits, lookups]).toEqual([[], [], [], 0, {}]);
       // The same request, from the launch's own browser: carried through the door, and nowhere on this computer.
       expect(await fetched("http://localhost:3000/a?b=c")).toEqual({ status: 201, body: "hello from the site" });
       expect((await fetched(`http://localhost:${service.port}/`)).status).toBe(502);
@@ -673,6 +678,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
       ["a page of another site whose referrer is put forward as a chat's", { ...cors, origin: "http://evil.example", referer: "http://localhost:3000/" }],
       ["a request that says nothing of where it comes from, as no browser's does", {}],
       ["one that says something else", { "sec-fetch-site": "cross-origin" }],
+      ["one that says something else, as a link followed", { "sec-fetch-site": "cross-origin", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" }],
+      ["a document asked for by no navigation", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "document", referer: "http://evil.example/" }],
     ];
     for (const [what, headers, method] of refused) expect((await fetched("http://localhost:3000/", headers, method)).status, what).toBe(403);
     // A port taken back is no chat's page from then on.
@@ -748,6 +755,16 @@ describe("a chat's own servers, through the browser's proxy", () => {
     await vi.waitFor(() => expect(kept.cut).toBe(true));
     await vi.waitFor(() => expect(behind.size).toBe(0));
     expect((await fetched("http://localhost:3001/")).status).toBe(403);
+  });
+
+  it("carries nothing to a port taken back while the door answered its knock: the connection is let go, and the chat's server asked nothing", async () => {
+    slow = 200;
+    const asking = fetched("http://localhost:3000/late");
+    await vi.waitFor(() => expect(knocks).toEqual([`${KEY} 3000`]));
+    proxy.forwards([3001], path(), KEY);
+    expect((await asking).status).toBe(403);
+    await vi.waitFor(() => expect(behind.size).toBe(0));
+    expect(seen).toEqual([]);
   });
 
   it("leaves nothing open behind the door when the browser leaves an answer partway through, or gives up before any", async () => {

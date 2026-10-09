@@ -180,8 +180,11 @@ describe("the agent's network", () => {
       runner.write(`/in/${id(n)}\n`);
       return { handed: await asked, runner };
     };
-    // One asked for and never brought, or that nothing took, holds no place once it is answered.
-    expect(new Set(await Promise.all(Array.from({ length: MAX_INBOUND }, (_, n) => network.arrival(ROOT, id(n), 50))))).toEqual(new Set(["ETIMEDOUT"]));
+    // One asked for holds a place until it is answered: with every one of them awaited, the next is refused. One never
+    // brought, or that nothing took, holds none once it is answered.
+    const awaited = Array.from({ length: MAX_INBOUND }, (_, n) => network.arrival(ROOT, id(n), 50));
+    expect(network.arrival(ROOT, id(MAX_INBOUND))).toBe("EMFILE");
+    expect(new Set(await Promise.all(awaited))).toEqual(new Set(["ETIMEDOUT"]));
     const held = [];
     for (let n = 0; n < MAX_INBOUND; n += 1) held.push(await bring(ROOT, n));
     expect(held.every(({ handed }) => typeof handed === "object")).toBe(true);
