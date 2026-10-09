@@ -86,15 +86,18 @@ export interface Applied {
   said: string;
 }
 
-// pkexec's own answers where no administrator approved: 126, the prompt was dismissed; and 127 in
-// these words, authorization was refused or there was no one to ask. It is started with no locale,
-// so its words are English. Its 127 is also what it answers when it cannot run the helper at all
-// (the helper gone or no program, pkexec not set-id, no system bus), in other words: no
-// administrator can help then, and it is a failure, said as pkexec says it.
+// pkexec's own answers where no administrator approved: 126, the prompt was dismissed; and 127
+// with a line that begins with these words, authorization was refused or there was no one to ask.
+// It is started with no locale, so its words are English. They are looked for on every line: the
+// helper is not run at a refusal, so no one else writes them, and another program may write a
+// line of its own first, as the loader does of a library it cannot preload. Its 127 is also what
+// it answers when it cannot run the helper at all (the helper gone or no program, pkexec not
+// set-id, no system bus), in other words: no administrator can help then, and it is a failure,
+// said as pkexec says it.
 const DISMISSED = 126;
 const NOT_AUTHORIZED = 127;
 const AS_ANOTHER_USER = "Error executing command as another user:";
-const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.startsWith(AS_ANOTHER_USER));
+const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
 // The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest

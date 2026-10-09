@@ -132,6 +132,9 @@ describe("what pkexec answers for the helper", () => {
       { code: 126, said: `${AS_ANOTHER} Request dismissed` },
       { code: 127, said: `${AS_ANOTHER} Not authorized\n\nThis incident has been reported.` },
       { code: 127, said: `${AS_ANOTHER} No authentication agent found.` },
+      // Its words on a line behind another's: the loader's own, where /etc/ld.so.preload names a
+      // library that is gone, comes before anything pkexec says.
+      { code: 127, said: `ERROR: ld.so: object '/usr/lib/libgone.so' from /etc/ld.so.preload cannot be preloaded (cannot open shared object file): ignored.\n${AS_ANOTHER} Not authorized\n\nThis incident has been reported.` },
     ];
     for (answer of refusals) {
       await found.install();
@@ -144,9 +147,10 @@ describe("what pkexec answers for the helper", () => {
       [{ code: 127, said: "pkexec must be setuid root" }, "pkexec must be setuid root"],
       [{ code: 127, said: "Error getting authority: Error initializing authority: Could not connect: Connection refused" }, "Error getting authority: Error initializing authority: Could not connect: Connection refused"],
       [{ code: 127, said: "" }, "its helper exited 127"],
-      // Its words begin what it says of a refusal: behind another line they are no refusal's, as where
-      // the helper itself ends 127 for a tool that is not there.
-      [{ code: 127, said: `/opt/surogate/bin/surogate-apply-update: line 412: jq: command not found\n${AS_ANOTHER} Not authorized` }, "/opt/surogate/bin/surogate-apply-update: line 412: jq: command not found"],
+      // Its words begin a line of a refusal: inside another's line they are no refusal's. Nor is the
+      // helper's own 127, for a tool that is not there.
+      [{ code: 127, said: `sh: 1: ${AS_ANOTHER} not found` }, `sh: 1: ${AS_ANOTHER} not found`],
+      [{ code: 127, said: "/opt/surogate/bin/surogate-apply-update: line 412: jq: command not found" }, "/opt/surogate/bin/surogate-apply-update: line 412: jq: command not found"],
       // Nor is an exit beside pkexec's two a refusal.
       [{ code: 125, said: "" }, "its helper exited 125"],
       [{ code: 128, said: `${AS_ANOTHER} Not authorized` }, `${AS_ANOTHER} Not authorized`],
