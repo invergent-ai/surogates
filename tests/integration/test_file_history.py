@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from surogates.harness import landing as landing_module
 from surogates.session.store import SessionStore
+from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.store import WorkstreamStore
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
@@ -28,7 +29,7 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     stored,
 )
 from .test_redo_loop import a_clash, a_routine_run, in_its_pod, pickups_of
-from .test_thread_copies import a_thread, open_pod, pods  # noqa: F401  (pods is a fixture)
+from .test_thread_copies import a_thread, git, open_pod, pods  # noqa: F401  (pods is a fixture)
 from .test_thread_helpers import a_coordinating_thread, helpers_of
 from .test_turn_sagas import a_turn, calling, stop
 from .test_workstream_overview import act_on
@@ -296,7 +297,11 @@ async def test_a_settled_landing_is_announced_once_and_only_after_its_row_says_i
     assert len(told) == 1
 
 
-async def test_a_settled_landing_whose_row_could_not_be_written_is_not_announced(api, monkeypatch, tmp_path):
+async def test_a_pushed_landing_whose_row_could_not_be_written_is_put_back_once_landed_over_and_never_announced(
+    api, monkeypatch, tmp_path,
+):
+    """What holds today, not what should: the files of a landing that pushed are taken out of the
+    project again, by the settle after one whose two writes of its row were refused."""
     project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
     told = announced(api, monkeypatch, second)
     save = landing_module.save_landing
@@ -312,9 +317,18 @@ async def test_a_settled_landing_whose_row_could_not_be_written_is_not_announced
     await ends(api, pool, first)
     # The settle found it pushed, and its row was never written so: nothing is announced that a
     # reader would not find.  A's landing went over it, so the next settle, the pruning's, takes
-    # it for not pushed and puts it back: it never landed, and nothing said it had.
+    # it for not pushed and puts it back.
     assert len(refused) == 2 and told == []
-    assert [row.saga_state for row in await rows(api, second)] == ["compensated"]
+    [killed] = await rows(api, second)
+    assert (killed.saga_state, killed.files, killed.commit) == ("compensated", [], None)
+    # B's file is gone from the project's files, while the history's main still holds B's landing
+    # under A's, and its tree the file.  B's row lists nothing, so its thread's row shows no file.
+    files = api.app.state.storage._resolve(first.config["storage_bucket"], boundary_workspace_prefix(first.config, first, first.id))
+    durable = files / "_history"
+    assert sorted(found.name for found in files.iterdir() if not found.name.startswith("_")) == ["Report.docx", "c.md", "notes.txt"]
+    assert "b.md" in git(durable, "ls-tree", "--name-only", "refs/heads/main").split()
+    assert f"Surogate-Saga: {killed.saga_id}" in git(durable, "log", "--format=%(trailers:only,unfold)", "refs/heads/main")
+    assert await marks_of(api, project, second) == []
 
 
 async def test_a_settled_landing_whose_thread_is_gone_names_no_thread_on_the_stream(api, monkeypatch, tmp_path):
