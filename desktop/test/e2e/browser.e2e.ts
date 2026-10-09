@@ -81,8 +81,8 @@ async function operation(kind: string, args: Record<string, unknown>, invocation
 }
 
 // The app launched and signed in, and *folder* bound to the chat in the desktop's own sheet. Each of
-// *requires*, a script of the test's, runs in the app before its own code.
-async function bound(folder: string, requires: string[] = []): Promise<Page> {
+// *requires*, a script of the test's, runs in the app before its own code; *env* adds to the app's environment.
+async function bound(folder: string, requires: string[] = [], env: Record<string, string> = {}): Promise<Page> {
   origin = await agent.start();
   // The app's own environment is the browser's: apart from the user's session, or no launch.
   isolated(shellEnv(home));
@@ -90,7 +90,7 @@ async function bound(folder: string, requires: string[] = []): Promise<Page> {
     mkdirSync(join(home, "surogate"), { recursive: true });
     writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: BROWSER.id }));
   }
-  app = await launch(home, {}, [], requires);
+  app = await launch(home, env, [], requires);
   await stubNative(app);
   const page = await shellPage(app);
   await connect(page, origin);
@@ -240,6 +240,30 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     app!.process().kill("SIGKILL");
     app = undefined;
     await expect.poll(() => browsers().length, { timeout: 15_000 }).toBe(0);
+  });
+
+  it("prints nothing of what it says to the browser, though its user's environment asks Playwright to: its proxy's sign-in is in no log", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    // As a developer's shell may have it set: Playwright then prints every message of the browser's protocol.
+    await bound(folder, [], { DEBUG: "pw:protocol", DEBUG_FILE: join(home, "debug.log"), DEBUGP: "pw:protocol" });
+    // The browser's host writes where the app does.
+    let printed = "";
+    app!.process().stderr!.on("data", (chunk: Buffer) => (printed += chunk.toString()));
+    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    await press(await prompt(app!), "allow_session");
+    // The browser is up, and has signed in to its proxy.
+    expect((await navigating).error.type).toBe("browser");
+    expect(browsers().length).toBeGreaterThan(0);
+    await new Promise((done) => setTimeout(done, 500));
+    try {
+      printed += readFileSync(join(home, "debug.log"), "utf8");
+    } catch {
+      // Nothing was written there.
+    }
+    expect(printed).not.toMatch(/continueWithAuth|password/i);
+    expect(printed).not.toMatch(/proxy-authorization/i);
+    expect(printed).not.toContain("pw:protocol");
   });
 
   it("answers the chat's browser operations as denied once its user denies the first use, and asks again at the next", async () => {
