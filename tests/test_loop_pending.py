@@ -11,8 +11,8 @@ import pytest
 import surogates.harness.loop as loop_module
 from surogates.harness.loop_context_replay import ContextReplayMixin, news, unread_reports
 from surogates.harness.loop_pending import (
-    _actionable_pending_events, _command_answered, _cut_off_at, _hand_back_unread, _in_typed_order, _left_behind,
-    _read_as_words, _shown_before_its_answer, _turn_for_a_hand_back,
+    _actionable_pending_events, _command_answered, _cut_off_at, _first_unread, _hand_back_unread, _in_typed_order,
+    _left_behind, _read_as_words, _redo_unread, _shown_before_its_answer, _turn_for_a_hand_back, _turn_for_a_redo,
 )
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive, _session, _stub_store
@@ -499,3 +499,84 @@ async def test_a_wake_at_a_hand_back_whose_user_took_the_browser_over_again_runs
 async def test_a_wake_that_finds_only_a_hand_backs_own_event_runs_no_turn(monkeypatch, said_too):
     taken_over = told(3, EventType.BROWSER_CONTROL_GRANTED)
     assert await _wake(monkeypatch, taken_over, told(4, EventType.BROWSER_CONTROL_RETURNED, **said_too)) == (0, [])
+
+
+REQUEST, ANSWER, DONE, REDO, SAID = (
+    EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.SESSION_COMPLETE, EventType.HISTORY_REDO, EventType.USER_MESSAGE,
+)
+
+
+@pytest.mark.parametrize("types, unread", [
+    ((SAID, REQUEST, ANSWER, DONE, REDO), True),
+    # A command's answer is no request of the model's.
+    ((SAID, REQUEST, ANSWER, DONE, REDO, SAID, EventType.HARNESS_WAKE, ANSWER), True),
+    ((SAID, REQUEST, ANSWER, DONE, REDO, REQUEST), False),
+    ((SAID, REQUEST, ANSWER, DONE, REDO, REQUEST, ANSWER, DONE, REDO), True),
+    ((SAID, REQUEST, ANSWER, DONE), False),
+], ids=["told", "a command answered since", "read by a request", "told again", "never told"])
+def test_a_redo_is_unread_until_a_request_of_the_models_comes_after_it(types, unread):
+    assert _redo_unread(log(*types)) is unread
+
+
+def test_a_commands_end_does_not_move_the_cursor_past_a_redo():
+    events = log(SAID, REQUEST, ANSWER, DONE, REDO, SAID)
+    nothing_plain = dict(goal_in_flight=False, is_plain_message=lambda _event: False)
+    assert _first_unread(events, **nothing_plain) == 5
+    assert _first_unread([*events, event(7, REQUEST)], **nothing_plain) is None
+
+
+#: The model's answer that calls a tool: its turn goes on.
+CALLS = (ANSWER, {"message": {"role": "assistant", "tool_calls": [{"id": "call-1"}]}})
+
+
+@pytest.mark.parametrize("after_the_redo, the_redos", [
+    ((), True),
+    # A command the harness answers opens no turn of the model's, answered or not.
+    (("/loop 5m Go on.",), True),
+    (("/loop 5m Go on.", EventType.HARNESS_WAKE, ANSWER), True),
+    # A wake that died before it asked the model.
+    ((EventType.SESSION_RESUME, EventType.HARNESS_WAKE), True),
+    # Anything else its user says has the turn, and so has what the harness says for them.
+    (("Go on.",), False),
+    (("/report-writer Go on.",), False),
+    (("/loop 5m Go on.", "Go on."), False),
+    (("Go on.", "/loop 5m Go on."), False),
+    # The turn is the redo's until it ends: a worker that died once the model was asked left it open.
+    ((REQUEST,), True),
+    ((REQUEST, CALLS, EventType.TOOL_RESULT, REQUEST), True),
+    ((REQUEST, "/loop 5m Go on.", EventType.HARNESS_WAKE, (ANSWER, {"answers": 7})), True),
+    ((REQUEST, "Go on."), False),
+    ((REQUEST, ANSWER), False),
+    ((REQUEST, CALLS, EventType.TOOL_RESULT, EventType.SESSION_STOPPED), False),
+    ((REQUEST, ANSWER, DONE, "/loop 5m Go on."), False),
+], ids=[
+    "the redo alone", "a command waiting", "a command answered", "a dead wake", "a message", "a skill",
+    "a message behind a command", "a command behind a message", "the model asked", "the model's tools called",
+    "a command answered meanwhile", "a message meanwhile", "the model's answer", "stopped", "ended, and a command since",
+])
+def test_the_turn_after_a_redo_is_the_redos_unless_something_else_opened_it(after_the_redo, the_redos):
+    events = log(SAID, REQUEST, ANSWER, DONE, REDO)
+    for said in after_the_redo:
+        if isinstance(said, tuple):
+            events.append(event(len(events) + 1, said[0], **said[1]))
+        else:
+            events.append(
+                event(len(events) + 1, said) if isinstance(said, EventType) else event(len(events) + 1, SAID, content=said)
+            )
+    is_command = lambda e: e.type == SAID and (e.data.get("content") or "").startswith("/loop")  # noqa: E731
+    assert _turn_for_a_redo(events, is_command=is_command) is the_redos
+
+
+@pytest.mark.parametrize("typed, the_redos", [("Go on.", False), ("/report-writer Go on.", False), ("/loop 5m Go on.", True)])
+def test_a_message_no_request_had_read_when_the_redo_was_written_keeps_the_turn(typed, the_redos):
+    # Typed as the turn landed: after its last request, before its redo.
+    events = [*log(SAID, REQUEST, ANSWER), event(4, SAID, content=typed), event(5, DONE), event(6, REDO)]
+    is_command = lambda e: e.type == SAID and (e.data.get("content") or "").startswith("/loop")  # noqa: E731
+    assert _turn_for_a_redo(events, is_command=is_command) is the_redos
+    # Read by a request before the redo, it is the turn's that ended: the redo opens the next.
+    events = [event(1, SAID, content=typed), event(2, REQUEST), event(3, ANSWER), event(4, DONE), event(5, REDO)]
+    assert _turn_for_a_redo(events, is_command=is_command) is True
+
+
+def test_a_turn_no_redo_opened_is_not_the_redos():
+    assert _turn_for_a_redo(log(SAID, REQUEST, ANSWER, DONE), is_command=lambda _event: True) is False

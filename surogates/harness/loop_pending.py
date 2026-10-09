@@ -131,6 +131,63 @@ def _turn_for_a_hand_back(events: list[Any]) -> bool:
     return opened_by == "hand back"
 
 
+def _redo_unread(events: list[Any]) -> bool:
+    """Whether a project's thread was told to redo files and none of the model's requests came after:
+    no turn has read it.
+
+    Told like a hand back (``_hand_back_unread``): a command's end moves the
+    cursor, and a redo is written as its turn ends, where a command typed
+    during that turn still waits.
+    """
+    unread = False
+    for event in events:
+        if _event_type(event) == EventType.LLM_REQUEST.value:
+            unread = False
+        elif _event_type(event) == EventType.HISTORY_REDO.value:
+            unread = True
+    return unread
+
+
+def _turn_for_a_redo(events: list[Any], *, is_command: Any) -> bool:
+    """Whether the turn a wake is about to run, or to go on with, is the one a redo gives its thread.
+
+    Nothing was said after the redo that opens a turn of its own, and the
+    turn it opened has not ended.  A wake reads the user's last message to
+    run its command; in such a turn that message is not what the wake is
+    for, and its command must not run again.  A command the harness answers
+    itself (*is_command* says which) opens no turn of the model's, typed
+    before the redo or after it; any other message after the redo is the
+    turn's, and its command runs once.  So is one typed as the turn before
+    the redo landed, which stands before the redo with no request to have
+    read it: its turn comes first, and reads the redo too.
+
+    The turn is the redo's until it ends: at the model's answer that calls
+    no tool, or at a turn's end, once the model was asked in it.  One a dead
+    worker cut off, before its first request or after it, is still the
+    redo's for the wake that goes on with it.
+    """
+    # Whether the redo's turn is open, whether the model was asked in it, and
+    # whether a message that opens a turn of its own waits, read by no request.
+    opened = asked = waits = False
+    for event in events:
+        kind = _event_type(event)
+        data = getattr(event, "data", None) or {}
+        if kind == EventType.LLM_REQUEST.value:
+            asked, waits = opened, False
+        elif kind == EventType.HISTORY_REDO.value:
+            opened, asked = not waits, False
+        elif kind == EventType.USER_MESSAGE.value and not is_command(event):
+            opened, waits = False, True
+        elif asked and (
+            kind in _TURN_END_EVENT_TYPES
+            # The model's answer ends a turn; its calls for tools do not, nor the harness's answer to a command.
+            or kind == EventType.LLM_RESPONSE.value and "answers" not in data
+            and not (data.get("message") or {}).get("tool_calls")
+        ):
+            opened = False
+    return opened
+
+
 #: The field a wake of this harness sets on its ``harness.wake``: under such
 #: a wake every answer to a command names its message, and a command is
 #: never given to the model as words.  A wake without it is an older
@@ -234,11 +291,11 @@ _GOAL_TURN_MESSAGES = frozenset({"outcome_kickoff", "outcome_continuation"})
 def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: Any) -> int | None:
     """Return the id of the first event in *events* that still waits for the model to read it.
 
-    A worker's report; a message of the user's own that is no command
-    (*is_plain_message* says which); and, while a goal is in flight, the
-    message that gives the goal its next turn.  A request reads what was
-    written before it, so the unread ones are those after the log's last
-    ``llm.request``.
+    A worker's report; a redo a thread was told of; a message of the
+    user's own that is no command (*is_plain_message* says which); and,
+    while a goal is in flight, the message that gives the goal its next
+    turn.  A request reads what was written before it, so the unread ones
+    are those after the log's last ``llm.request``.
     """
     first: int | None = None
     for event in events:
@@ -247,6 +304,7 @@ def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: 
             first = None
         elif first is None and (
             event_type in _REPORT_EVENT_TYPES
+            or event_type == EventType.HISTORY_REDO.value
             or is_plain_message(event)
             or goal_in_flight and _gives_a_goal_its_turn(event)
         ):

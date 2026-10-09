@@ -150,6 +150,8 @@ class EventType(str, Enum):
     WORKER_FAILED = "worker.failed"
     # Threads a project's master proposes for the user to start (propose_threads).
     THREAD_PROPOSED = "thread.proposed"
+    # A project's thread is told to redo its change to files its landing left out.
+    HISTORY_REDO = "history.redo"
 
     # Subagent task layer (spawn_task tool / tasks_tick dispatcher).
     # Emitted to the parent (spawning) session so the coordinator agent
