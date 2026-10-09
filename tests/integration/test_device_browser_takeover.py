@@ -549,6 +549,39 @@ async def test_a_hand_back_whose_wake_could_not_be_queued_has_given_its_turn_and
         await computer.unqueue(chat)
 
 
+async def test_a_hand_back_and_the_turn_it_gives_are_announced_to_the_chats_listeners_once_written(
+    session_factory, redis_client,
+):
+    org_id = await create_org(session_factory)
+    announcing = SessionStore(session_factory, redis=redis_client)
+    computer = await Computer(announcing, session_factory, redis_client, org_id, await create_user(session_factory, org_id)).signed_in()
+    chat = await computer.idle()
+    listening = redis_client.pubsub()
+    await listening.subscribe(f"surogates:session:{chat}")
+
+    async def heard(expected: int) -> list[str]:
+        """The kinds of the events announced since, read until *expected* came and a moment more."""
+        kinds: list[str] = []
+        until = time.monotonic() + 5.0
+        while time.monotonic() < until:
+            message = await listening.get_message(ignore_subscribe_messages=True, timeout=0.3)
+            if message is not None:
+                kinds.append(message["data"].decode().split(":", 1)[1])
+            elif len(kinds) >= expected:
+                break
+        return kinds
+
+    try:
+        await computer.control(chat, "acquire")
+        assert await heard(1) == ["browser.control_granted"]
+        # The pane hears the hand back, and whoever follows the chat hears its turn begin.
+        await computer.hands_back(chat)
+        assert await heard(2) == ["browser.control_returned", "session.resume"]
+    finally:
+        await listening.aclose()
+        await computer.unqueue(chat)
+
+
 async def test_a_hand_back_whose_turn_cannot_be_written_is_not_told_and_can_be_made_again(computer, monkeypatch):
     chat = await computer.idle()
     await computer.store.update_session_status(chat, "completed")
@@ -1554,6 +1587,24 @@ async def test_a_hand_back_made_before_a_commands_wake_came_is_given_its_turn_on
         assert ran(watched) == []
         assert [conversation.count(HANDED_BACK) for conversation in handed] == [1]
         assert not await asking.queued(chat)
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_a_hand_back_made_while_a_commands_wake_ran_is_given_its_turn_by_that_wakes_end(asking, monkeypatch):
+    chat = await asking.held()
+
+    async def user_hands_back():
+        async with asking.no_turn_seen_under_way(monkeypatch):
+            await asking.hands_back(chat)
+        # The wake the hand back queued came at once, found the chat taken, and went.
+        await asking.unqueue(chat)
+
+    await command_answered(asking, monkeypatch, chat, "/goal status", meanwhile=user_hands_back)
+
+    try:
+        # The command's wake read what was written while it ran, and queued the hand back's turn.
+        assert await asking.queued(chat)
     finally:
         await asking.unqueue(chat)
 
