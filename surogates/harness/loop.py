@@ -4854,7 +4854,36 @@ class AgentHarness(
             lease_token=lease.lease_token,
             at_rest=at_rest,
         )
+        if at_rest:
+            await self._release_command_turn(session)
         return at_rest
+
+    async def _release_command_turn(self, session: Session) -> None:
+        """Let go of what a turn holds, at the end of a command's turn as at
+        the end of a model's (``_complete_session``): the sandbox a command
+        may have made, and the holds its message was admitted on.  The
+        holds go back with nothing spent: a command asks the model nothing
+        on the agent's account.
+
+        Nothing else of a model's turn end belongs here.  A command has no
+        tool saga, no summary and no files to land, and it reports to
+        nobody: its answer is its whole result.
+        """
+        if self._sandbox_pool is not None:
+            try:
+                sandbox_id = await self._sandbox_pool.release_for_session(str(session.id))
+            except Exception:
+                logger.debug("Sandbox detach failed for %s", session.id, exc_info=True)
+            else:
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                    name=f"sandbox-teardown-{session.id}",
+                )
+        nothing_spent = SessionCostTracker()
+        await asyncio.gather(
+            self._settle_commerce_reservation(session, nothing_spent),
+            self._settle_allowance_reservation(session, nothing_spent),
+        )
 
     def _goal_waits(self, session: Session, events: list) -> bool:
         """Whether the session's goal is in flight with its next turn queued

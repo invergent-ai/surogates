@@ -1067,6 +1067,49 @@ async def test_a_coding_run_whose_worker_died_is_left_as_its_death_left_it(worke
     assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
 
 
+async def test_a_commands_end_releases_what_a_turns_end_releases(workers, monkeypatch):
+    async def run(*, store, session, agent, started_metadata, **_):
+        await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})
+        result = await store.emit_event(
+            session.id, EventType.CODE_RUN_RESULT,
+            {"run_id": "run-1", "agent": agent, "final_message": "The totals are fixed.", "error": None},
+        )
+        return CodingRunOutcome(status="ok", result_event_id=result)
+
+    monkeypatch.setattr("surogates.coding_agents.run_core.execute_coding_run", run)
+    released, destroyed, settled = [], [], []
+
+    async def release_for_session(session_id, **_):
+        released.append(session_id)
+        return "the-runs-sandbox"
+
+    async def destroy_released(sandbox_id, session_id):
+        destroyed.append(sandbox_id)
+
+    async def allowance_debit(agent_id, **hold):
+        settled.append(hold)
+
+    workers.sandbox_pool = SimpleNamespace(release_for_session=release_for_session, destroy_released=destroy_released)
+    chat = await workers.chat()
+    # The message route held the turn against its user's allowance.
+    hold = {"allowance_id": "allowance-1", "reservation_id": "reservation-1", "reserved_tokens": 500}
+    await workers.store.append_session_config_list(chat, "allowance_reservations", hold)
+    await workers.says(chat, '/code claude "Fix the totals"')
+    worker = workers.worker()
+    worker._platform_client = SimpleNamespace(allowance_debit=allowance_debit)
+    await worker.wake(chat)
+
+    # The sandbox the run made is let go, and the hold goes back with nothing of the agent's spent.
+    assert (released, destroyed) == ([str(chat)], ["the-runs-sandbox"])
+    assert settled == [{"allowance_id": "allowance-1", "reserved_tokens": 500, "actual_tokens": 0, "reservation_id": "reservation-1"}]
+    assert "allowance_reservations" not in (await workers.session(chat)).config
+
+    # A later wake of the chat at rest releases nothing again.
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert (released, len(settled)) == ([str(chat)], 1)
+
+
 # -- A routine's run --
 
 
