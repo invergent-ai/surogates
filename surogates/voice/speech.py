@@ -8,6 +8,9 @@ of them.
 """
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -153,6 +156,16 @@ GAIN_DB = {"elevenlabs": 4.0}
 DEFAULT_GAIN_DB = 4.0
 
 
+def phrase_scope(slot: Slot, language: str, org_id: str) -> str:
+    """Whose cached phrases a line plays (PhraseCache's scope). Our voices are shared by every line; a
+    provider's belong to the org that paid for them, and change with anything else that shapes the audio
+    besides the model and voice the cache key already has (options, server, language, our gain)."""
+    if slot.ours:
+        return ""
+    shape = [dict(slot.options), slot.base_url, language, GAIN_DB.get(slot.provider, DEFAULT_GAIN_DB)]
+    return f"{org_id}:{hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:8]}"
+
+
 class ShapedTTS(tts.TTS):
     """A provider's TTS, one sentence at a time, shaped like ours for a phone line (PhoneVoice)."""
 
@@ -183,7 +196,10 @@ class ShapedStream(tts.ChunkedStream):
         voice = PhoneVoice(t.sample_rate, gain_db=GAIN_DB.get(t.provider, DEFAULT_GAIN_DB))
         output_emitter.initialize(request_id=utils.shortuuid(), sample_rate=t.sample_rate, num_channels=1,
                                   mime_type="audio/pcm")
-        async with t._inner.synthesize(self._input_text, conn_options=self._conn_options) as stream:
+        # this stream retries the sentence; the provider inside must not as well (4 x 4 tries is minutes of
+        # silence before a dead provider is noticed)
+        once = dataclasses.replace(self._conn_options, max_retry=0)
+        async with t._inner.synthesize(self._input_text, conn_options=once) as stream:
             async for ev in stream:
                 frame = ev.frame
                 if frame.sample_rate != t.sample_rate or frame.num_channels != 1:

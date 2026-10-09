@@ -222,7 +222,10 @@ async def list_voices(conn: Conn, client: httpx.AsyncClient, *, query: str = "",
     status = _status(r)
     if not status.ok:
         return status, []
-    voices = _voices(conn.provider, r.json())
+    try:
+        voices = _voices(conn.provider, r.json())
+    except (ValueError, KeyError, TypeError, AttributeError):  # a proxy's page, a changed API
+        return Status(False, "error", "The provider answered in a way we could not read."), []
     if query and conn.provider in ("deepgram", "gradium"):  # no search on their side
         q = query.lower()
         voices = [v for v in voices if q in v.name.lower() or q in v.id.lower()]

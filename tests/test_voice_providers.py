@@ -178,3 +178,59 @@ def test_the_tone_is_short_and_never_clips():
     (frame,) = tone()
     pcm = np.frombuffer(frame.data, "<i2")
     assert 0.5 < len(pcm) / frame.sample_rate < 1.0 and np.abs(pcm).max() < 32767 * 0.3
+
+
+async def test_a_failing_provider_sentence_is_tried_a_few_times_not_sixteen():
+    from livekit.agents import APIConnectionError, APIConnectOptions, tts
+
+    from surogates.voice.speech import ShapedTTS
+
+    tries = 0
+
+    class Down(tts.TTS):
+        def __init__(self):
+            super().__init__(capabilities=tts.TTSCapabilities(streaming=False), sample_rate=24000, num_channels=1)
+
+        def synthesize(self, text, *, conn_options=None):
+            return DownStream(tts=self, input_text=text, conn_options=conn_options)
+
+    class DownStream(tts.ChunkedStream):
+        async def _run(self, output_emitter):
+            nonlocal tries
+            tries += 1
+            raise APIConnectionError("timed out")
+
+    shaped = ShapedTTS(Down(), provider="elevenlabs", model="m", voice="v")
+    options = APIConnectOptions(max_retry=3, retry_interval=0.0, timeout=1.0)
+    with pytest.raises(APIConnectionError):
+        async with shaped.synthesize("Hello.", conn_options=options) as stream:
+            async for _ in stream:
+                pass
+    assert tries == 4  # once and three retries: the wrapper retries, the provider inside does not
+
+
+def test_a_cached_phrase_is_redone_when_anything_that_shapes_its_audio_changes():
+    from dataclasses import replace
+
+    from surogates.voice.speech import phrase_scope
+
+    org, el = str(uuid4()), _slot("elevenlabs")
+    base = phrase_scope(el, "en", org)
+    assert base.startswith(org) and phrase_scope(el, "en", org) == base
+    assert phrase_scope(replace(el, options={"speed": 1.1}), "en", org) != base
+    assert phrase_scope(el, "de", org) != base
+    compat = _slot("openai_compat")
+    assert phrase_scope(compat, "en", org) != phrase_scope(replace(compat, base_url="http://other/v1"), "en", org)
+    assert phrase_scope(Slot(), "ro", org) == ""  # our voices are shared by every line
+
+
+async def test_a_voice_list_the_provider_garbled_is_a_status_not_a_crash():
+    from surogates.voice.providers import list_voices
+
+    answers = [("elevenlabs", httpx.Response(200, text="<html>proxy login</html>")),  # not JSON
+               ("elevenlabs", httpx.Response(200, json={"voices": [{"name": "no id"}]})),  # a voice without its id
+               ("fishaudio", httpx.Response(200, json={"items": "?"}))]  # not a list
+    for pid, answer in answers:
+        async with _client(lambda r, a=answer: a) as c:
+            status, voices = await list_voices(Conn(pid, "k"), c)
+        assert not status.ok and status.code == "error" and voices == []
