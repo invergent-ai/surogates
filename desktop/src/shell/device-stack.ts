@@ -51,6 +51,9 @@ export interface ToolLayer extends Executor {
   takeOver?(root: string): boolean;
   handBack?(root: string): boolean;
   takenOver?(root: string): boolean | "orphaned" | "elsewhere";
+  // Whether it is held from a chat that is gone; and handed back then by the desktop itself, for no chat.
+  heldFromGone?(): boolean;
+  handBackGone?(): boolean;
   show?(root: string): Promise<boolean>;
   // What saves each download the agent's pages start: the stack's, through the binder. *stop* aborts when the
   // download's chat is deleted.
@@ -96,6 +99,12 @@ export interface DeviceStack {
    * Whether it was handed back.
    */
   handBack(root: string): boolean;
+  /**
+   * Whether the browser is held from a chat that is gone, which no chat's own page may be there to hand back
+   * for; and handed back then by the desktop itself, from its Settings. Whether it was handed back.
+   */
+  heldFromGone(): boolean;
+  handBackGone(): boolean;
   working(): number;
   stop(): Promise<void>;
   /** Revoke this device on its own link, then stop: true once the agent confirmed, false when it could not hear it in time. */
@@ -248,6 +257,8 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
       return held;
     },
     handBack: (root) => tools.handBack?.(root) === true,
+    heldFromGone: () => tools.heldFromGone?.() === true,
+    handBackGone: () => tools.handBackGone?.() === true,
     working,
     stop,
     retire: () => {

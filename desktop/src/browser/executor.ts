@@ -288,6 +288,26 @@ export class Browsing implements ToolLayer {
   }
 
   /**
+   * Whether the browser is held from a chat that is gone. No pane of that chat is left to hand it back in,
+   * and another chat has one only where its own browser is open: so the desktop offers it itself, in Settings.
+   */
+  heldFromGone(): boolean {
+    return this.orphaned();
+  }
+
+  /**
+   * The browser handed back by the desktop itself, through its own confirmation, where the chat it is held
+   * from is gone. Whether it was: held from a chat that is here, it is that chat's to hand back, and nothing is.
+   */
+  handBackGone(): boolean {
+    const holder = this.held;
+    if (holder === null || !this.orphaned()) return false;
+    this.held = null;
+    this.options.browser.pause(holder, false);
+    return true;
+  }
+
+  /**
    * Where the browser is held, as the chat is told: true from this chat; false by nobody, the agent drives
    * it; "elsewhere" from another chat that is here, which alone hands it back; "orphaned" from a chat that
    * is gone, which any chat may hand back.

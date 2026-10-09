@@ -192,6 +192,21 @@ describe("the browser's kinds beside the tools", () => {
     expect(paused).toEqual([[ROOT, true], [ROOT, false]]);
   });
 
+  it("hands the browser back for no chat, as the desktop's own Settings asks, only where it is held from a chat that is gone: held from one that is here it is that chat's to hand back, and held by nobody nothing is", () => {
+    const { browsing, chats, paused } = rig();
+    expect([browsing.heldFromGone(), browsing.handBackGone()]).toEqual([false, false]);
+    browsing.takeOver(ROOT);
+    expect([browsing.heldFromGone(), browsing.handBackGone(), browsing.takenOver(ROOT)]).toEqual([false, false, true]);
+    // The chat is deleted: no page of its is left to hand the browser back in.
+    browsing.retired(ROOT);
+    chats.delete(ROOT);
+    expect([browsing.heldFromGone(), browsing.refusal(op("browser.navigate", OTHER))]).toEqual([true, PAUSED]);
+    expect(browsing.handBackGone()).toBe(true);
+    // Handed back: the browser host is told for the chat that held it, every chat's operations run, and nothing is left to hand back.
+    expect([paused, browsing.takenOver(OTHER), browsing.refusal(op("browser.navigate", OTHER))]).toEqual([[[ROOT, true], [ROOT, false]], false, null]);
+    expect([browsing.heldFromGone(), browsing.handBackGone()]).toEqual([false, false]);
+  });
+
   it("takes a deleted chat for gone though its folder could not be forgotten here, and lets the next chat take the browser over as well", () => {
     const { browsing, paused } = rig();
     browsing.takeOver(ROOT);

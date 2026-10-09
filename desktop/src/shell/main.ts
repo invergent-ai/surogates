@@ -1653,6 +1653,8 @@ const menuActions = {
 
 // Why the last browser picked with Custom… was not kept, until the next choice.
 let browserFailure: string | null = null;
+// Whether Settings is asking to hand the agent's browser back: one confirmation at a time.
+let handingBack = false;
 
 // Settings → Browser's rows: what is found here, each named with the version it says.
 async function browserState() {
@@ -1663,7 +1665,11 @@ async function browserState() {
     const version = await browserVersion(browser.executable);
     if (version) versions.set(browser.executable, version);
   }));
-  return { choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure };
+  return {
+    choice: choice.choice, rows: choiceRows(choice, found, versions), none: chosenBrowser(choice, found) === null, failure: browserFailure,
+    // Held from a chat that is gone: handed back here, where no chat's own page may be left to do it in.
+    held: openStack()?.heldFromGone() ?? false,
+  };
 }
 
 /**
@@ -1987,6 +1993,31 @@ function showSettings(section?: "browser"): void {
       const bindings = openStack()?.bindings;
       if (!bindings || typeof root !== "string" || !bindings.browsing(root)) throw new Error("This chat does not use the browser on this computer");
       bindings.disallowBrowser(root);
+    });
+    // The agent's browser handed back from here, where it is held from a chat that is gone: such a chat has no
+    // page to hand it back in, and another chat has a pane for it only where its own browser is open. Through the
+    // same confirmation as from a chat's page, at its user's click in the desktop's own page; one at a time, and
+    // closed with Settings. Whether it was handed back.
+    handle("settings:hand-back-browser", async () => {
+      const stack = openStack();
+      const agent = agents.get();
+      if (!stack?.heldFromGone() || !agent || handingBack) return false;
+      handingBack = true;
+      const closed = new AbortController();
+      const gone = () => closed.abort();
+      contents.once("destroyed", gone);
+      try {
+        if (!(await prompts.confirmHandBack({ agent: agent.name, gone: true, title: null }, closed.signal))) return false;
+        // Whether anything was handed back: a chat may have taken the browser over while the confirmation was up.
+        if (!stack.handBackGone()) return false;
+        // Every chat's page is told: none of them holds it, and each may use it again.
+        for (const { root } of stack.bindings.all()) main?.webContents()?.send("desktop:binding-changed", root);
+        return true;
+      } finally {
+        handingBack = false;
+        contents.off("destroyed", gone);
+        if (!contents.isDestroyed()) contents.send("settings:changed");
+      }
     });
     // A chat's background process, stopped by its user, as the agent's own kill stops one. Only one
     // Settings shows: the VM runs other devices' chats too, and a chat deleted here keeps its processes there.

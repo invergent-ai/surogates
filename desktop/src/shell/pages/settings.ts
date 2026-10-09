@@ -13,7 +13,7 @@ interface Appearance {
 }
 
 interface State {
-  browser: { choice: string; rows: Array<{ value: string; label: string; disabled: boolean }>; none: boolean; failure: string | null };
+  browser: { choice: string; rows: Array<{ value: string; label: string; disabled: boolean }>; none: boolean; failure: string | null; held: boolean };
   appearance: Appearance;
   preferences: Record<string, "on" | "off">;
   startAtLoginRefused: string | null;
@@ -36,6 +36,7 @@ interface Settings {
   folders(): Promise<Folder[]>;
   takeBack(root: string, host: string): Promise<void>;
   takeBrowserBack(root: string): Promise<void>;
+  handBrowserBack(): Promise<boolean>;
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
@@ -186,6 +187,8 @@ async function render(): Promise<void> {
   note.textContent = state.browser.failure
     ?? (state.browser.none ? "No supported browser is installed. Install Google Chrome, Microsoft Edge, Brave or Vivaldi, or choose one with Custom…. The Snap build of Chromium is not supported." : "");
   note.hidden = note.textContent === "";
+  // Held from a chat that is gone: handed back here.
+  byId("browser-held").hidden = !state.browser.held;
   // A build that cannot start at login says why, and its On does nothing; its Off still removes an entry already there.
   const refused = byId("login-refused");
   refused.textContent = state.startAtLoginRefused ?? "";
@@ -225,6 +228,8 @@ byId("sandbox-log").addEventListener("click", () => void settings.sandbox("log")
 byId("sandbox-retry").addEventListener("click", () => void settings.sandbox("retry"));
 byId("sandbox-check").addEventListener("click", () => void settings.sandbox("check"));
 // Custom… opens the system's dialog: the page shows the choice kept once the main process answers.
+// Asked in the desktop's own confirmation, over this page: whatever its answer, the page is drawn anew when it is given.
+byId("browser-hand-back").addEventListener("click", () => void settings.handBrowserBack().then(() => {}, () => {}));
 byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
   void settings.set("browser", (event.target as HTMLSelectElement).value).then(render, render);
 });

@@ -772,6 +772,64 @@ describe("a chat's browser taken over, and handed back", () => {
     expect((await navigating).error.type).toBe("denied");
   });
 
+  it("offers a Hand back in Settings → Browser for a browser held from a chat that is gone, where no chat is left with a page to hand it back in: through the desktop's own confirmation, at its user's click there; and offers none while the chat it is held from is here", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder);
+    const client = await webClient(app!, origin);
+    const binding = (chat: string) => client.evaluate((id) => window.surogateDesktop!.getBinding!(id), chat);
+    const navigated = () => operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER);
+    // Settings, opened at Browser from the agent's page at its user's click, as the page's own link opens it.
+    const settingsAtBrowser = async (): Promise<Page> => {
+      expect(await atClick(client, "openSettings")).toBeNull();
+      let settings: Page | undefined;
+      await expect.poll(() => {
+        settings = app!.windows().find((window) => window.url().includes("/settings.html"));
+        return settings !== undefined;
+      }, { timeout: 10_000 }).toBe(true);
+      await settings!.waitForSelector("#browser option", { state: "attached" });
+      return settings!;
+    };
+    await client.evaluate((chat) => window.surogateDesktop!.browser!.takeOver(chat), CHAT);
+    // Held from a chat that is here: that chat's own page hands it back, and Settings offers nothing.
+    let settings = await settingsAtBrowser();
+    expect(await settings.isHidden("#browser-held")).toBe(true);
+    await settings.keyboard.press("Escape").catch(() => {});
+    await expect.poll(() => over("/settings.html"), { timeout: 10_000 }).toBe(false);
+    // That chat is deleted, as a page can have one deleted. Another chat is here, which never opened the browser:
+    // its page has no browser pane, so nothing in it hands the browser back, and its browser calls wait.
+    expect(await operation("retire", {}, "retire", 0, CHAT)).toEqual({ ok: null });
+    expect(await binding(CHAT)).toBeNull();
+    await alsoBound(client, join(home, "second"));
+    expect(await navigated()).toEqual(PAUSED);
+    // Settings says so, and offers the hand back itself.
+    settings = await settingsAtBrowser();
+    await expect.poll(() => settings.isVisible("#browser-held")).toBe(true);
+    expect(await settings.textContent("#browser-held .desc")).toBe(
+      "You took the agent's browser over from a chat that is gone. Until you hand it back, the agent's browser waits in every chat.",
+    );
+    // At its user's click there the desktop asks, as it does from a chat's page: Keep control keeps it.
+    await settings.click("#browser-hand-back");
+    let asked = await prompted();
+    expect(await asked.textContent("#prompt-title")).toMatch(/^Hand the browser back to .+\?$/);
+    expect(await asked.textContent("#prompt-lead")).toBe(`${LEAD} The chat it was taken over from is gone.`);
+    expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
+    await press(asked, "keep");
+    await expect.poll(() => promptsShown(app!)).toBe(0);
+    expect([await settings.isVisible("#browser-held"), await navigated()]).toEqual([true, PAUSED]);
+    // Hand back hands it back: Settings offers it no more, the chat's page is told, and the agent's browser is
+    // every chat's again, asking its first use as any.
+    await settings.click("#browser-hand-back");
+    asked = await prompted();
+    await press(asked, "hand_back");
+    await expect.poll(() => settings.isHidden("#browser-held")).toBe(true);
+    expect(await binding(OTHER)).toMatchObject({ takenOver: false });
+    await settings.keyboard.press("Escape").catch(() => {});
+    const navigating = navigated();
+    await press(await prompt(app!), "deny");
+    expect((await navigating).error.type).toBe("denied");
+  });
+
   it("tells the page nothing was handed back when the browser was taken over from another chat while the confirmation was up", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
