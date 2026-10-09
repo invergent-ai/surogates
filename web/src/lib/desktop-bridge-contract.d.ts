@@ -73,9 +73,12 @@ export interface DesktopBrowser {
   // is held from hands it back, while that chat is here: from another chat (takenOver reads "elsewhere")
   // it rejects with "The agent's browser on this computer is taken over from another chat, and is handed
   // back there", and nothing is asked. Once the chat it was held from is gone (takenOver reads "orphaned"),
-  // any chat hands it back, at its user's click and the desktop's prompt as any. True, with no prompt,
-  // where nobody holds the browser.
-  handBack(sessionId: string): Promise<boolean>;
+  // any chat hands it back, at its user's click and the desktop's prompt as any. With no prompt where
+  // nobody holds the browser. It resolves which hand back was made: "confirmed", its user confirmed
+  // handing back the browser this chat held; "released", the browser is the agent's again and no hand
+  // back of this chat's was confirmed (held from a chat that is gone, or by nobody); false, kept, or
+  // handed back from another chat meanwhile.
+  handBack(sessionId: string): Promise<false | "confirmed" | "released">;
 }
 
 // The project's thread a folder is asked for (Section 12): the sheet names both. The page's own

@@ -385,9 +385,11 @@ export const WRITE_TO_THE_AGENT =
  * What a button of the pane does, when pressed. The desktop's call is made in the same turn as the
  * press, before anything is awaited: the desktop lets one call through for a click of its user's.
  * The pause is the desktop's; the server is told of a take-over, and of a hand back only once the
- * desktop answered true (POST …/browser/control). *held* is who held the browser when the button
- * was pressed, as the chat's binding read it: only a hand back of the browser this chat held is
- * its user's confirmed one, for which the server gives the agent a turn where it can. Resolves
+ * desktop answered that it was (POST …/browser/control). The desktop says which hand back it made:
+ * "confirmed" where its user confirmed, in the desktop's own window, handing back the browser this
+ * chat held, for which the server gives the agent a turn where it can; "released" for any other,
+ * held from a chat that is gone or by nobody. Its answer counts, not what the page last read of who
+ * held the browser, which can have changed while the confirmation was up. Resolves
  * with what the pane says of a hand back made, whether the agent goes on or is to be written to;
  * rejects in the desktop's words, or with what the server could not be told.
  */
@@ -396,7 +398,6 @@ export async function actOnBrowser(
   root: string,
   desktop: BrowserCalls,
   server: BrowserTelling,
-  held?: DesktopBinding["takenOver"],
 ): Promise<string | null> {
   if (action === "settings") {
     await desktop.openSettings?.("browser");
@@ -417,10 +418,11 @@ export async function actOnBrowser(
     });
     return null;
   }
-  if (!(await calls.handBack(root))) {
+  const handed = await calls.handBack(root);
+  if (handed === false) {
     return null;
   }
-  const goesOn = await server.handedBack(held === true).catch(() => {
+  const goesOn = await server.handedBack(handed === "confirmed").catch(() => {
     throw new Error(
       "The browser is the agent's again, but the agent could not be told: write to it to go on.",
     );
@@ -476,7 +478,6 @@ export interface BrowserPane {
     action: BrowserAction,
     root: string,
     desktop: BrowserCalls,
-    held?: DesktopBinding["takenOver"],
   ): Promise<void>;
   /** What the computer says of who holds the browser, when the chat is opened. Never rejects. */
   loaded(takenOver: DesktopBinding["takenOver"] | undefined): Promise<void>;
@@ -555,7 +556,7 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
         listeners.delete(listener);
       };
     },
-    press: (action, root, desktop, held) => {
+    press: (action, root, desktop) => {
       const handingBack = action === "handBack";
       if (handingBack && state.asking) {
         return Promise.resolve();
@@ -585,7 +586,6 @@ export function browserPane(posts: BrowserPosts): BrowserPane {
             return telling.handedBack(confirmed);
           },
         },
-        held,
       );
       // What was said of the last press stays until the next, which starts clean.
       set({ asking: handingBack || state.asking, failure: null, said: null });

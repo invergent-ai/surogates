@@ -393,7 +393,7 @@ return [
     await expect.poll(() => buttons(confirmation)).toEqual([["keep", "Keep control"], ["hand_back", "Hand back"]]);
     await expect.poll(() => confirmation.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
     await press(confirmation, "hand_back");
-    expect(await answer()).toBe(true);
+    expect(await answer()).toBe("confirmed");
     expect(await binding()).toMatchObject({ takenOver: false });
 
     // The agent drives again. It hears nothing of its user's download; and the input that asked before they took
@@ -526,7 +526,7 @@ describe("a chat's browser taken over, and handed back", () => {
     // A new click of its user's asks again, and they can still keep it; at the next they hand it back.
     expect(await handBackWith(client, "keep")).toBe(false);
     expect(await binding()).toMatchObject({ takenOver: true });
-    expect(await handBackWith(client, "hand_back")).toBe(true);
+    expect(await handBackWith(client, "hand_back")).toBe("confirmed");
     expect(await binding()).toMatchObject({ takenOver: false });
     await expect.poll(heard, { timeout: 10_000 }).toEqual([CHAT, CHAT, CHAT]);
     // Handed back, the chat's browser asks its first use, as before.
@@ -537,7 +537,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await takeOver();
     await expect(handBack()).rejects.toThrow(HAND_BACK_AT_A_CLICK);
     expect(await promptsShown(app!)).toBe(0);
-    expect(await handBackWith(client, "hand_back")).toBe(true);
+    expect(await handBackWith(client, "hand_back")).toBe("confirmed");
     // Not one native box in all of it: the confirmation is the desktop's own window.
     expect(await boxes()).toHaveLength(before);
   });
@@ -568,7 +568,7 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await client.evaluate(() => [...document.querySelectorAll<HTMLElement>("button[id^=ask-]")].map((button) => button.dataset.answer ?? null))).toEqual([null]);
     // Once it has passed, Hand back hands it back.
     await press(asked, "hand_back");
-    expect(await answer()).toBe(true);
+    expect(await answer()).toBe("confirmed");
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: false });
   });
 
@@ -633,7 +633,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await sleep(200);
     expect(await state()).toEqual([1, true, "hand_back", true]);
     await key(asked, "Enter");
-    expect(await answer()).toBe(true);
+    expect(await answer()).toBe("confirmed");
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: false });
   });
 
@@ -674,7 +674,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await client.waitForFunction(() => window.surogateDesktop !== undefined, undefined, { timeout: 15_000 });
     expect(await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT)).toMatchObject({ takenOver: true });
     // The new page asks afresh, at its user's click.
-    expect(await handBackWith(client, "hand_back")).toBe(true);
+    expect(await handBackWith(client, "hand_back")).toBe("confirmed");
   });
 
   it("asks one hand back at a time: a second while the confirmation is up is refused, and changes nothing of it", async () => {
@@ -695,7 +695,7 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await asked.evaluate(() => (window as unknown as { drawn: Element }).drawn === document.querySelector("#prompt-buttons button"))).toBe(true);
     expect(await asked.getAttribute(HAND_BACK, "aria-disabled")).toBe("false");
     await press(asked, "hand_back");
-    expect(await first()).toBe(true);
+    expect(await first()).toBe("confirmed");
   });
 
   it("holds the agent's browser for every chat from the chat that took it over: another chat's browser calls wait, and it can neither take the browser nor hand it back", async () => {
@@ -724,13 +724,13 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await operation("browser.close", {}, undefined, 1, OTHER)).toEqual(PAUSED);
     // Handed back from the chat that holds it: nobody holds it, as the other chat's page is told, and its
     // browser asks its first use, as any chat's.
-    expect(await handBackWith(client, "hand_back")).toBe(true);
+    expect(await handBackWith(client, "hand_back")).toBe("confirmed");
     expect(await binding(OTHER)).toMatchObject({ takenOver: false });
     const navigating = operation("browser.navigate", { url: "https://example.com/", wait_until: "load" }, undefined, 1, OTHER);
     await press(await prompt(app!), "deny");
     expect((await navigating).error.type).toBe("denied");
     // Nothing is held now: a hand back has nothing to ask.
-    expect(await atClick(client, "handBack", OTHER)).toBe(true);
+    expect(await atClick(client, "handBack", OTHER)).toBe("released");
     expect(await promptsShown(app!)).toBe(0);
   });
 
@@ -765,7 +765,8 @@ describe("a chat's browser taken over, and handed back", () => {
     expect(await binding(OTHER)).toMatchObject({ takenOver: "orphaned" });
     expect(await navigated()).toEqual(PAUSED);
     // At the next they hand it back: the agent's browser is every chat's again, asking its first use as any.
-    expect(await handBackWith(client, "hand_back", OTHER)).toBe(true);
+    // Not the hand back of a chat that held it: the page is told so, and gives no agent a turn for it.
+    expect(await handBackWith(client, "hand_back", OTHER)).toBe("released");
     expect(await binding(OTHER)).toMatchObject({ takenOver: false });
     const navigating = navigated();
     await press(await prompt(app!), "deny");
@@ -817,6 +818,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await press(asked, "keep");
     await expect.poll(() => promptsShown(app!)).toBe(0);
     expect([await settings.isVisible("#browser-held"), await navigated()]).toEqual([true, PAUSED]);
+    expect(await settings.isHidden("#browser-handed-back")).toBe(true);
     // Hand back hands it back: Settings offers it no more, the chat's page is told, and the agent's browser is
     // every chat's again, asking its first use as any.
     await settings.click("#browser-hand-back");
@@ -824,6 +826,11 @@ describe("a chat's browser taken over, and handed back", () => {
     await press(asked, "hand_back");
     await expect.poll(() => settings.isHidden("#browser-held")).toBe(true);
     expect(await binding(OTHER)).toMatchObject({ takenOver: false });
+    // No agent is given a turn from here, and Settings says so.
+    await expect.poll(() => settings.isVisible("#browser-handed-back")).toBe(true);
+    expect(await settings.textContent("#browser-handed-back")).toBe(
+      "The browser is the agent's again. The agent does not go on by itself: write to it in a chat to go on.",
+    );
     await settings.keyboard.press("Escape").catch(() => {});
     const navigating = navigated();
     await press(await prompt(app!), "deny");
@@ -932,7 +939,7 @@ describe("a chat's browser taken over, and handed back", () => {
       // Nothing in it scrolls sideways under the word.
       expect(await asked.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.querySelector(".prompt-body")!.scrollWidth <= document.querySelector(".prompt-body")!.clientWidth)).toBe(true);
       await press(asked, "hand_back");
-      expect(await answer()).toBe(true);
+      expect(await answer()).toBe("confirmed");
     }
   });
 

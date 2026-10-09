@@ -66,7 +66,7 @@ export function ComputerBrowser({
               // lets one call through for a click of its user's, and asks one of a hand back.
               onClick={() => {
                 if (desktop) {
-                  pane.press(action, chat.root, desktop, chat.here?.takenOver);
+                  pane.press(action, chat.root, desktop);
                 }
               }}
             >

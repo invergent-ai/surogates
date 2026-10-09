@@ -189,6 +189,8 @@ async function render(): Promise<void> {
   note.hidden = note.textContent === "";
   // Held from a chat that is gone: handed back here.
   byId("browser-held").hidden = !state.browser.held;
+  // Held again: what was said of the last hand back from here is true no more.
+  if (state.browser.held) byId("browser-handed-back").hidden = true;
   // A build that cannot start at login says why, and its On does nothing; its Off still removes an entry already there.
   const refused = byId("login-refused");
   refused.textContent = state.startAtLoginRefused ?? "";
@@ -229,7 +231,11 @@ byId("sandbox-retry").addEventListener("click", () => void settings.sandbox("ret
 byId("sandbox-check").addEventListener("click", () => void settings.sandbox("check"));
 // Custom… opens the system's dialog: the page shows the choice kept once the main process answers.
 // Asked in the desktop's own confirmation, over this page: whatever its answer, the page is drawn anew when it is given.
-byId("browser-hand-back").addEventListener("click", () => void settings.handBrowserBack().then(() => {}, () => {}));
+// Handed back from here, no agent takes a turn for it, as one does at a hand back from the chat that held the
+// browser: the page says so, for whoever expects the agent to go on.
+byId("browser-hand-back").addEventListener("click", () => void settings.handBrowserBack().then((handed) => {
+  if (handed) byId("browser-handed-back").hidden = false;
+}, () => {}));
 byId<HTMLSelectElement>("browser").addEventListener("change", (event) => {
   void settings.set("browser", (event.target as HTMLSelectElement).value).then(render, render);
 });

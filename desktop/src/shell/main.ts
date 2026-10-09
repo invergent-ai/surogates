@@ -1256,8 +1256,8 @@ function bridge(contents: WebContents, agent: Agent): void {
     handBack: (sessionId, window) => preparing(window, async (signal) => {
       const stack = await browsing(sessionId);
       const held = stack.tools.takenOver?.(sessionId) ?? false;
-      // Nobody holds it: the agent drives it already.
-      if (held === false) return true;
+      // Nobody holds it: the agent drives it already, and nothing was handed back by anyone.
+      if (held === false) return "released";
       // Held from another chat that is here: handed back there, and nothing is asked here.
       if (held === "elsewhere") throw new Error(HELD_FROM_ANOTHER_CHAT);
       // Held from this chat, which the confirmation names by its title; or from one that is gone, which can
@@ -1270,7 +1270,10 @@ function bridge(contents: WebContents, agent: Agent): void {
       // confirmation was up, and is that chat's to hand back then.
       if (!stack.handBack(sessionId)) return false;
       contents.send("desktop:binding-changed", sessionId);
-      return true;
+      // Which hand back it was, for the page to tell the server: only of the browser this chat held is it the
+      // one its user confirmed for this chat, which gives its agent a turn. Held from a chat that is gone,
+      // their confirmation handed back nobody's hold.
+      return held === true ? "confirmed" : "released";
     }),
     openSettings: async (section) => {
       // A project's dialog is over the window: Settings does not open over it.

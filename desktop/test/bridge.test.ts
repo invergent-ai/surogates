@@ -20,7 +20,7 @@ function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
     revealFolder: vi.fn(() => Promise.resolve()),
     showBrowser: vi.fn(() => Promise.resolve()),
     takeOver: vi.fn(() => Promise.resolve()),
-    handBack: vi.fn(() => Promise.resolve(true)),
+    handBack: vi.fn(() => Promise.resolve("confirmed" as const)),
     openSettings: vi.fn(() => Promise.resolve()),
     getAppearance: vi.fn(() => ({ theme: "dark", textSize: "medium", transcriptWidth: "medium", motion: "system" })),
     setAccount: vi.fn(),
@@ -68,7 +68,7 @@ describe("the bridge", () => {
     expect(made.showBrowser).toHaveBeenCalledWith(SESSION);
     await handlers.takeOver!(TOP, "7", SESSION);
     expect(made.takeOver).toHaveBeenCalledWith(SESSION);
-    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe(true);
+    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe("confirmed");
     expect(made.handBack).toHaveBeenCalledWith(SESSION, "7");
     await handlers.openSettings!(TOP, "7", "browser");
     expect(made.openSettings).toHaveBeenCalledWith("browser");
@@ -105,8 +105,8 @@ describe("the bridge", () => {
 
   it("asks one hand back at a time for a window: a page cannot pile the desktop's confirmations up", async () => {
     const made = calls();
-    let answer = (_handed: boolean) => {};
-    (made.handBack as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+    let answer = (_handed: false | "confirmed" | "released") => {};
+    (made.handBack as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<false | "confirmed" | "released">((resolve) => {
       answer = resolve;
     }));
     const handlers = bridgeHandlers(ORIGIN, made);
@@ -115,7 +115,10 @@ describe("the bridge", () => {
     await vi.waitFor(() => expect(made.handBack).toHaveBeenCalledTimes(1));
     answer(false);
     expect(await first).toBe(false);
-    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe(true);
+    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe("confirmed");
+    // Which hand back it was is passed on as the desktop said it.
+    (made.handBack as ReturnType<typeof vi.fn>).mockImplementationOnce(() => Promise.resolve("released"));
+    expect(await handlers.handBack!(TOP, "7", SESSION)).toBe("released");
   });
 
   it("asks one question of each kind at a time for a window, and the next once that one is answered", async () => {

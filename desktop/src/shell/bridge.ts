@@ -35,7 +35,10 @@ export interface BridgeCalls {
   // confirmation.
   showBrowser(sessionId: string): Promise<void>;
   takeOver(sessionId: string): Promise<void>;
-  handBack(sessionId: string, window: string): Promise<boolean>;
+  // Which hand back was made: "confirmed", its user confirmed handing back the browser this chat held;
+  // "released", the browser is the agent's again with no hand back of this chat's confirmed, as where it
+  // was held from a chat that is gone, or by nobody; false, nothing was handed back.
+  handBack(sessionId: string, window: string): Promise<false | "confirmed" | "released">;
   // Settings opened on the one section the page may open.
   openSettings(section: "browser"): Promise<void>;
   getAppearance(): DesktopAppearance;
