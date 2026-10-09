@@ -492,17 +492,17 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
 })
 
 # A project's thread schedules no routine: a run would start from old files,
-# and its work would land only when someone next speaks to the thread.
-THREAD_REFUSED_TOOLS: frozenset[str] = frozenset({"cron_create"})
+# and its work would land only when someone next speaks to the thread.  Nor
+# does it dispatch a research run's experiments: they work on a bundle of a
+# git repository, and a thread's copy holds none to bundle.
+THREAD_REFUSED_TOOLS: frozenset[str] = frozenset({"cron_create", "dispatch_experiments"})
 
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.  Named one by one: a tool that
 # only reaches a session that exists, or that a thread may not run, hands
 # nothing on, and a new tool that starts a session is put here on purpose.
-HELPER_STARTING_TOOLS: frozenset[str] = frozenset({
-    "delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments",
-})
+HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task"})
 #: What a thread's step says of files it and a helper both changed.
 NOT_TAKEN_UP = "Changed here and by a helper, so this copy keeps its own version (the helper's is in the history)"
 
@@ -1362,7 +1362,7 @@ async def _run_single_tool(
     # In a project's thread every saga step starts from a snapshot of its
     # copy, taken right before it runs: a stop puts the copy back however
     # the step changed it.  A call refused below for not being offered or
-    # allowed, for arguments that are not JSON, or for scheduling a routine,
+    # allowed, for arguments that are not JSON, or by the thread's own rule,
     # never runs, so it takes none.
     allowed = session.config.get("tool_allow_list")
     if (
@@ -1795,8 +1795,8 @@ async def _run_single_tool(
                 # A thread's step that starts a helper puts its copy on its hand-off first, where the
                 # helper's own copy starts from.  Only once the tool is past its own refusals and
                 # about to start one: a call that starts nothing takes no lock, pushes nothing, and
-                # leaves nothing for a Stop to drop.  Before each one it starts: what the tool wrote
-                # for the second since the first goes with it, and a copy as it was is pushed once.
+                # leaves nothing for a Stop to drop.  Before each one it starts, and before a task it
+                # queues: the copy as it is then, and a copy as it was is pushed once.
                 # A helper hands nothing on for a helper of its own: its half-done copy stays its own
                 # until its turn's end, and that helper starts from the thread's hand-off as it is.
                 from surogates.harness.landing import keep_copy

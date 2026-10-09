@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-import os
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -23,13 +22,10 @@ import surogates.harness.loop as loop_module
 from surogates.governance.policy import GovernanceGate
 from surogates.harness import agent_resolver, tool_exec
 from surogates.harness import landing as landing_module
-from surogates.harness.slash_skill import build_deep_research_message
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
 from surogates.tasks import service as task_service
-from surogates.tasks import spawn as task_spawn
-from surogates.tools.builtin import arbor
 from surogates.tools.builtin import delegate as delegate_module
 from tests.test_steer_loop import _final_response
 
@@ -229,63 +225,35 @@ def an_agent(*tools: str) -> SimpleNamespace:
     return SimpleNamespace(tools=list(tools), disallowed_tools=[], model=None, max_iterations=None, preloaded_skills=[])
 
 
-async def test_a_threads_deep_research_hands_its_topic_to_a_planner_on_a_copy_of_its_own_whose_work_lands_with_the_thread(
-    api, monkeypatch, pods,
-):
+@pytest.mark.parametrize("command, why", [
+    # Run end to end in a thread, a deep research handed its topic to a planner on a copy of its own, and
+    # the planner its outline to a writer on another, started from the thread's hand-off as it was: the
+    # writer's copy had none of the evidence the planner kept in .research/, which is all it writes from.
+    ("/deep-research Heat pumps in cold climates", "the writer finds no evidence"),
+    # Run end to end with its repository's bundle supplied, a research run handed each experiment the
+    # copy with its bundle.  But a copy leaves out every folder that holds a git repository: the one the
+    # command names was in no copy, the thread's or an experiment's, so there is none to bundle or merge.
+    ("/auto-research repo=/workspace/app Raise the score.\n\nRubric:\n- the dev score is higher", "a copy holds no repository"),
+], ids=["deep-research", "auto-research"])
+async def test_a_threads_research_command_is_refused_and_starts_nothing(api, monkeypatch, pods, command, why):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
-    store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
-    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/deep-research Heat pumps in cold climates"})
-    agents = {"deep-research": an_agent("terminal", "delegate_task"), "research-writer": an_agent("terminal")}
-    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", AsyncMock(side_effect=lambda name, *_, **__: agents.get(name)))
-    handed_on = handed_on_to(api, monkeypatch, pods, thread)
-    poll = delegate_module._poll_child_completion
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": command})
+    ran: list = []
 
-    async def each_runs(*, session_store, parent_session_id, child_id, **kwargs):
-        helper = await session_store.get_session(child_id)
-        if parent_session_id == thread.id:
-            # The planner keeps its evidence, then hands the outline to the writer, as its definition has it.
-            await a_helpers_turn(
-                api, monkeypatch, theirs, helper,
-                "mkdir -p .research && echo S1 > .research/memory.jsonl && cat outline.md > plan.md",
-                calling(("delegate_task", {"goal": "Write the report.", "agent_type": "research-writer"})),
-            )
-        else:
-            await a_helpers_turn(api, monkeypatch, theirs, helper, "ls -A > seen-by-the-writer.txt && echo report > report.md")
-        return await poll(session_store=session_store, parent_session_id=parent_session_id, child_id=child_id, **kwargs)
+    async def a_turn_of_it(*args, **kwargs):
+        ran.append(args)
 
-    monkeypatch.setattr(delegate_module, "_poll_child_completion", each_runs)
-    said: list[dict] = []
-    looping = a_looping_harness(api, monkeypatch, thread, [
-        calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("delegate_task", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"})),
-        _final_response("Done."),
-    ], pool=mine, saga_settings=FENCED)
-
-    async def the_threads_turn(session, messages, system_prompt, lease, **kwargs):
-        said.extend(messages)
-        await looping._run_loop(session, messages, system_prompt, lease, **kwargs)
-
-    # The command is not refused: the wake hands the model its directive, and the turn runs.
-    await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, the_threads_turn).wake(thread.id), 120)
-    assert said[-1]["content"] == build_deep_research_message(topic="Heat pumps in cold climates")
-    [planner] = await helpers_of(api, thread)
-    [writer] = await helpers_of(api, planner)
-    assert (planner.config["agent_type"], writer.config["agent_type"]) == ("deep-research", "research-writer")
-    for helper in (planner, writer):
-        the_helper_is_on_a_copy_of_its_own(pods, thread, helper)
-    # The thread's copy was handed on for its planner.  The planner's step that started the writer handed
-    # nothing on or back: the hand-off was as the thread made it, without the planner's half-done work.
-    assert handed_on == [["Report.docx", "notes.txt", "outline.md"]] * 2
-    # So the writer started from the thread's work, not the planner's: its copy had no evidence of the planner's.
-    seen = set((pods.project / "seen-by-the-writer.txt").read_text().split()) - {"seen-by-the-writer.txt"}
-    assert seen == {"Report.docx", "notes.txt", "outline.md"}
-    # Each one's work came back at its own turn's end, and landed with the thread's.
-    assert pods.real_names() == [
-        ".research", "Report.docx", "notes.txt", "outline.md", "plan.md", "report.md", "seen-by-the-writer.txt",
-    ]
-    assert (pods.project / ".research" / "memory.jsonl").read_text() == "S1\n"
-    assert refs(pods, "handoff") == []
+    await asyncio.wait_for(a_worker_waking(api, monkeypatch, pool, thread, a_turn_of_it).wake(thread.id), 60)
+    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
+    name = command.split()[0]
+    assert answer == f"A thread can't start {name} yet: do this step in the thread itself.", why
+    # No turn ran for it, no helper or task was started, no research run made, no pod, no history.
+    thread = await store.get_session(thread.id)
+    assert (ran, await helpers_of(api, thread), pods.pods) == ([], [], {})
+    assert not {"active_research_run_id", "active_mission_id", "coordinator"} & set(thread.config)
+    assert not (pods.project / "_history").exists()
 
 
 async def test_a_helper_that_fails_leaves_its_files_apart_and_its_thread_is_told_in_the_steps_result(api, monkeypatch, tmp_path):
@@ -520,66 +488,17 @@ async def test_a_step_that_hands_the_copy_on_waits_out_the_fence_its_harness_run
     assert fences == [903.0]
 
 
-async def test_a_threads_research_run_starts_each_experiment_on_a_copy_of_its_own_with_what_the_thread_wrote_for_it(
-    api, monkeypatch, tmp_path,
-):
-    master = await master_of(api, await create(api))
-    thread = await a_thread(api, "Draft A", master)
-    pods = stored(api, thread, tmp_path)
-    # A repository among the project's files, as the command names one.
-    for command in (["init", "-q", "app"], ["-C", "app", "commit", "-q", "--allow-empty", "-m", "first"]):
-        subprocess.run(
-            ["git", "-c", "user.name=u", "-c", "user.email=u@example.com", *command], cwd=pods.project, check=True,
-            env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
-        )
-    execute = pods.execute
-
-    async def with_its_copy_at_workspace(sandbox_id, name, input, *, timeout=None):
-        # A real pod's copy is at /workspace: a path a tool names so is one in the copy.
-        return await execute(sandbox_id, name, input.replace('"/workspace/', '"'), timeout=timeout)
-
-    monkeypatch.setattr(pods, "execute", with_its_copy_at_workspace)
-    store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
-    await store.emit_event(thread.id, EventType.USER_MESSAGE, {
-        "content": "/auto-research repo=/workspace/app Raise the score.\n\nRubric:\n- the dev score is higher",
-    })
-    await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, AsyncMock()).wake(thread.id), 60)
-    [answer] = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
-    assert "can't start" not in answer and "not available" not in answer, answer
-    thread = await store.get_session(thread.id)
-    assert thread.config["active_research_run_id"] and thread.config["strict_coordinator"] is True
-
-    # The run's executor, as the agent's bundle defines it; and the repository's bundle, as if the thread's
-    # copy held the repository to make it from.
-    monkeypatch.setattr(task_spawn, "resolve_agent_by_name", AsyncMock(return_value=an_agent("terminal")))
-    monkeypatch.setattr(arbor, "_bundle_branch_b64", AsyncMock(return_value="QUJD"))
-    handed_on = handed_on_to(api, monkeypatch, pods, thread)
+async def test_a_thread_dispatches_no_research_experiment_and_hands_nothing_on_for_one(api, monkeypatch, pods):
+    thread = await a_coordinating_thread(api)
+    locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling(("idea_tree", {"action": "set_meta", "values": {"eval_cmd": "python eval.py --split dev"}})),
-        calling(("idea_tree", {"action": "add", "hypothesis": "A wider model."})),
-        calling(("idea_tree", {"action": "add", "hypothesis": "A longer schedule."})),
-        calling(("dispatch_experiments", {"node_keys": ["1", "2"]})),
-        _final_response("Dispatched."),
-    ], pool=mine, saga_settings=FENCED), 120)
-    [dispatched] = [json.loads(result) for result in await results_of(api, thread, "dispatch_experiments")]
-    assert dispatched["dispatched"] == ["1", "2"], dispatched
-    first, second = await helpers_of(api, thread)
-    # The copy was handed on before each experiment's task was made, with the bundle and the brief the
-    # step had just written for it: the second's are not waiting for a later step.
-    experiment = lambda key: [f".arbor/experiments/{key}/executor_prompt.md", f".arbor/experiments/{key}/repo.bundle.b64"]
-    assert handed_on == [
-        [*experiment("1"), "Report.docx", "notes.txt"],
-        [*experiment("1"), *experiment("2"), "Report.docx", "notes.txt"],
-    ]
-    # Each works from its own bundle in its own copy, and its work comes back to the thread's next turn end.
-    for key, helper in (("1", first), ("2", second)):
-        await a_helpers_turn(api, monkeypatch, theirs, helper, f"cat .arbor/experiments/{key}/repo.bundle.b64 > result-{key}.txt")
-        the_helper_is_on_a_copy_of_its_own(pods, thread, helper)
-    await ends(api, mine, thread)
-    assert [(pods.project / f"result-{key}.txt").read_text() for key in ("1", "2")] == ["QUJD", "QUJD"]
-    # What the run cannot do in a thread: the project's repository is in no copy, a thread's or an
-    # experiment's, since a copy leaves out every folder that holds one.
-    assert not any((pods.copies[str(session.id)] / "app").exists() for session in (thread, first, second))
+        calling(("dispatch_experiments", {"node_keys": ["1"]})), _final_response("Done."),
+    ], pool=SandboxPool(pods), saga_settings=FENCED), 60)
+    # A thread has no research run, its command being refused, so the model is not sent the tool, and a
+    # call of it all the same never runs.  (Reached past that, it answers with the thread's refusal: a run
+    # could bundle no repository from a copy that holds none.)
+    assert await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_CALL]) == []
+    assert (await helpers_of(api, thread), pods.pods, locks) == ([], {}, [])
 
 
 async def test_a_task_queued_behind_another_takes_the_copy_as_it_is_when_queued_and_one_the_tool_refuses_takes_none(

@@ -169,7 +169,7 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     assert _llm_responses(store) == []
 
 
-@pytest.mark.parametrize("command", ["loop", "code"])
+@pytest.mark.parametrize("command", ["loop", "auto-research", "deep-research", "code"])
 def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     harness = _harness(AsyncMock(), _permissive())
     thread = _session()
@@ -179,7 +179,7 @@ def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     assert harness._slash_command_block_reason(f"/{command} Go.", _session()) is None
 
 
-@pytest.mark.parametrize("command", ["mission", "auto-research", "deep-research"])
+@pytest.mark.parametrize("command", ["mission"])
 def test_a_project_thread_runs_a_command_whose_helpers_work_on_copies_of_their_own(command):
     harness = _harness(AsyncMock(), _permissive())
     thread = _session()
@@ -191,10 +191,10 @@ def test_a_project_thread_runs_a_command_whose_helpers_work_on_copies_of_their_o
 @pytest.mark.parametrize("command, answer", [
     ("loop", "A thread can't start /loop yet: do this step in the thread itself."),
     ("code", "A thread can't start /code yet: do this step in the thread itself."),
-    # The rule of a chat on a folder of the user's computer, which a thread there is too.
-    ("auto-research", "/auto-research is not available for sessions on a local folder"),
+    # As a thread in the cloud answers them: the thread's rule comes before the local folder's.
+    ("auto-research", "A thread can't start /auto-research yet: do this step in the thread itself."),
+    ("deep-research", "A thread can't start /deep-research yet: do this step in the thread itself."),
     ("mission", None),
-    ("deep-research", None),
 ])
 def test_a_project_thread_on_the_users_computer_runs_the_commands_its_folder_can(command, answer):
     harness = _harness(AsyncMock(), _permissive())

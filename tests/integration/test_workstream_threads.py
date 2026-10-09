@@ -1736,13 +1736,15 @@ async def test_a_report_lists_at_most_twenty_files(api):
 @pytest.mark.parametrize("tool, arguments, answer", [
     # A routine's runs would work on old files, and land only when someone next speaks to the thread.
     ("cron_create", {}, thread_refusal("cron_create")),
+    # A research run's experiments work on a bundle of a git repository, and a thread's copy holds none.
+    ("dispatch_experiments", {}, thread_refusal("dispatch_experiments")),
     # A thread starts and proposes no threads: each tool's own answer, to a call that is well formed.
     ("start_thread", {"title": "Draft B", "goal": "Draft the B memo."}, "Only a project's coordinator starts threads."),
     (
         "propose_threads", {"threads": [{"title": "Draft B", "goal": "Draft the B memo.", "where": "cloud"}]},
         "Only a project's coordinator proposes threads.",
     ),
-], ids=["cron_create", "start_thread", "propose_threads"])
+], ids=["cron_create", "dispatch_experiments", "start_thread", "propose_threads"])
 async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool, arguments, answer):
     thread = await start(api, await master_of(api, await create(api)))
     # call_tool also pins that a refused call sets up no pod.

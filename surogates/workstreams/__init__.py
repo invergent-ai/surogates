@@ -37,7 +37,9 @@ def thread_refusal(name: str) -> str:
     it cannot start yet.  A routine's runs would work on old files, and
     their work would land only when someone next speaks to the thread; a
     coding agent's turn ends outside the thread's landing, so its edits
-    would stay in a copy never landed."""
+    would stay in a copy never landed; a deep research's writer would find
+    no evidence on a copy of its own; and a research run's experiments need
+    a git repository, which a copy does not hold."""
     return f"A thread can't start {name} yet: do this step in the thread itself."
 
 

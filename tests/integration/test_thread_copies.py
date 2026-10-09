@@ -749,9 +749,10 @@ async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_co
     from surogates.harness.tool_exec import HELPER_STARTING_TOOLS, SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS
 
     # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
-    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task", "dispatch_experiments"}
+    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task"}
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
-    assert THREAD_REFUSED_TOOLS == {"cron_create"}
+    # Nor does it dispatch a research run's experiments: its copy holds no repository to bundle for them.
+    assert THREAD_REFUSED_TOOLS == {"cron_create", "dispatch_experiments"}
     # Every other tool that starts a session is named here, with why it hands nothing on: it reaches a
     # session that exists already, or a thread may not run it at all.  A new tool that starts a session
     # fails this until it is put on one side or the other: none hands a copy on, or fails to, unnoticed.

@@ -365,10 +365,12 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
 # The commands a project's thread refuses.  A routine's runs would start from
 # old files, and their work would land only when someone next speaks to the
 # thread.  A coding agent's turn ends outside the thread's landing, so its
-# edits would stay in a copy never landed.  A mission's tasks, a research's
-# experiments and its helpers each work on a copy of their own, handed back
-# to the thread: those run.
-_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "code"})
+# edits would stay in a copy never landed.  A deep research's writer works on
+# a copy of its own, where it finds none of the evidence its planner kept.
+# An auto-research run works on a git repository, and a copy holds none.
+# A mission's tasks each work on a copy of their own, handed back to the
+# thread: that one runs.
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "auto-research", "deep-research", "code"})
 
 # The commands a chat on a local folder refuses: a research run's
 # experiments need the cloud's coding sandbox and a /workspace repository.
