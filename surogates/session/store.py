@@ -2411,6 +2411,17 @@ class SessionStore:
             # tool.call, so a dead worker's session is still recovered.
             "device.waiting",
             "device.resumed",
+            # What a chat's browser pane is told: its browser opened, closed
+            # or not there (a sub-agent's too, written to its root while the
+            # root is idle, and one the reaper found dead), and its user
+            # taking it over, from the API, whenever they like.  None shows a
+            # turn under way: the event under them says whether a worker
+            # died.  The hand back is not here: it wakes the agent, and one
+            # whose wake was lost is recovered.
+            "browser.provisioned",
+            "browser.destroyed",
+            "browser.unavailable",
+            "browser.control_granted",
         )
         # Correlated scalar subqueries: latest event for the session
         # under test, skipping trailing-async events so the predicate

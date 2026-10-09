@@ -12,6 +12,13 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
     # These tell viewers about a wait on the user's computer and give the harness nothing to do.
     EventType.DEVICE_WAITING.value,
     EventType.DEVICE_RESUMED.value,
+    # These tell a chat's browser pane that its browser opened, closed or is not there, and that its
+    # user took it over, which is to stop the agent.  The hand back is not among them: it is what
+    # wakes the agent to go on.
+    EventType.BROWSER_PROVISIONED.value,
+    EventType.BROWSER_DESTROYED.value,
+    EventType.BROWSER_UNAVAILABLE.value,
+    EventType.BROWSER_CONTROL_GRANTED.value,
 })
 
 
