@@ -54,10 +54,10 @@ class ReleaseWorkflowTest < Minitest::Test
 
     assert_includes release_needs, "wheel"
     assert_includes release_needs, "images"
-    assert release_job.fetch("steps").any? { |step| step["uses"] == "softprops/action-gh-release@v2" }
+    assert release_job.fetch("steps").any? { |step| step["uses"].to_s.start_with?("softprops/action-gh-release@") }
 
     jobs.except("release").each_value do |job|
-      refute job.fetch("steps", []).any? { |step| step["uses"] == "softprops/action-gh-release@v2" }
+      refute job.fetch("steps", []).any? { |step| step["uses"].to_s.start_with?("softprops/action-gh-release@") }
     end
   end
 
@@ -69,13 +69,13 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_includes generate_step.fetch("run"), "scripts/release-notes.mjs"
     assert_path_exists "scripts/release-notes.mjs"
 
-    release_step = steps.find { |step| step["uses"] == "softprops/action-gh-release@v2" }
+    release_step = steps.find { |step| step["uses"].to_s.start_with?("softprops/action-gh-release@") }
     assert_equal "release-notes.md", release_step.fetch("with").fetch("body_path")
     refute release_step.fetch("with").key?("generate_release_notes")
   end
 
   def test_the_release_uploads_the_wheel_and_the_sdist_alone
-    release_step = @workflow.fetch("jobs").fetch("release").fetch("steps").find { |step| step["uses"] == "softprops/action-gh-release@v2" }
+    release_step = @workflow.fetch("jobs").fetch("release").fetch("steps").find { |step| step["uses"].to_s.start_with?("softprops/action-gh-release@") }
 
     # Not whatever the build left in dist/: a desktop-vm-<key>.json there would be an anchor.
     assert_equal %w[dist/*.whl dist/*.tar.gz], release_step.fetch("with").fetch("files").split("\n")
@@ -101,7 +101,7 @@ class ReleaseWorkflowTest < Minitest::Test
     [build, send].each do |index|
       assert_equal "steps.published.outputs.state == 'missing'", steps[index].fetch("if")
     end
-    keep = steps.find { |step| step["uses"] == "actions/upload-artifact@v4" }
+    keep = steps.find { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
     assert_equal "images/guest/out/manifest.json", keep.fetch("with").fetch("path")
     %w[images/guest/inputs.sh images/guest/build.sh images/guest/publish.sh images/guest/kernel-current.sh].each do |script|
       assert File.executable?(script), "#{script} is not executable"
@@ -156,7 +156,7 @@ class ReleaseWorkflowTest < Minitest::Test
     refute job.key?("if")
     assert_includes run, "gh release view"
     assert_equal({ "contents" => "write" }, job.fetch("permissions"))
-    download = job.fetch("steps").find { |step| step["uses"] == "actions/download-artifact@v4" }
+    download = job.fetch("steps").find { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
     assert_equal "desktop-vm-manifest", download.fetch("with").fetch("name")
     assert_includes run, 'desktop-vm-${key}.json'
     assert_includes run, 'gh release upload "$GITHUB_REF_NAME"'
@@ -179,80 +179,76 @@ class ReleaseWorkflowTest < Minitest::Test
 
   def test_desktop_build_makes_the_tarball_from_the_tag_with_the_vm_image_and_keeps_it
     job = @workflow.fetch("jobs").fetch("desktop-build")
-    steps = job.fetch("steps")
-    runs = steps.map { |step| step["run"].to_s }
+    tarball = 'out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz'
 
     assert_equal ["desktop-vm-image"], Array(job.fetch("needs"))
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
-    build = steps.find { |step| step["name"] == "Build the app" }
-    assert_equal "desktop", build.fetch("working-directory")
-    assert_equal "/dev/null", build.fetch("env").fetch("NPM_CONFIG_USERCONFIG")
-    commands = build.fetch("run").lines.map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
-    assert_equal ["rm -rf bin", "npm ci", "node node_modules/electron/install.js", "npm run build"], commands
-    vm = steps.index { |step| step["uses"] == "actions/download-artifact@v4" }
-    assert_equal "desktop-vm-manifest", steps[vm].fetch("with").fetch("name")
-    # The job packages once, and its command is this, whole: a fourth argument would name the
-    # install script packed as the root helper, which only a test names.
-    packagings = runs.each_index.select { |index| runs[index].include?("package.sh") }
-    assert_equal ['desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop'], packagings.map { |index| runs[index].strip }
-    package = packagings.first
-    keep = steps.index { |step| step["uses"] == "actions/upload-artifact@v4" }
-    refute_nil package
-    assert_operator vm, :<, package
-    assert_operator package, :<, keep
-    # The agent's disk is made under fakeroot, which the job installs before it packages.
-    fakeroot = runs.index { |run| run.match?(/\bapt-get install\b.*\bfakeroot\b/) }
-    refute_nil fakeroot
-    assert_operator fakeroot, :<, package
-    assert_equal "desktop-tarball", steps[keep].fetch("with").fetch("name")
-    assert_equal "out/desktop/surogate-desktop-*-linux-x64.tar.gz", steps[keep].fetch("with").fetch("path")
+    assert_equal %w[needs outputs permissions runs-on steps timeout-minutes], job.keys.sort
+    # What this job writes is what is signed, so the job is these steps, whole, and nothing between
+    # them: the tag's own checkout, with no other ref named; the app built from it; the VM image's
+    # manifest; the one packaging, with no fourth argument, which would name the install script
+    # packed as the root helper and which only a test names; the tarball's hash and size, said
+    # right after it is made; and the tarball kept. Each action by its commit.
+    assert_equal [
+      { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
+      { "name" => "Set up Node", "uses" => "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020", "with" => { "node-version" => "22" } },
+      {
+        "name" => "Build the app", "working-directory" => "desktop", "env" => { "NPM_CONFIG_USERCONFIG" => "/dev/null" },
+        "run" => "# The app's node is fetched and checked against its pin, never one a runner kept.\nrm -rf bin\nnpm ci\nnode node_modules/electron/install.js\nnpm run build\n",
+      },
+      {
+        "name" => "Take the VM image's manifest", "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "with" => { "name" => "desktop-vm-manifest", "path" => "out/vm" },
+      },
+      # The agent's disk is made under fakeroot, which the job installs before it packages.
+      { "name" => "Install fakeroot, which the agent's disk is made with", "run" => "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fakeroot" },
+      { "name" => "Package the app", "run" => 'desktop/scripts/package.sh "${GITHUB_REF_NAME#v}" out/vm/manifest.json out/desktop' },
+      {
+        "name" => "Say the tarball's hash and size to the publish job", "id" => "tarball",
+        "run" => "echo \"sha256=$(sha256sum <\"#{tarball}\" | cut -d' ' -f1)\" >>\"$GITHUB_OUTPUT\"\necho \"size=$(stat -c %s \"#{tarball}\")\" >>\"$GITHUB_OUTPUT\"\n",
+      },
+      {
+        "name" => "Keep the tarball for the publish job", "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "with" => { "name" => "desktop-tarball", "path" => "out/desktop/surogate-desktop-*-linux-x64.tar.gz", "if-no-files-found" => "error" },
+      },
+    ], job.fetch("steps")
     # The tarball's hash and its size are the job's own outputs, which no other job of the run can
     # set: an artifact is the run's, and any of its jobs may put another file under the tarball's
     # name. The signing opens no tarball, and has these two words for what it signs.
     assert_equal({ "sha256" => "${{ steps.tarball.outputs.sha256 }}", "size" => "${{ steps.tarball.outputs.size }}" }, job.fetch("outputs"))
-    hash = steps.index { |step| step["id"] == "tarball" }
-    refute_nil hash
-    assert_operator package, :<, hash
-    assert_equal [
-      'echo "sha256=$(sha256sum <"out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz" | cut -d\' \' -f1)" >>"$GITHUB_OUTPUT"',
-      'echo "size=$(stat -c %s "out/desktop/surogate-desktop-${GITHUB_REF_NAME#v}-linux-x64.tar.gz")" >>"$GITHUB_OUTPUT"',
-    ], steps[hash].fetch("run").lines.map(&:strip)
   end
 
-  def test_desktop_describe_writes_the_manifest_of_the_built_tarball_in_a_job_that_holds_no_secret
+  def test_desktop_describe_reads_the_built_tarball_in_a_job_that_holds_no_secret_and_says_one_word_of_it
     job = @workflow.fetch("jobs").fetch("desktop-describe")
     steps = job.fetch("steps")
 
     # All that reads the build's tarball, on a runner of its own: a step of the job that signs
     # could write into that job's checkout, or leave something running beside its key. The job
-    # is these four steps and nothing else, each action by its commit (v4.4.0, v4.3.0, v4.6.2).
+    # is these three steps, whole, each action by its commit (v4.4.0, v4.3.0).
     assert_equal [
       { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
-      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
-      { "run" => 'desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop' },
-      { "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" },
-    ], steps.map { |step| step.slice("uses", "run") }
-    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[name uses with]], steps.map { |step| step.keys.sort }
-    assert_equal({ "name" => "desktop-tarball", "path" => "out/desktop" }, steps[1].fetch("with"))
-    # The hash the build's job gave for its tarball, through the step's environment, never pasted
-    # into its script, where what the build says would be run.
-    assert_equal({ "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}" }, steps[2].fetch("env"))
-    # The manifest alone is handed on, and a run that wrote none hands on nothing.
-    assert_equal({ "name" => "desktop-manifest", "path" => "out/desktop/manifest.json", "if-no-files-found" => "error" }, steps[3].fetch("with"))
+      { "name" => "Take the tarball", "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "with" => { "name" => "desktop-tarball", "path" => "out/desktop" } },
+      {
+        "name" => "Write its manifest, and say the app's state schema to the publish job",
+        "id" => "manifest",
+        # The hash the build's job gave for its tarball, through the step's environment, never
+        # pasted into its script, where what the build says would be run.
+        "env" => { "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}" },
+        "run" => "desktop/release/publish.sh describe \"${GITHUB_REF_NAME#v}\" out/desktop\necho \"schema=$(jq -r .stateSchema out/desktop/manifest.json)\" >>\"$GITHUB_OUTPUT\"\n",
+      },
+    ], steps
+    # One word is handed on, as the job's own output, which no other job can set: the state schema.
+    # Nothing of this job's is an artifact, which is the run's.
+    assert_equal({ "schema" => "${{ steps.manifest.outputs.schema }}" }, job.fetch("outputs"))
     # No secret by any name, no Environment, which would hand it every secret of that one, and no
     # env of the job's own; a runner of its own; and the build before it, whose hash it checks.
-    assert_equal %w[needs permissions runs-on steps timeout-minutes], job.keys.sort
+    assert_equal %w[needs outputs permissions runs-on steps timeout-minutes], job.keys.sort
     assert_equal ["desktop-build"], Array(job.fetch("needs"))
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
-    refute_match(/\bsecrets\b/, job.to_s)
-    refute_includes job.to_s, "DESKTOP_RELEASE_KEY"
-    refute_includes job.to_s, "desktop-release"
-    # Nothing of the dependency tree: no npm, no node, and no script of the package's but the one.
-    steps.each do |step|
-      refute_match(/\b(npm|npx|node|package\.sh)\b/, step["run"].to_s, "#{step["name"] || step["uses"]} runs npm, node or the packaging")
-      refute_includes step["uses"].to_s, "setup-node"
-    end
+    refute_match(/secrets/i, job.to_s)
+    refute_match(/DESKTOP_RELEASE_KEY/i, job.to_s)
+    refute_match(/desktop-release/i, job.to_s)
   end
 
   def test_desktop_publish_signs_and_sends_the_built_tarball_one_release_at_a_time_in_its_environment
@@ -260,19 +256,19 @@ class ReleaseWorkflowTest < Minitest::Test
     steps = job.fetch("steps")
     runs = steps.map { |step| step["run"].to_s }
 
-    # Both: the build, for its two words of the tarball, and the job that wrote the manifest, which
-    # this one does not write itself.
+    # Both: the build, for its two words of the tarball, and the job that read it, for its one.
     assert_equal %w[desktop-build desktop-describe], Array(job.fetch("needs"))
     assert_equal "desktop-release", job.fetch("environment")
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     assert_equal({ "group" => "desktop-release", "cancel-in-progress" => false }, job.fetch("concurrency"))
     taken = steps.each_index.select { |index| steps[index]["uses"].to_s.start_with?("actions/download-artifact@") }
-    assert_equal [{ "name" => "desktop-tarball", "path" => "out/desktop" }, { "name" => "desktop-manifest", "path" => "out/desktop" }], taken.map { |index| steps[index].fetch("with") }
+    # The tarball alone is taken, to be sent: the manifest is written here, and no other job's file is read for it.
+    assert_equal [{ "name" => "desktop-tarball", "path" => "out/desktop" }], taken.map { |index| steps[index].fetch("with") }
     sign = runs.index { |run| run.include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
     send = runs.index { |run| run.include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
     refute_nil sign
     refute_nil send
-    # The manifest and the tarball are here before the one is signed, and it is signed before both are sent.
+    # The tarball is here before its manifest is signed, and that is signed before both are sent.
     assert_operator taken.max, :<, sign
     assert_operator sign, :<, send
     # The job that holds the key reads no tarball: it writes no manifest of one, and unpacks none.
@@ -307,12 +303,14 @@ class ReleaseWorkflowTest < Minitest::Test
       refute_match(/\b(npm|npx|node)\b/, run, "#{step["name"] || step["uses"]} runs npm or node")
       refute_includes step["uses"].to_s, "setup-node"
       if run.include?("publish.sh sign")
-        # With the key, the build's own words for its tarball, its hash and its size: the signing
-        # opens no tarball.
+        # With the key, three words that are each a job's own output: the build's for its tarball,
+        # its hash and its size, and the describe job's for the app's state schema. The signing
+        # opens no tarball, and reads no artifact.
         assert_equal({
           "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}",
           "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}",
           "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-build.outputs.size }}",
+          "DESKTOP_STATE_SCHEMA" => "${{ needs.desktop-describe.outputs.schema }}",
         }, step.fetch("env"))
       elsif run.include?("publish.sh send")
         assert_equal r2, step.fetch("env")
@@ -354,24 +352,23 @@ class ReleaseWorkflowTest < Minitest::Test
     refute_includes release_needs, "desktop-publish"
   end
 
-  def test_desktop_publish_is_the_tag_s_checkout_the_two_downloads_and_publish_sh_and_nothing_else
+  def test_desktop_publish_is_the_tag_s_checkout_the_tarball_s_download_and_publish_sh_and_nothing_else
     job = @workflow.fetch("jobs").fetch("desktop-publish")
     steps = job.fetch("steps")
 
     # A step need not name npm to run it: package.sh does, and so may an action, a container's
     # image, or a runner that kept what an earlier job's npm left on it. The job that holds the
-    # keys is these five steps, each with these keys alone, on a runner of its own.
+    # keys is these four steps, each with these keys alone, on a runner of its own.
     # Its two actions are named by their commits (v4.4.0 and v4.3.0): a tag can be moved to other
     # code, and the job that holds the release key would run it.
     assert_equal [
       { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
       { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
-      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
       { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
       { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
     ], steps.map { |step| step.slice("uses", "run") }
     # The checkout names no ref, repository or path: publish.sh and install.sh are the tag's.
-    assert_equal [%w[uses], %w[name uses with], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
+    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
     assert_equal %w[concurrency environment needs permissions runs-on steps timeout-minutes], job.keys.sort
     assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
   end
@@ -390,5 +387,100 @@ class ReleaseWorkflowTest < Minitest::Test
     # image's job and the desktop's publish job read them, and no other.
     r2 = /\bR2_(ENDPOINT|BUCKET|ACCESS_KEY_ID|SECRET_ACCESS_KEY)\b/
     assert_equal %w[desktop-vm-image desktop-publish], jobs.select { |_, job| job.to_s.match?(r2) }.keys
+  end
+
+  def test_the_workflow_has_no_key_of_its_own_but_its_name_its_trigger_its_permissions_and_its_jobs
+    # A shell, an environment or a concurrency of the workflow's own is every job's: a shell that
+    # traces would print what a step reads, an env would be every step's, the release key's step
+    # among them, and a concurrency that cancels would cut a send short.
+    assert_equal ["jobs", "name", "permissions", "true"], @workflow.keys.map(&:to_s).sort
+    assert_equal({ "contents" => "write", "packages" => "write" }, @workflow.fetch("permissions"))
+  end
+
+  # Each workflow file of the repository, read: a second file is started by its own trigger, and
+  # reads the repository's secrets as this one does.
+  def workflows
+    Dir[".github/workflows/*"].sort.to_h { |file| [File.basename(file), YAML.load_file(file)] }
+  end
+
+  def test_every_secret_is_read_by_its_own_name_in_its_own_step_in_every_workflow_file
+    r2 = %w[R2_ENDPOINT R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY]
+    # Who reads which secret: each file, each job, each step. R2's keys can rewrite
+    # desktop/install.sh, which runs as root on each new install; the desktop's release key signs
+    # what every installed app takes. A reader that is not here is one too many.
+    allowed = {
+      "release.yml" => {
+        ["images", "Log in to GHCR"] => %w[GITHUB_TOKEN],
+        ["npm", "Publish SDK packages"] => %w[NPM_TOKEN],
+        ["desktop-vm-image", "Look for the image's key in our releases, and check R2 against it"] => r2,
+        ["desktop-vm-image", "Publish the image"] => r2,
+        ["desktop-publish", "Sign its manifest"] => %w[DESKTOP_RELEASE_KEY],
+        ["desktop-publish", "Publish the release"] => r2,
+      },
+      "update-images.yml" => {
+        ["update-agent-images", nil] => %w[NODE_HOSTS MASTER_HOST],
+        ["update-agent-images", "Write SSH identity file"] => %w[SSH_KEY],
+      },
+    }
+    read = workflows.to_h do |file, workflow|
+      # Named with whatever letters, large or small: GitHub reads both the word and the name so.
+      named = ->(part) { part.to_s.scan(/secrets\s*\.\s*([A-Za-z0-9_]+)/i).flatten }
+      found = {}
+      found[[nil, nil]] = named.call(workflow.reject { |key, _| key == "jobs" })
+      workflow.fetch("jobs").each do |name, job|
+        found[[name, nil]] = named.call(job.reject { |key, _| key == "steps" })
+        job.fetch("steps", []).each { |step| (found[[name, step["name"] || step["uses"]]] ||= []).concat(named.call(step)) }
+      end
+      [file, found.reject { |_, names| names.empty? }]
+    end
+    assert_equal allowed, read
+    # And by no other way than its name: not by brackets, not all of them at once, and not handed
+    # on whole to a workflow that is called. Every use of the word is the word, a dot and a name.
+    Dir[".github/workflows/*"].sort.each do |file|
+      text = File.read(file)
+      assert_equal text.scan(/secrets/i).length, text.scan(/secrets\.[A-Za-z0-9_]+/).length, "#{file} reads a secret by another way than its name"
+      refute_match(/\binherit\b/, text, file)
+    end
+  end
+
+  def test_one_job_alone_runs_in_the_desktop_s_environment_in_every_workflow_file
+    # An Environment's secrets reach every job that names it, whatever letters it is named with.
+    named = workflows.flat_map do |file, workflow|
+      workflow.fetch("jobs").select { |_, job| job.key?("environment") }.map { |name, job| [file, name, job["environment"]] }
+    end
+    assert_equal [["release.yml", "desktop-publish", "desktop-release"]], named
+  end
+
+  def test_every_action_is_named_by_its_commit
+    # A tag or a branch can be moved to other code: the build's job writes what is signed, and
+    # other jobs hold R2's keys beside the actions they run.
+    @workflow.fetch("jobs").each do |name, job|
+      job.fetch("steps").each do |step|
+        next unless step.key?("uses")
+
+        assert_match(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}\z}, step["uses"], "#{name} runs an action that is not named by its commit")
+      end
+    end
+  end
+
+  def test_each_artifact_is_one_job_s_to_keep_and_is_never_overwritten
+    # An artifact is the run's: any job may put a file under its name. The desktop's tarball is the
+    # build's alone to keep, and no step may replace what another kept.
+    kept = []
+    taken = []
+    @workflow.fetch("jobs").each do |name, job|
+      job.fetch("steps").each do |step|
+        uses = step["uses"].to_s
+        kept << [name, step.fetch("with").fetch("name")] if uses.start_with?("actions/upload-artifact@")
+        taken << [name, step.fetch("with").fetch("name")] if uses.start_with?("actions/download-artifact@")
+        refute step.fetch("with", {}).key?("overwrite"), "#{name} overwrites an artifact"
+        refute_match(/upload-artifact|download-artifact|gh run download|actions\/artifacts/, step["run"].to_s, "#{name} keeps or takes an artifact by hand")
+      end
+    end
+    assert_equal [%w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-build desktop-tarball]], kept
+    assert_equal [
+      %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-build desktop-vm-manifest], %w[desktop-describe desktop-tarball],
+      %w[desktop-publish desktop-tarball], %w[release dist],
+    ], taken
   end
 end
