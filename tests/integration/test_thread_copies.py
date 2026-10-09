@@ -746,20 +746,27 @@ async def test_a_crashed_turns_retry_is_told_its_copy_was_made_fresh(api, monkey
 
 
 async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_copy_on_or_not():
-    from surogates.harness.tool_exec import HELPER_STARTING_TOOLS, SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS
+    from surogates.harness.tool_exec import (
+        HELPER_STARTING_TOOLS, SESSION_STARTING_TOOLS, THREAD_REFUSED_TOOLS, refused_in_a_thread,
+    )
 
     # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
     assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task"}
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
     # Nor does it dispatch a research run's experiments: its copy holds no repository to bundle for them.
     assert THREAD_REFUSED_TOOLS == {"cron_create", "dispatch_experiments"}
-    # Every other tool that starts a session is named here, with why it hands nothing on: it reaches a
-    # session that exists already, or a thread may not run it at all.  A new tool that starts a session
-    # fails this until it is put on one side or the other: none hands a copy on, or fails to, unnoticed.
+    # Every other tool that starts a session is named, with why the thread's rule leaves it: it reaches a
+    # session that exists already, or it answers a thread itself.
     assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {
         "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads",
     }
     assert HELPER_STARTING_TOOLS <= SESSION_STARTING_TOOLS and THREAD_REFUSED_TOOLS <= SESSION_STARTING_TOOLS
+    # A new tool that starts a session is refused in a thread by the code itself, until it is placed: it never
+    # runs there with no hand-off because nobody thought of threads.  Do not loosen this.
+    assert refused_in_a_thread(SESSION_STARTING_TOOLS | {"start_something_new"}) == {
+        "cron_create", "dispatch_experiments", "start_something_new",
+    }
+    assert THREAD_REFUSED_TOOLS == refused_in_a_thread(SESSION_STARTING_TOOLS)
 
 
 async def test_a_threads_loop_starts_no_run_to_edit_a_copy_never_landed(api, monkeypatch, pods):

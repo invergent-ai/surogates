@@ -491,18 +491,32 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "propose_threads",
 })
 
-# A project's thread schedules no routine: a run would start from old files,
-# and its work would land only when someone next speaks to the thread.  Nor
-# does it dispatch a research run's experiments: they work on a bundle of a
-# git repository, and a thread's copy holds none to bundle.
-THREAD_REFUSED_TOOLS: frozenset[str] = frozenset({"cron_create", "dispatch_experiments"})
-
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
-# what helpers kept comes into the copy after.  Named one by one: a tool that
-# only reaches a session that exists, or that a thread may not run, hands
-# nothing on, and a new tool that starts a session is put here on purpose.
+# what helpers kept comes into the copy after.
 HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task"})
+
+# The session-starting tools the thread's rule leaves alone: three only reach
+# a session that exists, and two answer a thread themselves.
+_NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({
+    "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads",
+})
+
+
+def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:
+    """Of the tools that start a session, those a project's thread is refused: every one not placed elsewhere.
+
+    So a new one is refused there until someone hands the copy on for it,
+    or says why it needs no refusal.
+    """
+    return session_starting - HELPER_STARTING_TOOLS - _NOT_THE_THREADS_TO_REFUSE
+
+
+# Today: a thread schedules no routine, since a run would start from old
+# files and its work would land only when someone next speaks to the thread;
+# and it dispatches no research run's experiments, which work on a bundle of
+# a git repository, and a thread's copy holds none to bundle.
+THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOLS)
 
 
 def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
