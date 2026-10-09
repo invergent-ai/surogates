@@ -362,6 +362,19 @@ export function computerBrowser(
   };
 }
 
+/**
+ * What the pane shows of the last hand back made from it (*said*: whether the agent goes on, or is
+ * to be written to): only while the computer says nobody holds the browser. Taken over again since,
+ * from this chat or from another, the line above says who holds it, and this one would say beside
+ * it that the browser is the agent's.
+ */
+export function saidOfHandBack(
+  chat: LocalChat,
+  said: string | null,
+): string | null {
+  return chat.here?.takenOver === false ? said : null;
+}
+
 /** What the pane's presses tell the chat's server: that its user took the browser over, and that they handed it back. */
 export interface BrowserTelling {
   taken(): Promise<unknown>;

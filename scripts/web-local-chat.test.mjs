@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import {
   AGENT_GOES_ON, actOnBrowser, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, localChatOf,
-  NO_FOLDER, newChatPlace, saidBy, switchMode, WRITE_TO_THE_AGENT,
+  NO_FOLDER, newChatPlace, saidBy, saidOfHandBack, switchMode, WRITE_TO_THE_AGENT,
 } from "../web/src/lib/local-chat.ts";
 
 const PREPARED = { folder: "/home/flavius/notes", mode: "ask", nonce: "n".repeat(43), token: "t".repeat(43) };
@@ -522,6 +522,20 @@ test("says nothing of a hand back whose answer comes once its user has taken the
   desk.answers.acquire = offline;
   await pane.press("takeOver", "root-1", desk.desktop);
   assert.deepEqual(pane.state(), { ...quiet(3), failure: UNTOLD_TAKEN });
+});
+
+test("shows what was said of a hand back only while the computer says nobody holds the browser", () => {
+  // Handed back, and read again: nobody holds it, and the pane says whether the agent goes on.
+  assert.equal(saidOfHandBack(bound(false), AGENT_GOES_ON), AGENT_GOES_ON);
+  assert.equal(saidOfHandBack(bound(false), WRITE_TO_THE_AGENT), WRITE_TO_THE_AGENT);
+  assert.equal(saidOfHandBack(bound(false), null), null);
+  // Taken over again since, from this chat, from another, or from one that is gone; or not yet read
+  // again: the line above says who holds it, and this one would contradict it.
+  for (const takenOver of [true, "elsewhere", "orphaned", undefined]) {
+    assert.equal(saidOfHandBack(bound(takenOver), AGENT_GOES_ON), null, String(takenOver));
+  }
+  // A chat this desktop is not bound to has no hand back to speak of.
+  assert.equal(saidOfHandBack(localChatOf("s-1", NOTES, DEVICES, null), AGENT_GOES_ON), null);
 });
 
 test("asks the desktop once for each press, the first thing the press does", async () => {

@@ -7,7 +7,11 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
-import { type BrowserAction, computerBrowser } from "@/lib/local-chat";
+import {
+  type BrowserAction,
+  computerBrowser,
+  saidOfHandBack,
+} from "@/lib/local-chat";
 
 import { browserPaneOf } from "./browser-panes";
 import { useLocalChat } from "./local-chat-bar";
@@ -76,7 +80,7 @@ export function ComputerBrowser({
         </div>
       )}
       {/* Whether the agent goes on once the browser is handed back, as the server answered. */}
-      <output>{said}</output>
+      <output>{saidOfHandBack(chat, said)}</output>
       <span role="alert" className="text-destructive">
         {failure}
       </span>
