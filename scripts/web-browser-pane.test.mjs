@@ -64,13 +64,18 @@ test("posts a release to the chat's control route, saying it is a hand back only
 
 test("fails a release, and a take-over, the server did not make, so the pane says the chat could not be told", async () => {
   const busy = { detail: "The chat is being told of its browser by another request. Post it again." };
-  const posted = signedIn([503, busy], [503, busy]);
+  const posted = signedIn([503, busy], [503, busy], [500, {}], [404, {}]);
 
   // Each failure says how the server answered: the pane posts again what was answered busy.
   await assert.rejects(releaseBrowserControl("s/1", true), { message: "Failed to release browser control", status: 503 });
   await assert.rejects(acquireBrowserControl("s/1"), { message: "Failed to acquire browser control", status: 503 });
+  // As it answered, and no other way: only a busy answer is posted again.
+  await assert.rejects(releaseBrowserControl("s/1", true), { status: 500 });
+  await assert.rejects(acquireBrowserControl("s/1"), { status: 404 });
 
-  assert.deepEqual(posted.map(([, , , said]) => said), [{ action: "release", handed_back: true }, { action: "acquire" }]);
+  assert.deepEqual(posted.map(([, , , said]) => said), [
+    { action: "release", handed_back: true }, { action: "acquire" }, { action: "release", handed_back: true }, { action: "acquire" },
+  ]);
 });
 
 const NOTES = {
