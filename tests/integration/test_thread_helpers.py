@@ -552,3 +552,103 @@ async def test_a_stop_of_a_turn_that_used_no_pod_opens_none(api, monkeypatch, po
     await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
     assert await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE]) == []
     assert (pods.pods, pods.copies) == ({}, {})
+
+
+async def a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path):
+    """A coordinating thread that landed a turn, and whose helper then kept ``sources.md`` and reported; with its master, pods and pool."""
+    master = await master_of(api, await create(api))
+    thread = await a_coordinating_thread(api, master)
+    pods = stored(api, thread, tmp_path)
+    mine = SandboxPool(pods)
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo outline > outline.md"})),
+        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        _final_response("Started."),
+    ], pool=mine, saga_settings=FENCED), 120)
+    [first] = await helpers_of(api, thread)
+    await a_helpers_turn(api, monkeypatch, SandboxPool(pods), first, "echo an hour of work > sources.md")
+    await api.app.state.session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Now check them."})
+    return master, thread, pods, mine
+
+
+async def one_more_turn(api, monkeypatch, pods, thread, command: str) -> None:
+    await api.app.state.session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Something else."})
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": command})), _final_response("Done."),
+    ], pool=SandboxPool(pods), saga_settings=FENCED), 120)
+
+
+async def test_a_stop_of_a_turn_that_took_a_helpers_finished_work_up_and_handed_on_loses_none_of_that_work(api, monkeypatch, tmp_path):
+    master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
+    # The next turn's copy takes the helper's work up, the turn starts a second helper, and is stopped.
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "ls > seen.txt"})),
+        calling(("spawn_worker", {"goal": "Check the sources."})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Done."),
+    ], pool=mine, during=stop, saga_settings=FENCED), 120)
+    assert not (pods.project / "sources.md").exists()
+    # The hand-off is back as the turn found it: the first helper's work, for the next turn to take up.
+    assert refs(pods, "handoff") == [f"refs/handoff-from/{thread.id}", f"refs/handoff/{thread.id}"]
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    assert "sources.md" in (pods.project / "seen-later.txt").read_text().split()
+    assert (pods.project / "sources.md").read_text() == "an hour of work\n"
+    # And the stopped turn's own file is nowhere.
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
+    assert ("sources.md", "landed") in {(f["ref"], f["landing"]) for f in (await reports(api, master))[-1]["files"]}
+
+
+async def test_a_thread_whose_pod_goes_after_its_turn_took_a_helpers_work_up_and_handed_on_lands_that_work(api, monkeypatch, tmp_path):
+    master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
+
+    async def the_pod_goes(harness):
+        await pods.destroy(mine.sandbox_of(str(thread.id)))  # evicted, under the turn
+
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "ls > seen.txt"})),
+        calling(("spawn_worker", {"goal": "Check the sources."})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        calling(("terminal", {"command": "ls > seen-after.txt"})),
+        _final_response("Done."),
+    ], pool=mine, during=the_pod_goes, saga_settings=FENCED), 120)
+    # The copy made in the pod's place took up what was handed on: the helper's work lands with this very turn.
+    assert "sources.md" in (pods.project / "seen-after.txt").read_text().split()
+    assert (pods.project / "sources.md").read_text() == "an hour of work\n"
+    assert ("sources.md", "landed") in {(f["ref"], f["landing"]) for f in (await reports(api, master))[-1]["files"]}
+    assert refs(pods, "handoff") == []
+
+
+@pytest.mark.parametrize("third_turn", ["loses its pod", "is stopped"])
+async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_that_starts_the_next(api, monkeypatch, tmp_path, third_turn):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    store, mine = api.app.state.session_store, SandboxPool(pods)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/mission Write three parts.\n\nRubric:\n- a.md, b.md and c.md exist"})
+    await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, AsyncMock()).wake(thread.id), 60)
+    thread = await store.get_session(thread.id)
+
+    async def the_third_turn_ends_badly(harness):
+        if third_turn == "is stopped":
+            await stop(harness)
+        else:
+            await pods.destroy(mine.sandbox_of(str(thread.id)))
+
+    # Each task's report wakes the thread, whose turn takes that task's work up and starts the next.
+    for part, during in (("a", None), ("b", None), ("c", the_third_turn_ends_badly)):
+        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+            calling(("spawn_task", {"goal": f"Write {part}.md."})),
+            *([calling(("memory", {"action": "add", "content": "x"}))] if during else []),
+            _final_response("Started."), _final_response("Waiting for the task."),  # a coordinator is asked once more
+        ], pool=mine, during=during, saga_settings=FENCED), 120)
+        task = (await helpers_of(api, thread))[-1]
+        await a_helpers_turn(api, monkeypatch, SandboxPool(pods), task, f"echo part {part} > {part}.md")
+        await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": f"Part {part} is done."})
+    assert len(await helpers_of(api, thread)) == 3
+    # The first task's work landed with the second turn.  The second's was taken up by the third turn, which
+    # handed the copy on and then did not land: it is not lost with that turn.
+    await ends(api, SandboxPool(pods), thread)
+    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt"]
+    assert [(pods.project / f"{part}.md").read_text() for part in "abc"] == ["part a\n", "part b\n", "part c\n"]
+    landed = {f["ref"] for report in await reports(api, master) for f in report.get("files", []) if f.get("landing") == "landed"}
+    assert {"a.md", "b.md", "c.md"} <= landed

@@ -1840,11 +1840,11 @@ def test_a_pod_made_again_drops_the_hand_off_its_stopped_turn_made_and_no_other_
     assert again.drop_hand_off() == {"dropped": False}
     assert again.drop_hand_off(gave=["0" * 40]) == {"dropped": False}
     assert len([ref for ref in git(durable, "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]) == 2
-    # Told which hand-off the stopped turn made, it drops that one, whole.
+    # Told which hand-off the stopped turn made, it takes the turn's own files off it.
     assert again.drop_hand_off(gave=[gave]) == {"dropped": True}
-    assert not [ref for ref in git(durable, "for-each-ref", "--format=%(refname)").splitlines() if "handoff" in ref]
-    # And nothing of the turn is left for the next one to land.
-    assert not (a_pod(tmp_path, project).copy / "draft.md").exists()
+    # Nothing of the turn is left for the next one to land; what the helper changed itself is.
+    after = a_pod(tmp_path, project)
+    assert not (after.copy / "draft.md").exists() and (after.copy / "sources.md").read_text() == "from the draft"
 
 
 def test_a_copy_handed_on_again_as_it_was_is_pushed_once_and_one_changed_since_again(tmp_path, project, monkeypatch):
@@ -1866,7 +1866,7 @@ def test_a_copy_handed_on_again_as_it_was_is_pushed_once_and_one_changed_since_a
     # What it wrote for the next one since goes on a new hand-off.
     (thread.copy / "brief.md").write_text("for the second")
     second = thread.hand_off(author=A, trailers=KEPT)["commit"]
-    assert second != first and [sorted(updates) for updates in pushes] == [["refs/handoff-from/t1", "refs/handoff/t1"]]
+    assert second != first and [sorted(updates) for updates in pushes] == [["refs/handoff/t1"]]
     assert git(durable, "show", "refs/handoff/t1:brief.md") == "for the second"
     # A hand-off a helper has kept onto since is not the copy as it was: handing on takes that up, and pushes.
     helper = a_helper(tmp_path, project)
@@ -1874,7 +1874,82 @@ def test_a_copy_handed_on_again_as_it_was_is_pushed_once_and_one_changed_since_a
     helper.hand_back(author=A, trailers=KEPT)
     third = thread.hand_off(author=A, trailers=KEPT)["commit"]
     assert third != second and len(pushes) == 2
-    assert git(durable, "rev-parse", "refs/handoff/t1", "refs/handoff-from/t1").split() == [third, third]
+    # Where the hand-off is taken up from stays where the branch has it: only a landing or a keep moves that.
+    assert git(durable, "rev-parse", "refs/handoff/t1", "refs/handoff-from/t1").split() == [third, git(thread.repo, "rev-parse", "refs/bases/t1")]
     assert git(durable, "show", f"{third}:sources.md") == "sources"
-    # Each is the stopped turn's to drop, whichever the history holds.
+    # Each is the stopped turn's to take back, whichever the history holds: the helper's own file is what is left.
     assert a_pod(tmp_path, project).drop_hand_off(gave=[first, second, third]) == {"dropped": True}
+    left = a_pod(tmp_path, project)
+    assert (left.copy / "sources.md").read_text() == "sources"
+    assert not (left.copy / "outline.md").exists() and not (left.copy / "brief.md").exists()
+
+
+def a_thread_whose_helper_finished_after_its_turn(tmp_path, project) -> str:
+    """Thread t1 landed a turn, and a helper of it then kept ``sources.md`` on a hand-off of its own making; that hand-off."""
+    first = a_pod(tmp_path, project)
+    (first.copy / "outline.md").write_text("outline")
+    land(first, "saga:1")
+    helper = a_helper(tmp_path, project, "h-a")
+    (helper.copy / "sources.md").write_text("an hour of work")
+    return helper.hand_back(author=A, trailers=KEPT)["commit"]
+
+
+def handoffs(project: Path) -> dict[str, str]:
+    """The history's hand-off refs of t1, by their short names."""
+    out = git(project / "_history", "for-each-ref", "--format=%(refname) %(objectname)", "refs/handoff/", "refs/handoff-from/")
+    return {line.split()[0].split("/")[1]: line.split()[1] for line in out.splitlines()}
+
+
+def test_a_stop_puts_the_hand_off_back_to_what_the_turn_took_up_so_a_helpers_finished_work_is_in_the_next_copy(tmp_path, project):
+    kept = a_thread_whose_helper_finished_after_its_turn(tmp_path, project)
+    before = handoffs(project)
+    second = a_pod(tmp_path, project)  # the thread's next turn: its open takes the helper's work up
+    assert (second.copy / "sources.md").read_text() == "an hour of work"
+    (second.copy / "draft.md").write_text("the stopped turn's draft")
+    second.hand_off(author=A, trailers=KEPT)  # for a second helper, which it starts
+    assert second.drop_hand_off() == {"dropped": True}
+    # The hand-off is as the turn found it: the first helper's work is still there to take up.
+    assert handoffs(project) == before and before["handoff"] == kept
+    third = a_pod(tmp_path, project)
+    assert (third.copy / "sources.md").read_text() == "an hour of work"
+    assert not (third.copy / "draft.md").exists()
+    landed = land(third, "saga:3")
+    assert (project / "sources.md").read_text() == "an hour of work" and not (project / "draft.md").exists()
+    assert landed["commit"] and handoffs(project) == {}
+
+
+def test_a_pod_lost_after_its_turn_handed_on_loses_no_helpers_work_the_copy_had_taken_up(tmp_path, project):
+    a_thread_whose_helper_finished_after_its_turn(tmp_path, project)
+    second = a_pod(tmp_path, project)
+    (second.copy / "draft.md").write_text("the turn's draft")
+    second.hand_off(author=A, trailers=KEPT)
+    # Its pod goes under the turn.  The copy made in its place has what was handed on, the helper's work with it.
+    again = a_pod(tmp_path, project)
+    assert (again.copy / "sources.md").read_text() == "an hour of work"
+    assert (again.copy / "draft.md").read_text() == "the turn's draft"
+    land(again, "saga:2")
+    assert (project / "sources.md").read_text() == "an hour of work"
+    assert handoffs(project) == {}
+
+
+def test_a_stop_keeps_what_helpers_kept_onto_the_turns_hand_offs_and_drops_only_the_turns_own(tmp_path, project):
+    a_thread_whose_helper_finished_after_its_turn(tmp_path, project)
+    turn = a_pod(tmp_path, project)
+    (turn.copy / "draft.md").write_text("the stopped turn's draft")
+    first = turn.hand_off(author=A, trailers=KEPT)["commit"]
+    b = a_helper(tmp_path, project, "h-b")  # started from the turn's copy
+    (b.copy / "checked.md").write_text("checked by b")
+    b.hand_back(author=A, trailers=KEPT)
+    # The turn's next step takes that up, writes more, and hands on again; another helper keeps onto that.
+    (turn.copy / "more.md").write_text("more of the stopped turn")
+    second = turn.hand_off(author=A, trailers=KEPT)["commit"]
+    c = a_helper(tmp_path, project, "h-c")
+    (c.copy / "counted.md").write_text("counted by c")
+    c.hand_back(author=A, trailers=KEPT)
+    # Stopped, by a pod made in the turn's place, told which hand-offs the turn made.
+    assert a_pod(tmp_path, project).drop_hand_off(gave=[first, second]) == {"dropped": True}
+    after = a_pod(tmp_path, project)
+    names = sorted(p.name for p in after.copy.iterdir() if p.name != ".git")
+    # Each helper's own work, the first's from before the turn too; none of the turn's own files.
+    assert names == ["Report.docx", "checked.md", "counted.md", "notes.txt", "outline.md", "sources.md"]
+    assert git(project / "_history", "fsck", "--no-dangling") == ""

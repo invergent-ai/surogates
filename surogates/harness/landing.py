@@ -341,22 +341,24 @@ def turn_ended(session: Any) -> None:
 
 
 async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
-    """Drop the hand-off a thread's stopped turn made, so the turn's own files do not land later; whether one was dropped.
+    """Take a thread's stopped turn's own files off its hand-off, so they do not land later; whether it was done.
 
     A turn that handed nothing on takes no lock and asks no pod.  One that
     did goes behind the guard a keep has, since it writes the history's
-    refs as a keep does.  The pod drops the hand-off it made itself; a pod
-    made again since the turn handed on is told which commits those were.
-    With no pod it does nothing: its caller opens one first.
+    refs as a keep does.  The pod knows the last hand-off it made itself; a
+    pod made again since the turn handed on is told which commits the turn
+    handed on.  With no pod it does nothing: its caller opens one first.
 
-    What the Stop takes back is the hand-off, whole: with the stopped
-    turn's files, whatever a helper had kept on it that the thread's
-    branch had not taken up, an earlier step's helper's finished work
-    included.  It stays in the history, on no ref, until a pruning.  A
-    helper still at work is not stopped by this: when it ends it hands
-    back onto no hand-off and makes a new one from where it started, so
-    what it changed itself lands with the thread's next turn, a file it
-    made from the stopped turn's draft among them.
+    What the stop takes back is what the turn itself made and handed on.
+    The hand-off goes back to the one the turn's copy had taken up, with
+    what helpers kept onto the turn's hand-offs since: a helper's finished
+    work is there for the thread's next turn.  A helper still at work is
+    not stopped by this: when it ends it hands back what it changed
+    itself, a file it made from the stopped turn's draft among them.
+
+    Where this is not done, the pod or the lock not had, the hand-off
+    stays as the turn left it, and the stopped turn's handed-on files
+    come into the thread's next copy with the helpers' work.
     """
     owner = sandbox_session_key(session)
     gave = _HANDED_ON.pop(owner, None)
