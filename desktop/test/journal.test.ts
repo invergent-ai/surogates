@@ -499,6 +499,7 @@ describe("a device the agent revoked", () => {
     journal.acknowledge("sent");
     journal.finish("finished", outcome, [Buffer.from("first")]);
     journal.bindings.add({ root: "r1", nonce: "n", folder: "/home/me/Report", dev: 1, ino: 2, boot: "b", mode: "free", boundAt: 1 });
+    journal.bindings.allowPort("r1", 3000);
     journal.retire();
     expect(journal.unsent()).toEqual([]);
     expect(journal.openIds()).toEqual([]);
@@ -506,6 +507,8 @@ describe("a device the agent revoked", () => {
     for (const id of ["finished", "started", "received"]) expect(journal.receive(operation(id))).toEqual({ action: "ignore" });
     expect(journal.receive(operation("sent"))).toEqual({ action: "reply", outcome: { ok: "done" } });
     expect(journal.bindings.folders()).toEqual(["/home/me/Report"]);
+    // With the ports its chats' browsers may open, for a Restore: nothing forwards them while its access is ended.
+    expect(journal.bindings.forwards()).toEqual([{ port: 3000, root: "r1" }]);
     journal.close();
   });
 

@@ -41,6 +41,8 @@ class Tools implements ToolLayer {
   // What an operation answers, where a test says; and what the stack gave it to save its downloads with.
   answer: ((operation: Operation) => Outcome) | null = null;
   save: ((download: StagedDownload, stop: AbortSignal) => Promise<string>) | null = null;
+  // The ports the journal held each time the stack had the tools tell the browser and the sandbox of them.
+  readonly forwards: Array<Array<{ port: number; root: string }>> = [];
   // The ports each chat's sandbox listens on, and each question the stack's approvals asked of it.
   listens: number[] = [];
   readonly probed: Array<[string, number]> = [];
@@ -72,6 +74,10 @@ class Tools implements ToolLayer {
 
   saveDownloadsWith(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void {
     this.save = save;
+  }
+
+  forwarded(): void {
+    this.forwards.push(this.bindings?.forwards() ?? []);
   }
 
   listening(root: string, port: number): Promise<boolean> {
@@ -238,6 +244,43 @@ describe("one agent's device", () => {
     expect(tools.probed).toEqual([[ROOT, 3000], [ROOT, 3000], [ROOT, 3000]]);
     expect(asked).toMatchObject([1, 2].map(() => ({ kind: "browser", action: "port", detail: "3000", chat: { root: ROOT, calling: CHILD } })));
     expect(asked).toHaveLength(2);
+  });
+
+  it("has its tools tell of the ports the browser may open at its start, what the run before kept, and at each change: allowed, moved, taken back, and gone with a deleted chat", async () => {
+    // A port the run before kept.
+    mkdirSync(join(base, "data", "devices", "d"), { recursive: true });
+    const before = new OperationJournal(join(base, "data", "devices", "d", "journal.sqlite"));
+    before.bindings.add({ root: OTHER, nonce: "nonce-other", folder, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    before.bindings.allowPort(OTHER, 5173);
+    before.close();
+    const device = await start({
+      approvalPrompts: { approve: () => Promise.resolve("allow_session"), confirmFreeMode: () => Promise.resolve(false) },
+    });
+    await server.until(() => statuses.includes("connected"));
+    expect(tools.forwards).toEqual([[{ port: 5173, root: OTHER }]]);
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    tools.bindings?.allowBrowser(ROOT);
+    // Allowed by the chat's user at its agent's navigation: told before the navigation runs.
+    tools.listens = [3000];
+    tools.answer = (operation) => ({ ok: [operation.kind, tools.forwards.at(-1)] });
+    server.send(op("nav-1", "browser.navigate", { url: "http://localhost:3000/", wait_until: "load" }));
+    await server.until(() => results("nav-1").length === 1);
+    expect(results("nav-1")[0]?.outcome).toEqual({ ok: ["browser.navigate", [{ port: 3000, root: ROOT }, { port: 5173, root: OTHER }]] });
+    // Given to another chat, and taken back in Settings: each told at once.
+    device.bindings.allowPort(ROOT, 5173);
+    expect(tools.forwards.at(-1)).toEqual([{ port: 3000, root: ROOT }, { port: 5173, root: ROOT }]);
+    device.bindings.disallowPort(ROOT, 3000);
+    expect(tools.forwards.at(-1)).toEqual([{ port: 5173, root: ROOT }]);
+    // The chat's browser taken back, its ports with it; and a chat deleted, its ports with its binding.
+    device.bindings.allowPort(OTHER, 8000);
+    device.bindings.disallowBrowser(ROOT);
+    expect(tools.forwards.at(-1)).toEqual([{ port: 8000, root: OTHER }]);
+    device.bindings.allowPort(ROOT, 3000);
+    server.send({ ...op("retire-1", "retire", {}, true), invocation_id: "retire" });
+    await server.until(() => results("retire-1").length === 1);
+    expect([device.bindings.get(ROOT), tools.forwards.at(-1)]).toEqual([undefined, [{ port: 8000, root: OTHER }]]);
   });
 
   it("takes the agent's browser over through its tools, from the chat that asks first: every chat's open browser prompt dismissed and answered as its tools answer now", async () => {
@@ -446,12 +489,13 @@ describe("one agent's device", () => {
           tools,
           browser: {
             perform: () => Promise.resolve({ ok: null }), forget: () => {}, stop: () => Promise.resolve(), end: () => Promise.resolve(), address: () => Promise.resolve("about:blank"),
-            notComing: () => {}, pause: () => {}, show: () => Promise.resolve(false), onDownload: () => {},
+            notComing: () => {}, pause: () => {}, show: () => Promise.resolve(false), onDownload: () => {}, forwards: () => {},
           },
           bindingOf: (root) => bindings.get(root),
           launch: () => null,
           staging: join(base, "data", "browser-profiles", "tmp"),
-          vm: { listening: () => Promise.resolve(false) },
+          ports: () => bindings.forwards(),
+          vm: { door: join(base, "browser.sock"), forwards: () => {}, listening: () => Promise.resolve(false) },
         });
       },
     });
