@@ -343,6 +343,13 @@ describe("the install script's release keys", () => {
   });
 });
 
+describe("the install script's packages", () => {
+  it("names each program that the app starts by a path of the system's: pkexec, for an update, and perl, with which it starts a child that has none of its descriptors", () => {
+    const asked = /apt-get install [^\n]*/.exec(readFileSync(SCRIPT, "utf8"))?.[0].split(" ") ?? [];
+    expect(asked).toEqual(expect.arrayContaining(["pkexec", "perl-base"]));
+  });
+});
+
 describe("the install script's waits", () => {
   it("are shorter for all an apply reads with the lock held than for the lock: one who was let apply once keeps no other waiting until it gives up", () => {
     const script = readFileSync(SCRIPT, "utf8");
@@ -2086,7 +2093,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(current()).toBe("/opt/surogate/versions/1.0.0");
 
     // The packages, QEMU's without its recommends, and its firmware for q35.
-    expect(root("dpkg-query -W -f='${Status}\\n' bubblewrap socat ripgrep virtiofsd uidmap zstd openssl jq qemu-system-x86 | sort -u").stdout).toBe("install ok installed\n");
+    expect(root("dpkg-query -W -f='${Status}\\n' bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec perl-base openssl jq qemu-system-x86 | sort -u").stdout).toBe("install ok installed\n");
     expect(root("dpkg-query -W -f='${Status}\\n' qemu-system-gui 2>/dev/null").stdout).not.toBe("install ok installed\n");
     expect(root("timeout 3 qemu-system-x86_64 -machine q35,accel=tcg -display none -nodefaults -S").status).toBe(124);
     expect(root("getent group kvm").stdout).toMatch(/\btester\b/);

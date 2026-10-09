@@ -806,7 +806,7 @@ packages() {
   # A package source of the computer's own that fails stops nothing: what is needed may be known already.
   apt-get update -qq || say "apt-get update failed for a package source of this computer's: installing from what apt knows already"
   # Soon after a desktop's first boot, its unattended upgrades hold dpkg's lock for a while.
-  apt-get install -y -qq -o DPkg::Lock::Timeout=300 bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec openssl jq curl desktop-file-utils \
+  apt-get install -y -qq -o DPkg::Lock::Timeout=300 bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec perl-base openssl jq curl desktop-file-utils \
     && apt-get install -y -qq -o DPkg::Lock::Timeout=300 --no-install-recommends qemu-system-x86 \
     || fail "could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include"
 }

@@ -499,6 +499,8 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
         // pkexec is the system's own, which the install brought: where the app runs it by its whole
         // path, set-id and root's, and on the PATH the install script pins for itself.
         expect((await ssh("stat -c '%a %U %n' /usr/bin/pkexec && PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v pkexec")).stdout).toBe("4755 root /usr/bin/pkexec\n/usr/bin/pkexec\n");
+        // And perl, where the app looks for it to start a child with none of its own descriptors: the install names its package.
+        expect((await ssh("dpkg-query -W -f='${Status}\\n' perl-base && /usr/bin/perl -e 'print 6 * 7'")).stdout).toBe("install ok installed\n42");
 
         // The app takes the helper's release keys, the record's base and the installed version's
         // mark only from files that are root's own, which here they truly are. Each as the install
