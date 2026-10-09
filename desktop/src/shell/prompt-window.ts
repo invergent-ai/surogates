@@ -1,10 +1,12 @@
 // One of the desktop's own prompts, in a window of its own (spec, Section 4), as Claude
 // Desktop draws its local consent (index.chunk-CHp2HdS0.js, renderer/local_exec_consent/):
 // 460 px wide, frameless and modal over the app's window, its page one of the app's
-// files, with no web content in it. An answer that allows anything counts only once
-// the window has been shown, or focused again, for the input protection's 500 ms; the
-// page holds those buttons back as long. Over a hidden window, a prompt waits to be
-// shown until the window is, and the user is told.
+// files, with no web content in it. An answer counts only once the window has been
+// shown, or focused again, for the input protection's 500 ms, and only from a key or a
+// press that came that long after the one before it: keys already on their way when
+// the prompt took the keyboard, as of a person typing into the agent's browser, answer
+// nothing, whichever button they would reach. The page holds its buttons back as long.
+// Over a hidden window, a prompt waits to be shown until the window is, and the user is told.
 
 import { BrowserWindow } from "electron";
 
@@ -64,6 +66,25 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   let closing = false;
   let armedAt = Number.POSITIVE_INFINITY;
   let arming: NodeJS.Timeout | undefined;
+  // When a key last went down in the prompt, or a press began; and whether that one may answer: it came once
+  // the prompt had been shown for the input protection, and that long after the key or press before it. The
+  // protection is counted anew from each: a person who is typing never answers, and one who stops and then
+  // chooses does. Seen here, before the page sees it: the page's own word of a key or a press is not taken.
+  let lastDown = Number.NEGATIVE_INFINITY;
+  let answers = false;
+  const down = (repeated = false) => {
+    const now = performance.now();
+    // A key held down repeats only after a wait of its own, which can be longer than the protection: it is the
+    // key that was down before, and answers nothing however late it comes.
+    answers = !repeated && now >= armedAt && now - lastDown >= INPUT_PROTECTION_MS;
+    lastDown = now;
+  };
+  // Every key and press the window is sent, whoever sends it: one event for each key that goes down, a held
+  // key's repeats among them, and one for each press of the mouse or a finger.
+  contents.on("input-event", (_event, input) => {
+    if (input.type === "rawKeyDown" || input.type === "keyDown") down(input.modifiers?.includes("isautorepeat") === true);
+    else if (input.type === "mouseDown" || input.type === "touchStart") down();
+  });
   const send = (channel: string, ...args: unknown[]) => {
     if (!contents.isDestroyed()) contents.send(channel, ...args);
   };
@@ -95,14 +116,15 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
       return handler(...args);
     });
   };
-  handle("prompt:state", () => ({ content, waiting: options.queue.waiting(), armed: performance.now() >= armedAt }));
-  // True once taken; false for a press that allows anything before the input protection has passed.
+  handle("prompt:state", () => ({ content, waiting: options.queue.waiting(), armed: performance.now() >= armedAt, protection: INPUT_PROTECTION_MS }));
+  // True once taken; false for one that the input protection holds back: before it has passed since the prompt
+  // was shown, or with no key or press behind it that came after a quiet protection time.
   handle("prompt:answer", (pressed, chosen) => {
     const offered = content.buttons.find((candidate) => candidate.id === pressed);
     if (!offered) throw new Error("Not a button of this prompt");
     const choice = content.choice === null ? null : content.choice.options.find((option) => option.value === chosen)?.value;
     if (choice === undefined) throw new Error("Not an option of this prompt");
-    if (offered.allows && performance.now() < armedAt) return false;
+    if (!answers || performance.now() < armedAt) return false;
     answer ??= { button: offered.id, choice };
     close();
     return true;

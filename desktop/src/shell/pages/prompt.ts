@@ -1,7 +1,9 @@
 // One of the desktop's prompts (spec, Section 4), drawn from what the main process
 // sends. Every string is set as text, with each special character in it shown as its
-// code point. The buttons answer the main process, which ignores one that allows
-// anything before the input protection has passed; the page holds those back as long.
+// code point. The buttons answer the main process, which takes no answer before the
+// input protection has passed, nor one from a key or a press that came sooner than
+// that after the one before it; the page holds its buttons back as long, and a key
+// that comes meanwhile does nothing here at all.
 
 import { byId, markTheme, showText } from "./ui.js";
 
@@ -21,6 +23,7 @@ interface State {
   content: Content;
   waiting: number;
   armed: boolean;
+  protection: number;
 }
 
 interface Prompt {
@@ -35,9 +38,17 @@ const prompt = (globalThis as unknown as { surogatePrompt: Prompt }).surogatePro
 markTheme();
 
 let content: Content | null = null;
+// Whether the prompt has been shown, or focused again, for the input protection: as the main process says.
 let armed = false;
-// Presses on what allows that began before the input protection passed: the click that ends one answers nothing.
-const early = new WeakSet<HTMLButtonElement>();
+// The input protection, in milliseconds; when a key last went down here, or a press began; and whether that
+// one acts: it came once the prompt was armed, and a protection time after the one before it. One that does
+// not act does nothing: it moves no focus, changes no choice and answers nothing. The main process counts the
+// same keys and presses by itself, and takes an answer from none but one that acts.
+let protection = 500;
+let lastDown = Number.NEGATIVE_INFINITY;
+let acts = false;
+let quiet: number | undefined;
+const held = (): boolean => !armed || performance.now() - lastDown < protection;
 
 const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] => {
   const made = document.createElement(tag);
@@ -50,17 +61,42 @@ const chosen = (): string | null => document.querySelector<HTMLInputElement>("#p
 
 function answer(id: string): void {
   const offered = content?.buttons.find((button) => button.id === id);
-  if (!offered || (offered.allows && !armed)) return;
+  if (!offered || !acts) return;
   void prompt.answer(id, content?.choice ? chosen() : null);
 }
 
-// What allows is held back until the input protection has passed: focusable, and marked unavailable.
+// Every button is held back until the input protection has passed, since the prompt was shown and since the
+// last key or press: focusable, and marked unavailable.
 function hold(): void {
-  for (const button of document.querySelectorAll<HTMLButtonElement>("#prompt-buttons button")) {
-    if (content?.buttons.find((offered) => offered.id === button.dataset.id)?.allows) {
-      button.setAttribute("aria-disabled", String(!armed));
-    }
-  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#prompt-buttons button")) button.setAttribute("aria-disabled", String(held()));
+  // Looked at again once what is left of the protection since the last key or press has passed.
+  clearTimeout(quiet);
+  const left = lastDown + protection - performance.now();
+  if (armed && left > 0) quiet = window.setTimeout(hold, left + 1);
+}
+
+// A key went down, or a press began: it acts only where the prompt was not held back, and holds it back anew.
+// A key held down repeats after a wait of its own, which can outlast the protection: it never acts.
+function down(event: Event): void {
+  acts = !held() && !(event instanceof KeyboardEvent && event.repeat);
+  lastDown = performance.now();
+  hold();
+  if (!acts) still(event);
+}
+// What a key or a press that does not act would do next does not happen either: its key coming up, its click.
+// A key does nothing at all: keys are what a person typing elsewhere sends here. A press of the mouse is made
+// where it lands, and one that does not act is held back from the buttons alone: a choice it lands on is taken.
+function still(event: Event): void {
+  if (!(event instanceof KeyboardEvent) && !(event.target instanceof Element && event.target.closest("#prompt-buttons"))) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+document.addEventListener("keydown", down, true);
+document.addEventListener("pointerdown", down, true);
+for (const after of ["keyup", "click"]) {
+  document.addEventListener(after, (event) => {
+    if (!acts) still(event);
+  }, true);
 }
 
 // More may wait than the line here holds: each chat keeps its own later prompts back until this one is answered.
@@ -68,15 +104,10 @@ function waiting(count: number): void {
   byId("prompt-waiting").textContent = count === 0 ? "" : "More prompts wait after this one.";
 }
 
-// Where a press on *button* begins: one on what allows, before the input protection has passed, answers nothing.
-function begin(button: HTMLButtonElement): void {
-  if (content?.buttons.find((offered) => offered.id === button.dataset.id)?.allows && !armed) early.add(button);
-  else early.delete(button);
-}
-
 function draw(state: State): void {
   content = state.content;
   armed = state.armed;
+  protection = state.protection;
   showText(byId("prompt-title"), content.title);
   showText(byId("prompt-lead"), content.lead);
   byId("prompt-details").replaceChildren(...content.details.map((detail) => {
@@ -116,11 +147,7 @@ function draw(state: State): void {
     const button = element("button", "btn", offered.label);
     button.type = "button";
     button.dataset.id = offered.id;
-    button.addEventListener("pointerdown", () => begin(button));
-    button.addEventListener("click", () => {
-      if (early.delete(button)) return;
-      answer(offered.id);
-    });
+    button.addEventListener("click", () => answer(offered.id));
     return button;
   }));
   waiting(state.waiting);
@@ -131,13 +158,6 @@ function draw(state: State): void {
 
 document.addEventListener("keydown", (event) => {
   if (!content) return;
-  // A key held down from before the prompt opened answers nothing.
-  if (event.repeat && (event.key === "Enter" || event.key === " ")) {
-    event.preventDefault();
-    return;
-  }
-  // An Enter or a Space on a button begins a press there, whenever its key comes up.
-  if ((event.key === "Enter" || event.key === " ") && event.target instanceof HTMLButtonElement) begin(event.target);
   if (event.key === "Escape") {
     event.preventDefault();
     answer(content.cancel);

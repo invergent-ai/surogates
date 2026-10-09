@@ -117,7 +117,7 @@ describe("the folder sheet", () => {
     expect(await prepared).toMatchObject({ folder, mode: "free" });
   });
 
-  it("takes an answer that allows anything only once its input protection has passed, even straight from its page", async () => {
+  it("takes no answer straight from its page, before its input protection has passed or after: only a key or a press of its user's answers", async () => {
     const client = await signedIn();
     const prepared = prepare(client);
     const sheet = await prompt(app!);
@@ -129,8 +129,12 @@ describe("the folder sheet", () => {
     await expect(answer("grant", "free")).rejects.toThrow("Not a button of this prompt");
     expect(await promptsShown(app!)).toBe(1);
     await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("false");
-    // Taken: the window closes as it answers.
-    expect(await answer("accept", "ask").catch(() => true)).toBe(true);
+    // The protection passed, the page's own word is still no key and no press: nothing is taken, not a Cancel either.
+    expect([await answer("accept", "ask"), await answer("cancel", "ask")]).toEqual([false, false]);
+    expect(await promptsShown(app!)).toBe(1);
+    // A press is: the window closes as it answers.
+    await sheet.check('input[value="ask"]');
+    await press(sheet, "accept");
     expect(await prepared).toMatchObject({ folder, mode: "ask" });
   });
 
@@ -179,6 +183,8 @@ describe("the folder sheet", () => {
     await expect.poll(() => sheet.getAttribute('[data-id="accept"]', "aria-disabled")).toBe("true");
     expect(await answer()).toBe(false);
     expect(await promptsShown(app!)).toBe(1);
+    // Nothing answers it while its focus is away, a Cancel neither: focused again, Escape cancels once its protection has passed.
+    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/prompt.html"))!.focus());
     await key(sheet, "Escape");
     expect(await prepared).toBeNull();
   });
@@ -193,8 +199,12 @@ describe("the folder sheet", () => {
     const sheet = await prompt(app!);
     // The user typing in the composer as the page opens the sheet: its spaces come long after the input protection.
     await sheet.keyboard.type("please fix the failing test", { delay: 90 });
+    // Nor from the keys that move through a form: the mode chosen stays as it was, with the keyboard on it.
+    for (const name of ["ArrowDown", "Tab", "ArrowDown", "Tab"]) await sheet.keyboard.press(name, { delay: 90 });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect([await promptsShown(app!), settled]).toEqual([1, false]);
+    expect(await sheet.evaluate(() => [(document.activeElement as HTMLInputElement).value, document.querySelector<HTMLInputElement>("#prompt-choice input:checked")!.value]))
+      .toEqual(["free", "free"]);
     await key(sheet, "Escape");
     expect(await prepared).toBeNull();
   });
