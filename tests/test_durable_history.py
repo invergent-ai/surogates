@@ -1953,3 +1953,50 @@ def test_a_stop_keeps_what_helpers_kept_onto_the_turns_hand_offs_and_drops_only_
     # Each helper's own work, the first's from before the turn too; none of the turn's own files.
     assert names == ["Report.docx", "checked.md", "counted.md", "notes.txt", "outline.md", "sources.md"]
     assert git(project / "_history", "fsck", "--no-dangling") == ""
+
+
+def a_day_a_helpers_version_is_left_out(tmp_path, project, day: int) -> str:
+    """You save the report, a helper of t1 edits its old version, and t1's next turn changes nothing else; the helper's hand-back."""
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report, saved by you on day %d" % day)
+    run = a_helper(tmp_path, project, f"d{day}")
+    (run.copy / "Report.docx").write_bytes(b"PK\x03\x04 report + numbers of day %d" % day)
+    handed_back = run.hand_back(author=A, trailers=KEPT)["commit"]
+    assert a_pod(tmp_path, project).commit_turn(author=A, trailers=TURN)["not_taken"] == ["Report.docx"]
+    return handed_back
+
+
+def test_the_versions_a_thread_left_out_go_with_its_next_landing_and_their_ref_with_them(tmp_path, project):
+    durable, untaken = project / "_history", "refs/helpers/t1/not-taken"
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    left_out = [a_day_a_helpers_version_is_left_out(tmp_path, project, day) for day in (1, 2)]
+    assert untaken in git(durable, "for-each-ref", "--format=%(refname)").splitlines()
+    # The thread's next turn that changes a file lands: its commit names them, and the ref is not needed.
+    pod = a_pod(tmp_path, project)
+    (pod.copy / "more.md").write_text("more")
+    step = [["Surogate-Saga", "saga:2"], ["Surogate-Kind", "turn"]]
+    turn = pod.commit_turn(author=A, trailers=step)["commit"]
+    # A commit step tried again after its push was cut off, the ref gone with that push, makes the same commit.
+    git(pod.repo, "update-ref", "-d", "refs/synced/t1")
+    assert pod.commit_turn(author=A, trailers=step)["commit"] == turn
+    landed = land(pod, "saga:2")["commit"]
+    assert untaken not in git(durable, "for-each-ref", "--format=%(refname)").splitlines()
+    assert set(left_out) <= set(git(durable, "rev-list", landed).split())
+    assert len(parents(durable, f"{landed}^2")) <= 8
+    # So a pruning cuts them with the landing, when its window has passed: nothing holds them for the thread's life.
+    assert a_pod(tmp_path, project, "t2").prune(keep=["refs/helpers/t1/"], now=time.time(), spare=0)["pruned"] is True
+    assert git(durable, "show", f"{left_out[0]}:Report.docx") == "PK\x03\x04 report + numbers of day 1"
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_the_ref_of_versions_left_out_names_eight_hand_offs_at_most(tmp_path, project):
+    durable, untaken = project / "_history", "refs/helpers/t1/not-taken"
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first, "saga:1")
+    left_out = [a_day_a_helpers_version_is_left_out(tmp_path, project, day) for day in range(11)]
+    held = set(git(durable, "rev-list", untaken).split()) & set(left_out)
+    # The last eight days': an older one is let go, and no chain of them grows with the thread's life.
+    assert held == set(left_out[-8:])
+    assert set(parents(durable, untaken)) == set(left_out[-8:])

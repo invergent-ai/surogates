@@ -100,6 +100,8 @@ _ZERO = "0" * 40
 #: The blob of a file with nothing in it, as an index entry holds it.
 _EMPTY = bytes.fromhex("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
 MAIN = "refs/heads/main"
+#: The title of a commit that only names hand-offs, changing no file.
+_EARLIER = "Earlier hand-offs"
 #: What a thread's hand-off says of itself: the hand-off its copy had taken up, and the one its pod made before it.
 _TOOK, _GAVE_BEFORE = "Surogate-Took", "Surogate-Gave-Before"
 #: The hand-backs a stop follows down from the history's hand-off to the stopped turn's, at most.
@@ -429,9 +431,10 @@ class History:
             behind = self._behind(base)
             if left_out["not_taken"] and behind:
                 # A helper's version this copy left out is told as kept.  No turn is pushed to name the
-                # hand-off behind it, so a ref among the thread's helpers' names it, with what it named before.
-                earlier = refs.get(self.untaken)
-                named = [*behind, *([earlier] if earlier and earlier not in behind else [])]
+                # hand-off behind it, so a ref among the thread's helpers' names it, with those it named
+                # before: the last ``_PARENTS`` of them, an older one let go.  The thread's next push
+                # names them itself, and the ref goes.
+                named = list(dict.fromkeys([*behind, *self._left_out_before(refs)]))[:_PARENTS]
                 taken[self.untaken] = named[0] if len(named) == 1 else self._folded(named)
             if any(refs.get(ref) != to for ref, to in taken.items()):
                 # What it took up and threw away stays away: no later take-up, and no later helper, starts from it.
@@ -440,9 +443,17 @@ class History:
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
         if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").splitlines():
             self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
-        turn = self._one(self._copy("rev-parse", "HEAD"), base, *self._behind(base), author=author, title="Turn", trailers=trailers)
+        # Also what a try of this step cut off after its push named, when the ref had gone with that push.
+        pushed = refs.get(self.branch)
+        named = self._parents(pushed) if pushed and pushed != base and self._has(pushed) else []
+        behind = self._behind(base, [*self._left_out_before(refs), *(named[1:] if named[:1] == [base] else [])])
+        turn = self._one(self._copy("rev-parse", "HEAD"), base, *behind, author=author, title="Turn", trailers=trailers)
         if refs.get(self.branch) != turn:
-            self._push({self.branch: turn, self.base: base, **self._taken_up(refs)}, expect={self.branch: self._ref(self.synced)})
+            self._push(
+                # The turn names the hand-offs whose versions earlier turns left out: their own ref is not needed.
+                {self.branch: turn, self.base: base, **self._taken_up(refs), **({self.untaken: None} if self.untaken in refs else {})},
+                expect={self.branch: self._ref(self.synced)},
+            )
         # Also when the history had it already: a try cut off after its push never noted it.
         self._main("update-ref", self.synced, turn)
         versions, renames = self._diff(base, turn)
@@ -939,7 +950,7 @@ class History:
             cwd=self.repo, input=f"{title}\n\n{_block(trailers)}\n",
         )
 
-    def _behind(self, onto: str) -> list[str]:
+    def _behind(self, onto: str, also: Iterable[str] = ()) -> list[str]:
         """A thread's pushed copy's parents after *onto*, its base: the hand-offs its copy has taken up.
 
         A helper's version of a file the thread did not take is in the
@@ -952,14 +963,23 @@ class History:
         most.  Past that the older ones go behind one commit that names
         them, the last of the list: each stays in the history as long as
         the pushed commit does, as when it was a parent itself, and none of
-        their versions is let go.
+        their versions is let go.  *also* are named after them: the
+        hand-offs whose versions earlier turns left out and no turn named.
         """
         handed, synced = self._ref(self.handed), self._ref(self.synced)
         earlier = self._parents(synced) if synced and synced != onto else []
-        behind = list(dict.fromkeys([*([handed] if handed else []), *(earlier[1:] if earlier[:1] == [onto] else [])]))
+        behind = list(dict.fromkeys([*([handed] if handed else []), *(earlier[1:] if earlier[:1] == [onto] else []), *also]))
         if len(behind) < _PARENTS:
             return behind
         return [*behind[:_PARENTS - 2], self._folded(behind[_PARENTS - 2:])]
+
+    def _left_out_before(self, refs: dict[str, str]) -> list[str]:
+        """The hand-offs the thread's ref of versions left out names, *refs* the history's as it is now."""
+        named = refs.get(self.untaken)
+        if named is None:
+            return []
+        self._fetch(named)
+        return self._parents(named) if self._message(named)[:1] == [_EARLIER] else [named]
 
     def _folded(self, commits: list[str]) -> str:
         """One commit that names *commits* as its parents, ``_PARENTS`` at most, and changes no file.
@@ -971,7 +991,7 @@ class History:
         if len(commits) > _PARENTS:
             commits = [*commits[:_PARENTS - 1], self._folded(commits[_PARENTS - 1:])]
         self._fetch(*commits)
-        return self._one(commits[0], *commits, author=_CHECKPOINT, title="Earlier hand-offs", trailers=[["Surogate-Kind", "hand-offs"]])
+        return self._one(commits[0], *commits, author=_CHECKPOINT, title=_EARLIER, trailers=[["Surogate-Kind", "hand-offs"]])
 
     def _taken_up(self, refs: dict[str, str]) -> dict[str, str | None]:
         """What a push of the branch makes of the hand-off, *refs* the history's as it is now.
