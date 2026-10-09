@@ -151,7 +151,7 @@ async def _build_session_sandbox_spec(
         else:
             # Which turn of the thread the pod is for: its hand-offs name it, and its open leaves
             # out the own files of a hand-off another turn made.
-            sandbox_spec.env["HISTORY_TURN"] = str(session.config.get("history_turn") or 0)
+            sandbox_spec.env["HISTORY_TURN"] = str(session.config["turn_after"])
     # Pass through skill-declared env vars to the sandbox pod.  Only
     # matters at provisioning time — env is baked into the pod spec.
     if not sandbox_spec.env.get("_passthrough_done"):

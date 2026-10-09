@@ -37,7 +37,7 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import _fence, keep_copy, land_turn, next_turn, prune_later, turn_ended
+from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later, turn_ended
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1082,8 +1082,6 @@ class ArtifactCompletionMixin:
                 logger.exception("Landing failed for %s", session.id)
                 # The master hears it: the report names the turn's files as not saved.
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
-        # Landed or not, the turn is over: a pod made from here on is the next turn's.
-        await next_turn(self._store, session)
 
         not_kept: list[str] = []
         # What a hand-back that failed leaves: its completion's mark, and the files kept apart.
@@ -1451,8 +1449,6 @@ class ArtifactCompletionMixin:
                 self._spawn_background(
                     self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
                 )
-        # Kept or not, the turn is over: a pod made from here on is the next turn's.
-        await next_turn(self._store, session)
 
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,

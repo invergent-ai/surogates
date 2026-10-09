@@ -135,6 +135,8 @@ async def open_pod(pool, thread) -> None:
     """*thread*'s pod, opened now: its copy is the real files as they are."""
     tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
     owner = sandbox_session_key(thread)
+    # Outside a turn of its own, a pod opened here is the thread's first turn's unless its session says another.
+    thread.config.setdefault("turn_after", 0)
     await pool.ensure(owner, await _build_session_sandbox_spec(thread, tenant, owner))
 
 

@@ -75,6 +75,8 @@ async def ends(api, pool, thread, *, failed: bool = False, settings=FENCED, prun
     harness = harness_of(api)
     harness._sandbox_pool, harness._saga_settings, harness._storage = pool, settings, api.app.state.storage
     harness._tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    if "turn_after" not in thread.config:
+        await landing_module.name_turn(store, thread)  # as the turn that ends here was named at its start
     lease = await store.try_acquire_lease(thread.id, f"worker-{thread.id}", ttl_seconds=60)
     messages = [{"role": "assistant", "content": "Done."}]
     if failed:
@@ -1636,6 +1638,7 @@ async def test_a_project_over_the_cap_has_no_history_and_its_threads_work_on_the
     (pods.project / "node_modules" / "x.js").write_text("x")
     monkeypatch.setattr(rows_module, "HISTORY_CAP", 2)
     monkeypatch.setattr(rows_module, "_COUNTED", {})
+    await landing_module.name_turn(api.app.state.session_store, thread)  # as its worker does before any pod is made
     within = await harness._with_history_cap(thread)
     assert within.config["history_off"] is False
     assert "PROJECT_DIR" in (await _build_session_sandbox_spec(within, tenant, str(thread.id))).env

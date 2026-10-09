@@ -22,6 +22,7 @@ from surogates.db.models import BoardNote, Event, InboxItem, Session, SessionCur
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
+from surogates.harness.landing import name_turn
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
 from surogates.orchestrator.dispatcher import Orchestrator
@@ -120,6 +121,7 @@ async def test_a_master_starts_a_thread_in_its_own_pod(api):
 
     # Its own pod, over the project's files.
     tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    await name_turn(api.app.state.session_store, thread)  # as its worker names its turn before any pod is made
     spec = await _build_session_sandbox_spec(thread, tenant, sandbox_session_key(thread))
     assert spec.session_id == str(thread.id)
     assert [r.source_ref for r in spec.resources] == [
@@ -140,6 +142,7 @@ async def test_a_threads_pod_mounts_the_real_files_beside_its_copy(api):
     master = await master_of(api, await create(api))
     thread = await start(api, master)
     tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    await name_turn(api.app.state.session_store, thread)  # as its worker names its turn before any pod is made
     spec = await _build_session_sandbox_spec(thread, tenant, sandbox_session_key(thread))
     [real] = spec.resources
     assert real.mount_path == "/project"

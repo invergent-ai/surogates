@@ -365,6 +365,9 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
 #: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
 #: pod's answer together.  Past it the stop goes on, and the hand-off stays as the turn left it.
 _STOP_HAND_OFF_BOUND = 60.0
+#: The threads whose stopped turn this worker could not write a turn-ending event for, with the event:
+#: written before the thread's next turn starts here.
+_STOPS_NOT_WRITTEN: dict[Any, dict[str, Any]] = {}
 
 # The commands a project's thread refuses.  A routine's runs would start from
 # old files, and their work would land only when someone next speaks to the
@@ -910,6 +913,8 @@ class AgentHarness(
         returning from the loop.
         """
         reason_msg = self._interrupt_message or "interrupted"
+        # A project thread's turn that is stopped is over from here on, whatever becomes of this worker.
+        stop_written = is_project_thread(session.config) and await self._write_that_the_turn_was_stopped(session, reason_msg)
         if saga is not None and saga.active_sagas:
             await self._compensate_sagas(saga, session, "interrupt")
         # A project's stopped turn spent what it spent: settle its holds now,
@@ -923,10 +928,6 @@ class AgentHarness(
             )
         if self._sandbox_pool is not None:
             await self._take_back_what_the_turn_handed_on(session)
-            # Taken back or not, the turn is over: the next turn's copy leaves its own files out.
-            from surogates.harness.landing import next_turn
-
-            await next_turn(self._store, session)
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
@@ -942,7 +943,7 @@ class AgentHarness(
         # and leave the client's terminal flag stuck on, suppressing
         # the running indicator for the new turn's deltas.
         current = await self._store.get_session(session.id)
-        if current.status == "paused":
+        if current.status == "paused" and not stop_written:
             await self._store.emit_event(
                 session.id,
                 EventType.SESSION_PAUSE,
@@ -1025,15 +1026,55 @@ class AgentHarness(
         finally:
             turn_ended(session)
 
+    async def _name_the_turn(self, session: Session) -> None:
+        """Before a thread's turn makes any pod: the name its pods are told (see :func:`landing.name_turn`).
+
+        A stop this worker could not write down for the thread is written
+        first: the turn starting now comes after it.
+        """
+        from surogates.harness.landing import name_turn
+
+        if session.id in _STOPS_NOT_WRITTEN:
+            await self._store.emit_event(session.id, EventType.SESSION_PAUSE, _STOPS_NOT_WRITTEN[session.id])
+            del _STOPS_NOT_WRITTEN[session.id]
+        await name_turn(self._store, session)
+
+    async def _write_that_the_turn_was_stopped(self, session: Session, reason: str) -> bool:
+        """Have a turn-ending event after a thread's turn that is stopped here, before anything else of the stop.
+
+        The user's own stop has one already, written by its route.  Any
+        other interrupt gets one now, so the thread's next turn is another
+        turn whatever becomes of this worker.  Whether one was written
+        here.  Where it cannot be, the log says so, and this worker writes
+        it before the thread's next turn starts here; a turn taken by
+        another worker first takes this turn's hand-off for its own, if
+        the stop could not take it back either.
+        """
+        from surogates.harness.landing import TURN_ENDS
+
+        said = {"reason": "interrupted", "message": reason, "worker_id": self._worker_id}
+        try:
+            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            if (ended.id if ended else 0) != session.config.get("turn_after"):
+                return False
+            await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            return True
+        except Exception:
+            _STOPS_NOT_WRITTEN[session.id] = said
+            logger.warning(
+                "Could not write that the turn of thread %s was stopped: it is written before the thread's next turn "
+                "here. Until then a turn another worker starts takes this turn's hand-off for its own, where the "
+                "stop did not take it back.", session.id, exc_info=True,
+            )
+            return False
+
     async def _turn_started_a_helper(self, session: Session) -> bool:
         """Whether a step of the thread's turn now ending called a tool that starts a helper, by its log."""
         from surogates.harness.tool_exec import HELPER_STARTING_TOOLS
 
         try:
-            ended = await self._store.last_event(
-                session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED,
-            )
-            calls = await self._store.get_events(session.id, after=ended.id if ended else 0, types=[EventType.TOOL_CALL])
+            # Since the turn-ending event the turn is named by: its own calls, a cut-off part of it included.
+            calls = await self._store.get_events(session.id, after=session.config.get("turn_after") or 0, types=[EventType.TOOL_CALL])
         except Exception:
             return False
         return any(call.data.get("name") in HELPER_STARTING_TOOLS for call in calls)
@@ -1901,6 +1942,8 @@ class AgentHarness(
         - Per-session cost tracking
         """
         self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
+        if is_project_thread(session.config):
+            await self._name_the_turn(session)
         # --- Saga orchestrator ---
         saga = None
         # A project's thread always runs one: its steps are undone in its copy.

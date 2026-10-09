@@ -1065,3 +1065,134 @@ async def test_a_task_for_a_sub_agent_the_agents_bundle_delivers_is_started(api,
     answer = json.loads(message["content"])
     # The tool looks the sub-agent up where the agent's wake has it, as the task's start does.
     assert answer.get("status") == "running" and set(seen) == {"the agent's bundle"}, (answer, seen)
+
+
+async def paused_as_the_route_pauses(api, thread) -> None:
+    """The user presses Stop: the route writes the status and the event before it signals any worker."""
+    store = api.app.state.session_store
+    await store.update_session_status(thread.id, "paused")
+    await store.emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": "user"})
+
+
+async def a_worker_gone_under_a_turn_that_handed_on(api, monkeypatch, tmp_path, *, dies_at="its step"):
+    """A thread's turn takes up a helper's finished ``sources.md``, writes ``stopped.md`` and hands on; its worker
+    then dies, with its pod and all it knew: under the step, or inside the stop the user has just pressed."""
+    master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
+
+    async def the_worker_dies(harness):
+        if dies_at == "the stop":
+            await paused_as_the_route_pauses(api, thread)
+
+            async def killed(session):
+                raise asyncio.CancelledError("the worker died inside the stop")
+
+            monkeypatch.setattr(harness, "_take_back_what_the_turn_handed_on", killed)
+            await stop(harness)
+            return
+        raise asyncio.CancelledError("the worker died under the turn")
+
+    with pytest.raises(BaseException):
+        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+            calling(("spawn_worker", {"goal": "Check the sources."})),
+            calling(("memory", {"action": "add", "content": "x"})),
+            _final_response("Done."),
+        ], pool=mine, during=the_worker_dies), 120)
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": thread.id})
+        await db.commit()
+    await pods.destroy(mine.sandbox_of(str(thread.id)))
+    landing_module.turn_ended(thread)
+    return master, thread, pods
+
+
+@pytest.mark.parametrize("stopped", ["while no worker runs the turn", "and its worker dies inside the stop"])
+async def test_a_stop_no_worker_carries_out_still_keeps_the_stopped_turns_files_out(api, monkeypatch, tmp_path, stopped):
+    master, thread, pods = await a_worker_gone_under_a_turn_that_handed_on(
+        api, monkeypatch, tmp_path, dies_at="its step" if stopped == "while no worker runs the turn" else "the stop",
+    )
+    if stopped == "while no worker runs the turn":
+        await paused_as_the_route_pauses(api, thread)
+    # Later the user writes again: the route makes the thread active, and a worker takes it.
+    await api.app.state.session_store.update_session_status(thread.id, "active")
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    # Nothing was written for the stop but what the route wrote, and that is enough.
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
+
+
+async def test_a_turn_cut_off_and_taken_up_by_another_worker_is_the_same_turn_and_has_all_it_handed_on(api, monkeypatch, tmp_path):
+    master, thread, pods = await a_worker_gone_under_a_turn_that_handed_on(api, monkeypatch, tmp_path)
+    # No stop: the turn is taken up again, by another worker, with a pod of its own.
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "ls > seen-again.txt"})), _final_response("Done."),
+    ], pool=SandboxPool(pods)), 120)
+    assert {"stopped.md", "sources.md"} <= set((pods.project / "seen-again.txt").read_text().split())
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-again.txt", "sources.md", "stopped.md"]
+
+
+async def test_a_threads_pod_is_told_the_threads_last_turn_end_and_none_at_its_first_turn(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store, mine, told = api.app.state.session_store, SandboxPool(pods), []
+    ensure = mine.ensure
+
+    async def watched(owner, spec):
+        told.append(spec.env["HISTORY_TURN"])
+        return await ensure(owner, spec)
+
+    monkeypatch.setattr(mine, "ensure", watched)
+    for n in range(2):
+        await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+        await a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": f"echo {n} > {n}.md"})), _final_response("Done."),
+        ], pool=mine)
+    [first_end, _] = await store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])
+    # A thread with no turn end yet, new or made before turns were named, is at turn 0; then at its last end's id.
+    assert set(told) == {"0", str(first_end.id)} and told[0] == "0" and told[-1] == str(first_end.id)
+
+
+async def test_a_thread_whose_turn_cannot_be_named_makes_no_pod(api, monkeypatch, pods):
+    thread = await a_thread(api)
+    store = api.app.state.session_store
+
+    async def the_store_does_not_answer(*args, **kwargs):
+        raise ConnectionError("the database did not answer")
+
+    looping = a_looping_harness(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo draft > draft.md"})), _final_response("Done."),
+    ], pool=SandboxPool(pods))
+    monkeypatch.setattr(store, "last_event", the_store_does_not_answer)
+    # The turn's start fails, for its wake to be tried again: no pod is made under a name that is not known.
+    with pytest.raises(ConnectionError):
+        await the_loop_runs(api, looping, thread)
+    assert (pods.pods, pods.copies) == ({}, {})
+
+
+async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_threads_next_turn_here(api, monkeypatch, tmp_path, caplog):
+    master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
+    store = api.app.state.session_store
+    emit = store.emit_event
+
+    async def no_stop_is_written(session_id, type, data, *args, **kwargs):
+        if type == EventType.SESSION_PAUSE:
+            raise ConnectionError("the database did not answer")
+        return await emit(session_id, type, data, *args, **kwargs)
+
+    async def stopped_by_no_route(harness):
+        landing_module.turn_ended(thread)  # nor is the stop carried out on the hand-off
+        monkeypatch.setattr(store, "emit_event", no_stop_is_written)
+        await stop(harness)
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+            calling(("spawn_worker", {"goal": "Check the sources."})),
+            calling(("memory", {"action": "add", "content": "x"})),
+            _final_response("Done."),
+        ], pool=mine, during=stopped_by_no_route), 120)
+    monkeypatch.setattr(store, "emit_event", emit)
+    assert "Could not write that the turn of thread" in caplog.text
+    assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
+    # The thread's next turn on this worker writes it first, and so is another turn: the stopped file stays out.
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    assert len(await store.get_events(thread.id, types=[EventType.SESSION_PAUSE])) == 1
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]

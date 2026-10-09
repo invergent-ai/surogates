@@ -341,28 +341,27 @@ def turn_ended(session: Any) -> None:
     _HANDED_ON.pop(sandbox_session_key(session), None)
 
 
-async def next_turn(store: Any, session: Any) -> None:
-    """A project thread's turn is over, landed, kept, failed or stopped: its next pod is another turn's.
+#: The events that end a thread's turn: a landing or its failure, a failed turn, a stop.
+TURN_ENDS = (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED)
 
-    The count is the thread's, in its row: a turn cut off and taken up
-    again, here or by another worker, is the same turn, and one after a
-    stop is not.  A pod is told it, its hand-offs name it, and the open of
-    a later turn's copy leaves out the own files of a hand-off that names
-    another: a stopped turn's files stay out whether or not its stop
-    could be carried out on the hand-off.
+
+async def name_turn(store: Any, session: Any) -> None:
+    """Name the turn of a project's thread now starting, or taken up again: by the thread's last turn-ending event.
+
+    Its id, or 0 for a thread that has none yet.  Nothing is written for
+    it.  A turn cut off and taken up again, by any worker, reads the same
+    id; a turn after a landing, a failure or a stop reads a new one, and
+    the stop's is written by the route that takes the user's stop, before
+    any worker hears of it.  The turn's pods are told the name, its
+    hand-offs carry it, and a copy's first take-up leaves out the own
+    files of a hand-off that carries another: a stopped turn's files stay
+    out whether or not any worker carried the stop out.
+
+    A read that fails fails the turn's start: no pod is made under a
+    name that is not known.
     """
-    if not is_project_thread(session.config):
-        return
-    turn = int(session.config.get("history_turn") or 0) + 1
-    try:
-        await store.update_session_config_key(session.id, "history_turn", turn)
-    except Exception:
-        logger.warning(
-            "Could not count the turn of thread %s over: its next turn's copy takes this turn's hand-offs for its own",
-            session.id, exc_info=True,
-        )
-        return
-    session.config["history_turn"] = turn
+    ended = await store.last_event(session.id, *TURN_ENDS)
+    session.config["turn_after"] = ended.id if ended else 0
 
 
 async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
