@@ -15,8 +15,10 @@ const LIST = /^ *RELEASE_KEYS=\(\n[^)]*\)\n/m;
 const rewritten = (script: string, change: (list: string) => string) => script.replace(LIST, (list) => change(list));
 
 // Each spelling: its name, the script it makes of one whose list holds *keys* in the list's form,
-// and how many of two keys every reader reads of it.
-export type KeyList = [name: string, written: (script: string) => string, read: number];
+// and how many of two keys every reader reads of it. And *entries*, where it is another number:
+// how many entries the install script's reader takes of the list before any is asked whether it
+// is a key, which is what its signing hands to OpenSSL.
+export type KeyList = [name: string, written: (script: string) => string, read: number, entries?: number];
 export const KEY_LISTS: KeyList[] = [
   ["as it is", (script) => script, 2],
   ["with spaces after an entry's quote", (script) => rewritten(script, (list) => list.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'  \n")), 0],
@@ -28,6 +30,16 @@ export const KEY_LISTS: KeyList[] = [
   ["on one line", (script) => rewritten(script, (list) => `${list.trim().replace("(\n", "( ").replace(/\n *\)$/, " )")}\n`), 0],
   ["with its closing bracket behind the last key", (script) => rewritten(script, (list) => list.replace(/'\n *\)\n$/, "' )\n")), 0],
   ["with a key's lines indented", (script) => rewritten(script, (list) => list.replace(/\n(?=[A-Za-z0-9+/=]+\n|-----END)/g, "\n    ")), 0],
+  // One line of a key alone, where the spelling above has them all: OpenSSL reads a key whose
+  // lines are indented, so a reader that let one by would hand it a key in another spelling.
+  ["with one line of a key's letters indented", (script) => rewritten(script, (list) => list.replace(/\n(?=[A-Za-z0-9+/=]+\n)/, "\n    ")), 0],
+  ["with a key's last line indented", (script) => rewritten(script, (list) => list.replace(/\n(?=-----END)/, "\n    ")), 0],
+  ["with a key that has no line between its first and its last", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\n")), 0],
+  // A line of the list with more on it than the form has, before or behind: bash would read a
+  // word joined to a key, a list closed early, or a comment.
+  ["with a word before a key's first quote", (script) => rewritten(script, (list) => list.replace("'-----BEGIN", "x'-----BEGIN")), 0],
+  ["with a word before its closing bracket", (script) => rewritten(script, (list) => list.replace(/\n( *)\)\n$/, "\n$1true)\n")), 0],
+  ["with a comment behind its opening bracket", (script) => rewritten(script, (list) => list.replace("(\n", "( # the keys\n")), 0],
   ["with an empty line in it", (script) => rewritten(script, (list) => list.replace("(\n", "(\n\n")), 0],
   ["with no key in it", (script) => rewritten(script, (list) => `${list.split("\n")[0]}\n  )\n`), 0],
   ["with a second list added to it", (script) => rewritten(script, (list) => `${list}${list.replace("RELEASE_KEYS=(", "RELEASE_KEYS+=(")}`), 0],
@@ -41,5 +53,5 @@ export const KEY_LISTS: KeyList[] = [
   // the key without it. Read letter for letter, the line is no line of a key.
   ["with a zero byte in a key's line", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/=]{8})(?=[A-Za-z0-9+/=]+\n)/, "\n$1\0")), 0],
   ["with a zero byte behind its closing bracket", (script) => rewritten(script, (list) => list.replace(/\)\n$/, ")\0\n")), 0],
-  ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1],
+  ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1, 2],
 ];

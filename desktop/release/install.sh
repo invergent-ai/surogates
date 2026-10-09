@@ -203,8 +203,8 @@ trusted() {
 # the list is in its one form (see the list, in settings), and none where it is not, or where the
 # script assigns the list a second time or adds to it. The helper is read, and not run: grep
 # counts the lines that assign the list, sed takes the list's own lines, from the one that opens
-# it to the first that closes one, and those few are asked line by line, letter for letter, in no
-# locale of the caller's. A zero byte, which bash would drop from what sed hands it, is handed on
+# it to the first that ends in a bracket, and those few are asked line by line, letter for
+# letter, in no locale of the caller's: whether that last line closes the list is asked there. A zero byte, which bash would drop from what sed hands it, is handed on
 # as a byte that no line of the form holds: the line it is in is read as the app reads it.
 listed() {
   local -n entries="$1"
@@ -216,7 +216,9 @@ listed() {
   entries=()
   lists="$(grep -cE "^[[:blank:]]*${name}\\+?=" -- "$2" 2>/dev/null)" || lists=0
   [ "$lists" = 1 ] || return 0
-  text="$(sed -n -e 's/\x00/\x01/g' -e "/^[[:blank:]]*${name}=($/,/^[[:blank:]]*)$/p" -- "$2" 2>/dev/null)" || return 0
+  text="$(sed -n -e 's/\x00/\x01/g' -e "/^[[:blank:]]*${name}=($/,/)$/p" -- "$2" 2>/dev/null)" || return 0
+  # The first line is the one that opens the list, as sed took it. A list that a line made wrong
+  # stays wrong to its end, and no line follows the one that closes it.
   while IFS= read -r line; do
     case "$at" in
       before) at=open ;;
@@ -232,9 +234,7 @@ listed() {
         else at=wrong
         fi
         ;;
-      *) at=wrong ;;
     esac
-    [ "$at" != wrong ] || break
   done <<<"$text"
   [ "$at" = closed ] || entries=()
 }

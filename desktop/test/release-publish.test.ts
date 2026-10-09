@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { KNOWN } from "../src/browser/choose.js";
 
+import { KEY_LISTS } from "./key-list-forms.js";
 import { FORMS, line, SHA } from "./manifest-forms.js";
 
 const RELEASE = fileURLToPath(new URL("../release", import.meta.url));
@@ -725,6 +726,33 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
+  it("signs no line that the install script beside it does not take for the release: one longer than an install reads, or one of another channel than that script's", () => {
+    // The script's own checks of its four words let both by: each is a version, a hash, a size and
+    // a schema. What refuses them is the install script's reader, asked of the line before it is
+    // signed. A signed manifest that no install takes is a release that is never sent again.
+    const words = { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: "a".repeat(64), DESKTOP_TARBALL_SIZE: "1", DESKTOP_STATE_SCHEMA: "1" };
+    const before = readdirSync(out);
+    // A version of some thousand digits, which the line has three times, makes a line over the
+    // 4096 bytes that an install reads of one.
+    const long = `1.2.${"7".repeat(1400)}`;
+    expect(publish("sign", long, words)).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: the manifest of ${long} is none that install.sh takes for it: nothing is signed\n` });
+    expect(readdirSync(out)).toEqual(before);
+    // The longest that an install does read is signed.
+    const fits = `1.2.${"7".repeat(1200)}`;
+    expect(publish("sign", fits, words)).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
+    expect(statSync(join(out, "manifest.json")).size).toBeGreaterThan(3800);
+    rmSync(join(out, "manifest.json"));
+    rmSync(join(out, "manifest.json.sig"));
+    // An install script of another channel takes no release of this one's.
+    const script = join(dir, "release", "install.sh");
+    const channel = readFileSync(script, "utf8").replace(/^  CHANNEL=stable$/m, "  CHANNEL=beta");
+    expect(channel).toContain("\n  CHANNEL=beta\n");
+    writeFileSync(script, channel, { mode: 0o755 });
+    expect(publish("sign", "1.2.3", words)).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the manifest of 1.2.3 is none that install.sh takes for it: nothing is signed\n" });
+    expect(readdirSync(out)).toEqual(before);
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
   it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there to describe", () => {
     // A part with a zero before it is no version either: dpkg reads 1.2.03 as 1.2.3, a second spelling of one release.
     for (const [verb, version] of [["sign", "1.2"], ["sign", "1.2.3-rc1"], ["sign", "v1.2.3"], ["sign", "1.2.3/../1.2.3"], ["sign", "1.2.03"], ["describe", "01.2.3"], ["send", "1.02.3"], ["publish", "1.2.3"]] as const) {
@@ -1026,6 +1054,26 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(["install.sh", "latest.json", "latest.json.sig"].map(caching)).toEqual(["no-cache", "no-cache", "no-cache"]);
     expect(send("1.0.0", released("1.0.0"))).toMatchObject({ status: 1, stderr: "publish.sh: desktop/releases/1.0.0 is published already, and is not sent again\n" });
     expect(object("latest.json")?.equals(manifest)).toBe(true);
+  });
+
+  it("sends nothing beside an install script whose list of release keys bash reads otherwise than an install does: the script is sent too, and is the next install's", () => {
+    const out = released("1.0.0");
+    // The list in its form, which signed this release's manifest, and a key more that bash alone
+    // sets: the pair is one the script's own reader takes, and the script is not one to send.
+    const spelled = KEY_LISTS.find(([name]) => name === "with a key added to it from the middle of another line");
+    expect(spelled).toBeDefined();
+    const script = join(dir, "release", "install.sh");
+    writeFileSync(script, spelled![1](trusting()), { mode: 0o755 });
+    try {
+      expect(send("1.0.0", out)).toMatchObject({
+        status: 1, stdout: "",
+        stderr: "publish.sh: install.sh's list of release keys is not in the one form that an install reads (see the list in install.sh): a computer that installed this release would take no later one\n",
+      });
+      for (const path of ["latest.json", "latest.json.sig", "install.sh", "releases/1.0.0/manifest.json", "releases/1.0.0/manifest.json.sig", "releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz"]) expect(object(path), path).toBeNull();
+    } finally {
+      writeFileSync(script, trusting(), { mode: 0o755 });
+    }
+    expect(send("1.0.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0 as desktop/latest.json\n" });
   });
 
   it("keeps latest.json at the newest version when an older line's release comes after it", () => {
