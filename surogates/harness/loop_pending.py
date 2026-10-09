@@ -292,11 +292,12 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
         event.id: event for event in events
         if _event_type(event) == EventType.USER_MESSAGE.value and event.id in named
     }
-    moved = {id(event) for group in named.values() for event in group} | {id(event) for event in typed.values()}
+    # An answer whose message is not among the events stays where it was written.
+    moved = {id(event) for typed_at in typed for event in (typed[typed_at], *named[typed_at])}
     #: What stands right after each place, each group with the place it was written at.
     after: dict[int, list[tuple[int, list[Any]]]] = {}
     for typed_at in sorted(typed):
-        message, block = typed[typed_at], named.pop(typed_at)
+        message, block = typed[typed_at], named[typed_at]
         waited_for = [
             place for place in range(at[id(message)] + 1, at[id(block[0])]) if _of_a_turn(events[place])
         ]
@@ -323,9 +324,6 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
             ordered.append(event)
         for _, group in sorted(after.get(place, ()), key=lambda placed: placed[0]):
             ordered.extend(group)
-    # An answer whose message is not among the events stays where it was written.
-    for group in named.values():
-        ordered.extend(group)
     return ordered
 
 

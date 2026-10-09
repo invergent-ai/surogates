@@ -128,7 +128,7 @@ def test_what_the_harness_wrote_for_a_command_is_replayed_right_after_the_comman
     ]
     # Each with its own command, in the order written; one whose command is not here, and the
     # model's own words, stay where they are.
-    assert [e.id for e in _in_typed_order(events)] == [1, 5, 6, 2, 3, 7, 4, 9, 8]
+    assert [e.id for e in _in_typed_order(events)] == [1, 5, 6, 2, 3, 7, 4, 8, 9]
     assert _in_typed_order(events[:4]) == events[:4]
 
 
