@@ -38,7 +38,7 @@ from surogates.harness.agent_resolver import (
 )
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
-from surogates.harness.device_replay import replay_unanswered, resumable
+from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
@@ -189,6 +189,8 @@ from surogates.harness.loop_pending import (
     _shown_before_its_answer,
     NAMES_ANSWERS,
     _turn_cut_off,
+    _hand_back_unread,
+    _turn_for_a_hand_back,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -209,13 +211,13 @@ from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
-    WORKER_NEWS_TYPES,
+    NEWS_TYPES,
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
+    held_news,
     prune_superseded_canvas_images,
     unread_reports,
-    worker_news,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -518,6 +520,12 @@ def _carries_information(text: str) -> bool:
     does, and an ASCII-only test would discard it.
     """
     return bool(re.search(r"[^\W_]", text, re.UNICODE))
+
+
+#: What revives a finished session with no message of its user's: a worker's
+#: report to a project's master, and, in a chat on its user's computer, the
+#: resume a hand back of the browser gave it that no turn has read.
+_REVIVED_BY_NEWS = frozenset({"worker_report", "unread_browser_hand_back"})
 
 
 class AgentHarness(
@@ -979,6 +987,21 @@ class AgentHarness(
             session_factory=self._session_factory,
         )
 
+    async def _has_unread_hand_back(self, session_id: UUID) -> bool:
+        """Return True if a hand back of the browser gave the session a resume after its last
+        model request.
+
+        Read as a worker's report is (``_has_unread_report``): every model
+        request reads the hand backs written before it, so one after the last
+        request is one no turn read.  The control route writes it only for a
+        hand back its user confirmed, to a chat that could take a turn.
+        """
+        events = await self._store.get_events(
+            session_id,
+            types=[EventType.LLM_REQUEST, EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED],
+        )
+        return _hand_back_unread(events)
+
     async def _has_unread_report(self, session_id: UUID) -> bool:
         """Return True if a worker's report is newer than the session's last model request.
 
@@ -996,31 +1019,37 @@ class AgentHarness(
     async def _collect_reports(
         self,
         session: Session,
+        held: list[dict],
         after_event_id: int,
         before: int | None = None,
     ) -> tuple[list[dict], int]:
-        """Thread reports, and news of threads the user started, that reached
-        a project's master past *after_event_id*, and below *before* when given.
+        """*held*, the news waiting for a session's next request, with what
+        reached it past *after_event_id*, and below *before* when given:
+        for a project's master, thread reports and news of threads the user
+        started; for a chat on its user's computer, the resume their handing
+        back the browser gave it, unless they took it over again since.
 
         Read for each model request, and at the end of a reply, one message
-        per report, as replay renders them.  Only a master reads them live:
-        its only reporting children are its threads.  A ``delegate_task``
-        parent, which a master never is, already has its child's result as
-        the tool's result.
+        each, as replay renders them.  Of workers, only a master reads them
+        live: its only reporting children are its threads.  A
+        ``delegate_task`` parent, which a master never is, already has its
+        child's result as the tool's result.
         """
-        if not is_project_master(session.config):
-            return [], after_event_id
-        events = await self._store.get_events(
-            session.id,
-            after=after_event_id,
-            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED],
-        )
+        types: list[EventType] = []
+        if is_project_master(session.config):
+            types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
+        if device_of(session.config) is not None:
+            types += [EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
+        if not types:
+            return held, after_event_id
+        events = await self._store.get_events(session.id, after=after_event_id, types=types)
         if before is not None:
             events = [event for event in events if event.id < before]
         if not events:
-            return [], after_event_id
-        notes = [worker_news(event.type, event.data) for event in events]
-        return [note for note in notes if note is not None], max(event.id for event in events)
+            return held, after_event_id
+        for event in events:
+            held = held_news(held, event)
+        return held, max(event.id for event in events)
 
     async def _collect_steer_messages(
         self,
@@ -1527,6 +1556,12 @@ class AgentHarness(
             # A project's master is also resumed by a thread's report that
             # no turn has read: the master's turn has usually ended long
             # before a thread finishes, and the report is what it waits for.
+            # And a chat on its user's computer by the resume their handing
+            # back the browser gave it, where no turn has read it.  The
+            # control route makes the chat active as it writes that resume;
+            # a turn that began just then, and ended without reading it,
+            # left the chat finished again.  Only one whose turn completed: a
+            # failed one is its user's to retry.
             revived_by: str | None = None
             if session.status in ("paused", "completed", "failed", "archived"):
                 if session.status in ("completed", "failed"):
@@ -1537,19 +1572,25 @@ class AgentHarness(
                         revived_by = "stranded_user_message"
                     elif is_project_master(session.config) and await self._has_unread_report(session_id):
                         revived_by = "worker_report"
-                # A report has no user waiting on it: while the user's limit
-                # refuses the turn, the report waits for their next message,
-                # which the message route holds.
-                if revived_by == "worker_report" and admitted_at_wake(session):
+                    elif (
+                        session.status == "completed"
+                        and device_of(session.config) is not None
+                        and await self._has_unread_hand_back(session_id)
+                    ):
+                        revived_by = "unread_browser_hand_back"
+                # A report, or a hand back, has no message of the user's
+                # waiting on it: while their limit refuses the turn, it waits
+                # for their next message, which the message route holds.
+                if revived_by in _REVIVED_BY_NEWS and admitted_at_wake(session):
                     try:
                         refused = await self._admit_turn(session, "")
                     except (AllowanceReserveError, CommerceReserveError):
                         # Closed without a crash: no turn ran, and the next
-                        # report or message wakes the master again.
-                        logger.warning("Session %s: a report waits while ops is unreachable", session_id, exc_info=True)
+                        # report or message wakes the session again.
+                        logger.warning("Session %s: %s waits while ops is unreachable", session_id, revived_by, exc_info=True)
                         return
                     if refused is not None:
-                        logger.info("Session %s: the user's limit holds back a report", session_id)
+                        logger.info("Session %s: the user's limit holds back %s", session_id, revived_by)
                         return
                 if revived_by is not None:
                     logger.info(
@@ -1644,7 +1685,13 @@ class AgentHarness(
                 session_id, exclude_types=[EventType.LLM_DELTA],
             )
 
-            # 4. Check for pending events (events after the cursor).
+            # 4. Check for work: events after the cursor, or a call of the
+            # model's last response that was begun and never answered.  A
+            # worker that died after a sibling call's result moved the
+            # cursor past that call left nothing else to say so.  Or the
+            # resume a hand back of the browser gave the chat, read by no
+            # request: one that landed while a command's own wake was
+            # answering it is behind the cursor that wake moved.
             pending = _actionable_pending_events(all_events, cursor)
             command_waits = self._waiting_command(session, all_events) is not None
             # 4a. A paused mission's coordinator takes no turn on what
@@ -1653,12 +1700,12 @@ class AgentHarness(
             # work meanwhile: a command, a message, or the turn on one that
             # a dead worker cut off.  Decided here, before anything is
             # written or held for a turn.
-            if not command_waits and not _turn_cut_off(all_events) and await self._mission_is_paused(session) and not _plain_message_unread(
+            if not command_waits and not _hand_back_unread(all_events) and not _turn_cut_off(all_events) and await self._mission_is_paused(session) and not _plain_message_unread(
                 all_events, is_plain_message=lambda event: self._is_plain_message(session, event),
             ):
                 logger.debug("Session %s: its mission is paused, nothing of its user's waits", session_id)
                 return
-            if not pending and not resumable(session, all_events) and not command_waits:
+            if not pending and not unanswered_calls(all_events) and not command_waits and not _hand_back_unread(all_events):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -1668,9 +1715,9 @@ class AgentHarness(
 
             # 4'. A project's turn no route admitted (a thread's, a helper's,
             # or a master's resumed or retried) is held against the user's
-            # allowance and paid turns, as a typed message is.  A report
-            # wake was held when it revived the master.
-            if revived_by != "worker_report" and admitted_at_wake(session):
+            # allowance and paid turns, as a typed message is.  A wake for a
+            # report or a hand back was held when it revived the session.
+            if revived_by not in _REVIVED_BY_NEWS and admitted_at_wake(session):
                 refused = await self._admit_turn(session, _latest_user_event_text(all_events))
                 if refused is not None:
                     # The turn never ran: a paid hold taken before the
@@ -1785,9 +1832,10 @@ class AgentHarness(
             )
             # A wake for a report has no new user input, so the user's last
             # message, a command already handled included, must not run again.
-            last_user_content = (
-                "" if revived_by == "worker_report" else _latest_user_event_text(all_events)
-            )
+            # Nor has the turn a hand back of the browser gives the agent,
+            # in a chat left active by a command's answer as in a finished one.
+            for_news = revived_by == "worker_report" or _turn_for_a_hand_back(all_events)
+            last_user_content = "" if for_news else _latest_user_event_text(all_events)
 
             # 10a. A command the harness answers itself, with no model
             # turn: one gated off for this agent (master switch off, or this
@@ -1872,11 +1920,13 @@ class AgentHarness(
                 at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
                 if is_new and self._redis is not None and (
                     not at_rest or is_project_master(session.config) and unread_reports(written)
+                    or device_of(session.config) is not None and _hand_back_unread(written)
                 ):
                     # What still waits, another command, a message, a turn
-                    # cut off, a goal's next turn or a thread's report to
-                    # its master, gets its wake: the one it queued may have
-                    # come and gone, for nothing, while this command was the
+                    # cut off, a goal's next turn, a thread's report to its
+                    # master or the turn a hand back of the browser gave,
+                    # gets its wake: the one it queued may have come and
+                    # gone, for nothing, while this command was the
                     # session's work.
                     from surogates.config import enqueue_session
 
@@ -1963,11 +2013,11 @@ class AgentHarness(
                     # or expert.failure, so we intentionally skip the
                     # SKILL_INVOKED row here.
 
-            # A report wake replays the user's last message, which a skill
-            # may have expanded at its own wake.  Expanded again, the master
-            # keeps that skill's instructions, and the conversation the
-            # prompt cache holds.
-            elif revived_by == "worker_report":
+            # A wake for a report or a hand back replays the user's last
+            # message, which a skill may have expanded at its own wake.
+            # Expanded again, the session keeps that skill's instructions,
+            # and the conversation the prompt cache holds.
+            elif for_news:
                 await self._expand_last_skill_again(session, messages, all_events)
 
             # 11. Run the core LLM loop.
@@ -2257,19 +2307,21 @@ class AgentHarness(
             ),
             default=0,
         )
-        # The worker reports no request had read when the wake began.  Replay
-        # left them out of ``messages``; the first request reads them.
+        # The worker reports, and the hand backs of the browser, that no
+        # request had read when the wake began.  Replay left them out of
+        # ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
         # What the user asked for, for the turn's summary: their own words,
         # never a worker's report, which replay and the live loop put after them.
         request = _latest_user_event_text(all_events or [])[:1000]
-        # Report cursor: the newest worker news the wake has.  A project's
-        # master reads later news live, before each request.
+        # Report cursor: the newest news the wake has.  A project's master,
+        # and a chat on its user's computer, read later news live, before
+        # each request.
         report_cursor = max(
             (
                 event.id
                 for event in (all_events or [])
-                if event.type in WORKER_NEWS_TYPES
+                if event.type in NEWS_TYPES
             ),
             default=0,
         )
@@ -2557,10 +2609,10 @@ class AgentHarness(
             # it rebuilds is the one sent.  A master's threads also report
             # during its turn; this request reads those written before it,
             # and one that lands after it waits for the next request.
-            arrived, report_cursor = await self._collect_reports(
-                session, report_cursor, before=request_id,
+            reports, report_cursor = await self._collect_reports(
+                session, reports, report_cursor, before=request_id,
             )
-            messages.extend(reports + arrived)
+            messages.extend(reports)
             reports = []
 
             # 2. Call the LLM with retry (streaming or non-streaming).
@@ -3375,9 +3427,12 @@ class AgentHarness(
                 # A thread's report that landed meanwhile keeps the wake
                 # going too; the next request reads it.  News alone waits
                 # for the master's next turn, which reads it from the log.
-                arrived, report_cursor = await self._collect_reports(session, report_cursor)
-                reports.extend(arrived)
-                if followup is not None or (reports and await self._has_unread_report(session.id)):
+                # So does the resume a hand back of the browser gave the chat.
+                reports, report_cursor = await self._collect_reports(session, reports, report_cursor)
+                if followup is not None or (reports and (
+                    await self._has_unread_report(session.id)
+                    or (device_of(session.config) is not None and await self._has_unread_hand_back(session.id))
+                )):
                     if followup is not None:
                         messages.append(followup)
                         request = _latest_user_message_text([followup])

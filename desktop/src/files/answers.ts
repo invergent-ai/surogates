@@ -87,6 +87,9 @@ const STRERROR: Record<string, string> = {
   ENOMEDIUM: "No medium found",
 };
 
+/** An errno code's text, as an OSError shows it; null for a code that is none of these. */
+export const strerror = (code: unknown): string | null => (typeof code === "string" && Object.hasOwn(STRERROR, code) ? (STRERROR[code] ?? null) : null);
+
 // Python's repr() of a str: the quote it picks, its escapes, and \x, \u or \U
 // for what str.isprintable() rejects.
 export function pyRepr(text: string): string {

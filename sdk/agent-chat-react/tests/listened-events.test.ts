@@ -20,6 +20,10 @@ describe("AGENT_CHAT_LISTENED_EVENTS", () => {
     expect(AGENT_CHAT_LISTENED_EVENTS).toContain("device.resumed");
   });
 
+  it("includes the computer's no-browser event so a local-folder chat's pane says it", () => {
+    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("browser.unavailable");
+  });
+
   it("includes the worker and proposal events so a master's cards are drawn", () => {
     for (const type of ["worker.spawned", "worker.complete", "worker.failed", "thread.proposed"] as const) {
       expect(AGENT_CHAT_LISTENED_EVENTS).toContain(type);

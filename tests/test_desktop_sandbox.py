@@ -6,6 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -223,3 +224,64 @@ async def test_only_a_session_on_the_computer_is_told_what_git_and_shared_mappin
         assert terminal(describe_for_device(schemas, cloud)) == TERMINAL_TOOL_DESCRIPTION
     # The registry's schema, which every session shares, keeps the cloud's text.
     assert terminal(schemas) == TERMINAL_TOOL_DESCRIPTION
+
+
+async def test_only_a_session_on_the_computer_is_offered_the_browsers_upload():
+    from surogates.harness.tool_schemas import describe_for_device
+
+    tools = ToolRegistry()
+    ToolRuntime(tools).register_builtins()
+    schemas = tools.get_schemas()
+
+    def names(described: list[dict]) -> set[str]:
+        return {s["function"]["name"] for s in described}
+
+    assert "browser_upload_file" in names(describe_for_device(schemas, device_session().config))
+    for cloud in ({}, None, {"execution": {"kind": "cloud"}}):
+        assert "browser_upload_file" not in names(describe_for_device(schemas, cloud))
+        assert "browser_navigate" in names(describe_for_device(schemas, cloud))
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
+async def test_a_session_in_the_cloud_cannot_call_the_browsers_upload_it_was_not_offered(monkeypatch, streamed):
+    from surogates.harness import loop
+    from tests.test_steer_loop import _final_response, _make_loop_harness, _make_session
+
+    tools = ToolRegistry()
+    ToolRuntime(tools).register_builtins()
+    ran = AsyncMock(return_value='{"uploaded": 1}')
+    monkeypatch.setattr(tools, "dispatch", ran)
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._tools = tools
+    harness._streaming_enabled = streamed
+    call = {
+        "id": "call_upload", "type": "function",
+        "function": {"name": "browser_upload_file", "arguments": json.dumps({"paths": ["report.pdf"]})},
+    }
+    answers = iter([
+        ({"role": "assistant", "content": "", "tool_calls": [call]},
+         {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1}),
+        _final_response("Done."),
+    ])
+    offered: list[set[str]] = []
+
+    async def model(**kwargs):
+        offered.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
+        message, usage = next(answers)
+        if kwargs["on_tool_call_complete"] is not None:
+            for made in message["tool_calls"] or []:
+                kwargs["on_tool_call_complete"](made)
+        return message, usage
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", model)
+    messages = [{"role": "user", "content": "Give the page the report"}]
+    await harness._run_loop(_make_session(), messages, "system", SimpleNamespace(lease_token=uuid4()), all_events=[])
+
+    # The cloud's browser tools are there; the upload is not, and its name alone runs nothing.
+    assert "browser_navigate" in offered[0] and "browser_upload_file" not in offered[0]
+    ran.assert_not_awaited()
+    [answer] = [message["content"] for message in messages if message.get("role") == "tool"]
+    assert json.loads(answer)["error"].startswith("Unknown tool: 'browser_upload_file'. Available tools: ")

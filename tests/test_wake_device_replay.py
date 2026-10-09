@@ -31,8 +31,11 @@ def _events() -> list:
     ]
 
 
-async def _wake(monkeypatch, config: dict, *, while_running=None, before_replay=None) -> tuple[list[str], list[dict]]:
-    """Wake a session; *while_running* and *before_replay* are called with the harness to inject behaviour."""
+async def _wake(
+    monkeypatch, config: dict, *, while_running=None, before_replay=None, events: list | None = None, cursor: int = 12,
+) -> tuple[list[str], list[dict]]:
+    """Wake a session whose log is *events*, read up to *cursor*; *while_running* and *before_replay* are
+    called with the harness to inject behaviour."""
     order: list[str] = []
     compacted: list[dict] = []
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
@@ -46,8 +49,8 @@ async def _wake(monkeypatch, config: dict, *, while_running=None, before_replay=
     monkeypatch.setattr(loop_module, "execute_single_tool", fake_execute_single_tool)
     session = _session()
     session.config.update(config)
-    store = _stub_store(session, _events())
-    store.get_harness_cursor = AsyncMock(return_value=12)
+    store = _stub_store(session, _events() if events is None else events)
+    store.get_harness_cursor = AsyncMock(return_value=cursor)
     harness = _harness(store, _permissive())
     # The helper's compressor is a spec mock: left alone it hands compaction a mock instead of the messages.
     harness._compressor.prune_stale_browser_states = lambda messages: messages
@@ -83,9 +86,29 @@ async def test_a_local_folder_wake_resumes_a_call_a_sibling_hid_before_it_compac
     assert {"role": "tool", "tool_call_id": "a", "content": "resumed"} in compacted
 
 
-async def test_a_cloud_wake_with_nothing_pending_does_nothing(monkeypatch):
+async def test_a_cloud_wake_runs_the_turn_of_a_call_a_sibling_hid_and_resumes_nothing(monkeypatch):
+    # Its worker died with the call begun. No journal says what it did, so nothing is resumed: the turn
+    # runs again, and the model is told that call's result is unavailable.
     order, _ = await _wake(monkeypatch, {})
+    assert order == ["compact", "loop"]
+
+
+async def test_a_cloud_wake_with_every_call_answered_and_nothing_pending_does_nothing(monkeypatch):
+    answered = [*_events(), SimpleNamespace(id=13, type=EventType.TOOL_RESULT.value, data={"tool_call_id": "a"})]
+    order, _ = await _wake(monkeypatch, {}, events=answered, cursor=13)
     assert order == []
+
+
+@pytest.mark.parametrize("opened", ["before", "after"])
+async def test_a_cloud_wake_runs_that_turn_whichever_side_of_the_siblings_result_its_browser_opened(monkeypatch, opened):
+    # The call that opened the browser is the one left unanswered; its sibling's result moved the cursor.
+    result = SimpleNamespace(type=EventType.TOOL_RESULT.value, data={"tool_call_id": "b"})
+    browser = SimpleNamespace(type=EventType.BROWSER_PROVISIONED.value, data={"session_id": "s", "browser_id": "b-1"})
+    tail = [browser, result] if opened == "before" else [result, browser]
+    for at, event in enumerate(tail, start=12):
+        event.id = at
+    order, _ = await _wake(monkeypatch, {}, events=[*_events()[:3], *tail], cursor=result.id)
+    assert order == ["compact", "loop"]
 
 
 LOCAL = {"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/u/project"}

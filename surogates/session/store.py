@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 import hashlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -18,10 +19,11 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, case, exists, not_, select, text, true, update, delete, func, or_, tuple_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from surogates.browser.control import BROWSER_HAND_BACK, RESUMES, TAKEN_OVER_FROM
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -72,6 +74,118 @@ logger = logging.getLogger(__name__)
 
 class SessionNotFoundError(Exception):
     """Raised when a session lookup finds no matching row."""
+
+
+@dataclass(slots=True)
+class _EventWrite:
+    """An event on its way into a session's log: made ready before its
+    transaction, written in it, and announced once that has committed."""
+
+    session_id: UUID
+    event_type: EventType
+    data: dict  # as it is written: redacted
+    row: EventRow
+    inbox_row: Any  # None for an event no inbox is told of
+    id: int = 0
+    stamped: Any = None
+    inbox_publish: tuple[int, str, UUID] | None = None
+
+
+class BrowserControlBusy(Exception):
+    """A take-over or a hand back was not told: the chat's lock, or its row,
+    was held for longer than a telling waits (``CONTROL_LOCK_WAIT_MS``)."""
+
+
+#: How long the telling of a take-over or a hand back waits for its chat's
+#: lock, and then for the chat's row.  What holds either is another telling
+#: for the same chat, whose work is a read, two inserts and two updates:
+#: milliseconds.  Two seconds is far past any wait that is one of those, and
+#: far short of the pool's own wait for a connection: each post waiting holds
+#: one, so posts left to wait without end for one chat would leave none for
+#: any other request.
+CONTROL_LOCK_WAIT_MS = 2000
+#: Postgres's ``lock_not_available``, raised when ``lock_timeout`` runs out.
+_LOCK_NOT_AVAILABLE = "55P03"
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserControlTold:
+    """What the telling of a take-over or a hand back did (``SessionStore.tell_browser_control``)."""
+
+    #: Whether the chat was told: False where it had been told already.
+    told: bool
+    #: Of a hand back: whether it gave the chat's agent a turn, or, where
+    #: nothing was told, whether the hand back that stands gave one that is
+    #: still to come or under way.  Whoever held that turn against its
+    #: user's limit keeps the hold while this is so.
+    turn: bool = False
+
+
+#: Whether the last word of a chat's browser control is a hand back that gave
+#: its agent a turn which is still to come, or under way: the chat is active,
+#: and no request of the model's has read the hand back yet or a worker holds
+#: the chat.  Once that turn is over, it is not.
+_A_HAND_BACKS_TURN_STANDS = text(
+    """
+    SELECT s.status = 'active'
+       AND last.type = 'browser.control_returned'
+       AND last.data->>'resumes' = 'true'
+       AND (
+           NOT EXISTS (
+               SELECT 1 FROM events r
+               WHERE r.session_id = s.id AND r.type = 'llm.request' AND r.id > last.id
+           )
+           OR EXISTS (
+               SELECT 1 FROM session_leases l WHERE l.session_id = s.id AND l.expires_at > now()
+           )
+       )
+    FROM sessions s
+    LEFT JOIN LATERAL (
+        SELECT e.id, e.type, e.data FROM events e
+        WHERE e.session_id = s.id AND e.type IN ('browser.control_granted', 'browser.control_returned')
+        ORDER BY e.id DESC LIMIT 1
+    ) last ON true
+    WHERE s.id = :id
+    """
+)
+
+
+def browser_control_lock(org_id: Any, user_id: Any, agent_id: Any, device_id: Any) -> str:
+    """The name of the lock the tellings of one browser are taken in turn
+    under: an agent's browser on one computer of a user's, which is one for
+    all that user's chats with the agent there.  So a take-over told from
+    one chat is taken in turn with a hand back being told to another, and
+    sees what it gave."""
+    return f"browser-control:{org_id}:{user_id}:{agent_id}:{device_id}"
+
+
+#: A user's other chats with an agent on one computer whose last word of the
+#: browser's control is a hand back that gave a turn no request of the
+#: model's has read yet.
+_OTHER_CHATS_WITH_A_HAND_BACKS_TURN_TO_COME = text(
+    """
+    SELECT s.id
+    FROM sessions s
+    JOIN LATERAL (
+        SELECT e.id, e.type, e.data FROM events e
+        WHERE e.session_id = s.id AND e.type IN ('browser.control_granted', 'browser.control_returned')
+        ORDER BY e.id DESC LIMIT 1
+    ) last ON true
+    WHERE s.org_id = :org_id
+      AND s.user_id IS NOT DISTINCT FROM :user_id
+      AND s.agent_id = :agent_id
+      AND s.config->'execution'->>'device_id' = :device_id
+      AND s.id <> :id
+      AND s.status <> 'archived'
+      AND last.type = 'browser.control_returned'
+      AND last.data->>'resumes' = 'true'
+      AND NOT EXISTS (
+          SELECT 1 FROM events r
+          WHERE r.session_id = s.id AND r.type = 'llm.request' AND r.id > last.id
+      )
+    ORDER BY s.id
+    """
+)
 
 
 class LeaseNotHeldError(Exception):
@@ -922,6 +1036,45 @@ class SessionStore:
             row.updated_at = func.now()
             await db.commit()
 
+    async def remove_from_session_config_list(
+        self,
+        session_id: UUID,
+        key: str,
+        value: Any,
+    ) -> bool:
+        """Take ``value`` out of the list at ``config[key]`` atomically; whether it was there.
+
+        The counterpart of :meth:`append_session_config_list` for a record
+        whose turn will not run.  Under the row lock exactly one of this and
+        :meth:`pop_session_config_key` gets the record: one a settlement
+        took first is not here to take.
+        """
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            existing = config.get(key)
+            items = list(existing) if isinstance(existing, list) else []
+            if value not in items:
+                return False
+            items.remove(value)
+            if items:
+                config[key] = items
+            else:
+                del config[key]
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+            return True
+
     async def pop_session_config_key(
         self, session_id: UUID, key: str,
     ) -> Any:
@@ -1117,6 +1270,28 @@ class SessionStore:
         (``message_count = message_count + 1``) which can't be expressed
         cleanly in ORM ``update().values()``.
         """
+        event = await self._ready_event(session_id, event_type, data)
+        async with self._sf() as db:
+            if lease_token is not None:
+                held = (await db.execute(
+                    text(
+                        "SELECT 1 FROM session_leases "
+                        "WHERE session_id = :id AND lease_token = :token FOR SHARE"
+                    ),
+                    {"id": session_id, "token": lease_token},
+                )).first()
+                if held is None:
+                    raise LeaseNotHeldError(
+                        f"Session {session_id}: lease {lease_token} is no longer held"
+                    )
+            await self._write_event(db, event, status=status)
+            await db.commit()
+        await self._announce_event(event)
+        return event.id
+
+    async def _ready_event(self, session_id: UUID, event_type: EventType, data: dict) -> _EventWrite:
+        """Make an event ready to be written: all of it that asks nothing of
+        the database, done before the transaction that writes it opens."""
         from surogates.trace import get_trace
 
         trace = get_trace()
@@ -1134,11 +1309,9 @@ class SessionStore:
             trace_id=trace.trace_id if trace else None,
             span_id=trace.span_id if trace else None,
         )
-        counter_clause = _build_counter_update_clause(event_type, redacted_data)
-        inbox_publish: tuple[int, str, UUID] | None = None
 
         # Build the inbox row and run the presence check up front, before the
-        # DB transaction below, so the Redis NUMSUB round-trip doesn't hold a
+        # DB transaction, so the Redis NUMSUB round-trip doesn't hold a
         # pooled DB connection open. Acknowledge-only notifications are skipped
         # while the operator is actively watching the session (a live viewer);
         # kinds that need a response are always created.
@@ -1156,114 +1329,111 @@ class SessionStore:
             and inbox_row.kind in ACKNOWLEDGE_ONLY_KINDS
             and await self._session_has_live_viewer(session_id)
         )
+        return _EventWrite(
+            session_id=session_id, event_type=event_type, data=redacted_data, row=row,
+            inbox_row=None if suppress_for_viewer else inbox_row,
+        )
 
-        async with self._sf() as db:
-            if lease_token is not None:
-                held = (await db.execute(
-                    text(
-                        "SELECT 1 FROM session_leases "
-                        "WHERE session_id = :id AND lease_token = :token FOR SHARE"
-                    ),
-                    {"id": session_id, "token": lease_token},
-                )).first()
-                if held is None:
-                    raise LeaseNotHeldError(
-                        f"Session {session_id}: lease {lease_token} is no longer held"
-                    )
-            db.add(row)
-            await db.flush()  # assigns row.id via BIGSERIAL
-            event_id: int = row.id
+    async def _write_event(self, db: AsyncSession, event: _EventWrite, *, status: str | None = None) -> None:
+        """Write a ready event in *db*'s transaction, which the caller commits; with *status*, set the session's status with it."""
+        session_id, event_type = event.session_id, event.event_type
+        db.add(event.row)
+        await db.flush()  # assigns row.id via BIGSERIAL
+        event.id = event.row.id
 
-            # Atomic counter update (raw SQL — ORM can't do col = col + 1).
-            #
-            # LLM_DELTA fires once per streamed token and increments no
-            # counter, so its only effect here is bumping ``updated_at`` on a
-            # single hot row -- hundreds of dead tuples and WAL records for
-            # one response, multiplied by every streaming session on the
-            # fleet.  ``updated_at`` is a liveness signal for the orphan
-            # sweeper, which uses a 60s threshold, so a bump every few
-            # seconds is as good as a bump per token: the guard makes the
-            # statement match no row and write nothing the rest of the time.
-            params: dict[str, Any] = {"id": session_id}
-            if status is not None:
-                counter_clause += ", status = CASE WHEN status = 'archived' THEN status ELSE :status END"
-                params["status"] = status
-            touch_guard = ""
-            if event_type == EventType.LLM_DELTA:
-                touch_guard = (
-                    " AND updated_at < now() - "
-                    "make_interval(secs => :touch_window)"
-                )
-                params["touch_window"] = _DELTA_TOUCH_THROTTLE_SECONDS
-            # For an event a project's stream may name, the session's
-            # workspace boundary names its project, and its role whether it
-            # is a thread, with no query of their own.
-            streamed = event_type.value in project_stream.STREAM_TYPES
-            result = await db.execute(
-                text(  # noqa: S608
-                    f"UPDATE sessions SET {counter_clause} "
-                    f"WHERE id = :id{touch_guard}"
-                    + (" RETURNING config->>'workspace_boundary', config->>'workstream_role'" if streamed else "")
-                ),
-                params,
+        # Atomic counter update (raw SQL — ORM can't do col = col + 1).
+        #
+        # LLM_DELTA fires once per streamed token and increments no
+        # counter, so its only effect here is bumping ``updated_at`` on a
+        # single hot row -- hundreds of dead tuples and WAL records for
+        # one response, multiplied by every streaming session on the
+        # fleet.  ``updated_at`` is a liveness signal for the orphan
+        # sweeper, which uses a 60s threshold, so a bump every few
+        # seconds is as good as a bump per token: the guard makes the
+        # statement match no row and write nothing the rest of the time.
+        counter_clause = _build_counter_update_clause(event_type, event.data)
+        params: dict[str, Any] = {"id": session_id}
+        if status is not None:
+            counter_clause += ", status = CASE WHEN status = 'archived' THEN status ELSE :status END"
+            params["status"] = status
+        touch_guard = ""
+        if event_type == EventType.LLM_DELTA:
+            touch_guard = (
+                " AND updated_at < now() - "
+                "make_interval(secs => :touch_window)"
             )
-            stamped = result.one_or_none() if streamed else None
+            params["touch_window"] = _DELTA_TOUCH_THROTTLE_SECONDS
+        # For an event a project's stream may name, the session's
+        # workspace boundary names its project, and its role whether it
+        # is a thread, with no query of their own.
+        streamed = event_type.value in project_stream.STREAM_TYPES
+        result = await db.execute(
+            text(  # noqa: S608
+                f"UPDATE sessions SET {counter_clause} "
+                f"WHERE id = :id{touch_guard}"
+                + (" RETURNING config->>'workspace_boundary', config->>'workstream_role'" if streamed else "")
+            ),
+            params,
+        )
+        event.stamped = result.one_or_none() if streamed else None
 
-            if inbox_row is not None and not suppress_for_viewer:
-                session_row = await db.get(SessionRow, session_id)
-                # Target the turn's acting principal (the participant who
-                # triggered this event), not the frozen session owner — in a
-                # shared thread they differ. Resolved in this same transaction
-                # so the event row and inbox target agree; falls back to the
-                # session owner when the triggering message is unstamped.
-                acting = (
-                    await self._resolve_acting_principal_in(db, session_row)
-                    if session_row is not None
-                    else ActingPrincipal(user_id=None, service_account_id=None)
+        inbox_row = event.inbox_row
+        if inbox_row is not None:
+            session_row = await db.get(SessionRow, session_id)
+            # Target the turn's acting principal (the participant who
+            # triggered this event), not the frozen session owner — in a
+            # shared thread they differ. Resolved in this same transaction
+            # so the event row and inbox target agree; falls back to the
+            # session owner when the triggering message is unstamped.
+            acting = (
+                await self._resolve_acting_principal_in(db, session_row)
+                if session_row is not None
+                else ActingPrincipal(user_id=None, service_account_id=None)
+            )
+            if acting.user_id is not None or acting.service_account_id is not None:
+                item = InboxItem(
+                    org_id=session_row.org_id,
+                    user_id=acting.user_id,
+                    service_account_id=acting.service_account_id,
+                    session_id=session_id,
+                    source_event_id=event.id,
+                    kind=inbox_row.kind,
+                    title=inbox_row.title,
+                    body=inbox_row.body,
+                    payload=inbox_row.payload,
+                    action_ref=inbox_row.action_ref,
                 )
-                if acting.user_id is not None or acting.service_account_id is not None:
-                    item = InboxItem(
-                        org_id=session_row.org_id,
-                        user_id=acting.user_id,
-                        service_account_id=acting.service_account_id,
-                        session_id=session_id,
-                        source_event_id=event_id,
-                        kind=inbox_row.kind,
-                        title=inbox_row.title,
-                        body=inbox_row.body,
-                        payload=inbox_row.payload,
-                        action_ref=inbox_row.action_ref,
-                    )
-                    db.add(item)
-                    await db.flush()
-                    # Publish to the acting principal's inbox channel (a user,
-                    # or a service account for ops chats) so the live unread
-                    # badge updates. The one-principal CHECK guarantees this is
-                    # non-null.
-                    principal_id = acting.user_id or acting.service_account_id
-                    inbox_publish = (item.id, inbox_row.kind, principal_id)
+                db.add(item)
+                await db.flush()
+                # Publish to the acting principal's inbox channel (a user,
+                # or a service account for ops chats) so the live unread
+                # badge updates. The one-principal CHECK guarantees this is
+                # non-null.
+                principal_id = acting.user_id or acting.service_account_id
+                event.inbox_publish = (item.id, inbox_row.kind, principal_id)
 
-            await db.commit()
-
+    async def _announce_event(self, event: _EventWrite) -> None:
+        """Tell those who listen of an event its transaction has committed."""
+        session_id, event_type = event.session_id, event.event_type
         # Notify SSE subscribers via Redis pub/sub (best-effort).
         if self._redis is not None:
             try:
                 await self._redis.publish(
                     f"surogates:session:{session_id}",
-                    f"{event_id}:{event_type.value}",
+                    f"{event.id}:{event_type.value}",
                 )
             except Exception:
                 pass
 
         # The project's stream, for a master, its threads and every session
         # under them.
-        project = project_stream.heard(*stamped, event_type.value) if stamped is not None else None
+        project = project_stream.heard(*event.stamped, event_type.value) if event.stamped is not None else None
         if project is not None:
             await project_stream.publish(self._redis, project, session_id, event_type.value)
 
         # Notify inbox subscribers after commit so consumers can read the row.
-        if inbox_publish is not None and self._redis is not None:
-            item_id, kind, principal_id = inbox_publish
+        if event.inbox_publish is not None and self._redis is not None:
+            item_id, kind, principal_id = event.inbox_publish
             try:
                 await self._redis.publish(
                     f"surogates:inbox:{principal_id}",
@@ -1277,12 +1447,10 @@ class SessionStore:
         if event_type in _DELIVERABLE_EVENTS:
             await self._enqueue_channel_delivery(
                 session_id,
-                event_id,
+                event.id,
                 event_type,
-                redacted_data,
+                event.data,
             )
-
-        return event_id
 
     async def _enqueue_channel_delivery(
         self,
@@ -2439,7 +2607,45 @@ class SessionStore:
             # tool.call, so a dead worker's session is still recovered.
             "device.waiting",
             "device.resumed",
+            # What a chat's browser pane is told: its browser opened, closed
+            # or not there (a sub-agent's too, written to its root while the
+            # root is idle, and one the reaper found dead), and its user
+            # taking it over, from the API, whenever they like.  None shows a
+            # turn under way: the event under them says whether a worker
+            # died.  The cloud's hand back is not here: it wakes the agent,
+            # and one whose wake was lost is recovered.
+            "browser.provisioned",
+            "browser.destroyed",
+            "browser.unavailable",
+            "browser.control_granted",
         )
+        # A hand back of the browser on the user's computer is told for the
+        # chat's pane, as the take-over was: the turn a confirmed one gives
+        # is the ``session.resume`` written with it.  The cloud's names no
+        # computer, and is as it was: the wake at a release.
+        hand_back_for_the_pane = and_(
+            EventRow.type == "browser.control_returned",
+            EventRow.data["computer"].astext.is_not_distinct_from("true"),
+        )
+        # The resume such a hand back gave is passed over with it once its
+        # user took the browser over again: with that turn still to come, a
+        # wake finds no work in it (``_hand_backs_taken_over_again``), and a
+        # chat recovered for it pass after pass would be failed.  One a turn
+        # had read is under that turn's own events, so nothing changes there.
+        later = aliased(EventRow)
+        resume_taken_over_again = and_(
+            EventRow.type == "session.resume",
+            EventRow.data["source"].astext.is_not_distinct_from(BROWSER_HAND_BACK),
+            select(later.id)
+            .where(
+                later.session_id == EventRow.session_id,
+                later.id > EventRow.id,
+                later.type == "browser.control_granted",
+                later.data["computer"].astext.is_not_distinct_from("true"),
+            )
+            .exists(),
+        )
+
         # Correlated scalar subqueries: latest event for the session
         # under test, skipping trailing-async events so the predicate
         # sees the most recent harness-driven event.  Used to distinguish
@@ -2451,6 +2657,8 @@ class SessionStore:
                 .where(
                     EventRow.session_id == SessionRow.id,
                     EventRow.type.notin_(trailing_async_event_types),
+                    not_(hand_back_for_the_pane),
+                    not_(resume_taken_over_again),
                 )
                 .order_by(EventRow.id.desc())
                 .limit(1)
@@ -2531,6 +2739,172 @@ class SessionStore:
             result = await db.execute(stmt)
             rows = result.scalars().all()
         return [Session.model_validate(r) for r in rows]
+
+    async def chats_told_taken_over(
+        self, *, device_id: UUID, org_id: UUID, agent_id: str, user_id: UUID | None,
+    ) -> list[UUID]:
+        """A user's chats with an agent on one computer that still say their user holds its browser.
+
+        The agent's browser there is one for all those chats.  Each is told of
+        a take-over and of a hand back in its own log, so the last of the two
+        says what it shows.  A deleted chat is told nothing more.
+        """
+        last_told = (
+            select(EventRow.type)
+            .where(
+                EventRow.session_id == SessionRow.id,
+                EventRow.type.in_((
+                    EventType.BROWSER_CONTROL_GRANTED.value,
+                    EventType.BROWSER_CONTROL_RETURNED.value,
+                )),
+            )
+            .order_by(EventRow.id.desc())
+            .limit(1)
+            .correlate(SessionRow)
+            .scalar_subquery()
+        )
+        stmt = select(SessionRow.id).where(
+            SessionRow.org_id == org_id,
+            SessionRow.user_id == user_id,
+            SessionRow.agent_id == agent_id,
+            SessionRow.status != "archived",
+            SessionRow.config["execution"]["device_id"].astext == str(device_id),
+            last_told == EventType.BROWSER_CONTROL_GRANTED.value,
+        )
+        async with self._sf() as db:
+            return list((await db.execute(stmt)).scalars())
+
+    async def tell_browser_control(
+        self, session_id: UUID, event_type: EventType, data: dict, *,
+        gives_a_turn: bool = False, to_its_users_other_chats: bool = False,
+    ) -> BrowserControlTold:
+        """Tell a chat on its user's computer of a take-over, or of a hand back, unless it was told already.
+
+        A take-over is told only while none stands, and a hand back only
+        while one does: the chat's last control event says which.  Two posts
+        at once, as from a chat open in two windows, tell it one: they are
+        taken in turn under a Postgres advisory lock, the one of the browser
+        they are of (``browser_control_lock``).  The lock, the reading
+        and the writing are one transaction on one connection: a holder that
+        asked the pool for a second would leave none once as many posts came
+        together as the pool is wide.
+
+        A hand back that *gives_a_turn* gives the chat's agent one in that
+        same transaction, where the chat can take it then: one still active,
+        or whose turn had ended, is made active as a typed message makes it,
+        the hand back says so (``resumes``), and the resume that is the turn
+        is written after it.  A chat its user stopped or deleted meanwhile,
+        or that failed, is told the hand back and given nothing.  So the log
+        never says of a turn that it was given when it was not, nor the
+        reverse.
+
+        A take-over told *to_its_users_other_chats* is told, in that same
+        transaction, to each other chat of theirs with the agent on the
+        computer whose hand back gave a turn no request has read yet,
+        naming the chat it was made from (``taken_over_from``).  The browser
+        is one for all those chats: such a turn would begin by reading that
+        the browser tools work again, with its user holding the browser.
+        Told so, it is off, as when the browser is taken over again from
+        that chat itself.
+
+        A hand back with nothing to tell says, read under the same lock,
+        whether the hand back that stands gave a turn that is still to come
+        or under way: another post's, made at once, which may have counted
+        on what this one's caller held for the turn.
+
+        A telling kept waiting for the chat's lock, or for its row, gives
+        up after ``CONTROL_LOCK_WAIT_MS`` and raises
+        :class:`BrowserControlBusy`, with nothing told: its connection goes
+        back to the pool.
+        """
+        handing_back = event_type is EventType.BROWSER_CONTROL_RETURNED
+        written: list[_EventWrite] = []
+        try:
+            async with self._sf() as db:
+                whose = await self._lock_browser_control(db, session_id)
+                last = (await db.execute(
+                    select(EventRow.type)
+                    .where(
+                        EventRow.session_id == session_id,
+                        EventRow.type.in_((
+                            EventType.BROWSER_CONTROL_GRANTED.value,
+                            EventType.BROWSER_CONTROL_RETURNED.value,
+                        )),
+                    )
+                    .order_by(EventRow.id.desc())
+                    .limit(1)
+                )).scalar_one_or_none()
+                if (last == EventType.BROWSER_CONTROL_GRANTED.value) is not handing_back:
+                    stands = handing_back and bool(
+                        (await db.execute(_A_HAND_BACKS_TURN_STANDS, {"id": session_id})).scalar()
+                    )
+                    return BrowserControlTold(told=False, turn=stands)
+                resumes = handing_back and gives_a_turn and (await db.execute(
+                    update(SessionRow)
+                    .where(SessionRow.id == session_id, SessionRow.status.in_(("active", "completed")))
+                    .values(status="active", updated_at=func.now())
+                )).rowcount == 1
+                telling = [(session_id, event_type, {**data, RESUMES: True} if resumes else data)]
+                if resumes:
+                    telling.append((session_id, EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK}))
+                if to_its_users_other_chats and not handing_back:
+                    others = (await db.execute(
+                        _OTHER_CHATS_WITH_A_HAND_BACKS_TURN_TO_COME, {**whose._mapping, "id": session_id},
+                    )).scalars()
+                    telling += [
+                        (other, event_type, {**data, "session_id": str(other), TAKEN_OVER_FROM: str(session_id)})
+                        for other in others
+                    ]
+                # None is for an inbox, so making them ready here asks nothing of Redis under the lock.
+                for chat, kind, said in telling:
+                    written.append(await self._ready_event(chat, kind, said))
+                    await self._write_event(db, written[-1])
+                await db.commit()
+        except DBAPIError as error:
+            if getattr(error.orig, "sqlstate", None) == _LOCK_NOT_AVAILABLE:
+                raise BrowserControlBusy(f"session {session_id}") from error
+            raise
+        for event in written:
+            await self._announce_event(event)
+        return BrowserControlTold(told=True, turn=resumes)
+
+    async def _lock_browser_control(self, db: AsyncSession, session_id: UUID) -> Any:
+        """Take, for *db*'s transaction, the lock of the browser a chat's
+        take-overs and hand backs are of, waiting no longer than
+        ``CONTROL_LOCK_WAIT_MS`` for it or for anything the transaction
+        locks after it.  Returns whose browser it is: the chat's
+        organisation, user, agent and computer.
+        """
+        whose = (await db.execute(
+            select(
+                SessionRow.org_id, SessionRow.user_id, SessionRow.agent_id,
+                SessionRow.config["execution"]["device_id"].astext.label("device_id"),
+            ).where(SessionRow.id == session_id)
+        )).one_or_none()
+        if whose is None:
+            raise SessionNotFoundError(f"session {session_id} not found")
+        await db.execute(text(f"SET LOCAL lock_timeout = {CONTROL_LOCK_WAIT_MS}"))
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(browser_control_lock(*whose)))))
+        return whose
+
+    async def hand_backs_turn_stands(self, session_id: UUID, *, behind_tellings: bool = True) -> bool:
+        """Whether a chat's last hand back gave its agent a turn that is still to come or under way.
+
+        Read *behind_tellings*: once any telling of the chat under way has
+        committed, under its lock.  Where the lock cannot be had in time, or
+        the caller was itself just answered busy and says not to wait, it is
+        read as the log stands.
+        """
+        if behind_tellings:
+            try:
+                async with self._sf() as db:
+                    await self._lock_browser_control(db, session_id)
+                    return bool((await db.execute(_A_HAND_BACKS_TURN_STANDS, {"id": session_id})).scalar())
+            except DBAPIError as error:
+                if getattr(error.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+                    raise
+        async with self._sf() as db:
+            return bool((await db.execute(_A_HAND_BACKS_TURN_STANDS, {"id": session_id})).scalar())
 
 
 # ---------------------------------------------------------------------------

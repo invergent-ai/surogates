@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Operation, Outcome } from "../link/protocol.js";
+import type { StagedDownload } from "./downloads.js";
 import type { Launch } from "./host.js";
 
 // The same from src/browser and from dist/browser.
@@ -14,6 +15,8 @@ const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 export const BROWSER_HOST = join(PACKAGE, "dist", "browser", "main.js");
 // Above the host's own bound on its browser's close (RELEASE_MS).
 const STOP_MS = 10_000;
+// How long a host may take to say whether it showed a page: above its own bound on bringing one to the front (SHOW_MS).
+const SHOWN_MS = 5_000;
 
 export const CANCELLED: Outcome = {
   error: { type: "cancelled", message: "The session stopped this before the computer finished it" },
@@ -21,6 +24,10 @@ export const CANCELLED: Outcome = {
 // A second operation under the id of one still running: its answer would be taken for the first's.
 export const DUPLICATE: Outcome = {
   error: { type: "browser", message: "The computer's browser is already running an operation under this id" },
+};
+// A browser operation of a chat its user took the browser over (surogates/devices/browser.py).
+export const PAUSED: Outcome = {
+  error: { type: "paused_by_user", message: "The user took over the agent's browser on this computer" },
 };
 export const BROWSER_STOPPED: Outcome = {
   error: {
@@ -40,15 +47,26 @@ export type ToBrowser =
   | { type: "forget"; root: string }
   // A browser the user picked, launched once to see that it runs: answered {version}, or why not.
   | { type: "try"; id: string; executable: string }
-  // The address of the page the session's next operation acts in.
-  | { type: "address"; id: string; session: string }
+  // The address of the page the session's next operation acts in; for an upload, of the frame of the file input that asked,
+  // *of* being the upload's operation, by its id: the input is kept for that upload alone. *root*: the chat that asks.
+  | { type: "address"; id: string; session: string; root?: string; upload?: boolean; of?: string }
+  // An upload the host was asked about, by its operation's id, is not coming: it keeps nothing for it.
+  | { type: "not_coming"; of: string }
+  // A chat its user took the browser over, or handed back: an operation of it waiting its turn is answered paused.
+  | { type: "pause"; root: string; paused: boolean }
+  // The chat's newest page brought to the front: answered whether there was one.
+  | { type: "show"; id: string; root: string }
   | { type: "stop" };
 
 export type FromBrowser =
   | { type: "result"; id: string; outcome: Outcome }
   // A try's answer: its ids are the client's own, apart from the link's operation ids.
   | { type: "tried"; id: string; outcome: Outcome }
-  | { type: "address"; id: string; url: string }
+  // refused: for an upload's address, why that upload can be given to nothing.
+  | { type: "address"; id: string; url: string; refused?: string }
+  | { type: "shown"; id: string; shown: boolean }
+  // A download a session's page started, finished and staged by the host, for the chat's folder.
+  | ({ type: "download" } & StagedDownload)
   // Its last word at a stop, after every answer: a utility process's postMessage has no callback.
   | { type: "stopped" };
 
@@ -82,10 +100,15 @@ export class BrowserClient {
   private host: BrowserProcess | null = null;
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private readonly trying = new Map<string, (outcome: Outcome) => void>();
-  private readonly addressing = new Map<string, (url: string) => void>();
+  private readonly addressing = new Map<string, (url: string, refused?: string) => void>();
+  private readonly showing = new Map<string, (shown: boolean) => void>();
+  private downloaded: (download: StagedDownload) => void = () => {};
   private stopping: Promise<void> | null = null;
+  // The chat whose user holds the browser, as the last pause left it; null: the agent drives.
+  private holder: string | null = null;
   private tries = 0;
   private addresses = 0;
+  private shows = 0;
 
   constructor(private readonly spawn: () => BrowserProcess = forkBrowserHost) {}
 
@@ -110,17 +133,64 @@ export class BrowserClient {
     return this.ask(this.trying, id, { type: "try", id, executable });
   }
 
-  /** The address of the page *session*'s next operation acts in: a new tab's, about:blank, where no host runs. Never rejects. */
-  address(session: string): Promise<string> {
+  /**
+   * The address of the page *session*'s next operation acts in: a new tab's, about:blank, where no host runs.
+   * For an *upload*, of the frame of the file input its page asked for; *of* is that upload's operation,
+   * by its id, for which alone the host then keeps that input; or why the host gives that upload to
+   * nothing. *root*: the chat that asks, which the host tells of no other chat's session. Never rejects.
+   */
+  address(session: string, upload = false, of?: string, root?: string): Promise<string | { refused: string }> {
     const host = this.host;
     if (!host || this.stopping) return Promise.resolve(NEW_TAB);
     const id = `address-${(this.addresses += 1)}`;
     return new Promise((resolve) => {
-      this.addressing.set(id, (url) => {
+      this.addressing.set(id, (url, refused) => {
         this.addressing.delete(id);
-        resolve(url);
+        resolve(refused === undefined ? url : { refused });
       });
-      host.send({ type: "address", id, session });
+      host.send({ type: "address", id, session, ...(root === undefined ? {} : { root }), ...(upload ? { upload, ...(of === undefined ? {} : { of }) } : {}) });
+    });
+  }
+
+  /** An upload a running host was asked about, by its operation's id, is not coming: the host keeps nothing for it. */
+  notComing(of: string): void {
+    this.host?.send({ type: "not_coming", of });
+  }
+
+  /** Hear each download a host stages, for the chat's folder. */
+  onDownload(listener: (download: StagedDownload) => void): void {
+    this.downloaded = listener;
+  }
+
+  /**
+   * A chat its user took the browser over, or handed back: a running host is told, for an operation waiting
+   * there. None is started to hear it; one that starts while the browser is held is told first of all (start).
+   */
+  pause(root: string, paused: boolean): void {
+    // As a host keeps it: taken over, that chat holds it; handed back only by the chat that holds it.
+    if (paused) this.holder = root;
+    else if (this.holder === root) this.holder = null;
+    this.host?.send({ type: "pause", root, paused });
+  }
+
+  /**
+   * Bring the chat's newest page to the front: whether there was one. None where no host runs, or
+   * where the host does not say within SHOWN_MS. Never rejects.
+   */
+  show(root: string): Promise<boolean> {
+    const host = this.host;
+    if (!host || this.stopping) return Promise.resolve(false);
+    const id = `show-${(this.shows += 1)}`;
+    return new Promise((resolve) => {
+      const answer = (shown: boolean) => {
+        clearTimeout(late);
+        this.showing.delete(id);
+        resolve(shown);
+      };
+      // A host that never says leaves nobody waiting.
+      const late = setTimeout(() => answer(false), SHOWN_MS);
+      this.showing.set(id, answer);
+      host.send({ type: "show", id, root });
     });
   }
 
@@ -172,10 +242,20 @@ export class BrowserClient {
   private start(): BrowserProcess {
     const host = this.spawn();
     this.host = host;
+    // A host knows that its browser is held only by being told. One that starts while it is held hears so
+    // before the message that started it, which it then answers as any host does while its user holds the browser.
+    if (this.holder !== null) host.send({ type: "pause", root: this.holder, paused: true });
     host.onMessage((message) => {
       if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
       else if (message.type === "tried") this.trying.get(message.id)?.(message.outcome);
-      else if (message.type === "address") this.addressing.get(message.id)?.(message.url);
+      else if (message.type === "address") this.addressing.get(message.id)?.(message.url, typeof message.refused === "string" ? message.refused : undefined);
+      else if (message.type === "shown") this.showing.get(message.id)?.(message.shown);
+      else if (message.type === "download") {
+        this.downloaded({
+          root: message.root, session: message.session, name: message.name, path: message.path, user: message.user === true,
+          ...(message.afterHandBack === true ? { afterHandBack: true as const } : {}),
+        });
+      }
       else if (message.type === "stopped") host.kill();
     });
     host.onExit(() => {
@@ -183,6 +263,7 @@ export class BrowserClient {
       for (const answer of [...this.pending.values(), ...this.trying.values()]) answer(BROWSER_STOPPED);
       // The next operation starts another host, and opens a new tab.
       for (const answer of [...this.addressing.values()]) answer(NEW_TAB);
+      for (const answer of [...this.showing.values()]) answer(false);
     });
     return host;
   }

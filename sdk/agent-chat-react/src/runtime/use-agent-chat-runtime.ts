@@ -483,6 +483,7 @@ export function useAgentChatRuntime({
               ? {
                   status: browserState.status,
                   controlOwner: browserState.controlOwner ?? null,
+                  ...(browserState.computer ? { computer: true } : {}),
                 }
               : null,
           }));

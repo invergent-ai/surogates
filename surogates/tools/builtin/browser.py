@@ -20,7 +20,7 @@ from surogates.browser.base import (
     browser_unavailable_result,
 )
 from surogates.browser.client import KernelBrowserClient
-from surogates.browser.control import BrowserControlStore
+from surogates.browser.control import BrowserControlStore, paused_by_user_result
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
 from surogates.devices.browser import (
@@ -28,6 +28,7 @@ from surogates.devices.browser import (
     DeviceEndpoint,
     answering_refusals,
     forget_snapshot_cache,
+    tell_pane,
 )
 from surogates.devices.browser import snapshot_cache as device_snapshot_cache
 from surogates.devices.workspace import DeviceWorkspaceIO
@@ -71,25 +72,13 @@ def build_browser_screenshot_key(
         session_id,
         relative_path,
     )
-from surogates.devices.workspace import DeviceOperationError
+from surogates.devices.workspace import DeviceOperationError, said
+from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 logger = logging.getLogger(__name__)
-
-
-def _paused_by_user_result() -> str:
-    return json.dumps(
-        {
-            "error": "paused_by_user",
-            "guidance": (
-                "The user has taken control of the browser. Wait for them to "
-                "finish before continuing; every browser_* tool will return "
-                "this error until they release control."
-            ),
-        }
-    )
 
 
 # A local-folder chat's browser is on the user's computer, reached only through its tool call's own
@@ -126,7 +115,7 @@ async def _resolve_session_browser(
 
     sid = str(session_id)
     if browser_control is not None and await browser_control.get(sid) is not None:
-        return _paused_by_user_result()
+        return paused_by_user_result()
 
     try:
         storage_bucket = (session_config or {}).get("storage_bucket")
@@ -325,6 +314,7 @@ async def _browser_navigate_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    session_store: Any = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
@@ -368,6 +358,9 @@ async def _browser_navigate_handler(
     except RuntimeError as exc:
         return json.dumps({"error": "navigate_failed", "detail": str(exc)})
 
+    # A tab of the session's opened on the user's computer: its pane shows that the browser is open there.
+    if getattr(client, "opened", False):
+        await tell_pane(session_store, session_id, EventType.BROWSER_PROVISIONED, session_config)
     payload: dict[str, Any] = _noted({"url": result["url"], "title": result["title"]}, client)
     if snapshot is None:
         payload["snapshot_error"] = (
@@ -583,12 +576,15 @@ async def _browser_close_handler(
     browser_control: BrowserControlStore | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    session_store: Any = None,
     **_: Any,
 ) -> str:
     if isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None:
         # Its tab on the computer, and the popups it opened; the browser stays for the other sessions.
         closed = await DeviceBrowserClient(workspace_io.runner).close_tab()
         forget_snapshot_cache(str(session_id))
+        if closed:
+            await tell_pane(session_store, session_id, EventType.BROWSER_DESTROYED, session_config)
         return json.dumps({"closed": closed})
     if _on_a_computer(session_config):
         return browser_unavailable_result(_NO_COMPUTER)
@@ -598,7 +594,7 @@ async def _browser_close_handler(
 
     sid = str(session_id)
     if browser_control is not None and await browser_control.get(sid) is not None:
-        return _paused_by_user_result()
+        return paused_by_user_result()
 
     await browser_pool.destroy_for_session(sid)
     return json.dumps({"closed": True})
@@ -1194,6 +1190,79 @@ async def _browser_screenshot_handler(
     return json.dumps(body)
 
 
+# The most files one upload gives a page.
+_MAX_UPLOAD_FILES = 10
+
+UPLOAD_FILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "paths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": _MAX_UPLOAD_FILES,
+            "description": "Files of the chat's folder, as read_file names them.",
+        },
+    },
+    "required": ["paths"],
+    "additionalProperties": False,
+}
+
+# What resolving a path of the folder on the user's computer can raise for one it refuses.
+_UNRESOLVED = (WorkspaceSandboxError, DeviceOperationError, OSError, ValueError)
+
+
+def _wrong_upload_paths(paths: Any) -> str | None:
+    """What is wrong with an upload's *paths*, or None for 1 to 10 names of files.
+
+    The schema tells the model the same, but the registry checks no call against a schema: a string
+    would be resolved letter by letter.
+    """
+    if not isinstance(paths, list):
+        return f"'paths' must be a list of 1 to {_MAX_UPLOAD_FILES} files of the chat's folder"
+    if not 1 <= len(paths) <= _MAX_UPLOAD_FILES:
+        return f"An upload names 1 to {_MAX_UPLOAD_FILES} files of the chat's folder: 'paths' holds {len(paths)}"
+    for at, path in enumerate(paths, start=1):
+        if not isinstance(path, str):
+            return f"Each of 'paths' must name a file of the chat's folder: item {at} is not text"
+        if not path:
+            return f"Each of 'paths' must name a file of the chat's folder: item {at} is empty"
+    return None
+
+
+@answering_refusals
+async def _browser_upload_file_handler(
+    arguments: dict[str, Any],
+    *,
+    session_id: UUID | str | None = None,
+    session_config: dict[str, Any] | None = None,
+    workspace_io: Any = None,
+    **_: Any,
+) -> str:
+    if not (isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None):
+        if _on_a_computer(session_config):
+            return browser_unavailable_result(_NO_COMPUTER)
+        return json.dumps({
+            "error": "unsupported",
+            "detail": "Files can be given to a page only in a chat on a folder of the user's computer.",
+        })
+    paths = arguments.get("paths")
+    wrong = _wrong_upload_paths(paths)
+    if wrong is not None:
+        return json.dumps({"error": "upload_failed", "detail": wrong})
+    # Each a file of the chat's folder, as the folder names it: one outside it is refused here, before the browser.
+    try:
+        keys = [await workspace_io.resolve(path) for path in paths]
+    except _UNRESOLVED as exc:
+        return json.dumps({"error": "upload_failed", "detail": said(exc)})
+    client = DeviceBrowserClient(workspace_io.runner, snapshot_cache=device_snapshot_cache(str(session_id)))
+    try:
+        given = await client.set_input_files(keys)
+    except RuntimeError as exc:
+        return json.dumps({"error": "upload_failed", "detail": str(exc)})
+    return json.dumps(_noted({"uploaded": given}, client))
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         name="browser_navigate",
@@ -1319,6 +1388,20 @@ def register(registry: ToolRegistry) -> None:
             parameters=WAIT_SCHEMA,
         ),
         handler=_browser_wait_handler,
+        toolset="browser",
+    )
+    registry.register(
+        name="browser_upload_file",
+        schema=ToolSchema(
+            name="browser_upload_file",
+            description=(
+                "Give files of the chat's folder to the page's file input. Click its "
+                "upload button or the file input first: the page asks for a file, "
+                "and this answers it. The browser's notices say when a page asked."
+            ),
+            parameters=UPLOAD_FILE_SCHEMA,
+        ),
+        handler=_browser_upload_file_handler,
         toolset="browser",
     )
     registry.register(
