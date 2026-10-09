@@ -175,6 +175,16 @@ def test_a_command_is_never_replayed_before_a_compaction_no_command_asked_for_th
     assert [e.id for e in _in_typed_order(events)] == [2, 3, 1, 4, 5]
 
 
+def test_the_answer_to_a_clear_is_left_out_of_what_the_model_is_shown():
+    events = [
+        event(1, EventType.USER_MESSAGE), event(2, EventType.CONTEXT_COMPACT, answers=1, strategy="clear"),
+        event(3, EventType.LLM_RESPONSE, answers=1), event(4, EventType.USER_MESSAGE),
+        event(5, EventType.CONTEXT_COMPACT, answers=4, strategy="summary"), event(6, EventType.LLM_RESPONSE, answers=4),
+    ]
+    # A cleared conversation starts on what its user says next; a compressed one keeps its answer.
+    assert [e.id for e in _in_typed_order(events)] == [1, 2, 4, 5, 6]
+
+
 def test_the_conversation_a_command_acts_on_ends_where_its_answer_will_stand():
     typed_in_a_turn = [
         event(1, EventType.USER_MESSAGE), event(2, EventType.LLM_REQUEST), event(3, EventType.USER_MESSAGE),

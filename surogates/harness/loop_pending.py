@@ -194,7 +194,7 @@ def _cut_off_at(events: list[Any]) -> int | None:
                 at = event.id if (data.get("message") or {}).get("tool_calls") else None
         elif event_type in _TURN_END_EVENT_TYPES:
             at = None
-        elif event_type == EventType.CONTEXT_COMPACT.value and (getattr(event, "data", None) or {}).get("strategy") == "clear":
+        elif _clears(event):
             # The user cleared the conversation: the turn that was in it is not one to go on with.
             at = None
     return at
@@ -249,6 +249,14 @@ def _of_a_turn(event: Any) -> bool:
     return _event_type(event) in _TURN_EVENT_TYPES and "answers" not in (getattr(event, "data", None) or {})
 
 
+def _clears(event: Any) -> bool:
+    """Whether *event* is the compaction a ``/clear`` wrote."""
+    return (
+        _event_type(event) == EventType.CONTEXT_COMPACT.value
+        and (getattr(event, "data", None) or {}).get("strategy") == "clear"
+    )
+
+
 def _in_typed_order(events: list[Any]) -> list[Any]:
     """Return *events* in the order the model is shown them: each command the harness answered
     as one block, at the place it took effect.
@@ -267,6 +275,10 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
     would part a call from its result, and where a compaction would leave
     the turn's end standing.  What its user typed after the command and
     that turn did not read comes after the block.
+
+    The answer to a ``/clear`` is left out: it is the harness's word to
+    its user and nothing for the model, whose conversation starts anew on
+    what its user says next.
     """
     named: dict[Any, list[Any]] = {}
     for event in events:
@@ -289,6 +301,8 @@ def _in_typed_order(events: list[Any]) -> list[Any]:
             place for place in range(at[id(message)] + 1, at[id(block[0])]) if _of_a_turn(events[place])
         ]
         stands_after = waited_for[-1] if waited_for else at[id(message)]
+        if any(_clears(event) for event in block):
+            block = [event for event in block if _event_type(event) != EventType.LLM_RESPONSE.value]
         after.setdefault(stands_after, []).append((at[id(message)], [message, *block]))
         read_to = max(
             (place for place in waited_for if _event_type(events[place]) == EventType.LLM_REQUEST.value),

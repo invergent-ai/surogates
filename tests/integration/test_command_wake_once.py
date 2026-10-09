@@ -971,10 +971,9 @@ async def test_a_question_asked_after_clear_is_all_the_model_is_asked_about(work
     for _ in range(2):
         await workers.wake(chat)
 
-    # The clear takes what was said before it, not the question typed behind it.
-    assert workers.requests == [[
-        {"role": "assistant", "content": "Conversation cleared."}, {"role": "user", "content": "And Q1?"},
-    ]]
+    # The clear takes what was said before it, not the question typed behind it; and its answer is
+    # the harness's word to its user, nothing for the model to read.
+    assert workers.requests == [[{"role": "user", "content": "And Q1?"}]]
 
 
 async def test_a_question_asked_before_a_commands_answer_was_written_is_asked_after_that_answer(workers):
@@ -1061,9 +1060,7 @@ async def test_clear_typed_during_a_turn_leaves_nothing_of_that_turn(workers, mo
     await workers.says(chat, "And Q1?")
     await workers.wake(chat)
 
-    assert workers.requests == [[
-        {"role": "assistant", "content": "Conversation cleared."}, {"role": "user", "content": "And Q1?"},
-    ]]
+    assert workers.requests == [[{"role": "user", "content": "And Q1?"}]]
 
 
 async def test_the_models_reply_to_a_question_stands_before_the_command_typed_behind_the_question(workers):
