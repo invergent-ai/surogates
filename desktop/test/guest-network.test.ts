@@ -190,12 +190,14 @@ describe("the agent's network", () => {
     expect(await through(network.path(ROOT), "echo.example:80")).toEqual({ status: "200", reply: "got 5\n" });
     const others = await bring(OTHER, 0);
     expect(typeof others.handed).toBe("object");
-    // One that ends gives its place to the next.
+    // The refusal is said before anything is awaited, so whoever asks can ask the runner for no dial.
+    expect(network.arrival(ROOT, id(MAX_INBOUND))).toBe("EMFILE");
+    // One let go gives its place to the next at once, before its close has come: the host ends one to admit another.
     const [first] = held;
     if (typeof first?.handed !== "object") throw new Error("not handed over");
     first.handed.destroy();
-    await vi.waitFor(async () => expect(typeof (await bring(ROOT, MAX_INBOUND)).handed).toBe("object"));
-    expect(await network.arrival(ROOT, id(MAX_INBOUND + 1))).toBe("EMFILE");
+    expect(typeof (await bring(ROOT, MAX_INBOUND)).handed).toBe("object");
+    expect(network.arrival(ROOT, id(MAX_INBOUND + 1))).toBe("EMFILE");
 
     // The other way, with the browser's still at their bound: the root's commands have every one of their own, each
     // waiting on its user's answer.

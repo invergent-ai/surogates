@@ -38,8 +38,8 @@ export class Network {
   private readonly session: ClientHttp2Session;
   // The connections asked of each root's runner and not brought yet, by root and id.
   private readonly awaited = new Map<string, (brought: Socket | string) => void>();
-  // How many connections into each root are asked of its runner, or handed over and still open.
-  private readonly inward = new Map<string, number>();
+  // The connections into each root: how many are asked of its runner and not answered, and those handed over and still open.
+  private readonly inward = new Map<string, { asked: number; handed: Set<Socket> }>();
 
   constructor(port: Duplex, private readonly folder = TUNNELS, private readonly lineMs = LINE_MS) {
     this.session = connectH2("http://guest", { createConnection: () => port });
@@ -87,27 +87,36 @@ export class Network {
 
   /**
    * The connection into *root* its runner was asked for under *id*, once the runner brings it on
-   * that root's own socket; or why there is none: what the runner said of its dial, "ETIMEDOUT"
-   * when it brought nothing in *ms*, or "EMFILE" for a root that has MAX_INBOUND of them already,
-   * awaited or open. Never rejects.
+   * that root's own socket; or why there is none: what the runner said of its dial, or "ETIMEDOUT"
+   * when it brought nothing in *ms*. Never rejects. For a root that has MAX_INBOUND of them already,
+   * awaited or open, the answer is "EMFILE", said at once and not as a promise: nothing is awaited,
+   * so its runner is to be asked for no dial. One let go counts no more from then, before its close.
    */
-  arrival(root: string, id: string, ms = ARRIVAL_MS): Promise<Socket | string> {
-    if ((this.inward.get(root) ?? 0) >= MAX_INBOUND) return Promise.resolve("EMFILE");
+  arrival(root: string, id: string, ms = ARRIVAL_MS): Promise<Socket | string> | "EMFILE" {
+    const into = this.inward.get(root) ?? { asked: 0, handed: new Set<Socket>() };
+    for (const socket of into.handed) if (socket.destroyed) into.handed.delete(socket);
+    if (into.asked + into.handed.size >= MAX_INBOUND) return "EMFILE";
+    this.inward.set(root, into);
     const key = `${root} ${id}`;
-    const count = (change: number) => {
-      const left = (this.inward.get(root) ?? 0) + change;
-      if (left === 0) this.inward.delete(root);
-      else this.inward.set(root, left);
+    const left = () => {
+      if (into.asked === 0 && into.handed.size === 0 && this.inward.get(root) === into) this.inward.delete(root);
     };
-    count(1);
+    into.asked += 1;
     return new Promise((resolve) => {
       const timer = setTimeout(() => settle("ETIMEDOUT"), ms);
       const settle = (brought: Socket | string) => {
         clearTimeout(timer);
         this.awaited.delete(key);
-        // One handed over keeps its place until it closes.
-        if (typeof brought === "string") count(-1);
-        else brought.once("close", () => count(-1));
+        into.asked -= 1;
+        // One handed over keeps its place until it is let go.
+        if (typeof brought !== "string") {
+          into.handed.add(brought);
+          brought.once("close", () => {
+            into.handed.delete(brought);
+            left();
+          });
+        }
+        left();
         resolve(brought);
       };
       this.awaited.set(key, settle);
