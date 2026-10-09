@@ -132,15 +132,17 @@ async def test_a_landings_row_is_its_saga_written_as_it_runs(api, monkeypatch, p
 
     monkeypatch.setattr(landing_module, "save_landing", watched)
     await ends(api, pool, thread)
-    # Its steps are written whole, so not at each: once fixed, before the first apply; with the record, before its first try; and at its end.
+    # Its steps are written whole, so not at each: once fixed, before the first apply, the pickup and the commit
+    # done; with the record, before its first try; and at its end.
     assert seen == [
-        ("running", ["committed", "pending", "pending"]),
-        ("running", ["committed", "committed", "committed", "pending"]),
-        ("completed", ["committed", "committed", "committed", "committed"]),
+        ("running", ["committed", "committed", "pending", "pending"]),
+        ("running", ["committed", "committed", "committed", "committed", "pending"]),
+        ("completed", ["committed", "committed", "committed", "committed", "committed"]),
     ]
     [row] = await rows(api, thread)
     assert (row.kind, row.saga_state, str(row.workstream_id)) == ("landing", "completed", thread.config["workstream_id"])
     assert [(s["tool_name"], s["state"]) for s in row.steps] == [
+        ("history.pickup", "committed"),
         ("history.commit", "committed"), ("history.apply", "committed"), ("history.apply", "committed"),
         ("history.record", "committed"),
     ]
@@ -366,7 +368,7 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     # Two files were written, and the row shows neither done: at best a.md done and b.md under way.
     assert row.saga_state == "running"
     # The turn its row names is the one the history has: what the next lock holder fetches to put it back.
-    assert row.steps[0]["result"]["commit"] == git(pods.project / "_history", "rev-parse", f"refs/heads/threads/{first.id}")
+    assert row.steps[1]["result"]["commit"] == git(pods.project / "_history", "rev-parse", f"refs/heads/threads/{first.id}")
     assert [s["state"] for s in row.steps if s["tool_name"] == "history.apply"] == {
         "behind": ["pending", "pending", "pending", "pending"],
         "exact": ["committed", "executing", "pending", "pending"],
@@ -434,7 +436,7 @@ async def test_a_commit_step_whose_answer_was_lost_is_tried_again_and_its_row_na
     # Both tries made and pushed one commit: the row cannot name a turn the history lacks.
     assert len(pushed) == 2 and len({commit for answer in pushed for commit in answer}) == 1
     [row] = await rows(api, thread)
-    assert (row.saga_state, row.steps[0]["result"]["commit"]) == ("completed", pushed[0][0])
+    assert (row.saga_state, row.steps[1]["result"]["commit"]) == ("completed", pushed[0][0])
     assert git(pods.project / "_history", "rev-parse", f"{row.commit}^2") == pushed[0][0]
     assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
 
@@ -544,7 +546,7 @@ async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_
     assert row.saga_state == "running"
     # Never a put-back shown done that is not: at best the one done, and the one the kill cut off under way.
     assert [(s["tool_name"], s["arguments"].get("path"), s["state"]) for s in row.steps] == [
-        ("history.commit", None, "committed"),
+        ("history.pickup", None, "committed"), ("history.commit", None, "committed"),
         ("history.apply", "a.md", {"behind": "committed", "exact": "compensating"}[row_is]),
         ("history.apply", "notes.txt", {"behind": "committed", "exact": "compensated"}[row_is]),
         ("history.apply", "z.md", "failed"),
@@ -1159,8 +1161,8 @@ async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_t
         await db.commit()
     [row] = await rows(api, first)
     assert (row.saga_state, [s["state"] for s in row.steps]) == ("running", {
-        "behind": ["committed", "committed", "committed", "failed"],
-        "exact": ["committed", "compensating", "compensation_failed", "failed"],
+        "behind": ["committed", "committed", "committed", "committed", "failed"],
+        "exact": ["committed", "committed", "compensating", "compensation_failed", "failed"],
     }[row_is])
     assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
 
@@ -1414,7 +1416,7 @@ async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up
     await edited(pool, first, "echo a > a.md && echo b > b.md")
     await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
     [row] = await rows(api, first)
-    base = row.steps[0]["result"]["base"]
+    base = row.steps[1]["result"]["base"]
     # The history is deleted, as the master's own tools can delete it: nobody has the versions from before.
     shutil.rmtree(pods.project / "_history")
     looks = looks_for_commits(monkeypatch)
@@ -1476,7 +1478,7 @@ async def test_a_landing_left_running_is_not_given_up_while_the_history_is_only_
     await edited(pool, first, "echo a > a.md && echo b > b.md")
     await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
     [row] = await rows(api, first)
-    base = row.steps[0]["result"]["base"]
+    base = row.steps[1]["result"]["base"]
     await edited(pool, second, "echo by B > B.md")
     looks, sleep, waits = looks_for_commits(monkeypatch, unseen=1), asyncio.sleep, []
 
@@ -1730,9 +1732,9 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
     lander = await a_thread(api, "Lander", master)
     await edited(pool, lander, "echo landed > landed.md")
     await ends(api, pool, lander)
-    # Its own bound, from the size of the history; and the packs it is to leave, those younger than the fence:
-    # the pod is told which are older, by the dates the storage itself gives them.
-    assert len(bounds) == 1 and bounds[0] >= landing_module._PRUNE_BOUND
+    # Its own bound, from the size of the history, as the pickup measured it; and the packs it is to leave,
+    # those younger than the fence: the pod is told which are older, by the dates the storage itself gives them.
+    assert len(bounds) == 1 and bounds[0] > landing_module._PRUNE_BOUND
     assert spared == [landing_module._fence(FENCED)]
     assert told == [sorted({name.rpartition(".")[0] for name in old})]
     refs = git(durable, "for-each-ref", "--format=%(refname)").splitlines()

@@ -120,9 +120,10 @@ async def compensate_history(
     An apply puts back the real file's version from before the landing,
     where the real file is still the one the step wrote.  *ran* is false
     for an apply that failed: it may still have written its file, and a
-    file it did not write is left as it is.  The commit and the record
-    need none: the turn stays on the thread's branch, and a recorded
-    landing is undone only by a new one.
+    file it did not write is left as it is.  The pickup, the commit and
+    the record need none: your edits are picked up again by the next
+    landing, the turn stays on the thread's branch, and a recorded landing
+    is undone only by a new one.
     """
     if step.tool_name != "history.apply":
         return None
