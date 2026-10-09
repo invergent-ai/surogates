@@ -31,7 +31,7 @@ from surogates.voice.llm import SurogatesLLM
 from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
 from surogates.voice.sessions import CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.text import asks_for_details
-from surogates.voice.speech import Slot, build_stt, build_tts, turn_handling
+from surogates.voice.speech import Slot, build_stt, build_tts, phrase_scope, turn_handling
 from surogates.voice.tts import PhraseCache, RoTTS
 
 log = logging.getLogger("surogates.voice")
@@ -155,10 +155,14 @@ def tone(rate: int = 16000) -> list[rtc.AudioFrame]:
     return [rtc.AudioFrame(data=pcm, sample_rate=rate, num_channels=1, samples_per_channel=len(pcm) // 2)]
 
 
-def provider_failed(error: object) -> bool:
-    """The line's hearing or voice gave up for good (a revoked key, no credits left, the provider down):
-    the call cannot go on, and its owner must see why."""
-    return isinstance(error, (STTError, TTSError)) and not error.recoverable
+def provider_failed(error: object, config: CallConfig) -> bool:
+    """The session closed because the owner's provider gave up for good (a revoked key, no credits left,
+    the provider down): its owner must see why. Our own speech servers failing is our outage, not theirs."""
+    if isinstance(error, STTError):
+        return not error.recoverable and not config.hearing.ours
+    if isinstance(error, TTSError):
+        return not error.recoverable and not config.speaking.ours
+    return False
 
 
 async def tone_and_hang_up(ctx: JobContext, tts_url: str) -> None:
@@ -286,7 +290,7 @@ async def entrypoint(ctx: JobContext) -> None:
         log.warning("call %s refused: %s", info.call_id, e)
         await report("provider_error")
         return await tone_and_hang_up(ctx, vs.tts_url)
-    phrases = PhraseCache(rt.redis, tts, scope="" if config.speaking.ours else str(org_id))
+    phrases = PhraseCache(rt.redis, tts, scope=phrase_scope(config.speaking, config.language, str(org_id)))
     slots = CallSlots(rt.redis, vs.max_concurrent_calls)  # releasing a line never taken is a no-op
     if not await slots.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
@@ -321,20 +325,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("error")
     def _error(ev) -> None:
-        nonlocal outcome
         if isinstance(ev.source, SurogatesLLM):  # the turn failed: say so instead of leaving silence
             log.warning("call %s turn failed: %r", info.call_id, ev.error)
             session.say(config.lines.sorry_turn, add_to_chat_ctx=False)
-        elif provider_failed(ev.error):  # the session closes next; the tone and the report say why
-            log.warning("call %s: %s gave up: %r", info.call_id, ev.error.label, ev.error.error)
-            outcome = "provider_error"
 
     @session.on("close")
     def _closed(ev) -> None:
         # the session gave up (unrecoverable STT/LLM/TTS errors, or the caller left): never keep a caller
-        # on the line with nobody there. A provider that gave up gets the same two beeps as a missing key.
+        # on the line with nobody there. Decided here, not on the first error: LiveKit rides out a few failed
+        # sentences, and the call goes on. A provider that gave up gets the same two beeps as a missing key.
+        nonlocal outcome
         log.info("call %s session closed: %s", info.call_id, ev.reason)
-        spawn(tone_and_hang_up(ctx, vs.tts_url) if outcome == "provider_error" else hang_up())
+        if provider_failed(ev.error, config):
+            log.warning("call %s: %s gave up: %r", info.call_id, ev.error.label, ev.error.error)
+            outcome = "provider_error"
+            spawn(tone_and_hang_up(ctx, vs.tts_url))
+        else:
+            spawn(hang_up())
 
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:

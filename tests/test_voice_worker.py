@@ -100,12 +100,19 @@ def test_a_provider_that_gives_up_ends_the_call_as_a_provider_error():
     from livekit.agents.stt import STTError
     from livekit.agents.tts import TTSError
 
+    from surogates.voice.speech import Slot
     from surogates.voice.worker import provider_failed
 
-    def err(cls, recoverable):
+    def err(cls, recoverable=False):
         return cls(timestamp=0.0, label="x", error=RuntimeError("auth_error"), recoverable=recoverable)
 
-    assert provider_failed(err(STTError, False))  # a revoked key: the ears are gone for good
-    assert provider_failed(err(TTSError, False))
-    assert not provider_failed(err(STTError, True))  # a blip that LiveKit retries
-    assert not provider_failed(err(LLMError, False))  # the agent's turn failed: it says sorry instead
+    el = Slot(provider="elevenlabs", model="m", voice="v", key_ref="vault://k")
+    providers = CallConfig(hearing=el, speaking=el)
+    assert provider_failed(err(STTError), providers)  # a revoked key: the ears are gone for good
+    assert provider_failed(err(TTSError), providers)
+    assert not provider_failed(err(STTError, recoverable=True), providers)  # a blip that LiveKit retries
+    assert not provider_failed(err(LLMError), providers)  # the agent's turn failed: it says sorry instead
+    assert not provider_failed(None, providers)  # the caller hung up
+    # our own speech servers failing is our outage, not the owner's provider
+    assert not provider_failed(err(STTError), CallConfig())
+    assert not provider_failed(err(TTSError), CallConfig(hearing=el))
