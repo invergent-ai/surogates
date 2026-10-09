@@ -1105,3 +1105,52 @@ def test_a_folders_history_is_no_helpers_and_no_turns_and_holds_no_hand_off(tmp_
     for ask in (lambda h: h.open(), lambda h: h.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:2"]]), lambda h: h.take_up()):
         with refused("history_refused", "refused the project's history: it holds a hand-off, which a folder's history never does"):
             ask(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"))
+
+
+@pytest.mark.parametrize("pushed", ["a turn", "a kept turn"])
+def test_a_push_cut_before_the_repository_noted_it_does_not_keep_the_threads_next_turn_from_landing(tmp_path, folder, pushed):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    noted = git(one.repo, "for-each-ref", "refs/synced/")
+    if pushed == "a turn":
+        one.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"]], pickup=None)
+    else:
+        one.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True)
+    # As the request cut right after its push leaves the repository: the branch is in the history, and not noted here.
+    assert git(one.repo, "for-each-ref", "refs/synced/") != noted == ""
+    git(one.repo, "update-ref", "-d", "refs/synced/t1")
+    # Never asked again: the thread's next turn is another landing, and it lands.
+    (one.copy / "more.md").write_text("the next turn's\n")
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open() == {"copy": "kept"}
+    assert [c["path"] for c in land(again, "saga:2")["changes"]] == ["more.md", "notes.txt"]
+
+
+def test_a_branch_the_threads_repository_did_not_push_is_still_one_that_moved(tmp_path, folder):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (two.copy / "B.md").write_text("B's own\n")
+    theirs = two.commit_turn(author=B, trailers=[["Surogate-Saga", "saga:2"]], pickup=None)["commit"]
+    # The history names another's commit as this thread's branch: nothing this repository made.
+    packed = tmp_path / "store" / "history.git" / "packed-refs"
+    packed.write_text(packed.read_text() + f"{theirs} refs/heads/threads/t1\n")
+    with refused("conflict", "refs/heads/threads/t1 moved in the project's history"):
+        one.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"]], pickup=None)
+
+
+def test_a_repository_made_again_owes_its_copy_no_record_of_a_landing_made_before_it(tmp_path, folder):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    (one.copy / "A.md").write_text("A's, landed\n")
+    land(one, "saga:1")
+    (two.copy / "B.md").write_text("B's, landed since\n")
+    land(two, "saga:2", B)
+    # The thread's repository and copy are gone, and made again from the history: at main, which has moved on.
+    shutil.rmtree(one.repo)
+    shutil.rmtree(one.copy)
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open() == {"copy": "made"}
+    # Its own landing is still where the history has its branch: the copy is not put back to it.
+    assert again.changed() == {"paths": []}
+    assert (again.copy / "B.md").read_text() == "B's, landed since\n"
+    assert again.open() == {"copy": "moved"}
+    assert not list((again.repo / "refs").glob("set-aside/*/*"))

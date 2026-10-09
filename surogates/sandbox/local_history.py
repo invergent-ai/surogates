@@ -319,10 +319,11 @@ class LocalHistory(History):
             commit = found[0]
         else:
             commit = super().record(**step)["commit"]
-            self._unrecorded(told=True)
-        # Told here, where a try of this record cut after its push was finished just now.
+            self._unrecorded()
+        aside = self._asides().get(step["turn"], (None, None))[1]
+        # Told here, by this answer: the thread's next open has nothing left to say of it.
         self._said(commit)
-        return {"commit": commit, "set_aside": self._asides().get(step["turn"], (None, None))[1]}
+        return {"commit": commit, "set_aside": aside}
 
     def _landing(self, refs: dict[str, str]) -> tuple[str, str, list[str]] | None:
         """The thread's landing where *refs*, the history's, still have its branch: it, its turn, and its message.
@@ -342,7 +343,7 @@ class LocalHistory(History):
             return None
         return landing, _checked_id(parents[1], "a commit"), message
 
-    def _unrecorded(self, *, told: bool = False) -> None:
+    def _unrecorded(self) -> None:
         """Finish a record of this thread's that was cut after its push, before the copy is read as anything's base.
 
         The push is the moment a landing counts; making the copy the
@@ -361,13 +362,26 @@ class LocalHistory(History):
         left as it is, with whatever the thread has written since.  Safe to
         cut anywhere: the ref that says it is done moves last.  Where it
         cannot be done the request is refused, and nothing was read from
-        the copy.  Unless whoever asked is *told* by this request's own
-        answer, a note is left for the thread's next open to tell.
+        the copy.  A note is left for whoever is told of it: the record's
+        own answer, or the thread's next open.
+
+        A turn, or a kept one, that this repository pushed and a cut kept it
+        from noting is noted here too.  The thread's next push expects the
+        branch where this repository last left it, and a copy here outlives
+        the turn that pushed: left unnoted, every later landing of the
+        thread's would be refused as one whose branch moved.  A branch this
+        repository did not make is still that.
         """
         if not (self.repo / "HEAD").is_file():
             return
-        found = self._landing(self._take())
-        if found is None or self._ref(self.landed) == found[0]:
+        refs = self._take()
+        found = self._landing(refs)
+        if found is None:
+            pushed = refs.get(self.branch)
+            if pushed is not None and pushed != self._ref(self.synced) and self._has(pushed):
+                self._main("update-ref", self.synced, pushed)
+            return
+        if self._ref(self.landed) == found[0]:
             return
         landing, turn, _ = found
         try:
@@ -380,8 +394,7 @@ class LocalHistory(History):
                 if held not in {self._tree(commit) for commit in (landing, turn) if self._has(commit)}:
                     self._set_aside(held, turn)
                 self._copy("read-tree", "-u", "--reset", landing)
-            if not told:
-                _replace(self.repo / _FINISHED, f"{landing} {turn}\n".encode())
+            _replace(self.repo / _FINISHED, f"{landing} {turn}\n".encode())
             for ref in (self.branch, self.base, self.synced, self.landed):
                 self._main("update-ref", ref, landing)
         except HistoryError as why:
