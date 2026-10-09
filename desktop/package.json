@@ -5,6 +5,7 @@
   "description": "Surogate Desktop: lets an agent's tools work on a folder of your computer.",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "main": "dist/shell/main.js",
   "engines": {
     "node": ">=22.14"
   },

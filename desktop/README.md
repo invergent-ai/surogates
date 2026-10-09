@@ -33,6 +33,12 @@ downloaded, which the app's tarball carries.
 
 The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
 `virtiofsd`), with the agent disk `vm/agent-disk.sh` makes from `dist/`.
+That script needs `mke2fs` and `debugfs` (e2fsprogs) and `fakeroot`
+(`apt install fakeroot`): the disk's files are root's, and it is made without
+root and in no user namespace, which a stock Ubuntu 24.04 refuses. `npm start`,
+`npm run test:e2e` and `scripts/package.sh` run it too. At one
+`SOURCE_DATE_EPOCH`, and with the same e2fsprogs, the same build gives the same
+disk, and the same tarball.
 `SUROGATE_VM_IMAGE` names another image folder, and `SUROGATE_VM_KVM` a device
 that does not exist, to run them emulated.
 
@@ -87,3 +93,13 @@ all of it:
 They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` names another:
 
     SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts
+
+A release is a tarball (`scripts/package.sh`), its manifest signed with the release key
+(`release/publish.sh sign`), and both on the release bucket under `desktop/` with the
+install script (`release/publish.sh send`). In `.github/workflows/release.yml`, `desktop-build`
+makes the tarball, and `desktop-publish`, which alone holds the release key and runs no npm, signs and
+sends it. `release/install.sh` installs it into `/opt/surogate`, and is each version's root
+helper for updates (`--apply`):
+
+    curl -fsSL https://surogate.ai/desktop/install.sh | bash
+    curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall
