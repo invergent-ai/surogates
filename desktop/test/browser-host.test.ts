@@ -1742,6 +1742,64 @@ describe("a page's download, as the host stages it", () => {
       }
     });
 
+    it("hears of the file a busy page asked for before it lets the page be, by nothing but the order in which Playwright's steps and this host's readings reach the page: for each number of steps Playwright takes, and where the last of them is heard of one answer late", async () => {
+      // No browser, and no race: the page a test plays answers what waits in it one at a time, in the order sent.
+      // Playwright sends each of its steps the moment the one before has answered; this host sends each reading
+      // only once the one before has answered and its line to the page is made, so later than Playwright's step
+      // of that round. The file is heard of when the last step has answered. *late*: only once whatever the page
+      // answers next has been answered too, as where the word of it is slow to reach the listener. Whether the
+      // page is heard still once all has been answered: let be before that, it would have opened the browser's
+      // own chooser.
+      const heardStill = async (steps: number, late: boolean): Promise<number> => {
+        host = new BrowserHost({ downloaded: (download) => staged.push(download) });
+        fresh();
+        const tab = taken();
+        tab.answering.slow = true;
+        host.pause("chat-2", true);
+        vi.advanceTimersByTime(OWN_CHOOSER_MS);
+        await turn();
+        // The page was busy since it asked: Playwright's first step waits in it, and behind it whatever this host
+        // has sent it by now, and sends it from here on, each where it was sent.
+        const waiting: Array<"playwright" | "host"> = ["playwright"];
+        const sent = () => {
+          while (waiting.filter((who) => who === "host").length < tab.reads.length) waiting.push("host");
+        };
+        sent();
+        let step = 1;
+        let unheard = false;
+        while (waiting.length > 0) {
+          const answered = waiting.shift()!;
+          if (answered === "host") tab.reads.shift()!();
+          else if (step < steps) {
+            step += 1;
+            waiting.push("playwright");
+          } else if (late) unheard = true;
+          else tab.input();
+          await turn();
+          if (answered === "host" && unheard) {
+            unheard = false;
+            tab.input();
+            await turn();
+          }
+          sent();
+        }
+        return tab.heard();
+      };
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        // As many answers as steps cover the steps: so the three Playwright takes at most, and fewer.
+        for (let steps = 1; steps <= PLAYWRIGHT_READ_STEPS; steps += 1) expect([steps, await heardStill(steps, false)]).toEqual([steps, 1]);
+        // The one more is what covers the last step heard of late. Nothing in the order of what reaches the
+        // page needs it, so no test that plays only that order can show it: this one plays the lateness too.
+        expect(await heardStill(PLAYWRIGHT_READ_STEPS, true)).toBe(1);
+        // And no more than that is covered: a step more than was counted, heard of late, and the page is let be
+        // first. That is what the count's tie to the Playwright installed is for.
+        expect(await heardStill(READS, true)).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
       const tab = taken();
       const asked = tab.input({ evaluate: () => Promise.resolve("given"), dispose: () => Promise.resolve() });
