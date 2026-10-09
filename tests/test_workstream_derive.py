@@ -379,9 +379,11 @@ def test_a_landing_of_two_thousand_files_lists_the_shells_limit_those_left_out_f
 
 def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_it_is():
     markup = '<img src=x onerror="alert(1)">.md'
+    longest = "a" * SHELL_LIMITS["label"]
     given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(
-        landing(41, ("a" * (SHELL_LIMITS["label"] + 1), None, "v1", True), (markup, None, "v2", False)),
+        landing(41, (longest + "a", None, "v1", True), (markup, None, "v2", False), (longest, None, "v3", True)),
     ))
     assert derive_thread(given, now=NOW)["files"] == [
         {"kind": "file", "label": markup, "ref": markup, "thread_id": IDLE, "landing": "not_merged"},
+        {"kind": "file", "label": longest, "ref": longest, "thread_id": IDLE, "landing": "landed"},
     ]

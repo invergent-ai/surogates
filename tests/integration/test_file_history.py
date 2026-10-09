@@ -247,6 +247,9 @@ async def test_a_threads_landing_another_threads_landing_settles_is_announced_to
     # A's worker holds the lock next: it completes B's landing, and the stream says B's files changed.
     sent = await streamed(api, monkeypatch, project, 1, act)
     assert sent[:2] == [("ready", {}), ("change", {"thread_id": str(second.id), "type": "history.landed"})]
+    # Each thread's row has its own landing's files, in the project's list too.
+    listed = {found["title"]: [(f["ref"], f["landing"]) for f in found["files"]] for found in await thread_rows(api, project)}
+    assert listed == {"Draft A": [("c.md", "landed")], "Draft B": [("b.md", "landed")]}
     assert await marks_of(api, project, second) == [("b.md", "landed")]
 
 
@@ -296,6 +299,27 @@ async def test_a_settled_landing_whose_thread_is_gone_names_no_thread_on_the_str
         ), {"project": project["id"]})).scalars().all()
     # No thread's row changed: nothing names one.
     assert states == ["completed"] and told == []
+
+
+async def test_a_landings_row_knows_the_state_its_own_last_write_left_it_in(monkeypatch):
+    written: list[str] = []
+
+    async def saved(session_factory, row, saga, *, state="running", **values):
+        if state == "refused":
+            raise ConnectionError("the database went away")
+        written.append(state)
+
+    monkeypatch.setattr(landing_module, "save_landing", saved)
+    row = landing_module._Row(None, 7, None)
+    assert row.state is None
+    await row.write(state="completed", commit="c1")
+    assert (row.state, written) == ("completed", ["completed"])
+    # A write that names no outcome writes the row as running again, and one refused changes nothing.
+    await row.write()
+    assert (row.state, written) == ("running", ["completed", "running"])
+    with pytest.raises(ConnectionError):
+        await row.write(state="refused")
+    assert row.state == "running"
 
 
 async def test_a_landing_settled_as_put_back_is_not_announced_as_landed(api, monkeypatch, tmp_path):
