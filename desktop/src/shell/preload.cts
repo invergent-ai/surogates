@@ -90,6 +90,28 @@ if (origin !== undefined && window.top === window && location.origin === origin)
       called(source, message);
     }
   });
+  // What the user sent from the desktop's quick entry, for the new chat the shell opened: held until
+  // the page listens, as when it comes while the chat's page still loads. A page that leaves that
+  // chat first never hears it, and the desktop is told: the text was for that chat only.
+  type QuickMessage = { id: string; text: string };
+  let handed: QuickMessage | null = null;
+  const quickListeners = new Set<(message: QuickMessage) => void>();
+  const answerQuick = (id: unknown, refused: unknown) => ipcRenderer.send("desktop:quick-entry-answer", id, refused);
+  const LEFT_CHAT = "The agent's page left the new chat before it heard the message, so nothing was sent.";
+  ipcRenderer.on("desktop:quick-entry", (_event, message: unknown) => {
+    const { id, text } = (message ?? {}) as { id?: unknown; text?: unknown };
+    if (typeof id !== "string" || typeof text !== "string") return;
+    // Come after the page left the new chat, it is for none the page shows.
+    if (location.pathname !== "/chat") return answerQuick(id, LEFT_CHAT);
+    if (quickListeners.size === 0) handed = { id, text };
+    for (const listener of quickListeners) listener({ id, text });
+  });
+  // The Navigation API tells of a pushState too, which the TypeScript of this pin does not type.
+  (window as unknown as { navigation: EventTarget }).navigation.addEventListener("currententrychange", () => {
+    if (handed === null || location.pathname === "/chat") return;
+    answerQuick(handed.id, LEFT_CHAT);
+    handed = null;
+  });
   contextBridge.exposeInMainWorld("surogateDesktop", {
     version: 1,
     getDevice: call("getDevice"),
@@ -121,6 +143,16 @@ if (origin !== undefined && window.top === window && location.origin === origin)
       ipcRenderer.on("desktop:binding-changed", relay);
       return () => ipcRenderer.off("desktop:binding-changed", relay);
     },
+    onQuickEntry: (listener: (message: QuickMessage) => void) => {
+      quickListeners.add(listener);
+      const held = handed;
+      handed = null;
+      if (held !== null) listener(held);
+      return () => {
+        quickListeners.delete(listener);
+      };
+    },
+    answerQuickEntry: answerQuick,
     getAppearance: call("getAppearance"),
     onAppearanceChanged: (listener: (appearance: unknown) => void) => {
       const relay = (_event: unknown, appearance: unknown) => listener(appearance);

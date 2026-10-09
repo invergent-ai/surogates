@@ -9,7 +9,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
-  app, BrowserWindow, dialog, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
+  app, BrowserWindow, dialog, globalShortcut, type IpcMainEvent, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, session, shell, Tray, utilityProcess,
   type WebContents, webContents,
 } from "electron";
 
@@ -47,6 +47,7 @@ import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } 
 import { PreferencesStore } from "./preferences.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
+import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { appTools, BWRAP } from "./tools.js";
@@ -1426,11 +1427,21 @@ function bridge(contents: WebContents, agent: Agent): void {
   contents.ipc.on("desktop:projects-changed", (event, id: unknown, threadId: unknown) => {
     if (fromView(event)) projects.changed(id, threadId);
   });
+  // The page's word on a text it was handed, by the id it was handed with: its reason is text, bounded as every text of the page's is.
+  contents.ipc.on("desktop:quick-entry-answer", (event, id: unknown, refused: unknown) => {
+    if (fromView(event) && typeof id === "string") handed(id, typeof refused === "string" ? refused.slice(0, 1_000) : null);
+  });
   // A page that loads again starts with no source, until it registers one. Until its load commits,
   // the page there still serves: a load the shell cancels, as to an address outside the agent's, changes nothing.
   onReplaced(contents, () => {
     load += 1;
     if (served) withdrawProjects(false);
+    // A text quick entry handed the page that went is not sent: its box says so.
+    if (handing) handed(handing.id, LEFT_CHAT);
+  });
+  // Nor is one handed a page whose view went with no other page in its place, as removing the agent takes it.
+  contents.once("destroyed", () => {
+    if (handing) handed(handing.id, LEFT_CHAT);
   });
 }
 
@@ -1592,13 +1603,14 @@ const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XD
 function updateTray(): void {
   if (!tray) return;
   const agent = agents.get();
-  const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null }, {
+  const template = trayMenu({ device: agent ? deviceLine(agent) : null, quitting: waiting ? (device?.stack?.working() ?? 0) : null, shortcut }, {
     show: () => main?.show(),
+    quickEntry: toggleQuickEntry,
     settings: menuActions.settings,
     quit: () => app.quit(),
     quitNow: () => waiting?.(),
   });
-  const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled]));
+  const drawn = JSON.stringify(template.map((item) => [item.label, item.enabled, item.accelerator]));
   if (drawn === trayDrawn) return;
   trayDrawn = drawn;
   tray.setContextMenu(Menu.buildFromTemplate(template));
@@ -1708,9 +1720,10 @@ function notifyAsking(): void {
   notifications?.show({ tag: "asking", title: "Surogate is asking you something", body: "Open Surogate to answer.", open: () => main?.show() });
 }
 
-// A page of the web client in the centre: what the sidebar's links, New chat and a notification open.
-function goWeb(path: string): void {
-  if (!main) return;
+// A page of the web client in the centre: what the sidebar's links, New chat, quick entry and a
+// notification open. True once it has loaded; false once it failed, or another load took its place.
+function goWeb(path: string): Promise<boolean> {
+  if (!main) return Promise.resolve(false);
   choose();
   // The open project's conversation, or a thread its pane lists, keeps the project open, with its
   // crumb and Overview, as View thread does; any other page leaves it.
@@ -1726,7 +1739,67 @@ function goWeb(path: string): void {
     show({ kind: "web" });
   }
   main.showWeb(true);
-  void main.go(path);
+  return main.go(path);
+}
+
+// Quick entry, once the app is ready: what the user types there starts the chat New starts.
+let quickEntry: QuickEntry | null = null;
+// The keys that open it from anywhere, once the app holds them: never in a Wayland session, nor while another app holds them.
+let shortcut: string | null = null;
+
+/** Quick entry shown, or hidden when it shows. With nobody signed in, the window shows instead: it asks them to sign in. */
+function toggleQuickEntry(): void {
+  if (leaving || !main) return;
+  if (!signedIn || !main.webContents()) return main.show();
+  quickEntry?.toggle();
+}
+
+// The text quick entry handed the agent's page, until the page says what became of it.
+let handing: { id: string; settle(refused: string | null): void } | null = null;
+const LEFT_CHAT = "Surogate's window left the new chat before it was made, so nothing was sent.";
+
+// The page's word on the text it was handed: null once it sent it, or why it did not.
+function handed(id: string, refused: string | null): void {
+  if (!handing || handing.id !== id) return;
+  const { settle } = handing;
+  handing = null;
+  settle(refused);
+}
+
+// Quick entry's text starts a new chat, as New does: Settings closes, the window shows, and its web
+// client loads /chat. Only once that load is the page on screen is the text handed to it, by an id
+// of its own: the page sends it as the new chat's first message once it may, and says so. Its
+// preload holds it until the page listens. Why it was not sent, or null once the page sent it.
+async function sendQuickEntry(text: string): Promise<string | null> {
+  const agent = agents.get();
+  const shown = main;
+  const view = shown?.webContents();
+  const session = signedIn;
+  // A page that said nobody, or another account, is not who the text is from: before the load, nor
+  // after it, as when the user logs out while it loads.
+  const notTheirs = () => leaving || session === null || signedIn !== session || !pageIs(session.account);
+  const SIGN_IN = "Sign in to your agent in Surogate's window first.";
+  if (!shown || !view || !agent || notTheirs()) return SIGN_IN;
+  const unreachable = `Surogate cannot reach ${agent.name} right now, so nothing was sent.`;
+  if (shown.unreachable !== null) return unreachable;
+  // Quick entry starts new chats, and an agent of one conversation has none to start: said before
+  // Settings closes or the window loads anything. Its page says the same, where it knows better than the app's last read.
+  if (agent.multiSession === false) return "This agent keeps one conversation, and quick entry starts new chats, so nothing was sent. Write to it in Surogate's window.";
+  // A newer message takes the place of one still on its way.
+  if (handing) handed(handing.id, "A newer message took its place.");
+  quickEntry?.hide();
+  shown.closeSettings();
+  shown.show();
+  const loaded = await goWeb("/chat");
+  if (shown.unreachable !== null) return unreachable;
+  if (notTheirs()) return SIGN_IN;
+  // A load another replaced, or one that ended on another page, is not the new chat.
+  if (!loaded || shown.webContents() !== view || new URL(view.getURL()).pathname !== "/chat") return LEFT_CHAT;
+  const id = crypto.randomUUID();
+  return new Promise((settle) => {
+    handing = { id, settle };
+    view.send("desktop:quick-entry", { id, text });
+  });
 }
 
 // The window's menu button opens the app's own menu, as Claude Desktop's does; the project's opens its own.
@@ -2481,6 +2554,14 @@ if (!app.requestSingleInstanceLock()) {
     tray.setToolTip("Surogate");
     tray.on("click", () => main?.show());
     updateTray();
+    quickEntry = new QuickEntry({ page: join(PAGES, "quick.html"), preload: PAGES_PRELOAD, send: sendQuickEntry });
+    // From anywhere on the display, where the X server grabs keys for an app: a Wayland session has
+    // its GlobalShortcuts portal instead, which Surogate does not ask. There the tray opens quick entry.
+    if (!waylandSession(process.env)) {
+      if (globalShortcut.register(QUICK_ENTRY_KEYS, toggleQuickEntry)) shortcut = QUICK_ENTRY_KEYS;
+      else report(new Error(`Another app holds ${QUICK_ENTRY_KEYS}: quick entry opens from the tray only`));
+      updateTray();
+    }
     main.window.on("focus", () => void refreshProjects());
     // The window going away, or coming back, starts or ends the follow of the chat it shows.
     app.on("browser-window-focus", () => followAgent());

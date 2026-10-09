@@ -279,6 +279,145 @@ describe("the Projects page", () => {
     expect(await page.getAttribute("#open-projects", "aria-current")).toBe(null);
   });
 
+  it("gives each project a mark of its own, the same in the sidebar, on its card and over its conversation", async () => {
+    const { page, client } = await signedIn();
+    // A mark: its hue and its icon's drawing.
+    const mark = (selector: string) => page.$eval(selector, (found) => `${(found as HTMLElement).dataset.hue} ${found.querySelector("svg")!.innerHTML}`);
+    const sidebar = await Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#projects [data-project="${id}"] .pmark`)));
+    expect(new Set(sidebar).size).toBeGreaterThan(1);
+    // Each of the six hues reads on the sidebar at 3:1 or better, in the light theme and the dark, as WCAG measures it.
+    const contrasts = await page.evaluate(() => {
+      const luminance = (colour: string) => {
+        const [red, green, blue] = (colour.match(/[\d.]+/g) ?? []).map((channel) => {
+          const part = Number(channel) / 255;
+          return part <= 0.04045 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+      };
+      const root = document.documentElement;
+      const before = root.dataset.theme;
+      const probe = document.createElement("span");
+      probe.className = "pmark";
+      document.getElementById("projects")!.append(probe);
+      const found: string[] = [];
+      for (const theme of ["light", "dark"]) {
+        root.dataset.theme = theme;
+        const under = luminance(getComputedStyle(document.getElementById("sidebar")!).backgroundColor);
+        for (const hue of ["0", "1", "2", "3", "4", "5"]) {
+          probe.dataset.hue = hue;
+          const over = luminance(getComputedStyle(probe).color);
+          const contrast = (Math.max(over, under) + 0.05) / (Math.min(over, under) + 0.05);
+          if (!(contrast >= 3)) found.push(`hue ${hue}, ${theme}: ${contrast.toFixed(2)}`);
+        }
+      }
+      probe.remove();
+      root.dataset.theme = before;
+      return found;
+    });
+    expect(contrasts).toEqual([]);
+    // The dot that says a thread waits sits on the mark, whole: what is drawn past the mark's edge is the dot's too.
+    const dot = `#projects [data-project="${REPORT}"] .pmark .waiting`;
+    await expect.poll(() => page.$eval(dot, (found) => {
+      const { right, top, height } = found.getBoundingClientRect();
+      return document.elementFromPoint(right - 1.5, top + height / 2) === found;
+    }), { timeout: 5_000 }).toBe(true);
+    // On the mark: over its icon, not beside it.
+    expect(await page.$eval(dot, (found) => {
+      const [own, drawn] = [found, found.parentElement!.querySelector("svg")!].map((each) => each.getBoundingClientRect());
+      return own!.left < drawn!.right && drawn!.left < own!.right && own!.top < drawn!.bottom && drawn!.top < own!.bottom;
+    })).toBe(true);
+    // A ring of 2 px in its row's colour parts it from the mark, whatever the mark's hue: the dot's
+    // ring, and the row's colour as it is seen, over the sidebar's.
+    const ringed = () => page.$eval(dot, (found) => {
+      const numbers = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+      const [shadow, sidebar, row] = [found, document.getElementById("sidebar")!, found.closest(".item")!]
+        .map((each, at) => numbers(at === 0 ? getComputedStyle(each).boxShadow : getComputedStyle(each).backgroundColor));
+      const alpha = row![3] ?? 1;
+      return {
+        ring: shadow!.slice(0, 3),
+        spread: shadow!.slice(3),
+        row: sidebar!.slice(0, 3).map((under, channel) => Math.round(row![channel]! * alpha + under * (1 - alpha))),
+      };
+    });
+    const ringIsItsRows = async () => {
+      const { ring, spread, row: seen } = await ringed();
+      expect(spread).toEqual([0, 0, 0, 2]);
+      expect(seen.map((channel, at) => Math.abs(channel - ring[at]!) <= 1)).toEqual([true, true, true]);
+      return ring;
+    };
+    // In each theme, plain and then with the pointer over its row, whose colour is another: the other
+    // theme first, so that what follows is drawn in the page's own.
+    const own = await page.evaluate(() => document.documentElement.dataset.theme!);
+    const rings: Record<string, { plain: number[]; hovered: number[] }> = {};
+    for (const theme of [own === "dark" ? "light" : "dark", own]) {
+      await page.evaluate((chosen) => {
+        document.documentElement.dataset.theme = chosen;
+      }, theme);
+      await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), { timeout: 5_000 }).toBe(theme);
+      const plain = await ringIsItsRows();
+      await page.hover(row(REPORT));
+      await expect.poll(async () => (await ringed()).ring, { timeout: 5_000 }).not.toEqual(plain);
+      const hovered = await ringIsItsRows();
+      await page.mouse.move(0, 0);
+      await expect.poll(async () => (await ringed()).ring, { timeout: 5_000 }).toEqual(plain);
+      rings[theme] = { plain, hovered };
+    }
+    // Each theme's own colours were the ones drawn.
+    expect(rings.dark!.plain).not.toEqual(rings.light!.plain);
+    expect(rings.dark!.hovered).not.toEqual(rings.light!.hovered);
+    const { plain, hovered } = rings[own]!;
+    await page.click("#open-projects");
+    await expect.poll(() => Promise.all([REPORT, BUDGET, HIRING].map((id) => mark(`#cards [data-project="${id}"] .pmark`))), { timeout: 5_000 })
+      .toEqual(sidebar);
+    await page.click(`#cards [data-project="${BUDGET}"]`);
+    await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+    await expect.poll(() => mark("#project-icon .pmark"), { timeout: 5_000 }).toBe(sidebar[1]);
+    // Its project open, its row is the selected one, in a third colour.
+    await page.click(row(REPORT));
+    await expect.poll(() => page.getAttribute(row(REPORT), "aria-current")).toBe("page");
+    const selected = await ringIsItsRows();
+    expect(selected).not.toEqual(plain);
+    expect(selected).not.toEqual(hovered);
+  });
+
+  it("ages its cards as time goes on, with nothing drawn again", async () => {
+    const { page } = await signedIn();
+    // The window's page starts again on the test's clock.
+    await page.clock.install();
+    await page.reload();
+    await page.waitForSelector("#projects .project");
+    await page.click("#open-projects");
+    await expect.poll(() => texts(page, "#cards .card .age"), { timeout: 5_000 }).toEqual(["17 minutes ago", "9 hours ago", "2 days ago"]);
+    await page.clock.fastForward("01:00:00");
+    await expect.poll(() => texts(page, "#cards .card .age"), { timeout: 5_000 }).toEqual(["1 hour ago", "10 hours ago", "2 days ago"]);
+  });
+
+  it("draws as the references do: three columns of cards at most, the first project's ring in sight, and nothing through Couldn't connect", async () => {
+    const { shell, page, client } = await signedIn();
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 1600, height: 1000 }));
+    await page.click("#open-projects");
+    await expect.poll(() => page.$eval("#cards", (found) => getComputedStyle(found).gridTemplateColumns.split(" ").length), { timeout: 5_000 }).toBe(3);
+    // The ring the first project's row draws with the keyboard on it, inside the list that scrolls.
+    // The keyboard comes to it by Tab, as its user's does: a ring is drawn only for a focus the keys brought.
+    await page.focus(row(REPORT));
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    const [ring, list, drawn] = await page.evaluate((chosen) => {
+      const button = document.querySelector(chosen)!;
+      if (document.activeElement !== button) return [0, 0, 0];
+      const style = getComputedStyle(button);
+      const drawn = style.outlineStyle === "none" ? 0 : Number.parseFloat(style.outlineWidth);
+      return [button.getBoundingClientRect().top - drawn - Number.parseFloat(style.outlineOffset), document.querySelector("#projects")!.getBoundingClientRect().top, drawn];
+    }, row(REPORT));
+    expect(drawn).toBeGreaterThan(0);
+    expect(ring).toBeGreaterThanOrEqual(list);
+    agent.pagesRedirect = "https://sso.example.com/login";
+    await client.reload().catch(() => {});
+    await expect.poll(() => page.isVisible("#unreachable"), { timeout: 5_000 }).toBe(true);
+    expect(await page.$eval("#unreachable", (found) => getComputedStyle(found).backgroundColor))
+      .toBe(await page.$eval("#centre", (found) => getComputedStyle(found).backgroundColor));
+  });
+
   it("is left by Back for the thread that was open, with its project as the way back", async () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
@@ -693,6 +832,20 @@ describe("the project dialog", () => {
     // The page says nobody is signed in, as after its session expired.
     await client.evaluate(() => window.surogateDesktop!.registerProjects(null));
     await expect.poll(() => dialogOpen(shell)).toBe(false);
+  });
+
+  it("stays open, with what was typed, on an Escape that cancels an input method's composition", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Hiring brief");
+    await dialog.evaluate(() => {
+      document.getElementById("name")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", isComposing: true, bubbles: true }));
+    });
+    await pause(500);
+    expect(await dialogOpen(shell)).toBe(true);
+    expect(await dialog.inputValue("#name")).toBe("Hiring brief");
   });
 
   it("asks for a name, says what the agent refused, and keeps a project when the archive is cancelled", async () => {

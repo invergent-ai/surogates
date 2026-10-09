@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { useProjectThreads } from "./components/chat/use-project-threads";
 import {
@@ -113,6 +113,18 @@ export interface AgentChatProps {
    */
   composerFooter?: React.ReactNode;
   /**
+   * A message the host has a new chat send as its first, as if its user had typed and sent it:
+   * Surogate Desktop's quick entry hands one. Sent once per id, while the chat has no session and
+   * is not disabled; it goes through the adapter's createSession as any first message does.
+   */
+  firstMessage?: { id: string; text: string } | null;
+  /**
+   * Told what became of the host's first message, by its id, once: null once it was sent, or why it
+   * was not, as when a chat was already open, or the chat went before it could send it. The callback
+   * the host passes by then is the one told.
+   */
+  onFirstMessageSent?: (id: string, error: string | null) => void;
+  /**
    * The browser pane of a chat whose browser is on the user's computer, as the
    * host draws it: where it is, and what the host can do with it there.
    * *available* is false where that computer has no supported browser, and
@@ -165,6 +177,8 @@ export function AgentChat({
   onOpenIntegrations,
   onOpenBilling,
   composerFooter,
+  firstMessage,
+  onFirstMessageSent,
   computerBrowser,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
@@ -309,6 +323,54 @@ export function AgentChat({
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
   }, [onMessagesChange, runtime.messages]);
+
+  // The host's first message, once: a drawing again sends it no more. It goes once this commit's
+  // effects have run, StrictMode's second run of the runtime's reset included, which would wipe it
+  // from the transcript; an effect cleaned up before then sends nothing. The host hears what became
+  // of it at the callback it has by then, and hears of one that will never go: a chat already open
+  // takes none, and a chat that is gone sends none.
+  const firstSent = useRef<string | null>(null);
+  const first = useRef({ message: firstMessage ?? null, told: onFirstMessageSent });
+  useEffect(() => {
+    first.current = { message: firstMessage ?? null, told: onFirstMessageSent };
+  });
+  const send = runtime.send;
+  useEffect(() => {
+    if (!firstMessage || firstSent.current === firstMessage.id) return;
+    if (sessionId !== null) {
+      firstSent.current = firstMessage.id;
+      first.current.told?.(firstMessage.id, "Another chat opened before this one was made, so nothing was sent.");
+      return;
+    }
+    if (effectiveDisabled) return;
+    let live = true;
+    queueMicrotask(() => {
+      if (!live || firstSent.current === firstMessage.id) return;
+      firstSent.current = firstMessage.id;
+      // A send that fails is marked on its message too, as one from the composer is.
+      send(firstMessage.text).then(
+        () => first.current.told?.(firstMessage.id, null),
+        (error: unknown) => first.current.told?.(firstMessage.id, error instanceof Error ? error.message : String(error)),
+      );
+    });
+    return () => {
+      live = false;
+    };
+  }, [firstMessage, sessionId, effectiveDisabled, send]);
+  // Gone with one still to send: said once the chat has not come back, as after StrictMode's passing unmount it has.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      queueMicrotask(() => {
+        const { message, told } = first.current;
+        if (mounted.current || !message || firstSent.current === message.id) return;
+        firstSent.current = message.id;
+        told?.(message.id, "The page left the new chat before it was made, so nothing was sent.");
+      });
+    };
+  }, []);
 
   // One path for every "open this file" gesture — a tree row, a file chip in
   // the transcript — so they all land in the same drawer.
