@@ -56,6 +56,8 @@ class FakeStore:
         session_id: UUID,
         event_type: EventType,
         data: dict[str, Any],
+        *,
+        lease_token: Any = None,
     ) -> int:
         self.events.append((session_id, event_type, data))
         event_id = self.next_event_id

@@ -19,7 +19,7 @@ class _FakeStore:
     def __init__(self) -> None:
         self.events: list[tuple] = []
 
-    async def emit_event(self, session_id, event_type, data):
+    async def emit_event(self, session_id, event_type, data, *, lease_token=None):
         self.events.append((event_type, data))
         return len(self.events)  # real store returns a BIGSERIAL int id
 

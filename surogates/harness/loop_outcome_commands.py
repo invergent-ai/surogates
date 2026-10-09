@@ -328,6 +328,7 @@ class OutcomeCommandMixin:
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
+            lease_token=lease.lease_token,
         )
 
         # /mission create writes its synthetic kickoff message after its
@@ -508,6 +509,7 @@ class OutcomeCommandMixin:
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
+            lease_token=lease.lease_token,
         )
 
         # The synthetic kickoff after the answer, as /mission and /goal.
@@ -590,6 +592,7 @@ class OutcomeCommandMixin:
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
+            lease_token=lease.lease_token,
         )
 
         if outcome_kickoff_needed:

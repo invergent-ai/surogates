@@ -4992,6 +4992,7 @@ class AgentHarness(
                 "original_message_count": 0,
                 "compressed_message_count": 0,
             },
+            lease_token=lease.lease_token,
         )
         self._forget_compacted_reads(session)
 
@@ -5009,6 +5010,7 @@ class AgentHarness(
                 "output_tokens": 0,
                 "context_window": self._compressor.context_length,
             },
+            lease_token=lease.lease_token,
         )
         # Lease released by the outer wake() finally block.
 
@@ -5167,6 +5169,7 @@ class AgentHarness(
             session.id,
             EventType.LLM_RESPONSE,
             {"message": assistant_message, **self._names_its_message()},
+            lease_token=lease.lease_token,
         )
 
     async def _handle_compress_command(
@@ -5209,6 +5212,7 @@ class AgentHarness(
                                    f"{len(messages)} messages.",
                     },
                 },
+                lease_token=lease.lease_token,
             )
             # Lease released by the outer wake() finally block.
             return
@@ -5229,6 +5233,7 @@ class AgentHarness(
                         "content": f"Compression failed: {exc}",
                     },
                 },
+                lease_token=lease.lease_token,
             )
             # Lease released by the outer wake() finally block.
             return
@@ -5244,6 +5249,7 @@ class AgentHarness(
                 **summary_data,
                 "compacted_messages": compressed,
             },
+            lease_token=lease.lease_token,
         )
         self._forget_compacted_reads(session)
 
@@ -5265,6 +5271,7 @@ class AgentHarness(
                 "output_tokens": 0,
                 "context_window": self._compressor.context_length,
             },
+            lease_token=lease.lease_token,
         )
         # Lease released by the outer wake() finally block.
 

@@ -28,6 +28,7 @@ from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.store import ScheduledSessionStore
+from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
@@ -901,6 +902,30 @@ async def test_a_turn_cut_off_with_no_command_is_resumed_as_before(workers):
     assert await workers.swept(chat)
     await workers.wake(chat)
     assert (workers.ran, len(workers.requests), await workers.status(chat)) == ([], 1, "completed")
+
+
+@pytest.mark.parametrize("command", ["/goal status", "/clear", "/compress", "/code status", "/loop list", "/mission status"])
+async def test_a_worker_whose_lease_moved_does_not_answer_a_command_another_worker_has_answered(workers, command):
+    chat = await workers.chat()
+    answers = len(await workers.said(chat))
+
+    async def its_lease_expires_and_another_worker_takes_the_chat():
+        async with workers.api.app.state.session_factory() as db:
+            await db.execute(
+                text("UPDATE session_leases SET expires_at = now() - interval '1 minute' WHERE session_id = :id"), {"id": chat},
+            )
+            await db.commit()
+        await workers.wake(chat)
+
+    await workers.says(chat, command)
+    slow = workers.worker(store=Meanwhile(workers.store, before=its_lease_expires_and_another_worker_takes_the_chat))
+    with pytest.raises(LeaseNotHeldError):
+        await slow.wake(chat)
+
+    # One answer in the chat: the worker that lost the session writes none.
+    assert len(await workers.said(chat)) == answers + 1
+    await workers.wake(chat)
+    assert (len(await workers.said(chat)), workers.requests) == (answers + 1, [])
 
 
 async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stopped(workers):

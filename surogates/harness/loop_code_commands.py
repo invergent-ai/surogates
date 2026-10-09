@@ -84,6 +84,7 @@ class CodeCommandMixin:
             session.id,
             EventType.LLM_RESPONSE,
             {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
+            lease_token=lease.lease_token,
         )
 
     def _names_its_message(self) -> dict:
