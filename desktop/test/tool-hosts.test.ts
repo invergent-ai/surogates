@@ -515,7 +515,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       await until(() => gone, 2_000);
       await new Promise((resolve) => setTimeout(resolve, 100));
       const said = written.mock.calls.map(([text]) => String(text)).filter((text) => text.startsWith("the file host"));
-      expect(said).toEqual(["the file host could not start: spawn /nonexistent/node ENOENT"]);
+      expect(said).toEqual(["the file host could not start: /nonexistent/node is not there, or cannot be run"]);
       host.kill();
     } finally {
       written.mockRestore();

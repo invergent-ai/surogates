@@ -4,12 +4,12 @@
 // the VM asks the chat's approvals about the hosts its connections reach past the
 // package hosts.
 
-import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
+import { spawnClean } from "../clean-child.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -79,7 +79,8 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
   // OPENSSL_CONF and the like, and srt on CLAUDE_CODE_TMPDIR, none of which the user's may set for it.
   // --disable-sigusr1: a plain node opens its inspector on SIGUSR1, which any process of the user's can
   // send, and has no fuse to refuse it as Electron has.
-  const child = spawn(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
+  // With its three standard descriptors and its channel, and nothing else the app has open.
+  const child = spawnClean(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
     detached: true,
     stdio: ["ignore", 2, 2, "ipc"],
     env: { PATH: process.env.PATH ?? "", HOME: homedir() },
@@ -111,7 +112,12 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
     console.error(`the file host could not start: ${error.message}`);
     gone();
   });
-  child.on("exit", gone);
+  // Started through the line that closes the app's descriptors, a node that is not there, or is no
+  // program, is that line's 127, and never an error of the spawn.
+  child.on("exit", (code) => {
+    if (code === 127 && !exited) console.error(`the file host could not start: ${options.execPath ?? NODE} is not there, or cannot be run`);
+    gone();
+  });
   child.on("close", gone);
   return {
     send: (message) => {

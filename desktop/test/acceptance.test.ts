@@ -595,13 +595,15 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
         expect(byPkexec.environment!.map((entry) => entry.split("=")[0]).sort())
           .toEqual(release === "24.04" ? ["HOME", "LANG", "LOGNAME", "PATH", "PKEXEC_UID", "USER"] : ["HOME", "LOGNAME", "PATH", "PKEXEC_UID", "SUDO_GID", "SUDO_UID", "USER"]);
         expect(byPkexec.environment).toEqual(expect.arrayContaining(["HOME=/root", "LOGNAME=root", "USER=root", `PKEXEC_UID=${uid}`]));
-        // Of the descriptors pkexec held, the app's own among them, the helper has the first three
-        // and no other: what else it has open is bash's own, the script it reads and what the
-        // script opened.
+        // The helper has pkexec's three descriptors and no other of its: what else it has open is
+        // bash's own, the script it reads and what the script opened.
         const { 0: input, 1: output, 2: errors, 255: script, ...opened } = byPkexec.descriptors;
         expect([input, output, errors, script]).toEqual(["/dev/null", "/dev/null", byApp.descriptors["2"], HELPER]);
+        // And pkexec itself, which is root's process for as long as its prompt is open, held nothing
+        // else either: none of what the app's main process has open.
         const { 0: _input, 1: _output, 2: _errors, ...held } = byApp.descriptors;
-        expect(Object.values(opened).filter((file) => Object.values(held).includes(file))).toEqual([]);
+        expect(held).toEqual({});
+        expect(Object.keys(opened).every((fd) => Number(fd) > 2)).toBe(true);
 
         // The administrator rolls back: the version before, with the binding still there, and the
         // helper pkexec runs still the update's.

@@ -21,7 +21,12 @@ import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js"
 import { type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
+import { closeHanded } from "./handed.js";
 import { fileToolsMissing, GLOB, hideSrtTmp, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
+
+// Before anything else: nothing this process starts, the helper in its sandbox least of all, holds
+// a descriptor of the app's.
+closeHanded();
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;

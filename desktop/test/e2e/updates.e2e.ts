@@ -44,7 +44,7 @@ beforeEach(async () => {
   // what it was given in <home>/applied, then the exit code and the words <home>/answer holds,
   // once <home>/hold is no longer there.
   writeFileSync(join(home, "surogate-apply-update"), [
-    "#!/usr/bin/env bash", "CHANNEL=stable", "RELEASE_KEYS=(", `    '${PUBLIC}'`, "  )", `printf '%s\\n' "$@" >${join(home, "applied")}`, `read -r code words <${join(home, "answer")}`,
+    "#!/usr/bin/env bash", "CHANNEL=stable", "RELEASE_KEYS=(", `    '${PUBLIC}'`, "  )", `printf '%s\\n' "$@" >${join(home, "applied")}`, `ls -l /proc/$$/fd >${join(home, "held")}`, `read -r code words <${join(home, "answer")}`,
     `[ -z "$words" ] || echo "Surogate Desktop: $words" >&2`, `while [ -e ${join(home, "hold")} ]; do sleep 0.1; done`, `exit "$code"`, "",
   ].join("\n"), { mode: 0o755 });
   writeFileSync(join(home, "answer"), "0\n");
@@ -133,6 +133,10 @@ describe("updates, through the app", () => {
     // The helper was handed the files as the user downloaded them.
     const updates = join(home, "k", "surogate", "updates", "0.0.1");
     expect(readFileSync(join(home, "applied"), "utf8")).toBe(["--apply", join(updates, "manifest.json"), join(updates, "manifest.json.sig"), join(updates, "release.tar.gz"), ""].join("\n"));
+    // It held its three standard descriptors, the script bash reads it from, and nothing else: none
+    // of what the app's main process has open, which pkexec would hold for as long as its prompt.
+    const held = readFileSync(join(home, "held"), "utf8").split("\n").flatMap((line) => / (\d+) -> (.*)$/.exec(line)?.slice(1, 3).join(" ") ?? []).map((line) => line.replace(/^(\d+) (socket|pipe):.*$/, "$1 $2"));
+    expect(held.sort()).toEqual(["0 /dev/null", "1 /dev/null", "2 socket", `255 ${join(home, "surogate-apply-update")}`]);
     // Started again as Start at login starts a development build: its Electron on this main, the update's.
     await expect.poll(() => relaunched().filter(({ pid, argv }) => pid !== first && !argv.some((arg) => arg.startsWith("--type=")))
       .map(({ argv }) => argv), { timeout: 30_000 }).toEqual([[ELECTRON, MAIN]]);

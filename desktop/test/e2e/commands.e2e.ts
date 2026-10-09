@@ -176,6 +176,31 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     expect(inheriting.map(({ exe, args }) => `${exe.split("/").at(-1)} ${args.find((arg) => arg.startsWith("--type=")) ?? ""}`.trim())).toEqual([]);
     const plainElectron = processes.filter(({ exe, args }) => exe === realpathSync(ELECTRON) && !args.some((arg) => arg.startsWith("--type=")));
     expect(plainElectron.map(({ pid }) => pid)).toEqual([main]);
+    // What the file host holds open, and all it started: its socat bridges out here, and bubblewrap,
+    // seccomp's wrapper and the helper in the sandbox. Nothing of the main process's, which has its
+    // profile's files open for writing and its channels with its other processes: none of them holds
+    // a file at all but /dev/null, and the helper no socket but its three standard ones.
+    const opened = (pid: number) => {
+      try {
+        return readdirSync(`/proc/${pid}/fd`).flatMap((fd) => {
+          try {
+            return [[Number(fd), readlinkSync(`/proc/${pid}/fd/${fd}`)] as const];
+          } catch {
+            return []; // the listing's own
+          }
+        });
+      } catch {
+        return []; // gone meanwhile, or bubblewrap's own first process, which no other may read
+      }
+    };
+    const host = processes.find(({ args }) => args.some((arg) => arg.endsWith("/dist/hosts/host.js")))!;
+    const under = tree(host.pid);
+    expect(under.length).toBeGreaterThan(4);
+    expect(under.flatMap((pid) => opened(pid).filter(([, file]) => file.startsWith("/") && file !== "/dev/null").map(([fd, file]) => `${pid}: ${fd} ${file}`))).toEqual([]);
+    const sandboxed = processes.find(({ args }) => args.some((arg) => arg.endsWith("/dist/files/helper.js")))!;
+    expect(opened(sandboxed.pid).filter(([, file]) => file.startsWith("socket:")).map(([fd]) => fd)).toEqual([0, 1, 2]);
+    // The main process's own, for the measure of what was not handed on.
+    expect(opened(main).filter(([, file]) => file.startsWith(home)).length).toBeGreaterThan(10);
   });
 
   it("runs the folder's own configure script, refuses SQLite's WAL there plainly, and keeps a database with a rollback journal that this computer reads", async () => {
@@ -699,6 +724,16 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     }).stdout.trim().split("\n")[0] || 0);
     await expect.poll(unpacking, { timeout: 60_000, interval: 50 }).toBeGreaterThan(0);
     const zstd = unpacking();
+    // zstd holds its three standard descriptors and the two files it works on, and nothing else of the app's.
+    const held = readdirSync(`/proc/${zstd}/fd`).flatMap((fd) => {
+      try {
+        return [readlinkSync(`/proc/${zstd}/fd/${fd}`)];
+      } catch {
+        return [];
+      }
+    });
+    expect(held.length).toBeGreaterThanOrEqual(3);
+    expect(held.filter((file) => file !== "/dev/null" && !file.startsWith(join(home, "surogate", "vm", "images")))).toEqual([expect.stringMatching(/^socket:/)]);
     const closed = app!.waitForEvent("close");
     await app!.evaluate(({ app: electron }) => electron.quit());
     // It goes with the quit, not seconds later once it has written the image out.

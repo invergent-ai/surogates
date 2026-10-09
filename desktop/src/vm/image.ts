@@ -6,11 +6,11 @@
 // file in it is checked; its last step is its completion mark, so a folder with that
 // mark and its files' sizes is a whole image, and one without is downloaded again.
 
-import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { open, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { spawnClean } from "../clean-child.js";
 import { download, type DownloadOptions, hashOf, sizeOf } from "../download.js";
 
 // Each file the image has, as the manifest names it: unpacked, and as downloaded.
@@ -225,9 +225,9 @@ export async function deliver(options: DeliverOptions): Promise<string> {
 async function unpack(from: string, to: string, file: ImageFile, signal?: AbortSignal): Promise<void> {
   const partial = `${to}.partial`;
   const said = await new Promise<string | null>((resolve) => {
-    const zstd = spawn("/usr/bin/zstd", ["-q", "-d", "-f", "--sparse", from, "-o", partial], { stdio: ["ignore", "ignore", "pipe"], env: {}, signal });
+    const zstd = spawnClean("/usr/bin/zstd", ["-q", "-d", "-f", "--sparse", from, "-o", partial], { stdio: ["ignore", "ignore", "pipe"], env: {}, signal });
     let stderr = "";
-    zstd.stderr.on("data", (chunk: Buffer) => {
+    zstd.stderr?.on("data", (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-2000);
     });
     zstd.once("error", (error) => resolve(error.message));

@@ -5,7 +5,7 @@
 // manager however it dies, and each leaves a pidfile in the runtime folder, so a later
 // manager can end one that did not.
 
-import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile } from "node:child_process";
 import {
   accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
@@ -13,6 +13,7 @@ import { connect, type Socket } from "node:net";
 import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+import { cleanly, spawnClean } from "../clean-child.js";
 import { findOnPath } from "../files/operations.js";
 import type { Share } from "../guest/protocol.js";
 import { pathOutside } from "../hosts/policy.js";
@@ -77,7 +78,7 @@ const qemuOn = (path: string) => findOnPath("qemu-system-x86_64", path, "/");
 
 // A child that dies with this process, and the end of what it said on stderr.
 function launch(argv: string[]): { child: ChildProcess; said: () => string } {
-  const child = spawn("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", ...argv], { stdio: ["ignore", "ignore", "pipe"], env: toolEnv() });
+  const child = spawnClean("/usr/bin/setpriv", ["--pdeathsig", "KILL", "--", ...argv], { stdio: ["ignore", "ignore", "pipe"], env: toolEnv() });
   let said = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     said = (said + chunk.toString()).slice(-4000);
@@ -93,7 +94,7 @@ const onPath = (name: string, path = toolPath()) => findOnPath(name, path, "/") 
 // not answered in 5 s is killed, as a SIGTERM may be ignored.
 const versionOf = (program: string | null, args: string[], held: Held = []) => new Promise<[number, number] | null>((resolve) => {
   if (program === null) return resolve(null);
-  execFile(program, args, { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv(held) }, (error, stdout) => {
+  execFile(...cleanly(program, args), { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv(held) }, (error, stdout) => {
     const found = error ? null : /(\d+)\.(\d+)/.exec(stdout);
     resolve(found ? [Number(found[1]), Number(found[2])] : null);
   });

@@ -6,7 +6,7 @@
 // an installed app; the helper checks all of them again before it applies anything.
 // Electron-free.
 
-import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 import {
   closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
@@ -14,6 +14,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
+import { spawnClean } from "../clean-child.js";
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
 import { installBase, rootsOwn } from "../vm/image.js";
 
@@ -166,9 +167,11 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
 export function helperRun(command: string[]): (files: Staged) => Promise<Applied> {
   return (files) => new Promise((resolve) => {
     const [program, ...args] = command;
-    let child: ReturnType<typeof spawn>;
+    let child: ChildProcess;
     try {
-      child = spawn(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
+      // With its three standard descriptors and nothing else the app has open: pkexec is root's
+      // process for as long as its prompt is.
+      child = spawnClean(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
         stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" },
       });
     } catch (error) {

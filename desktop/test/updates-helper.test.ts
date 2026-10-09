@@ -6,6 +6,7 @@ import { EventEmitter } from "node:events";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { cleanly } from "../src/clean-child.js";
 import { installedUpdates } from "../src/shell/updates.js";
 
 const asked = vi.hoisted(() => ({
@@ -50,12 +51,15 @@ describe("an installed app's root helper", () => {
     const files = { manifest: `${folder}/manifest.json`, signature: `${folder}/manifest.json.sig`, tarball: `${folder}/release.tar.gz` };
     asked.ends = { code: 0, signal: null, says: "", fails: "", throws: "" };
     expect(await installed().apply(files)).toEqual({ code: 0, said: "" });
-    expect(asked.spawned).toEqual([[
-      "/usr/bin/pkexec",
-      ["--disable-internal-agent", "/opt/surogate/bin/surogate-apply-update", "--apply", files.manifest, files.signature, files.tarball],
-      // No shell, nothing on its input or from its output but what it says of a failure, and of the app's environment a PATH alone.
-      { stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" } },
-    ]]);
+    // Started the one way the app starts a child: through perl's fixed line, which closes all but
+    // its three standard descriptors and becomes the program. No word of the paths is anyone's to
+    // read on the way: each is an argument of its own, behind the line.
+    const [[file, [flag, line, dashes, keep, ...argv], options]] = asked.spawned as [[string, string[], unknown]];
+    expect([file, flag, dashes, keep]).toEqual(["/usr/bin/perl", "-e", "--", "2"]);
+    expect(line).toBe(cleanly("/x", [])[1][1]);
+    expect(argv).toEqual(["/usr/bin/pkexec", "--disable-internal-agent", "/opt/surogate/bin/surogate-apply-update", "--apply", files.manifest, files.signature, files.tarball]);
+    // Nothing on its input or from its output but what it says of a failure, and of the app's environment a PATH alone.
+    expect(options).toEqual({ stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" } });
   });
 
   it("answers what pkexec answers: its exit code, and the last 4000 characters of what was said", async () => {
