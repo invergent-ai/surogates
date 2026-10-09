@@ -1067,7 +1067,7 @@ describe("the browser on this computer", () => {
       for (const url of [
         "https://localhost:3000/", "http://example.com:3000/", "http://app.localhost:3000/", "http://0.0.0.0:3000/", "http://127.0.0.2:3000/",
         "http://[::ffff:127.0.0.1]:3000/", "http://[::]:3000/", "http://localhost.example.com:3000/", "http://user@localhost:3000/", "ws://localhost:3000/",
-        "not an address",
+        "http://localhost.:3000/", "not an address",
       ]) {
         expect(await approvals.admit(open(url), never()), url).toBeNull();
       }

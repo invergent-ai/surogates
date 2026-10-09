@@ -621,13 +621,13 @@ describe("a chat's own servers, through the browser's proxy", () => {
   });
 
   it("carries a request for an allowed port to the manager's door under its device's key, by each name of this computer's loopback, the family its name says first, and dials nothing here", async () => {
-    const hosts = ["localhost", "127.0.0.1", "[::1]", "2130706433", "0x7f.1", "0177.0.0.1", "127.1", "LOCALHOST", "localhost."];
+    const hosts = ["localhost", "127.0.0.1", "[::1]", "2130706433", "0x7f.1", "0177.0.0.1", "127.1", "LOCALHOST"];
     for (const host of hosts) expect(await fetched(`http://${host}:3000/a?b=c`), host).toEqual({ status: 201, body: "hello from the site" });
     // Only the address that names IPv6's loopback has the door try that family first.
     expect(knocks).toEqual(hosts.map((host) => (host === "[::1]" ? `${KEY} 3000 6` : `${KEY} 3000`)));
     // The chat's server sees the name its page was opened by.
     expect(seen.map(({ host }) => host)).toEqual([
-      "localhost:3000", "127.0.0.1:3000", "[::1]:3000", "127.0.0.1:3000", "127.0.0.1:3000", "127.0.0.1:3000", "127.0.0.1:3000", "localhost:3000", "localhost.:3000",
+      "localhost:3000", "127.0.0.1:3000", "[::1]:3000", "127.0.0.1:3000", "127.0.0.1:3000", "127.0.0.1:3000", "127.0.0.1:3000", "localhost:3000",
     ]);
     expect(dialed).toEqual([]);
   });
@@ -640,6 +640,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
       "http://localhost:3128/", "http://127.0.0.1:1080/",
       // On a port that is allowed: only the loopback's three names are a chat's servers.
       "http://0.0.0.0:3000/", "http://127.0.0.2:3000/", "http://app.localhost:3000/", "http://localhost.localdomain:3000/",
+      // A name with a dot after it is another origin to the browser: no fourth name for a chat's server.
+      "http://localhost.:3000/", "http://LOCALHOST.:3000/",
       "http://[::ffff:127.0.0.1]:3000/", "http://[::]:3000/", "http://[::ffff:7f00:1]:3000/", "http://[64:ff9b::7f00:1]:3000/",
       // A public name that leads here, as a rebinding site's does, and this computer's own address on its network.
       "http://loop.example:3000/", "http://rebinding.example:3000/", "http://198.51.100.5:3000/", "http://lan.example:3000/",
@@ -649,7 +651,7 @@ describe("a chat's own servers, through the browser's proxy", () => {
     // The rebinding name led elsewhere at its first lookup, and is refused once it leads here.
     expect((await fetched("http://rebinding.example:3000/")).status).toBe(403);
     // A tunnel to a chat's port is carried for nobody, allowed or not: https, and a page's socket.
-    for (const authority of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "localhost:3003", "0.0.0.0:3000", "127.0.0.2:3000", "app.localhost:3000", "[::ffff:127.0.0.1]:3000", "loop.example:3000"]) {
+    for (const authority of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "localhost:3003", "localhost.:3000", "0.0.0.0:3000", "127.0.0.2:3000", "app.localhost:3000", "[::ffff:127.0.0.1]:3000", "loop.example:3000"]) {
       expect((await connect(authority)).status, authority).toBe(403);
     }
     expect(knocks).toEqual([]);
