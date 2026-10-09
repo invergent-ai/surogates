@@ -13,7 +13,7 @@ import { gzipSync } from "node:zlib";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, signedInAndAdded } from "./fake-agent.js";
+import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, ELECTRON, launch, MAIN, quit, shellPage, stubNative } from "./launch.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
@@ -26,6 +26,7 @@ let base: string;
 let served: Map<string, Buffer>;
 let app: ElectronApplication | undefined;
 let agent: FakeAgent;
+let origin: string;
 
 beforeEach(async () => {
   home = dataHome();
@@ -98,7 +99,7 @@ function relaunched(): Array<{ pid: number; argv: string[] }> {
 // The app launched with the test's install record and helper, signed in to the fake agent: the sidebar,
 // where the update's line is, shows once an agent is added and signed in to. The window's page.
 async function launched(): Promise<Page> {
-  const origin = await agent.start();
+  origin = await agent.start();
   app = await launch(home, { SUROGATE_INSTALL_JSON: join(home, "install.json"), SUROGATE_UPDATE_HELPER: join(home, "surogate-apply-update") });
   await stubNative(app);
   const page = await shellPage(app);
@@ -134,6 +135,40 @@ describe("updates, through the app", () => {
     // Started again as Start at login starts a development build: its Electron on this main, the update's.
     await expect.poll(() => relaunched().filter(({ pid, argv }) => pid !== first && !argv.some((arg) => arg.startsWith("--type=")))
       .map(({ argv }) => argv), { timeout: 30_000 }).toEqual([[ELECTRON, MAIN]]);
+  });
+
+  it("starts nothing again at a quit that no update asked for, with one downloaded and waiting", async () => {
+    publish("0.0.1");
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    const closed = app!.waitForEvent("close", { timeout: 30_000 });
+    await app!.evaluate(({ app: electron }) => electron.quit());
+    await closed;
+    app = undefined;
+    // A restart's app is there within a second of the quit: three seconds on, none is, and nothing was installed.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(relaunched().filter(({ argv }) => !argv.some((arg) => arg.startsWith("--type=")))).toEqual([]);
+    expect(existsSync(join(home, "applied"))).toBe(false);
+  });
+
+  it("takes Restart to update from the window's own page alone: the agent's web client has no such call, and no one answers Settings'", async () => {
+    publish("0.0.1");
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    // The agent's own page, in the window's view of it: none of the shell's calls is there.
+    const client = await webClient(app!, origin);
+    expect(await client.evaluate(() => "surogateShell" in window)).toBe(false);
+    // Settings is a page of the app's own, with the same preload: the call is there, and its channel is not.
+    await page.evaluate(() => (window as unknown as { surogateShell: { settings(): Promise<void> } }).surogateShell.settings());
+    await expect.poll(() => app!.windows().some((found) => found.url().endsWith("/settings.html")), { timeout: 10_000 }).toBe(true);
+    const settings = app!.windows().find((found) => found.url().endsWith("/settings.html"))!;
+    await settings.waitForLoadState();
+    const answered = await settings.evaluate(() => (window as unknown as { surogateShell: { update(): Promise<void> } }).surogateShell.update()
+      .then(() => "answered", (error: Error) => error.message));
+    expect(answered).toContain("No handler registered for 'shell:update'");
+    // Nothing was run, and the offer is as it was.
+    expect(existsSync(join(home, "applied"))).toBe(false);
+    await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Restart to update");
   });
 
   it("runs no helper at a click once a downloaded file is no longer its own: it downloads the release again, and offers it for another click", async () => {
