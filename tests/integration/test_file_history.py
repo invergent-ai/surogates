@@ -3,12 +3,16 @@ stands, and the stream's word of a landing another lock holder finished."""
 
 from __future__ import annotations
 
+import asyncio
+from uuid import UUID
+
 import pytest
 from sqlalchemy import text
 
 from surogates.harness import landing as landing_module
 from surogates.session.store import SessionStore
 from surogates.workstreams import stream as project_stream
+from surogates.workstreams.store import WorkstreamStore
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
@@ -25,7 +29,8 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
 )
 from .test_redo_loop import a_clash
 from .test_thread_copies import a_thread, open_pod, pods  # noqa: F401  (pods is a fixture)
-from .test_turn_sagas import a_turn, calling
+from .test_thread_helpers import a_coordinating_thread, helpers_of
+from .test_turn_sagas import a_turn, calling, stop
 from .test_workstream_overview import act_on
 from .test_workstream_overview import rows as thread_rows
 from .test_workstream_overview import streamed
@@ -74,6 +79,9 @@ async def test_a_file_your_edit_clashed_with_is_being_redone_until_the_redo_land
     await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
     # What its landing left out comes first.
     assert await marks_of(api, project, thread) == [("Report.docx", "redoing"), ("a.md", "landed")]
+    # A read that takes no files, as the coordinator's list of its threads does, reads no landing and no redo.
+    [bare] = await WorkstreamStore(api.app.state.session_factory).thread_facts(UUID(project["id"]), with_files=False)
+    assert (bare.landings, bare.redoing) == ((), frozenset())
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Redid the edit."),
     ], pool=pool)
@@ -145,6 +153,14 @@ async def test_a_thread_with_no_landing_lists_its_turn_summaries_files_unmarked(
     ]}
     await store.emit_event(thread.id, EventType.TURN_SUMMARY, {"recap": "Wrote notes.", **named})
     assert await marks_of(api, project, thread) == [("notes.md", None), ("art-1", None)]
+    # A record with no file is no landing of a file: the thread still works on the real ones.
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "INSERT INTO workstream_history (workstream_id, kind, saga_id, saga_state, thread_id, agent_id) "
+            "VALUES (:project, 'landing', 'saga:nothing', 'completed', :thread, :agent)"
+        ), {"project": project["id"], "thread": thread.id, "agent": thread.agent_id})
+        await db.commit()
+    assert await marks_of(api, project, thread) == [("notes.md", None), ("art-1", None)]
     # Once a landing recorded its files, they are the row's: a summary gives its artifacts alone.
     pool = SandboxPool(pods)
     await edited(pool, thread, "echo a > a.md")
@@ -163,11 +179,18 @@ async def test_a_computers_records_are_none_of_the_clouds(api, tmp_path):
     assert await marks_of(api, project, thread) == []
 
 
-async def test_another_projects_landings_and_a_landing_left_running_mark_nothing(api, tmp_path):
+async def test_only_a_threads_own_completed_landings_in_its_project_mark_its_files(api, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
     other = await create(api)
     async with api.app.state.session_factory() as db:
-        # A record of this thread under another project, and one still running: neither is this row's.
+        # A record of this thread under another project, one still running, and one that is no landing:
+        # none is this row's.
+        await db.execute(text(
+            "INSERT INTO workstream_history (workstream_id, kind, saga_id, saga_state, thread_id, agent_id, files) "
+            "SELECT workstream_id, 'pickup', 'saga:pickup', 'completed', thread_id, agent_id, "
+            "'[{\"path\": \"picked.md\", \"before\": null, \"after\": \"k1\", \"merged\": true}]'::jsonb "
+            "FROM workstream_history WHERE id = :id"
+        ), {"id": row.id})
         await db.execute(text(
             "INSERT INTO workstream_history (workstream_id, kind, saga_id, saga_state, thread_id, agent_id, files) "
             "SELECT :other, 'landing', 'saga:elsewhere', 'completed', thread_id, agent_id, "
@@ -260,6 +283,21 @@ async def test_a_settled_landing_whose_row_could_not_be_written_is_not_announced
     assert [row.saga_state for row in await rows(api, second)] == ["compensated"]
 
 
+async def test_a_settled_landing_whose_thread_is_gone_names_no_thread_on_the_stream(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    async with api.app.state.session_factory() as db:  # as deleting its session leaves the record
+        await db.execute(text("UPDATE workstream_history SET thread_id = NULL WHERE saga_state = 'running'"))
+        await db.commit()
+    told = announced(api, monkeypatch, second)
+    await ends(api, pool, first)
+    async with api.app.state.session_factory() as db:
+        states = (await db.execute(text(
+            "SELECT saga_state FROM workstream_history WHERE workstream_id = :project AND thread_id IS NULL"
+        ), {"project": project["id"]})).scalars().all()
+    # No thread's row changed: nothing names one.
+    assert states == ["completed"] and told == []
+
+
 async def test_a_landing_settled_as_put_back_is_not_announced_as_landed(api, monkeypatch, tmp_path):
     project = await create(api)
     master = await master_of(api, project)
@@ -302,3 +340,55 @@ async def test_the_wait_a_settled_escalation_puts_on_its_thread_reaches_the_proj
     assert (str(first.id), "inbox.action_required") in heard and (str(master.id), "worker.complete") in heard
     [found] = await thread_rows(api, project, thread_id=str(first.id))
     assert (found["group"], found["reason"]) == ("waiting", "files")
+
+
+async def test_every_holder_of_the_lock_in_a_threads_work_settles_with_its_workers_redis(api, monkeypatch, tmp_path):
+    thread = await a_coordinating_thread(api, await master_of(api, await create(api)))
+    pods = stored(api, thread, tmp_path)
+    store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
+    #: Each of the pod's actions made under a lock whose holder settled first, and whether it settled with Redis.
+    settled_for: dict[str, bool] = {}
+    with_redis: list[bool] = []
+    settle, call = landing_module.settle_running, landing_module._call
+
+    async def settled(session_factory, sandbox_pool, *args, **kwargs):
+        had = kwargs.get("redis") is api.app.state.redis
+        if isinstance(sandbox_pool, landing_module._Released):
+            settled_for["prune"] = had  # the pruning asks its pod past the pool's sessions
+        else:
+            with_redis.append(had)
+        return await settle(session_factory, sandbox_pool, *args, **kwargs)
+
+    async def called(sandbox_pool, owner, action, **arguments):
+        if with_redis:
+            settled_for.setdefault(action, with_redis.pop())
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    monkeypatch.setattr(landing_module, "settle_running", settled)
+    monkeypatch.setattr(landing_module, "_call", called)
+
+    async def stopped_while_the_helper_works(harness):
+        [helper] = await helpers_of(api, thread)
+        await edited(theirs, helper, "echo by the helper > sources.md")
+        await stop(harness)
+
+    # A step hands the copy on to a helper, and a stop drops that hand-off.
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo outline > outline.md"})),
+        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Done."),
+    ], pool=mine, during=stopped_while_the_helper_works), 120)
+    # The helper hands back at its end; the thread's next turn lands, and the day's pruning follows it.
+    [helper] = await helpers_of(api, thread)
+    await ends(api, theirs, helper)
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Something else."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo other > other.md"})), _final_response("Done."),
+    ], pool=SandboxPool(pods))
+    await asyncio.gather(*landing_module._PRUNINGS)
+    # A turn that fails keeps its copy.
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo half > half.md")
+    await ends(api, pool, thread, failed=True)
+    assert settled_for == {"hand_off": True, "drop_hand_off": True, "hand_back": True, "pickup": True, "prune": True, "keep": True}
