@@ -2389,3 +2389,35 @@ async def test_a_stop_gives_up_taking_the_hand_off_back_when_the_projects_lock_i
     assert git(pods.project / "_history", "for-each-ref", "--format=%(refname) %(objectname)") == before
     assert "was not carried out on its hand-off: its pod, the project's lock and the pod's answer were not had within" in caplog.text
     assert not landing_module.handed_on(thread)
+
+
+@pytest.mark.parametrize("ends_by", ["a landing that fails", "failing"])
+async def test_a_turn_that_handed_on_and_neither_landed_nor_was_kept_leaves_its_own_files_out_of_the_next_copy(api, monkeypatch, tmp_path, ends_by):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo half made > draft.md")
+    await handed_off(api, pool, thread)
+    helper = await a_helper(api, thread)
+    await a_turn(api, monkeypatch, helper, [
+        calling(("terminal", {"command": "echo by the helper > sources.md"})), _final_response("Done."),
+    ], pool=SandboxPool(pods))
+    call = landing_module._call
+
+    async def the_pod_answers_no_push(sandbox_pool, owner, action, **arguments):
+        if owner == str(thread.id) and action in ("commit", "keep"):
+            raise landing_module.LandingStepError("the pod's step timed out")
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_pod_answers_no_push)
+        await ends(api, pool, thread, failed=ends_by == "failing")
+    # The turn is over with its work on no branch.  Its next turn is another: the helper's work is in its
+    # copy and lands; the turn's own draft, told as not saved, is not.
+    store = api.app.state.session_store
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    await a_turn(api, monkeypatch, await store.get_session(thread.id), [
+        calling(("terminal", {"command": "ls > seen.txt"})), _final_response("Done."),
+    ], pool=SandboxPool(pods))
+    assert pods.real_names() == ["Report.docx", "notes.txt", "seen.txt", "sources.md"]
