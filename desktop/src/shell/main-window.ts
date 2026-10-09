@@ -87,7 +87,13 @@ interface PaneView {
   url: string;
   attempt: number;
   retry?: NodeJS.Timeout;
+  // When its page last loaded, while it is up.
+  upSince?: number;
 }
+
+// How long the pane's page stays up before its backoff starts over: one that crashes after each load
+// is loaded again ever more slowly.
+const PANE_STAYS_UP_MS = 10_000;
 
 interface WebView {
   agent: Agent;
@@ -178,7 +184,8 @@ export class MainWindow {
 
   paint(dark: boolean): void {
     this.dark = dark;
-    const { background, overlay } = chrome(dark);
+    // Settings, or the project dialog, dims the controls with the window under it.
+    const { background, overlay } = chrome(dark, this.settingsView !== null);
     this.window.setBackgroundColor(background);
     this.window.setTitleBarOverlay(overlay);
     this.web?.view.setBackgroundColor(background);
@@ -280,6 +287,7 @@ export class MainWindow {
     lockPage(view.webContents);
     wire(view.webContents);
     this.settingsView = view;
+    this.paint(this.dark);
     // Closed while its page still loads, the load ends with it, and nothing is left to say.
     void view.webContents.loadFile(page, { hash }).then(() => {
       if (this.settingsView === view) view.webContents.focus();
@@ -293,6 +301,7 @@ export class MainWindow {
     const view = this.settingsView;
     if (!view) return;
     this.settingsView = null;
+    this.paint(this.dark);
     this.window.contentView.removeChildView(view);
     view.webContents.close();
     const back = this.opener && !this.opener.isDestroyed() ? this.opener : this.window.webContents;
@@ -326,9 +335,10 @@ export class MainWindow {
 
   /**
    * The web client's page at *path*, a thread's transcript, in the Overview pane's hole; null takes it
-   * away. It has the agent's partition, so its session, and no preload, so no bridge. It stays on
-   * its page: a page the web client routes to in place is its transcript again, an address off the
-   * agent's, and any popup, opens in the system browser, and nothing else of the agent's loads there.
+   * away. It has the agent's partition, so its session, and a preload that only hears its keys and
+   * exposes nothing, so no bridge. It stays on its page: a page the web client routes to in place is
+   * its transcript again, an address off the agent's, and any popup, opens in the system browser, and
+   * nothing else of the agent's loads there.
    */
   read(path: string | null): void {
     const web = this.web;
@@ -391,6 +401,8 @@ export class MainWindow {
     // A load that failed, or a page that crashed, is loaded again, with the link's backoff, while the pane reads it.
     const again = () => {
       clearTimeout(pane.retry);
+      if (pane.upSince !== undefined && Date.now() - pane.upSince >= PANE_STAYS_UP_MS) pane.attempt = 0;
+      pane.upSince = undefined;
       pane.retry = setTimeout(() => {
         if (this.pane === pane) void contents.loadURL(url).catch(() => {});
       }, reconnectDelayMs(pane.attempt++));
@@ -400,8 +412,9 @@ export class MainWindow {
       if (isMainFrame && code !== -3) again();
     });
     contents.on("render-process-gone", again);
+    // A page committed, never the error page of a load that failed.
     contents.on("did-navigate", () => {
-      pane.attempt = 0;
+      pane.upSince = Date.now();
     });
     this.pane = pane;
     void contents.loadURL(url).catch(() => {});
@@ -418,9 +431,9 @@ export class MainWindow {
     this.pane?.view.setBounds(hole);
   }
 
-  /** Load *path* of the web client: settled once it has loaded, or failed to. */
-  go(path: string): Promise<void> {
-    return this.web ? this.load(this.web, path) : Promise.resolve();
+  /** Load *path* of the web client: true once it has loaded, false once it failed, or another load or the shell's refusal ended it. */
+  go(path: string): Promise<boolean> {
+    return this.web ? this.load(this.web, path) : Promise.resolve(false);
   }
 
   back(): void {
@@ -444,9 +457,9 @@ export class MainWindow {
     contents.setZoomLevel(step === 0 ? 0 : Math.min(3, Math.max(-3, contents.getZoomLevel() + step)));
   }
 
-  private load(web: WebView, path: string): Promise<void> {
+  private load(web: WebView, path: string): Promise<boolean> {
     clearTimeout(web.retry);
-    return web.view.webContents.loadURL(`${web.agent.origin}${path}`).catch(() => {});
+    return web.view.webContents.loadURL(`${web.agent.origin}${path}`).then(() => true, () => false);
   }
 
   // A failed load is tried again, with the link's backoff, once the agent answers its /auth/config.

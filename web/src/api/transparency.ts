@@ -8,7 +8,12 @@ export interface TransparencyConfig {
   // Server-composed disclosure text (per-agent). Newer runtimes send
   // it; when absent the banner falls back to its local copies.
   text?: string;
+  // Set where the config could not be read: no banner is drawn, and
+  // nothing is sent for the user that they did not type.
+  read?: false;
 }
+
+const UNREAD: TransparencyConfig = { enabled: false, read: false };
 
 let _cached: TransparencyConfig | null = null;
 
@@ -16,10 +21,12 @@ export async function getTransparencyConfig(): Promise<TransparencyConfig> {
   if (_cached) return _cached;
   try {
     const response = await fetch("/api/v1/transparency");
-    if (!response.ok) return { enabled: false };
+    if (!response.ok) {
+      return UNREAD;
+    }
     _cached = (await response.json()) as TransparencyConfig;
     return _cached;
   } catch {
-    return { enabled: false };
+    return UNREAD;
   }
 }

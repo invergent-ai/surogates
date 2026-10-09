@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  AGENT_GOES_ON, actOnBrowser, BUSY_WAITS_MS, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, localChatOf,
-  NO_FOLDER, newChatPlace, saidBy, saidOfHandBack, switchMode, WRITE_TO_THE_AGENT,
+  AGENT_GOES_ON, actOnBrowser, BUSY_WAITS_MS, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, handedNow,
+  localChatOf, NO_FOLDER, newChatPlace, PRE_SESSION_KEY, saidBy, saidOfHandBack, switchMode, WRITE_TO_THE_AGENT,
 } from "../web/src/lib/local-chat.ts";
 
 const PREPARED = { folder: "/home/flavius/notes", mode: "ask", nonce: "n".repeat(43), token: "t".repeat(43) };
@@ -258,6 +258,27 @@ test("uses a chat's folder calls only where this desktop has them", () => {
   assert.equal(folderCalls(full), full);
   assert.equal(folderCalls({ getBinding: async () => null }), null);
   assert.equal(folderCalls(undefined), null);
+});
+
+test("sends what quick entry handed as a new chat's first message only past the AI disclosure, read and accepted where it must be, and the line under the composer", () => {
+  const handed = { id: "q-1", text: "Draft the March invoices" };
+  const accepted = { [PRE_SESSION_KEY]: "accepted" };
+  const page = { sessionId: null, multiSession: true, transparency: { enabled: true }, disclosures: {}, place: { text: "Works in a folder on this computer" } };
+  // Not read yet, to accept first, accepted only for another chat, or the line not drawn yet: held.
+  assert.equal(handedNow(handed, { ...page, transparency: null }), null);
+  assert.equal(handedNow(handed, page), null);
+  assert.equal(handedNow(handed, { ...page, disclosures: { "s-1": "accepted" } }), null);
+  assert.equal(handedNow(handed, { ...page, disclosures: accepted, place: { text: null } }), null);
+  // Accepted for the new chat, or no disclosure to accept, an older server's agent included: sent.
+  assert.equal(handedNow(handed, { ...page, disclosures: accepted }), handed);
+  assert.equal(handedNow(handed, { ...page, transparency: { enabled: false }, multiSession: null }), handed);
+  // Never, and why: declined, unread, into a chat the page shows, or to an agent of one conversation.
+  assert.match(handedNow(handed, { ...page, disclosures: { [PRE_SESSION_KEY]: "declined" } }), /^You declined/);
+  assert.match(handedNow(handed, { ...page, transparency: { enabled: false, read: false } }), /^Surogate could not read/);
+  assert.match(handedNow(handed, { ...page, disclosures: accepted, sessionId: "s-1" }), /^Another chat opened/);
+  assert.match(handedNow(handed, { ...page, multiSession: false, place: { text: null } }), /keeps one conversation/);
+  // Nothing handed is nothing sent.
+  assert.equal(handedNow(null, { ...page, disclosures: accepted }), null);
 });
 
 test("says where a local-folder chat's browser is, with its buttons only in the desktop on the computer it is bound to", () => {

@@ -110,6 +110,22 @@ for (const path of [
 }
 
 {
+  // Signing out of the web client in a browser keeps the page: what the SDK's file panel kept of
+  // each chat goes with the account.
+  const authSource = readFileSync(repoPath("web/src/api/auth.ts"), "utf8");
+  assert.match(
+    authSource,
+    /import \{ forgetChatFiles \} from "@invergent\/agent-chat-react";/,
+    "web auth should take forgetChatFiles from the shared SDK",
+  );
+  assert.match(
+    authSource,
+    /export function logout\(\): void \{[^}]*\bforgetChatFiles\(\);[^}]*\}/s,
+    "web logout should forget what the file panel kept of each chat",
+  );
+}
+
+{
   const sessionsSliceSource = readFileSync(
     repoPath("web/src/stores/sessions-slice.ts"),
     "utf8",

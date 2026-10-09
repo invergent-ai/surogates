@@ -3,7 +3,8 @@
 // it when that root first needs the guest. What differs by OS is behind one
 // interface, VmBackend, with a backend per OS (linux.ts); everything here is the
 // same on every OS: hello, the keepalive, the roots' set-up and teardown, the host
-// proxy on the guest's net port, and what a lost guest was running.
+// proxy on the guest's net port, the way into a root on its inbound port, and what a
+// lost guest was running.
 
 import { readFileSync, renameSync, rmSync } from "node:fs";
 import type { Duplex } from "node:stream";
@@ -18,6 +19,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
+import { Carrier, letGo } from "./inbound.js";
 import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
@@ -59,6 +61,7 @@ export interface VmOptions extends Disks {
   shareMs?: number;
   setupMs?: number;
   powerOffMs?: number;
+  reachMs?: number; // how long the agent has to answer a connection into a root
 }
 
 /**
@@ -79,6 +82,14 @@ export interface VmBackend {
    * vsock, gives one connection for this.
    */
   readonly net: Duplex;
+  /**
+   * The guest's inbound port, ai.surogate.inbound, as a byte stream: the one way into a root from
+   * outside the guest. The host opens one HTTP/2 session on it, the agent its server, a CONNECT
+   * stream for each connection the agent's browser makes to a chat's own server (inbound.ts).
+   * A second stream like *net*, the other way: Linux's is a second virtio-serial port; a backend
+   * with a socket per connection to give, as hvsock or vsock, gives a second connection for it.
+   */
+  readonly inbound: Duplex;
   /** Settles once the VM has gone, however it went, with the end of what its hypervisor said, or "". */
   readonly exited: Promise<string>;
   /** Null with the OS's hardware virtualization, else why the VM runs emulated. */
@@ -223,6 +234,10 @@ export class Guest {
   private readonly setupMs: number;
   private readonly powerOffMs: number;
   private readonly proxy: NetProxy;
+  // The way into its roots: the host's end of the inbound port.
+  private readonly carrier: Carrier;
+  // The roots set up in it now: a connection is carried into no other.
+  private readonly up = new Set<string>();
   // Its own stop, once asked: a guest that goes without one was lost.
   private stopping: Promise<void> | null = null;
 
@@ -242,6 +257,7 @@ export class Guest {
     void vm.exited.then(() => this.lose());
     void control.closed.then(() => this.lose());
     control.onLost((root) => {
+      this.up.delete(root);
       const entry = this.roots.get(root);
       if (entry) entry.setup = null;
     });
@@ -266,6 +282,8 @@ export class Guest {
     this.powerOffMs = options.powerOffMs ?? waits.powerOffMs;
     // Each connection a root's command makes, judged with the root the agent named.
     this.proxy = new NetProxy(vm.net, { egress });
+    // Each connection made into a root from outside the guest.
+    this.carrier = new Carrier(vm.inbound, options.reachMs);
   }
 
   /**
@@ -349,7 +367,10 @@ export class Guest {
       // land after its teardown.
       this.proxy.forget(root);
       const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, this.setupMs);
-      if (answer?.type === "done") return null;
+      if (answer?.type === "done") {
+        this.up.add(root);
+        return null;
+      }
       entry.setup = null;
       if (answer?.type === "failed") return unavailable(`could not set up this chat: ${answer.message}`);
       // No answer in time: the agent is stuck, and the guest goes with it.
@@ -398,6 +419,7 @@ export class Guest {
     // does not land within setupMs loses the guest, the root's processes with it.
     if ((await Promise.race([entry.setup, late(this.setupMs)])) === "late") return this.lose();
     entry.setup = null;
+    this.up.delete(root);
     // One that could not be added has left already.
     const share = await entry.share.catch(() => null);
     if (this.roots.get(root) === entry) this.roots.delete(root);
@@ -411,6 +433,23 @@ export class Guest {
     // VM stops. The root's next setup gets a share of its own. Any other failure lets it go.
     if (answer.type === "failed" && answer.message === HELD) return;
     await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+  }
+
+  /**
+   * A connection to *port* of *root*'s own loopback, for the agent's browser (spec, Section 5), or
+   * why there is none: "sandbox" for a root not set up in this guest, which is asked nothing, else
+   * what the guest's agent answered. Nothing is set up, or booted, for it.
+   */
+  reach(root: string, port: number): Promise<Duplex | string> {
+    return this.up.has(root) && !this.ended ? this.carrier.open(root, port) : Promise.resolve("sandbox");
+  }
+
+  /** Whether something in *root* takes a connection on *port* of its own loopback now: one is made, and let go. */
+  async listening(root: string, port: number): Promise<boolean> {
+    const reached = await this.reach(root, port);
+    if (typeof reached === "string") return false;
+    letGo(reached);
+    return true;
   }
 
   /**
@@ -472,6 +511,8 @@ export class Guest {
     clearInterval(this.keepalive);
     this.control.close();
     this.proxy.close();
+    this.carrier.close();
+    this.up.clear();
     // Before what waited on it is answered: the next operation finds them ended.
     for (const root of this.roots.keys()) this.told(root, { gone: true });
     void this.vm.kill().catch(() => {}).then(this.leave);
@@ -545,6 +586,12 @@ export class VmManager {
     } finally {
       this.done();
     }
+  }
+
+  /** Whether something in *root* listens on *port* of its own loopback now, in the guest that runs: none is booted to ask. Never rejects. */
+  async listening(root: string, port: number): Promise<boolean> {
+    const guest = await this.guest?.catch(() => null);
+    return guest ? guest.listening(root, port).catch(() => false) : false;
   }
 
   /** The user's Retry, its image checked: the boot that did not start, and its backoff, are forgotten. */

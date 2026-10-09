@@ -15,16 +15,10 @@ import { type BrowserContext, type CDPSession, chromium, type Dialog, type Downl
 import { MAX_WRITE_BYTES } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { destination, reach } from "../vm/egress.js";
-import { CANCELLED, NEW_TAB, PAUSED } from "./client.js";
+import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
-
-// What to launch: the browser the user chose, and the identity's profile for it.
-export interface Launch {
-  executable: string;
-  profile: string;
-}
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
 const PLAYWRIGHT_FEATURES =
@@ -2092,11 +2086,30 @@ export class BrowserHost {
   // The proxy is proven to carry the browser's requests before any page is the agent's: a policy,
   // or anything else managing the browser's proxy settings, outranks --proxy-server. The page
   // asks for a name only the proxy answers; it is the first tab's page after.
+  //
+  // The proxy answers that name only to a browser that signs in to it, with a secret made for this
+  // launch. Its challenge is answered here, once, on a line of this host's own to that page: the
+  // browser keeps the sign-in from then on, for every request, and nothing is held up after. So the
+  // secret is on no command line, in no environment and in no file, and the check proves it was taken.
   private async proxied(context: BrowserContext, proxy: BrowserProxy): Promise<Page> {
     const page = context.pages()[0] ?? (await context.newPage());
     const token = randomBytes(8).toString("hex");
     proxy.expect(token);
+    const signIn = proxy.signIn();
+    const line = await context.newCDPSession(page);
+    let answered = false;
+    line.on("Fetch.requestPaused", ({ requestId }) => void line.send("Fetch.continueRequest", { requestId }).catch(() => {}));
+    line.on("Fetch.authRequired", ({ requestId, authChallenge }) => {
+      const first = authChallenge.source === "Proxy" && !answered;
+      answered ||= first;
+      const authChallengeResponse = first ? { response: "ProvideCredentials" as const, ...signIn } : { response: "CancelAuth" as const };
+      void line.send("Fetch.continueWithAuth", { requestId, authChallengeResponse }).catch(() => {});
+    });
+    // Only the check's own requests are held, its https upgrade's try among them.
+    await line.send("Fetch.enable", { handleAuthRequests: true, patterns: [{ urlPattern: `*://${token}${CHECK_DOMAIN}/*` }] });
     await page.goto(`http://${token}${CHECK_DOMAIN}/`, { timeout: CHECK_MS }).catch(() => {});
+    await line.send("Fetch.disable").catch(() => {});
+    await line.detach().catch(() => {});
     if (!proxy.checked(token)) throw new Error(PROXY_BYPASSED);
     await page.goto("about:blank").catch(() => {});
     return page;

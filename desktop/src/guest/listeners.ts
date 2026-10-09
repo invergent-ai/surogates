@@ -8,8 +8,12 @@
 import { createServer as createHttpServer, request, STATUS_CODES } from "node:http";
 import { connect, createServer, type Server, type Socket } from "node:net";
 
+import { inboundLine } from "./protocol.js";
+
 export const HTTP_PORT = 3128;
 export const SOCKS_PORT = 1080;
+// Both of them: a root's own proxies for its commands, which nothing from outside the root is carried to.
+export const SANDBOX_PORTS: ReadonlySet<number> = new Set([HTTP_PORT, SOCKS_PORT]);
 // What a command's proxy variables name (root.ts, rootEnvironment).
 export const PROXY_URL = `http://127.0.0.1:${HTTP_PORT}`;
 // The agent's answer is one short line.
@@ -74,6 +78,37 @@ function join(a: Socket, b: Socket): void {
   b.pipe(a);
   a.resume();
   b.resume();
+}
+
+// The root's own loopback, where a server of the root's listens: both of its families, as a server
+// that listens on "localhost" may have taken either. The one the browser's address named is tried first.
+const LOOPBACK = { 4: ["127.0.0.1", "::1"], 6: ["::1", "127.0.0.1"] } as const;
+
+/**
+ * A connection into the root (spec, Section 5), for the agent, which asked for it under *id*: to
+ * *port* of the root's own loopback and nowhere else, the family *first* names before the other, then
+ * to the root's socket at *path* with its line, and each carries the other's bytes. Where nothing
+ * takes it, the line says why. Never rejects.
+ */
+export async function carryIn(path: string, id: string, port: number, first: 4 | 6 = 4): Promise<void> {
+  let reason = "EINVAL";
+  for (const host of Number.isInteger(port) && port > 0 && port < 65_536 && (first === 4 || first === 6) ? LOOPBACK[first] : []) {
+    const reached = await new Promise<Socket | string>((resolve) => {
+      const server = connect({ host, port, allowHalfOpen: true });
+      server.once("connect", () => resolve(server));
+      server.once("error", (error: NodeJS.ErrnoException) => resolve(/^[A-Z]{1,16}$/.test(error.code ?? "") ? String(error.code) : "ECONNREFUSED"));
+    });
+    if (typeof reached === "string") {
+      reason = reached;
+      continue;
+    }
+    const agent = connect({ path, allowHalfOpen: true });
+    agent.write(inboundLine(id));
+    return join(reached, agent);
+  }
+  const agent = connect({ path });
+  agent.on("error", () => {});
+  agent.end(inboundLine(id, reason));
 }
 
 // Until its tunnel answers, *client* is read, so that it is seen to leave: a CONNECT or SOCKS

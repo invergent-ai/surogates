@@ -142,7 +142,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("quitting", () => {
     quitApp(shell);
     await expect.poll(() => page.textContent("#quitting-text")).toBe("Quitting once 1 thread working on this computer finishes.");
     expect(await page.isVisible("#quit-now")).toBe(true);
-    await expect.poll(() => trayLabels(shell)).toEqual(["Show Surogate", "Connected as Laptop", "", "Settings…", "Quit now"]);
+    await expect.poll(() => trayLabels(shell)).toEqual(["Show Surogate", "Quick entry", "Connected as Laptop", "", "Settings…", "Quit now"]);
     // The window goes the moment the user says quit now, before the device has stopped.
     const hidden = new Promise<void>((resolve) => shell.on("console", (message) => {
       if (message.text() === "window hidden") resolve();

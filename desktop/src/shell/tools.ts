@@ -12,7 +12,7 @@ import { VmExecutor, type VmExecutorOptions } from "../vm/executor.js";
 // The installed app gives srt its version's own copy of the system's bwrap, which the install script
 // makes beside it: the copy takes the app's AppArmor profile, never the one Ubuntu attaches to
 // /usr/bin/bwrap (spec, Section 4). A development build finds bwrap on its PATH.
-const BWRAP = app.isPackaged ? join(dirname(process.execPath), "bin", "bwrap") : undefined;
+export const BWRAP = app.isPackaged ? join(dirname(process.execPath), "bin", "bwrap") : undefined;
 
 /** The file kinds in each root's file host, on this version's bwrap when installed, and the process kinds in the VM. */
 export function appTools(options: Omit<VmExecutorOptions, "bwrapPath">): VmExecutor {

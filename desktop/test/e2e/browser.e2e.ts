@@ -33,12 +33,14 @@ const THIRD = "7a8b9c0d-1e2f-4a3b-84c5-d6e7f8a9b0c1";
 const NAMED = process.env.SUROGATE_TEST_BROWSER;
 const BROWSER = NAMED ? findBrowsers().find((browser) => browser.executable === NAMED) ?? null : chosenBrowser({ choice: "auto" }, findBrowsers());
 const run = BROWSER !== null && process.env.SUROGATE_BROWSER_TESTS === "1";
+// The guest's image, for the tests that run a chat's commands too (SUROGATE_VM_TESTS=1), as commands.e2e.ts takes it.
+const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 
 let home: string;
 let origin: string;
 let agent: FakeAgent;
 let app: ElectronApplication | undefined;
-let canary: Server;
+let canary: Server[];
 let canaryPort: number;
 let hits: string[];
 let next = 0;
@@ -47,13 +49,19 @@ beforeEach(async () => {
   home = dataHome();
   agent = new FakeAgent();
   hits = [];
-  // This computer's own service, which the agent's browser must never reach.
-  canary = createServer((req, res) => {
-    hits.push(req.url ?? "");
-    res.end("canary");
-  });
-  await new Promise<void>((done) => canary.listen(0, "127.0.0.1", () => done()));
-  canaryPort = (canary.address() as { port: number }).port;
+  // This computer's own service, which the agent's browser must never reach: on both of the loopback's
+  // families, on one port, so that a dial that strays to either is heard.
+  for (;;) {
+    const [six, four] = canary = [0, 1].map(() => createServer((req, res) => {
+      hits.push(req.url ?? "");
+      res.end("canary");
+    })) as [Server, Server];
+    await new Promise<void>((done) => six.listen(0, "::1", () => done()));
+    canaryPort = (six.address() as { port: number }).port;
+    // The port IPv6 gave may be taken on IPv4: another is tried.
+    if (await new Promise<boolean>((done) => four.once("error", () => done(false)).listen(canaryPort, "127.0.0.1", () => done(true)))) break;
+    await new Promise<void>((done) => six.close(() => done()));
+  }
 });
 
 afterEach(async () => {
@@ -61,7 +69,7 @@ afterEach(async () => {
   app = undefined;
   await agent.stop();
   await agent.link.stop();
-  await new Promise<void>((done) => canary.close(() => done()));
+  await Promise.all(canary.map((server) => new Promise<void>((done) => server.close(() => done()))));
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -80,9 +88,9 @@ async function operation(kind: string, args: Record<string, unknown>, invocation
   return result?.outcome;
 }
 
-// The app launched and signed in, and *folder* bound to the chat in the desktop's own sheet. Each of
-// *requires*, a script of the test's, runs in the app before its own code.
-async function bound(folder: string, requires: string[] = []): Promise<Page> {
+// The app launched and signed in, with *env* in its environment, and *folder* bound to the chat in the desktop's own
+// sheet. Each of *requires*, a script of the test's, runs in the app before its own code.
+async function bound(folder: string, requires: string[] = [], env: Record<string, string> = {}): Promise<Page> {
   origin = await agent.start();
   // The app's own environment is the browser's: apart from the user's session, or no launch.
   isolated(shellEnv(home));
@@ -90,7 +98,7 @@ async function bound(folder: string, requires: string[] = []): Promise<Page> {
     mkdirSync(join(home, "surogate"), { recursive: true });
     writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: BROWSER.id }));
   }
-  app = await launch(home, {}, [], requires);
+  app = await launch(home, env, [], requires);
   await stubNative(app);
   const page = await shellPage(app);
   await connect(page, origin);
@@ -212,7 +220,8 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     const folder = join(home, "project");
     mkdirSync(folder);
     await bound(folder);
-    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    // This computer's loopback, under a name no chat's own server has.
+    const navigating = operation("browser.navigate", { url: `http://[::ffff:127.0.0.1]:${canaryPort}/`, wait_until: "load" });
     const asked = await prompt(app!);
     expect(await asked.textContent("#prompt-title")).toMatch(/^Let .+ use a browser on this computer\?$/);
     expect(await asked.getAttribute("#prompt-buttons", "data-held")).toBe("true");
@@ -221,6 +230,15 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     expect(await navigating).toEqual({
       error: { type: "browser", message: `The agent's browser does not reach this computer's own services (127.0.0.1:${canaryPort})` },
     });
+    // Under the name a chat's own server has, it is that port of the chat's sandbox, where nothing listens: never this computer's.
+    expect(await operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" })).toEqual({
+      error: {
+        type: "browser",
+        message: `Nothing listens on port ${canaryPort} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${canaryPort}/ again.`,
+      },
+    });
+    // Its user is asked nothing for it.
+    expect(await promptsShown(app!)).toBe(0);
     expect(hits).toEqual([]);
     expect(readdirSync(profiles())).toHaveLength(1);
     expect(browsers().length).toBeGreaterThan(0);
@@ -242,6 +260,30 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     await expect.poll(() => browsers().length, { timeout: 15_000 }).toBe(0);
   });
 
+  it("prints nothing of what it says to the browser, though its user's environment asks Playwright to: its proxy's sign-in is in no log", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    // As a developer's shell may have it set: Playwright then prints every message of the browser's protocol.
+    await bound(folder, [], { DEBUG: "pw:protocol", DEBUG_FILE: join(home, "debug.log"), DEBUGP: "pw:protocol" });
+    // The browser's host writes where the app does.
+    let printed = "";
+    app!.process().stderr!.on("data", (chunk: Buffer) => (printed += chunk.toString()));
+    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    await press(await prompt(app!), "allow_session");
+    // The browser is up, and has signed in to its proxy.
+    expect((await navigating).error.type).toBe("browser");
+    expect(browsers().length).toBeGreaterThan(0);
+    await new Promise((done) => setTimeout(done, 500));
+    try {
+      printed += readFileSync(join(home, "debug.log"), "utf8");
+    } catch {
+      // Nothing was written there.
+    }
+    expect(printed).not.toMatch(/continueWithAuth|password/i);
+    expect(printed).not.toMatch(/proxy-authorization/i);
+    expect(printed).not.toContain("pw:protocol");
+  });
+
   it("answers the chat's browser operations as denied once its user denies the first use, and asks again at the next", async () => {
     const folder = join(home, "project");
     mkdirSync(folder);
@@ -261,7 +303,8 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     const folder = join(home, "project");
     mkdirSync(folder);
     const page = await bound(folder);
-    const navigating = operation("browser.navigate", { url: `http://127.0.0.1:${canaryPort}/`, wait_until: "load" });
+    // This computer's loopback, under a name no chat's own server has.
+    const navigating = operation("browser.navigate", { url: `http://[::ffff:127.0.0.1]:${canaryPort}/`, wait_until: "load" });
     await press(await prompt(app!), "allow_session");
     await navigating;
     expect(readdirSync(profiles())).toHaveLength(1);
@@ -436,6 +479,46 @@ const kept = () => {
     return "";
   }
 };
+
+describe.skipIf(!run || process.env.SUROGATE_VM_TESTS !== "1")("a chat's own servers named in the agent's browser, through the app", () => {
+  beforeAll(() => isolated());
+
+  it("tells the agent what is so in its chat's sandbox: that nothing listens on a port, until a server it started there does, and never asks this computer's own", async () => {
+    const folder = join(home, "project");
+    mkdirSync(folder);
+    await bound(folder, [], { SUROGATE_VM_IMAGE: IMAGE });
+    const NOT_LISTENING = (port: number) => ({
+      error: {
+        type: "browser",
+        message: `Nothing listens on port ${port} in this chat's sandbox. Start the server there as a background command, then open http://localhost:${port}/ again.`,
+      },
+    });
+    // Before the chat has run anything its sandbox is not up, and none is started to ask: after its first use of the browser, nothing listens.
+    const first = operation("browser.navigate", { url: `http://localhost:${canaryPort}/`, wait_until: "load" });
+    await press(await prompt(app!), "allow_session");
+    expect(await first).toEqual(NOT_LISTENING(canaryPort));
+    // The chat's server, on the very port this computer's own canary has, once it answers inside the sandbox.
+    const background = { command: `python3 -m http.server ${canaryPort} --bind 127.0.0.1`, workdir: null, task_id: "servers", pty: false, notify_on_complete: false, watcher_interval: null };
+    expect(await operation("start", background)).toMatchObject({ ok: { session_id: expect.any(String) } });
+    const answering = `curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${canaryPort}/`;
+    await expect.poll(async () => (await operation("run", { command: answering, workdir: null, timeout: 10 })).ok?.output, { timeout: 30_000 }).toBe("200");
+    // Now the sandbox says the chat listens there, by each of the loopback's names: the navigation goes on to the
+    // browser, whose proxy opens no port of this computer's names yet.
+    for (const name of ["localhost", "127.0.0.1"]) {
+      expect(await operation("browser.navigate", { url: `http://${name}:${canaryPort}/`, wait_until: "load" })).toEqual({
+        error: { type: "browser", message: `The agent's browser does not reach this computer's own services (${name}:${canaryPort})` },
+      });
+    }
+    // A port beside it, where the chat has no server, and the sandbox's own proxy, which is not the browser's to open.
+    const beside = canaryPort === 65_535 ? canaryPort - 1 : canaryPort + 1;
+    expect(await operation("browser.navigate", { url: `http://localhost:${beside}/`, wait_until: "load" })).toEqual(NOT_LISTENING(beside));
+    expect(await operation("browser.navigate", { url: "http://localhost:3128/", wait_until: "load" })).toEqual({
+      error: { type: "browser", message: "Port 3128 is the sandbox's own proxy for this chat's commands, which the agent's browser does not open" },
+    });
+    // Its user was asked nothing for any of it, and this computer's own service on that port heard nothing.
+    expect([await promptsShown(app!), hits]).toEqual([0, []]);
+  }, 180_000);
+});
 
 describe.skipIf(!run)("Custom… in Settings → Browser", () => {
   beforeAll(() => isolated());
@@ -1322,5 +1405,39 @@ describe("Settings → Browser", () => {
       await settings!.selectOption("#browser", found[0].id);
       await expect.poll(() => readFileSync(join(home, "surogate", "browser.json"), "utf8")).toContain(`"choice": "${found[0].id}"`);
     }
+  });
+
+  it("leaves its list as drawn across a redraw while its rows are the same, on the choice kept and with the keyboard, and draws it anew once they change", async () => {
+    const settings = await browserSettings();
+    await expect.poll(() => settings.$$eval("#browser option", (options) => options.length)).toBeGreaterThan(1);
+    await settings.focus("#browser");
+    await settings.$eval("#browser option", (option) => Object.assign(option, { drawnBefore: true }));
+    const asDrawn = () => settings.$eval("#browser option", (option) => "drawnBefore" in option);
+    // Custom…, and the system's dialog cancelled: nothing is kept and the rows are the same, so the redraw
+    // puts the list back on the choice kept, in the options it had.
+    await settings.selectOption("#browser", "pick");
+    await expect.poll(() => settings.inputValue("#browser"), { timeout: 5_000 }).toBe("auto");
+    expect(await asDrawn()).toBe(true);
+    expect(kept()).not.toContain("custom");
+    // Settings drawn again, as each change of the app's state draws it: a text size chosen meanwhile shows that it was.
+    const redrawn = async (size: string) => {
+      await settings.evaluate((chosen) => (window as unknown as { surogateSettings: { set(key: string, value: string): Promise<void> } })
+        .surogateSettings.set("textSize", chosen), size);
+      await app!.evaluate(({ webContents }) => {
+        webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/settings.html"))!.send("settings:changed");
+      });
+      await expect.poll(() => settings.getAttribute(`[data-setting="textSize"] [data-value="${size}"]`, "aria-pressed")).toBe("true");
+    };
+    await redrawn("large");
+    expect(await asDrawn()).toBe(true);
+    expect(await settings.inputValue("#browser")).toBe("auto");
+    expect(await settings.evaluate(() => document.activeElement?.id)).toBe("browser");
+    // A browser kept meanwhile is one more row: the list is drawn anew, with it chosen.
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    writeFileSync(join(home, "surogate", "browser.json"), JSON.stringify({ choice: "custom", executable: "/opt/own/chrome", version: "130.0" }));
+    await redrawn("small");
+    expect(await asDrawn()).toBe(false);
+    expect(await settings.$$eval("#browser option", (options) => options.map((option) => option.textContent))).toContain("/opt/own/chrome 130.0");
+    expect(await settings.inputValue("#browser")).toBe("custom");
   });
 });
