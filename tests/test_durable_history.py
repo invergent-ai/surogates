@@ -986,7 +986,8 @@ def test_a_keep_whose_history_moved_while_its_pack_went_up_writes_over_no_landin
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
-def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_under_names_no_commit_it_took(tmp_path, project, monkeypatch):
+@pytest.mark.parametrize("clock", [0, 3600, -86_400], ids=["the pod's clock right", "an hour ahead", "a day behind"])
+def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_under_names_no_commit_it_took(tmp_path, project, monkeypatch, clock):
     for n in range(3):
         seed = a_pod(tmp_path, project, "t9")
         (seed.copy / f"seed{n}.md").write_text("seed")
@@ -997,15 +998,18 @@ def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_unde
         os.utime(durable / "objects" / "pack" / name, (time.time() - 3600, time.time() - 3600))
     pusher, pruner = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
     (pusher.copy / "a.md").write_text("a turn")
-    put, pruned = History._put_durable, []
+    put, pruned, real = History._put_durable, [], time.time
     keep = [f"refs/{kind}/{thread}" for thread in ("t1", "t2", "t9") for kind in ("heads/threads", "bases")]
 
     def a_pruning_runs_whole(self, name, source):
         put(self, name, source)
         if self.thread == "t1" and name.endswith(".idx") and not pruned:
             # This push lost its lock unseen: its pack is up, its refs are not, and another holder prunes.
-            # Asked as a caller that names no fence asks, a day on by its own count: the pod's clock decides.
-            pruned.append(pruner.prune(keep=keep, now=time.time() + 90_000))
+            # Asked as a caller that names no fence asks, a day on by its own count, in a pod whose clock
+            # may be wrong: a pack's age is by the times the files' own store gives, and by no clock.
+            with monkeypatch.context() as wrong:
+                wrong.setattr(time, "time", lambda: real() + clock)
+                pruned.append(pruner.prune(keep=keep, now=real() + 90_000))
 
     monkeypatch.setattr(History, "_put_durable", a_pruning_runs_whole)
     turn = pusher.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])

@@ -718,8 +718,10 @@ class History:
         unseen and has not written its refs yet, whose commits no ref here
         names.  *spare* is the landings' fence, the longest such a push
         goes on; a caller that names none gets ``_SPARE``.  A pack's age is
-        by the pod's own clock as the pruning ends, never by *now*, which
-        its caller may hold from before it waited for the lock.
+        by the bucket's own times: from when the bucket dates the refs this
+        pruning has just written back to when it dates the pack.  Neither
+        *now*, which its caller may hold from before it waited for the
+        lock, nor this pod's clock is in it.
         """
         # Its git has no bound of its own: its call's, sized from the history, cuts it off.
         budget = _TIMEOUT.set(THREAD_POD_DEADLINE)
@@ -770,11 +772,16 @@ class History:
                 raise HistoryConflict("the project's history moved while it was pruned")
             self._put_durable("packed-refs", work / "packed-refs")
             # Only now: until packed-refs names the new pack's commits, the old packs hold them.
+            # The time is the bucket's own, as it dates what was just written there: no clock of this
+            # pod's is in a pack's age.  Past its cache, since the mount dates its own writes itself.
+            with self._folder() as history:
+                _looked(history, "packed-refs", self.durable)
+                written = _looked(history, "packed-refs")
             with self._folder("objects", "pack") as folder:
                 # A pack and its index go together, and only when neither was written within the fence.
                 young = {
                     old.rpartition(".")[0] for old in packs
-                    if (seen := _looked(folder, old)) is not None and time.time() - seen.st_mtime < spare
+                    if (seen := _looked(folder, old)) is not None and (written is None or written.st_mtime - seen.st_mtime < spare)
                 }
                 for old in packs:
                     if old not in (f"{name}.pack", f"{name}.idx") and old.rpartition(".")[0] not in young:
