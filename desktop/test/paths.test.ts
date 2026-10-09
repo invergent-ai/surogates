@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { Failure, type Refusal } from "../src/files/answers.js";
+import { Failure, NUL_REFUSED, type Refusal } from "../src/files/answers.js";
 import { expandUser, inside, keyInFolder, realpath, resolveInFolder } from "../src/files/paths.js";
 
 let base: string;
@@ -129,10 +129,10 @@ describe("resolveInFolder, as the cloud's resolve", () => {
     expect(refusal(() => resolveInFolder(folder, home, "~/x")).message).toContain("'/home/tester/x'");
   });
 
-  it("refuses a NUL byte as Python does", () => {
-    expect(refusal(() => resolveInFolder(folder, home, "a\0b"))).toEqual({
-      type: "value", message: "embedded null byte",
-    });
+  it("refuses a NUL in the cloud's sentence, in a path and in a key", () => {
+    expect(NUL_REFUSED).toBe("A path, a command or a search pattern cannot hold a NUL character");
+    expect(refusal(() => resolveInFolder(folder, home, "a\0b"))).toEqual({ type: "value", message: NUL_REFUSED });
+    expect(refusal(() => keyInFolder(folder, `${folder}/a\0b`))).toEqual({ type: "value", message: NUL_REFUSED });
   });
 
   it("answers a symlink loop as ELOOP, unless the path climbs back out of it", () => {

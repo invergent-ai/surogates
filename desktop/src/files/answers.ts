@@ -22,6 +22,10 @@ export const WALK_MARGIN_NS = 2_000_000_000n;
 export const WALK_BUDGET_MS = 5_000;
 export const READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)";
 export const WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)";
+// What a NUL is refused with, in a path as the model wrote it, a key, a working folder, a command, or a search's
+// pattern or glob, before anything is done with the text: the cloud's sentence (NUL_REFUSED in
+// surogates/tools/workspace_io/base.py), never the words one release of Python or another has for it.
+export const NUL_REFUSED = "A path, a command or a search pattern cannot hold a NUL character";
 
 export type Refusal = { type: string; message: string; [detail: string]: unknown };
 

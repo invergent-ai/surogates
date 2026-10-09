@@ -29,7 +29,7 @@ from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
 from surogates.tools.builtin import file_ops, research, terminal
 from surogates.tools.utils import document_cache
 from surogates.tools.utils import process_registry as registry_module
-from surogates.tools.workspace_io import LocalWorkspaceIO, RunResult
+from surogates.tools.workspace_io import NUL_REFUSED, LocalWorkspaceIO, RunResult
 from tests.fake_laptop import InProcessRunner
 from tests.tools.fixtures.build_documents import build_minimal_docx
 
@@ -473,6 +473,27 @@ class TestSearch:
 
 
 @pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
+async def test_a_nul_in_a_path_or_a_pattern_is_refused_alike_by_every_file_tool(ws):
+    assert await call(file_ops._read_file_handler, ws, path="a\x00b") == {"error": NUL_REFUSED}
+    for arguments in (
+        {"pattern": "x", "path": "a\x00b"},
+        {"pattern": "a\x00"},
+        {"pattern": "x", "file_glob": "*\x00"},
+        {"pattern": "*\x00", "target": "files"},
+    ):
+        assert await call(file_ops._search_files_handler, ws, **arguments) == {"error": f"Search failed: {NUL_REFUSED}"}
+    # A write's refusal is the handler's own failure, which its dispatcher reports.
+    for handler, arguments in (
+        (file_ops._write_file_handler, {"path": "a\x00b", "content": "x"}),
+        (file_ops._patch_handler, {"mode": "replace", "path": "a\x00b", "old_string": "a", "new_string": "b"}),
+    ):
+        with pytest.raises(ValueError) as refused:
+            await raw_call(handler, ws, **arguments)
+        assert str(refused.value) == NUL_REFUSED
+    assert os.listdir(ws.real) == []
+
+
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestTerminal:
     async def test_runs_in_workspace_with_home_there(self, ws):
         out = await call(terminal._terminal_handler, ws, command="pwd; echo $HOME")
@@ -496,8 +517,20 @@ class TestTerminal:
         out = await call(terminal._terminal_handler, ws, command="pwd", workdir="a\x00b")
         assert time.monotonic() - started < 1.0
         assert out["status"] == "error"
-        assert out["error"] == "Failed to execute command: embedded null byte"
+        assert out["error"] == f"Failed to execute command: {NUL_REFUSED}"
         assert "traceback" in out
+
+    @pytest.mark.parametrize("arguments", [
+        {"command": "a\x00b"},
+        {"command": "a\x00b", "workdir": "sub"},
+        {"command": "a\x00b", "background": True},
+        {"command": "true", "workdir": "a\x00b", "background": True},
+    ], ids=["command", "command in a folder", "background command", "background workdir"])
+    async def test_a_nul_in_a_command_or_its_folder_is_refused_alike(self, ws, arguments):
+        (ws.real / "sub").mkdir()
+        out = await call(terminal._terminal_handler, ws, **arguments)
+        assert (out["status"], out["exit_code"]) == ("error", -1)
+        assert out["error"] == f"Failed to execute command: {NUL_REFUSED}"
 
     async def test_exit_code_meaning_for_grep(self, ws):
         (ws.real / "a.txt").write_text("x\n")

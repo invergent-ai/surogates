@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { OUTPUT_CAP_CHARS } from "../src/files/answers.js";
+import { NUL_REFUSED, OUTPUT_CAP_CHARS } from "../src/files/answers.js";
 import { type Context, findOnPath, perform, RG_MISSING } from "../src/files/operations.js";
 
 let base: string;
@@ -207,7 +207,10 @@ describe("ripgrep, with the cloud's arguments", () => {
   it("refuses bad arguments", async () => {
     expect(await search({ key: folder, mode: "regex", pattern: "a" })).toMatchObject({ error: { type: "value" } });
     expect(await search({ key: folder, mode: "count", pattern: "a\0" })).toEqual({
-      error: { type: "value", message: "embedded null byte" },
+      error: { type: "value", message: NUL_REFUSED },
+    });
+    expect(await search({ key: folder, mode: "count", pattern: "a", glob: "*\0" })).toEqual({
+      error: { type: "value", message: NUL_REFUSED },
     });
     expect(await search({ key: `${base}`, mode: "files", pattern: "*" })).toMatchObject({ error: { type: "sandbox" } });
   });

@@ -90,7 +90,7 @@ An error names the exception the worker raises again:
   {"type": "os", "code", "message"}       OSError: code is the errno name ("ENOENT"),
                                           message is str(exc) without "[Errno N] "
   {"type": "ripgrep", "message"}          RipgrepError
-  {"type": "value", "message"}            ValueError, e.g. a NUL byte in a path
+  {"type": "value", "message"}            ValueError: arguments the computer cannot take
   {"type": "conflict", "message"}         RevisionConflict: the file is not at the
                                           revision the write expected
   any other type                          DeviceOperationError(message), including
@@ -98,6 +98,11 @@ An error names the exception the worker raises again:
                                           "cancelled" (the session stopped it before
                                           the computer reported a result) and
                                           "too_large"
+
+A NUL in a path as the model wrote it, a key, a working folder, a command, or
+a search's pattern or glob is answered with a value error whose message is
+NUL_REFUSED (surogates.tools.workspace_io.base), before anything is done with
+the text: the cloud's own workspaces refuse it in the same sentence.
 
 Data is standard base64 (RFC 4648 section 4: the "+" and "/" alphabet, padded
 with "=", no line breaks).  A reply in any other form is refused, never decoded

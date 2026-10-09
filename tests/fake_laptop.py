@@ -45,6 +45,7 @@ from surogates.devices.workspace import (
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RevisionConflict, RipgrepError, WorkspaceIO
+from surogates.tools.workspace_io.base import refuse_nul
 from surogates.tools.workspace_io.local import CODE_UNITS
 
 # What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
@@ -265,6 +266,7 @@ def _walk(a: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(key, str):
         # The key before anything else, as the app checks it.
         raise ValueError("'key' must be a string")
+    refuse_nul(key)
     skip, top, hidden, since = (a.get(name) for name in ("skip", "skip_top", "skip_hidden", "since"))
     if (
         type(hidden) is not bool
