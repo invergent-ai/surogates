@@ -110,7 +110,9 @@ class StorageBackend(Protocol):
 
         With *limit* the listing stops at that many entries, whichever they
         are: for a caller that must not read a folder of any size, and asks
-        for one more than it will take to learn that there are more.
+        for one more than it will take to learn that there are more.  A
+        store with folders of its own counts each as an entry then, its key
+        ending in ``/``, as a bucket counts a folder's marker.
 
         Backends should populate this from their native list response —
         ``list_objects_v2`` already returns ``LastModified``/``Size`` for
@@ -290,13 +292,16 @@ class LocalBackend:
         for path in search_root.rglob("*"):
             if limit is not None and len(entries) >= limit:
                 break
-            if not path.is_file():
+            folder = not path.is_file()
+            if folder and (limit is None or not path.is_dir()):
                 continue
             st = path.stat()
             entries.append({
-                "key": str(path.relative_to(bucket_root)),
+                # Bounded, a folder is an entry too, named as a bucket names a folder's marker: a
+                # folder of folders is not walked whole, and the caller learns there is more.
+                "key": str(path.relative_to(bucket_root)) + ("/" if folder else ""),
                 "modified": st.st_mtime,
-                "size": st.st_size,
+                "size": 0 if folder else st.st_size,
             })
         entries.sort(key=lambda e: e["key"])
         return entries

@@ -107,6 +107,18 @@ class TestLocalBackendObjects:
         assert len(await backend.list_entries("bucket", prefix="many", limit=50)) == 20
         assert len(await backend.list_entries("bucket", prefix="many")) == 20
 
+    async def test_a_bounded_listing_counts_a_folder_as_the_bucket_counts_its_marker(self, backend: LocalBackend, tmp_path):
+        await backend.create_bucket("bucket")
+        await backend.write("bucket", "packs/a.pack", b"a")
+        for n in range(40):
+            (tmp_path / "bucket" / "packs" / f"junk-{n:02d}").mkdir()
+        # A folder full of folders is not walked whole to find one file: each is an entry, named as a
+        # bucket names a folder's marker, and the listing stops at the limit all the same.
+        listed = await backend.list_entries("bucket", prefix="packs", limit=5)
+        assert len(listed) == 5 and all(e["key"].endswith("/") for e in listed if "junk" in e["key"])
+        # With no limit the listing is the files alone, as it was.
+        assert [e["key"] for e in await backend.list_entries("bucket", prefix="packs")] == ["packs/a.pack"]
+
     async def test_list_entries_with_prefix(self, backend: LocalBackend):
         await backend.write_text("bucket", "a.txt", "x")
         await backend.write_text("bucket", "sub/b.txt", "yy")
