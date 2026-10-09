@@ -293,13 +293,16 @@ describe.skipIf(!run)("the agent's browser through the app", () => {
     };
     const buttons = (asked: Page) => asked.$$eval("#prompt-buttons button", (drawn) => drawn.map((button) => [button.dataset.id, button.textContent]));
     // What the agent hears of what its page did, with its answers that say so: *first*, or its next ones, each a
-    // move of the mouse, until one says something.
+    // move of the mouse, until one says something, for 15 s at most. An answer that refuses the move fails here
+    // at once, shown as it is: not as a poll that ran out on reading what it has not.
     const hears = async (first: string[] = []): Promise<string[]> => {
       const said = [...first];
-      await expect.poll(async () => {
-        if (said.length === 0) said.push(...(await operation("browser.mouse", { action: "move", x: 1, y: 1 })).ok.notices);
-        return said.length;
-      }, { timeout: 15_000 }).toBeGreaterThan(0);
+      for (const until = Date.now() + 15_000; said.length === 0 && Date.now() < until;) {
+        const answer = await operation("browser.mouse", { action: "move", x: 1, y: 1 });
+        expect(answer).toMatchObject({ ok: { notices: expect.any(Array) } });
+        said.push(...answer.ok.notices);
+        if (said.length === 0) await new Promise((done) => setTimeout(done, 100));
+      }
       return said;
     };
     // The chat works freely, as the folder's sheet offers first: once its user has let the agent use the browser
@@ -331,6 +334,9 @@ document.body.append(link); link.click(); return 1;`,
     expect(await promptsShown(app!)).toBe(0);
 
     // A file of the folder, given to the input the page asked for a file for: by its name, its type and what it holds.
+    // Given only because the chat works freely. This page has no site: an upload its user is asked about is
+    // refused for a frame that runs as none, before anyone is asked. Should uploads come to be asked about in a
+    // chat that works freely too, these lines need a page of a site.
     const click = () => operation("browser.mouse", { action: "click", x: 50, y: 30, button: "left", clicks: 1 });
     expect(await hears((await click()).ok.notices)).toEqual([FILE_ASKED]);
     expect(await operation("browser.set_input_files", { paths: [notes] })).toEqual({ ok: { files: 1, notices: [] } });
@@ -358,16 +364,21 @@ return [
 
     // Its user clicks the page's link themselves, in the browser they hold. The download is theirs: asked in a
     // chat that works freely too, in words that say when it came, with no "stop asking".
+    // The click lands on the link only where the browser's window is above the app's at that place. On the
+    // display these tests run on, which has no window manager, the order of this test gives that: nothing has
+    // shown the app's window, or a prompt of its, since the browser's came to the front. Either would take the click.
     await expect.poll(() => browserWindow("Statements"), { timeout: 10_000 }).toBeDefined();
     asUser("focus", browserWindow("Statements")!);
     asUser("click", String(x), String(y));
+    // A prompt is waited for until its buttons are drawn. The rest of what it draws is looked at until it is
+    // there too, not once.
     const save = await prompted();
-    expect(await save.textContent("#prompt-title")).toBe("Save statement.txt?");
-    expect(await save.textContent("#prompt-lead")).toMatch(
+    await expect.poll(() => save.textContent("#prompt-title")).toBe("Save statement.txt?");
+    await expect.poll(() => save.textContent("#prompt-lead")).toMatch(
       /^This file was downloaded while you had control of (.+)'s browser, or just after you handed it back, 9 bytes\. Save it in project\? \1 can read what is saved there\.$/,
     );
-    expect(await fields(save)).toEqual([["File", "Downloads/statement.txt"], ["New content, 9 bytes", "statement"]]);
-    expect(await buttons(save)).toEqual([["deny", "Deny"], ["allow", "Save"]]);
+    await expect.poll(() => fields(save)).toEqual([["File", "Downloads/statement.txt"], ["New content, 9 bytes", "statement"]]);
+    await expect.poll(() => buttons(save)).toEqual([["deny", "Deny"], ["allow", "Save"]]);
     await press(save, "allow");
     await expect.poll(() => saved("statement.txt"), { timeout: 15_000 }).toBe("statement");
 
@@ -378,9 +389,9 @@ return [
     expect(await promptsShown(app!)).toBe(0);
     const answer = await clicked(client, "handBack");
     const confirmation = await prompted();
-    expect(await confirmation.textContent("#prompt-title")).toMatch(/^Hand the browser back to .+\?$/);
-    expect(await buttons(confirmation)).toEqual([["keep", "Keep control"], ["hand_back", "Hand back"]]);
-    expect(await confirmation.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
+    await expect.poll(() => confirmation.textContent("#prompt-title")).toMatch(/^Hand the browser back to .+\?$/);
+    await expect.poll(() => buttons(confirmation)).toEqual([["keep", "Keep control"], ["hand_back", "Hand back"]]);
+    await expect.poll(() => confirmation.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
     await press(confirmation, "hand_back");
     expect(await answer()).toBe(true);
     expect(await binding()).toMatchObject({ takenOver: false });
