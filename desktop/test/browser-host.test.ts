@@ -693,6 +693,48 @@ describe("a page's download, as the host stages it", () => {
     state().tabs.set(SESSION, [PAGE]);
   });
 
+  it("drops a download of the agent's once no byte has come for the stated time, counted from when it began whatever came or did not before it, tells its agent so, and drops none of its user's own", async () => {
+    // The host's clock, which the test puts on: past the minute after a hand back in which a download may be its user's.
+    let skew = 0;
+    host = new BrowserHost({ downloaded: (download) => staged.push(download), stalledMs: 300, now: () => performance.now() + skew });
+    state().roots.set(SESSION, "chat-1");
+    state().tabs.set(SESSION, [PAGE]);
+    const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+    // A download that goes on until a test ends it, or the host stops it: stopped, it says so as the browser does.
+    const endless = (name: string) => {
+      let fails!: (error: Error) => void;
+      const ends = new Promise<string>((_, reject) => {
+        fails = reject;
+      });
+      const download = downloadOf(name, fileOf(6), ends);
+      return { ...download, cancel: () => (did.push(`cancel ${name}`), fails(new Error("canceled")), Promise.resolve()) };
+    };
+    // The first is not stopped before its time, and is once it has passed: the browser shows this host no file that grows.
+    const first = arrives(endless("first.bin"));
+    await sleep(150);
+    expect(did).toEqual([]);
+    await first;
+    expect(did).toEqual(["cancel first.bin"]);
+    expect(state().unseen.get(SESSION)).toEqual([notFinished("first.bin", "no more of it came for 0.3 s")]);
+    // Some while later another begins. It has its own time, whole: not what was left of the first's.
+    await sleep(200);
+    const second = arrives(endless("second.bin"));
+    await sleep(150);
+    expect(did).toEqual(["cancel first.bin"]);
+    await second;
+    expect(did).toEqual(["cancel first.bin", "cancel second.bin"]);
+    // With none of the agent's on its way, nothing is staged that this host watches.
+    expect([state().arriving.size, staged, (host as unknown as { watching: unknown }).watching]).toEqual([0, [], null]);
+    // Their own, begun while they hold the browser, is never stopped so, though one of the agent's beside it is.
+    host.pause("chat-1", true);
+    void arrives(endless("theirs.bin"));
+    host.pause("chat-1", false);
+    skew += AFTER_HAND_BACK_MS + 1;
+    await arrives(endless("third.bin"));
+    await sleep(400);
+    expect(did.filter((done) => done.startsWith("cancel"))).toEqual(["cancel first.bin", "cancel second.bin", "cancel third.bin"]);
+  });
+
   it("hands on one of exactly what a write may carry, and none a byte over, which it removes and says", async () => {
     const most = fileOf(MAX_WRITE_BYTES);
     await arrives(downloadOf("most.bin", most, Promise.resolve(most)));
@@ -1565,6 +1607,61 @@ describe("a page's download, as the host stages it", () => {
       for (let n = 0; n < 10 && moves.length === 0; n += 1) await turn();
       moves.shift()!();
       expect(await acting).toEqual({ ok: { notices: [] } });
+    });
+
+    it("counts what this host does in a page for an upload until it has reached the page: the look at where its file input is, for the prompt, and the steps that give the files, each sent before its user took the browser over and reaching the page long after", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const tab = taken();
+        const here = { here: true, href: FORM_URL, origin: new URL(FORM_URL).origin };
+        // The page is slow to say where its input is, for an upload's prompt, which gives the look up meanwhile.
+        const asked = tab.input();
+        const slow: { says?: (place: unknown) => void } = {};
+        Object.assign(asked.element(), { evaluate: () => new Promise((resolve) => {
+          slow.says = resolve;
+        }) });
+        const naming = host.address(SESSION, true, "upload-1");
+        for (let n = 0; n < 10 && !slow.says; n += 1) await turn();
+        host.pause("chat-2", true);
+        vi.advanceTimersByTime(LOOK_MS);
+        await naming;
+        vi.advanceTimersByTime(OWN_CHOOSER_MS + 1_000);
+        await turn();
+        // The look is still on its way to the page, and gives it leave when it lands: heard until five seconds after that.
+        expect(tab.heard()).toBe(1);
+        slow.says!(here);
+        await turn();
+        vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        await turn();
+        expect(tab.heard()).toBe(1);
+        vi.advanceTimersByTime(1);
+        await turn();
+        expect(tab.heard()).toBe(0);
+        host.pause("chat-2", false);
+        await turn();
+        // An upload's step waits on the page when its user takes the browser over: answered paused at once, and counted until it lands.
+        const step: { lands?: (came: string) => void } = {};
+        tab.input({ evaluate: () => new Promise((done) => {
+          step.lands = done;
+        }), dispose: () => Promise.resolve() });
+        const giving = uploads();
+        for (let n = 0; n < 10 && !step.lands; n += 1) await turn();
+        host.pause("chat-2", true);
+        expect(await giving).toEqual(PAUSED);
+        vi.advanceTimersByTime(OWN_CHOOSER_MS + 1_000);
+        await turn();
+        expect(tab.heard()).toBe(1);
+        step.lands!("late");
+        await turn();
+        vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
+        await turn();
+        expect(tab.heard()).toBe(1);
+        vi.advanceTimersByTime(1);
+        await turn();
+        expect(tab.heard()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
