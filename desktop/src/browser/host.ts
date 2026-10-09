@@ -634,6 +634,7 @@ export class BrowserHost {
       // also where it was handed back before they were let be.
       for (const [page, kept] of this.hearing) {
         clearTimeout(kept.quiet);
+        delete kept.quiet;
         this.hear(page);
         this.settle(page);
       }
@@ -927,12 +928,23 @@ export class BrowserHost {
     }));
   }
 
-  // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before.
+  // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before: and
+  // then only once it has answered, twice over, with nothing heard of it meanwhile (settle says why twice).
+  // A page that asked for a file and was busy from then on is heard of only when Playwright's reading of
+  // its input reaches it, which gives it leave to ask again: let be before that, it would ask on that leave
+  // and the browser's own chooser would open. That reading was sent before these, so it is heard of before
+  // they answer, and the page's quiet begins anew (asks). With no bound: a page one of whose frames never
+  // answers is not let be, and a file input in it opens nothing for its user while they hold the browser.
   private quiet(page: Page): void {
     const kept = this.hearing.get(page);
     if (!kept?.heard) return;
     clearTimeout(kept.quiet);
-    kept.quiet = setTimeout(() => this.unhear(page), OWN_CHOOSER_MS);
+    const mine: NodeJS.Timeout = setTimeout(() => {
+      void this.read(page).then(() => this.read(page)).then(() => {
+        if (this.hearing.get(page) === kept && kept.quiet === mine && kept.acting === 0) this.unhear(page);
+      });
+    }, OWN_CHOOSER_MS);
+    kept.quiet = mine;
   }
 
   // *work* is what an operation of the agent's does in *page*, until it ends. Taken over meanwhile, the

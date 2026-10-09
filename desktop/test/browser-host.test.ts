@@ -3324,6 +3324,16 @@ await navigator.serviceWorker.ready;`);
     expect(await watched(8_000)).toBe(0);
   }, 60_000);
 
+  it("opens no chooser of the browser's own for a page that asked for a file on the agent's click and was busy from then on: what it asked for is heard of only after its user has held the browser five seconds, and gives it leave to ask again then", async () => {
+    const { a, watched } = await stuck();
+    // The agent's click, beside the file input, gives the page leave: it asks on it, and is busy at once.
+    await op(a, "browser.mouse", { action: "click", x: 400, y: 300, button: "left", clicks: 1 }, "chat-1");
+    gate!(8_000, true);
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await watched(8_000)).toBe(0);
+  }, 60_000);
+
   it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/asks/later" }, "chat-1");
