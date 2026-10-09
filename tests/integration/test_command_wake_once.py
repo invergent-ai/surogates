@@ -29,7 +29,7 @@ from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session import LeaseNotHeldError
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
@@ -735,10 +735,12 @@ async def test_a_wake_of_a_finished_chat_looks_for_a_waiting_command_from_its_la
 
     await workers.worker(store=Reads()).wake(chat)
 
-    # The wake has nothing to do.  Beside its user's messages it read the log from the last command
-    # on: commands are answered in the order typed, so none waits unless the last one does.
+    # The wake has nothing to do.  Beside the messages typed into it, its user's and a project
+    # coordinator's follow-ups, it read the log from the last command on: commands are answered in
+    # the order typed, so none waits unless the last one does.
     assert (workers.ran, len(workers.requests)) == (["_handle_loop_command", "_handle_goal_command"], 2)
-    assert [read.get("after") for read in reads if read.get("types") != [EventType.USER_MESSAGE]] == [typed - 1]
+    messages = ([EventType.USER_MESSAGE], list(MESSAGE_TYPES))
+    assert [read.get("after") for read in reads if read.get("types") not in messages] == [typed - 1]
 
 
 async def test_a_command_typed_before_the_last_one_does_not_wait_once_the_last_one_is_answered(workers):
