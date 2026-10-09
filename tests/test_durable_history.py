@@ -341,6 +341,82 @@ def test_a_file_no_older_than_the_index_is_read_however_its_size_and_time_match(
     assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
 
 
+def test_a_file_that_became_another_kind_with_its_own_size_and_time_is_read(tmp_path, project, monkeypatch):
+    a_messy_project(project)
+    time.sleep(1.1)
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    # A file to be run becomes a link, and a link a file, each of the size and the second the index knows:
+    # nothing but its kind tells the look that it is not the file it was.
+    script, link = project / "run.sh", project / "latest"
+    was = {path: os.lstat(path) for path in (script, link)}
+    script.unlink()
+    script.symlink_to("x" * was[script].st_size)
+    link.unlink()
+    link.write_bytes(b"y" * was[link].st_size)
+    for path in (script, link):
+        os.utime(path, ns=(was[path].st_atime_ns, was[path].st_mtime_ns), follow_symlinks=False)
+        assert (os.lstat(path).st_size, int(os.lstat(path).st_mtime)) == (was[path].st_size, int(was[path].st_mtime))
+    time.sleep(1.1)
+    seen = read_by(monkeypatch)
+    pod = a_pod(tmp_path, project)
+    assert {"run.sh", "latest"} <= {name for names in seen["readers"] for name in names}
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+    assert os.readlink(pod.copy / "run.sh") == "x" * was[script].st_size and not (pod.copy / "latest").is_symlink()
+
+
+def test_an_index_entry_with_no_size_is_read_unless_its_file_is_the_empty_one(tmp_path, project, monkeypatch):
+    time.sleep(1.1)
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    # The kept index as git leaves an entry it could not vouch for: no size, the time it had, a blob with bytes.
+    kept = project / "_history" / "index"
+    dated, entries = os.stat(kept), history_module._entries(kept)
+    entries[b"notes.txt"] = entries[b"notes.txt"][:36] + bytes(4) + entries[b"notes.txt"][40:]
+    kept.write_bytes(history_module._index(entries))
+    os.utime(kept, ns=(dated.st_atime_ns, dated.st_mtime_ns))
+    # And the file emptied since, in the same second: its size is the entry's, and its time.
+    saved = os.stat(project / "notes.txt")
+    (project / "notes.txt").write_bytes(b"")
+    os.utime(project / "notes.txt", ns=(saved.st_atime_ns, saved.st_mtime_ns))
+    time.sleep(1.1)
+    seen = read_by(monkeypatch)
+    pod = a_pod(tmp_path, project)
+    assert "notes.txt" in {name for names in seen["readers"] for name in names}
+    assert (pod.copy / "notes.txt").read_bytes() == b"" and mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+
+
+@pytest.mark.parametrize("pickup", ["The project's files", "Your changes"])
+def test_the_pickup_is_committed_from_the_index_with_no_git_that_looks_at_every_file_again(tmp_path, project, monkeypatch, pickup):
+    if pickup == "Your changes":
+        first = a_pod(tmp_path, project)
+        (first.copy / "a.md").write_text("a")
+        land(first)
+        (project / "notes.txt").write_text("v2 notes, saved by you\n")
+        time.sleep(1.1)
+    run, commits = subprocess.run, []
+
+    def spied(args, **kwargs):
+        if "commit" in args and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
+            commits.append(args)
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spied)
+    pod = a_pod(tmp_path, project)
+    monkeypatch.setattr(subprocess, "run", run)
+    # ``git commit`` looks at every real file once more, a request or two each through the mount: the
+    # pickup is made of the index the open has just written, by you, on main as the history has it.
+    assert commits == []
+    yours = git(pod.repo, "rev-parse", "refs/bases/t1")
+    parent = git(project / "_history", "rev-parse", "refs/heads/main") if pickup == "Your changes" else ""
+    assert git(pod.repo, "log", "-1", "--format=%s|%an <%ae>|%cn <%ce>|%P", yours) == (
+        f"{pickup}|u1 <user:u1@surogate>|u1 <user:u1@surogate>|{parent}"
+    )
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+
+
 class ChangedAfterTheListing:
     """A folder's listing in which *change* is made to the file *name* once it is listed and before it is looked at."""
 
