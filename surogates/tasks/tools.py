@@ -388,6 +388,8 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             session_factory=session_factory,
             redis=redis,
             tenant=tenant,
+            # The agent's own wake bundle: a sub-agent it delivers is looked up there.
+            bundle=kwargs.get("bundle"),
         )
     except TaskSpawnError as exc:
         return _tool_error(str(exc))

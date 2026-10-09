@@ -31,6 +31,8 @@ from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.db.models import Task
 from surogates.tasks import service as task_service
+from surogates.tools.registry import ToolRegistry
+from surogates.tools.runtime import ToolRuntime
 from surogates.tasks import spawn as task_spawn
 from surogates.tools.builtin import delegate as delegate_module
 from surogates.workstreams import thread_refusal
@@ -1037,3 +1039,29 @@ async def test_a_stopped_turns_file_never_lands_when_its_tasks_queued_in_order_h
     await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
     assert pods.real_names() == ["Report.docx", "notes.txt", "one.md", "seen-later.txt", "two.md"]
     assert (pods.project / "two.md").read_text() == "part one\npart two\n"
+
+
+async def test_a_task_for_a_sub_agent_the_agents_bundle_delivers_is_started(api, monkeypatch):
+    seen = []
+
+    async def only_with_the_bundle(name, tenant, *, session_factory=None, loader=None, bundle=None):
+        seen.append(bundle)
+        return an_agent("terminal") if bundle is not None else None
+
+    monkeypatch.setattr(task_spawn, "resolve_agent_by_name", only_with_the_bundle)
+    chat = await a_chat(api)
+    store = api.app.state.session_store
+    await store.update_session_config_key(chat.id, "coordinator", True)
+    chat = await store.get_session(chat.id)
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    state = api.app.state
+    message = await tool_exec.execute_single_tool(
+        {"id": "call_1", "function": {"name": "spawn_task", "arguments": json.dumps({"goal": "Draft the sources.", "agent_type": "in-the-bundle"})}},
+        session=chat, lease=SimpleNamespace(lease_token=uuid4()), store=store, tools=registry,
+        tenant=SimpleNamespace(org_id=chat.org_id, user_id=chat.user_id, asset_root="/tmp/test"),
+        redis=state.redis, storage=state.storage, session_factory=state.session_factory, bundle="the agent's bundle",
+    )
+    answer = json.loads(message["content"])
+    # The tool looks the sub-agent up where the agent's wake has it, as the task's start does.
+    assert answer.get("status") == "running" and set(seen) == {"the agent's bundle"}, (answer, seen)
