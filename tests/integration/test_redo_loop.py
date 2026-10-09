@@ -506,7 +506,8 @@ async def test_a_redo_turn_cut_off_after_the_model_was_asked_keeps_its_redo_besi
     if typed == "as its last message before the clash":
         # That message's skill ran at its own turn: it is not given to the model again as something new.
         assert expanded == [A_SKILL] and [m["content"] for m in recovered].count(THE_SKILL) == 0
-    elif typed == "after the redo":
+    else:
+        # A message no request had read has the turn: its skill is in it, once, and the redo after.
         assert [m["content"] for m in recovered[-2:]] == [THE_SKILL, REDO_OF_THE_REPORT]
         assert [m["content"] for m in recovered].count(THE_SKILL) == 1
     # The redo is done, once, and its master reads the file landed.
@@ -517,6 +518,33 @@ async def test_a_redo_turn_cut_off_after_the_model_was_asked_keeps_its_redo_besi
     asked = len(workers.requests)
     await with_real_tools(workers).wake(thread.id)
     assert len(workers.requests) == asked
+
+
+@pytest.mark.parametrize("typed", [A_SKILL, A_COMMAND], ids=["a skill", "a command"])
+async def test_what_its_user_typed_while_the_clashing_turn_landed_is_taken_once_and_the_redo_read_once(workers, monkeypatch, pods, typed):
+    api, store = workers.api, workers.store
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    workers.sandbox_pool = pool = SandboxPool(pods)
+    expanded = skills_expanded(monkeypatch)
+    await a_clash_while_its_user_types(workers, pods, pool, thread, typed)
+    # Typed before the redo was written: it stands before it in the log, read by no request.
+    assert [e.type for e in await store.get_events(thread.id)][-1] == EventType.HISTORY_REDO.value
+    assert [e.data["content"] for e in await store.get_events(thread.id, types=[EventType.USER_MESSAGE])][-1] == typed
+    for _ in range(3):
+        await workers.nobody_is_queued()  # as a dispatcher takes each wake the one before queued
+        await workers.wake(thread.id, SlashCommandConfig())
+    [request] = workers.requests
+    if typed == A_SKILL:
+        # The message has the turn: its skill runs, once, and the redo is read after it, on its own.
+        assert [m["content"] for m in request[-2:]] == [THE_SKILL, REDO_OF_THE_REPORT] and expanded == [A_SKILL]
+    else:
+        # The harness answers it, once and by name, and the redo has its turn after.
+        assert [m["content"] for m in request[-3:]] == [A_COMMAND, REFUSED, REDO_OF_THE_REPORT] and expanded == []
+        named = [e for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE]) if "answers" in e.data]
+        *_, said = await store.get_events(thread.id, types=[EventType.USER_MESSAGE])
+        assert [(e.data["answers"], e.data["message"]["content"]) for e in named] == [(said.id, REFUSED)]
+    assert [m["content"] for m in request].count(REDO_OF_THE_REPORT) == 1
+    assert await workers.status(thread.id) == "completed" and not await queued(api, thread)
 
 
 async def test_a_redo_revives_no_thread_whose_turn_failed(api, monkeypatch, pods):

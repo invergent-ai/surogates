@@ -157,24 +157,27 @@ def _turn_for_a_redo(events: list[Any], *, is_command: Any) -> bool:
     for, and its command must not run again.  A command the harness answers
     itself (*is_command* says which) opens no turn of the model's, typed
     before the redo or after it; any other message after the redo is the
-    turn's, and its command runs once.
+    turn's, and its command runs once.  So is one typed as the turn before
+    the redo landed, which stands before the redo with no request to have
+    read it: its turn comes first, and reads the redo too.
 
     The turn is the redo's until it ends: at the model's answer that calls
     no tool, or at a turn's end, once the model was asked in it.  One a dead
     worker cut off, before its first request or after it, is still the
     redo's for the wake that goes on with it.
     """
-    # Whether the redo's turn is open, and whether the model was asked in it.
-    opened = asked = False
+    # Whether the redo's turn is open, whether the model was asked in it, and
+    # whether a message that opens a turn of its own waits, read by no request.
+    opened = asked = waits = False
     for event in events:
         kind = _event_type(event)
         data = getattr(event, "data", None) or {}
         if kind == EventType.LLM_REQUEST.value:
-            asked = opened
+            asked, waits = opened, False
         elif kind == EventType.HISTORY_REDO.value:
-            opened, asked = True, False
+            opened, asked = not waits, False
         elif kind == EventType.USER_MESSAGE.value and not is_command(event):
-            opened = False
+            opened, waits = False, True
         elif asked and (
             kind in _TURN_END_EVENT_TYPES
             # The model's answer ends a turn; its calls for tools do not, nor the harness's answer to a command.

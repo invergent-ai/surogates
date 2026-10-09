@@ -567,5 +567,16 @@ def test_the_turn_after_a_redo_is_the_redos_unless_something_else_opened_it(afte
     assert _turn_for_a_redo(events, is_command=is_command) is the_redos
 
 
+@pytest.mark.parametrize("typed, the_redos", [("Go on.", False), ("/report-writer Go on.", False), ("/loop 5m Go on.", True)])
+def test_a_message_no_request_had_read_when_the_redo_was_written_keeps_the_turn(typed, the_redos):
+    # Typed as the turn landed: after its last request, before its redo.
+    events = [*log(SAID, REQUEST, ANSWER), event(4, SAID, content=typed), event(5, DONE), event(6, REDO)]
+    is_command = lambda e: e.type == SAID and (e.data.get("content") or "").startswith("/loop")  # noqa: E731
+    assert _turn_for_a_redo(events, is_command=is_command) is the_redos
+    # Read by a request before the redo, it is the turn's that ended: the redo opens the next.
+    events = [event(1, SAID, content=typed), event(2, REQUEST), event(3, ANSWER), event(4, DONE), event(5, REDO)]
+    assert _turn_for_a_redo(events, is_command=is_command) is True
+
+
 def test_a_turn_no_redo_opened_is_not_the_redos():
     assert _turn_for_a_redo(log(SAID, REQUEST, ANSWER, DONE), is_command=lambda _event: True) is False
