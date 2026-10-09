@@ -1345,12 +1345,17 @@ class ArtifactCompletionMixin:
             )
 
         if prunes is not None:
+            from surogates.storage.tenant import boundary_workspace_prefix
+
             # Last, with the turn ended and reported, and outside the wake: its lease goes without
             # waiting, so the thread's next message is not held for a pruning.  Its pod goes after it.
             prune_later(
                 session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, sandbox_id=prunes,
                 session_id=str(session.id), workstream=session.config["workstream_id"],
                 packs=landing.get("packs", 0), saga_settings=self._saga_settings,
+                # The bucket itself says which packs are old: no pod's clock, and not the worker's.
+                storage=self._storage, bucket=session.config.get("storage_bucket"),
+                prefix=boundary_workspace_prefix(session.config, session, session.id),
             )
 
     async def _kept_apart(self, session: Any) -> dict[str, Any]:

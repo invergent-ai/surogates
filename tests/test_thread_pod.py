@@ -8,6 +8,8 @@ import contextlib
 import json
 import logging
 import subprocess
+import time
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -528,3 +530,71 @@ async def test_a_pruning_whose_pod_never_goes_ends_all_the_same(monkeypatch, cap
         done, _ = await asyncio.wait([pruning], timeout=5)
     assert done and pool.let_go == [("pod-1", "t1", True)] and "Could not let pod pod-1 go" in caplog.text
     assert pruning.cancelled() is (ended == "by a cancel")
+
+
+class Bucket:
+    """An object store that dates what it holds by its own clock, as a bucket does."""
+
+    def __init__(self, now: float, packs: dict[str, float], *, dates=float) -> None:
+        self.now, self.dates, self.wrote = now, dates, []
+        self.held = {f"proj/_history/objects/pack/{name}": written for name, written in packs.items()}
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        self.wrote.append((bucket, key))
+        self.held[key] = self.now
+
+    async def stat(self, bucket: str, key: str) -> dict:
+        return {"size": 0, "modified": self.dates(self.held[key])}
+
+    async def list_entries(self, bucket: str, prefix: str = "") -> list[dict]:
+        return [{"key": key, "modified": self.dates(at), "size": 1} for key, at in sorted(self.held.items()) if key.startswith(prefix)]
+
+
+@pytest.mark.parametrize("dates", [float, lambda at: datetime.fromtimestamp(at, timezone.utc)], ids=["a disk's", "a bucket's"])
+@pytest.mark.parametrize("clock", [0, 3600, -86_400], ids=["the worker's clock right", "an hour ahead", "a day behind"])
+async def test_the_packs_older_than_the_fence_are_found_by_the_buckets_own_dates(monkeypatch, dates, clock):
+    there = 1_800_000_000.0  # the bucket's now, whatever the worker's clock says
+    bucket = Bucket(there, {
+        "pack-old.pack": there - 3600, "pack-old.idx": there - 3600,
+        "pack-young.pack": there - 100, "pack-young.idx": there - 99,
+        # Its index written within the fence: a pack is as young as the younger of its two files.
+        "pack-half.pack": there - 400, "pack-half.idx": there - 200,
+        "pack-edge.pack": there - 300, "pack-edge.idx": there - 300,
+        ".~1a2b3c4d.landing~": there - 5000,
+    }, dates=dates)
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + clock)
+    old = await landing._old_packs(bucket, "b1", "proj/", 300)
+    # Against a mark the bucket itself has just dated: no clock but the bucket's is in a pack's age.
+    assert old == ["pack-edge", "pack-old"] and bucket.wrote == [("b1", "proj/_history/pruning")]
+
+
+async def test_a_pruning_tells_the_pod_which_packs_the_bucket_dates_older_than_the_fence(monkeypatch):
+    asked = []
+
+    async def none(*_):
+        return []
+
+    class Pod:
+        async def execute_released(self, sandbox_id, name, input, **kwargs):
+            asked.append(json.loads(input))
+            return json.dumps({"pruned": True})
+
+    @contextlib.asynccontextmanager
+    async def the_lock(*_):
+        async def held():
+            return None
+
+        yield held
+
+    there = 1_800_000_000.0
+    monkeypatch.setattr(landing, "kept_refs", none)
+    monkeypatch.setattr(landing, "running_landings", none)
+    monkeypatch.setattr(landing, "project_lock", the_lock)
+    for storage in (Bucket(there, {"pack-old.pack": there - 3600, "pack-old.idx": there - 3600, "pack-new.pack": there, "pack-new.idx": there}), None):
+        await landing.prune_after(
+            session_factory=None, sandbox_pool=Pod(), sandbox_id="pod-1", workstream="w1", packs=0, saga_settings=None,
+            storage=storage, bucket="b1", prefix="proj/",
+        )
+    # With no object store to ask, the pod is told nothing and goes by the dates it sees.
+    assert [request.get("old") for request in asked] == [["pack-old"], None]

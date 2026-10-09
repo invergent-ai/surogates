@@ -334,7 +334,7 @@ async def take_up(sandbox_pool: Any, owner: str) -> list[str]:
 
 def prune_later(
     *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, session_id: str, workstream: Any, packs: int,
-    saga_settings: Any,
+    saga_settings: Any, storage: Any = None, bucket: str | None = None, prefix: str = "",
 ) -> None:
     """Start the day's pruning after a landing, in no wake: the turn's lease goes without waiting for it.
 
@@ -348,7 +348,7 @@ def prune_later(
     """
     pruning = asyncio.ensure_future(_pruned_then_gone(
         session_factory=session_factory, sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, session_id=session_id,
-        workstream=workstream, packs=packs, saga_settings=saga_settings,
+        workstream=workstream, packs=packs, saga_settings=saga_settings, storage=storage, bucket=bucket, prefix=prefix,
     ))
     _PRUNINGS.add(pruning)
     pruning.add_done_callback(_PRUNINGS.discard)
@@ -378,8 +378,35 @@ class _Released:
         return await self._pool.execute_released(self._sandbox_id, name, input, **kwargs)
 
 
+async def _old_packs(storage: Any, bucket: str, prefix: str, fence: float) -> list[str]:
+    """The history's packs the bucket itself dates older than *fence*, each named without its ending.
+
+    Both ends of a pack's age are the bucket's: a mark written now, as
+    the bucket dates it, and the pack and its index, as the bucket dates
+    them.  The pod that prunes cannot tell: its mount dates the files it
+    wrote itself by its own clock, and no clock of the worker's is in it
+    here either.
+    """
+    mark = f"{prefix}_history/pruning"
+    await storage.write(bucket, mark, b"")
+    now = _epoch((await storage.stat(bucket, mark))["modified"])
+    written: dict[str, float] = {}
+    for entry in await storage.list_entries(bucket, f"{prefix}_history/objects/pack/"):
+        stem, _, ending = entry["key"].rpartition("/")[2].rpartition(".")
+        if ending in ("pack", "idx"):
+            # As young as the younger of its two files.
+            written[stem] = max(written.get(stem, 0.0), _epoch(entry["modified"]))
+    return sorted(stem for stem, at in written.items() if now - at >= fence)
+
+
+def _epoch(modified: Any) -> float:
+    """An object's date as the store gives it, in seconds: a datetime from a bucket, a number from a disk."""
+    return modified.timestamp() if hasattr(modified, "timestamp") else float(modified)
+
+
 async def prune_after(
     *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, workstream: Any, packs: int, saga_settings: Any,
+    storage: Any = None, bucket: str | None = None, prefix: str = "",
 ) -> None:
     """Prune the project's history after a landing, in the landing's pod, under the project's lock again.
 
@@ -397,7 +424,10 @@ async def prune_after(
     settle that fails leaves the pruning to the next landing, the day not
     marked; so does a lock not had within ``_PRUNE_PATIENCE``.  And the pod
     leaves every pack younger than the fence, for a push no row tells of:
-    a keep's or a hand-off's.
+    a keep's or a hand-off's.  Which packs are older is asked of the
+    bucket, through *storage*, where the project's files are under
+    *prefix* of *bucket*: the pod is told them by name.  With no storage
+    it is told nothing, and goes by the dates it sees.
     """
     try:
         async with asyncio.timeout(_PRUNE_PATIENCE) as patience, project_lock(session_factory, workstream) as held:
@@ -409,6 +439,7 @@ async def prune_after(
             request = {
                 "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
                 "spare": _fence(saga_settings),
+                **({"old": await _old_packs(storage, bucket, prefix, _fence(saga_settings))} if storage is not None else {}),
             }
             await held()
             step_result(await sandbox_pool.execute_released(

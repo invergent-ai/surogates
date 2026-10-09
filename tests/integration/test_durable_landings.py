@@ -1667,9 +1667,11 @@ async def test_a_wake_whose_count_of_the_files_fails_takes_the_last_count_and_wi
     assert pods.real_names() == ["Report.docx", "notes.txt"]
 
 
-async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_threads(api, monkeypatch, pods):
+async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_threads(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     live, resolved, gone = [await a_thread(api, title, master) for title in ("Live", "Resolved", "Gone")]
+    # Where the storage keeps the project's files: the worker asks the bucket itself how old each pack is.
+    pods = stored(api, live, tmp_path)
     pool = SandboxPool(pods)
     for thread in (live, resolved, gone):
         await edited(pool, thread, f"echo {thread.title} > '{thread.title}.md'")
@@ -1682,13 +1684,14 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
             "UPDATE workstream_threads SET resolved_at = now() - interval '100 days' WHERE session_id = :g"
         ), {"g": gone.id})
         await db.commit()
-    bounds, spared = [], []
+    bounds, spared, told = [], [], []
     execute = pool.execute_released
 
     async def watched(sandbox_id, name, input, **kwargs):
         if name == "_history" and json.loads(input)["action"] == "prune":
             bounds.append(kwargs.get("timeout"))
             spared.append(json.loads(input)["spare"])
+            told.append(json.loads(input)["old"])
         return await execute(sandbox_id, name, input, **kwargs)
 
     monkeypatch.setattr(pool, "execute_released", watched)
@@ -1699,9 +1702,11 @@ async def test_a_landing_prunes_the_history_at_most_once_a_day_keeping_live_thre
     lander = await a_thread(api, "Lander", master)
     await edited(pool, lander, "echo landed > landed.md")
     await ends(api, pool, lander)
-    # Its own bound, from the size of the history; and the packs it is to leave, those younger than the fence.
+    # Its own bound, from the size of the history; and the packs it is to leave, those younger than the fence:
+    # the pod is told which are older, by the dates the storage itself gives them.
     assert len(bounds) == 1 and bounds[0] >= landing_module._PRUNE_BOUND
     assert spared == [landing_module._fence(FENCED)]
+    assert told == [sorted({name.rpartition(".")[0] for name in old})]
     refs = git(durable, "for-each-ref", "--format=%(refname)").splitlines()
     assert f"refs/heads/threads/{live.id}" in refs and f"refs/heads/threads/{resolved.id}" in refs
     assert f"refs/heads/threads/{gone.id}" not in refs

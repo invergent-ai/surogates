@@ -1062,8 +1062,11 @@ def test_a_keep_whose_history_moved_while_its_pack_went_up_writes_over_no_landin
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+@pytest.mark.parametrize("told", ["the old ones", "that none is old", None], ids=["told which packs are old", "told none is old", "told nothing"])
 @pytest.mark.parametrize("clock", [0, 3600, -86_400], ids=["the pod's clock right", "an hour ahead", "a day behind"])
-def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_under_names_no_commit_it_took(tmp_path, project, monkeypatch, clock):
+def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_under_names_no_commit_it_took(
+    tmp_path, project, monkeypatch, clock, told,
+):
     for n in range(3):
         seed = a_pod(tmp_path, project, "t9")
         (seed.copy / f"seed{n}.md").write_text("seed")
@@ -1081,11 +1084,16 @@ def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_unde
         put(self, name, source)
         if self.thread == "t1" and name.endswith(".idx") and not pruned:
             # This push lost its lock unseen: its pack is up, its refs are not, and another holder prunes.
-            # Asked as a caller that names no fence asks, a day on by its own count, in a pod whose clock
-            # may be wrong: a pack's age is by the times the files' own store gives, and by no clock.
+            # Asked a day on by its caller's count, in a pod whose clock may be wrong.  Told which packs
+            # the bucket itself dates older than the fence, it deletes those and no other: no clock of
+            # the pod's is in it.  Told nothing, as by a caller that cannot ask the bucket, it goes by
+            # the times its own files' store gives, which on a disk is one clock.
             with monkeypatch.context() as wrong:
                 wrong.setattr(time, "time", lambda: real() + clock)
-                pruned.append(pruner.prune(keep=keep, now=real() + 90_000))
+                pruned.append(pruner.prune(
+                    keep=keep, now=real() + 90_000,
+                    **({"old": sorted({name.rpartition(".")[0] for name in old}) if told == "the old ones" else []} if told else {}),
+                ))
 
     monkeypatch.setattr(History, "_put_durable", a_pruning_runs_whole)
     turn = pusher.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
@@ -1095,7 +1103,11 @@ def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_unde
     assert git(durable, "rev-parse", "refs/heads/threads/t1") == turn["commit"] and in_history(durable, turn["commit"])
     # What was older than the fence went into the pruning's one pack; the push's pack stayed beside it.
     packs = {pack.name for pack in (durable / "objects" / "pack").iterdir()}
-    assert not old & packs and len([name for name in packs if name.endswith(".pack")]) == 2
+    if told == "that none is old":
+        # The bucket's word, not the dates this pod sees: every pack it listed stays beside the new one.
+        assert old <= packs and len([name for name in packs if name.endswith(".pack")]) == 2 + len(old) // 2
+    else:
+        assert not old & packs and len([name for name in packs if name.endswith(".pack")]) == 2
     assert git(durable, "fsck", "--no-dangling") == ""
     assert (a_pod(tmp_path, project, "t1").copy / "a.md").read_text() == "a turn"  # and the thread's next pod opens
 

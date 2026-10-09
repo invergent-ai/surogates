@@ -699,7 +699,7 @@ class History:
         self._main("update-ref", "-d", self.gave)
         return {"dropped": True}
 
-    def prune(self, *, keep: list[str], now: float, spare: float = _SPARE) -> dict:
+    def prune(self, *, keep: list[str], now: float, spare: float = _SPARE, old: list[str] | None = None) -> dict:
         """Cut the durable history back to its window, at most once a day, under the project's lock.
 
         Kept: ``main``'s commits of the last 90 days and never fewer than its
@@ -717,20 +717,26 @@ class History:
         to the next pruning: it may be the pack of a push that lost the lock
         unseen and has not written its refs yet, whose commits no ref here
         names.  *spare* is the landings' fence, the longest such a push
-        goes on; a caller that names none gets ``_SPARE``.  A pack's age is
-        by the bucket's own times: from when the bucket dates the refs this
-        pruning has just written back to when it dates the pack.  Neither
-        *now*, which its caller may hold from before it waited for the
-        lock, nor this pod's clock is in it.
+        goes on; a caller that names none gets ``_SPARE``.
+
+        Which packs are older than that is the bucket's to say, and its
+        caller asks it: *old* names them, each without its ending, and no
+        other pack is deleted.  A pod cannot tell through its own mount,
+        which dates the files the pod wrote by the pod's clock and every
+        other by the bucket's.  Told nothing, as by a caller with no way
+        to ask the bucket, a pack's age runs from the time of the refs
+        this pruning has just written back to the pack's own: one clock on
+        a disk, two through a mount.  Neither *now*, which its caller may
+        hold from before it waited for the lock, nor ``time.time`` is in it.
         """
         # Its git has no bound of its own: its call's, sized from the history, cuts it off.
         budget = _TIMEOUT.set(THREAD_POD_DEADLINE)
         try:
-            return self._prune(keep=keep, now=now, spare=spare)
+            return self._prune(keep=keep, now=now, spare=spare, old=old)
         finally:
             _TIMEOUT.reset(budget)
 
-    def _prune(self, *, keep: list[str], now: float, spare: float) -> dict:
+    def _prune(self, *, keep: list[str], now: float, spare: float, old: list[str] | None) -> dict:
         # The first look refuses a history whose folder is a link, before anything is written.
         refs = self._durable_refs()
         with self._folder() as history:
@@ -772,21 +778,19 @@ class History:
                 raise HistoryConflict("the project's history moved while it was pruned")
             self._put_durable("packed-refs", work / "packed-refs")
             # Only now: until packed-refs names the new pack's commits, the old packs hold them.
-            # The time is the bucket's own, as it dates what was just written there: no clock of this
-            # pod's is in a pack's age.  Past its cache, since the mount dates its own writes itself.
             with self._folder() as history:
-                _looked(history, "packed-refs", self.durable)
                 written = _looked(history, "packed-refs")
             with self._folder("objects", "pack") as folder:
-                # A pack and its index go together, and only when neither was written within the fence.
+                # A pack and its index go together, and only when neither was written within the fence:
+                # as the caller found by the bucket's own dates, else by the dates this pod sees.
                 young = {
-                    old.rpartition(".")[0] for old in packs
-                    if (seen := _looked(folder, old)) is not None and (written is None or written.st_mtime - seen.st_mtime < spare)
-                }
-                for old in packs:
-                    if old not in (f"{name}.pack", f"{name}.idx") and old.rpartition(".")[0] not in young:
+                    listed.rpartition(".")[0] for listed in packs
+                    if (seen := _looked(folder, listed)) is not None and (written is None or written.st_mtime - seen.st_mtime < spare)
+                } if old is None else {listed.rpartition(".")[0] for listed in packs} - set(old)
+                for listed in packs:
+                    if listed not in (f"{name}.pack", f"{name}.idx") and listed.rpartition(".")[0] not in young:
                         with contextlib.suppress(FileNotFoundError):
-                            os.unlink(old, dir_fd=folder)
+                            os.unlink(listed, dir_fd=folder)
                 os.fsync(folder)
             return {"pruned": True, "commits": min(kept, len(mains)), "size": packed, "files": size}
         finally:
