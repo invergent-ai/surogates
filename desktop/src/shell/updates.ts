@@ -140,6 +140,8 @@ const AS_ANOTHER_USER = "Error executing command as another user:";
 const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
 // The most that is kept of what a helper said, its end: its last lines are why it failed.
 const SAID_MAX = 4000;
+// How long what a helper says is waited for once the helper itself has ended.
+const OUTPUT_MS = 2_000;
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
 // The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest
@@ -239,10 +241,18 @@ export function helperRun(command: string[]): (files: Staged) => Promise<Applied
       said = kept(said + decoder.write(chunk));
     });
     // One a signal ended has no exit code: how it ended is the last of what is said of it.
-    child.once("close", (code, signal) => {
+    const answer = (code: number | null, signal: NodeJS.Signals | null): void => {
+      clearTimeout(waited);
       said = kept(said + decoder.end());
       resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() });
+    };
+    // Its exit is its answer. What it says ends with it, or a moment after; a program it left
+    // running holds that open for as long as it runs, and is not waited for beyond OUTPUT_MS.
+    let waited: NodeJS.Timeout | undefined;
+    child.once("exit", (code, signal) => {
+      waited = setTimeout(() => answer(code, signal), OUTPUT_MS);
     });
+    child.once("close", answer);
   });
 }
 

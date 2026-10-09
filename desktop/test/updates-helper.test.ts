@@ -14,7 +14,7 @@ const asked = vi.hoisted(() => ({
   // How the next program started ends: its exit code, its signal, and what it says first. Or, with
   // *fails*, how it does not start: Node then gives it no output to read, and tells its error
   // later; or, with *throws*, spawn itself throws.
-  ends: { code: 0 as number | null, signal: null as string | null, says: "" as string | Buffer[], fails: "", throws: "" },
+  ends: { code: 0, signal: null, says: "", fails: "", throws: "" } as { code: number | null; signal: string | null; says: string | Buffer[]; fails: string; throws: string; held?: boolean },
 }));
 
 vi.mock("node:child_process", async (original) => {
@@ -34,7 +34,8 @@ vi.mock("node:child_process", async (original) => {
       setImmediate(() => {
         // What it says, in the reads it comes in.
         for (const read of typeof asked.ends.says === "string" ? [Buffer.from(asked.ends.says)] : asked.ends.says) if (read.length > 0) child.stderr.emit("data", read);
-        child.emit("close", asked.ends.code, asked.ends.signal);
+        // *held*: it has ended, and something it started still holds what it says open.
+        child.emit(asked.ends.held ? "exit" : "close", asked.ends.code, asked.ends.signal);
       });
       return child;
     },
@@ -105,6 +106,14 @@ describe("an installed app's root helper", () => {
     asked.ends = { code: 1, signal: null, says: [...Array.from({ length: 600 }, () => megabyte), Buffer.from(`\n${own}\n`)], fails: "", throws: "" };
     const { said } = await installed().apply(files);
     expect([said.length, said.split("\n").at(-1)]).toEqual([3999, own]);
+  });
+
+  it("answers once it has ended, and waits two seconds at most for the end of what it says: a program it left running, which holds its output open, does not hold the line at Installing", { timeout: 10_000 }, async () => {
+    const files = { manifest: "/c/m.json", signature: "/c/m.json.sig", tarball: "/c/r.tar.gz" };
+    asked.ends = { code: 0, signal: null, says: "Surogate Desktop: 1.2.4 is installed\n", fails: "", throws: "", held: true };
+    const began = Date.now();
+    expect(await installed().apply(files)).toEqual({ code: 0, said: "Surogate Desktop: 1.2.4 is installed" });
+    expect([Date.now() - began >= 1_900, Date.now() - began < 4_000]).toEqual([true, true]);
   });
 
   it("answers why where it cannot be started at all, as for want of file descriptors: with no output to read, and its error told later", async () => {
