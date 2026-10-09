@@ -25,6 +25,19 @@ export const MAX_SHARES = 8;
 // share is still in use in the guest, so the host keeps it until the VM stops.
 export const HELD = "What this chat ran is waiting on its folder, which does not answer";
 
+// The guest's third port, ai.surogate.inbound (spec, Section 11, Network, "Later"): the host opens a
+// stream on it for each connection the agent's browser makes to a server of a root's own (inbound.ts).
+export const INBOUND_PORT = "ai.surogate.inbound";
+
+// What a root's runner sends on the root's socket for a connection the agent asked it for (ToRunner's
+// dial): "/in/<id>", then the connection's bytes, or "/in/<id> <errno>" when nothing took it. No
+// destination a command names starts with '/' (network.ts).
+export const INBOUND_LINE = /^\/in\/([0-9a-f]{32})(?: ([A-Z]{1,16}))?$/;
+export const inboundLine = (id: string, reason?: string): string => `/in/${id}${reason ? ` ${reason}` : ""}\n`;
+// How many connections of the browser's one root may have open at once, counted apart from its commands'
+// own (network.ts, MAX_TUNNELS): neither can take the other's place. One browser's most, measured, is 146.
+export const MAX_INBOUND = 160;
+
 // How the guest mounts a root's folder, as the host's VM backend shared it. Each
 // kind names who maps the folder's owner to the root's guest uid. virtiofs: its
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
@@ -77,7 +90,11 @@ export type ToRunner =
   // Where a command would run, looked up in the runner's own view and as its user: run's workdir checks.
   | { type: "place"; id: string; folder: string; home: string; workdir: string | null }
   // shutil.which, in the commands' environment.
-  | { type: "which"; id: string; name: string; cwd: string };
+  | { type: "which"; id: string; name: string; cwd: string }
+  // A connection into the root (spec, Section 5): the runner connects to *port* of its own loopback, the
+  // family *first* names before the other, and brings the connection, or why it has none, to the agent on
+  // the root's socket (INBOUND_LINE).
+  | { type: "dial"; id: string; port: number; first: 4 | 6 };
 
 export type FromRunner =
   | { type: "started"; id: string; pid: number }

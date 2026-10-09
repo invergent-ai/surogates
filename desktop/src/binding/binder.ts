@@ -93,6 +93,8 @@ export interface BinderOptions {
   // that asked, *of* being the upload's operation; *root*, the chat that asks.
   address?(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }>;
   notComing?(of: string): void; // an upload the browser was asked about, by its operation, that got no leave
+  // Whether something in a chat's sandbox listens on a port of its own loopback now: asked before its browser is sent there.
+  listening?(root: string, port: number): Promise<boolean>;
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
@@ -176,7 +178,7 @@ export class Binder implements Executor {
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
       bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address,
-      notComing: options.notComing, refusal: options.refusal, onError: options.onError,
+      notComing: options.notComing, refusal: options.refusal, listening: options.listening, onError: options.onError,
     });
   }
 

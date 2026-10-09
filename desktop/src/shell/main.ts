@@ -778,6 +778,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         const browser = chosenBrowser(browserSetting.get(), findBrowsers());
         return browser && { executable: browser.executable, profile: profileOf(root, credential, browser) };
       },
+      // A chat's own servers are in its sandbox: the VM says whether one listens on a port.
+      vm: vmFor(),
     }),
     prompts,
     approvalPrompts: prompts,
