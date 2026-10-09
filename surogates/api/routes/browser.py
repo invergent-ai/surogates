@@ -30,7 +30,7 @@ from surogates.tenant.auth.middleware import (
     get_current_tenant,
 )
 from surogates.tenant.context import TenantContext
-from surogates.workstreams.spend import admit_turn
+from surogates.workstreams.spend import hold_turn, release_turn
 
 logger = logging.getLogger(__name__)
 
@@ -235,8 +235,9 @@ async def _chat_of(app_state: Any, session: Any, tenant: TenantContext) -> Any:
     return chat
 
 
-async def _may_go_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
-    """Whether a hand back its user confirmed may give the chat's agent a turn.
+async def _may_go_on(app_state: Any, chat: Any, tenant: TenantContext) -> dict[str, dict] | None:
+    """Whether a hand back its user confirmed may give the chat's agent a turn: the holds taken on
+    its user's limit for that turn where it may, None where it may not.
 
     The confirmation is the desktop's own window, and it leaves the page nothing but a yes: the
     pane's word is all the server has of it.  It is taken only from the web client in the window of
@@ -250,18 +251,18 @@ async def _may_go_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
 
     The chat is as it was read when the post arrived, and holding the turn asks ops: its user can
     stop it, or delete it, meanwhile.  Whether the turn is given is the store's to say, as it tells
-    the hand back (``tell_browser_control``).
+    the hand back (``tell_browser_control``); where it is not, the route gives the holds back.
     """
     sign_in = tenant.oauth_family_id
     factory = getattr(app_state, "session_factory", None)
     if sign_in is None or factory is None:
-        return False
+        return None
     if await OAuthTokens(factory).computer(sign_in) != device_of(chat.config):
-        return False
+        return None
     if chat.status not in ("active", "completed") or await app_state.session_store.has_live_lease(chat.id):
-        return False
+        return None
     try:
-        refused = await admit_turn(
+        refused, held = await hold_turn(
             chat, "",
             platform_client=getattr(app_state, "platform_client", None),
             runtime_config_cache=getattr(app_state, "runtime_config_cache", None),
@@ -269,8 +270,8 @@ async def _may_go_on(app_state: Any, chat: Any, tenant: TenantContext) -> bool:
         )
     except (AllowanceReserveError, CommerceReserveError):
         logger.warning("Session %s: a hand back gives no turn while ops is unreachable", chat.id, exc_info=True)
-        return False
-    return refused is None
+        return None
+    return held if refused is None else None
 
 
 # What says whether the turn a hand back gave a chat is still to come.
@@ -481,12 +482,22 @@ async def post_browser_control(
         # confirmed, of a take-over that stands, to a chat that can take a turn as it is told.
         if not await _told_taken_over(request.app.state, chat.id):
             return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}
-        confirmed = body.handed_back and await _may_go_on(request.app.state, chat, tenant)
+        held = await _may_go_on(request.app.state, chat, tenant) if body.handed_back else None
         told = {"session_id": sid, "released_by": owner_user_id, "computer": True}
         # The turn is given with the telling, or not at all: the chat is made active as a typed
         # message makes one whose turn had ended, and the resume written is the turn, and what the
         # agent reads the hand back from.
-        goes_on = await _tell(store, chat.id, EventType.BROWSER_CONTROL_RETURNED, told, gives_a_turn=confirmed)
+        goes_on = None
+        try:
+            goes_on = await _tell(
+                store, chat.id, EventType.BROWSER_CONTROL_RETURNED, told, gives_a_turn=held is not None,
+            )
+        finally:
+            # Held for a turn that is not given, however the telling ended: given back here, unspent.
+            if held and not goes_on:
+                await release_turn(
+                    chat, held, platform_client=getattr(request.app.state, "platform_client", None), session_store=store,
+                )
         if goes_on is None:
             # Another post handed it back meanwhile: that one told the chat, and gave what it gave.
             return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}

@@ -956,6 +956,45 @@ class SessionStore:
             row.updated_at = func.now()
             await db.commit()
 
+    async def remove_from_session_config_list(
+        self,
+        session_id: UUID,
+        key: str,
+        value: Any,
+    ) -> bool:
+        """Take ``value`` out of the list at ``config[key]`` atomically; whether it was there.
+
+        The counterpart of :meth:`append_session_config_list` for a record
+        whose turn will not run.  Under the row lock exactly one of this and
+        :meth:`pop_session_config_key` gets the record: one a settlement
+        took first is not here to take.
+        """
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            existing = config.get(key)
+            items = list(existing) if isinstance(existing, list) else []
+            if value not in items:
+                return False
+            items.remove(value)
+            if items:
+                config[key] = items
+            else:
+                del config[key]
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+            return True
+
     async def pop_session_config_key(
         self, session_id: UUID, key: str,
     ) -> Any:

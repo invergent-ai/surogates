@@ -48,7 +48,7 @@ from tests.test_steer_loop import _final_response
 from .conftest import create_org, create_user, issue_service_account_token
 from .test_devices import AGENT_ID, add_user, api  # noqa: F401  (api is a fixture)
 from .test_oauth import add_computer, signed_in, window_session
-from .test_workstream_spend import CAPPED, Down, Ops, worker
+from .test_workstream_spend import CAPPED, PAID, Down, Ops, a_firebase_user, worker
 from .test_workstream_spend import served as metered
 from .test_workstream_threads import TODO_CALL, harness_of, live_turn, replayed, waking, woken
 
@@ -2048,3 +2048,166 @@ async def test_a_hand_back_whose_turn_the_users_limit_refuses_is_made_and_gives_
     assert chat not in stale
     # And nothing waits for the user's next message, once their limit allows one.
     assert HANDED_BACK not in await replayed(asking.api, await asking.session(chat))
+
+
+# -- The hold a hand back's turn is given on its user's limit, where the turn is then not given --
+
+BOTH_PLANES = {**PAID, **CAPPED}
+# What the route gives back, unspent, of what it held for a hand back's turn on a paid agent with a cap.
+GIVEN_BACK = [("paid", "hold-1", 0), ("allowance", "hold-2", 0)]
+
+
+async def holds_listed(asking, chat: UUID) -> dict[str, list]:
+    config = (await asking.session(chat)).config
+    return {key: config[key] for key in ("commerce_reservations", "allowance_reservations") if key in config}
+
+
+def before_the_telling(asking, monkeypatch, happens) -> None:
+    """*happens* once the route has held the hand back's turn, as the store is about to tell the hand back."""
+    tell = asking.store.tell_browser_control
+
+    async def and_then_tell(session_id, event_type, *args, **kwargs):
+        if event_type is EventType.BROWSER_CONTROL_RETURNED:
+            await happens(session_id)
+        return await tell(session_id, event_type, *args, **kwargs)
+
+    monkeypatch.setattr(asking.store, "tell_browser_control", and_then_tell)
+
+
+@pytest.mark.parametrize("no_turn_for", ["the chat stopped meanwhile", "another post told it meanwhile"])
+async def test_the_hold_taken_for_a_hand_backs_turn_is_given_back_unspent_where_the_turn_is_not_given(
+    asking, monkeypatch, no_turn_for,
+):
+    await a_firebase_user(asking.api)
+    chat = await asking.stopped_while_held()
+    metered(asking.api, BOTH_PLANES, ops := Ops())
+
+    async def stopped(session_id: UUID) -> None:
+        await asking.store.update_session_status(session_id, "paused")
+
+    async def told_by_another(session_id: UUID) -> None:
+        await SessionStore.tell_browser_control(
+            asking.store, session_id, EventType.BROWSER_CONTROL_RETURNED, {"session_id": str(session_id), "computer": True},
+        )
+
+    before_the_telling(asking, monkeypatch, stopped if no_turn_for == "the chat stopped meanwhile" else told_by_another)
+
+    await asking.hands_back(chat, goes_on=False)
+
+    # Held on both planes by the route, then given back in the same request at nothing spent, and
+    # no longer listed on the chat: its next turn is asked of the limit as any is.
+    assert ops.held == [("paid", "fb-flavius", "web"), ("allowance", str(asking.api.user_id), "web")]
+    assert ops.spent == GIVEN_BACK
+    assert await holds_listed(asking, chat) == {}
+    assert asking.wakes == []
+
+
+async def test_the_hold_taken_for_a_hand_backs_turn_is_given_back_where_the_telling_is_answered_busy(
+    asking, monkeypatch, session_factory,
+):
+    await a_firebase_user(asking.api)
+    chat = await asking.stopped_while_held()
+    metered(asking.api, BOTH_PLANES, ops := Ops())
+
+    async with session_factory() as holder:
+        await holder.execute(HELD_FROM_OUTSIDE["its lock"], {"chat": str(chat)})
+        answer = await asking.control(chat, "release", asking.window, handed_back=True)
+        await holder.rollback()
+
+    assert answer == (503, BUSY)
+    assert (len(ops.held), ops.spent) == (2, GIVEN_BACK)
+    assert await holds_listed(asking, chat) == {}
+    try:
+        # Posted again, the turn is held anew and given: that hold stays, for the turn's end to spend.
+        await asking.hands_back(chat)
+        assert (len(ops.held), ops.spent) == (4, GIVEN_BACK)
+        assert {key: len(holds) for key, holds in (await holds_listed(asking, chat)).items()} == {
+            "commerce_reservations": 1, "allowance_reservations": 1,
+        }
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_the_hold_taken_for_a_hand_backs_turn_is_given_back_where_the_telling_fails(asking, monkeypatch):
+    await a_firebase_user(asking.api)
+    chat = await asking.stopped_while_held()
+    metered(asking.api, BOTH_PLANES, ops := Ops())
+
+    async def the_database_goes_away(session_id: UUID) -> None:
+        raise RuntimeError("the database went away")
+
+    before_the_telling(asking, monkeypatch, the_database_goes_away)
+
+    with pytest.raises(RuntimeError, match="the database went away"):
+        await asking.control(chat, "release", asking.window, handed_back=True)
+
+    assert (len(ops.held), ops.spent) == (2, GIVEN_BACK)
+    assert await holds_listed(asking, chat) == {}
+
+
+async def test_only_the_hold_a_hand_backs_own_request_took_is_given_back_and_only_while_it_is_still_listed(
+    asking, monkeypatch,
+):
+    typed = {"allowance_id": "al-1", "reserved_tokens": 900, "reservation_id": "a-typed-messages"}
+    metered(asking.api, CAPPED, ops := Ops())
+    settled: set[UUID] = set()
+
+    async def stopped(session_id: UUID) -> None:
+        if session_id in settled:
+            # A turn's end settles every hold listed on the chat, this request's own among them.
+            await asking.store.pop_session_config_key(session_id, "allowance_reservations")
+        await asking.store.update_session_status(session_id, "paused")
+
+    before_the_telling(asking, monkeypatch, stopped)
+    # A hold a typed message's route listed, for a turn still to run: the hand back holds nothing more.
+    listed = await asking.stopped_while_held()
+    await asking.store.append_session_config_list(listed, "allowance_reservations", typed)
+    await asking.hands_back(listed, goes_on=False)
+    assert ops.held == []
+    taken = await asking.stopped_while_held()
+    settled.add(taken)
+    await asking.hands_back(taken, goes_on=False)
+
+    # The typed message's hold is its turn's, and stays; one a settle took is that settle's to answer for.
+    assert ops.held == [("allowance", str(asking.api.user_id), "web")]
+    assert ops.spent == []
+    assert await holds_listed(asking, listed) == {"allowance_reservations": [typed]}
+    assert await holds_listed(asking, taken) == {}
+
+
+async def test_a_hold_that_cannot_be_given_back_leaves_the_hand_back_answered_as_made(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    metered(asking.api, CAPPED, ops := Ops())
+
+    async def ops_is_away(*args, **kwargs):
+        raise ConnectionError("ops is unreachable")
+
+    async def stopped(session_id: UUID) -> None:
+        await asking.store.update_session_status(session_id, "paused")
+        monkeypatch.setattr(ops, "allowance_debit", ops_is_away)
+
+    before_the_telling(asking, monkeypatch, stopped)
+
+    # Ops' own reaper releases a hold nobody settled: the hand back is made all the same.
+    await asking.hands_back(chat, goes_on=False)
+    assert await holds_listed(asking, chat) == {}
+
+
+async def test_one_record_is_taken_out_of_a_chats_config_list_and_only_where_it_is(computer):
+    chat = await computer.idle()
+    first, second = {"reservation_id": "hold-1"}, {"reservation_id": "hold-2"}
+    for hold in (first, second):
+        await computer.store.append_session_config_list(chat, "allowance_reservations", hold)
+
+    async def listed() -> list | None:
+        return (await computer.store.get_session(chat)).config.get("allowance_reservations")
+
+    assert await computer.store.remove_from_session_config_list(chat, "allowance_reservations", first) is True
+    assert await listed() == [second]
+    # Taken already, or never there: nothing changes, and the caller is told so.
+    assert await computer.store.remove_from_session_config_list(chat, "allowance_reservations", first) is False
+    assert await computer.store.remove_from_session_config_list(chat, "commerce_reservations", second) is False
+    assert await listed() == [second]
+    # The last one out takes the list with it, as a settlement leaves none.
+    assert await computer.store.remove_from_session_config_list(chat, "allowance_reservations", second) is True
+    assert await listed() is None
