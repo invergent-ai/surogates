@@ -118,6 +118,8 @@ interface Begun {
 
 // What a page did that its agent could not see happen, at most this many to an answer.
 const MAX_NOTICES = 20;
+// How many answers this host remembers the notices of, for one whose cancel crossed it on the way (unanswered).
+const CARRIED = 32;
 export const FILE_ASKED =
   "The page asked for a file to upload. Nothing was chosen: browser_upload_file gives it files of the chat's folder.";
 export const NOT_ASKED = "The page has not asked for a file: click its upload button or its file input first";
@@ -513,6 +515,8 @@ export class BrowserHost {
   // opens no file chooser of its own there. Null once its user holds the browser and the page has been quiet
   // for OWN_CHOOSER_MS: a file input is theirs then. *acting*: how many operations of the agent's are still
   // doing something in it. *quiet*: what lets it be, while it is held and heard.
+  // What the last answers carried of what their sessions' pages did, by their operations' ids (took).
+  private readonly carried = new Map<string, { session: string; notices: string[] }>();
   // The uploads whose prompts have asked this host where their input is and have no answer yet, by their
   // operations' ids: whether each is still coming.
   private readonly sought = new Map<string, { coming: boolean }>();
@@ -761,7 +765,7 @@ export class BrowserHost {
     launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined,
   ): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
-    if (kind === "browser.set_input_files") return this.upload(session, args, stop, id);
+    if (kind === "browser.set_input_files") return this.upload(session, args, signal, stop, id);
     // Its agent acted since an upload's prompt named an input: that prompt's upload is not coming, or, allowed
     // and still having its files read, comes to nothing (upload).
     if (!looks(kind, args)) this.unname(session);
@@ -793,8 +797,9 @@ export class BrowserHost {
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
       if (stop.aborted) return PAUSED;
       if (!isRecord(value) || kind === "browser.observe" || kind === "browser.evaluate") return { ok: value ?? null };
-      const notices = this.unseen.get(session) ?? [];
-      this.unseen.delete(session);
+      // Cancelled while it acted: its answer goes to no one, and takes nothing with it of what its pages did.
+      if (signal.aborted) return CANCELLED;
+      const notices = this.took(session, id);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened: this.untold.delete(session) } : {}), notices } };
     } catch (error) {
       // Taken over: a navigation stopped for it is no failure to wait an error page for.
@@ -1140,7 +1145,7 @@ export class BrowserHost {
   // *id*: its operation's. One its user was asked about is given only to what its own prompt named: where
   // that is the session's no more, since its agent acted before its files came or another upload was
   // asked about meanwhile, it is given to nothing, and never to whatever asked last.
-  private async upload(session: string, args: Record<string, unknown>, stop: AbortSignal, id: string | undefined): Promise<Outcome> {
+  private async upload(session: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined): Promise<Outcome> {
     const kept = this.named.get(session);
     const named = kept !== undefined && kept.of === id ? kept : undefined;
     if (named) this.named.delete(session);
@@ -1150,7 +1155,7 @@ export class BrowserHost {
     const chooser = named?.input?.chooser ?? this.choosers.get(session);
     if (!chooser) return failed(NOT_ASKED);
     try {
-      return await this.fill(session, chooser, named?.input ?? null, args, stop);
+      return await this.fill(session, chooser, named?.input ?? null, args, signal, stop, id);
     } finally {
       // Named for this upload alone, or given its files: this host's handle on it is let go.
       this.release(chooser);
@@ -1159,7 +1164,8 @@ export class BrowserHost {
 
   // An upload's files given to *chooser*'s input, of *session*'s: *at*, where its prompt named it.
   private async fill(
-    session: string, chooser: FileChooser, at: { href: string; origin: string } | null, args: Record<string, unknown>, stop: AbortSignal,
+    session: string, chooser: FileChooser, at: { href: string; origin: string } | null, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal,
+    id: string | undefined,
   ): Promise<Outcome> {
     // Its page closed, or is this session's no more.
     if (this.sessionOf(chooser.page()) !== session) return failed(NOT_ASKED);
@@ -1190,10 +1196,41 @@ export class BrowserHost {
     // The input that asked last has its files: its agent is not told again, with this answer, that the page asked
     // for one. Where another input has asked since, that is still to tell.
     const last = this.choosers.get(session) === chooser;
-    if (last) this.choosers.delete(session);
-    const notices = (this.unseen.get(session) ?? []).filter((notice) => !(last && notice === FILE_ASKED));
+    if (last) {
+      this.choosers.delete(session);
+      this.unseen.set(session, (this.unseen.get(session) ?? []).filter((notice) => notice !== FILE_ASKED));
+    }
+    // Cancelled while its files were given: its answer goes to no one, and takes nothing more with it.
+    if (signal.aborted) return CANCELLED;
+    return { ok: { files: files.length, notices: this.took(session, id) } };
+  }
+
+  // What *session*'s pages did since its last answer that said so, for the answer to its operation *id*: kept
+  // no more for the next, unless that answer turns out to have reached no one (unanswered).
+  private took(session: string, id: string | undefined): string[] {
+    const notices = this.unseen.get(session) ?? [];
     this.unseen.delete(session);
-    return { ok: { files: files.length, notices } };
+    if (id !== undefined && notices.length > 0) {
+      this.carried.set(id, { session, notices });
+      // The oldest goes: a cancel that crosses an answer comes within a moment of it.
+      if (this.carried.size > CARRIED) this.carried.delete(this.carried.keys().next().value as string);
+    }
+    return notices;
+  }
+
+  /**
+   * The answer to the operation *id* reached no one: its cancel crossed the answer on the way, and whoever
+   * waited for it had been answered cancelled. What the answer carried of what its session's pages did is
+   * kept for the session's next answer again, before what they have done since. Nothing for an operation
+   * whose answer carried none, or whose session has no tab now.
+   */
+  unanswered(id: string): void {
+    const carried = this.carried.get(id);
+    if (!carried) return;
+    this.carried.delete(id);
+    if (!this.tabs.has(carried.session)) return;
+    const since = (this.unseen.get(carried.session) ?? []).filter((notice) => notice !== FILE_ASKED || !carried.notices.includes(FILE_ASKED));
+    this.unseen.set(carried.session, [...carried.notices, ...since].slice(0, MAX_NOTICES));
   }
 
   // No input is named for *session*'s upload any more.

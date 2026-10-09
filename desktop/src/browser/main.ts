@@ -56,7 +56,11 @@ function received(message: ToBrowser): void {
   } else if (message.type === "show") {
     void host.show(message.root).then((shown) => send({ type: "shown", id: message.id, shown }));
   } else if (message.type === "cancel") {
-    running.get(message.id)?.abort();
+    // Still running: it ends cancelled. Answered already: the answer crossed this on the way, and whoever
+    // waited for it took the cancel's, so what the answer carried of what the page did is kept for the next.
+    const controller = running.get(message.id);
+    if (controller) controller.abort();
+    else host.unanswered(message.id);
   } else if (message.type === "forget") {
     void host.forget(message.root);
   } else if (message.type === "stop") {

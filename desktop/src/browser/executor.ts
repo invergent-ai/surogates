@@ -139,7 +139,10 @@ export class Browsing implements ToolLayer {
     if (!("kind" in sent)) return this.ended(operation, sent);
     // Its user took the browser over while its files were read, handed back since or not: none of them leaves this process.
     if (this.takes !== begun) return this.ended(operation, PAUSED);
-    return this.tell(operation.callingSessionId, await this.options.browser.perform(launch, sent, signal));
+    const outcome = await this.options.browser.perform(launch, sent, signal);
+    // An answer made for an operation that was cancelled meanwhile reaches no one: it takes with it nothing of
+    // what the session's downloads came to, which its next answer says.
+    return signal.aborted ? outcome : this.tell(operation.callingSessionId, outcome);
   }
 
   // An upload, with what each file it names holds, read through the chat's file host as any read of

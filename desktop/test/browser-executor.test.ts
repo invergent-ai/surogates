@@ -287,6 +287,21 @@ describe("the browser's kinds beside the tools", () => {
     expect(told.size).toBe(0);
   });
 
+  it("keeps what a download came to for the session's next answer where the one that would have carried it was made for an operation already cancelled: that answer reaches no one", async () => {
+    const { browsing, answers, stage } = rig();
+    browsing.saveDownloadsWith((download) => Promise.resolve(`saved ${download.name}`));
+    const told = (browsing as unknown as { told: Map<string, { notices: string[] }> }).told;
+    stage({ root: ROOT, session: ROOT, name: "report.txt", path: kept("a"), user: false });
+    await vi.waitFor(() => expect(told.get(ROOT)?.notices).toEqual(["saved report.txt"]));
+    // Cancelled while the browser acted, which answers as if it had not been.
+    const cancelled = new AbortController();
+    cancelled.abort();
+    answers.push({ ok: { notices: [] } }, { ok: { notices: [] } });
+    expect(await browsing.run(op("browser.mouse"), cancelled.signal)).toEqual({ ok: { notices: [] } });
+    expect(told.get(ROOT)?.notices).toEqual(["saved report.txt"]);
+    expect(await browsing.run(op("browser.mouse"), signal)).toEqual({ ok: { notices: ["saved report.txt"] } });
+  });
+
   it("goes on to the next download after one that what saves it failed on, and tells nothing of that one", async () => {
     const { browsing, answers, stage } = rig();
     let saves = 0;

@@ -466,6 +466,64 @@ describe.skipIf(!run)("the browser host's process", () => {
     }
   }, 30_000);
 
+  it("keeps what a page did for its session's next answer where an operation's cancel crossed the answer that carried it, through the host's own process", async () => {
+    profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
+    // A host the answer of one operation, by its id, is taken from as it comes: *crossed* is given it before the client is.
+    const crossing: { id?: string; crossed?: (outcome: { ok?: { notices?: string[] } }) => void } = {};
+    const client = new BrowserClient(() => {
+      const child = fork(BROWSER_HOST, [], { stdio: ["ignore", 2, 2, "ipc"] });
+      const exits: Array<() => void> = [];
+      let closed = false;
+      child.once("close", () => {
+        closed = true;
+        for (const listener of exits) listener();
+      });
+      return {
+        send: (message) => void child.send(message),
+        onMessage: (listener) => void child.on("message", (message) => {
+          const from = message as FromBrowser;
+          if (from.type === "result" && from.id === crossing.id) crossing.crossed?.(from.outcome as { ok?: { notices?: string[] } });
+          listener(from);
+        }),
+        onExit: (listener) => (closed ? listener() : void exits.push(listener)),
+        kill: () => void child.kill("SIGKILL"),
+      };
+    });
+    const launch = { executable: EXECUTABLE!, profile };
+    const signal = new AbortController().signal;
+    let ops = 0;
+    const move = (stop = signal, id = `op-${(ops += 1)}`) =>
+      client.perform(launch, operation(id, "browser.mouse", { action: "move", x: 1, y: 1 }), stop) as Promise<{ ok?: { notices?: string[] } }>;
+    // A move whose cancel is sent as its answer arrives: the host has answered when the cancel reaches it, and the
+    // client, which had the cancel first, answers cancelled. What the answer that reached no one carried.
+    const crossed = async () => {
+      const cancel = new AbortController();
+      crossing.id = `crossed-${(ops += 1)}`;
+      const dropped = new Promise<string[] | undefined>((done) => {
+        crossing.crossed = (outcome) => {
+          cancel.abort();
+          done(outcome.ok?.notices);
+        };
+      });
+      expect(await move(cancel.signal, crossing.id)).toEqual(CANCELLED);
+      return dropped;
+    };
+    try {
+      await client.perform(launch, operation("op-0", "browser.navigate", { url: "http://127.0.0.1:9/" }), signal);
+      // The page asks for a file, as a page's script can: the host hears it a moment later, with no answer made meanwhile.
+      await client.perform(launch, operation("op-ask", "browser.evaluate", {
+        code: "const input = document.createElement('input'); input.type = 'file'; document.body.append(input); input.click(); return 1;",
+      }), signal);
+      let carried: string[] | undefined;
+      await expect.poll(async () => (carried = await crossed()), { timeout: 15_000 }).toEqual([FILE_ASKED]);
+      // The answer that carried it reached no one. The session's next says it, once.
+      expect((await move()).ok?.notices).toEqual([FILE_ASKED]);
+      expect((await move()).ok?.notices).toEqual([]);
+    } finally {
+      await client.stop();
+    }
+  }, 60_000);
+
   it("gives a page what an upload's files hold, and an upload its user was asked about to nothing but what its own prompt named, through the host's own process", async () => {
     profile = mkdtempSync(join(tmpdir(), "sb-profile-"));
     const client = new BrowserClient();

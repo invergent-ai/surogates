@@ -19,7 +19,7 @@ import type { BrowserContext, FileChooser, Frame, JSHandle, Page } from "playwri
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ADDRESS_MS } from "../src/binding/approvals.js";
-import { PAUSED } from "../src/browser/client.js";
+import { CANCELLED, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
@@ -611,6 +611,7 @@ describe("a page's download, as the host stages it", () => {
     prompted: Set<string>;
     live: BrowserContext | null;
     adopt(session: string, page: Page): void;
+    keep(session: string, notice: string): void;
     arrived(page: Page, download: unknown): Promise<void>;
     requested(request: unknown): void;
     loaded(request: unknown): void;
@@ -1404,6 +1405,57 @@ describe("a page's download, as the host stages it", () => {
       expect(keeps()).toEqual([[], null, 0]);
       // The input is kept still for an upload nobody is asked about.
       expect(state().choosers.get(SESSION)).toBe(asked);
+    });
+
+    it("keeps what a session's pages did for its next answer where the answer that would have carried it reached no one: its operation was cancelled while it ran, or its cancel crossed the answer on the way", async () => {
+      const tab = taken();
+      const moves: Array<() => void> = [];
+      Object.assign(tab.page, { mouse: { move: () => new Promise<void>((done) => moves.push(done)) } });
+      const launch = { executable: join(profile, "no-browser-here"), profile };
+      // A move of the mouse in the session's page, which the page takes when the test says.
+      const move = (id: string, signal = new AbortController().signal) => host.perform(launch, "chat-1", SESSION, "browser.mouse", { action: "move", x: 1, y: 1 }, signal, id);
+      const taking = () => vi.waitFor(() => expect(moves).toHaveLength(1));
+      const moved = async (id: string) => {
+        const answer = move(id);
+        await taking();
+        moves.shift()!();
+        return answer;
+      };
+      // The page asks for a file while an operation runs in it, and that operation is cancelled before it ends: it is
+      // answered cancelled, to no one, and takes nothing with it.
+      const cancel = new AbortController();
+      const first = move("op-1", cancel.signal);
+      await taking();
+      tab.input();
+      cancel.abort();
+      expect(await first).toEqual(CANCELLED);
+      moves.shift()!();
+      await turn();
+      expect(state().unseen.get(SESSION)).toEqual([FILE_ASKED]);
+      // The next answer says so. Its cancel crossed it on the way: told that, the host keeps what it carried again.
+      expect(await moved("op-2")).toEqual({ ok: { notices: [FILE_ASKED] } });
+      expect(state().unseen.get(SESSION)).toBeUndefined();
+      state().keep(SESSION, "Something the page did since");
+      host.unanswered("op-2");
+      host.unanswered("op-2");
+      expect(state().unseen.get(SESSION)).toEqual([FILE_ASKED, "Something the page did since"]);
+      // An answer that reached its agent is told once: nothing of it is kept, and a cancel of an operation long answered restores nothing.
+      expect(await moved("op-3")).toEqual({ ok: { notices: [FILE_ASKED, "Something the page did since"] } });
+      expect(await moved("op-4")).toEqual({ ok: { notices: [] } });
+      host.unanswered("op-4");
+      host.unanswered("op-1");
+      expect(await moved("op-5")).toEqual({ ok: { notices: [] } });
+      // An upload's answer too: what it carried is kept again where it reached no one.
+      tab.input({ evaluate: () => Promise.resolve("given"), dispose: () => Promise.resolve() });
+      state().keep(SESSION, "A download was saved");
+      expect(await uploads("op-6")).toEqual({ ok: { files: 1, notices: ["A download was saved"] } });
+      host.unanswered("op-6");
+      expect(state().unseen.get(SESSION)).toEqual(["A download was saved"]);
+      // And nothing for a session whose tab has closed since: no page of its is left to say it of.
+      expect(await moved("op-7")).toEqual({ ok: { notices: ["A download was saved"] } });
+      state().tabs.delete(SESSION);
+      host.unanswered("op-7");
+      expect(state().unseen.get(SESSION)).toBeUndefined();
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {
