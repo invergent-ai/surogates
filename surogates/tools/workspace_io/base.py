@@ -28,22 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+# Where a NUL is refused, and in what words: said once, beside the sandbox's path rules.
+from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, refuse_nul
+
+__all__ = ["NUL_REFUSED", "refuse_nul"]
+
 RipgrepMode = Literal["files", "count", "json"]
-
-# What a NUL is refused with wherever one would reach the system: in a path as
-# the model wrote it, a key, a working folder, a command, or a search's pattern
-# or glob.  Every backend says it, and the desktop app says the same
-# (desktop/src/files/answers.ts), before anything is done with the text.
-# Python's own words are no answer to give: they differ by the call that meets
-# the NUL and by Python's release ("embedded null byte" from os.lstat up to
-# 3.12.3, "lstat: embedded null character in path" since).
-NUL_REFUSED = "A path, a command or a search pattern cannot hold a NUL character"
-
-
-def refuse_nul(*texts: str | None) -> None:
-    """Raise ValueError(NUL_REFUSED) when one of *texts* holds a NUL."""
-    if any(isinstance(text, str) and "\0" in text for text in texts):
-        raise ValueError(NUL_REFUSED)
 
 
 @dataclass(frozen=True, slots=True)
