@@ -34,6 +34,27 @@ class WorkspaceSandboxError(Exception):
     """Raised when a path violates the workspace sandbox."""
 
 
+# What a NUL is refused with wherever one would reach the system: in a path as
+# the model wrote it, a key, a working folder, a command, or a search's pattern
+# or glob.  Every workspace says it, and the desktop app says the same
+# (desktop/src/files/answers.ts), before anything is done with the text.
+# Python's own words are no answer to give: they differ by the call that meets
+# the NUL and by Python's release ("embedded null byte" from os.lstat up to
+# 3.12.3, "lstat: embedded null character in path" since).
+NUL_REFUSED = "A path, a command or a search pattern cannot hold a NUL character"
+
+
+def holds_nul(*texts: object) -> bool:
+    """Whether one of *texts* is a string that holds a NUL."""
+    return any(isinstance(text, str) and "\0" in text for text in texts)
+
+
+def refuse_nul(*texts: str | None) -> None:
+    """Raise ValueError(NUL_REFUSED) when one of *texts* holds a NUL."""
+    if holds_nul(*texts):
+        raise ValueError(NUL_REFUSED)
+
+
 def validate_workspace_root(workspace_path: str | None) -> Path:
     """Validate and return the resolved workspace root.
 
@@ -100,6 +121,7 @@ def validate_path(
     Returns the resolved path as a string.  Raises
     :class:`WorkspaceSandboxError` on any violation.
     """
+    refuse_nul(user_path)
     root = validate_workspace_root(workspace_path)
     return str(resolve_in_workspace(root, user_path))
 
@@ -115,6 +137,7 @@ def validate_workdir(
 
     Returns the resolved workdir as a string.
     """
+    refuse_nul(workdir)
     root = validate_workspace_root(workspace_path)
     if not workdir:
         return str(root)

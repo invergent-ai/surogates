@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 
 from surogates.storage.backend import StorageBackend
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io.base import FileStat, Walk
+from surogates.tools.workspace_io.base import FileStat, Walk, refuse_nul
 
 
 def _missing(key: str) -> FileNotFoundError:
@@ -36,6 +36,8 @@ class StorageWorkspaceIO:
         self._prefix = prefix
 
     async def resolve(self, path: str) -> str:
+        # Refused here, as every workspace refuses it, and never left to what a store says of such a key.
+        refuse_nul(path)
         if path.startswith("/") or ".." in PurePosixPath(path).parts:
             raise WorkspaceSandboxError(f"Path traversal blocked: {path}")
         # As given: the routes used it literally, and an object stored under

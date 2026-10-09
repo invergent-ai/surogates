@@ -1,17 +1,25 @@
 name: Update agent images
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types:
-      - completed
+  # The Release workflow's rollout job calls it once the cloud's release is out. It is not
+  # started by how a Release run ended: that run holds the desktop's jobs too.
+  workflow_call:
+    # A called workflow reads only the secrets it declares here and its caller hands it. None is
+    # marked required: a secret the organisation lacks comes empty, as on a manual run.
+    secrets:
+      NODE_HOSTS:
+        description: The cluster's nodes, separated by spaces.
+      MASTER_HOST:
+        description: The node the agent pods are restarted from.
+      SSH_KEY:
+        description: The private key root accepts over SSH on each of them.
   workflow_dispatch:
 
 jobs:
   update-agent-images:
     name: Update agent images on cluster nodes
-    # Run after a successful Release, or on manual dispatch.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # No condition of its own: called by the release it sees the tag's push as its event, and a
+    # condition on the event would skip it there without a word.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       REMOTE_SCRIPT: /root/update-agent-images.sh

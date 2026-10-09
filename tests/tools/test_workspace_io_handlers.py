@@ -29,7 +29,7 @@ from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
 from surogates.tools.builtin import file_ops, research, terminal
 from surogates.tools.utils import document_cache
 from surogates.tools.utils import process_registry as registry_module
-from surogates.tools.workspace_io import LocalWorkspaceIO, RunResult
+from surogates.tools.workspace_io import NUL_REFUSED, LocalWorkspaceIO, RunResult
 from tests.fake_laptop import InProcessRunner
 from tests.tools.fixtures.build_documents import build_minimal_docx
 
@@ -473,6 +473,43 @@ class TestSearch:
 
 
 @pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
+async def test_a_nul_in_a_path_or_a_pattern_is_refused_alike_by_every_file_tool(ws):
+    assert await call(file_ops._read_file_handler, ws, path="a\x00b") == {"error": NUL_REFUSED}
+    for arguments in (
+        {"pattern": "x", "path": "a\x00b"},
+        {"pattern": "a\x00"},
+        {"pattern": "x", "file_glob": "*\x00"},
+        {"pattern": "*\x00", "target": "files"},
+    ):
+        assert await call(file_ops._search_files_handler, ws, **arguments) == {"error": f"Search failed: {NUL_REFUSED}"}
+    # A write is refused as its other refusals are, not as a tool that failed.
+    for handler, arguments in (
+        (file_ops._write_file_handler, {"path": "a\x00b", "content": "x"}),
+        (file_ops._patch_handler, {"mode": "replace", "path": "a\x00b", "old_string": "a", "new_string": "b"}),
+        (file_ops._patch_handler, {"mode": "patch", "patch": "*** Begin Patch\n*** Add File: a\x00b\n+x\n*** End Patch"}),
+    ):
+        assert await call(handler, ws, **arguments) == {"error": NUL_REFUSED}
+    assert os.listdir(ws.real) == []
+
+
+async def test_a_command_whose_workspace_fails_is_reported_at_once_and_run_once(monkeypatch):
+    ran = []
+
+    class NoShell:
+        async def run(self, command, *, workdir, timeout):
+            ran.append(command)
+            raise RuntimeError("no shell on this host")
+
+    monkeypatch.setattr(terminal, "workspace_io_from", lambda kwargs: NoShell())
+    out = json.loads(await terminal._terminal_handler({"command": "pwd"}))
+    assert out["status"] == "error"
+    assert out["error"] == "Failed to execute command: no shell on this host"
+    assert "traceback" in out
+    # Not tried again: the command may already have run.
+    assert ran == ["pwd"]
+
+
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestTerminal:
     async def test_runs_in_workspace_with_home_there(self, ws):
         out = await call(terminal._terminal_handler, ws, command="pwd; echo $HOME")
@@ -491,13 +528,21 @@ class TestTerminal:
         assert "All commands must run within the workspace directory" in out["error"]
         assert time.monotonic() - started < 1.0
 
-    async def test_setup_failure_is_reported_at_once_not_retried(self, ws):
-        started = time.monotonic()
-        out = await call(terminal._terminal_handler, ws, command="pwd", workdir="a\x00b")
-        assert time.monotonic() - started < 1.0
-        assert out["status"] == "error"
-        assert out["error"] == "Failed to execute command: embedded null byte"
-        assert "traceback" in out
+    @pytest.mark.parametrize("arguments", [
+        {"command": "a\x00b"},
+        {"command": "a\x00b", "workdir": "sub"},
+        {"command": "a\x00b", "background": True},
+        {"command": "true", "workdir": "a\x00b", "background": True},
+        {"command": "pwd", "workdir": "a\x00b"},
+        {"command": "a\x00b", "workdir": "/etc"},
+    ], ids=["command", "command in a folder", "background command", "background workdir", "workdir", "command, workdir outside"])
+    async def test_a_nul_in_a_command_or_its_folder_is_refused_as_its_other_refusals_are(self, ws, arguments, caplog):
+        (ws.real / "sub").mkdir()
+        with caplog.at_level("WARNING"):
+            out = await call(terminal._terminal_handler, ws, **arguments)
+        # The model's mistake, not the server's failure: no traceback for the model, nothing in the log.
+        assert out == {"output": "", "exit_code": -1, "error": NUL_REFUSED, "status": "blocked"}
+        assert caplog.records == []
 
     async def test_exit_code_meaning_for_grep(self, ws):
         (ws.real / "a.txt").write_text("x\n")

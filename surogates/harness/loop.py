@@ -5442,7 +5442,7 @@ class AgentHarness(
         list refresh.  Messages are snapshotted so the chat thread can keep
         mutating the live list without racing the background reader.
         """
-        # A phone call is titled when it opens ("Apel de la …"); an LLM title would be one more
+        # A phone call is titled when it opens ("Call from …"); an LLM title would be one more
         # background call the session waits on before the caller's next turn.
         if (session.title or "").strip() or getattr(session, "channel", None) in REALTIME_CHANNELS:
             return

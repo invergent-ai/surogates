@@ -20,6 +20,7 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 import uvicorn
+from asyncpg.exceptions import InternalClientError
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -66,11 +67,12 @@ from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.builtin import file_ops
+from surogates.tools.utils import process_registry
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import LocalWorkspaceIO
+from surogates.tools.workspace_io import NUL_REFUSED, LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop, perform
 from tests.test_turn_slots import as_tool_call, held_turn
 
@@ -1101,16 +1103,64 @@ async def test_a_database_blip_while_recording_does_not_fail_the_operation(
         (DBAPIError("SELECT ...", {}, Exception("terminating connection"), connection_invalidated=True), True),
         (ConnectionRefusedError("the primary is restarting"), True),
         (TimeoutError("pool timeout"), True),
+        # What the driver says of a connection whose backend ended between two of a call's statements.
+        (InternalClientError("cannot switch to state 11; another operation (2) is in progress"), True),
+        # Its other faults never go away: asked again, the same answer for ever.
+        (InternalClientError("no encoder for OID 16385"), False),
+        (InternalClientError("Bind: expected a sequence, got NoneType"), False),
         (DBAPIError("SELECT ...", {}, Exception("some other failure")), False),
         (IntegrityError("INSERT ...", {}, Exception("duplicate key")), False),
         (ProgrammingError("SELECT ...", {}, Exception("no such column")), False),
         (OperationConflict("changed"), False),
         (ValueError("bad"), False),
     ],
-    ids=lambda case: type(case).__name__ if not isinstance(case, bool) else str(case),
+    ids=lambda case: f"{type(case).__name__} {str(case)[:12]}" if not isinstance(case, bool) else str(case),
 )
 async def test_only_a_database_out_of_reach_is_worth_waiting_out(error, blip):
     assert operations_module._database_unavailable(error) is blip
+
+
+async def test_waiting_out_the_database_says_what_it_said(session_factory, redis_client, caplog):
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.01)
+    said = [InternalClientError("cannot switch to state 11; another operation (2) is in progress")]
+
+    async def call():
+        if said:
+            raise said.pop()
+        return "recorded"
+
+    with caplog.at_level(logging.WARNING, logger="surogates.devices.operations"):
+        assert await ops._while_database_recovers("recording", call) == "recorded"
+    # The message, not only the kind of error: one kind covers faults that are not the database's.
+    assert "InternalClientError: cannot switch to state 11; another operation (2) is in progress" in caplog.text
+
+
+async def test_a_closing_that_fails_after_its_caller_was_stopped_again_says_the_operation_stays_open(
+    api, session_factory, redis_client, monkeypatch, caplog,
+):
+    issued, root = await bound_device(api)
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(UUID(issued["id"]), root)
+    reached, let_go = asyncio.Event(), asyncio.Event()
+
+    async def failing(self, *conditions, decided_for=None):
+        reached.set()
+        await let_go.wait()
+        raise RuntimeError("the journal refused it")
+
+    monkeypatch.setattr(DeviceOperations, "_cancel_where", failing)
+    closing = asyncio.create_task(ops._cancel_own(request))
+    await asyncio.wait_for(reached.wait(), 5.0)
+    with caplog.at_level(logging.WARNING, logger="surogates.devices.operations"):
+        # Its caller is stopped again: the closing goes on without it, and nobody awaits what it raises.
+        await stop(closing)
+        let_go.set()
+        await eventually(lambda: said_it(caplog))
+    assert caplog.text.count("it stays open") == 1 and "the journal refused it" in caplog.text
+
+
+async def said_it(caplog) -> bool:
+    return "it stays open" in caplog.text
 
 
 async def test_a_database_error_that_is_not_a_blip_is_not_retried(
@@ -1669,6 +1719,117 @@ async def _first_op(ws) -> dict:
         frame = await receive(ws)
         if frame["type"] == "op":
             return frame
+
+
+_PAGE = {"encoding": "utf-8", "offset": 1, "limit": 10, "max_bytes": 100}
+_STARTED = {"task_id": "nul", "pty": False, "notify_on_complete": False, "watcher_interval": None}
+# Each operation that hands a text of the model's, or a key, to the computer, with a NUL in it.
+WITH_A_NUL = {
+    "resolve": lambda io: io.resolve("a\0b"),
+    "check_write": lambda io: io.check_write("a\0b"),
+    "read": lambda io: io.read("/f/a\0b"),
+    "read_lines": lambda io: io.read_lines("/f/a\0b", **_PAGE),
+    "write": lambda io: io.write("/f/a\0b", b"x"),
+    "a large write": lambda io: io.write("/f/a\0b", b"x" * (workspace_module.MAX_PAYLOAD_BYTES + 1)),
+    "delete": lambda io: io.delete("/f/a\0b"),
+    "list_dir": lambda io: io.list_dir("/f/a\0b"),
+    "walk": lambda io: io.walk("/f/a\0b", skip=()),
+    "local_file": lambda io: io.local_file("/f/a\0b").__aenter__(),
+    "ripgrep key": lambda io: io.ripgrep("/f/a\0b", mode="count", pattern="x"),
+    "ripgrep pattern": lambda io: io.ripgrep("/f", mode="count", pattern="a\0"),
+    "ripgrep glob": lambda io: io.ripgrep("/f", mode="count", pattern="x", glob="*\0"),
+    "run command": lambda io: io.run("a\0b", workdir=None, timeout=10),
+    "run workdir": lambda io: io.run("pwd", workdir="a\0b", timeout=10),
+    "start command": lambda io: io.start("a\0b", workdir=None, **_STARTED),
+    "start workdir": lambda io: io.start("true", workdir="a\0b", **_STARTED),
+}
+
+
+@pytest.mark.parametrize("call", WITH_A_NUL.values(), ids=WITH_A_NUL)
+async def test_a_nul_is_refused_at_once_with_the_computer_away_and_nothing_is_asked_of_it(laptop_rig, session_factory, call):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    # The computer is away: an operation recorded for it would wait until it is back, and
+    # in a chat that asks every time its user would be asked about what can never run.
+    with pytest.raises(ValueError) as refused:
+        await asyncio.wait_for(call(wio), 3.0)
+    assert str(refused.value) == NUL_REFUSED
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+async def test_a_stat_of_a_key_with_a_nul_finds_nothing_with_the_computer_away(laptop_rig, session_factory):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    assert await asyncio.wait_for(wio.stat("/f/a\0b"), 3.0) is None
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+@pytest.mark.parametrize("arguments", [
+    {"pattern": "a\0"},
+    {"pattern": "x", "file_glob": "*\0"},
+    {"pattern": "a\0", "path": "missing"},
+    {"pattern": "*\0", "target": "files"},
+    {"pattern": "x", "path": "a\0b"},
+], ids=["pattern", "glob", "pattern, path missing", "file pattern", "path"])
+async def test_a_search_with_a_nul_is_refused_at_once_with_the_computer_away(laptop_rig, session_factory, arguments):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    # Before the path is resolved, which asks the computer: nothing waits for it.
+    answer = await asyncio.wait_for(file_ops._search_files_handler(arguments, workspace_io=wio), 3.0)
+    assert json.loads(answer) == {"error": f"Search failed: {NUL_REFUSED}"}
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+@pytest.mark.parametrize("action", ["poll", "log", "wait", "kill", "write", "submit"])
+async def test_a_process_named_with_a_nul_is_unknown_at_once_with_the_computer_away(laptop_rig, session_factory, action):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    before = len(await operation_rows(session_factory, rig.device_id))
+    # No process has such a name: said as the tool says it of any it does not know, without asking the computer.
+    answer = await asyncio.wait_for(
+        process_registry._handle_process({"action": action, "session_id": "proc_\0", "data": "x"}, workspace_io=wio), 3.0,
+    )
+    assert json.loads(answer) == {"status": "not_found", "error": "No process with ID proc_\0"}
+    assert len(await operation_rows(session_factory, rig.device_id)) == before
+
+
+async def test_a_nul_in_what_a_process_is_sent_or_a_browser_is_told_reaches_the_computer(laptop_rig):
+    """Content, not a name: recorded as given while the computer is away, and delivered when it is back."""
+    rig = laptop_rig
+    heard: list[tuple[str, dict]] = []
+    rig.laptop.browser = lambda kind, args: heard.append((kind, args)) or {"ok": {"value": None}}
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    client = DeviceBrowserClient(JournalRunner(
+        rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+        invocation_id=f"call-{uuid.uuid4()}",
+    ))
+    calls = [
+        asyncio.create_task(wio.write_stdin("proc_000000000000", "a\0b")),
+        asyncio.create_task(client.evaluate("return 'a\0b'")),
+        asyncio.create_task(client.type_text("a\0b")),
+        asyncio.create_task(client.navigate("https://example.org/a\0b")),
+    ]
+    try:
+        async def all_recorded() -> bool:
+            return len(await rig.ops.pending(rig.device_id, 1)) == len(calls)
+
+        await eventually(all_recorded)
+        recorded = {op.kind: op.args for op in await rig.ops.pending(rig.device_id, 1)}
+        assert recorded["write_stdin"] == {"session_id": "proc_000000000000", "data": "a\0b"}
+        assert all("a\\u0000b" in json.dumps(args) for args in recorded.values()), recorded
+        await rig.laptop.connect()
+        # Every one is answered by the computer, whatever it answers.
+        done, pending = await asyncio.wait(calls, timeout=10.0)
+        assert not pending
+        assert sorted(rig.laptop.ran) == sorted(recorded)
+        assert all("a\\u0000b" in json.dumps(args) for _, args in heard) and len(heard) == 3
+    finally:
+        for call in calls:
+            call.cancel()
+        await asyncio.gather(*calls, return_exceptions=True)
 
 
 async def test_operations_run_on_the_laptop(laptop_rig):

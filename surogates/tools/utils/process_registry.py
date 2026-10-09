@@ -1069,6 +1069,13 @@ async def _handle_process(args: dict[str, Any], **kw: Any) -> str:
                 },
                 ensure_ascii=False,
             )
+        if "\0" in session_id:
+            # No process has such a name: said at once, as of any the workspace
+            # does not know, and without asking a computer that may be away.
+            return json.dumps(
+                {"status": "not_found", "error": f"No process with ID {session_id}"},
+                ensure_ascii=False,
+            )
         if action == "poll":
             result = await wio.poll(session_id)
         elif action == "log":
