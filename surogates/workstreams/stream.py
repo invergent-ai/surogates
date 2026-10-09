@@ -29,6 +29,7 @@ STREAM_TYPES = frozenset(t.value for t in (
     EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED,
     EventType.TODO_UPDATED, EventType.ITERATION_SUMMARY, EventType.TURN_SUMMARY,
     EventType.WORKER_SPAWNED, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.THREAD_PROPOSED,
+    EventType.HISTORY_REDO, EventType.COORDINATOR_MESSAGE,
 ))
 #: What a project's stream names of its other sessions (the master, and the
 #: sessions under a thread): only what changes a count or a card.  The rest of

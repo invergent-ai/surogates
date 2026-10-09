@@ -296,7 +296,8 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     # a stopped one runs again, and its viewers see it resume.
     if thread.status in ("completed", "failed", "paused"):
         await store.resume_session(thread.id)
-    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": f"{_FROM_COORDINATOR}\n{message}"})
+    # The coordinator's own kind, never the user's message: it answers no wait on the user.
+    await store.emit_event(thread.id, EventType.COORDINATOR_MESSAGE, {"content": f"{_FROM_COORDINATOR}\n{message}"})
     redis = kwargs.get("redis")
     if redis is not None:
         await enqueue_session(

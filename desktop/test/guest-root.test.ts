@@ -498,6 +498,22 @@ describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
     expect(dials.map(({ id }) => id)).toEqual(awaited.map(([, id]) => id));
     expect(awaited.map(([root]) => root)).toEqual(["root-2", "root-2"]);
     expect(dials.every(({ id }) => /^[0-9a-f]{32}$/.test(id)) && dials[0]?.id !== dials[1]?.id).toBe(true);
+    // A root that has every connection it takes is refused before its runner is asked: no dial reaches its server.
+    const full = new Roots({
+      start: () => {
+        const child = spawn(process.execPath, ["-e", NOTING], { stdio: ["pipe", "pipe", "pipe"] });
+        children.push(child);
+        return child;
+      },
+      uid: () => 10_002,
+      kill: () => {},
+      arrivals: () => "EMFILE",
+    });
+    await full.setup("root-3", base, R1, user);
+    expect(await full.reach("root-3", 3000)).toBe("EMFILE");
+    expect(await reaching.reach("root-2", 9000)).toBe("ETIMEDOUT");
+    await until(() => spawnSync("cat", [asked], { encoding: "utf8" }).stdout.split("\n").length === 4);
+    expect(spawnSync("cat", [asked], { encoding: "utf8" }).stdout.trim().split("\n").map((line) => (JSON.parse(line) as { port: number }).port)).toEqual([3000, 8000, 9000]);
     // A root whose runner has gone has no sandbox either: nothing is awaited for it.
     own.at(-1)?.kill("SIGKILL");
     await until(async () => {

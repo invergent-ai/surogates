@@ -34,8 +34,8 @@ def event(event_id: int, type_: str, **data) -> SimpleNamespace:
     return SimpleNamespace(id=event_id, type=type_, data=data)
 
 
-def item(kind: str, status: str, title: str, source_event_id: int) -> SimpleNamespace:
-    return SimpleNamespace(kind=kind, status=status, title=title, source_event_id=source_event_id)
+def item(kind: str, status: str, title: str, source_event_id: int, **payload) -> SimpleNamespace:
+    return SimpleNamespace(kind=kind, status=status, title=title, source_event_id=source_event_id, payload=payload)
 
 
 def summary(event_id: int, recap: str, *files: tuple[str, str, str]) -> SimpleNamespace:
@@ -238,8 +238,12 @@ def test_a_file_named_in_two_turns_is_listed_once_newest_first():
            items=[item("input_required", "expired", "Which year?", 3)]), "Which year?"),
     (facts(THREAD, "T", 60, "active", events=[event(7, "user.message", content="2025.")],
            items=[item("input_required", "expired", "Which year?", 3)]), None),
+    # The coordinator's follow-up is a message after it too, though not the user's.
+    (facts(THREAD, "T", 60, "active", events=[
+        event(1, "user.message", content="Go."), event(7, "coordinator.message", content="Use 2025."),
+    ], items=[item("input_required", "expired", "Which year?", 3)]), None),
     (facts(THREAD, "T", 60, "active", items=[item("action_required", "pending", "Send it?", 5)]), None),
-], ids=["pending", "expired-unanswered", "expired-answered", "an-approval-only"])
+], ids=["pending", "expired-unanswered", "expired-answered", "expired-followed-up", "an-approval-only"])
 def test_the_question_a_thread_waits_on(given, asked):
     found = question_of(given)
     assert (found.title if found else None) == asked
@@ -292,3 +296,13 @@ def test_a_row_has_the_shells_fields_and_values():
         assert derived["group"] in GROUPS and derived["reason"] in (*REASONS, None)
         assert all(list(f) == [_snake(field) for field in file_fields] for f in derived["files"])
         assert all(derived[key] is None or derived[key].endswith("Z") for key in ("created_at", "updated_at", "resolved_at"))
+
+
+def test_a_thread_whose_files_did_not_merge_waits_on_you_with_the_reason_files():
+    given = facts(IDLE, "Draft A", 5, "completed", events=[event(1, "user.message", content="Edit the report.")], items=[
+        item("action_required", "pending", "Couldn't merge my changes to Report.docx", 7, action_type="files"),
+    ])
+    derived = derive_thread(given, now=NOW)
+    assert (derived["group"], derived["reason"], derived["status_line"]) == (
+        "waiting", "files", "Couldn't merge my changes to Report.docx",
+    )

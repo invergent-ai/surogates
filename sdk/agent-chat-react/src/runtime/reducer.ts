@@ -76,6 +76,8 @@ export function applyAgentChatEvent(
 
   switch (event.type) {
     case "user.message":
+    // A project coordinator's follow-up to its thread: shown as the thread reads it, its header saying whose it is.
+    case "coordinator.message":
       // A new user message means the session is about to run a new turn.
       // Clear ``terminal`` so any out-of-order ``session.pause`` that
       // landed between the ``/messages`` route's RESUME and USER_MESSAGE

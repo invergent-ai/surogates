@@ -58,8 +58,10 @@ export interface ToolLayer extends Executor {
   // What saves each download the agent's pages start: the stack's, through the binder. *stop* aborts when the
   // download's chat is deleted.
   saveDownloadsWith?(save: (download: StagedDownload, stop: AbortSignal) => Promise<string>): void;
+  // The ports of chats' own servers their users let the browser open changed, or may have: the tools tell whoever enforces them.
+  forwarded?(): void;
   // Whether something in a chat's sandbox listens on a port of its own loopback now.
-  listening?(root: string, port: number): Promise<boolean>;
+  listening?(root: string, port: number): Promise<boolean | "busy">;
 }
 
 export interface DeviceStackOptions {
@@ -159,6 +161,10 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
   const tools = options.tools(journal.bindings, network, tell);
   made.tools = tools;
   if (options.onBindingChanged) journal.bindings.watch(options.onBindingChanged);
+  // The ports the browser may open are the journal's: told at the start, what the run before kept, and at each
+  // change of a chat's bindings, a port allowed, taken back, moved, or gone with a deleted chat.
+  journal.bindings.watch(() => tools.forwarded?.());
+  tools.forwarded?.();
   const count = (session: string, change: number): void => {
     const left = (running.get(session) ?? 0) + change;
     if (left === 0) running.delete(session);

@@ -274,8 +274,8 @@ async def test_a_landing_whose_main_moved_without_its_saga_is_put_back(api, monk
     await ends(api, pool, thread)
     # It never counts as landed: main does not carry its saga.
     assert pods.real_names() == ["Report.docx", "notes.txt"]
-    [row] = await rows(api, thread)
-    assert (row.saga_state, row.commit) == ("compensated", None)
+    # Nor does its one retry count: main moved again without its saga.
+    assert [(r.saga_state, r.commit) for r in await rows(api, thread)] == [("compensated", None)] * 2
 
 
 async def test_running_landings_are_the_projects_own_oldest_first_with_how_long_each_is_quiet(api):
@@ -1598,7 +1598,8 @@ async def test_only_a_landing_that_completed_with_a_commit_prunes_the_history(ap
     # and its pod goes with the turn.
     assert len(pruned) == (1 if landing == "completed" else 0)
     assert [row.saga_state for row in await rows(api, thread)] == {
-        "rolled back": ["compensated"], "of a turn that changed nothing": [], "completed": ["completed"],
+        # Rolled back, and again on its one retry.
+        "rolled back": ["compensated"] * 2, "of a turn that changed nothing": [], "completed": ["completed"],
     }[landing]
 
 

@@ -23,7 +23,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,10 @@ def build_user_message_dict(
     # Attribute group messages so the model can tell participants apart
     # in a shared thread. Derived entirely from the durable event payload, so
     # the produced bytes are identical on every replay (prefix-cache stable).
-    _source = event_data.get("source") or {}
+    # A route's own message names its source in a word (the inbox's answer
+    # to an item), not as a channel's sender: it has no sender to attribute.
+    _source = event_data.get("source")
+    _source = _source if isinstance(_source, dict) else {}
     if _source.get("chat_type") == "group":
         _sender = sanitize_sender_name((_source.get("user_name") or "").strip())
         if _sender:
@@ -134,7 +137,9 @@ BROWSER_HANDED_BACK = (
     "you act on it.]"
 )
 #: The events a session reads as news at its next model request.
-NEWS_TYPES = WORKER_NEWS_TYPES | {EventType.SESSION_RESUME.value}
+NEWS_TYPES = WORKER_NEWS_TYPES | {
+    EventType.SESSION_RESUME.value, EventType.HISTORY_REDO.value, EventType.INBOX_ACTION_REQUIRED.value,
+}
 
 
 #: The lines a thread's own words sit between in its report.  Only the
@@ -200,6 +205,7 @@ _NOT_MERGED = {
     "shape": "Not merged, because the project has a folder where the thread made a file, or a file where it made a folder",
     "with": "Not merged, because they go with a change that was not merged (a move lands whole or not at all)",
     "kept": "Not kept, because the thread or another helper changed them first (their version stays)",
+    "left": "Not merged, because the thread left the newer file as it is",
 }
 
 
@@ -219,11 +225,14 @@ def not_handed_back(data: dict, *, copy: str = "the thread's copy") -> str:
     return f"Its work could not be handed back, and its changes are not in {copy}"
 
 
-def _landing_lines(data: dict, kept: list, deleted: list) -> str:
-    """A thread report's lines on the files it deleted, the files that did
-    not land, the excluded files it made, and the folders inside a git
-    repository it wrote into."""
+def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
+    """A thread report's lines on the files it deleted, the files being
+    redone, the files that did not land, the excluded files it made, and
+    the folders inside a git repository it wrote into."""
     lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
+    if redoing:
+        # Not finished: the thread is redoing its change on the newer file, and reports again.
+        lines += f"\nBeing redone: {_listed(redoing)}"
     if data.get("landing") in _NOT_LANDED:
         # Said even when no file is known: the master must hear the turn did not land.
         named = _listed(kept) if kept else "the turn's files could not be read"
@@ -288,16 +297,19 @@ def worker_note(event_type: str, data: dict) -> dict:
             files = data.get("files")
             # A thread's files that did not land, and the ones it deleted,
             # are named apart from the ones it made or changed.
-            kept, deleted, made = [], [], []
+            kept, deleted, made, redoing = [], [], [], []
             for f in files if isinstance(files, list) else ():
                 landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
-                (kept if landing == "not_merged" else deleted if change == "deleted" else made).append(f)
+                (
+                    kept if landing == "not_merged" else redoing if landing == "redoing"
+                    else deleted if change == "deleted" else made
+                ).append(f)
             listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
             if data.get("recovered"):
                 # No turn of the thread ended: a later lock holder settled what its lost worker left, and
                 # the harness alone speaks.
                 content = (
-                    f"{named}: a landing its worker left unfinished was settled]" + _landing_lines(data, kept, deleted)
+                    f"{named}: a landing its worker left unfinished was settled]" + _landing_lines(data, kept, deleted, redoing)
                     + (f"\n{_NONE_PUT_BACK}" if data.get("gone") else "")
                 )
             else:
@@ -305,8 +317,63 @@ def worker_note(event_type: str, data: dict) -> dict:
                     f"{named} reported]\n"
                     f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
                     f"Files: {listed}"
-                ) + _landing_lines(data, kept, deleted)
+                ) + _landing_lines(data, kept, deleted, redoing)
     return {"role": "user", "content": content}
+
+
+#: How a thread reads each file its landing left out, by why it was.
+_REDO_WHY = {
+    "changed": "it changed since you started",
+    "shape": "the project now has a folder where you made a file, or a file where you made a folder",
+    "with": "it goes with a change that was not applied",
+}
+
+
+def _by_whom(by: object) -> str:
+    """Who changed a file, as a thread reads it."""
+    by = by if isinstance(by, dict) else {}
+    if by.get("kind") == "thread":
+        return f"by thread {json.dumps(_file_label(by.get('title') or ''), ensure_ascii=False)}"
+    if by.get("kind") == "routine":
+        return f"by the routine {json.dumps(_file_label(by.get('name') or ''), ensure_ascii=False)}"
+    return "by the user"
+
+
+def redo_note(data: dict) -> dict:
+    """The user-role message a thread reads a ``history.redo`` as, built from
+    its payload alone, so the live loop and replay produce the same bytes.
+    A file held with another names no one."""
+    lines = [
+        f"- {_file_label(f.get('path') or '')}: {_REDO_WHY.get(f.get('reason'), _REDO_WHY['changed'])}"
+        + (f" ({_by_whom(f['by'])})" if "by" in f else "")
+        for f in data.get("files") or [] if isinstance(f, dict)
+    ]
+    return {"role": "user", "content": (
+        "[Your changes to these files were not applied:\n" + "\n".join(lines)
+        + "\nRe-apply your change to the current version of each.]"
+    )}
+
+
+def wait_note(data: dict) -> dict | None:
+    """The user-role message a thread reads its wait on its user over files
+    as, built from the item's payload alone, so the live loop and replay
+    produce the same bytes; None for an item that asks its user for
+    anything else.  The item is the user's to read; without this the thread
+    would answer their reply believing its change is in the file."""
+    if data.get("action_type") != "files":
+        return None
+    files = "\n".join(f"- {_file_label(path)}" for path in data.get("files") or [] if isinstance(path, str))
+    if data.get("escalated"):
+        return {"role": "user", "content": (
+            f"[A landing of your changes to these files could not be finished, nor put back whole:\n{files}\n"
+            "Each may hold part of your change in the project. The user was asked to check them: "
+            "read a file again before you change it.]"
+        )}
+    return {"role": "user", "content": (
+        f"[Your changes to these files were left out again, since each changed once more while you redid it:\n{files}\n"
+        "The newer file was kept, and your version is in the file's history, not in the file. "
+        "The user was asked what to do about it: do not put your change in again unless they tell you to.]"
+    )}
 
 
 def worker_news(event_type: str, data: dict) -> dict | None:
@@ -323,10 +390,15 @@ def worker_news(event_type: str, data: dict) -> dict | None:
 def news(event) -> dict | None:
     """The message a session reads an event as at its next model request, or
     None for an event that is no news: a worker's news to its coordinator,
-    and, in a chat on its user's computer, the resume a hand back of the
-    browser gave it."""
+    a redo a project's thread was told of, the wait on its user over files
+    it was put in, and, in a chat on its user's computer, the resume a hand
+    back of the browser gave it."""
     if event.type in WORKER_NEWS_TYPES:
         return worker_news(event.type, event.data)
+    if event.type == EventType.HISTORY_REDO.value:
+        return redo_note(event.data)
+    if event.type == EventType.INBOX_ACTION_REQUIRED.value:
+        return wait_note(event.data or {})
     if resumes_the_agent(event):
         return {"role": "user", "content": BROWSER_HANDED_BACK}
     return None
@@ -348,8 +420,9 @@ def held_news(held: list[dict], event) -> list[dict]:
 
 
 def unread_reports(events: list) -> list[dict]:
-    """The news no model request has read, worker reports and hand backs of
-    the browser alike: those after the log's last ``llm.request``.  Replay
+    """The news no model request has read, worker reports, a thread's redo
+    and hand backs of the browser alike: those after the log's last
+    ``llm.request``.  Replay
     leaves them out, and the wake adds them right before its first request,
     after its compaction, its command and its board update, which is where
     replay puts them once that request is in the log."""
@@ -516,7 +589,8 @@ class ContextReplayMixin:
                 iteration_open = True
                 awaiting_tool_ids = set()
 
-            elif etype == EventType.USER_MESSAGE.value:
+            elif etype in MESSAGE_TYPES:
+                # A coordinator's follow-up is read as a typed message is: its marked content.
                 rendered = build_user_message_dict(event.data)
                 if iteration_open and not (event.data or {}).get("synthetic"):
                     deferred_users.append(rendered)
@@ -598,6 +672,17 @@ class ContextReplayMixin:
             # the browser over again first.  The hand back's own event, as the
             # take-over's, is for the pane.
             elif resumes_the_agent(event) or takes_the_browser_over(event):
+                held_reports = held_news(held_reports, event)
+
+            # A redo a project's thread was told of opens its next turn, and
+            # is read the same way: a command its user typed meanwhile is
+            # answered first, and its answer stands before the redo.
+            elif etype == EventType.HISTORY_REDO.value:
+                held_reports = held_news(held_reports, event)
+
+            # So is the wait on its user over files a thread was put in:
+            # the turn that reads their answer reads what was asked.
+            elif etype == EventType.INBOX_ACTION_REQUIRED.value:
                 held_reports = held_news(held_reports, event)
 
             # A sub-agent's tab on the user's computer is in this log for the

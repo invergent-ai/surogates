@@ -37,7 +37,16 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
-from surogates.harness.landing import _fence, keep_copy, land_turn, prune_later, turn_ended
+from surogates.harness.landing import (
+    _fence,
+    keep_copy,
+    land_turn,
+    left_alone,
+    prune_later,
+    redo_files,
+    turn_ended,
+    waiting_on_you,
+)
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1191,6 +1200,10 @@ class ArtifactCompletionMixin:
                 # A landing that never knew its files: the turn's own list names them, none landed.
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
+        elif is_project_thread(session.config) and (alone := await redo_files(self._store, session.id)):
+            # A redo turn that never used its pod left the files it was woken
+            # for as they are: not merged, and nothing waits on you.
+            files = [f for f in files or [] if f.get("ref") not in alone] + [left_alone(p) for p in sorted(alone)]
 
         if not_kept:
             # Another helper, or the thread, changed them first: theirs stays.
@@ -1325,6 +1338,31 @@ class ArtifactCompletionMixin:
                 )
 
         await self._finalize_dynamic_loop_if_needed(session)
+
+        if landing is not None and landing.get("redo"):
+            from surogates.harness.worker_notify import notify_parent_of_task_event
+
+            # After the turn's end, so that its next turn reads it, and queued,
+            # as a report queues its master: the thread redoes those files.
+            await notify_parent_of_task_event(
+                session_store=self._store, parent_session_id=session.id, event_type=EventType.HISTORY_REDO,
+                payload={"saga": landing["saga"], "files": landing["redo"]}, redis=self._redis,
+            )
+
+        if landing is not None and landing["state"] == "completed":
+            # A file it waited on you over has landed since: that wait is over.
+            landed = {f["ref"] for f in landing["files"] if f.get("landing") == "landed"}
+            if landed:
+                await self._store.land_file_waits(session.id, landed)
+
+        if landing is not None and (landing.get("stuck") or landing["state"] == "escalated"):
+            # It waits on you: a file left out again after its redo, or a
+            # landing it could not put back whole.
+            escalated = landing["state"] == "escalated"
+            paths = [f["ref"] for f in landing["files"] if f.get("kind") == "file"] if escalated else landing["stuck"]
+            await self._store.emit_event(
+                session.id, EventType.INBOX_ACTION_REQUIRED, waiting_on_you(paths, escalated=escalated),
+            )
 
         # Advance cursor to the latest event.
         cursor_target = (

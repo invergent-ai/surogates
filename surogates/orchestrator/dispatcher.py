@@ -33,7 +33,7 @@ from surogates.config import (
 )
 from surogates.harness.error_classify import classify_harness_error
 from surogates.runtime.turn_slots import TurnSlots, current_turn
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.store import SessionNotFoundError
 
 if TYPE_CHECKING:
@@ -642,17 +642,18 @@ class Orchestrator:
 
         Synthetic user messages — mission continuations in particular —
         must NOT count: they re-injected the same poisoned conversation
-        every iteration in the original incident.
+        every iteration in the original incident.  A project coordinator's
+        follow-up to its thread counts as a typed message does.
         """
         events = await self.session_store.get_events(
             session_id,
             after=after_event_id,
-            types=[EventType.USER_MESSAGE, EventType.SESSION_RESUME],
+            types=[*MESSAGE_TYPES, EventType.SESSION_RESUME],
         )
         for event in events:
             data = event.data or {}
             if (
-                event.type == EventType.USER_MESSAGE.value
+                event.type in MESSAGE_TYPES
                 and not data.get("synthetic")
             ):
                 return True

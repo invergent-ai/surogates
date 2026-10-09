@@ -17,7 +17,7 @@ import asyncio
 import logging
 from datetime import timedelta
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, not_, or_, select, update
 from sqlalchemy.orm import aliased
 
 from surogates.db.models import InboxItem, Session
@@ -62,6 +62,9 @@ async def expire_inbox_items(session_store) -> int:
                         # persist until read/acknowledged rather than
                         # expiring on a terminal session.
                         InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
+                        # A thread's wait on you over its files outlives its
+                        # turn: your next message to it answers it.
+                        not_(InboxItem.payload.contains({"action_type": "files"})),
                     ),
                     # The backstop for a question whose tool never got to
                     # retire its own row — a worker killed mid-wait leaves

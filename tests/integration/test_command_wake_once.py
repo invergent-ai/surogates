@@ -20,8 +20,10 @@ import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
 from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import Mission as MissionRow
+from surogates.devices.browser import BROWSER_HAND_BACK
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
+from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.orchestrator.dispatcher import Orchestrator
@@ -29,7 +31,7 @@ from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session import LeaseNotHeldError
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
@@ -735,10 +737,12 @@ async def test_a_wake_of_a_finished_chat_looks_for_a_waiting_command_from_its_la
 
     await workers.worker(store=Reads()).wake(chat)
 
-    # The wake has nothing to do.  Beside its user's messages it read the log from the last command
-    # on: commands are answered in the order typed, so none waits unless the last one does.
+    # The wake has nothing to do.  Beside the messages typed into it, its user's and a project
+    # coordinator's follow-ups, it read the log from the last command on: commands are answered in
+    # the order typed, so none waits unless the last one does.
     assert (workers.ran, len(workers.requests)) == (["_handle_loop_command", "_handle_goal_command"], 2)
-    assert [read.get("after") for read in reads if read.get("types") != [EventType.USER_MESSAGE]] == [typed - 1]
+    messages = ([EventType.USER_MESSAGE], list(MESSAGE_TYPES))
+    assert [read.get("after") for read in reads if read.get("types") not in messages] == [typed - 1]
 
 
 async def test_a_command_typed_before_the_last_one_does_not_wait_once_the_last_one_is_answered(workers):
@@ -1661,6 +1665,52 @@ async def test_the_sweeper_spares_a_paused_missions_chat_only_while_no_turn_of_i
     assert await workers.looks_abandoned(chat)
 
 
+async def test_the_sweeper_takes_a_paused_missions_chat_that_ends_on_a_follow_up_nobody_woke_it_for(workers):
+    chat = await a_coordinator(workers)
+    await pause(workers, chat, "not typed")
+    assert not await workers.looks_abandoned(chat)
+
+    # A project coordinator's follow-up to its thread is a turn to run, as a message typed into it is.
+    await workers.store.emit_event(chat, EventType.COORDINATOR_MESSAGE, {"content": "[From the project's coordinator]\nGo on."})
+    assert await workers.looks_abandoned(chat)
+
+
+@pytest.mark.parametrize("kind, raised, answer, reads", [
+    (
+        EventType.INBOX_ACTION_REQUIRED,
+        {"title": "Log in", "instructions": "Log in to the site.", "context": "", "action_type": "browser", "target": "site"},
+        {"completed": True}, "[user action completed] browser.",
+    ),
+    (
+        EventType.INBOX_GOVERNANCE_GATE,
+        {"tool_name": "send_email", "tool_call_id": "tc-1", "arguments_excerpt": "to=ceo@example.com",
+         "deny_reason": "External recipient", "policy_id": "external-comms-v1"},
+        {"decision": "approve"}, "[governance decision] APPROVE for send_email",
+    ),
+], ids=["an action completed", "a governance decision"])
+async def test_an_inbox_items_answer_gives_its_chat_one_turn_and_its_users_next_message_still_works(workers, kind, raised, answer, reads):
+    chat = await workers.chat()
+    raised_at = await workers.store.emit_event(chat, kind, raised)
+    async with workers.api.app.state.session_factory() as db:
+        item = (await db.execute(text("SELECT id FROM inbox_items WHERE source_event_id = :id"), {"id": raised_at})).scalar_one()
+    answered_it = await workers.api.client.post(f"/v1/inbox/{item}/respond", json=answer, headers=workers.api.auth())
+    assert answered_it.status_code == 200, answered_it.text
+    assert await queued(workers.api, await workers.session(chat))
+    await workers.nobody_is_queued()
+
+    await workers.wake(chat)
+
+    # The route's message names its source in a word, where a channel's names a sender: replay takes both.
+    [conversation] = workers.requests
+    assert conversation[-1]["role"] == "user" and conversation[-1]["content"].startswith(reads)
+    assert await workers.status(chat) == "completed" and not await queued(workers.api, await workers.session(chat))
+    assert EventType.HARNESS_CRASH.value not in await workers.log(chat) and not await workers.looks_abandoned(chat)
+    await workers.says(chat, "Hello again?")
+    await workers.wake(chat)
+    assert [request[-1]["content"] for request in workers.requests[1:]] == ["Hello again?"]
+    assert await workers.status(chat) == "completed"
+
+
 async def test_a_wake_that_goes_on_to_the_model_behind_a_command_leaves_the_cursor_to_that_turn(workers):
     chat = await a_coordinator(workers)
     await workers.types(chat, "/mission status")
@@ -2162,3 +2212,28 @@ async def test_a_routines_run_whose_prompt_is_a_command_ends_and_its_routine_goe
     # ... and its routine is given its next run.
     given = await routines.recover_stalled_dynamic_loops(agent_id=AGENT_ID, stale_seconds=0)
     assert routine.id in [r.id for r in given]
+
+
+@pytest.mark.parametrize("note", ["a helper's report", "a hand back of the browser"])
+async def test_a_skills_expansion_is_never_written_over_a_note_its_cut_off_turn_had_read(workers, monkeypatch, note):
+    chat, store = await workers.chat(), workers.store
+
+    async def a_skill(**_):
+        return "Follow the report-writer skill: tidy the notes.", "report-writer", None, "skill"
+
+    monkeypatch.setattr(loop_module, "expand_slash_skill", a_skill)
+    await workers.says(chat, "/report-writer Tidy the notes.")
+    if note == "a helper's report":
+        await workers.a_helper_reports(chat)
+    else:
+        await store.emit_event(chat, EventType.SESSION_RESUME, {"source": BROWSER_HAND_BACK})
+    # The turn's first request reads the skill and the note; its worker dies before the model's answer is written.
+    dying = DiesWriting(store, lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" not in data)
+    with pytest.raises(asyncio.CancelledError):
+        await workers.worker(store=dying).wake(chat)
+    await workers.wake(chat)
+    cut_off, recovered = workers.requests[-2:]
+    # The wake that goes on with the turn expands the skill in the user's own message: the note stays the newest.
+    assert recovered == cut_off
+    assert recovered[-2] == {"role": "user", "content": "Follow the report-writer skill: tidy the notes."}
+    assert recovered[-1]["content"].startswith("[Worker ") if note == "a helper's report" else recovered[-1]["content"] == BROWSER_HANDED_BACK

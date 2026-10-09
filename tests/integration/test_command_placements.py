@@ -13,7 +13,8 @@ Of every placement:
   command whose worker died before its answer was written is run again by
   the wake that recovers the chat, whichever command it is: its handler
   starts twice, and what it made is there once;
-* each message of the user's own was read by one turn of the model's, and no
+* each message of the user's own, and each follow-up of a project
+  coordinator's to its thread, was read by one turn of the model's, and no
   turn was asked with nothing new to read;
 * each request is one a provider takes: a call's results follow it at once,
   a request starts on a user's message and ends on a user's message or a
@@ -45,7 +46,7 @@ from tests.test_steer_loop import _final_response
 
 from .test_command_wake_once import MISSION, Workers, a_coordinator, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import answered, queued, start, turn_ends
+from .test_workstream_threads import answered, call_tool, queued, start, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -54,7 +55,9 @@ BEFORE_ANY_WAKE, FIRST_REQUEST, TOOL_CALL = "before any wake", "during the turn'
 BETWEEN_CALLS, LAST_REQUEST, TURN_ENDED = "between two tool calls", "during the turn's last request", "after the turn's end"
 MOMENTS = (BEFORE_ANY_WAKE, FIRST_REQUEST, TOOL_CALL, BETWEEN_CALLS, LAST_REQUEST, TURN_ENDED)
 ALONE, MESSAGE_BEFORE, MESSAGE_AFTER, COMMAND_AFTER = "alone", "a message before it", "a message after it", "a command after it"
-COMPANY = (ALONE, MESSAGE_BEFORE, MESSAGE_AFTER, COMMAND_AFTER)
+#: In a project's thread, where its coordinator follows up: never the user's message, and read as one.
+FOLLOW_UP_BEFORE, FOLLOW_UP_AFTER = "a coordinator's follow-up before it", "a coordinator's follow-up after it"
+COMPANY = (ALONE, MESSAGE_BEFORE, MESSAGE_AFTER, COMMAND_AFTER, FOLLOW_UP_BEFORE, FOLLOW_UP_AFTER)
 NO_DEATH, BEFORE_THE_ANSWER, AFTER_THE_ANSWER = "no death", "its worker dies before the answer", "its worker dies after the answer"
 #: No death, and no answer of the handler's either: the database is away as it writes it.
 NOT_WRITTEN = "its answer cannot be written"
@@ -62,9 +65,13 @@ DEATHS = (NO_DEATH, BEFORE_THE_ANSWER, AFTER_THE_ANSWER, NOT_WRITTEN)
 
 #: What the user says before the command, after it, and once the chat has come to rest.
 ASKED_BEFORE, ASKED_AFTER, ASKED_LAST = "And Q1?", "And Q4?", "And then?"
+#: What a thread's coordinator follows up with, and the thread's log holds of it.
+FOLLOW_UP = "Keep it to one page."
+FOLLOWED_UP = f"[From the project's coordinator]\n{FOLLOW_UP}"
 #: What is work for a wake while it lies past the cursor; a turn's end leaves only its own notes there.
 WORK = frozenset(kind.value for kind in (
-    EventType.USER_MESSAGE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.TOOL_CALL, EventType.TOOL_RESULT,
+    EventType.USER_MESSAGE, EventType.COORDINATOR_MESSAGE,
+    EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.TOOL_CALL, EventType.TOOL_RESULT,
     EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.CONTEXT_COMPACT,
 ))
 #: The wake's own answer for a command whose handler wrote none, and what it tells its user to look at.
@@ -232,6 +239,8 @@ class Placement:
         self.compressed: list[list[dict]] = []
         self.typed: list[str] = []
         self.chat: UUID | None = None
+        #: The coordinator of the thread's project, where the chat is a thread.
+        self.master = None
         self.began = 0
         self.left_waiting: list[str] = []
 
@@ -240,7 +249,8 @@ class Placement:
         if self.command.of_a_coordinator:
             self.chat = await a_coordinator(self.workers)
         elif self.command.in_a_thread:
-            thread = await start(self.workers.api, await master_of(self.workers.api, await create(self.workers.api)))
+            self.master = await master_of(self.workers.api, await create(self.workers.api))
+            thread = await start(self.workers.api, self.master)
             await self.workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
             await answered(self.workers.api, thread, "On it.")
             await turn_ends(self.workers.api, thread)
@@ -259,6 +269,12 @@ class Placement:
         self.typed.append(words)
         if words == self.command.typed:
             self.store.command = (await self.workers.store.get_events(self.chat, types=[EventType.USER_MESSAGE]))[-1].id
+
+    async def is_followed_up(self) -> None:
+        """The thread's coordinator sends it a follow-up, as its ``message_thread`` does."""
+        sent = await call_tool(self.workers.api, self.master, "message_thread", thread_id=str(self.chat), message=FOLLOW_UP)
+        assert sent == {"status": "sent", "thread_id": str(self.chat)}
+        self.typed.append(FOLLOWED_UP)
 
     async def wake(self) -> None:
         """A new worker wakes the chat; it may be the one that dies."""
@@ -293,11 +309,13 @@ class Placement:
             MESSAGE_BEFORE: [ASKED_BEFORE, self.command.typed],
             MESSAGE_AFTER: [self.command.typed, ASKED_AFTER],
             COMMAND_AFTER: [self.command.typed, self.second.typed],
+            FOLLOW_UP_BEFORE: [FOLLOWED_UP, self.command.typed],
+            FOLLOW_UP_AFTER: [self.command.typed, FOLLOWED_UP],
         }[company]
 
         async def typing():
             for said in words:
-                await self.says(said)
+                await (self.is_followed_up() if said == FOLLOWED_UP else self.says(said))
 
         await self.begin(moment)
         if moment == BEFORE_ANY_WAKE:
@@ -591,6 +609,8 @@ PLACEMENTS = [
     placement for placement in itertools.product(COMMANDS, MOMENTS, COMPANY, DEATHS)
     # A thread's command is placed where its user types one: after a turn's end.
     if not COMMANDS[placement[0]].in_a_thread or placement[1] == BEFORE_ANY_WAKE
+    # Only a thread has a coordinator to follow it up.
+    if COMMANDS[placement[0]].in_a_thread or placement[2] not in (FOLLOW_UP_BEFORE, FOLLOW_UP_AFTER)
 ]
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from surogates.harness.loop_messages import _format_bytes
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES
 
 _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
     "parse_error": (
@@ -76,11 +76,8 @@ def _attachments_note(events: list[Any]) -> str | None:
     so the LLM call proceeds unchanged.
     """
     for event in reversed(events):
-        event_type = event.type
-        type_value = (
-            event_type.value if hasattr(event_type, "value") else event_type
-        )
-        if type_value != EventType.USER_MESSAGE.value:
+        # A coordinator's follow-up is the turn's message, and carries no attachments.
+        if event.type not in MESSAGE_TYPES:
             continue
         data = event.data if isinstance(event.data, dict) else {}
         return _attachments_note_from_data(data)
@@ -146,7 +143,9 @@ def _attachments_note_from_data(data: Any) -> str | None:
     # Section 2: channel file ids from source.files (additive, never raises).
     files_section: str | None = None
     try:
-        source_files = (data.get("source") or {}).get("files")
+        source = data.get("source")
+        # A word, where a route wrote the message: no channel, no files.
+        source_files = source.get("files") if isinstance(source, dict) else None
         if isinstance(source_files, list):
             file_lines = []
             for f in source_files:

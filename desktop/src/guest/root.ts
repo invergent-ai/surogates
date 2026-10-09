@@ -543,8 +543,9 @@ export interface RootsOptions {
   flush?(share: Share, stalled: boolean): Promise<boolean>;
   // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
   tunnels?(root: string, uid: number): Promise<() => void>;
-  // A connection into the root that its runner was asked for under *id*, once it comes on the root's socket, or why none (Network.arrival).
-  arrivals?(root: string, id: string): Promise<Socket | string>;
+  // A connection into the root that its runner was asked for under *id*, once it comes on the root's socket, or why none;
+  // a reason said at once, not promised, is of a root that takes no more: its runner is then asked for nothing (Network.arrival).
+  arrivals?(root: string, id: string): Promise<Socket | string> | string;
   questionMs?: number;
   // How far past a run's timeout its backstop falls: BACKSTOP_MS by default.
   backstopMs?: number;
@@ -750,6 +751,8 @@ export class Roots {
     if (!target || target.runner.went || !this.options.arrivals) return "sandbox";
     const id = randomBytes(16).toString("hex");
     const arriving = this.options.arrivals(root, id);
+    // Refused before any dial: the root's server sees no connection made for one nobody would take.
+    if (typeof arriving === "string") return arriving;
     target.runner.dial(id, port, first);
     return arriving;
   }

@@ -190,7 +190,10 @@ async def land_turn(
     ``landed`` or ``not_merged``; *repositories* are the folders inside a
     git repository the turn wrote into, which never land; *not_taken* are
     the files a helper changed that the thread's copy kept its own version
-    of, whose helper's version is in the history alone.
+    of, whose helper's version is in the history alone.  *redo* names the
+    files a clash left out, each ``{path, reason, by}``, which the thread is
+    woken to redo; their files are ``redoing``.  *stuck* names the files it
+    was woken to redo and left out again: the thread waits on you over them.
 
     A landing that could not start, since another thread's landing left
     running could not be settled or the lock or its row could not be had,
@@ -210,7 +213,8 @@ async def land_turn(
     project, so a landing that starts after another sees its files as
     changed rather than rolling back over them.  The lock frees itself if
     its connection drops, so the landing asks it before each apply and the
-    record, and stops when it is gone.  The landings a killed worker left
+    record, and stops when it is gone.  A landing put back whole is tried
+    once more, at once, as a new saga.  The landings a killed worker left
     running are settled first; this thread's own, if one had pushed, is
     reported with this turn's files.
     """
@@ -219,6 +223,7 @@ async def land_turn(
         return None
     # Read before the lock, which is held for the landing alone.
     calls = await store.get_events(session.id, after=after_event_id, types=[EventType.TOOL_CALL])
+    redoing = await redo_files(store, session.id)
     workstream = session.config["workstream_id"]
     outcome = None
     settled: list[dict] = []
@@ -229,6 +234,12 @@ async def land_turn(
             settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited)
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
+            if outcome["state"] == "compensated":
+                # Put back whole: a file changed between the pickup and its
+                # apply, or a step failed.  Tried once more, at once, as a new
+                # saga, whose pickup sees the change: never with the lock lost.
+                await held()
+                outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception as exc:
         if _cancelling():
             # The lock's dead connection failed the block's exit: the cancel goes on.
@@ -265,6 +276,7 @@ async def land_turn(
         for row in settled if row["thread"] == session.id and row["state"] == "completed"
         for f in row["files"] if f["merged"] and f["path"] not in known
     ]
+    _tell(outcome, redoing)
     return outcome
 
 
@@ -977,6 +989,8 @@ async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any, at_is
             ).limit(1))
         if told is not None:
             return
+        # Its thread waits on you over those files, whichever lock holder found it so.
+        await store.emit_event(thread_id, EventType.INBOX_ACTION_REQUIRED, waiting_on_you(at_issue, escalated=True))
         await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
             "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
             "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in at_issue],
@@ -1123,3 +1137,90 @@ async def _put_back(
         # Not a put-back that failed: the next holder of the lock does the rest.
         raise lost[0]
     return failed
+
+
+def _tell(outcome: dict | None, redoing: set[str]) -> None:
+    """What the thread, the master and you hear of the files a completed landing left out.
+
+    A clash, a file someone changed since the thread's base (it names them,
+    ``by``), is redone: the thread is woken to redo it on the newer version
+    (``redo``), with what was held with it, and the report marks each
+    ``redoing``.  A file no one else changed clashed with nothing: a turn's
+    own change of shape, or a deletion held only with a write history
+    leaves out, stays not merged.  A file the turn was woken to redo that
+    clashes again is ``stuck``: the newer file stays, the thread's version
+    stays in history, and the thread waits on you.  One the redo turn left
+    alone it chose to leave as it is: not merged, and nothing waits.  The
+    turn end saved its work when every file it held is redone.
+    """
+    if outcome is None or outcome["state"] != "completed":
+        return
+    held = {o["path"]: o for o in outcome["overlapped"]}
+    outcome["stuck"] = sorted(_clashed({p: o for p, o in held.items() if p in redoing}))
+    redo = _clashed({p: o for p, o in held.items() if p not in redoing})
+    outcome["redo"] = [
+        {"path": p, "reason": o["reason"], **({"by": o["by"]} if "by" in o else {})} for p, o in sorted(redo.items())
+    ]
+    for f in outcome["files"]:
+        if f["ref"] in redo:
+            f["landing"] = "redoing"
+    landed = {c["path"] for c in outcome["landed"]}
+    outcome["files"] += [left_alone(p) for p in sorted(redoing - held.keys() - landed)]
+    outcome["saved"] = held.keys() <= redo.keys()
+
+
+def _clashed(held: dict[str, dict]) -> dict[str, dict]:
+    """Those of *held* that clashed: each someone changed (its ``by``), and what is held with them; none when no one did."""
+    if not any("by" in o for o in held.values()):
+        return {}
+    return {p: o for p, o in held.items() if "by" in o or o["reason"] == "with"}
+
+
+def left_alone(path: str) -> dict:
+    """A report's file a redo turn left as it is: not merged, and nothing waits."""
+    return {"kind": "file", "label": path, "ref": path, "landing": "not_merged", "reason": "left"}
+
+
+async def redo_files(store: Any, session_id: Any) -> set[str]:
+    """The files this turn of a thread was told to redo: those of the thread's last ``history.redo``,
+    while no turn that read it has ended; none for any other turn.
+
+    A turn reads a redo at its first request of the model.  One that ended
+    since, by a landing, a failure or a stop, was the redo's turn, and the
+    turn after it is an ordinary one.  A turn that ended before it asked
+    the model anything, refused by its user's limit, read no redo: the redo
+    is still the next turn's.
+    """
+    redo = await store.last_event(session_id, EventType.HISTORY_REDO)
+    if redo is None:
+        return set()
+    ended = await store.last_event(session_id, *TURN_ENDS)
+    if ended is not None and ended.id > redo.id and await store.has_event(
+        session_id, EventType.LLM_REQUEST, after=redo.id, before=ended.id,
+    ):
+        return set()
+    return {f["path"] for f in redo.data.get("files", [])}
+
+
+def waiting_on_you(paths: list[str], *, escalated: bool) -> dict:
+    """The ``inbox.action_required`` a thread waits on you with, over its files: its first file the target."""
+    first = paths[0] if paths else "session"
+    others = len(paths) - 1
+    named = ", ".join(paths[:20]) + (f" and {len(paths) - 20} more" if len(paths) > 20 else "")
+    if escalated:
+        title = "Couldn't finish landing my changes"
+        instructions = (
+            f"A landing of this thread's changes could not be put back whole: {named or 'its files'}. "
+            "Each file's History shows every version."
+        )
+    else:
+        title = f"Couldn't merge my changes to {first}" + (f" and {others} other file{'s' if others > 1 else ''}" if others else "")
+        instructions = (
+            f"{named} changed again while this thread redid its change. "
+            "The newer file was kept; this thread's version is in the file's History."
+        )
+    return {
+        "title": title, "instructions": instructions, "context": "", "action_type": "files", "target": first, "reason": "files",
+        # For the thread, which reads the wait as news, and for a later landing, which ends a wait whose files landed.
+        "files": list(paths), "escalated": escalated,
+    }

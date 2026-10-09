@@ -37,6 +37,19 @@ describe("applyAgentChatEvent", () => {
     expect(next.messages[0]?.content).toBe("hello");
   });
 
+  it("shows a coordinator's follow-up to a thread as the message it reads, and runs the turn", () => {
+    const next = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "coordinator.message",
+      eventId: 43,
+      data: { content: "[From the project's coordinator]\nUse the 2025 figures." },
+    });
+
+    expect(next.messages.map((m) => [m.id, m.role, m.content])).toEqual([
+      ["evt-43", "user", "[From the project's coordinator]\nUse the 2025 figures."],
+    ]);
+    expect(next.isRunning).toBe(true);
+  });
+
   it("does not duplicate llm.response content after llm.delta streamed it", () => {
     const afterDelta = applyAgentChatEvent(createInitialAgentChatState(), {
       type: "llm.delta",

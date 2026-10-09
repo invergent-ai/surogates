@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Event, InboxItem, Workstream, WorkstreamThread
 from surogates.db.models import Session as SessionRow
-from surogates.session.events import EventType
+from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import master_instructions
 from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of
 
@@ -236,7 +236,7 @@ class WorkstreamStore:
         tree = tree.union_all(select(SessionRow.id, tree.c.thread_id).join(tree, SessionRow.parent_id == tree.c.id))
         replied = (
             select(func.coalesce(func.max(Event.id), 0))
-            .where(Event.session_id == tree.c.thread_id, Event.type == EventType.USER_MESSAGE.value)
+            .where(Event.session_id == tree.c.thread_id, Event.type.in_([t.value for t in MESSAGE_TYPES]))
             .scalar_subquery()
         )
         # A pending item, or a question that expired with no message after it.
