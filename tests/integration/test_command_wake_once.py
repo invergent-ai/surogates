@@ -805,96 +805,63 @@ async def test_a_second_command_sent_before_the_first_ones_answer_is_written_is_
     assert (workers.requests, await workers.status(chat)) == ([], "completed")
 
 
-async def test_a_command_the_model_once_read_as_words_is_still_run(workers):
+async def test_a_command_the_old_harness_gave_the_model_as_words_is_never_run(workers):
     chat = await a_coordinator(workers)
     [mission] = await workers.missions(chat)
     emit = workers.store.emit_event
-    # As a turn left it that read what its user typed meanwhile: the model answered the command in
-    # its own words, and a later wake took a turn of the model's for something else.
+    # As a turn of the old harness left it, in a mission's chat, where no turn's end is written: its
+    # wake carries no mark, the command was typed during the turn, and the model answered it in words.
+    await emit(chat, EventType.HARNESS_WAKE, {"worker_id": "an-old-worker", "cursor": 0})
+    await emit(chat, EventType.LLM_REQUEST, {})
     await workers.says(chat, "/mission pause")
     await emit(chat, EventType.LLM_REQUEST, {})
     await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "I cannot pause a mission."}})
-    await emit(chat, EventType.HARNESS_WAKE, {"worker_id": "an-earlier-worker", "cursor": 0})
-    await emit(chat, EventType.LLM_REQUEST, {})
-    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Waiting for the helpers."}})
+    async with workers.api.app.state.session_factory() as db:
+        await db.execute(text("UPDATE events SET created_at = created_at - interval '40 days' WHERE session_id = :id"), {"id": chat})
+        await db.commit()
 
-    await workers.a_helper_reports(chat)
-    await workers.wake(chat)
-
-    # What the model said is no answer of the harness's: the command runs.
-    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_mission_command"], "Mission paused.")
-    assert ((await workers.missions(chat, mission.id))[0].status, workers.requests) == ("paused", [])
-
-
-async def test_two_commands_typed_before_any_wake_are_each_run_once_in_the_order_typed(workers):
-    chat = await a_coordinator(workers)
-    [mission] = await workers.missions(chat)
-    await workers.says(chat, "/mission pause")
-    await workers.says(chat, "/mission status")
-    await workers.nobody_is_queued()
-
-    await workers.wake(chat)
-    # One command a wake, the oldest first; the chat is queued while another waits.
-    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_mission_command"], "Mission paused.")
-    assert await queued(workers.api, await workers.session(chat))
     for _ in range(2):
+        await workers.a_helper_reports(chat)
         await workers.wake(chat)
 
-    assert workers.ran == ["_handle_mission_command"] * 2
-    paused, status = (await workers.said(chat))[-2:]
-    assert (paused, "status=paused" in status) == ("Mission paused.", True)
-    assert ((await workers.missions(chat, mission.id))[0].status, workers.requests) == ("paused", [])
+    # Its user has had the model's words for it since: a helper's report does not pause the mission now.
+    assert (workers.ran, (await workers.missions(chat, mission.id))[0].status) == ([], "active")
+    assert len(workers.requests) == 2
 
 
-async def test_a_routine_asked_for_before_another_command_is_made(workers):
+async def test_a_chat_the_old_harness_left_runs_each_new_command_once_and_no_old_one(workers):
     chat = await workers.chat()
-    await workers.says(chat, "/loop 1d Check the cash report")
-    await workers.says(chat, "/goal status")
-    for _ in range(3):
-        await workers.wake(chat)
-
-    [routine] = await workers.routines()
-    made, status = (await workers.said(chat))[-2:]
-    assert (made.startswith(f"Loop scheduled: `{routine.id}`"), status) == (True, "No active outcome. Set one with /goal <text>.")
-    assert (workers.ran, workers.requests, await workers.status(chat)) == (
-        ["_handle_loop_command", "_handle_goal_command"], [], "completed",
-    )
-
-
-async def test_three_commands_in_a_row_and_one_after_a_plain_message_are_each_run_once_in_order(workers):
-    chat = await workers.chat()
-    for words in ("/goal status", "/loop list", "/code status", "And Q1?", "/code help"):
-        await workers.says(chat, words)
-    for _ in range(6):
-        await workers.wake(chat)
-
-    assert workers.ran == ["_handle_goal_command", "_handle_loop_command", "_handle_code_command", "_handle_code_command"]
-    answers = [event.data["answers"] for event in await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE]) if "answers" in event.data]
-    typed = [event.id for event in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])]
-    # Each answer names the message it answers.
-    assert answers == [typed[-5], typed[-4], typed[-3], typed[-1]]
-
-
-async def test_a_command_whose_message_the_wake_could_not_yet_see_is_not_answered_by_the_first_ones_answer(workers):
-    chat = await workers.chat()
+    emit = workers.store.emit_event
+    old = {"worker_id": "an-old-worker", "cursor": 0}
+    # Two commands one old wake read: it answered the last, with no name, and both count as done.
     await workers.says(chat, "/goal status")
     await workers.says(chat, "/loop list")
-    hidden = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
+    await emit(chat, EventType.HARNESS_WAKE, old)
+    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "No active loops."}})
+    # One typed during an old turn, which the model read as words.
+    await workers.says(chat, "Go on.")
+    await emit(chat, EventType.HARNESS_WAKE, old)
+    await emit(chat, EventType.LLM_REQUEST, {})
+    await workers.says(chat, "/clear")
+    await emit(chat, EventType.LLM_REQUEST, {})
+    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "I cannot clear the conversation."}})
 
-    class NotYetCommitted(Meanwhile):
-        """The second command's event has its id, below the wake's own, and is committed only after the wake read the log."""
+    # This harness takes the chat over: what its user types now is run, each once, in order.
+    await workers.says(chat, "/code status")
+    await workers.says(chat, "/goal status")
+    for _ in range(4):
+        await workers.wake(chat)
 
-        async def get_events(self, *args, **kwargs):
-            return [event for event in await self._store.get_events(*args, **kwargs) if event.id != hidden]
-
-        async def last_event(self, *args, **kwargs):
-            return None
-
-    await workers.worker(store=NotYetCommitted(workers.store)).wake(chat)
-    assert workers.ran == ["_handle_goal_command"]
-
+    assert workers.ran == ["_handle_code_command", "_handle_goal_command"]
+    assert (await workers.said(chat)).count("Conversation cleared.") == 0
+    # Under this harness's wakes an answer with no name answers nothing: a command whose worker
+    # died after some other unnamed word was written is still run.
+    await workers.says(chat, "/loop list")
+    wake = await emit(chat, EventType.HARNESS_WAKE, {**old, "names_answers": True})
+    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Heard."}, "synthetic": "voice_heard"})
+    assert wake
     await workers.wake(chat)
-    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command", "_handle_loop_command"], "No active loops.")
+    assert workers.ran == ["_handle_code_command", "_handle_goal_command", "_handle_loop_command"]
 
 
 async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_not_taken_for_answered(workers):

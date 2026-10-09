@@ -38,6 +38,13 @@ def _event_type(event: Any) -> str:
     return event.type.value if isinstance(event.type, EventType) else str(event.type)
 
 
+#: The field a wake of this harness sets on its ``harness.wake``: under such
+#: a wake every answer to a command names its message, and a command is
+#: never given to the model as words.  A wake without it is an older
+#: harness's.
+NAMES_ANSWERS = "names_answers"
+
+
 def _command_answered(events: list[Any], typed_at: int) -> bool:
     """Return True if the harness has answered the command the user typed at event *typed_at*.
 
@@ -52,10 +59,12 @@ def _command_answered(events: list[Any], typed_at: int) -> bool:
     nobody read.  Not a model's request after it: a command is never the
     model's to read.
 
-    Answers written before they were named carry no name.  One of those
-    counts for the message it follows when a wake began between the two
-    and the model was not asked: the wake that takes a command up writes
-    ``harness.wake`` and then the answer, with no request between them.
+    Under a wake of an older harness, one without ``NAMES_ANSWERS``,
+    answers carry no name.  There an answer counts for the message it
+    follows when that wake began between the two and the model was not
+    asked: it wrote ``harness.wake`` and then the answer, with no request
+    between them.  Under a wake of this harness an answer with no name
+    answers nothing.
     """
     runs: dict[Any, Any] = {}
     taken_up = False
@@ -73,10 +82,28 @@ def _command_answered(events: list[Any], typed_at: int) -> bool:
             if data["answers"] == typed_at:
                 return True
         elif event_type == EventType.HARNESS_WAKE.value:
-            taken_up = True
+            taken_up = not data.get(NAMES_ANSWERS)
         elif event_type == EventType.LLM_REQUEST.value:
             taken_up = False
         elif taken_up and event_type == EventType.LLM_RESPONSE.value:
+            return True
+    return False
+
+
+def _read_as_words(events: list[Any], typed_at: int) -> bool:
+    """Return True if an older harness gave the command typed at event *typed_at* to the model as words.
+
+    The model was asked after the message under a wake without
+    ``NAMES_ANSWERS``: that harness steered whatever its user typed into
+    the turn under way.  Its user has had the model's words for the command
+    since, and it is never run, however the chat stands.
+    """
+    older = True
+    for event in events:
+        event_type = _event_type(event)
+        if event_type == EventType.HARNESS_WAKE.value:
+            older = not (getattr(event, "data", None) or {}).get(NAMES_ANSWERS)
+        elif event_type == EventType.LLM_REQUEST.value and older and event.id is not None and event.id > typed_at:
             return True
     return False
 

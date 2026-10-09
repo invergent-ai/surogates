@@ -185,6 +185,8 @@ from surogates.harness.loop_pending import (
     _goal_turn_waits,
     _left_behind,
     _plain_message_unread,
+    _read_as_words,
+    NAMES_ANSWERS,
     _turn_cut_off,
 )
 from surogates.harness.loop_tool_recovery import (
@@ -787,31 +789,16 @@ class AgentHarness(
         excluded by the type filter.
         """
         cursor = await self._store.get_harness_cursor(session.id)
-        events = await self._store.get_events(
-            session.id,
-            after=cursor,
-            types=[
-                EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST,
-                EventType.LLM_RESPONSE, EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT,
-                EventType.SESSION_COMPLETE,
-            ],
-        )
-        now = datetime.now(timezone.utc)
-        # A command the harness has answered is not stranded, though the
-        # cursor may lie before it: a command's end leaves the cursor
-        # before a report no turn has read.
-        return any(
-            event.type == EventType.USER_MESSAGE.value
-            and not (event.data or {}).get("synthetic")
-            and not (
-                self._answers_itself(_user_event_text(event.data), session)
-                and (
-                    _command_answered(events, event.id)
-                    or _left_behind(events, event.id, now=now, window=RERUN_WINDOW)
-                )
-            )
-            for event in events
-        )
+        typed = [
+            event for event in await self._store.get_events(session.id, after=cursor, types=[EventType.USER_MESSAGE])
+            if not (event.data or {}).get("synthetic")
+        ]
+        if any(self._is_plain_message(session, event) for event in typed):
+            return True
+        # A command past the cursor is stranded only while it waits: a
+        # command's end leaves the cursor before a report no turn has read,
+        # and an answered command is done with wherever the cursor lies.
+        return bool(typed) and await self._has_waiting_command(session)
 
     def _answers_itself(self, text: str, session: Session) -> bool:
         """Whether *text* is a command the harness answers itself, with no
@@ -854,7 +841,9 @@ class AgentHarness(
         work for a wake whatever the cursor says, and whatever the session
         was in the middle of when it was typed.  Not one behind a turn's
         end older than the sweeper's own window for doing again what a
-        user asked for (``RERUN_WINDOW``)."""
+        user asked for (``RERUN_WINDOW``), nor one an older harness gave
+        the model as words.  *events* is the session's log from its start:
+        which harness read a message is told by the wake before it."""
         now = datetime.now(timezone.utc)
         return [
             event for event in events
@@ -863,6 +852,7 @@ class AgentHarness(
                 and not (event.data or {}).get("synthetic")
                 and self._answers_itself(_user_event_text(event.data), session)
                 and not _command_answered(events, event.id)
+                and not _read_as_words(events, event.id)
                 and not _left_behind(events, event.id, now=now, window=RERUN_WINDOW)
             )
         ]
@@ -878,7 +868,7 @@ class AgentHarness(
         if not typed:
             return False
         since = await self._store.get_events(
-            session.id, after=typed[0].id - 1,
+            session.id,
             types=[
                 EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
                 EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT, EventType.SESSION_COMPLETE,
@@ -1483,7 +1473,7 @@ class AgentHarness(
             await self._store.emit_event(
                 session_id,
                 EventType.HARNESS_WAKE,
-                {"worker_id": self._worker_id, "cursor": cursor},
+                {"worker_id": self._worker_id, "cursor": cursor, NAMES_ANSWERS: True},
             )
 
             # 5'. Another worker woke a local-folder session since this one

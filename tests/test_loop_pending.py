@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from surogates.harness.loop_pending import (
-    _actionable_pending_events, _command_answered, _cut_off_at, _in_typed_order, _left_behind,
+    _actionable_pending_events, _command_answered, _cut_off_at, _in_typed_order, _left_behind, _read_as_words,
 )
 from surogates.session.events import EventType
 
@@ -143,3 +143,27 @@ def test_where_a_turn_was_cut_off():
         assert _cut_off_at([asked, event(3, end)]) is None
     assert _cut_off_at([asked, event(3, EventType.CONTEXT_COMPACT, strategy="clear")]) is None
     assert _cut_off_at([asked, event(3, EventType.CONTEXT_COMPACT, strategy="summary")]) == 2
+
+
+def test_an_answer_with_no_name_answers_nothing_under_a_wake_of_this_harness():
+    old = [event(1, EventType.USER_MESSAGE), event(2, EventType.HARNESS_WAKE), event(3, EventType.LLM_RESPONSE)]
+    new = [event(1, EventType.USER_MESSAGE), event(2, EventType.HARNESS_WAKE, names_answers=True), event(3, EventType.LLM_RESPONSE)]
+    assert (_command_answered(old, typed_at=1), _command_answered(new, typed_at=1)) == (True, False)
+    # The wake that counts is the one the word was written under.
+    mixed = [*new[:2], event(3, EventType.HARNESS_WAKE), event(4, EventType.LLM_RESPONSE)]
+    assert _command_answered(mixed, typed_at=1) is True
+    assert _command_answered([*old[:2], *[event(e.id + 1, e.type, **e.data) for e in new[1:]]], typed_at=1) is False
+
+
+def test_a_command_is_read_as_words_when_an_older_harness_asked_the_model_after_it():
+    wake, marked = event(1, EventType.HARNESS_WAKE), event(1, EventType.HARNESS_WAKE, names_answers=True)
+    typed, asked = event(2, EventType.USER_MESSAGE), event(3, EventType.LLM_REQUEST)
+    assert _read_as_words([wake, typed, asked], typed_at=2) is True
+    # With no wake before it in the log, it is an older harness's too.
+    assert _read_as_words([typed, asked], typed_at=2) is True
+    # This harness never gives a command to the model; a request before the command read nothing of it.
+    assert _read_as_words([marked, typed, asked], typed_at=2) is False
+    assert _read_as_words([wake, event(2, EventType.LLM_REQUEST), event(3, EventType.USER_MESSAGE)], typed_at=3) is False
+    # An older turn, then this harness's wake: the request under the new wake does not count.
+    later = [wake, typed, event(3, EventType.HARNESS_WAKE, names_answers=True), event(4, EventType.LLM_REQUEST)]
+    assert _read_as_words(later, typed_at=2) is False
