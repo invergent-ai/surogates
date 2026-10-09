@@ -108,6 +108,48 @@ CONTROL_LOCK_WAIT_MS = 2000
 _LOCK_NOT_AVAILABLE = "55P03"
 
 
+@dataclass(frozen=True, slots=True)
+class BrowserControlTold:
+    """What the telling of a take-over or a hand back did (``SessionStore.tell_browser_control``)."""
+
+    #: Whether the chat was told: False where it had been told already.
+    told: bool
+    #: Of a hand back: whether it gave the chat's agent a turn, or, where
+    #: nothing was told, whether the hand back that stands gave one that is
+    #: still to come or under way.  Whoever held that turn against its
+    #: user's limit keeps the hold while this is so.
+    turn: bool = False
+
+
+#: Whether the last word of a chat's browser control is a hand back that gave
+#: its agent a turn which is still to come, or under way: the chat is active,
+#: and no request of the model's has read the hand back yet or a worker holds
+#: the chat.  Once that turn is over, it is not.
+_A_HAND_BACKS_TURN_STANDS = text(
+    """
+    SELECT s.status = 'active'
+       AND last.type = 'browser.control_returned'
+       AND last.data->>'resumes' = 'true'
+       AND (
+           NOT EXISTS (
+               SELECT 1 FROM events r
+               WHERE r.session_id = s.id AND r.type = 'llm.request' AND r.id > last.id
+           )
+           OR EXISTS (
+               SELECT 1 FROM session_leases l WHERE l.session_id = s.id AND l.expires_at > now()
+           )
+       )
+    FROM sessions s
+    LEFT JOIN LATERAL (
+        SELECT e.id, e.type, e.data FROM events e
+        WHERE e.session_id = s.id AND e.type IN ('browser.control_granted', 'browser.control_returned')
+        ORDER BY e.id DESC LIMIT 1
+    ) last ON true
+    WHERE s.id = :id
+    """
+)
+
+
 class LeaseNotHeldError(Exception):
     """Raised when a lease operation fails because the caller does not hold it."""
 
@@ -2659,7 +2701,7 @@ class SessionStore:
 
     async def tell_browser_control(
         self, session_id: UUID, event_type: EventType, data: dict, *, gives_a_turn: bool = False,
-    ) -> bool | None:
+    ) -> BrowserControlTold:
         """Tell a chat on its user's computer of a take-over, or of a hand back, unless it was told already.
 
         A take-over is told only while none stands, and a hand back only
@@ -2679,20 +2721,21 @@ class SessionStore:
         never says of a turn that it was given when it was not, nor the
         reverse.
 
+        A hand back with nothing to tell says, read under the same lock,
+        whether the hand back that stands gave a turn that is still to come
+        or under way: another post's, made at once, which may have counted
+        on what this one's caller held for the turn.
+
         A telling kept waiting for the chat's lock, or for its row, gives
         up after ``CONTROL_LOCK_WAIT_MS`` and raises
         :class:`BrowserControlBusy`, with nothing told: its connection goes
         back to the pool.
-
-        Returns None when there was nothing to tell; otherwise whether the
-        chat's agent was given a turn.
         """
         handing_back = event_type is EventType.BROWSER_CONTROL_RETURNED
         written: list[_EventWrite] = []
         try:
             async with self._sf() as db:
-                await db.execute(text(f"SET LOCAL lock_timeout = {CONTROL_LOCK_WAIT_MS}"))
-                await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
+                await self._lock_browser_control(db, session_id)
                 last = (await db.execute(
                     select(EventRow.type)
                     .where(
@@ -2706,7 +2749,10 @@ class SessionStore:
                     .limit(1)
                 )).scalar_one_or_none()
                 if (last == EventType.BROWSER_CONTROL_GRANTED.value) is not handing_back:
-                    return None
+                    stands = handing_back and bool(
+                        (await db.execute(_A_HAND_BACKS_TURN_STANDS, {"id": session_id})).scalar()
+                    )
+                    return BrowserControlTold(told=False, turn=stands)
                 resumes = handing_back and gives_a_turn and (await db.execute(
                     update(SessionRow)
                     .where(SessionRow.id == session_id, SessionRow.status.in_(("active", "completed")))
@@ -2726,7 +2772,33 @@ class SessionStore:
             raise
         for event in written:
             await self._announce_event(event)
-        return resumes
+        return BrowserControlTold(told=True, turn=resumes)
+
+    async def _lock_browser_control(self, db: AsyncSession, session_id: UUID) -> None:
+        """Take a chat's browser-control lock for *db*'s transaction, waiting
+        no longer than ``CONTROL_LOCK_WAIT_MS`` for it or for anything the
+        transaction locks after it."""
+        await db.execute(text(f"SET LOCAL lock_timeout = {CONTROL_LOCK_WAIT_MS}"))
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"browser-control:{session_id}"))))
+
+    async def hand_backs_turn_stands(self, session_id: UUID, *, behind_tellings: bool = True) -> bool:
+        """Whether a chat's last hand back gave its agent a turn that is still to come or under way.
+
+        Read *behind_tellings*: once any telling of the chat under way has
+        committed, under its lock.  Where the lock cannot be had in time, or
+        the caller was itself just answered busy and says not to wait, it is
+        read as the log stands.
+        """
+        if behind_tellings:
+            try:
+                async with self._sf() as db:
+                    await self._lock_browser_control(db, session_id)
+                    return bool((await db.execute(_A_HAND_BACKS_TURN_STANDS, {"id": session_id})).scalar())
+            except DBAPIError as error:
+                if getattr(error.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+                    raise
+        async with self._sf() as db:
+            return bool((await db.execute(_A_HAND_BACKS_TURN_STANDS, {"id": session_id})).scalar())
 
 
 # ---------------------------------------------------------------------------

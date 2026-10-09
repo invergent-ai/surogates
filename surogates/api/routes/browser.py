@@ -23,7 +23,7 @@ from surogates.browser.shell import ShellSession
 from surogates.devices.binding import device_of, is_binding_root
 from surogates.harness.loop_pending import _hand_back_unread
 from surogates.session.events import EventType
-from surogates.session.store import BrowserControlBusy
+from surogates.session.store import BrowserControlBusy, BrowserControlTold
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.auth.middleware import (
     authenticate_websocket_tenant,
@@ -320,7 +320,7 @@ async def _computer_browser_state(app_state: Any, session_id: UUID) -> BrowserSt
     return BrowserStateResponse(status=status, control_owner=None, live_view_path="", computer=True)
 
 
-async def _tell(store: Any, chat_id: UUID, event_type: EventType, data: dict, **how: Any) -> bool | None:
+async def _tell(store: Any, chat_id: UUID, event_type: EventType, data: dict, **how: Any) -> BrowserControlTold:
     """Tell a chat of a take-over or a hand back, as its store does.
 
     One kept waiting behind another telling for the chat for longer than the store waits is
@@ -334,6 +334,29 @@ async def _tell(store: Any, chat_id: UUID, event_type: EventType, data: dict, **
         raise HTTPException(
             status_code=503, detail="The chat is being told of its browser by another request. Post it again.",
         )
+
+
+async def _give_back_unless_its_turn_stands(
+    app_state: Any, chat: Any, held: dict[str, dict], telling: BrowserControlTold | None, *, busy: bool,
+) -> None:
+    """Give back, unspent, what a hand back's request held on its user's limit for the turn, unless
+    that turn stands: given by this telling, or by the hand back another post told first, which may
+    have held nothing because this one's hold was listed.  A hold is its turn's, and that turn's
+    end spends it, as it settles the holds of two messages typed together.
+
+    However the telling ended.  Where it did not answer (it failed, or the request was cut off once
+    it was written), the chat's log is asked, behind any telling under way; after a telling answered
+    busy, as it stands, since the lock that was not had is not waited for again.  A log that cannot
+    be read leaves the hold: ops lets go of one nobody settles.
+    """
+    store = app_state.session_store
+    try:
+        stands = telling.turn if telling is not None else await store.hand_backs_turn_stands(chat.id, behind_tellings=not busy)
+    except Exception:
+        logger.warning("Session %s: could not read whether a hand back's turn stands; its hold is left", chat.id, exc_info=True)
+        return
+    if not stands:
+        await release_turn(chat, held, platform_client=getattr(app_state, "platform_client", None), session_store=store)
 
 
 # What tells a local-folder chat that its user took its browser over on the computer, and handed it back.
@@ -475,7 +498,7 @@ async def post_browser_control(
         sid = str(chat.id)
         if body.action == "acquire":
             taken_over = {"session_id": sid, "owner_user_id": owner_user_id, "computer": True}
-            if await _tell(store, chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over) is None:
+            if not (await _tell(store, chat.id, EventType.BROWSER_CONTROL_GRANTED, taken_over)).told:
                 return {"outcome": "refreshed", "owner_user_id": owner_user_id}
             return {"outcome": "granted", "owner_user_id": owner_user_id}
         # A release answers whether the agent goes on by itself: only at a hand back its user
@@ -487,26 +510,28 @@ async def post_browser_control(
         # The turn is given with the telling, or not at all: the chat is made active as a typed
         # message makes one whose turn had ended, and the resume written is the turn, and what the
         # agent reads the hand back from.
-        goes_on = None
         try:
-            goes_on = await _tell(
+            telling = await _tell(
                 store, chat.id, EventType.BROWSER_CONTROL_RETURNED, told, gives_a_turn=held is not None,
             )
-        finally:
-            # Held for a turn that is not given, however the telling ended: given back here, unspent.
-            if held and not goes_on:
-                await release_turn(
-                    chat, held, platform_client=getattr(request.app.state, "platform_client", None), session_store=store,
+        except BaseException as error:
+            if held:
+                # Only a telling kept waiting is answered with an HTTP error of its own.
+                await _give_back_unless_its_turn_stands(
+                    request.app.state, chat, held, None, busy=isinstance(error, HTTPException),
                 )
-        if goes_on is None:
+            raise
+        if held:
+            await _give_back_unless_its_turn_stands(request.app.state, chat, held, telling, busy=False)
+        if not telling.told:
             # Another post handed it back meanwhile: that one told the chat, and gave what it gave.
             return {"outcome": "released", RESUMES: body.handed_back and await _goes_on_already(request.app.state, chat.id)}
         # The agent's other chats there that still said their user held the browser are told too.
         await _tell_the_agents_other_chats_handed_back(request.app.state, chat.id, tenant, emit, owner_user_id)
-        if goes_on:
+        if telling.turn:
             # All that can still be lost is this, and the sweeper finds a chat left so.
             await wake(sid)
-        return {"outcome": "released", RESUMES: goes_on}
+        return {"outcome": "released", RESUMES: telling.turn}
 
     if body.action == "acquire":
         outcome, entry = await control.acquire(str(session_id), owner_user_id)

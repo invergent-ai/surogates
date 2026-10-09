@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from surogates.browser.base import BrowserEndpoint
 from surogates.browser.control import AcquireOutcome, ControlEntry
 from surogates.browser.resolver import ResolvedBrowser
+from surogates.session.store import BrowserControlTold
 from surogates.tenant.context import TenantContext
 
 
@@ -98,15 +99,16 @@ class StubSessions:
 
     async def tell_browser_control(
         self, session_id: UUID, event_type: Any, data: dict, *, gives_a_turn: bool = False,
-    ) -> bool | None:
+    ) -> BrowserControlTold:
         """As the store tells it: a take-over only while none stands, a hand back only while one does,
         and with a hand back that gives a turn, where the chat can take one, the chat made active and
         its resume."""
         log = self.events.setdefault(session_id, [])
         said = [kind for kind in (entry if isinstance(entry, str) else entry[0] for entry in log)
                 if kind in ("browser.control_granted", "browser.control_returned")]
-        if (said[-1:] == ["browser.control_granted"]) is not (event_type.value == "browser.control_returned"):
-            return None
+        handing_back = event_type.value == "browser.control_returned"
+        if (said[-1:] == ["browser.control_granted"]) is not handing_back:
+            return BrowserControlTold(told=False, turn=handing_back and await self.hand_backs_turn_stands(session_id))
         session = self.sessions[session_id]
         resumes = gives_a_turn and session.status in ("active", "completed")
         log.append(event_type.value)
@@ -115,7 +117,17 @@ class StubSessions:
             session.status = "active"
             log.append("session.resume")
             self.told.append((str(session_id), "session.resume", {"source": "browser_hand_back"}))
-        return resumes
+        return BrowserControlTold(told=True, turn=resumes)
+
+    async def hand_backs_turn_stands(self, session_id: UUID, **_: Any) -> bool:
+        """As the store reads it: the chat's last hand back gave a turn that is to come or under way."""
+        log = [entry if isinstance(entry, str) else entry[0] for entry in self.events.get(session_id, [])]
+        control = [at for at, kind in enumerate(log) if kind in ("browser.control_granted", "browser.control_returned")]
+        if not control or log[control[-1]:control[-1] + 2] != ["browser.control_returned", "session.resume"]:
+            return False
+        if self.sessions[session_id].status != "active":
+            return False
+        return "llm.request" not in log[control[-1]:] or session_id in self.busy
 
     async def has_live_lease(self, session_id: UUID) -> bool:
         return session_id in self.busy

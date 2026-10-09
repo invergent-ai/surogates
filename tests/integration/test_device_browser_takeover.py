@@ -592,7 +592,7 @@ async def test_a_take_over_gives_no_turn_whatever_its_telling_is_asked(computer)
         chat, EventType.BROWSER_CONTROL_GRANTED, {"session_id": str(chat), "computer": True}, gives_a_turn=True,
     )
 
-    assert told is False
+    assert (told.told, told.turn) == (True, False)
     assert (await computer.log(chat))[-1] == "browser.control_granted"
     assert "resumes" not in (await computer.store.get_events(chat, types=[EventType.BROWSER_CONTROL_GRANTED]))[-1].data
     assert (await computer.resumed(chat), (await computer.store.get_session(chat)).status) == ([], "completed")
@@ -2211,3 +2211,85 @@ async def test_one_record_is_taken_out_of_a_chats_config_list_and_only_where_it_
     # The last one out takes the list with it, as a settlement leaves none.
     assert await computer.store.remove_from_session_config_list(chat, "allowance_reservations", second) is True
     assert await listed() is None
+
+
+async def test_the_hold_of_a_post_that_lost_the_telling_stays_for_the_turn_the_other_post_gave_on_it(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    metered(asking.api, CAPPED, ops := Ops())
+
+    # Two confirmed hand backs at once. This one holds the turn; the other finds that hold listed,
+    # holds nothing more, tells first, and gives the turn.
+    async def told_by_the_other(session_id: UUID) -> None:
+        await SessionStore.tell_browser_control(
+            asking.store, session_id, EventType.BROWSER_CONTROL_RETURNED,
+            {"session_id": str(session_id), "computer": True}, gives_a_turn=True,
+        )
+
+    before_the_telling(asking, monkeypatch, told_by_the_other)
+    try:
+        # Answered that the agent goes on, as it does; the hold is the turn's, and is not given back.
+        await asking.hands_back(chat)
+        assert ops.spent == []
+        assert [len(holds) for holds in (await holds_listed(asking, chat)).values()] == [1]
+        monkeypatch.undo()
+        metered(asking.api, CAPPED, ops)
+        # The turn runs held, and its end spends the hold.
+        harness, turns = worker(asking.api, monkeypatch, CAPPED, ops)
+        await harness.wake(chat)
+        assert turns == [chat]
+        assert (ops.held, ops.spent) == ([("allowance", str(asking.api.user_id), "web")], [("allowance", "hold-1", 1500)])
+        assert await holds_listed(asking, chat) == {}
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_the_hold_stays_for_a_turn_given_by_a_request_cut_off_once_the_telling_was_written(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    metered(asking.api, CAPPED, ops := Ops())
+
+    # The hand back and its resume are committed; the request ends before the route's next line.
+    async def cut_off(event) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asking.store, "_announce_event", cut_off)
+    # As the app's own stack ends a request that was cancelled under it.
+    with pytest.raises((asyncio.CancelledError, RuntimeError)):
+        await asking.control(chat, "release", asking.window, handed_back=True)
+    monkeypatch.undo()
+    metered(asking.api, CAPPED, ops)
+
+    try:
+        # The turn was given, and will run once the sweeper finds the chat: its hold is still held.
+        assert (await asking.log(chat))[-2:] == ["browser.control_returned", "session.resume"]
+        assert ops.spent == []
+        assert [len(holds) for holds in (await holds_listed(asking, chat)).values()] == [1]
+        harness, turns = worker(asking.api, monkeypatch, CAPPED, ops)
+        await harness.wake(chat)
+        assert turns == [chat]
+        assert ops.spent == [("allowance", "hold-1", 1500)]
+    finally:
+        await asking.unqueue(chat)
+
+
+async def test_the_hold_is_given_back_where_the_hand_back_that_stands_gave_a_turn_that_is_over(asking, monkeypatch):
+    chat = await asking.stopped_while_held()
+    metered(asking.api, {}, Ops())
+
+    # The other post's hand back gave a turn, which ran and ended, all before this post reached its telling.
+    async def told_and_run(session_id: UUID) -> None:
+        await SessionStore.tell_browser_control(
+            asking.store, session_id, EventType.BROWSER_CONTROL_RETURNED,
+            {"session_id": str(session_id), "computer": True}, gives_a_turn=True,
+        )
+        await asking.store.emit_event(session_id, EventType.LLM_REQUEST, {})
+        await asking.store.emit_event(session_id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Going on."}})
+
+    before_the_telling(asking, monkeypatch, told_and_run)
+    metered(asking.api, CAPPED, ops := Ops())
+    try:
+        # No turn is to come for this post's hold: it is given back, and the pane is told to write.
+        await asking.hands_back(chat, goes_on=False)
+        assert ops.spent == [("allowance", "hold-1", 0)]
+        assert await holds_listed(asking, chat) == {}
+    finally:
+        await asking.unqueue(chat)
