@@ -74,6 +74,11 @@ case "$VERB" in
     [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
     sha256="$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)"
     [ "$sha256" = "$DESKTOP_TARBALL_SHA256" ] || fail "$OUT/$TARBALL is not the tarball the build made: its sha256 is $sha256, and the build's $DESKTOP_TARBALL_SHA256"
+    # The app's package is read below with the install script's own reader, from its functions
+    # alone: its last line, which runs it, is left out. Were its last line any other, the line
+    # that runs it would be left in, and its refusal taken for a package that names no schema
+    # (see sign). Said before anything is unpacked.
+    [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): no package is read with it'
     # The tarball's root helper is the install script beside this one, byte for byte: installed,
     # it is what pkexec runs as root at the next update, and its release keys are the ones every
     # later update is checked against. The build holds no key, and a helper of its own would need
@@ -107,13 +112,19 @@ case "$VERB" in
     # The state schema of what the app keeps in each user's home, as the tarball's own package names
     # it: a rollback takes only a release whose schema is the installed one's or later. Read as the
     # helper is: from the tarball unpacked whole, which is what an install leaves, and from a file
-    # of the tree's own, asked in a command of its own as the helper's path is. The package is one
-    # JSON document: of two, each would name a schema. And the schema is a whole number from 1 and
-    # below 10^15 as it rounds, which is what is signed: 999999999999999.99, compared as it is
-    # written, is below 10^15, and is written 1000000000000000.
+    # of the tree's own, asked in a command of its own as the helper's path is.
+    # The package is read by the rule a manifest is read by, with the install script's own reader
+    # (one_object, from its functions without its last line, which runs it): one JSON object, as
+    # JSON is written, of a megabyte at most. jq alone reads more than JSON: a schema written +1,
+    # 01, or in 20 digits that round to 1 would be signed as 1, where no reader of a manifest
+    # takes it so written, and no other reader of a package reads the first two at all. And the
+    # schema is a whole number from 1 and below 10^15 as it rounds, which is what is signed:
+    # 999999999999999.99, compared as it is written, is below 10^15, and is written
+    # 1000000000000000.
     package="surogate-desktop-$VERSION-linux-x64/resources/app/package.json"
     [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's resources/app/package.json names no stateSchema"
-    schema="$(jq -es 'select(length == 1) | .[0].stateSchema | select(type == "number" and . == floor and (floor | . >= 1 and . < 1e15)) | floor' "$unpacked/$package" 2>/dev/null)" \
+    reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e ".stateSchema | select(type == \"number\" and . == floor and (floor | . >= 1 and . < 1e15)) | floor"'
+    schema="$(bash -c "$reader" _ "$HERE/install.sh" "$unpacked/$package" 2>/dev/null)" \
       || fail "the tarball's resources/app/package.json names no stateSchema"
     # All that is read of the unpacked tarball is read by here. It is removed before the manifest is
     # written, and from its removal on no signal ends this: one would leave a manifest half

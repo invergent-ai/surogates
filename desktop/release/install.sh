@@ -201,7 +201,9 @@ signed_by() {
 # whose newline is the file's last byte, of 4096 bytes at most. No more of the file is read than
 # those and one byte. Of two documents, the first would be applied and both kept as a mark; and
 # each would name a version, where dpkg calls a version of two lines older than any other. With
-# "any" as $2 the object may be on any number of lines, as the install record is written.
+# "any" as $2 the object may be on any number of lines, as the install record is written. $3 is
+# its bound in bytes where that is not a manifest's: the release job reads the app's own package
+# by this rule, for the state schema it writes into a manifest (publish.sh describe).
 #
 # It is JSON as JSON is written, and no more of what jq reads besides: the app reads a manifest
 # with a reader of its own (oneObject in src/shell/updates.ts), and takes what this takes and
@@ -212,9 +214,10 @@ signed_by() {
 # not to jq); and no value more than 64 fields and places down (how deep jq reads at all is its
 # own, and changes with jq).
 one_object() {
-  head -c 4097 -- "$1" 2>/dev/null \
-    | jq -ceRs --arg lines "${2:-one}" '
-      select(utf8bytelength <= 4096 and ($lines == "any" or test("\\A[^\\n]*\\n\\z")) and (test("\ufffd") | not)
+  local most="${3:-4096}"
+  head -c "$(( most + 1 ))" -- "$1" 2>/dev/null \
+    | jq -ceRs --arg lines "${2:-one}" --argjson most "$most" '
+      select(utf8bytelength <= $most and ($lines == "any" or test("\\A[^\\n]*\\n\\z")) and (test("\ufffd") | not)
         and test("\\A(?:[ \\t\\r\\n\\[\\]{}:,]|\"(?:[^\"\\\\]|\\\\.)*\"|(?:true|false|null|-?(?!(?:[0-9]\\.?){18})(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)(?![^ \\t\\r\\n\\[\\]{}:,\"]))*\\z"))
       | fromjson | select(type == "object" and ([paths | length] | max // 0) <= 64)' 2>/dev/null
 }

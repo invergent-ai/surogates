@@ -13,6 +13,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { KNOWN } from "../src/browser/choose.js";
 
+import { FORMS, line, SHA } from "./manifest-forms.js";
+
 const RELEASE = fileURLToPath(new URL("../release", import.meta.url));
 const CREDENTIALS = { AWS_ACCESS_KEY_ID: "release", AWS_SECRET_ACCESS_KEY: "release-secret" };
 const NAME = `sg-desktop-publish-${process.pid}`;
@@ -214,6 +216,11 @@ describe("the desktop's release manifest", () => {
       // Two documents, each with a schema: neither is the app's own word for it.
       ["a package of two documents", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1}\n{"version":"1.2.3","stateSchema":2}\n')],
       ["a package that is no object", (top) => writeFileSync(app(top), '[{"version":"1.2.3","stateSchema":1}]\n')],
+      // A package is read by the rule a manifest is read by: JSON as it is written, where jq reads more.
+      ["a package with a byte order mark before it", (top) => writeFileSync(app(top), '\uFEFF{"version":"1.2.3","stateSchema":1}\n')],
+      ["a package with a number of its own in 18 digits", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1,"more":123456789012345678}\n')],
+      ["a package with a number of its own written 01", (top) => writeFileSync(app(top), '{"version":"1.2.3","stateSchema":1,"more":01}\n')],
+      ["a package of more than a megabyte", (top) => writeFileSync(app(top), `{"version":"1.2.3","stateSchema":1,"more":"${"x".repeat(1024 * 1024)}"}\n`)],
       // A package of this computer's that names one, and a link to it where the app's is: the
       // app that is installed would read whatever its own computer has there.
       ["a link in its place", (top) => {
@@ -258,6 +265,13 @@ describe("the desktop's release manifest", () => {
     const taken = () => spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
     // The app's package with the number as it is written: this test's own JSON would round it first.
     const written = (schema: string) => (top: string) => writeFileSync(join(top, "resources", "app", "package.json"), `{"version":"1.2.3","stateSchema":${schema}}\n`);
+    // A package as npm writes one, a field a line and longer than any manifest, is the app's own.
+    packed(dir, out, "1.2.3", withApp({ version: "1.2.3", stateSchema: 2 }));
+    expect(describes().status).toBe(0);
+    again();
+    packed(dir, out, "1.2.3", (top) => writeFileSync(join(top, "resources", "app", "package.json"), `${JSON.stringify({ version: "1.2.3", description: "x".repeat(8192), stateSchema: 7 }, null, 2)}\n`));
+    expect(describes().status).toBe(0);
+    expect((JSON.parse(readFileSync(join(out, "manifest.json"), "utf8")) as { stateSchema: number }).stateSchema).toBe(7);
     for (const [schema, signedAs] of [["1", 1], ["1.0", 1], ["999999999999999", 999999999999999]] as const) {
       again();
       packed(dir, out, "1.2.3", written(schema));
@@ -304,7 +318,7 @@ describe("the desktop's release manifest", () => {
   it("reads the build's tarball only where no release key is: with one in its environment, set or empty, it starts nothing and writes nothing", () => {
     // Each program the step starts, as publish.sh calls it, written down.
     const started = () => readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
-    for (const program of ["dirname", "sha256sum", "cut", "mktemp", "tar", "realpath", "cmp", "jq", "chmod", "rm", "stat"]) recording(dir, program);
+    for (const program of ["dirname", "sha256sum", "cut", "tail", "mktemp", "tar", "realpath", "cmp", "sed", "head", "jq", "chmod", "rm", "stat"]) recording(dir, program);
     for (const key of [PRIVATE, ""]) {
       expect(describes({ DESKTOP_RELEASE_KEY: key }), key === "" ? "empty" : "set").toMatchObject({
         status: 1, stdout: "", stderr: "publish.sh: describe reads the build's tarball, and runs only where no release key is: DESKTOP_RELEASE_KEY is in its environment\n",
@@ -315,7 +329,7 @@ describe("the desktop's release manifest", () => {
     }
     // With none, it starts each of them, tar on the tarball among them.
     expect(describes().status).toBe(0);
-    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "jq-argv", "mktemp-argv", "realpath-argv", "rm-argv", "sha256sum-argv", "stat-argv", "tar-argv"]);
+    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "head-argv", "jq-argv", "mktemp-argv", "realpath-argv", "rm-argv", "sed-argv", "sha256sum-argv", "stat-argv", "tail-argv", "tar-argv"]);
     expect(readFileSync(join(dir, "tar-argv"), "utf8")).toContain(`${tarball()}\n`);
   });
 
@@ -395,6 +409,97 @@ describe("the desktop's release manifest", () => {
     expect(signs()).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n` });
   });
 
+  it("writes, signs and takes a release's manifest by one rule, on every form that its readers are asked about: the first step writes none that an apply refuses, the second signs none, and what the second refuses for its form is what an apply's own reader refuses", { timeout: 180_000 }, () => {
+    const install = join(dir, "release", "install.sh");
+    const signature = join(out, "manifest.json.sig");
+    // What an apply's own reader says of a manifest: the release it takes it for, as
+    // "<version> <sha256> <size>", or null where it refuses it.
+    const applied = (manifest: Buffer) => {
+      writeFileSync(join(dir, "form.json"), manifest);
+      const read = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", install, join(dir, "form.json")], { encoding: "utf8" });
+      return read.status === 0 ? read.stdout.trim() : null;
+    };
+    // What the signing step says of it, as the manifest another step wrote, by the build's words
+    // for release *named*: "signed"; "no manifest", where it is none by its form; "another's",
+    // where it is one and not the one of that release as the first step writes it.
+    const signed = (manifest: Buffer, named: string) => {
+      const [version = "", sha = "", size = ""] = named.split(" ");
+      rmSync(signature, { force: true });
+      writeFileSync(join(out, "manifest.json"), manifest);
+      const step = publish("sign", version, { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: sha, DESKTOP_TARBALL_SIZE: size });
+      if (existsSync(signature) !== (step.status === 0)) return `ended ${step.status}, and a signature is ${existsSync(signature) ? "" : "not "}there`;
+      if (step.status === 0) return "signed";
+      if (step.stderr === `publish.sh: ${out}/manifest.json is no manifest that install.sh takes: nothing is signed\n`) return "no manifest";
+      if (step.stderr === `publish.sh: ${out}/manifest.json is not the manifest of ${version} and of the tarball the build made, of sha256 ${sha} and ${size} bytes: nothing is signed\n`) return "another's";
+      return step.stderr;
+    };
+    // What the first step writes of release *named*, whose app keeps state of schema *schema*. Its
+    // tarball is a small one of that version. No tarball has a hash that one chooses: the hash and
+    // the size are said by stand-ins for the two tools that measure it, and are the build's words.
+    const packedAt = new Map<string, number>();
+    const written = (named: string, schema: number) => {
+      const [version = "", sha = "", size = ""] = named.split(" ");
+      if (packedAt.get(version) !== schema) packed(dir, out, version, withApp({ version, stateSchema: schema }));
+      packedAt.set(version, schema);
+      recording(dir, "sha256sum", () => [`echo '${sha}  -'`]);
+      recording(dir, "stat", () => [`echo '${size}'`]);
+      rmSync(join(out, "manifest.json"), { force: true });
+      const step = publish("describe", version, { DESKTOP_TARBALL_SHA256: sha });
+      for (const tool of ["sha256sum", "stat"]) rmSync(join(dir, "bin", tool));
+      return step.status === 0 ? readFileSync(join(out, "manifest.json")) : null;
+    };
+    const base = `1.2.4 ${SHA} 171199516`;
+    const said = FORMS.map(([name, form]) => {
+      const manifest = Buffer.from(form);
+      const taken = applied(manifest);
+      // Refused by an apply: the signing refuses it for its form, whatever release the build names.
+      if (taken === null) return { name, apply: "refuses", sign: signed(manifest, base) };
+      // Taken by an apply, for a release: what the first step writes of that release is taken for
+      // the same one, and signed; and the form itself is signed where it is that writing, byte
+      // for byte, and nowhere else.
+      const schema = Math.floor((JSON.parse(manifest.toString()) as { stateSchema: number }).stateSchema);
+      const own = written(taken, schema);
+      return {
+        name, apply: "takes", sign: signed(manifest, taken),
+        writes: own === null ? "nothing" : own.equals(manifest) ? "this" : "another",
+        itsWriting: own === null ? null : { apply: applied(own) === taken ? "takes" : "refuses", sign: signed(own, taken) },
+      };
+    });
+    expect(said).toEqual(FORMS.map(([name, , helper], at) => (helper
+      ? { name, apply: "takes", sign: said[at]?.writes === "this" ? "signed" : "another's", writes: said[at]?.writes === "this" ? "this" : "another", itsWriting: { apply: "takes", sign: "signed" } }
+      : { name, apply: "refuses", sign: "no manifest" })));
+    // The forms that are the first step's own writing, and so are signed: the release job's line, of each version and size it may have.
+    expect(said.filter(({ sign }) => sign === "signed").map(({ name }) => name))
+      .toEqual(["as the release job writes it", "of version 0.0.1", "of version 10.20.30", "with a size one below 10^15"]);
+
+    // What the first step is given, it takes as an apply takes a manifest that says the same: a
+    // version, which is its argument; and the state schema, as the app's own package writes it.
+    // (A tarball's size is what the tarball is, and is given by nothing.) Asked of each form that
+    // is the release job's line but for its version, or but for its state schema as it is written.
+    const job = line();
+    const upTo = job.slice(0, job.lastIndexOf('"stateSchema":'));
+    const given = FORMS.flatMap(([name, form, helper]): Array<{ name: string; takes: boolean; version: string; schema: string | null }> => {
+      if (typeof form !== "string") return [];
+      const version = /^\{"version":"([^"\\]*)",/.exec(form)?.[1];
+      if (version !== undefined && version !== "1.2.4" && form === line({}, version)) return [{ name, takes: helper, version, schema: "1" }];
+      if (form === `${upTo.replace(/,$/, "")}}\n`) return [{ name, takes: helper, version: "1.2.4", schema: null }];
+      const schema = form.startsWith(`${upTo}"stateSchema":`) && form.endsWith("}\n") ? form.slice(`${upTo}"stateSchema":`.length, -2) : null;
+      return schema !== null && /^[^{}[\],:]+$/.test(schema) ? [{ name, takes: helper, version: "1.2.4", schema }] : [];
+    });
+    expect(given.filter(({ version }) => version !== "1.2.4").length).toBeGreaterThan(8);
+    expect(given.filter(({ version }) => version === "1.2.4").length).toBeGreaterThan(10);
+    const wrote = given.map(({ name, version, schema }) => {
+      rmSync(join(out, "manifest.json"), { force: true });
+      // A tarball of that version, where a file can have the version in its name, whose app's
+      // package writes the schema so.
+      const named = !version.includes("/");
+      if (named) packed(dir, out, version, (top) => writeFileSync(join(top, "resources", "app", "package.json"), `{"version":"${version}"${schema === null ? "" : `,"stateSchema":${schema}`}}\n`));
+      const step = publish("describe", version, { DESKTOP_TARBALL_SHA256: named ? sha256(readFileSync(join(out, `${NAME_OF(version)}.tar.gz`))) : SHA });
+      return { name, writes: step.status === 0 && existsSync(join(out, "manifest.json")) };
+    });
+    expect(wrote).toEqual(given.map(({ name, takes }) => ({ name, writes: takes })));
+  });
+
   it("signs with either key a rotating install.sh lists, and refuses a key whose public half it does not list", () => {
     const next = generateKeyPairSync("ed25519");
     writeFileSync(join(dir, "release", "install.sh"), trusting([PUBLIC, pem(next.publicKey)]));
@@ -421,6 +526,18 @@ describe("the desktop's release manifest", () => {
     });
     expect(existsSync(join(dir, "ran"))).toBe(false);
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    // Nor does the first step read the app's package with it, whose refusal would be taken for a
+    // package that names no schema: said before anything is unpacked. Its tarball's helper is
+    // that script, as the step asks.
+    packed(dir, out, "1.2.3");
+    recording(dir, "tar");
+    expect(describes()).toMatchObject({
+      status: 1, stdout: "", stderr: 'publish.sh: install.sh does not end with the line that runs it (main "$@"): no package is read with it\n',
+    });
+    expect(existsSync(join(dir, "ran"))).toBe(false);
+    expect(existsSync(join(dir, "tar-argv"))).toBe(false);
+    expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+    expect(readdirSync(tmp)).toEqual([]);
   });
 
   it("stops with its usage at a version that is no x.y.z or a verb it does not have, and says so where the tarball is not there to describe, or the manifest to sign", () => {
