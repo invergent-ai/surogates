@@ -49,6 +49,7 @@ from surogates.sandbox.history import (
 )
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
+from surogates.workstreams import is_project_thread
 from surogates.workstreams.history import (
     drop_landing,
     kept_refs,
@@ -340,6 +341,30 @@ def turn_ended(session: Any) -> None:
     _HANDED_ON.pop(sandbox_session_key(session), None)
 
 
+async def next_turn(store: Any, session: Any) -> None:
+    """A project thread's turn is over, landed, kept, failed or stopped: its next pod is another turn's.
+
+    The count is the thread's, in its row: a turn cut off and taken up
+    again, here or by another worker, is the same turn, and one after a
+    stop is not.  A pod is told it, its hand-offs name it, and the open of
+    a later turn's copy leaves out the own files of a hand-off that names
+    another: a stopped turn's files stay out whether or not its stop
+    could be carried out on the hand-off.
+    """
+    if not is_project_thread(session.config):
+        return
+    turn = int(session.config.get("history_turn") or 0) + 1
+    try:
+        await store.update_session_config_key(session.id, "history_turn", turn)
+    except Exception:
+        logger.warning(
+            "Could not count the turn of thread %s over: its next turn's copy takes this turn's hand-offs for its own",
+            session.id, exc_info=True,
+        )
+        return
+    session.config["history_turn"] = turn
+
+
 async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
     """Take a thread's stopped turn's own files off its hand-off, so they do not land later; whether it was done.
 
@@ -357,8 +382,9 @@ async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any
     itself, a file it made from the stopped turn's draft among them.
 
     Where this is not done, the pod or the lock not had, the hand-off
-    stays as the turn left it, and the stopped turn's handed-on files
-    come into the thread's next copy with the helpers' work.
+    stays as the turn left it.  It names its turn, so the open of the
+    thread's next copy leaves the stopped turn's own files out all the
+    same, and takes up the helpers' work.
     """
     owner = sandbox_session_key(session)
     gave = _HANDED_ON.pop(owner, None)

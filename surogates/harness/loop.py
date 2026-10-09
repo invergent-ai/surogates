@@ -923,6 +923,10 @@ class AgentHarness(
             )
         if self._sandbox_pool is not None:
             await self._take_back_what_the_turn_handed_on(session)
+            # Taken back or not, the turn is over: the next turn's copy leaves its own files out.
+            from surogates.harness.landing import next_turn
+
+            await next_turn(self._store, session)
             try:
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
@@ -962,22 +966,34 @@ class AgentHarness(
         self._clear_interrupt()
 
     async def _take_back_what_the_turn_handed_on(self, session: Session) -> None:
-        """Drop the hand-off a thread's stopped turn made for its helpers, before its pod goes.
+        """Take a thread's stopped turn's own files off the hand-off it made for its helpers, before its pod goes.
 
         A stopped turn lands nothing.  Its branch never had its work, but a
-        step that started a helper put its copy on the hand-off, which the
-        thread's next turn would take up and land.  The pod that made the
-        hand-off knows it; where that pod went under the turn, one is opened
-        to drop it.  As best it can, and within a bound: a hand-off left is
-        a stopped turn's handed-on files in the thread's next copy, and the
-        log says so.  A turn that
-        handed nothing on, as every turn of a session that is no thread
-        with a copy, is done here at once: no pod is asked, and none opened.
+        step that started a helper put its copy on the hand-off.  The pod
+        that made the hand-off knows it; where that pod went under the turn,
+        one is opened in its place.  As best it can, and within a bound.
+
+        Where it is not carried out, the log says so and why: the worker did
+        not hand the copy on itself (the turn was cut off and taken up
+        again), the pod or the project's lock was not had in time, or the
+        pod failed.  The stopped turn's files stay out all the same: the
+        hand-off names its turn, and the open of the next turn's copy
+        leaves another turn's own files out, keeping what helpers kept.
+
+        A turn that handed nothing on, as every turn of a session that is no
+        thread with a copy, is done here at once: no pod is asked, and none
+        opened.
         """
         from surogates.harness.landing import drop_hand_off, handed_on, turn_ended
         from surogates.sandbox.pool import sandbox_session_key
 
+        left = "The thread's next copy leaves the stopped turn's own files out, and keeps its helpers' work."
         if not handed_on(session):
+            if is_project_thread(session.config) and await self._turn_started_a_helper(session):
+                logger.warning(
+                    "The stop of thread %s's turn was not carried out on its hand-off: this worker did not hand the "
+                    "copy on itself, the turn having been cut off and taken up again. %s", session.id, left,
+                )
             return
         try:
             from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -996,13 +1012,31 @@ class AgentHarness(
 
             # A stop stops: behind another thread's landing or the day's pruning the lock is minutes away.
             await asyncio.wait_for(taken_back(), _STOP_HAND_OFF_BOUND)
-        except Exception:
+        except TimeoutError:
             logger.warning(
-                "Could not take back what the stopped turn of %s handed on: its handed-on files come into the "
-                "thread's next copy, with its helpers' work", session.id, exc_info=True,
+                "The stop of thread %s's turn was not carried out on its hand-off: its pod, the project's lock and "
+                "the pod's answer were not had within %d s. %s", session.id, _STOP_HAND_OFF_BOUND, left,
+            )
+        except Exception as exc:
+            logger.warning(
+                "The stop of thread %s's turn was not carried out on its hand-off: %s. %s", session.id, exc, left,
+                exc_info=True,
             )
         finally:
             turn_ended(session)
+
+    async def _turn_started_a_helper(self, session: Session) -> bool:
+        """Whether a step of the thread's turn now ending called a tool that starts a helper, by its log."""
+        from surogates.harness.tool_exec import HELPER_STARTING_TOOLS
+
+        try:
+            ended = await self._store.last_event(
+                session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED,
+            )
+            calls = await self._store.get_events(session.id, after=ended.id if ended else 0, types=[EventType.TOOL_CALL])
+        except Exception:
+            return False
+        return any(call.data.get("name") in HELPER_STARTING_TOOLS for call in calls)
 
     # ------------------------------------------------------------------
     # Lease renewal (background task)

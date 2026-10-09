@@ -45,6 +45,7 @@ class ThreadPods:
         history = History(
             repo=_shadow_repo_path(str(self.project), base=self.root / sandbox_id / "home" / ".surogates" / "history"),
             project=self.project, copy=copy, thread=thread, user=spec.env.get("USER_ID", ""), helper=helper,
+            turn=spec.env.get("HISTORY_TURN"),
         )
         app = executor_server.create_app(token="t", workspace=str(copy), require_fuse=False, history=history)
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pod")

@@ -8,6 +8,7 @@ lands at the thread's turn end.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -863,3 +864,104 @@ async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_with_no
     assert "no-such-agent" in answer["error"] and "no task was made" in answer["error"], answer
     async with api.app.state.session_factory() as db:
         assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": chat.id})).scalar() == 0
+
+
+#: The ways a stop of a turn that handed on is not carried out on the hand-off, or only by a pod that did not
+#: make all of it.
+WAYS_A_STOP_FALLS_SHORT = [
+    "its pod fails it", "the turn was cut off and taken up again", "the project's lock is not had in time",
+    "a pod in place of the turn's is not open in time", "a pod made again handed on again",
+]
+
+
+async def a_stop_that_falls_short(api, monkeypatch, tmp_path, caplog, way: str):
+    """A thread's turn takes up a helper's finished ``sources.md``, writes ``stopped.md``, starts a helper and is
+    stopped, the stop falling short in *way*; then that helper ends, and the thread's next turn lands.
+
+    The project's files after it, and what the log said of the stop."""
+    master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
+    theirs, steps = SandboxPool(pods), []
+    monkeypatch.setattr(loop_module, "_STOP_HAND_OFF_BOUND", 1.0)
+
+    async def never(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    async def stopped(harness):
+        steps.append(way)
+        if way == "a pod made again handed on again" and len(steps) == 1:
+            await pods.destroy(mine.sandbox_of(str(thread.id)))  # the turn goes on in a pod made again
+            return
+        if way == "its pod fails it":
+            call = landing_module._call
+
+            async def fails(sandbox_pool, owner, action, **arguments):
+                if action == "drop_hand_off":
+                    raise landing_module.LandingStepError("the pod's step timed out")
+                return await call(sandbox_pool, owner, action, **arguments)
+
+            monkeypatch.setattr(landing_module, "_call", fails)
+        elif way == "the turn was cut off and taken up again":
+            landing_module.turn_ended(thread)  # as its worker forgets it, here or on the worker that takes it up
+        elif way == "the project's lock is not had in time":
+            monkeypatch.setattr(landing_module, "_guarded", a_lock_never_had)
+        elif way == "a pod in place of the turn's is not open in time":
+            compensate, ensure = harness._compensate_sagas, mine.ensure
+
+            async def then_the_pod_goes(*args, **kwargs):
+                await compensate(*args, **kwargs)
+                await pods.destroy(mine.sandbox_of(str(thread.id)))
+                monkeypatch.setattr(mine, "ensure", never)
+
+            monkeypatch.setattr(harness, "_compensate_sagas", then_the_pod_goes)
+            steps.append(ensure)
+        await stop(harness)
+
+    again = way == "a pod made again handed on again"
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+            calling(("spawn_worker", {"goal": "Check the sources."})),
+            calling(("memory", {"action": "add", "content": "x"})),
+            *([
+                # In the pod made again, whose copy took up what the turn had handed on, its draft with it.
+                calling(("spawn_worker", {"goal": "Check them again."})),
+                calling(("memory", {"action": "add", "content": "x"})),
+            ] if again else []),
+            _final_response("Done."),
+        ], pool=mine, during=stopped), 180)
+    said = "\n".join(r.getMessage() for r in caplog.records if "stop of thread" in r.getMessage())
+    # What made the stop fall short is over.
+    monkeypatch.setattr(landing_module, "_guarded", GUARDED)
+    monkeypatch.setattr(landing_module, "_call", CALL)
+    # The helper the stopped turn started ends after the stop, with a file of its own.
+    checker = (await helpers_of(api, thread))[1]
+    await asyncio.wait_for(a_helpers_turn(api, monkeypatch, theirs, checker, "echo checked > checked.md"), 120)
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    return pods, said
+
+
+GUARDED, CALL = landing_module._guarded, landing_module._call
+
+
+@contextlib.asynccontextmanager
+async def a_lock_never_had(*args, **kwargs):
+    await asyncio.Event().wait()
+    yield
+
+
+@pytest.mark.parametrize("way", WAYS_A_STOP_FALLS_SHORT)
+async def test_a_stopped_turns_own_files_never_land_however_its_stop_falls_short(api, monkeypatch, tmp_path, caplog, way):
+    pods, said = await a_stop_that_falls_short(api, monkeypatch, tmp_path, caplog, way)
+    assert not (pods.project / "stopped.md").exists()
+    assert "stopped.md" not in (pods.project / "seen-later.txt").read_text().split()
+    if way != "a pod made again handed on again":
+        # A stop not carried out on the hand-off says so, and why.
+        assert "was not carried out on its hand-off" in said and "leaves the stopped turn's own files out" in said, said
+
+
+@pytest.mark.parametrize("way", WAYS_A_STOP_FALLS_SHORT)
+async def test_no_helpers_finished_work_is_lost_however_a_stop_falls_short(api, monkeypatch, tmp_path, caplog, way):
+    pods, _ = await a_stop_that_falls_short(api, monkeypatch, tmp_path, caplog, way)
+    # The helper that finished before the turn, and the one the turn started, which ended after the stop.
+    assert (pods.project / "sources.md").read_text() == "an hour of work\n"
+    assert (pods.project / "checked.md").read_text() == "checked\n"

@@ -104,7 +104,9 @@ MAIN = "refs/heads/main"
 _EARLIER = "Earlier hand-offs"
 #: What a thread's hand-off says of itself: the hand-off its copy had taken up, and the one its pod made before it.
 _TOOK, _GAVE_BEFORE = "Surogate-Took", "Surogate-Gave-Before"
-#: The hand-backs a stop follows down from the history's hand-off to the stopped turn's, at most.
+#: And which turn of its thread made it: the open of another turn's copy leaves its own files out.
+_TURN = "Surogate-Turn"
+#: The commits followed down from the history's hand-off, by a stop or an open, at most: all of them together.
 _HAND_BACKS = 256
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
 #: The pruning window: main's commits of this many days, never fewer than its last _PRUNE_LEAST.
@@ -206,6 +208,7 @@ class History:
     thread: str
     user: str       # who started the thread: main's first commit is theirs
     helper: str | None = None  # a thread's helper's own session: its pod and copy are its own
+    turn: str | None = None    # the thread's turn this pod is opened for, where its worker says: see hand_off
 
     @property
     def branch(self) -> str:
@@ -643,8 +646,10 @@ class History:
         from where the branch has it, so a copy made again in mid-turn
         loses none of it.  The hand-off is one commit, the copy's files on
         its base, the hand-off it took up behind it.  It says which
-        hand-off that was, and which one this pod made before it: a stop
-        of the turn follows those back to what the turn found.
+        hand-off that was, which one this pod made before it, and which
+        turn of the thread made it: a stop of the turn follows those back
+        to what the turn found, and so does the open of a later turn's
+        copy, which leaves another turn's own files out.
         """
         not_taken = self.take_up()["not_taken"]
         own = self._commit_copy(author, "Handed on", trailers)
@@ -655,7 +660,10 @@ class History:
             # which no helper has kept onto since, holds the copy already.
             return {"commit": there, "not_taken": not_taken}
         onto = self._main("rev-parse", self.base)
-        found = [[_TOOK, self._ref(self.handed) or "none"], [_GAVE_BEFORE, self._ref(self.gave) or "none"]]
+        found = [
+            [_TOOK, self._ref(self.handed) or "none"], [_GAVE_BEFORE, self._ref(self.gave) or "none"],
+            [_TURN, self.turn or "none"],
+        ]
         tip = self._one(own, onto, *self._behind(onto), author=author, title="Handed on", trailers=[*trailers, *found])
         self._push(
             # With no hand-off before it, it is taken up from the copy's base.
@@ -719,16 +727,37 @@ class History:
         at the turn's end, with the commit step, which names every file this
         pod's take-ups left so.  A hand-off with no ``handoff-from`` is taken
         up from the copy's base.
+
+        A copy's first take-up looks at whose hand-off it is.  One this
+        turn made, its pod gone since, is taken up whole.  One another turn
+        made is a turn that neither landed nor was kept, a stopped one whose
+        stop was not carried out among them: its own files are left out,
+        as a stop leaves them, and what it found and what helpers kept
+        since is taken up.  A hand-off that names no turn is taken for
+        another turn's.  A pod not told its turn leaves nothing out.
         """
         refs = self._take()
-        durable = refs.get(self.handoff)
-        since = self._ref(self.handed) or refs.get(self.handoff_from) or self._ref(self.base)
+        durable, handed = refs.get(self.handoff), self._ref(self.handed)
+        since = handed or refs.get(self.handoff_from) or self._ref(self.base)
         if durable is None or durable == since:
             return {"not_taken": []}
-        self._fetch(durable, since)
+        taken = durable
+        if handed is None:
+            followed = self._followed(
+                durable, refs.get(self.handoff_from),
+                gone=lambda commit, said: self.turn is not None and said.get(_TURN) != self.turn,
+            )
+            if followed is not None and followed[0]:
+                _, taken, onto_none, _ = followed
+                since = onto_none or since
+        if taken is None:
+            # Nothing but another turn's own files: none of it is this copy's.
+            self._main("update-ref", self.handed, durable)
+            return {"not_taken": []}
+        self._fetch(taken, since)
         tip = self.snapshot("before taking up a helper's work")
-        tree, not_taken = self._merged(since, winner=tip, loser=durable)
-        self._switch(tip, self._commit(tree, tip, durable, _CHECKPOINT, "Taken up", []))
+        tree, not_taken = self._merged(since, winner=tip, loser=taken)
+        self._switch(tip, self._commit(tree, tip, taken, _CHECKPOINT, "Taken up", []))
         self._main("update-ref", self.handed, durable)
         if not_taken:
             _replace(self.repo / "not-taken", json.dumps(sorted({*self._not_taken(), *not_taken})).encode())
@@ -737,10 +766,10 @@ class History:
     def drop_hand_off(self, gave: Iterable[str] = ()) -> dict:
         """Take the stopped turn's own files off its hand-off, so they do not land later; what helpers kept stays.
 
-        A pod knows the last hand-off it made itself.  One made again since
-        the turn handed on does not: *gave*, the commits the turn handed on
-        as its worker has them, in order, names it.  A hand-off that is not
-        under the history's, as another turn's is not, changes nothing.
+        The turn's hand-offs are those that name this pod's turn, the last
+        one this pod made, and *gave*, the commits the turn handed on as its
+        worker has them; each names the one its pod made before it.  With
+        none of them under the history's hand-off, nothing changes.
 
         The hand-off goes back to the one the turn took up, with what each
         helper kept onto the turn's hand-offs since put on it again, file by
@@ -752,61 +781,100 @@ class History:
         left, or onto none, as only what it changed itself.
         """
         refs = self._take()
-        now, last = refs.get(self.handoff), self._ref(self.gave) or next(reversed(list(gave)), None)
-        kept = self._kept_since(now, last) if now and last else None
-        if kept is None:
+        now, own = refs.get(self.handoff), {self._ref(self.gave), *gave} - {None}
+
+        def gone(commit: str, said: dict[str, str]) -> bool:
+            if commit not in own and (self.turn is None or said.get(_TURN) != self.turn):
+                return False
+            own.add(said.get(_GAVE_BEFORE, "none"))
+            return True
+
+        followed = self._followed(now, refs.get(self.handoff_from), gone=gone) if now else None
+        if followed is None or not followed[0]:
             return {"dropped": False}
-        while True:
-            # Back through the turn's hand-offs to the one it found, or none.
-            self._fetch(last)
-            said = dict(line.split(": ", 1) for line in self._message(last) if ": " in line)
-            found, before = (None if said.get(name, "none") == "none" else _checked_id(said[name], "a hand-off") for name in (_TOOK, _GAVE_BEFORE))
-            earlier = self._kept_since(found, before) if found and before else None
-            if earlier is None:
-                break
-            kept, last = [*kept, *earlier], before
-        updates: dict[str, str | None] = {}
-        for tip in reversed(kept):
-            [since] = self._parents(tip)
-            # Where the helper started may be a hand-off this pod never held: an earlier turn's.
-            self._fetch(since)
-            if found is None:
-                # Onto none: the helper's copy is the hand-off, taken up from where it started.
-                found, updates[self.handoff_from] = tip, since
-                continue
-            self._fetch(found)
-            tree, _ = self._merged(since, winner=found, loser=tip)
-            found = self._commit(tree, found, tip, _CHECKPOINT, "Kept", [["Surogate-Kind", "kept"]])
-        if found is None:
-            updates[self.handoff_from] = None
-        self._push({self.handoff: found, **updates}, expect={self.handoff: now})
+        _, found, onto_none, _ = followed
+        self._push(
+            {self.handoff: found, **({self.handoff_from: onto_none} if onto_none or found is None else {})},
+            expect={self.handoff: now},
+        )
         for ref in (self.gave, self.handed):
             if self._ref(ref) is not None:
                 self._main("update-ref", "-d", ref)
         return {"dropped": True}
 
-    def _kept_since(self, top: str, bottom: str) -> list[str] | None:
-        """The helpers' copies kept onto the hand-off *bottom* up to *top*, the last first; None when *bottom* is not under *top*.
+    def _followed(
+        self, top: str, floor: str | None, *, gone: Callable[[str, dict[str, str]], bool],
+    ) -> tuple[bool, str | None, str | None, str | None] | None:
+        """The hand-off *top* without the own files of each of the thread's hand-offs that *gone* names.
 
-        Each step down is a helper's hand-back: its copy alone, on the
-        hand-off it started from, or a merge of the hand-off and its copy.
+        Followed down from *top*: a helper's hand-back is its copy alone on
+        the hand-off it started from, or a merge of the hand-off and its
+        copy; a thread's hand-off says which hand-off its copy had taken
+        up.  It ends at *floor*, where the hand-off is taken up from, at a
+        hand-off of the thread's that is not gone, at one that found none,
+        or at any other commit.  Then what each helper kept onto a hand-off
+        that is gone is put on what is left, the oldest first.
+
+        Answers whether any was gone; what is left, None for nothing; where
+        that is taken up from when it is a helper's copy onto none; and,
+        where the walk ended at a hand-off of the thread's, the base that
+        one was made on.  None when it cannot be followed: a commit the
+        history lacks, or more than ``_HAND_BACKS`` commits in all.
         """
-        tips: list[str] = []
-        for _ in range(_HAND_BACKS):
-            if top == bottom:
-                return tips
-            try:
-                self._fetch(top)
-                parents = self._parents(top)
-            except HistoryError:
+        kept: list[str] = []
+        any_gone, found, rests = False, None, None
+        commit: str | None = top
+        try:
+            for _ in range(_HAND_BACKS):
+                if commit == floor:
+                    found = commit
+                    break
+                self._fetch(commit)
+                message, parents = self._message(commit), self._parents(commit)
+                if message[:1] == ["Kept"] and len(parents) == 2:
+                    kept.append(parents[1])
+                    commit = parents[0]
+                elif message[:1] == ["Kept"] and len(parents) == 1:
+                    if parents[0] != floor:
+                        self._fetch(parents[0])
+                    if parents[0] == floor or self._message(parents[0])[:1] != ["Handed on"]:
+                        found = commit  # a helper's copy onto none: it is the hand-off, from where it started
+                        break
+                    kept.append(commit)
+                    commit = parents[0]
+                elif message[:1] == ["Handed on"] and parents:
+                    said = dict(line.split(": ", 1) for line in message if ": " in line)
+                    if not gone(commit, said):
+                        found, rests = commit, parents[0]
+                        break
+                    any_gone = True
+                    if said.get(_TOOK, "none") == "none":
+                        break
+                    commit = _checked_id(said[_TOOK], "a hand-off")
+                else:
+                    found = commit
+                    break
+            else:
                 return None
-            if self._message(top)[:1] != ["Kept"] or len(parents) not in (1, 2):
-                return None
-            if len(parents) == 2:
-                self._fetch(parents[1])
-            tips.append(parents[-1] if len(parents) == 2 else top)
-            top = parents[0]
-        return None
+            if not any_gone:
+                return False, top, None, rests
+            onto_none = None
+            for tip in reversed(kept):
+                self._fetch(tip)
+                [since] = self._parents(tip)
+                # Where the helper started may be a hand-off this pod never held: an earlier turn's.
+                self._fetch(since)
+                if found is None:
+                    # Onto none: the helper's copy is the hand-off, taken up from where it started.
+                    found, onto_none = tip, since
+                    continue
+                self._fetch(found)
+                tree, _ = self._merged(since, winner=found, loser=tip)
+                found = self._commit(tree, found, tip, _CHECKPOINT, "Kept", [["Surogate-Kind", "kept"]])
+            return True, found, onto_none, rests
+        except HistoryError:
+            logger.warning("Could not follow the hand-off of thread %s", self.thread, exc_info=True)
+            return None
 
     def prune(self, *, keep: list[str], now: float, spare: float = _SPARE, old: list[str] | None = None) -> dict:
         """Cut the durable history back to its window, at most once a day, under the project's lock.

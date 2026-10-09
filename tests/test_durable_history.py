@@ -2051,3 +2051,92 @@ def test_a_helper_whose_start_the_history_holds_only_in_part_sends_its_files_who
     git(durable, "rev-list", "--objects", "--no-walk", "refs/handoff/t1")
     after = a_pod(tmp_path, project)
     assert (after.copy / "b.md").read_text() == "b"
+
+
+def names_in(pod: History) -> list[str]:
+    return sorted(str(p.relative_to(pod.copy)) for p in pod.copy.rglob("*") if p.is_file() and ".git" not in p.parts)
+
+
+def a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project, turn="turn-2") -> History:
+    """After a helper's finished work waits on the hand-off, t1's turn *turn* takes it up, writes a draft and hands on; its pod."""
+    a_thread_whose_helper_finished_after_its_turn(tmp_path, project)
+    pod = a_pod(tmp_path, project, turn=turn)
+    (pod.copy / "draft.md").write_text("the stopped turn's draft")
+    pod.hand_off(author=A, trailers=KEPT)
+    return pod
+
+
+def test_the_next_turns_copy_leaves_out_the_own_files_of_a_hand_off_another_turn_made_and_keeps_helpers_work(tmp_path, project):
+    a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    b = a_helper(tmp_path, project, "h-b")  # started by that turn, from its copy
+    (b.copy / "checked.md").write_text("checked by b")
+    b.hand_back(author=A, trailers=KEPT)
+    # The turn was stopped, and its stop was not carried out: the hand-off is as the turn left it.
+    later = a_pod(tmp_path, project, turn="turn-3")
+    # Its own draft is not this turn's to land.  The earlier helper's work, and the later one's own, are.
+    assert names_in(later) == ["Report.docx", "checked.md", "notes.txt", "outline.md", "sources.md"]
+    land(later, "saga:3")
+    assert not (project / "draft.md").exists() and (project / "sources.md").read_text() == "an hour of work"
+    assert handoffs(project) == {}
+    assert "draft.md" not in names_in(a_pod(tmp_path, project, turn="turn-4"))
+
+
+def test_a_copy_made_again_in_the_same_turn_has_all_the_turn_handed_on(tmp_path, project):
+    a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    again = a_pod(tmp_path, project, turn="turn-2")  # the pod went under the turn
+    assert names_in(again) == ["Report.docx", "draft.md", "notes.txt", "outline.md", "sources.md"]
+
+
+@pytest.mark.parametrize("says", [None, "turn-3"], ids=["no turn named", "the next turn's named"])
+def test_a_hand_off_that_names_no_turn_or_a_false_one_never_loses_a_helpers_work(tmp_path, project, says):
+    durable = project / "_history"
+    turn = a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    b = a_helper(tmp_path, project, "h-b")
+    (b.copy / "checked.md").write_text("checked by b")
+    # The thread's agent can write its pod's history: it puts a hand-off of its own making in the real one's place.
+    real = git(durable, "rev-parse", "refs/handoff/t1")
+    message = [line for line in git(durable, "log", "-1", "--format=%B", real).splitlines() if not line.startswith("Surogate-Turn:")]
+    forged = subprocess.run(
+        ["git", f"--git-dir={turn.repo}", "-c", "user.name=x", "-c", "user.email=x@x", "commit-tree", f"{real}^{{tree}}",
+         *(arg for parent in parents(durable, real) for arg in ("-p", parent)), "-F", "-"],
+        input="\n".join([*message, *([f"Surogate-Turn: {says}"] if says else [])]) + "\n", capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", f"--git-dir={turn.repo}", "pack-objects", "--revs", "-q", str(durable / "objects" / "pack" / "pack")],
+        input=f"{forged}\n^{real}\n", capture_output=True, text=True, check=True,
+    )
+    (durable / "packed-refs").write_text((durable / "packed-refs").read_text().replace(real, forged))
+    b.hand_back(author=A, trailers=KEPT)
+    later = a_pod(tmp_path, project, turn="turn-3")
+    # Whatever it says of its turn, each helper's work is in the next copy.
+    assert {"sources.md", "checked.md"} <= set(names_in(later))
+    # One that names no turn is taken for another turn's: its own files stay out.  One that names the turn now
+    # opening gets its own files into that turn's copy: no more than the agent could write there itself.
+    assert ("draft.md" in names_in(later)) is (says == "turn-3")
+
+
+def test_a_stop_takes_back_every_hand_off_of_its_turn_also_one_made_by_a_pod_made_again(tmp_path, project):
+    first = a_turn_that_handed_on_and_was_not_stopped_in_the_history(tmp_path, project)
+    again = a_pod(tmp_path, project, turn="turn-2")  # the first pod went; the copy made again has the draft
+    (again.copy / "more.md").write_text("more of the stopped turn")
+    again.hand_off(author=A, trailers=KEPT)
+    assert again.drop_hand_off() == {"dropped": True}
+    assert names_in(a_pod(tmp_path, project, turn="turn-3")) == ["Report.docx", "notes.txt", "outline.md", "sources.md"]
+    assert first.turn == "turn-2"
+
+
+def test_a_stop_follows_a_bounded_number_of_commits_whatever_the_hand_offs_say(tmp_path, project, monkeypatch):
+    monkeypatch.setattr(history_module, "_HAND_BACKS", 6)
+    turn = a_pod(tmp_path, project, turn="turn-2")
+    for n in range(4):  # four hand-offs of one turn, a helper keeping onto each
+        (turn.copy / f"draft{n}.md").write_text("draft")
+        turn.hand_off(author=A, trailers=KEPT)
+        helper = a_helper(tmp_path, project, f"h{n}")
+        (helper.copy / f"h{n}.md").write_text("kept")
+        helper.hand_back(author=A, trailers=KEPT)
+    before = handoffs(project)
+    # Eight commits to follow, and a bound of six over the whole walk: the stop changes nothing.
+    assert turn.drop_hand_off() == {"dropped": False} and handoffs(project) == before
+    monkeypatch.setattr(history_module, "_HAND_BACKS", 8)
+    assert turn.drop_hand_off() == {"dropped": True}
+    assert names_in(a_pod(tmp_path, project, turn="turn-3")) == ["Report.docx", "h0.md", "h1.md", "h2.md", "h3.md", "notes.txt"]

@@ -2370,5 +2370,5 @@ async def test_a_stop_gives_up_taking_the_hand_off_back_when_the_projects_lock_i
         assert time.monotonic() - began < 5
     # The stop goes on.  The hand-off is as the turn left it, and the log says what that means.
     assert git(pods.project / "_history", "for-each-ref", "--format=%(refname) %(objectname)") == before
-    assert "its handed-on files come into the thread's next copy" in caplog.text
+    assert "was not carried out on its hand-off: its pod, the project's lock and the pod's answer were not had within" in caplog.text
     assert not landing_module.handed_on(thread)
