@@ -88,9 +88,18 @@ async def create_task_and_spawn(
 
             # The task is known to be made, to start now or once its parents are done: what the
             # calling step set for the moment before it starts a session runs here, for a task
-            # queued too.  The read above is ended first.
-            from surogates.session.provisioning import NotHandedOn, before_child
+            # queued too.  The read above is ended first.  A step that has set something is told
+            # of a sub-agent its agent does not have before that runs, and before a row is left
+            # for a tick to try: its call is refused whole.
+            from surogates.session.provisioning import NotHandedOn, a_step_hands_on, before_child
 
+            if agent_def_name and a_step_hands_on():
+                from surogates.harness.agent_resolver import resolve_agent_by_name
+
+                if await resolve_agent_by_name(agent_def_name, tenant, session_factory=session_factory, bundle=bundle) is None:
+                    raise TaskSpawnError(
+                        f"agent_type {agent_def_name!r} names no enabled sub-agent of this agent; no task was made"
+                    )
             try:
                 await before_child(db)
             except NotHandedOn as exc:

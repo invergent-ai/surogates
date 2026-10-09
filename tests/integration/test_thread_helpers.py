@@ -784,3 +784,26 @@ async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_say
         assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": thread.id})).scalar() == 0
     # The turn's own work lands as ever.
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md"]
+
+
+async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_before_the_copy_is_handed_on(api, monkeypatch, pods):
+    thread = await a_coordinating_thread(api)
+    handed: list = []
+
+    async def after_it(harness):
+        handed.append((landing_module.handed_on(thread), list(locks)))
+
+    looping = a_looping_harness(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo outline > outline.md"})),
+        calling(("spawn_task", {"goal": "Draft the sources.", "agent_type": "no-such-agent"})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Done."),
+    ], pool=SandboxPool(pods), during=after_it, saga_settings=FENCED)
+    locks = await project_locks_taken(monkeypatch)
+    await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
+    [refusal] = await results_of(api, thread, "spawn_task")
+    assert "no-such-agent" in json.loads(refusal)["error"], refusal
+    # Refused before anything: no lock asked for a hand-off, nothing a stop would take back, no task left queued.
+    assert (handed, await helpers_of(api, thread)) == ([(False, [])], [])
+    async with api.app.state.session_factory() as db:
+        assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": thread.id})).scalar() == 0

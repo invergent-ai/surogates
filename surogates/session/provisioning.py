@@ -36,6 +36,11 @@ def before_a_child(run: Callable[[], Awaitable[None]]):
         _BEFORE_CHILD.reset(token)
 
 
+def a_step_hands_on() -> bool:
+    """Whether the step now running has set something to run before the sessions it starts."""
+    return _BEFORE_CHILD.get() is not None
+
+
 async def before_child(reading: Any = None) -> None:
     """Run what the step now running set to happen before it starts a session; nothing outside such a step.
 
