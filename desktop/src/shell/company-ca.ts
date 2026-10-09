@@ -185,7 +185,21 @@ export function trustInChromium(certificates: string[], home: string, dataHome: 
   // The app's own are those named as it names one, to the letter: no other entry is ever removed.
   const ours = (name: string): boolean => OURS.test(name);
   const wanted = new Map(certificates.map((pem) => [nicknameOf(pem), pem]));
-  for (const { name, trusted } of entries) if (ours(name) && (!wanted.has(name) || !trusted)) run(["-D", "-n", name]);
+  for (const { name, trusted } of entries) {
+    if (!ours(name) || (wanted.has(name) && trusted)) continue;
+    try {
+      run(["-D", "-n", name]);
+    } catch (error) {
+      // A name of the user's that goes on in spaces is listed as the app's is, and no entry is found
+      // by the app's: it is theirs, and stays. Any other refusal is the database's own.
+      try {
+        run(["-L", "-n", name]);
+      } catch {
+        continue;
+      }
+      throw error;
+    }
+  }
   const missing = [...wanted].filter(([name]) => !entries.some((entry) => entry.name === name && entry.trusted));
   if (missing.length === 0) return;
   // What the user's own entries hold, each read by its name: certutil prints no certificate without one.
