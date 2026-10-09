@@ -229,7 +229,14 @@ class _StoppedAt:
 
 
 class Stopping:
-    """An engine of a test's own, set as the worker's is, and calls on it stopped at one of their waits.
+    """An engine of a test's own, and calls on it stopped at one of their waits.
+
+    The engine is set as the worker's own is (surogates/orchestrator/worker.py):
+    statement caches off and no ping before a connection is lent.  The API's
+    (surogates/db/engine.py) pings, which replaces a connection that died in
+    the pool; the worker's lends it as it is, and that decides what a call
+    finds after a stop ended its connection.  Keep it without the ping while
+    the worker has none.
 
     Its connections carry a name of their own: those a stopped call still
     holds are then the test's to count, and to end.

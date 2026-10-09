@@ -248,8 +248,9 @@ async def test_a_write_stopped_twice_around_its_commit_is_never_left_open_for_it
             break
     else:
         pytest.fail("the write was never recorded")
-    # Which of the two the second stop meets is down to timing: each place many times.
-    for at in (commit - 1, commit, commit + 1) * 8:
+    # Stopped again one wait after each of its waits; around the commit many times, since
+    # which of the two the second stop meets there is down to timing.
+    for at in (*range(commit - 1), *(commit - 1, commit, commit + 1) * 8):
         request = write_request(rig, IN_PARTS)
         assert await stopping.stop_at(at, ops.run(request), again=1)
 
