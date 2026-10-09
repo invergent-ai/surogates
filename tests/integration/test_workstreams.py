@@ -509,7 +509,7 @@ async def test_a_master_keeps_its_routines(api, monkeypatch):
     await harness.wake(master.id)
     harness._handle_loop_command.assert_awaited_once()
     # No refusal; the stand-in handler wrote no answer, so the wake wrote the command's.
-    assert _llm_responses(store) == ["/loop could not be finished. Type it again."]
+    assert _llm_responses(store) == ["/loop was cut off before it could answer. Check `/loop list` before typing it again."]
 
 
 async def test_a_master_refuses_a_goal_the_web_client_sends_as_an_event(api):
