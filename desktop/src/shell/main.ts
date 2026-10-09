@@ -2195,7 +2195,11 @@ let leaving = false;
 // its launcher, never process.execPath, which is the old version's own folder.
 let restarting = false;
 
+// A quit the user asked for stays a quit: once one is under way, an update that ends installed does
+// not turn it into a restart, nor ask "Quit now?" of a quit that waits. The update stays installed,
+// and the next start is the user's own.
 function restart(): void {
+  if (quitting) return;
   restarting = true;
   app.quit();
 }

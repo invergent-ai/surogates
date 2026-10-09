@@ -13,7 +13,7 @@ import { gzipSync } from "node:zlib";
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
+import { connect, FakeAgent, quitHeld, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, ELECTRON, launch, MAIN, quit, shellPage, stubNative } from "./launch.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
@@ -41,10 +41,11 @@ beforeEach(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   writeFileSync(join(home, "install.json"), JSON.stringify({ base, channel: "stable" }));
   // The test's root helper: its release keys, listed as install.sh lists them; and, run with --apply,
-  // what it was given in <home>/applied, then the exit code and the words <home>/answer holds.
+  // what it was given in <home>/applied, then the exit code and the words <home>/answer holds,
+  // once <home>/hold is no longer there.
   writeFileSync(join(home, "surogate-apply-update"), [
     "#!/usr/bin/env bash", "CHANNEL=stable", "RELEASE_KEYS=(", `    '${PUBLIC}'`, "  )", `printf '%s\\n' "$@" >${join(home, "applied")}`, `read -r code words <${join(home, "answer")}`,
-    `[ -z "$words" ] || echo "Surogate Desktop: $words" >&2`, `exit "$code"`, "",
+    `[ -z "$words" ] || echo "Surogate Desktop: $words" >&2`, `while [ -e ${join(home, "hold")} ]; do sleep 0.1; done`, `exit "$code"`, "",
   ].join("\n"), { mode: 0o755 });
   writeFileSync(join(home, "answer"), "0\n");
 });
@@ -135,6 +136,26 @@ describe("updates, through the app", () => {
     // Started again as Start at login starts a development build: its Electron on this main, the update's.
     await expect.poll(() => relaunched().filter(({ pid, argv }) => pid !== first && !argv.some((arg) => arg.startsWith("--type=")))
       .map(({ argv }) => argv), { timeout: 30_000 }).toEqual([[ELECTRON, MAIN]]);
+  });
+
+  it("stays a quit where its user asked for one while the helper ran: the helper ends 0, and the app does not start again by itself", async () => {
+    publish("0.0.1");
+    writeFileSync(join(home, "hold"), "");
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    await page.click("#update-button");
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("Installing Surogate 0.0.1\u2026");
+    // The user quits, and the quit is under way, stopping what it stops, when the helper ends.
+    const closed = app!.waitForEvent("close", { timeout: 30_000 });
+    const release = await quitHeld(app!, page, agent);
+    rmSync(join(home, "hold"));
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 10_000 }).toBe("Surogate 0.0.1 is installed.");
+    release();
+    await closed;
+    app = undefined;
+    // The update is installed, and the app is quit: the next start is the user's own.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(relaunched().filter(({ argv }) => !argv.some((arg) => arg.startsWith("--type=")))).toEqual([]);
   });
 
   it("starts nothing again at a quit that no update asked for, with one downloaded and waiting", async () => {
