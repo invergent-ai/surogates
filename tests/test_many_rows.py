@@ -76,6 +76,18 @@ def test_the_bound_is_never_under_what_a_value_takes_on_the_wire():
     assert row_bound({"a": "x" * 500}) >= 500  # named parameters
 
 
+def test_loading_the_module_again_leaves_one_listener():
+    first = many_rows._send_whole
+    try:
+        importlib.reload(many_rows)
+        assert many_rows._send_whole is not first
+        assert event.contains(Engine, "do_executemany", many_rows._send_whole)
+        assert not event.contains(Engine, "do_executemany", first)
+    finally:
+        importlib.reload(many_rows)
+    assert event.contains(Engine, "do_executemany", many_rows._send_whole)
+
+
 def test_the_guard_is_on_every_engine_of_a_process_that_imports_the_database_layer():
     assert many_rows.GUARD is True
     assert event.contains(Engine, "do_executemany", many_rows._send_whole)

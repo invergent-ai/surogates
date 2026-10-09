@@ -125,7 +125,10 @@ def in_groups(rows: Sequence[Any]) -> list[list[Any]]:
     return groups
 
 
-@event.listens_for(Engine, "do_executemany")
+# What this module set on the engines before it was loaded again, if it was.
+_before = globals().get("_send_whole")
+
+
 def _send_whole(cursor: Any, statement: str, parameters: Any, context: Any) -> bool | None:
     if not GUARD or context is None or context.dialect.driver != "asyncpg":
         return None
@@ -156,3 +159,9 @@ def _send_whole(cursor: Any, statement: str, parameters: Any, context: Any) -> b
         raise
     await_only(transaction.commit())
     return True
+
+
+# Once, however often the module is loaded: a reload leaves the new listener alone.
+if _before is not None and event.contains(Engine, "do_executemany", _before):
+    event.remove(Engine, "do_executemany", _before)
+event.listen(Engine, "do_executemany", _send_whole)
