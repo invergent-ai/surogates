@@ -530,7 +530,8 @@ describe("a registry's output together", () => {
 describe("a background process with a terminal", { timeout: 20_000 }, () => {
   it("gets a terminal of the cloud's size, and answers its exit code", async () => {
     processes();
-    const id = await start("tty; stty size; exit 7", { pty: true });
+    // The terminal's name through echo, which ends it with one newline: uutils' tty, Ubuntu 26.04's, ends it with none.
+    const id = await start('echo "$(tty)"; stty size; exit 7', { pty: true });
     const answer = (await ask("wait", { session_id: id, timeout: 10 })).ok;
     expect(answer.exit_code).toBe(7);
     expect(answer.output).toMatch(/^\/dev\/pts\/\d+\r\n30 120\r\n$/);
