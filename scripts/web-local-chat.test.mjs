@@ -419,9 +419,10 @@ test("tells the server of a take-over, and of a hand back only once its user con
   assert.deepEqual(did.slice(7), [["handBack", "root-1"], ["server", "handed back, confirmed"]]);
   // Only of the browser this chat held, as the desktop itself answers: handed back for a chat that is gone, or
   // with nobody holding it and nothing asked, the desktop says it was released, and it is posted as a release.
+  // So is a bare true, which says a hand back was made and not that its user confirmed one.
   // Whatever the page last read of who held it: the desktop's answer is the one that counts.
   turn = true;
-  for (const answer of ["released"]) {
+  for (const answer of ["released", true]) {
     handed = answer;
     did.length = 0;
     assert.equal(await actOnBrowser("handBack", "root-1", desktop, server), WRITE_TO_THE_AGENT);
@@ -463,7 +464,8 @@ test("posts a hand back as its user's confirmed one only of the browser this cha
   }
   // Held from a chat that is gone: its user confirmed that, and no hand back of this chat's. Nobody held it, and
   // nothing was asked. The desktop answers each as released: a release, which wakes nobody, and the pane says to write.
-  for (const answer of ["released"]) {
+  // A bare true is read the same: only the desktop's "confirmed" is its user's confirmed hand back.
+  for (const answer of ["released", true]) {
     const other = browserDesk();
     other.answers.handBack = async () => answer;
     const gone = browserPane(other.posts);

@@ -30,8 +30,10 @@ export function ComputerBrowser({
 }: { sessionId: string; available: boolean; readOnly: boolean }) {
   const { chat, desktop, reread } = useLocalChat(sessionId);
   const pane = browserPaneOf(sessionId);
+  // The state is the same wherever the pane is drawn: off a browser too, as its test draws it.
   const { asking, failure, said, answers } = useSyncExternalStore(
     pane.subscribe,
+    pane.state,
     pane.state,
   );
   // Who holds the browser is the computer's to say: asked again once the desktop has answered a

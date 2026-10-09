@@ -1034,6 +1034,20 @@ async def test_the_chats_still_told_taken_over_are_looked_for_in_their_own_organ
     assert len(await told(another_org)) == 1
 
 
+async def test_a_computers_hand_back_is_passed_over_by_the_sweeper_whatever_it_says_it_gave(computer):
+    chat = await computer.told_taken_over()
+    # The hand back's own event is for the pane even where it says it gave a turn: the turn is the
+    # resume written with it, and without one there is nothing to recover.
+    await computer.store.emit_event(chat, EventType.BROWSER_CONTROL_RETURNED, {
+        "session_id": str(chat), "released_by": str(computer.user_id), "computer": True, "resumes": True,
+    })
+    await computer.left(chat)
+
+    assert await computer.orphans() == set()
+    assert await computer.sweep() == 0
+    assert not await computer.queued(chat)
+
+
 async def test_only_a_hand_back_is_passed_over_for_being_a_computers(computer):
     chat = await computer.idle()
 
@@ -1581,6 +1595,30 @@ async def test_a_hand_back_a_turn_ended_over_without_reading_is_read_at_the_wake
         assert (await asking.session(chat)).status == "active"
     finally:
         await asking.unqueue(chat)
+
+
+async def test_a_finished_chat_is_not_revived_for_an_unread_hand_back_while_its_users_limit_is_spent_nor_failed_for_it(
+    asking, monkeypatch,
+):
+    # A project's chat, whose turns the wake itself holds against its user's limit.
+    metered(asking.api, {}, Ops())
+    chat = await asking.stopped_while_held(**IN_A_PROJECT)
+    # Handed back as a turn is ending: the chat is finished again, the hand back's resume unread.
+    await asking.hands_back(chat)
+    await asking.ends(chat)
+    await asking.unqueue(chat)
+
+    spent = Ops(allowance_left=False)
+    harness, turns = worker(asking.api, monkeypatch, CAPPED, spent)
+    await harness.wake(chat)
+
+    # Asked once, at the revival, and refused: the hand back waits for their next message. Nobody typed
+    # into the limit, so the chat is not failed for it.
+    assert turns == []
+    assert spent.held == [("allowance", str(asking.api.user_id), "web")]
+    assert (await asking.session(chat)).status == "completed"
+    assert await asking.resumes(chat) == [{"source": "browser_hand_back"}]
+    assert await asking.store.get_events(chat, types=[EventType.SESSION_FAIL]) == []
 
 
 async def test_a_hand_back_gives_one_turn_however_often_it_is_posted_and_the_chat_is_woken(asking, monkeypatch):
