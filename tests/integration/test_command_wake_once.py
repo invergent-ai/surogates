@@ -460,6 +460,25 @@ async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_w
     assert len(await workers.said(chat)) == len(before) + 1
 
 
+@pytest.mark.parametrize("command, answer", [
+    ("/compress", "Context compressed to 2 messages. Strategy: summary."), ("/clear", "Conversation cleared."),
+])
+async def test_a_conversation_is_compacted_once_also_when_the_worker_dies_before_it_says_so(workers, command, answer):
+    chat = await workers.chat()
+    await workers.says(chat, command)
+    # The compaction is written; the worker stops as it writes the answer.
+    await workers.wake_of_a_worker_that_dies(chat, "answering")
+    assert (await workers.log(chat)).count(EventType.CONTEXT_COMPACT.value) == 1
+
+    assert await workers.swept(chat)
+    await workers.wake(chat)
+
+    # Run again, the command finds its own compaction: it says what is true, and compacts nothing twice.
+    assert (await workers.said(chat))[-1] == answer
+    assert (await workers.log(chat)).count(EventType.CONTEXT_COMPACT.value) == 1
+    assert len(workers.compressed) == (1 if command == "/compress" else 0)
+
+
 @pytest.mark.parametrize("command", ["/loop 1d Check the cash report", "/loop Check the cash report"])
 async def test_a_routine_is_made_once_also_when_the_worker_dies_before_it_says_so(workers, command):
     chat = await workers.chat()

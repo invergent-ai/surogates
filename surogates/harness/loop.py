@@ -4893,6 +4893,11 @@ class AgentHarness(
         typed: Any,
     ) -> None:
         """Run the handler of the built-in *command* the user typed as *text*, in the message *typed*."""
+        # The compaction a run of this very command wrote before its worker died.
+        compacted = next((
+            event for event in all_events
+            if event.type == EventType.CONTEXT_COMPACT.value and (event.data or {}).get("answers") == typed.id
+        ), None)
         if command == "compress":
             # The conversation the command acts on, by the place its answer
             # will stand at: the handler takes its last user message for
@@ -4902,9 +4907,9 @@ class AgentHarness(
                 _shown_before_its_answer([event for event in all_events if id(event) not in behind], typed.id),
                 workspace_path=(session.config or {}).get("workspace_path"),
             )
-            await self._handle_compress_command(session, messages, system_prompt, lease)
+            await self._handle_compress_command(session, messages, system_prompt, lease, compacted=compacted)
         elif command == "clear":
-            await self._handle_clear_command(session, lease)
+            await self._handle_clear_command(session, lease, cleared=compacted is not None)
         elif command == "goal":
             await self._handle_goal_command(session, text, lease)
         elif command == "mission":
@@ -5030,12 +5035,16 @@ class AgentHarness(
         self,
         session: Session,
         lease: SessionLease,
+        *,
+        cleared: bool = False,
     ) -> None:
         """Handle the /clear slash command.
 
         Emits a CONTEXT_COMPACT event with an empty message list, effectively
         clearing all conversation history.  The next wake() will rebuild from
-        the compacted (empty) state.
+        the compacted (empty) state.  *cleared* when a run of this very
+        command wrote that event before its worker died: it is not written
+        a second time.
         """
         # Destroy the sandbox if one exists.
         if self._sandbox_pool is not None:
@@ -5046,18 +5055,19 @@ class AgentHarness(
 
         # Emit a CONTEXT_COMPACT event with empty messages — this replaces
         # the entire conversation history on next replay.
-        await self._store.emit_event(
-            session.id,
-            EventType.CONTEXT_COMPACT,
-            {
-                **self._names_its_message(),
-                "compacted_messages": [],
-                "strategy": "clear",
-                "original_message_count": 0,
-                "compressed_message_count": 0,
-            },
-            lease_token=lease.lease_token,
-        )
+        if not cleared:
+            await self._store.emit_event(
+                session.id,
+                EventType.CONTEXT_COMPACT,
+                {
+                    **self._names_its_message(),
+                    "compacted_messages": [],
+                    "strategy": "clear",
+                    "original_message_count": 0,
+                    "compressed_message_count": 0,
+                },
+                lease_token=lease.lease_token,
+            )
         self._forget_compacted_reads(session)
 
         # Emit an assistant message confirming the clear.
@@ -5242,12 +5252,24 @@ class AgentHarness(
         messages: list[dict],
         system_prompt: str,
         lease: SessionLease,
+        *,
+        compacted: Any | None = None,
     ) -> None:
         """Handle the /compress slash command.
 
         Forces context compression regardless of threshold, emits the
         result as an assistant message so the user sees what happened.
+        *compacted* is the compaction a run of this very command wrote
+        before its worker died: the conversation is not compressed a
+        second time, and the answer says what is so.
         """
+        if compacted is not None:
+            await self._emit_loop_response(
+                session, lease,
+                f"Context compressed to {len(compacted.data.get('compacted_messages') or [])} messages. "
+                f"Strategy: {compacted.data.get('strategy', 'unknown')}.",
+            )
+            return
         original_count = len(messages)
 
         # Remove the /compress message itself — it's not real conversation.
