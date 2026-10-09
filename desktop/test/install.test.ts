@@ -2216,6 +2216,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     // The packages, QEMU's without its recommends, and its firmware for q35.
     expect(root("dpkg-query -W -f='${Status}\\n' bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec perl-base openssl jq qemu-system-x86 | sort -u").stdout).toBe("install ok installed\n");
     expect(root("dpkg-query -W -f='${Status}\\n' qemu-system-gui 2>/dev/null").stdout).not.toBe("install ok installed\n");
+    // certutil is for a company's CA alone: an install that keeps none brings none.
+    expect(root("test ! -e /usr/bin/certutil").status).toBe(0);
     expect(root("timeout 3 qemu-system-x86_64 -machine q35,accel=tcg -display none -nodefaults -S").status).toBe(124);
     expect(root("getent group kvm").stdout).toMatch(/\btester\b/);
 
@@ -3342,6 +3344,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   const { it: box, docker, root, as, releaseOf, manifestOf, current, versions } = lab(release, INSTALL_LAB, ["--network", "host"]);
   let server: ChildProcess;
   let base: string;
+  // The same base as a server of the public web serves it: its certificate signed by an authority
+  // that is none of the company's.
+  let publicServer: ChildProcess;
+  let publicBase: string;
   let certs: string;
   const www = () => join(box.dir, "www");
   // Release *version* on the base, as the release job sends one, signed by *key*: its tarball, its
@@ -3404,9 +3410,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const times = Math.floor(1_048_576 / unwrapped.length);
     expect(times * wordy.length).toBeGreaterThan(1_048_576);
     writeFileSync(join(certs, "wide.pem"), unwrapped.repeat(times));
+    // The company's CA in a file of a megabyte to the byte, and in one of a byte more.
+    for (const [file, bytes] of [["megabyte.pem", 1_048_576], ["megabyte-and-one.pem", 1_048_577]] as const) {
+      writeFileSync(join(certs, file), `${readFileSync(company, "utf8")}${"#".repeat(bytes - statSync(company).size - 1)}\n`);
+    }
     // More certificates than a process may have files open, behind one that is no CA's.
     writeFileSync(join(certs, "thousand.pem"), readFileSync(site, "utf8") + readFileSync(company, "utf8").repeat(1100));
-    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "thousand.pem"]) {
+    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "megabyte.pem", "megabyte-and-one.pem", "thousand.pem"]) {
       expect(docker(["cp", join(certs, file), `${box.container}:/home/tester/${file}`]).status).toBe(0);
     }
     expect(root("chown -R tester /home/tester").status).toBe(0);
@@ -3416,10 +3426,14 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     server = spawn(process.execPath, ["-e", SERVE, www(), site, join(certs, "site.key")], { stdio: ["ignore", "pipe", "inherit"] });
     const port = await new Promise<string>((resolve) => server.stdout!.once("data", (chunk: Buffer) => resolve(chunk.toString().trim())));
     base = `https://127.0.0.1:${port}`;
+    const elsewhere = certificate(certs, "elsewhere", "it");
+    publicServer = spawn(process.execPath, ["-e", SERVE, www(), elsewhere, join(certs, "elsewhere.key")], { stdio: ["ignore", "pipe", "inherit"] });
+    publicBase = `https://127.0.0.1:${await new Promise<string>((resolve) => publicServer.stdout!.once("data", (chunk: Buffer) => resolve(chunk.toString().trim())))}`;
   }, 900_000);
 
   afterAll(() => {
     server.kill();
+    publicServer.kill();
   });
 
   it("installs no release that no trusted key signed, whatever certificate authority it is given, and keeps no CA that came with one", () => {
@@ -3456,9 +3470,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   });
 
   it("keeps the company's CA when run again without --ca-cert, takes the next one in its place, and never one its downloads fail with", () => {
+    // certutil gone since, as with a package that another's removal took along: a run that keeps a CA brings it back.
+    expect(root("apt-get remove -y -qq libnss3-tools >/dev/null 2>&1 && test ! -e /usr/bin/certutil").status).toBe(0);
     const again = install();
     expect(again.status, again.stderr).toBe(0);
     expect(kept()).toBe(rewritten(join(certs, "company.pem")));
+    expect(root("test -x /usr/bin/certutil").status).toBe(0);
     // A certificate authority's file, but not this network's: the downloads fail with it, and the CA that works stays.
     const wrong = install("--ca-cert it.pem");
     expect(wrong.status).toBe(1);
@@ -3539,6 +3556,11 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     refused("signless.pem", "/home/tester/signless.pem holds a certificate that is not a certificate authority's");
     expect(() => appTakes(rewritten(join(certs, "wordy.pem")).repeat(13))).toThrow("holds more than a megabyte");
     refused("wide.pem", "/home/tester/wide.pem holds more than a megabyte of certificates, and a file of certificate authorities holds far less");
+    // A megabyte whole is read, and not a byte more, as the app reads its own.
+    expect(appTakes(readFileSync(join(certs, "megabyte.pem"), "utf8"))).toBe(1);
+    expect(() => appTakes(readFileSync(join(certs, "megabyte-and-one.pem"), "utf8"))).toThrow("holds more than a megabyte");
+    expect(alone('company_ca /home/tester/megabyte.pem; cat "$GIVEN_CA"')).toMatchObject({ status: 0, stderr: "", stdout: rewritten(join(certs, "company.pem")) });
+    refused("megabyte-and-one.pem", "/home/tester/megabyte-and-one.pem holds more than a megabyte, and a file of certificate authorities holds far less");
     // Each certificate is looked at, however many the file holds: the first here is a site's.
     refused("thousand.pem", "/home/tester/thousand.pem holds a certificate that is not a certificate authority's");
     // What it takes, the app takes: a CA that says nothing of its key, and every file kept so far.
@@ -3554,6 +3576,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root("cp /home/tester/it.pem /srv/elsewhere.pem").status).toBe(0);
     for (const [broken, handed] of [
       ["ln -s /srv/elsewhere.pem /etc/surogate/ca.pem", false],
+      // A link that leads nowhere, and one to a folder, into which a rename by the link's name would put the file.
+      ["ln -s /srv/nowhere /etc/surogate/ca.pem", false],
+      ["mkdir -p /srv/folder && ln -s /srv/folder /etc/surogate/ca.pem", false],
       ["mkdir -p /etc/surogate/ca.pem/inside", false],
       ["mkfifo /etc/surogate/ca.pem", false],
       ["cp /home/tester/it.pem /etc/surogate/ca.pem && chown tester /etc/surogate/ca.pem", false],
@@ -3569,10 +3594,27 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(appTakes(kept()), broken).toBe(2);
     }
     // What the link named is as it was: the CA took the link's place, and was not written through it.
-    expect(root("cmp /srv/elsewhere.pem /home/tester/it.pem").status).toBe(0);
+    expect(root("cmp /srv/elsewhere.pem /home/tester/it.pem && test ! -e /srv/nowhere && test -z \"$(ls -A /srv/folder)\"").status).toBe(0);
     expect(root("ls -A /etc/surogate").stdout).toBe("ca.pem\ninstall.json\n");
     const again = install();
     expect(again.status, again.stderr).toBe(0);
+  });
+
+  it("trusts the system's own roots as before, beside the company's CA and never in their place: a server that one of them signed is reached with the CA kept, and with one given", () => {
+    const reached = (given = "") => alone(`${given}fetch -fsS -o /dev/null ${publicBase}/desktop/latest.json`);
+    // Neither the kept CA nor a given one signed it, and the system does not trust who did.
+    for (const given of ["", "GIVEN_CA=/home/tester/company.pem; "]) expect(reached(given).stderr, given).toContain("curl: (60) SSL certificate");
+    expect(root("cp /home/tester/it.pem /usr/local/share/ca-certificates/it.crt && update-ca-certificates").status).toBe(0);
+    for (const given of ["", "GIVEN_CA=/home/tester/company.pem; "]) expect(reached(given), given).toMatchObject({ status: 0, stderr: "" });
+    expect(root("rm /usr/local/share/ca-certificates/it.crt && update-ca-certificates --fresh").status).toBe(0);
+    expect(reached().stderr).toContain("curl: (60) SSL certificate");
+  });
+
+  it("asks a release's file of an http or https address alone, whatever address it is handed", () => {
+    for (const address of ["file:///etc/hostname", "ftp://127.0.0.1:9/latest.json"]) {
+      expect(alone(`fetch -fsS -o /tmp/fetched ${address}`), address).toMatchObject({ status: 1, stdout: "", stderr: expect.stringContaining("curl: (1) ") });
+    }
+    expect(root("test -e /etc/hostname && test ! -e /tmp/fetched").status).toBe(0);
   });
 
   it("rolls back through the network the company's CA signs, as it installs through it, a release it must download again among them", () => {
