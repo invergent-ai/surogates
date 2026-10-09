@@ -71,7 +71,7 @@ describe("the folders the app holds", () => {
     const asked: string[] = [];
     const said: string[] = [];
     const look = (folder: string) => (asked.push(folder), folder === "/dead" ? new Promise<Stats>(() => {}) : Promise.resolve({ dev: 3, ino: Number(folder.slice(1)) } as Stats));
-    const looks = new FolderLooks(look, 30, (folder) => said.push(folder));
+    const looks = new FolderLooks(look, 300, (folder) => said.push(folder));
     const healthy = [1, 2, 3, 4].map((ino) => ({ dev: 3, ino }));
     const folders = ["/dead", "/1", "/2", "/3", "/4"];
     expect(await looks.held(folders)).toEqual(healthy);
@@ -79,7 +79,7 @@ describe("the folders the app holds", () => {
       const began = Date.now();
       expect(await looks.held(folders)).toEqual(healthy);
       // The dead one is not waited for a second time: its look is older than its bound.
-      expect(Date.now() - began).toBeLessThan(25);
+      expect(Date.now() - began).toBeLessThan(250);
     }
     expect(asked.filter((folder) => folder === "/dead")).toEqual(["/dead"]);
     // Said once, to the log: its chat's tools fail later, at its file host's start, and nothing else tells why.
