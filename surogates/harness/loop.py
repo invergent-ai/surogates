@@ -1590,21 +1590,40 @@ class AgentHarness(
                 written = all_events
                 if is_new:
                     self._answering = typed_at
-                    if slash_block is not None:
-                        await self._emit_loop_response(
-                            session, lease, slash_block, user_content=last_user_content
-                        )
-                    else:
-                        await self._run_command(
-                            command, session, last_user_content, lease,
-                            messages=messages, system_prompt=system_prompt,
-                            all_events=all_events, typed=waiting,
-                        )
+                    try:
+                        if slash_block is not None:
+                            await self._emit_loop_response(
+                                session, lease, slash_block, user_content=last_user_content
+                            )
+                        else:
+                            await self._run_command(
+                                command, session, last_user_content, lease,
+                                messages=messages, system_prompt=system_prompt,
+                                all_events=all_events, typed=waiting,
+                            )
+                    except LeaseNotHeldError:
+                        # Another worker has the session, and the command.
+                        raise
+                    except Exception:
+                        logger.exception("Session %s: %s failed", session_id, last_user_content.split()[0])
                     written = all_events + await self._store.get_events(
                         session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
+                    if not _command_answered(written, typed_at):
+                        # Whatever way its handler left, a command a wake has
+                        # run is answered by that wake: unanswered, every
+                        # later wake would run it again and take up nothing
+                        # typed after it.
+                        await self._emit_loop_response(
+                            session, lease,
+                            f"{last_user_content.split()[0]} could not be finished. Type it again.",
+                            user_content=last_user_content,
+                        )
+                        written = all_events + await self._store.get_events(
+                            session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
+                        )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
-                if is_new and self._redis is not None and (
+                if is_new and self._redis is not None and _command_answered(written, typed_at) and (
                     not at_rest or is_project_master(session.config) and unread_reports(written)
                 ):
                     # What still waits, another command, a message, a turn

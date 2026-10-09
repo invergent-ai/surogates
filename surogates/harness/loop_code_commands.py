@@ -29,6 +29,7 @@ from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
 
+RUN_CUT_OFF = "The coding run was cut off. Type the command again to start it."
 _NO_VAULT = "Credential vault is not configured on this deployment."
 _NO_SANDBOX = "Coding agents need a sandbox, which isn't available on this deployment."
 
@@ -157,6 +158,9 @@ class CodeCommandMixin:
         if source_event_id is not None and _code_run_already_started(
             all_events, source_event_id,
         ):
+            # Its worker died in the run.  The run is not started again, and
+            # the command gets its answer, so the chat goes on.
+            await self._emit_code_message(session, RUN_CUT_OFF, lease)
             return
 
         # Resolve the target repo from the wake-local config.  A specific

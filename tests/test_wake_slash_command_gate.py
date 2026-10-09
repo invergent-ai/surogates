@@ -81,7 +81,13 @@ def _stub_store(session: Session, events: list[Any]) -> AsyncMock:
     store.release_lease = AsyncMock(return_value=None)
     store.get_harness_cursor = AsyncMock(return_value=0)
     store.get_events = AsyncMock(return_value=events)
-    store.emit_event = AsyncMock(return_value=1000)
+
+    async def emit_event(session_id, event_type, data, **_):
+        # As the real store: what a wake writes, its later reads find.
+        events.append(SimpleNamespace(id=1000 + len(events), type=getattr(event_type, "value", event_type), data=data))
+        return events[-1].id
+
+    store.emit_event = AsyncMock(side_effect=emit_event)
     store.advance_harness_cursor = AsyncMock(return_value=None)
     return store
 
@@ -165,8 +171,9 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     await harness.wake(session.id)
 
     harness._handle_loop_command.assert_awaited_once()
-    # The gate did not fire, so no "disabled" response was emitted.
-    assert _llm_responses(store) == []
+    # The gate did not fire, so no "disabled" response was emitted; the
+    # stand-in handler wrote no answer, so the wake wrote the command's.
+    assert _llm_responses(store) == ["/loop could not be finished. Type it again."]
 
 
 @pytest.mark.parametrize("command", ["loop", "mission", "auto-research", "deep-research", "code"])

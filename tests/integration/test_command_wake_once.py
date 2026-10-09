@@ -415,7 +415,9 @@ async def test_a_command_switched_off_for_the_agent_is_refused_once(workers, lat
 # -- A worker's death between the command and the later wake --
 
 
-@pytest.mark.parametrize("command", ["/compress", "/clear", "/goal status", "/mission status", "/code status"])
+@pytest.mark.parametrize("command", [
+    "/compress", "/clear", "/goal status", "/mission status", "/auto-research status", "/code status", "/loop list",
+])
 async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_wake_that_recovers_it(workers, command):
     chat = await workers.chat()
     before = await workers.said(chat)
@@ -1593,7 +1595,7 @@ async def test_a_coding_run_is_the_answer_to_its_own_command_though_more_was_sai
     assert {"role": "user", "content": "And Q1?"} in conversation
 
 
-async def test_a_coding_run_whose_worker_died_is_left_as_its_death_left_it(workers, monkeypatch):
+async def test_a_coding_run_whose_worker_died_is_answered_once_and_the_chat_goes_on(workers, monkeypatch):
     async def run(*, store, session, agent, started_metadata, **_):
         await store.emit_event(session.id, EventType.CODE_RUN_STARTED, {"run_id": "run-1", "agent": agent, **started_metadata})
         raise asyncio.CancelledError
@@ -1604,14 +1606,56 @@ async def test_a_coding_run_whose_worker_died_is_left_as_its_death_left_it(worke
     await workers.says(chat, '/code claude "Fix the totals"')
     with pytest.raises(asyncio.CancelledError):
         await workers.wake(chat)
+    await workers.nobody_is_queued()
 
-    # The run is started once, and the wake that recovers the chat neither starts it again nor
-    # takes the chat for one whose command was answered: the sweeper still sees a worker's death.
+    # The wake that recovers the chat says the run was cut off, once, and queues nobody for it.
     assert await workers.swept(chat)
+    await workers.nobody_is_queued()
     await workers.wake(chat)
-
+    cut_off = "The coding run was cut off. Type the command again to start it."
+    assert ((await workers.said(chat))[-1], await workers.status(chat)) == (cut_off, "completed")
+    assert not await queued(workers.api, await workers.session(chat))
+    for _ in range(5):
+        await workers.wake(chat)
+    assert (workers.ran, (await workers.said(chat)).count(cut_off)) == (["_handle_code_command"] * 2, 1)
     assert (await workers.log(chat)).count(EventType.CODE_RUN_STARTED.value) == 1
-    assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
+
+    # What its user types next is taken up, in order.
+    await workers.says(chat, "/goal status")
+    await workers.says(chat, "And Q1?")
+    for _ in range(3):
+        await workers.wake(chat)
+    assert workers.ran == ["_handle_code_command"] * 2 + ["_handle_goal_command"]
+    [conversation] = workers.requests
+    assert {"role": "user", "content": "And Q1?"} in conversation
+
+
+@pytest.mark.parametrize("leaves", ["silently", "raising"])
+@pytest.mark.parametrize("command", ["/goal status", "/compress", "/code status", "/loop list", "/mission status"])
+async def test_a_command_whose_handler_leaves_without_an_answer_is_answered_by_its_wake_and_run_by_no_other(workers, command, leaves):
+    chat = await workers.chat()
+    await workers.says(chat, command)
+    await workers.nobody_is_queued()
+    broken = workers.worker()
+    ran = []
+
+    async def handler(*_, **__):
+        ran.append(command)
+        if leaves == "raising":
+            raise RuntimeError("the hub timed out")
+
+    setattr(broken, ANSWERED[command], handler)
+    await broken.wake(chat)
+
+    # One answer, the wake's own, names the command; the chat rests and nobody is queued.
+    [typed] = [event for event in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]) if event.data["content"] == command]
+    last = (await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE]))[-1]
+    assert (last.data.get("answers"), last.data["message"]["content"]) == (typed.id, f"{command.split()[0]} could not be finished. Type it again.")
+    assert (await workers.status(chat), await queued(workers.api, await workers.session(chat))) == ("completed", False)
+
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert (ran, workers.ran, workers.requests) == ([command], [], [])
 
 
 async def test_a_commands_end_releases_what_a_turns_end_releases(workers, monkeypatch):
