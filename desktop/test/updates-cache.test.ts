@@ -42,7 +42,7 @@ function downloaded(tarball: Buffer): void {
     expect([name, lstatSync(join(version(), name)).isFile(), nlink]).toEqual([name, true, 1]);
   }
   expect(readFileSync(join(version(), "manifest.json")).equals(base.served.get("/desktop/latest.json")!)).toBe(true);
-  expect(readFileSync(join(version(), "manifest.json.sig")).equals(base.served.get("/desktop/latest.json.sig")!)).toBe(true);
+  expect(readFileSync(join(version(), "manifest.json.sig")).equals(base.served.get(base.signatureAt("1.2.4"))!)).toBe(true);
   expect(readFileSync(join(version(), "release.tar.gz")).equals(tarball)).toBe(true);
 }
 
@@ -186,7 +186,7 @@ describe("the update's cache", () => {
     const found = base.updates();
     await found.check();
     expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig", base.tarballAt("1.2.4")]);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4"), base.tarballAt("1.2.4")]);
     downloaded(tarball);
     expect(readFileSync(elsewhere).equals(tarball)).toBe(true);
   });

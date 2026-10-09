@@ -69,7 +69,7 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-// Release *version* on the base, as the release job publishes it: its tarball, and latest.json signed with the test's key.
+// Release *version* on the base, as the release job publishes it: its tarball, its manifest's signature by the test's key, and latest.json.
 function publish(version: string): Buffer {
   const tarball = gzipSync(Buffer.from(`Surogate ${version}\n`.repeat(10_000)));
   const url = `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`;
@@ -78,7 +78,7 @@ function publish(version: string): Buffer {
   })}\n`);
   served.set(`/desktop/${url}`, tarball);
   served.set("/desktop/latest.json", manifest);
-  served.set("/desktop/latest.json.sig", sign(null, manifest, keys.privateKey));
+  served.set(`/desktop/releases/${version}/manifest.json.sig`, sign(null, manifest, keys.privateKey));
   return tarball;
 }
 

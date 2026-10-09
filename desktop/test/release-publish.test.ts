@@ -47,6 +47,7 @@ const faulty = (curl: string) => [
   'case "$arg" in */desktop/"${FAULT#* }") fault="${FAULT%% *}" ;; *) fault= ;; esac',
   'if [ "$fault" = refused ] && [ -n "$upload" ]; then printf 503; exit 0; fi',
   'if [ "$fault" = unread ] && [ -z "$upload" ]; then printf 503; exit 0; fi',
+  'if [ "$fault" = forbidden ] && [ -z "$upload" ]; then printf 403; exit 0; fi',
   'if [ "$fault" = stalled ] && [ -n "$upload" ]; then exit 28; fi',
   'if [ "$fault" = silent ] && [ -z "$upload" ]; then exit 28; fi',
   `'${curl}' "$@" || exit`,
@@ -1045,14 +1046,20 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     const manifest = readFileSync(join(out, "manifest.json"));
     const signature = readFileSync(join(out, "manifest.json.sig"));
     expect(object("latest.json")?.equals(manifest)).toBe(true);
-    expect(object("latest.json.sig")?.equals(signature)).toBe(true);
+    // latest.json has no signature of its own: its readers ask for its release's, which is sent once.
+    expect(object("latest.json.sig")).toBeNull();
     expect(object("releases/1.0.0/manifest.json")?.equals(manifest)).toBe(true);
     expect(object("releases/1.0.0/manifest.json.sig")?.equals(signature)).toBe(true);
     expect(object("releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz")?.equals(readFileSync(join(out, "surogate-desktop-1.0.0-linux-x64.tar.gz")))).toBe(true);
     expect(object("install.sh")?.equals(readFileSync(join(dir, "release", "install.sh")))).toBe(true);
     // What changes from release to release, never from a cache.
-    expect(["install.sh", "latest.json", "latest.json.sig"].map(caching)).toEqual(["no-cache", "no-cache", "no-cache"]);
-    expect(send("1.0.0", released("1.0.0"))).toMatchObject({ status: 1, stderr: "publish.sh: desktop/releases/1.0.0 is published already, and is not sent again\n" });
+    expect(["install.sh", "latest.json"].map(caching)).toEqual(["no-cache", "no-cache"]);
+    // And what is a release's own, for good, is a cache's to keep.
+    expect(["releases/1.0.0/manifest.json", "releases/1.0.0/manifest.json.sig"].map(caching)).toEqual([null, null]);
+    expect(send("1.0.0", out)).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.0.0 is published already, and is not sent again\n" });
+    // Nor is another build under its version: its manifest is not the one that is there.
+    expect(send("1.0.0", released("1.0.0"))).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.0.0 is published already, with another manifest, and is not sent again\n" });
+    expect(object("releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz")?.equals(readFileSync(join(out, "surogate-desktop-1.0.0-linux-x64.tar.gz")))).toBe(true);
     expect(object("latest.json")?.equals(manifest)).toBe(true);
   });
 
@@ -1103,7 +1110,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(object("latest.json")?.equals(readFileSync(join(newest, "manifest.json")))).toBe(true);
   });
 
-  it("sends nothing that a reader reads first before what it then asks for: cut short at each object in turn, a send leaves the release before's latest.json, signature and install script whole, or this one's", () => {
+  it("sends nothing that a reader reads first before what it then asks for: cut short at each object in turn, a send leaves no moment when latest.json names a release whose signature or tarball is not there, and the same send run again ends it", () => {
     const before = released("1.0.0");
     expect(send("1.0.0", before).status).toBe(0);
     const script = readFileSync(join(dir, "release", "install.sh"), "utf8");
@@ -1111,51 +1118,83 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
       // The next release, with another install script, as a rotation's last has.
       writeFileSync(join(dir, "release", "install.sh"), script.replace("\nsettings() {\n", "\n# The next release's.\nsettings() {\n"));
       const out = released("1.1.0");
-      const [older, newer] = [before, out].map((folder) => ({
-        "latest.json": readFileSync(join(folder, "manifest.json")), "latest.json.sig": readFileSync(join(folder, "manifest.json.sig")),
-      }));
+      const [older, newer] = [before, out].map((folder) => readFileSync(join(folder, "manifest.json")));
       const scripts = [Buffer.from(script), readFileSync(join(dir, "release", "install.sh"))] as const;
+      const own = ["surogate-desktop-1.1.0-linux-x64.tar.gz", "manifest.json.sig", "manifest.json"].map((name) => `releases/1.1.0/${name}`);
       // Each object of a send, in the order it is sent.
-      const order = ["releases/1.1.0/surogate-desktop-1.1.0-linux-x64.tar.gz", "releases/1.1.0/manifest.json.sig", "latest.json", "latest.json.sig", "install.sh", "releases/1.1.0/manifest.json"];
+      const order = [...own, "latest.json", "install.sh"];
       const seen = order.map((cut) => {
         expect(send("1.1.0", out, { FAULT: `refused ${cut}` }), cut).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: sending desktop/${cut} got 503\n` });
-        const which = (name: "latest.json" | "latest.json.sig") => (object(name)?.equals(newer![name]) ? "this release's" : object(name)?.equals(older![name]) ? "the one before's" : "neither");
+        const latest = object("latest.json");
         return {
-          cut, manifest: which("latest.json"), signature: which("latest.json.sig"),
+          cut, latest: latest?.equals(newer!) ? "this release's" : latest?.equals(older!) ? "the one before's" : "neither",
           script: object("install.sh")?.equals(scripts[1]) ? "this release's" : object("install.sh")?.equals(scripts[0]) ? "the one before's" : "neither",
-          published: object("releases/1.1.0/manifest.json") !== null,
+          // What a reader of latest.json then asks for, as it finds them: the signature and the
+          // tarball of the release it names, and whether that signature is of that manifest.
+          paired: (() => {
+            const version = (JSON.parse(latest!.toString()) as { version: string }).version;
+            const signature = object(`releases/${version}/manifest.json.sig`);
+            return signature !== null && verify(null, latest!, keys.publicKey, signature) && object(`releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`) !== null;
+          })(),
+          // No signature beside latest.json at any step.
+          beside: object("latest.json.sig"),
         };
       });
       const [was, is] = ["the one before's", "this release's"];
       expect(seen).toEqual([
-        { cut: order[0], manifest: was, signature: was, script: was, published: false },
-        { cut: order[1], manifest: was, signature: was, script: was, published: false },
-        { cut: order[2], manifest: was, signature: was, script: was, published: false },
-        // The one moment a reader finds a manifest whose signature is another's: it tries again.
-        { cut: order[3], manifest: is, signature: was, script: was, published: false },
-        // The pair is the new one, and the script that checks it for a first install is still the one before's, which lists its key.
-        { cut: order[4], manifest: is, signature: is, script: was, published: false },
-        { cut: order[5], manifest: is, signature: is, script: is, published: false },
+        { cut: order[0], latest: was, script: was, paired: true, beside: null },
+        { cut: order[1], latest: was, script: was, paired: true, beside: null },
+        { cut: order[2], latest: was, script: was, paired: true, beside: null },
+        { cut: order[3], latest: was, script: was, paired: true, beside: null },
+        // The release is the newest, and the script that checks it for a first install is still the one before's, which lists its key.
+        { cut: order[4], latest: is, script: was, paired: true, beside: null },
       ]);
-      // And the same send, run again, sends it whole.
+      // The same send, run again, ends it: the script alone was owed, and nothing of the release is sent a second time.
+      rmSync(join(dir, "curl-argv"), { force: true });
       expect(send("1.1.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.1.0 as desktop/latest.json\n" });
-      expect(object("releases/1.1.0/manifest.json")?.equals(newer!["latest.json"])).toBe(true);
+      const sent = readFileSync(join(dir, "curl-argv"), "utf8").split(/^-q\n/m).filter((args) => args.includes("\n-T\n")).map((args) => args.trimEnd().split("\n").at(-1)?.replace(/^.*\/desktop\//, ""));
+      expect(sent).toEqual(["install.sh"]);
+      expect(object("install.sh")?.equals(scripts[1])).toBe(true);
+      expect(send("1.1.0", out)).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.1.0 is published already, and is not sent again\n" });
     } finally {
       writeFileSync(join(dir, "release", "install.sh"), script);
     }
   });
 
-  it("leaves a release unpublished when its send stops part-way, so that the next send sends it whole", () => {
+  it("ends a send that stopped once its release was whole and before latest.json named it: the release's own three are not sent again", () => {
     const out = released("1.0.0");
     expect(send("1.0.0", out, { FAULT: "refused latest.json" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: sending desktop/latest.json got 503\n" });
-    // Its own manifest, the mark that it is published, is not there: with it there, the next send would be refused.
-    expect(object("releases/1.0.0/manifest.json")).toBeNull();
-    expect(send("1.0.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0 as desktop/latest.json\n" });
     const manifest = readFileSync(join(out, "manifest.json"));
-    expect(object("latest.json")?.equals(manifest)).toBe(true);
     expect(object("releases/1.0.0/manifest.json")?.equals(manifest)).toBe(true);
+    expect([object("latest.json"), object("install.sh")]).toEqual([null, null]);
+    rmSync(join(dir, "curl-argv"), { force: true });
+    expect(send("1.0.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0 as desktop/latest.json\n" });
+    const sent = readFileSync(join(dir, "curl-argv"), "utf8").split(/^-q\n/m).filter((args) => args.includes("\n-T\n")).map((args) => args.trimEnd().split("\n").at(-1)?.replace(/^.*\/desktop\//, ""));
+    expect(sent).toEqual(["latest.json", "install.sh"]);
+    expect(object("latest.json")?.equals(manifest)).toBe(true);
     // Nothing of a send stays beside what was sent.
     expect(readdirSync(out).sort()).toEqual(["manifest.json", "manifest.json.sig", "surogate-desktop-1.0.0-linux-x64.tar.gz"]);
+  });
+
+  it("sends a release's own three again where a send stopped before its manifest, the mark that they are there", () => {
+    const out = released("1.0.0");
+    expect(send("1.0.0", out, { FAULT: "refused releases/1.0.0/manifest.json.sig" }).status).toBe(1);
+    expect(object("releases/1.0.0/manifest.json")).toBeNull();
+    expect(send("1.0.0", out)).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0 as desktop/latest.json\n" });
+    expect(object("releases/1.0.0/manifest.json")?.equals(readFileSync(join(out, "manifest.json")))).toBe(true);
+  });
+
+  it("takes a bucket's 403 for an object that is not there as its 404: R2 answers so to a token that may not list", () => {
+    const out = released("1.0.0");
+    // Both looks of a first send: for the release's own manifest, and for latest.json.
+    expect(send("1.0.0", out, { FAULT: "forbidden releases/1.0.0/manifest.json" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the bucket's desktop/releases/1.0.0/manifest.json is not what was sent\n" });
+    expect(object("releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz")).not.toBeNull();
+    const next = released("1.1.0");
+    expect(send("1.1.0", next, { FAULT: "forbidden latest.json" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: the bucket's desktop/latest.json is not what was sent\n" });
+    expect(object("releases/1.1.0/manifest.json")?.equals(readFileSync(join(next, "manifest.json")))).toBe(true);
+    // And any other answer is not "not there".
+    expect(send("1.2.0", released("1.2.0"), { FAULT: "unread releases/1.2.0/manifest.json" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: looking for desktop/releases/1.2.0/manifest.json got 503\n" });
+    expect(object("releases/1.2.0/surogate-desktop-1.2.0-linux-x64.tar.gz")).toBeNull();
   });
 
   it("takes nothing for sent that the bucket does not give back as it was sent", () => {
@@ -1183,7 +1222,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(argv).not.toContain(CREDENTIALS.AWS_SECRET_ACCESS_KEY);
   });
 
-  it("bounds every request to the bucket, and tries again the sending of latest.json and of its signature: stopped between the two, a send would leave a manifest whose signature does not verify", () => {
+  it("bounds every request to the bucket, and tries again the sending of latest.json, which is small and is what names the release", () => {
     rmSync(join(dir, "curl-argv"), { force: true });
     expect(send("1.0.0", released("1.0.0")).status).toBe(0);
     // Each request as curl was given it: its arguments from one -q to the next, its address the last.
@@ -1191,9 +1230,9 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(requests.length).toBeGreaterThan(10);
     // One that cannot connect, or that stalls for a minute, stops there, and not at the job's time limit.
     for (const args of requests) expect(args.join(" "), args.at(-1)).toContain("--connect-timeout 30 --speed-limit 1024 --speed-time 60");
-    // Tried again: latest.json and its signature, each sent and each read back.
+    // Tried again: latest.json, sent and read back.
     const again = requests.filter((args) => args.includes("--retry"));
-    expect(again.map((args) => args.at(-1)?.replace(/^.*\/desktop\//, ""))).toEqual(["latest.json", "latest.json", "latest.json.sig", "latest.json.sig"]);
+    expect(again.map((args) => args.at(-1)?.replace(/^.*\/desktop\//, ""))).toEqual(["latest.json", "latest.json"]);
     // Ubuntu 24.04's curl (8.5) ends 23, and does not try again, where the answer it would write
     // again goes to no file: each of these writes its answer to one.
     for (const args of again) expect(args[args.indexOf("-o") + 1], args.at(-1)).toMatch(/\/out-[^/]+\/sent$/);
@@ -1214,9 +1253,9 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(object("releases/1.0.0/manifest.json")).toBeNull();
   });
 
-  it("stops at a bucket that refuses it, rather than taking the release for unpublished", () => {
+  it("stops at a bucket that refuses it, at the first object it would send: a 403 for a look is also what a bucket says of an object that is not there, and nothing is sent on the strength of it", () => {
     const refused = send("1.0.0", released("1.0.0"), { AWS_SECRET_ACCESS_KEY: "not-the-secret" });
-    expect(refused.status).toBe(1);
-    expect(refused.stderr).toBe("publish.sh: looking for desktop/releases/1.0.0/manifest.json got 403\n");
+    expect(refused).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: sending desktop/releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz got 403\n" });
+    for (const path of ["latest.json", "install.sh", "releases/1.0.0/manifest.json", "releases/1.0.0/manifest.json.sig", "releases/1.0.0/surogate-desktop-1.0.0-linux-x64.tar.gz"]) expect(object(path), path).toBeNull();
   });
 });

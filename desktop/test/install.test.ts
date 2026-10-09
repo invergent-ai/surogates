@@ -1977,7 +1977,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
   ], ["--network", "host"]);
   let server: ChildProcess;
   let base: string;
-  // What the base serves: desktop/install.sh, latest.json and its signature, and each release.
+  // What the base serves: desktop/install.sh, latest.json, and each release with its own manifest
+  // and signature. latest.json has no signature of its own: its release's is the one asked for.
   const www = () => join(box.dir, "www");
   // Release *version* on the base, signed by *key*, with *fields* in its manifest's place; its own
   // helper lists *trusted*, where a rotation's release lists other keys than the test's one.
@@ -1993,14 +1994,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     copyFileSync(join(box.dir, "manifest.json"), join(folder, "manifest.json"));
     copyFileSync(join(box.dir, "manifest.json.sig"), join(folder, "manifest.json.sig"));
     writeFileSync(join(www(), "desktop", "latest.json"), manifest);
-    copyFileSync(join(box.dir, "manifest.json.sig"), join(www(), "desktop", "latest.json.sig"));
   };
   const install = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --base ${base}`);
   const uninstall = (env = "") => as("tester", `curl -fsSL ${base}/desktop/install.sh | ${env} bash -s -- --uninstall`);
   const rollBack = (version: string) => as("tester", `curl -fsSL ${base}/desktop/install.sh | bash -s -- --version ${version}`);
   // The base's newest release named again: *version*'s own manifest as latest.json.
   const latest = (version: string) => {
-    for (const end of ["", ".sig"]) copyFileSync(join(www(), "desktop", "releases", version, `manifest.json${end}`), join(www(), "desktop", `latest.json${end}`));
+    copyFileSync(join(www(), "desktop", "releases", version, "manifest.json"), join(www(), "desktop", "latest.json"));
   };
   // The computer as a test that stands alone begins: nothing of a test before it, then each of
   // *releases* published in turn, with *fields* in its manifest's place, and installed.
@@ -2522,7 +2522,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     publish("2.3.0");
     const desktop = join(www(), "desktop");
     const tarball = join(desktop, "releases", "2.3.0", "surogate-desktop-2.3.0-linux-x64.tar.gz");
-    const kept = Object.fromEntries(["latest.json", "latest.json.sig"].map((name) => [name, readFileSync(join(desktop, name))]));
+    const kept = Object.fromEntries(["latest.json", "releases/2.3.0/manifest.json.sig"].map((name) => [name, readFileSync(join(desktop, name))]));
     const release = readFileSync(tarball);
     // What the install says last: curl's own words for a download past its bound, then the script's line.
     const stopped = (line: string) => {
@@ -2540,9 +2540,24 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
       stopped(`could not download ${base}/desktop/latest.json`);
       writeFileSync(join(desktop, "latest.json"), kept["latest.json"]!);
       // Its signature is Ed25519's 64 bytes.
-      writeFileSync(join(desktop, "latest.json.sig"), Buffer.concat([kept["latest.json.sig"]!, Buffer.alloc(2)]));
-      stopped(`could not download ${base}/desktop/latest.json.sig`);
-      writeFileSync(join(desktop, "latest.json.sig"), kept["latest.json.sig"]!);
+      writeFileSync(join(desktop, "releases/2.3.0/manifest.json.sig"), Buffer.concat([kept["releases/2.3.0/manifest.json.sig"]!, Buffer.alloc(2)]));
+      stopped(`could not download ${base}/desktop/releases/2.3.0/manifest.json.sig`);
+      writeFileSync(join(desktop, "releases/2.3.0/manifest.json.sig"), kept["releases/2.3.0/manifest.json.sig"]!);
+      // The signature asked for is the release's own, which is never sent a second time: the
+      // version is the manifest's, read before any key is asked, and only a version names a place.
+      // One that is none is no release, and nothing more is asked of the base.
+      for (const named of ["2.3.0/../../../unsized#", "", "2.3", "02.3.0", " 2.3.0", 230]) {
+        writeFileSync(join(desktop, "latest.json"), `${JSON.stringify({ ...JSON.parse(kept["latest.json"]!.toString()), version: named })}\n`);
+        expect(install(), String(named)).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not a release of Surogate Desktop for this computer\n` });
+      }
+      writeFileSync(join(desktop, "latest.json"), kept["latest.json"]!);
+      // And there is no other place for it: a signature beside latest.json is not looked for.
+      writeFileSync(join(desktop, "latest.json.sig"), kept["releases/2.3.0/manifest.json.sig"]!);
+      rmSync(join(desktop, "releases/2.3.0/manifest.json.sig"));
+      expect(install()).toMatchObject({ status: 1 });
+      expect(install().stderr.trimEnd().split("\n").at(-1)).toBe(`Surogate Desktop: could not download ${base}/desktop/releases/2.3.0/manifest.json.sig`);
+      rmSync(join(desktop, "latest.json.sig"));
+      writeFileSync(join(desktop, "releases/2.3.0/manifest.json.sig"), kept["releases/2.3.0/manifest.json.sig"]!);
       // The tarball is the size its signed manifest names, and here a megabyte more.
       writeFileSync(tarball, Buffer.concat([release, Buffer.alloc(1024 * 1024)]));
       stopped(`could not download Surogate Desktop 2.3.0 from ${base}`);
@@ -2751,7 +2766,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     expect(asked.startsWith("0 3 ") && asked.endsWith("Surogate Desktop: 1.6.0 is installed\n"), asked).toBe(true);
     bounded(["releases/1.6.0/manifest.json", "releases/1.6.0/manifest.json.sig", tarball]);
     expect(swapped("curl", asking, ["rm /opt/surogate/versions/1.6.0/surogate", ": >/tmp/curled", `/opt/surogate-test/install.sh --base ${base} >/dev/null 2>&1; echo "$?"`]).stdout).toBe("0\n");
-    bounded(["latest.json", "latest.json.sig", tarball]);
+    bounded(["latest.json", "releases/1.6.0/manifest.json.sig", tarball]);
     const installed = standing();
     const restored = `rm -rf ${record} ${mark}; cp -p /root/record ${record}; cp -p /root/mark ${mark}`;
     const refused = (what: string, made: string, said: string, version = "1.6.0") => {

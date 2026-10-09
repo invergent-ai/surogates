@@ -332,11 +332,17 @@ installed_version() {
   basename "$target"
 }
 
+# The version that the manifest $1 names, where it is one JSON object on one line (one_object) and
+# its version a version: x.y.z in the ten digits, with no zero before a part. Nothing else of it
+# is asked, and no key: it says where a release's own files are.
+named_version() {
+  one_object "$1" | jq -er '.version | select(type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))' 2>/dev/null
+}
+
 # The release that the helper's mark names. Fails where there is no mark of root's own that is a
 # release's manifest as an apply copies one (one_object), and names a release.
 marked() {
-  roots_own "$HELPER_MARK" 81a4 \
-    && one_object "$HELPER_MARK" | jq -er '.version | select(type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))' 2>/dev/null
+  roots_own "$HELPER_MARK" 81a4 && named_version "$HELPER_MARK"
 }
 
 # The release the helper pkexec runs is of, as its mark beside it names it: nothing on a computer
@@ -854,7 +860,7 @@ kvm_group() {
 # The newest release at $1, checked as the user's update would be, then applied. An installed
 # version newer than it stays (a mirror can lag, or a cache): the rest of the install repairs around it.
 install_latest() {
-  local base="$1" download release version size installed tarball=""
+  local base="$1" download named release version size installed tarball=""
   # In /tmp, whatever TMPDIR root's own shell has: /tmp is root's, and no one there renames what
   # is another's. Whoever owns a folder that TMPDIR named could put one of their own in this
   # one's name, and root's downloads would be written through whatever stood in it.
@@ -868,8 +874,13 @@ install_latest() {
   # signed manifest names.
   LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 4096 "${TIMELY[@]}" -o "$download/manifest.json" "$base/desktop/latest.json" \
     || fail "could not download $base/desktop/latest.json"
-  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/latest.json.sig" \
-    || fail "could not download $base/desktop/latest.json.sig"
+  # Its signature is its release's own, at the release's place, which is sent before latest.json
+  # names the release and never sent again: latest.json is then the one object that moves, and
+  # no moment has a manifest beside another's signature. The version that names the place is the
+  # manifest's own word, read before any key is asked of it, and a version is all it may be.
+  named="$(named_version "$download/manifest.json")" || fail "$base/desktop/latest.json is not a release of Surogate Desktop for this computer"
+  LC_ALL=C.UTF-8 curl -q -fsSL --proto '=https,http' --max-filesize 65 "${TIMELY[@]}" -o "$download/manifest.json.sig" "$base/desktop/releases/$named/manifest.json.sig" \
+    || fail "could not download $base/desktop/releases/$named/manifest.json.sig"
   signed "$download/manifest.json" "$download/manifest.json.sig" \
     || unsigned "$base/desktop/latest.json" "$download/manifest.json" "$download/manifest.json.sig"
   release="$(release_of "$download/manifest.json")" \

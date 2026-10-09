@@ -35,7 +35,7 @@ describe("a signed manifest", () => {
     const found = base.updates();
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json is not signed by Surogate's release key`);
     expect(found.state).toEqual({ state: "unsigned" });
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4")]);
   });
 
   it("is taken when the first of two listed keys signed it, as the last is", async () => {
@@ -113,7 +113,8 @@ describe("a signed manifest", () => {
     base.offer(Buffer.from(base.served.get("/desktop/latest.json")!.toString().trimEnd()));
     const found = base.updates();
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json ${NO_RELEASE}`);
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+    // It names no version as a manifest names one, so no signature is asked for.
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json"]);
   });
 });
 
@@ -126,7 +127,7 @@ describe("a release that no key this computer trusts has signed", () => {
     await expect(found.check()).rejects.toThrow(`${base.url}/desktop/latest.json is not signed by Surogate's release key`);
     expect([found.state, updateLine(found.state), states]).toEqual([{ state: "unsigned" }, LINE, ["unsigned"]]);
     // Nothing of it was downloaded, and nothing is installed from it.
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4")]);
     await found.install();
     expect(found.state).toEqual({ state: "unsigned" });
     // The line goes once the base's newest is one its keys take.
@@ -224,8 +225,8 @@ describe("a check", () => {
     await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(`${host} did not answer for ${base.url}/desktop/latest.json in 0.3 s`);
     expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json"]);
     base.answer = (request, response, body) => (request.url?.endsWith(".sig") ? undefined : ranged(request, response, body));
-    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(`${host} did not answer for ${base.url}/desktop/latest.json.sig in 0.3 s`);
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json", "/desktop/latest.json.sig"]);
+    await expect(base.updates({ askMs: 300 }).check()).rejects.toThrow(`${host} did not answer for ${base.url}${base.signatureAt("1.2.4")} in 0.3 s`);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json", base.signatureAt("1.2.4")]);
     expect(Date.now() - began).toBeLessThan(5_000);
     // One that sends its answer's first bytes and then nothing; one that drops the connection; and one that cannot be reached.
     base.answer = (_request, response) => void response.writeHead(200, { "content-length": 500 }).write("{");
@@ -265,7 +266,7 @@ describe("a check", () => {
     const [first, second] = [found.check(), found.check()];
     expect(second).toBe(first);
     await first;
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig", base.tarballAt("1.2.4")]);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4"), base.tarballAt("1.2.4")]);
     expect(statSync(join(version(), "release.tar.gz")).size).toBe(tarball.length);
     // The next is a check of its own.
     const third = found.check();

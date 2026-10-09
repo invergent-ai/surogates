@@ -223,7 +223,6 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     writeFileSync(join(dir, "www", "update.sha256"), hashes.stdout);
     // The newest release is the first: the update is one the app would have found later.
     copyFileSync(join(www, "releases", VERSION, "manifest.json"), join(www, "latest.json"));
-    copyFileSync(join(www, "releases", VERSION, "manifest.json.sig"), join(www, "latest.json.sig"));
     writeFileSync(join(www, "install.sh"), script);
     copyFileSync(join(DESKTOP, "test", "acceptance", "probe.mjs"), join(dir, "www", "probe.mjs"));
     // The VMs' own login key: never this user's, and no agent of theirs is offered.
@@ -450,7 +449,7 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
       join(DESKTOP, "test", "acceptance", "update-probe.mjs")]);
     expect(made.status, made.stderr).toBe(0);
     await signed(version, out);
-    for (const end of ["", ".sig"]) copyFileSync(join(out, `manifest.json${end}`), join(probeBase(), `latest.json${end}`));
+    copyFileSync(join(out, "manifest.json"), join(probeBase(), "latest.json"));
   };
 
   for (const [release, image] of [["24.04", "noble.img"], ["26.04", "resolute.img"]] as const) {

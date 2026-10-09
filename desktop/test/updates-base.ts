@@ -47,12 +47,14 @@ export interface Base {
   cache(): string;
   /** Where the base serves *version*'s tarball. */
   tarballAt(version: string): string;
+  /** Where it serves the signature of *version*'s manifest: the one place a signature is. */
+  signatureAt(version: string): string;
   /**
    * Release *version* on the base, as the release job publishes it: its tarball, and latest.json
    * signed by *key*, with *fields* in place of its own. The tarball.
    */
   publish(version: string, fields?: Record<string, unknown>, key?: KeyObject): Buffer;
-  /** latest.json as *manifest*'s bytes, signed by *key*. */
+  /** latest.json as *manifest*'s bytes, signed by *key* where the version it names says its signature is. */
   offer(manifest: Buffer, key?: KeyObject): void;
   /** An app at 1.2.3 that reads the test's record and helper, with *options* in place of its own. */
   updates(options?: Partial<UpdatesOptions>, changed?: () => void): Updates;
@@ -65,6 +67,7 @@ export function servedBase(): Base {
     dir: "", url: "", served: new Map(), heard: [], answer: ranged, record: "", helper: "",
     cache: () => join(base.dir, "cache", "surogate", "updates"),
     tarballAt: (version) => `/desktop/releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`,
+    signatureAt: (version) => `/desktop/releases/${version}/manifest.json.sig`,
     publish(version, fields = {}, key = keys.privateKey) {
       const tarball = gzipSync(randomBytes(300_000));
       const url = `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`;
@@ -76,7 +79,9 @@ export function servedBase(): Base {
     },
     offer(manifest, key = keys.privateKey) {
       base.served.set("/desktop/latest.json", manifest);
-      base.served.set("/desktop/latest.json.sig", sign(null, manifest, key));
+      // Its signature is its release's own, where the version it names says: beside latest.json there is none.
+      const version = /"version":"([0-9.]+)"/.exec(manifest.toString())?.[1];
+      if (version) base.served.set(base.signatureAt(version), sign(null, manifest, key));
     },
     updates: (options = {}, changed = () => {}) => new Updates({
       version: "1.2.3", record: base.record, rootOwned: false, helper: base.helper, installed: null,

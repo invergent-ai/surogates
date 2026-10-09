@@ -622,7 +622,13 @@ export class Updates {
     if (this.state.state === "broken") this.set({ state: "none" });
     const latest = `${base}/desktop/latest.json`;
     const manifest = await this.small(latest, MANIFEST_MAX);
-    const signature = await this.small(`${latest}.sig`, SIGNATURE_MAX);
+    // Its signature is its release's own, at the release's place, which is sent before latest.json
+    // names the release and never again: no moment has a manifest beside another's signature. The
+    // version that names the place is the manifest's own word, read before any key is asked of
+    // it, and a version is all it may be.
+    const named = oneObject(manifest)?.version;
+    if (typeof named !== "string" || !VERSION.test(named)) throw new Error(`${latest} is not a release of Surogate Desktop for this computer`);
+    const signature = await this.small(`${base}/desktop/releases/${named}/manifest.json.sig`, SIGNATURE_MAX);
     let release: Release;
     try {
       release = signedRelease(latest, manifest, signature, keys, channel);

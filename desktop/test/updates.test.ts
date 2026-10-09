@@ -49,7 +49,7 @@ function publish(version: string, fields: Record<string, unknown> = {}, key: Key
   })}\n`);
   served.set(`/desktop/${url}`, tarball);
   served.set("/desktop/latest.json", manifest);
-  served.set("/desktop/latest.json.sig", sign(null, manifest, key));
+  served.set(`/desktop/releases/${version}/manifest.json.sig`, sign(null, manifest, key));
   return tarball;
 }
 
@@ -96,14 +96,14 @@ describe("an update", () => {
     });
     // The helper is handed the exact bytes it verifies again, as root.
     expect(readFileSync(join(folder, "manifest.json")).equals(served.get("/desktop/latest.json")!)).toBe(true);
-    expect(readFileSync(join(folder, "manifest.json.sig")).equals(served.get("/desktop/latest.json.sig")!)).toBe(true);
+    expect(readFileSync(join(folder, "manifest.json.sig")).equals(served.get("/desktop/releases/1.2.4/manifest.json.sig")!)).toBe(true);
     expect(readFileSync(join(folder, "release.tar.gz")).equals(tarball)).toBe(true);
     expect(readdirSync(folder).sort()).toEqual(["manifest.json", "manifest.json.sig", "release.tar.gz"]);
     expect(statSync(folder).mode & 0o777).toBe(0o700);
     // Checked again, as every 6 hours: what is here is not downloaded again.
     heard = [];
     await found.check();
-    expect(heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+    expect(heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/releases/1.2.4/manifest.json.sig"]);
     expect(found.state.state).toBe("available");
   });
 
@@ -135,13 +135,27 @@ describe("an update", () => {
       else await found.check();
       // Nothing of any is taken; one that no trusted key signed has a line of its own, which says what may mend it.
       expect(found.state, `${version} ${JSON.stringify(fields)}`).toEqual({ state: why === unsigned ? "unsigned" : "none" });
-      expect(heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig"]);
+      expect(heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", `/desktop/releases/${version}/manifest.json.sig`]);
     }
+    // The signature asked for is the release's own, by the version the manifest names: a
+    // manifest that names none is no release, and nothing more is asked of the base.
+    for (const named of ["1.2.4/../../../latest.json#", "", "1.2", "01.2.4", 124]) {
+      publish("1.2.4", { version: named });
+      heard = [];
+      await expect(updates().check(), String(named)).rejects.toThrow(noRelease);
+      expect(heard.map(({ url }) => url), String(named)).toEqual(["/desktop/latest.json"]);
+    }
+    // And there is no other place for it: a signature beside latest.json is not asked for.
+    publish("1.2.4");
+    served.set("/desktop/latest.json.sig", served.get("/desktop/releases/1.2.4/manifest.json.sig")!);
+    served.delete("/desktop/releases/1.2.4/manifest.json.sig");
+    await expect(updates().check()).rejects.toThrow(`answered 404 for ${base}/desktop/releases/1.2.4/manifest.json.sig`);
+    served.delete("/desktop/latest.json.sig");
     // A manifest is one short line, and its signature 64 bytes: more in the place of either is refused unread.
     const refused = updates();
     publish("1.2.4");
-    served.set("/desktop/latest.json.sig", randomBytes(65));
-    await expect(refused.check()).rejects.toThrow(`${base}/desktop/latest.json.sig is not Surogate's: it is larger than 64 bytes`);
+    served.set("/desktop/releases/1.2.4/manifest.json.sig", randomBytes(65));
+    await expect(refused.check()).rejects.toThrow(`${base}/desktop/releases/1.2.4/manifest.json.sig is not Surogate's: it is larger than 64 bytes`);
     served.set("/desktop/latest.json", randomBytes(64 * 1024));
     await expect(refused.check()).rejects.toThrow(`${base}/desktop/latest.json is not Surogate's: it is larger than 4096 bytes`);
     // A base that has none says so, and what it sent in its place is not read as one.

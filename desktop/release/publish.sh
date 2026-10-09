@@ -2,7 +2,7 @@
 # Surogate Desktop's release on the release bucket (spec, Section 9), served at <base>/desktop/:
 #
 #   desktop/install.sh                                    the newest install script
-#   desktop/latest.json, latest.json.sig                  the newest release's signed manifest
+#   desktop/latest.json                                   the newest release's manifest; its signature is that release's own
 #   desktop/releases/<version>/manifest.json, .sig        each release's own, kept
 #   desktop/releases/<version>/surogate-desktop-<version>-linux-x64.tar.gz
 #
@@ -245,52 +245,76 @@ case "$VERB" in
       [ "$status" = 200 ] && cmp -s "$1" "$OUT/sent" || fail "the bucket's desktop/$2 is not what was sent"
       rm -f "$OUT/sent"
     }
-    status="$(s3 -o /dev/null -I "$bucket/releases/$VERSION/manifest.json")" || fail "looking for desktop/releases/$VERSION/manifest.json stopped: curl exit $?"
+    # Whether this release is on the bucket already, by its own manifest, which is sent once its
+    # tarball and its signature are there. A bucket whose token may not list answers 403 for an
+    # object that is not there, as R2 does, where another answers 404: both are "not there". A
+    # token that could not read at all is found at the first object sent, which is read back.
+    status="$(s3 -o "$OUT/sent" "$bucket/releases/$VERSION/manifest.json")" || fail "looking for desktop/releases/$VERSION/manifest.json stopped: curl exit $?"
     case "$status" in
-      404) ;;
-      200) fail "desktop/releases/$VERSION is published already, and is not sent again" ;;
+      404 | 403) there= ;;
+      200)
+        cmp -s "$OUT/manifest.json" "$OUT/sent" || fail "desktop/releases/$VERSION is published already, with another manifest, and is not sent again"
+        there=1
+        ;;
       *) fail "looking for desktop/releases/$VERSION/manifest.json got $status" ;;
     esac
+    rm -f "$OUT/sent"
     # The newest release the bucket names, which an older one does not replace.
     status="$(s3 -o "$OUT/latest.json" "$bucket/latest.json")" || fail "looking for desktop/latest.json stopped: curl exit $?"
     case "$status" in
       200) newest="$(jq -r .version "$OUT/latest.json")" ;;
-      404) newest= ;;
+      404 | 403) newest= ;;
       *) fail "looking for desktop/latest.json got $status" ;;
     esac
     rm -f "$OUT/latest.json"
+    # A release that is there, and older than the one latest.json names, is whole: no object of
+    # a release is sent a second time. So is one that latest.json names, once the bucket's
+    # install script is this one. Else a send was cut short after the release's own three were
+    # there, and this one ends it.
+    if [ -n "$there" ] && [ -n "$newest" ]; then
+      if dpkg --compare-versions "$VERSION" lt "$newest"; then fail "desktop/releases/$VERSION is published already, and is not sent again"; fi
+      if [ "$VERSION" = "$newest" ]; then
+        status="$(s3 -o "$OUT/sent" "$bucket/install.sh")" || fail "looking for desktop/install.sh stopped: curl exit $?"
+        case "$status" in
+          200) ! cmp -s "$HERE/install.sh" "$OUT/sent" || fail "desktop/releases/$VERSION is published already, and is not sent again" ;;
+          404 | 403) ;;
+          *) fail "looking for desktop/install.sh got $status" ;;
+        esac
+        rm -f "$OUT/sent"
+      fi
+    fi
     # The order, by who reads what first. Nothing that a reader reads first is sent before what
-    # it then asks for, and what a send that is cut short leaves is said at each step: the next
-    # send finds the release unpublished, by its own manifest, and sends it whole again.
-    # 1. The tarball, and the release's own signature. Nothing names them yet.
-    put "$OUT/$TARBALL" "releases/$VERSION/$TARBALL" application/gzip
-    put "$OUT/manifest.json.sig" "releases/$VERSION/manifest.json.sig" application/octet-stream
+    # it then asks for, and what a send that is cut short leaves is said at each step.
+    # 1. The release's own three, under its version, where nothing names them yet: the tarball,
+    #    the signature of its manifest, and last its manifest, the mark that the three are there.
+    #    None is ever sent again once that mark is: an install and an app read the signature of
+    #    the newest release from here, and --version reads all three. Cut before the mark, the
+    #    next send sends the three again.
+    if [ -z "$there" ]; then
+      put "$OUT/$TARBALL" "releases/$VERSION/$TARBALL" application/gzip
+      put "$OUT/manifest.json.sig" "releases/$VERSION/manifest.json.sig" application/octet-stream
+      put "$OUT/manifest.json" "releases/$VERSION/manifest.json" application/json
+    fi
     if [ -n "$newest" ] && dpkg --compare-versions "$VERSION" lt "$newest"; then
       published="published desktop/releases/$VERSION; desktop/latest.json stays $newest"
     else
-      # 2. latest.json, then its signature, which every app and every install reads first and
-      #    which name the tarball: an installed computer's own keys check them, and the install
-      #    script that the bucket has check them for a first install. That script is the release
-      #    before's, and lists the key that signs this one: a key signs only once a release that
-      #    lists it is out. Cut here, the script is still the older one, and installs this release.
-      #    Between the manifest and its signature a reader finds a manifest whose signature does
-      #    not verify, and tries again later; the other order would have the same moment. A send
-      #    that stopped between the two would leave them so until it is run again: each of these
-      #    two, which are small, is tried again when the bucket or the way to it fails for a moment.
-      #    What changes from release to release is never a cache's: one could pair a manifest with
-      #    another's signature, or serve an older install script.
-      put "$OUT/manifest.json" latest.json application/json no-cache --retry 3
-      put "$OUT/manifest.json.sig" latest.json.sig application/octet-stream no-cache --retry 3
-      # 3. The install script, after the pair it will check. Sent before it, a script that has
-      #    dropped the key before's would refuse the latest.json that the key before signed, and
-      #    every first install would end there until the send was run again.
+      # 2. latest.json: the one object that says which release is the newest, and the one that
+      #    every app and every install reads first. It has no signature of its own: its
+      #    release's is asked for, and has been there since step 1. So no reader finds a
+      #    manifest beside another's signature at any moment, and a send cut before this shows
+      #    nothing to any computer. Nothing is written to latest.json.sig, which no reader asks
+      #    for. Tried again when the bucket or the way to it fails for a moment. What changes
+      #    from release to release is never a cache's.
+      # 3. The install script, after the release it will check for a first install. Cut before
+      #    it, the bucket's script is the release before's, which lists the key that signs this
+      #    one: a key signs only once a release that lists it is out. Sent before latest.json,
+      #    a script that has dropped the key before's would refuse the release before, and
+      #    every first install would end there until the send was run again. The next send of
+      #    this release finds the script owed, and sends it.
+      [ "$VERSION" = "$newest" ] || put "$OUT/manifest.json" latest.json application/json no-cache --retry 3
       put "$HERE/install.sh" install.sh text/x-shellscript no-cache
       published="published desktop/releases/$VERSION as desktop/latest.json"
     fi
-    # 4. Last, the release's own manifest: the mark that it is published, so a send cut short at
-    #    any step above is sent again whole. Until it is there, --version of this release finds
-    #    no manifest, and says so.
-    put "$OUT/manifest.json" "releases/$VERSION/manifest.json" application/json
     echo "$published"
     ;;
   *)

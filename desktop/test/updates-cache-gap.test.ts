@@ -196,7 +196,7 @@ describe("the update's cache, changed between a look and a write", () => {
     const found = base.updates();
     await found.check();
     expect(planted()).toBe(true);
-    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", "/desktop/latest.json.sig", base.tarballAt("1.2.4")]);
+    expect(base.heard.map(({ url }) => url)).toEqual(["/desktop/latest.json", base.signatureAt("1.2.4"), base.tarballAt("1.2.4")]);
     expect(lstatSync(join(version(), "release.tar.gz")).isFile()).toBe(true);
     expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
   });
