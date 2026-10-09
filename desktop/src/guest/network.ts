@@ -4,12 +4,16 @@
 // its destination, host:port; the agent opens a CONNECT stream for it, naming the root
 // whose socket it came on, never anything the connection says, and answers the line
 // with the proxy's status: "200", then the connection's bytes, or "<status> <reason>".
+// The other way (spec, Section 5): a connection the agent asked a root's runner for, into the
+// root, comes on that root's socket too, under the id it was asked (protocol.ts, INBOUND_LINE).
 
 import { chmodSync, chownSync, mkdirSync, rmSync } from "node:fs";
 import { type ClientHttp2Session, connect as connectH2 } from "node:http2";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
+
+import { INBOUND_LINE } from "./protocol.js";
 
 // The roots' sockets, the agent's own: each root's namespace has its own bound at /run/surogate/net.sock.
 const TUNNELS = "/run/surogate/net";
@@ -21,6 +25,8 @@ const MAX_LINE = 512;
 const LINE_MS = 5_000;
 // How many connections one root may have open at once: past it, a connection is refused at once.
 export const MAX_TUNNELS = 256;
+// How long a root's runner has to bring a connection the agent asked it for: its dial is to its own loopback.
+const ARRIVAL_MS = 5_000;
 
 /** *root*'s socket, in the agent's folder of them unless *folder* is given. */
 export function socketOf(root: string, folder = TUNNELS): string {
@@ -29,6 +35,8 @@ export function socketOf(root: string, folder = TUNNELS): string {
 
 export class Network {
   private readonly session: ClientHttp2Session;
+  // The connections asked of each root's runner and not brought yet, by root and id.
+  private readonly awaited = new Map<string, (brought: Socket | string) => void>();
 
   constructor(port: Duplex, private readonly folder = TUNNELS, private readonly lineMs = LINE_MS) {
     this.session = connectH2("http://guest", { createConnection: () => port });
@@ -67,6 +75,24 @@ export class Network {
     return socketOf(root, this.folder);
   }
 
+  /**
+   * The connection into *root* its runner was asked for under *id*, once the runner brings it on
+   * that root's own socket; or why there is none: what the runner said of its dial, or "ETIMEDOUT"
+   * when it brought nothing in *ms*. Never rejects.
+   */
+  arrival(root: string, id: string, ms = ARRIVAL_MS): Promise<Socket | string> {
+    const key = `${root} ${id}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => settle("ETIMEDOUT"), ms);
+      const settle = (brought: Socket | string) => {
+        clearTimeout(timer);
+        this.awaited.delete(key);
+        resolve(brought);
+      };
+      this.awaited.set(key, settle);
+    });
+  }
+
   // A connection of *root*'s: its destination line, then a stream for it.
   private tunnel(root: string, socket: Socket): void {
     socket.on("error", () => {});
@@ -81,9 +107,20 @@ export class Network {
       }
       clearTimeout(timer);
       socket.off("data", read);
+      const line = head.subarray(0, end).toString("latin1");
+      const inbound = INBOUND_LINE.exec(line);
+      if (inbound) {
+        // What the root's server said first comes with the line, and is kept for whoever asked.
+        socket.pause();
+        if (end + 1 < head.length) socket.unshift(head.subarray(end + 1));
+        // Only the root whose socket it came on was asked: an id another root's command names brings nothing.
+        const asked = this.awaited.get(`${root} ${inbound[1]}`);
+        if (!asked || inbound[2] !== undefined) socket.destroy();
+        return void asked?.(inbound[2] ?? socket);
+      }
       // The runner sends nothing past its line before the answer.
       if (end + 1 < head.length) return void socket.destroy();
-      this.open(root, head.subarray(0, end).toString("latin1"), socket);
+      this.open(root, line, socket);
     };
     socket.on("data", read);
   }

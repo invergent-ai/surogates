@@ -204,6 +204,12 @@ export class SessionRunner {
     });
   }
 
+  // Asks the runner for a connection to *port* of its root's own loopback, which it brings to the agent
+  // on the root's socket under *id* (network.ts, arrival). A runner that has gone brings nothing.
+  dial(id: string, port: number): void {
+    if (!this.left) this.send({ type: "dial", id, port });
+  }
+
   // Its stdin ends, and the runner goes with everything in its sandbox; one that does not is killed.
   async stop(): Promise<void> {
     this.stopping = true;

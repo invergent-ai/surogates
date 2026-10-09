@@ -113,6 +113,60 @@ describe("the agent's network", () => {
     expect(asked.map(([root]) => root)).toEqual([OTHER, ROOT]);
   });
 
+  // What a root's runner sends on *path* for a connection the agent asked it for: its line, then *data*.
+  // Resolves with what came back once the agent's side closed it, or "kept" when it is still open after 300 ms.
+  const brought = (path: string, line: string, data = "") => new Promise<string>((done) => {
+    const socket: Socket = connect({ path, allowHalfOpen: true });
+    let heard = "";
+    socket.on("error", () => {});
+    socket.on("data", (chunk: Buffer) => {
+      heard += chunk.toString();
+    });
+    socket.on("end", () => done(`closed ${heard}`));
+    setTimeout(() => done(`kept ${heard}`), 300);
+    socket.write(`${line}\n${data}`);
+  });
+  const ID = "0123456789abcdef0123456789abcdef";
+
+  it("hands a connection a root's runner brings to whoever asked that root for it, with what the server said first", async () => {
+    await network.listen(ROOT, uid);
+    const asked = network.arrival(ROOT, ID);
+    const kept = brought(network.path(ROOT), `/in/${ID}`, "220 ready\n");
+    const socket = await asked;
+    if (typeof socket === "string") throw new Error(socket);
+    // Handed over paused, so nothing is lost before whoever asked reads it.
+    expect(await new Promise<string>((done) => socket.once("data", (chunk: Buffer) => done(chunk.toString())).resume())).toBe("220 ready\n");
+    socket.write("EHLO\n");
+    expect(await kept).toBe("kept EHLO\n");
+    socket.destroy();
+  });
+
+  it("answers why a root's runner reached nothing, and that it brought nothing in time", async () => {
+    await network.listen(ROOT, uid);
+    const refused = network.arrival(ROOT, ID);
+    expect(await brought(network.path(ROOT), `/in/${ID} ECONNREFUSED`)).toBe("closed ");
+    expect(await refused).toBe("ECONNREFUSED");
+    expect(await network.arrival(ROOT, ID, 50)).toBe("ETIMEDOUT");
+  });
+
+  it("drops a connection no one asked that root for: another root's id, one answered already, and a line that is none", async () => {
+    await network.listen(ROOT, uid);
+    await network.listen(OTHER, uid);
+    const asked = network.arrival(ROOT, ID, 400);
+    // Another chat's command that learned the id: the agent knows a root by its socket, never by what it says.
+    expect(await brought(network.path(OTHER), `/in/${ID}`, "from another chat")).toBe("closed ");
+    expect(await brought(network.path(ROOT), "/in/ffffffffffffffffffffffffffffffff")).toBe("closed ");
+    expect(await brought(network.path(ROOT), `/in/${ID.toUpperCase()}`)).toBe("closed 403 invalid\n");
+    expect(await brought(network.path(ROOT), `/in/${ID} econnrefused`)).toBe("closed 403 invalid\n");
+    const first = brought(network.path(ROOT), `/in/${ID}`);
+    const socket = await asked;
+    expect(typeof socket).toBe("object");
+    // Once handed over, the id brings nothing more.
+    expect(await brought(network.path(ROOT), `/in/${ID}`)).toBe("closed ");
+    expect(await first).toBe("kept ");
+    if (typeof socket !== "string") socket.destroy();
+  });
+
   it("answers what the host proxy refuses with its status and reason, and ends the connection", async () => {
     await network.listen(ROOT, uid);
     expect(await through(network.path(ROOT), "127.0.0.1:9")).toEqual({ status: "403 own", reply: "" });

@@ -6,7 +6,8 @@
 // with it. In the guest, enter-root gives it the root's cgroup, delegated to it
 // (--cgroups <folder>): each command gets a cgroup of its own there, which ends it
 // with everything it started; and the root's socket to the host proxy (--tunnel
-// <socket>), for the proxies it listens on before any command runs (listeners.ts).
+// <socket>), for the proxies it listens on before any command runs (listeners.ts),
+// and for each connection into the root it is asked to bring (dial).
 // The host's tests start it bare, without either: a command's process group is then all it signals.
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -19,7 +20,7 @@ import { parseArgs } from "node:util";
 import { Failure } from "../files/answers.js";
 import { findOnPath } from "../files/operations.js";
 import { unenterable, workdir } from "./command.js";
-import { listen } from "./listeners.js";
+import { carryIn, listen } from "./listeners.js";
 import { KILL_GRACE_MS } from "./processes.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
@@ -249,6 +250,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     } catch (error) {
       say({ type: "refused", id: message.id, refusal: { type: "other", message: String(error) } });
     }
+  } else if (message.type === "dial") {
+    // A connection the browser makes to a server of this root's: dialed in here, so in the root's own
+    // network namespace, and brought to the agent on the root's socket. A runner started bare has none.
+    if (TUNNEL && typeof message.id === "string") void carryIn(TUNNEL, message.id, message.port);
   } else if (message.type === "stdin") {
     // Each is answered, in order: the host waits to know whether it was taken.
     const stdin = children.get(message.id)?.proc.stdin;

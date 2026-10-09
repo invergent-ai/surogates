@@ -468,6 +468,39 @@ describe("a root's socket to the host proxy", { timeout: 20_000 }, () => {
     ]);
   });
 
+  it("asks a root's runner for a connection into the root under an id of its own, and answers what the agent's network hears of it", async () => {
+    // A runner that writes down what it is asked, where the test reads it.
+    const asked = join(base, "asked");
+    const NOTING = `process.stdout.write('{"ready":true}\\n'); require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => require("node:fs").appendFileSync(${JSON.stringify(asked)}, line + "\\n"));`;
+    const own: ChildProcess[] = [];
+    const awaited: Array<[string, string]> = [];
+    const reaching = new Roots({
+      start: () => {
+        const child = spawn(process.execPath, ["-e", NOTING], { stdio: ["pipe", "pipe", "pipe"] });
+        own.push(child);
+        children.push(child);
+        return child;
+      },
+      uid: () => 10_001,
+      kill: () => void own.at(-1)?.kill("SIGKILL"),
+      arrivals: (root, id) => (awaited.push([root, id]), Promise.resolve(awaited.length === 1 ? "ECONNREFUSED" : "ETIMEDOUT")),
+    });
+    // A root that is not set up has no loopback to reach, and its runner is asked nothing.
+    expect(await reaching.reach("root-2", 3000)).toBe("sandbox");
+    await reaching.setup("root-2", base, R1, user);
+    expect(await reaching.reach("root-2", 3000)).toBe("ECONNREFUSED");
+    expect(await reaching.reach("root-2", 8000)).toBe("ETIMEDOUT");
+    await until(() => spawnSync("cat", [asked], { encoding: "utf8" }).stdout.split("\n").length === 3);
+    const dials = spawnSync("cat", [asked], { encoding: "utf8" }).stdout.trim().split("\n").map((line) => JSON.parse(line) as { type: string; id: string; port: number });
+    expect(dials.map(({ type, port }) => [type, port])).toEqual([["dial", 3000], ["dial", 8000]]);
+    // Each under the id the network waits on, 128 bits no command could guess, never used twice.
+    expect(dials.map(({ id }) => id)).toEqual(awaited.map(([, id]) => id));
+    expect(awaited.map(([root]) => root)).toEqual(["root-2", "root-2"]);
+    expect(dials.every(({ id }) => /^[0-9a-f]{32}$/.test(id)) && dials[0]?.id !== dials[1]?.id).toBe(true);
+    // Without the agent's network, as in a test, there is nothing to bring a connection.
+    expect(await roots.reach("root-1", 3000)).toBe("sandbox");
+  });
+
   // Roots whose kill waits for the test, which kills the root's latest runner, as a cgroup's kill
   // ends whatever runs in the root's cgroup then; and the runners they start, exiting before
   // they are ready while *exiting* says so.

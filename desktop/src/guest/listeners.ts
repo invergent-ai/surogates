@@ -8,6 +8,8 @@
 import { createServer as createHttpServer, request, STATUS_CODES } from "node:http";
 import { connect, createServer, type Server, type Socket } from "node:net";
 
+import { inboundLine } from "./protocol.js";
+
 export const HTTP_PORT = 3128;
 export const SOCKS_PORT = 1080;
 // What a command's proxy variables name (root.ts, rootEnvironment).
@@ -74,6 +76,36 @@ function join(a: Socket, b: Socket): void {
   b.pipe(a);
   a.resume();
   b.resume();
+}
+
+// The root's own loopback, where a server of the root's listens: IPv4's, then IPv6's, as a server
+// that listens on "localhost" may have taken either.
+const LOOPBACK = ["127.0.0.1", "::1"];
+
+/**
+ * A connection into the root (spec, Section 5), for the agent, which asked for it under *id*: to
+ * *port* of the root's own loopback and nowhere else, then to the root's socket at *path* with its
+ * line, and each carries the other's bytes. Where nothing takes it, the line says why. Never rejects.
+ */
+export async function carryIn(path: string, id: string, port: number): Promise<void> {
+  let reason = "EINVAL";
+  for (const host of Number.isInteger(port) && port > 0 && port < 65_536 ? LOOPBACK : []) {
+    const reached = await new Promise<Socket | string>((resolve) => {
+      const server = connect({ host, port, allowHalfOpen: true });
+      server.once("connect", () => resolve(server));
+      server.once("error", (error: NodeJS.ErrnoException) => resolve(/^[A-Z]{1,16}$/.test(error.code ?? "") ? String(error.code) : "ECONNREFUSED"));
+    });
+    if (typeof reached === "string") {
+      reason = reached;
+      continue;
+    }
+    const agent = connect({ path, allowHalfOpen: true });
+    agent.write(inboundLine(id));
+    return join(reached, agent);
+  }
+  const agent = connect({ path });
+  agent.on("error", () => {});
+  agent.end(inboundLine(id, reason));
 }
 
 // Until its tunnel answers, *client* is read, so that it is seen to leave: a CONNECT or SOCKS

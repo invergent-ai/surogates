@@ -8,7 +8,7 @@ import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listen } from "../src/guest/listeners.js";
+import { carryIn, listen } from "../src/guest/listeners.js";
 import { Network } from "../src/guest/network.js";
 import { NetProxy } from "../src/vm/proxy.js";
 
@@ -348,5 +348,60 @@ describe("a root's proxies", () => {
   it("do not start where their ports are taken", async () => {
     const taken = portOf(proxies[0] as Server);
     await expect(listen(join(dir, "net.sock"), { http: taken, socks: 0 })).rejects.toThrow(/EADDRINUSE/);
+  });
+});
+
+describe("a connection into the root", () => {
+  const ID = "0123456789abcdef0123456789abcdef";
+  // The agent's end of the root's socket, for what the runner brings: each line, and each connection's bytes echoed with "agent ".
+  let inward: Server;
+  let brought: string[];
+  let path: string;
+
+  beforeEach(async () => {
+    brought = [];
+    path = join(dir, "in.sock");
+    inward = createServer({ allowHalfOpen: true }, (socket) => {
+      let said = "";
+      socket.on("error", () => {});
+      socket.on("data", (chunk: Buffer) => {
+        said += chunk.toString("latin1");
+        const end = said.indexOf("\n");
+        if (end < 0 || brought.includes(said.slice(0, end))) return;
+        brought.push(said.slice(0, end));
+        socket.end("hello from the browser");
+      });
+    });
+    await new Promise<void>((done) => inward.listen(path, done));
+  });
+
+  afterEach(() => void inward.close());
+
+  it("reaches a server on the root's own loopback, on 127.0.0.1 or on ::1, and brings it to the agent under the id it was asked", async () => {
+    for (const host of ["127.0.0.1", "::1"]) {
+      const heard: string[] = [];
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
+        socket.on("data", (chunk: Buffer) => heard.push(chunk.toString()));
+        socket.on("end", () => socket.end());
+      });
+      await new Promise<void>((done) => server.listen(0, host, done));
+      brought.length = 0;
+      await carryIn(path, ID, portOf(server));
+      await vi.waitFor(() => expect(heard.join("")).toBe("hello from the browser"));
+      expect(brought, host).toEqual([`/in/${ID}`]);
+      await new Promise<void>((done) => server.close(() => done()));
+    }
+  });
+
+  it("says why when nothing on the root's loopback takes the connection, and reaches nothing else", async () => {
+    const closed = createServer();
+    await new Promise<void>((done) => closed.listen(0, "127.0.0.1", done));
+    const port = portOf(closed);
+    await new Promise<void>((done) => closed.close(() => done()));
+    await carryIn(path, ID, port);
+    await vi.waitFor(() => expect(brought).toEqual([`/in/${ID} ECONNREFUSED`]));
+    // A port that is none is never dialed.
+    for (const none of [0, 65_536, 1.5, Number.NaN]) await carryIn(path, ID, none);
+    await vi.waitFor(() => expect(brought).toEqual([`/in/${ID} ECONNREFUSED`, `/in/${ID} EINVAL`]));
   });
 });
