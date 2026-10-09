@@ -679,6 +679,44 @@ async def test_a_message_sent_before_a_commands_answer_is_written_is_answered_to
     assert (workers.ran, (await workers.said(chat))[-1], await workers.status(chat)) == ([ANSWERED[command]], "Noted.", "completed")
 
 
+async def test_a_second_command_sent_before_the_first_ones_answer_is_written_is_run_by_its_own_wake(workers):
+    chat = await workers.chat()
+
+    async def the_user_types_another():
+        await workers.says(chat, "/loop list")
+
+    await workers.says(chat, "/goal status")
+    await workers.worker(store=Meanwhile(workers.store, before=the_user_types_another)).wake(chat)
+    # The first one's answer comes after the second command in the log, and is not its answer.
+    assert (workers.ran, await workers.status(chat)) == (["_handle_goal_command"], "active")
+
+    await workers.wake(chat)
+
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command", "_handle_loop_command"], "No active loops.")
+    assert (workers.requests, await workers.status(chat)) == ([], "completed")
+
+
+async def test_a_command_the_model_once_read_as_words_is_still_run(workers):
+    chat = await a_coordinator(workers)
+    [mission] = await workers.missions(chat)
+    emit = workers.store.emit_event
+    # As a turn left it that read what its user typed meanwhile: the model answered the command in
+    # its own words, and a later wake took a turn of the model's for something else.
+    await workers.says(chat, "/mission pause")
+    await emit(chat, EventType.LLM_REQUEST, {})
+    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "I cannot pause a mission."}})
+    await emit(chat, EventType.HARNESS_WAKE, {"worker_id": "an-earlier-worker", "cursor": 0})
+    await emit(chat, EventType.LLM_REQUEST, {})
+    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Waiting for the helpers."}})
+
+    await workers.a_helper_reports(chat)
+    await workers.wake(chat)
+
+    # What the model said is no answer of the harness's: the command runs.
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_mission_command"], "Mission paused.")
+    assert ((await workers.missions(chat, mission.id))[0].status, workers.requests) == ("paused", [])
+
+
 async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_not_taken_for_answered(workers):
     chat = await workers.chat()
 
