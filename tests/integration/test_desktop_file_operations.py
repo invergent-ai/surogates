@@ -241,6 +241,9 @@ SAME = [
     ("list_dir", {"key": "{f}/a\0b"}),
     ("walk", {"key": "{f}/a\0b", "skip": [], "skip_top": [], "skip_hidden": False, "since": None}),
     ("ripgrep", {"key": "{f}/a\0b", "mode": "count", "pattern": "gamma", "glob": None, "context": 0}),
+    # A stat of one alone answers that nothing is there, as it answers any key it cannot stat.
+    ("stat", {"key": "{f}/a\0b"}),
+    ("stat", {"key": "a\0b"}),
     # A NUL and another argument that is refused: the NUL first.
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "a\0", "glob": None, "context": -1}),
     ("ripgrep", {"key": "{f}/sub", "mode": "regex", "pattern": "a\0", "glob": None, "context": 0}),
