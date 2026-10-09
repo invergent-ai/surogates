@@ -528,6 +528,23 @@ describe("the browser's kinds beside the tools", () => {
     expect((browsed[0]?.args as { files: unknown[] }).files).toHaveLength(10);
   });
 
+  it("refuses an upload that names a file by a path that holds half a character, before anyone is asked: written out, it names another file than the one that would be read", async () => {
+    const { browsing, browsed, ran } = rig();
+    const names = (...paths: string[]) => ({ ...op("browser.set_input_files"), args: { paths } });
+    const good = "/home/u/notes/report.pdf";
+    for (const [bad, shown] of [["/home/u/notes/x\ud800.txt", "\\ud800"], ["/home/u/notes/x\udc00.txt", "\\udc00"], ["/home/u/no\udbfftes/report.pdf", "\\udbff"]] as const) {
+      const refused = { error: { type: "browser", message: `An upload gives a page no file whose path holds half a character, which no file's name can: ${JSON.stringify(bad)}` } };
+      expect(refused.error.message, bad).toContain(shown);
+      for (const paths of [[bad], [good, bad]]) {
+        expect(browsing.refusal(names(...paths)), JSON.stringify(paths)).toEqual(refused);
+        expect(await browsing.run(names(...paths), signal), JSON.stringify(paths)).toEqual(refused);
+      }
+    }
+    expect([ran, browsed]).toEqual([[], []]);
+    // Both halves, in their order, are one character, and a name as any other.
+    expect(browsing.refusal(names("/home/u/notes/\ud83d\ude00.pdf"))).toBeNull();
+  });
+
   it("refuses an upload that names a file by a path with a control character, or a line or paragraph separator, before anyone is asked, and says why", async () => {
     const { browsing, browsed, ran } = rig();
     const names = (...paths: string[]) => ({ ...op("browser.set_input_files"), args: { paths } });

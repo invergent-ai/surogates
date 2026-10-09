@@ -44,6 +44,9 @@ const failed = (message: string): Outcome => ({ error: { type: "browser", messag
 // A control character, or a separator of lines or of paragraphs: in a path, it would let one file's name read
 // as another's, or as two, wherever the path is shown.
 const UNSHOWN = /[\p{Cc}\p{Zl}\p{Zp}]/u;
+// Half of a character that is written as two: alone it is no character, and no file's name holds it. Shown,
+// and sent on to be read, it becomes another character, so the path asked about names another file.
+const HALVED = /\p{Cs}/u;
 // Why an upload that names *paths* gives a page nothing, whatever its files hold; null where nothing in how
 // it names them says so.
 function unfit(paths: unknown): string | null {
@@ -51,6 +54,7 @@ function unfit(paths: unknown): string | null {
   for (const path of paths) {
     if (typeof path !== "string") continue;
     if (UNSHOWN.test(path)) return `An upload gives a page no file whose path holds a line break or another control character: ${JSON.stringify(path)}`;
+    if (HALVED.test(path)) return `An upload gives a page no file whose path holds half a character, which no file's name can: ${JSON.stringify(path)}`;
     // The page is given a file by its last name alone. A backslash in that is a folder's separator elsewhere, and
     // the browser host takes no such name for a file's (host.ts, filesOf).
     if (basename(path).includes("\\")) {
