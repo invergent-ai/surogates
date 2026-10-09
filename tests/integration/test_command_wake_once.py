@@ -713,6 +713,49 @@ async def test_a_command_left_behind_past_the_cursor_does_not_revive_its_chat(wo
     assert (workers.ran, workers.requests, await workers.log(chat), await workers.status(chat)) == ([], [], written, "completed")
 
 
+async def test_a_wake_of_a_finished_chat_looks_for_a_waiting_command_from_its_last_command_on(workers):
+    chat = await workers.chat()
+    await workers.types(chat, "/goal status")
+    typed = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
+    # The chat goes on long after the command, and comes to rest.
+    for question in ("And Q1?", "And Q0?"):
+        await workers.says(chat, question)
+        await workers.wake(chat)
+    await workers.its_browser_is_handed_back(chat)
+    reads = []
+
+    class Reads:
+        def __getattr__(self, name: str):
+            return getattr(workers.store, name)
+
+        async def get_events(self, session_id, **kwargs):
+            reads.append(kwargs)
+            return await workers.store.get_events(session_id, **kwargs)
+
+    await workers.worker(store=Reads()).wake(chat)
+
+    # The wake has nothing to do.  Beside its user's messages it read the log from the last command
+    # on: commands are answered in the order typed, so none waits unless the last one does.
+    assert (workers.ran, len(workers.requests)) == (["_handle_goal_command"], 2)
+    assert [read.get("after") for read in reads if read.get("types") != [EventType.USER_MESSAGE]] == [typed - 1]
+
+
+async def test_a_command_typed_before_the_last_one_does_not_wait_once_the_last_one_is_answered(workers):
+    chat = await workers.chat()
+    await in_a_turn(workers, chat, "a tool call", "/goal status")
+    # The command waits behind the turn's end, and its user types another before its wake.
+    await workers.says(chat, "/loop list")
+    await workers.nobody_is_queued()
+    for _ in range(2):
+        await workers.wake(chat)
+    assert (workers.ran, await workers.status(chat)) == (["_handle_goal_command", "_handle_loop_command"], "completed")
+    written = await workers.log(chat)
+
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert (workers.ran, await workers.log(chat)) == (["_handle_goal_command", "_handle_loop_command"], written + ["browser.control_returned"])
+
+
 async def test_compress_typed_before_a_question_compresses_the_conversation_as_it_was_typed_in(workers):
     chat = await workers.chat()
     await workers.says(chat, "/compress")

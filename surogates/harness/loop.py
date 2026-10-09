@@ -885,14 +885,21 @@ class AgentHarness(
         ]
         if not typed:
             return False
+        # Commands are answered in the order typed, so one waits only while
+        # the last one typed does.  The log is read from that one on, with
+        # the wake before it, which says whose turn it was typed in: a
+        # finished session's wakes come often, and its log is long.
+        last = typed[-1]
+        woken = await self._store.last_event(session.id, EventType.HARNESS_WAKE, before=last.id)
         since = await self._store.get_events(
             session.id,
+            after=last.id - 1,
             types=[
                 EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
                 EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT, EventType.SESSION_COMPLETE,
             ],
         )
-        return self._waiting_command(session, since) is not None
+        return self._waiting_command(session, [woken, *since] if woken is not None else since) is not None
 
     async def _expand_last_skill_again(self, session: Session, messages: list[dict], all_events: list) -> None:
         """Put back the skill the user's last message ran at its own wake,

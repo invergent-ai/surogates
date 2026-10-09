@@ -1576,12 +1576,16 @@ class SessionStore:
         return events
 
     async def last_event(
-        self, session_id: UUID, type: EventType, *, containing: dict[str, Any] | None = None,
+        self, session_id: UUID, type: EventType, *,
+        containing: dict[str, Any] | None = None, before: int | None = None,
     ) -> Event | None:
-        """The session's latest *type* event whose data holds *containing*; None when it has none."""
+        """The session's latest *type* event whose data holds *containing*, of those
+        before event *before* when given; None when it has none."""
         stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type == type.value)
         if containing:
             stmt = stmt.where(EventRow.data.contains(containing))
+        if before is not None:
+            stmt = stmt.where(EventRow.id < before)
         stmt = stmt.order_by(EventRow.id.desc()).limit(1)
         async with self._sf() as db:
             row = (await db.execute(stmt)).scalars().first()
