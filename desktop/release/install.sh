@@ -195,23 +195,24 @@ trusted() {
 
 # The release keys that helper $2 lists, into the array $1 names: each entry of its list, where
 # the list is in its one form (see the list, in settings), and none where it is not, or where the
-# script assigns the list a second time or adds to it. The helper is read line by line, and not
-# run. Each line is asked letter for letter, in no locale of the caller's.
+# script assigns the list a second time or adds to it. The helper is read, and not run: grep
+# counts the lines that assign the list, sed takes the list's own lines, from the one that opens
+# it to the first that closes one, and those few are asked line by line, letter for letter, in no
+# locale of the caller's.
 listed() {
   local -n entries="$1"
-  local LC_ALL=C name=RELEASE_KEYS line entry="" at=before lists=0 blank=$'^[ \t]*'
+  local LC_ALL=C name=RELEASE_KEYS lists text line entry="" at=before blank=$'^[ \t]*'
   # A key's first line and its last, as OpenSSL writes them. Put together here, so that the
   # script has the first only where a key is.
   local begin="-----BEGIN" end="-----END"
   begin+=" PUBLIC KEY-----" end+=" PUBLIC KEY-----"
   entries=()
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" =~ ${blank}${name}\+?= ]]; then
-      lists=$(( lists + 1 ))
-      if [ "$at" = before ] && [[ "$line" =~ ${blank}${name}=\($ ]]; then at=open; continue; fi
-      at=wrong
-    fi
+  lists="$(grep -cE "^[[:blank:]]*${name}\\+?=" -- "$2" 2>/dev/null)" || lists=0
+  [ "$lists" = 1 ] || return 0
+  text="$(sed -n "/^[[:blank:]]*${name}=($/,/^[[:blank:]]*)$/p" -- "$2" 2>/dev/null)" || return 0
+  while IFS= read -r line; do
     case "$at" in
+      before) at=open ;;
       open)
         if [[ "$line" =~ ${blank}\'"$begin"$ ]]; then entry="$begin"; at=key
         elif [[ "$line" =~ ${blank}\)$ ]]; then at=closed
@@ -224,9 +225,11 @@ listed() {
         else at=wrong
         fi
         ;;
+      *) at=wrong ;;
     esac
-  done <"$2"
-  [ "$at" = closed ] && [ "$lists" -eq 1 ] || entries=()
+    [ "$at" != wrong ] || break
+  done <<<"$text"
+  [ "$at" = closed ] || entries=()
 }
 
 # Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys

@@ -333,7 +333,7 @@ describe("the desktop's release manifest", () => {
   it("reads the build's tarball only where no release key is: with one in its environment, set or empty, it starts nothing and writes nothing", () => {
     // Each program the step starts, as publish.sh calls it, written down.
     const started = () => readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
-    for (const program of ["dirname", "sha256sum", "cut", "tail", "mktemp", "tar", "realpath", "cmp", "sed", "head", "jq", "chmod", "rm", "stat"]) recording(dir, program);
+    for (const program of ["dirname", "sha256sum", "cut", "tail", "mktemp", "tar", "realpath", "cmp", "sed", "grep", "head", "jq", "chmod", "rm", "stat"]) recording(dir, program);
     for (const key of [PRIVATE, ""]) {
       expect(describes({ DESKTOP_RELEASE_KEY: key }), key === "" ? "empty" : "set").toMatchObject({
         status: 1, stdout: "", stderr: "publish.sh: describe reads the build's tarball, and runs only where no release key is: DESKTOP_RELEASE_KEY is in its environment\n",
@@ -344,7 +344,7 @@ describe("the desktop's release manifest", () => {
     }
     // With none, it starts each of them, tar on the tarball among them.
     expect(describes().status).toBe(0);
-    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "head-argv", "jq-argv", "mktemp-argv", "openssl-argv", "realpath-argv", "rm-argv", "sed-argv", "sha256sum-argv", "stat-argv", "tail-argv", "tar-argv"]);
+    expect(started()).toEqual(["chmod-argv", "cmp-argv", "cut-argv", "dirname-argv", "grep-argv", "head-argv", "jq-argv", "mktemp-argv", "openssl-argv", "realpath-argv", "rm-argv", "sed-argv", "sha256sum-argv", "stat-argv", "tail-argv", "tar-argv"]);
     expect(readFileSync(join(dir, "tar-argv"), "utf8")).toContain(`${tarball()}\n`);
   });
 
@@ -359,12 +359,12 @@ describe("the desktop's release manifest", () => {
     // the key's own line, under whatever name.
     const body = PRIVATE.split("\n")[1] ?? "";
     const counted = (real: string) => [`/usr/bin/env | /usr/bin/grep -cF '${body}' >> '${join(dir, "keyed")}'`, `exec '${real}' "$@"`];
-    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut", "rm", "chmod", "mv"]) recording(dir, program, counted);
+    for (const program of ["bash", "dirname", "tail", "sed", "head", "jq", "cmp", "openssl", "tar", "sha256sum", "stat", "realpath", "mktemp", "cut", "rm", "chmod", "mv", "grep"]) recording(dir, program, counted);
     expect(publish("sign", "1.2.3", { DESKTOP_RELEASE_KEY: PRIVATE, ...said })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
     expect(verify(null, readFileSync(join(out, "manifest.json")), keys.publicKey, readFileSync(join(out, "manifest.json.sig")))).toBe(true);
     // No tar, and nothing that would unpack, hash or measure one.
     const started = readdirSync(dir).filter((name) => name.endsWith("-argv")).sort();
-    expect(started).toEqual(["bash-argv", "dirname-argv", "head-argv", "jq-argv", "mktemp-argv", "mv-argv", "openssl-argv", "rm-argv", "sed-argv", "tail-argv"]);
+    expect(started).toEqual(["bash-argv", "dirname-argv", "grep-argv", "head-argv", "jq-argv", "mktemp-argv", "mv-argv", "openssl-argv", "rm-argv", "sed-argv", "tail-argv"]);
     // And none of what it starts is given the tarball's path, where it was or where it is: the manifest's alone.
     const given = started.map((name) => readFileSync(join(dir, name), "utf8")).join("");
     expect(given).toContain(`${join(out, "manifest.json")}\n`);
@@ -429,7 +429,7 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it("writes, signs and takes a release's manifest by one rule, on every form that its readers are asked about: the first step writes none that an apply refuses, the second signs none, and what the second refuses for its form is what an apply's own reader refuses", { timeout: 180_000 }, () => {
+  it("writes, signs and takes a release's manifest by one rule, on every form that its readers are asked about: the first step writes none that an apply refuses, the second signs none, and what the second refuses for its form is what an apply's own reader refuses", { timeout: 180_000 }, async () => {
     const install = join(dir, "release", "install.sh");
     const signature = join(out, "manifest.json.sig");
     // What an apply's own reader says of a manifest: the release it takes it for, as
@@ -458,11 +458,6 @@ describe("the desktop's release manifest", () => {
     // What the first step writes of release *named*, whose app keeps state of schema *schema*. Its
     // tarball is a small one of that version. No tarball has a hash that one chooses: the hash and
     // the size are said by stand-ins for the two tools that measure it, and are the build's words.
-    // The line the signing writes of the release that *manifest* says, read back.
-    const lineOf = (manifest: Buffer, named: string) => {
-      signed(manifest, named);
-      return readFileSync(join(out, "manifest.json"));
-    };
     const packedAt = new Map<string, number>();
     const written = (named: string, schema: number) => {
       const [version = "", sha = "", size = ""] = named.split(" ");
@@ -475,24 +470,33 @@ describe("the desktop's release manifest", () => {
       for (const tool of ["sha256sum", "stat"]) rmSync(join(dir, "bin", tool));
       return step.status === 0 ? readFileSync(join(out, "manifest.json")) : null;
     };
-    const said = FORMS.map(([name, form]) => {
+    // A turn of the event loop between forms: each is several programs run, and vitest's worker
+    // answers its runner on that loop within a minute.
+    const said: Array<Record<string, unknown>> = [];
+    for (const [name, form] of FORMS) {
+      await new Promise((resolve) => setImmediate(resolve));
       const manifest = Buffer.from(form);
       const taken = applied(manifest);
       // Refused by an apply: no signing has it to read, and none writes it.
-      if (taken === null) return { name, apply: "refuses" };
+      if (taken === null) {
+        said.push({ name, apply: "refuses" });
+        continue;
+      }
       // Taken by an apply, for a release: what the first step writes of that release is taken for
       // the same one, and signed; and the form itself is signed where it is that writing, byte
       // for byte, and nowhere else.
       const schema = Math.floor((JSON.parse(manifest.toString()) as { stateSchema: number }).stateSchema);
       const own = written(taken, schema);
-      return {
-        name, apply: "takes", sign: signed(manifest, taken),
+      const sign = signed(manifest, taken);
+      // The line the signing wrote of the release that this form says: the two steps write one line.
+      const line = readFileSync(join(out, "manifest.json"));
+      said.push({
+        name, apply: "takes", sign,
         writes: own === null ? "nothing" : own.equals(manifest) ? "this" : "another",
-        itsWriting: own === null ? null : { apply: applied(own) === taken ? "takes" : "refuses", sign: signed(own, taken) },
-        // The two steps write one line of one release.
-        one: own !== null && own.equals(lineOf(manifest, taken)),
-      };
-    });
+        itsWriting: own === null ? null : { apply: applied(own) === taken ? "takes" : "refuses", sign: own.equals(line) ? sign === "signed" || sign === "another's" ? "signed" : sign : signed(own, taken) },
+        one: own !== null && own.equals(line),
+      });
+    }
     expect(said).toEqual(FORMS.map(([name, , helper], at) => (helper
       ? { name, apply: "takes", sign: said[at]?.writes === "this" ? "signed" : "another's", writes: said[at]?.writes === "this" ? "this" : "another", itsWriting: { apply: "takes", sign: "signed" }, one: true }
       : { name, apply: "refuses" })));
@@ -516,15 +520,17 @@ describe("the desktop's release manifest", () => {
     });
     expect(given.filter(({ version }) => version !== "1.2.4").length).toBeGreaterThan(8);
     expect(given.filter(({ version }) => version === "1.2.4").length).toBeGreaterThan(10);
-    const wrote = given.map(({ name, version, schema }) => {
+    const wrote: Array<{ name: string; writes: boolean }> = [];
+    for (const { name, version, schema } of given) {
+      await new Promise((resolve) => setImmediate(resolve));
       rmSync(join(out, "manifest.json"), { force: true });
       // A tarball of that version, where a file can have the version in its name, whose app's
       // package writes the schema so.
       const named = !version.includes("/");
       if (named) packed(dir, out, version, (top) => writeFileSync(join(top, "resources", "app", "package.json"), `{"version":"${version}"${schema === null ? "" : `,"stateSchema":${schema}`}}\n`));
       const step = publish("describe", version, { DESKTOP_TARBALL_SHA256: named ? sha256(readFileSync(join(out, `${NAME_OF(version)}.tar.gz`))) : SHA });
-      return { name, writes: step.status === 0 && existsSync(join(out, "manifest.json")) };
-    });
+      wrote.push({ name, writes: step.status === 0 && existsSync(join(out, "manifest.json")) });
+    }
     expect(wrote).toEqual(given.map(({ name, takes }) => ({ name, writes: takes })));
   });
 
@@ -542,7 +548,7 @@ describe("the desktop's release manifest", () => {
     const seen = join(dir, "seen");
     mkdirSync(only);
     mkdirSync(seen);
-    const programs = ["bash", "dirname", "head", "jq", "mktemp", "mv", "openssl", "rm", "sed", "tail"];
+    const programs = ["bash", "dirname", "grep", "head", "jq", "mktemp", "mv", "openssl", "rm", "sed", "tail"];
     for (const program of programs) {
       const real = spawnSync("sh", ["-c", `command -v ${program}`], { encoding: "utf8" }).stdout.trim();
       expect(real, program).toMatch(/^\/.+/);
