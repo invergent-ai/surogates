@@ -420,11 +420,11 @@ describe("the image's manifest and the install record", () => {
     writeFileSync(path, JSON.stringify({ base: "https://surogate.ai/" }));
     expect(installBase(path)).toBe("https://surogate.ai");
     writeFileSync(path, JSON.stringify({ base: "file:///etc" }));
-    expect(() => installBase(path)).toThrow("names no web address to download the sandbox from");
+    expect(() => installBase(path)).toThrow("names no web address that Surogate was installed from");
     expect(() => installBase(join(dir, "missing.json"))).toThrow("Surogate was not installed by its install script");
     // One that is there but cannot be read, or is not JSON, is not a missing install.
     writeFileSync(path, "{");
-    expect(() => installBase(path)).toThrow(`${path} names no web address to download the sandbox from`);
+    expect(() => installBase(path)).toThrow(`${path} names no web address that Surogate was installed from`);
     chmodSync(path, 0o000);
     expect(() => installBase(path)).toThrow(`${path} could not be read: EACCES`);
   });
@@ -435,7 +435,15 @@ describe("the image's manifest and the install record", () => {
     expect(installBase(path)).toBe("https://surogate.ai");
     expect(() => installBase(path, true)).toThrow(`${path} is not the install script's: only root may write it`);
     // Root's own, as /etc/passwd is: taken, and read for its base.
-    expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address to download the sandbox from");
+    expect(() => installBase("/etc/passwd", true)).toThrow("/etc/passwd names no web address that Surogate was installed from");
+    // A base with a user or a password in it is refused in the app's own words, and never asked.
+    for (const base of ["https://user:secret@releases.example", "https://user@releases.example/x", "http://:secret@releases.example"]) {
+      writeFileSync(path, JSON.stringify({ base }));
+      expect(() => installBase(path), base).toThrow(`${path} names a web address with a user or a password in it, which Surogate does not send: run the install script again with a --base that has none`);
+    }
+    // Not through a link, though it leads to a file of root's own.
+    symlinkSync("/etc/passwd", join(dir, "linked.json"));
+    expect(() => installBase(join(dir, "linked.json"), true)).toThrow(`${join(dir, "linked.json")} is not the install script's: it is a link`);
     expect(() => installBase(join(dir, "missing.json"), true)).toThrow("Surogate was not installed by its install script");
   });
 });
@@ -526,11 +534,11 @@ describe("ImageDelivery", () => {
 
   it("fails at once without an install record to download from, and reads it again at the next start", async () => {
     let record = (): string => {
-      throw new Error("Surogate was not installed by its install script, so it does not know where to download its sandbox from");
+      throw new Error("Surogate was not installed by its install script, so it does not know where it was installed from");
     };
     const delivery = new ImageDelivery({ ...options(), base: () => record() });
     delivery.start();
-    expect(delivery.state).toEqual({ state: "failed", why: "Surogate was not installed by its install script, so it does not know where to download its sandbox from" });
+    expect(delivery.state).toEqual({ state: "failed", why: "Surogate was not installed by its install script, so it does not know where it was installed from" });
     await expect(delivery.wait(new AbortController().signal)).rejects.toThrow("was not installed by its install script");
     record = () => base;
     delivery.start();

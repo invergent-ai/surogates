@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
-import { segments } from "../src/shell/pages/ui.js";
+import { segments } from "../src/shell/text.js";
 import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };

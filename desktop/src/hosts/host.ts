@@ -8,7 +8,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import type { Server } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -17,12 +17,16 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { checkFolder, confirmedFolder } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
-import { realpath } from "../files/paths.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
 import { type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
-import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
+import { closeHanded } from "./handed.js";
+import { fileToolsMissing, GLOB, hideSrtTmp, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
+
+// Before anything else: nothing this process starts, the helper in its sandbox least of all, holds
+// a descriptor of the app's.
+closeHanded();
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
@@ -153,7 +157,7 @@ async function start(message: HostStart): Promise<void> {
   if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
   const tmp = resolve(message.tmp);
   const appDirs = message.appDirs.map((dir) => resolve(dir));
-  const checked = checkFolder(message.folder, { home, dataDir: message.dataDir, appDirs });
+  const checked = checkFolder(message.folder, { home, dataDir: message.dataDir, cacheDir: message.cacheDir, appDirs });
   if (!checked.ok) throw checked.missing ? new FolderUnavailable(checked.message) : new Error(checked.message);
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
@@ -203,26 +207,13 @@ async function start(message: HostStart): Promise<void> {
   // swaps in later moves none, and is dropped when it is the folder or the working folder, or
   // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
   // .. through a folder in it. srt's own tools go by absolute path. So no program a command
-  // wrote runs, out here or in the helper.
-  const held = [`${dev}:${ino}`, ((stats) => `${stats.dev}:${stats.ino}`)(statSync(tmp))];
-  const within = (dir: string): boolean => {
-    for (let at = dir; ; at = dirname(at)) {
-      let stats;
-      try {
-        stats = statSync(at, { throwIfNoEntry: false });
-      } catch {
-        return true; // a folder that cannot be judged (ENOTDIR, EACCES, ELOOP): its entry is dropped
-      }
-      if (stats && held.includes(`${stats.dev}:${stats.ino}`)) return true;
-      if (at === dirname(at)) return false;
-    }
-  };
-  const hostPath = (process.env.PATH ?? "").split(":")
-    .filter((entry) => entry.startsWith("/"))
-    .map((entry) => realpath(entry).path)
-    .filter((entry) => !within(entry))
-    .join(":") || "/usr/bin:/bin";
+  // wrote runs, out here or in the helper. The rule is pathOutside's: the app looks for the
+  // helper's tools by it too.
+  const hostPath = pathOutside(process.env.PATH, [{ dev, ino }, statSync(tmp)]);
   process.env.PATH = hostPath;
+  // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
+  const lacking = fileToolsMissing(message.bwrapPath, hostPath);
+  if (lacking.length > 0) throw new Error(toolsMissing(lacking));
   const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
   const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
   const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath });

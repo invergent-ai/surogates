@@ -169,6 +169,29 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     }
   });
 
+  it("packs no version but x.y.z in the ten digits with no zero before a part, as the install script and the signing take one: refused before anything is packed, whatever its caller's locale takes for a digit", async () => {
+    // Off the test's event loop too: where one is taken, a packaging follows.
+    const asked = (version: string, locale: string) => new Promise<{ status: number | string | null; stdout: string; stderr: string }>((resolve) => {
+      execFile(join(DESKTOP, "scripts", "package.sh"), [version, "vm-manifest.json", "refused"], {
+        cwd: dir, encoding: "utf8", env: { ...process.env, SOURCE_DATE_EPOCH: "1790000000", TMPDIR: join(dir, "tmp"), LC_ALL: locale }, maxBuffer: 16 * 1024 * 1024,
+      }, (error, stdout, stderr) => resolve({ status: error ? error.code ?? null : 0, stdout, stderr }));
+    });
+    const usage = { status: 2, stdout: "", stderr: "usage: scripts/package.sh <x.y.z> <vm manifest.json> <out> [<install script>]\n" };
+    // dpkg reads 1.2.03 as 1.2.3: a version has one spelling, and a tag of another would build
+    // for the job's whole length and be refused at its signing.
+    for (const version of ["1.2.03", "01.2.3", "1.02.3", "00.0.0", "1.2", "1.2.3.4", "v1.2.3", "1.2.3-rc.1", "1.2.3\n"]) {
+      expect(await asked(version, "C"), JSON.stringify(version)).toMatchObject(usage);
+    }
+    // A locale of this computer's in which bash takes other characters than the ten for digits:
+    // most do. Where a computer has none, there is nothing to show.
+    const locales = spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout.trim().split("\n");
+    const wide = locales.find((locale) => spawnSync("bash", ["-c", '[[ "$1" =~ ^[0-9]$ ]]', "_", "\u0663"], { env: { ...process.env, LC_ALL: locale } }).status === 0);
+    if (wide) {
+      for (const version of ["1.2.\u0663", "\uff11.2.3", "1.\u00b2.3"]) expect(await asked(version, wide), `${version} in ${wide}`).toMatchObject(usage);
+    }
+    expect(existsSync(join(dir, "refused"))).toBe(false);
+  });
+
   it("is the same bytes when the same build is packed again: a release sent again puts no other tarball under a name already served", async () => {
     const again = await pack("again");
     expect(again.status, again.stderr).toBe(0);

@@ -2,11 +2,57 @@
 // readable but the system, the app, the folder and the helper's working folder; nothing
 // writable but the folder and that working folder; no network.
 
-import { inside } from "../files/paths.js";
+import { statSync } from "node:fs";
+import { dirname } from "node:path";
+
+import { findOnPath } from "../files/operations.js";
+import { inside, realpath } from "../files/paths.js";
 
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 
 const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve"];
+// Section 9's words for a computer that lacks what the sandbox runs on, and what it lacks.
+export const toolsMissing = (lacking: string[]) => `Surogate's sandbox tools are missing. Run the install script again. It lacks ${lacking.join(", ")}`;
+
+/**
+ * What the file helper's sandbox lacks of this computer, each named as the install script
+ * installs it: bubblewrap, at *bwrap* (the installed version's own copy) or else on *path*;
+ * socat, which srt runs; and ripgrep, which the helper searches with.
+ */
+export function fileToolsMissing(bwrap: string | undefined, path: string): string[] {
+  return [["bubblewrap", bwrap ?? "bwrap"], ["socat", "socat"], ["ripgrep", "rg"]]
+    .filter(([, program]) => findOnPath(program!, path, "/") === null).map(([name]) => name!);
+}
+
+/**
+ * The PATH a file host looks on, of *path*, the app's own: each absolute entry, kept as the
+ * path it leads to now, so a link a command swaps in later moves none. An entry is dropped
+ * when it is one of *held*, the folders a command may write, or lies in one, by what each is
+ * (dev:ino), however it is spelled: a link, a bind mount, a .. through a folder in it. With
+ * none left, the system's own. A file host holds its folder and its working folder; the app
+ * looks for the file helper's tools by the same rule, holding every folder its chats are bound to.
+ */
+export function pathOutside(path: string | undefined, held: Array<{ dev: number; ino: number }>): string {
+  const ids = held.map(({ dev, ino }) => `${dev}:${ino}`);
+  const within = (dir: string): boolean => {
+    for (let at = dir; ; at = dirname(at)) {
+      let stats;
+      try {
+        stats = statSync(at, { throwIfNoEntry: false });
+      } catch {
+        return true; // a folder that cannot be judged (ENOTDIR, EACCES, ELOOP): its entry is dropped
+      }
+      if (stats && ids.includes(`${stats.dev}:${stats.ino}`)) return true;
+      if (at === dirname(at)) return false;
+    }
+  };
+  return (path ?? "").split(":")
+    .filter((entry) => entry.startsWith("/"))
+    .map((entry) => realpath(entry).path)
+    .filter((entry) => !within(entry))
+    .join(":") || "/usr/bin:/bin";
+}
+
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
 

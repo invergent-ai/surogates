@@ -87,7 +87,7 @@ async def start_landing(
 
 async def save_landing(
     session_factory: Any, row: int, saga: Saga, *, state: str = "running",
-    commit: str | None = None, files: list[dict] | None = None,
+    commit: str | None = None, files: list[dict] | None = None, picked_up: list[dict] | None = None,
 ) -> None:
     """Write the saga's steps as they are into its row, and its outcome once it has one."""
     values: dict[str, Any] = {"steps": saga.to_dict()["steps"], "saga_state": state}
@@ -95,6 +95,8 @@ async def save_landing(
         values["commit"] = commit
     if files is not None:
         values["files"] = files
+    if picked_up is not None:
+        values["picked_up"] = picked_up
     async with session_factory() as db, db.begin():
         await db.execute(update(WorkstreamHistory).where(WorkstreamHistory.id == row).values(**values))
 

@@ -21,11 +21,13 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
+import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
+import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
-import { missingTools, toolsMissing } from "../vm/linux.js";
+import { missingTools } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
@@ -47,8 +49,9 @@ import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
-import { appTools } from "./tools.js";
-import { asShown } from "./pages/ui.js";
+import { appTools, BWRAP } from "./tools.js";
+import { asShown } from "./text.js";
+import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -282,12 +285,23 @@ const utilityBrowser = (profiles: string) => () => utility<ToBrowser, FromBrowse
 // is none to make; its last boot.
 let lacking: string[] | null = null;
 let lackingFound: Promise<string[]> = Promise.resolve([]);
+// What the VM itself lacks, as last looked for: a change of the folders looks for the file helper's tools alone.
+let vmLacking: Promise<string[]> = Promise.resolve([]);
 const VM_RESOURCES = app.isPackaged ? join(process.resourcesPath, "vm") : null;
 // The environment the VM is made from: a packaged app's has no image or KVM device of a test's.
 const VM_ENV = vmEnv(process.env, app.isPackaged);
 let delivery: ImageDelivery | null = null;
-// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after it.
+// Aborted at the quit: a download or an unpack under way stops with the app, never writing on after
+// it. The image's and an update's.
 const stopDelivery = new AbortController();
+// Where the install script recorded the base the app was installed from: root's, in an installed
+// app. A development build reads only SUROGATE_INSTALL_JSON's, a test's, so it never downloads
+// from an installed app's base.
+const INSTALL_RECORD = app.isPackaged ? ROOT_RECORD : process.env.SUROGATE_INSTALL_JSON;
+// What the app downloads from that base: no cookie of its own session goes with it, and none of it
+// through the HTTP cache: a second copy of what is downloaded, and cached ranges in a resume.
+const fromBase = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) =>
+  net.fetch(url, { ...init, credentials: "omit", cache: "no-store" });
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
@@ -301,18 +315,57 @@ const vmUser = () => {
 // names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
 // development build only.
 function imageDelivery(): ImageDelivery | null {
-  const record = app.isPackaged ? "/etc/surogate/install.json" : process.env.SUROGATE_INSTALL_JSON;
-  if (VM_ENV.SUROGATE_VM_IMAGE || !record) return null;
+  if (VM_ENV.SUROGATE_VM_IMAGE || !INSTALL_RECORD) return null;
   return new ImageDelivery({
     manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
     // An installed app's record is root's alone to write, as the install script leaves it.
-    base: () => installBase(record, app.isPackaged),
+    base: () => installBase(INSTALL_RECORD, app.isPackaged),
     images: join(root, "vm", "images"),
-    // No cookie of the app's own session goes with it, and none of it through the HTTP cache: a second
-    // copy of what is downloaded, and cached ranges in a resume.
-    fetch: (url, init) => net.fetch(url, { ...init, credentials: "omit", cache: "no-store" }),
+    fetch: fromBase,
     signal: stopDelivery.signal,
   }, changed);
+}
+
+// Updates (spec, Section 9, "In-app updates"): an installed app checks the base it was installed
+// from at its start and every 6 hours, trusting the release keys that the helper pkexec runs
+// lists, and downloads into the user's cache. A development build updates only when a test names
+// an install record and a helper of its own, SUROGATE_UPDATE_HELPER.
+// A relative XDG_CACHE_HOME is ignored, as the XDG Base Directory specification says.
+const cacheHome = process.env.XDG_CACHE_HOME?.startsWith("/") ? process.env.XDG_CACHE_HOME : join(app.getPath("home"), ".cache");
+let updates: Updates | null = null;
+
+function startUpdates(): void {
+  const cache = join(cacheHome, "surogate", "updates");
+  const helper = process.env.SUROGATE_UPDATE_HELPER;
+  let options: UpdatesOptions;
+  if (app.isPackaged) {
+    options = installedUpdates(VERSION, cache, fromBase, stopDelivery.signal);
+  } else if (INSTALL_RECORD && helper) {
+    // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
+    options = {
+      version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
+      apply: helperRun([helper]),
+    };
+  } else {
+    return;
+  }
+  // Whichever build: all that a helper said of an install that did not end well goes to the log.
+  // What it keeps of a newest release that no trusted key signed is under the app's own root,
+  // which no chat's folder reaches.
+  updates = new Updates({ ...options, standing: join(root, "update-unsigned.json"), log: report }, changed);
+  // Checked at the start and every six hours; sooner after a check that failed; and when the
+  // computer wakes. A quit in the middle of one is no failure to say.
+  powerMonitor.on("resume", keepChecked(updates, stopDelivery.signal, report));
+}
+
+// The update line's button: the update downloaded installed by the root helper, then the app restarted
+// into it; or, installed already, the restart alone. Only while the line shows a button.
+async function updateAction(): Promise<void> {
+  if (!updates || !updateLine(updates.state)?.button) return;
+  // Where the downloaded files were no longer the app's own, the release is looked for again: one
+  // that cannot be found is said in the log, as a check's is.
+  await updates.install().catch(report);
+  if (updates.state.state === "installed") restart();
 }
 
 // The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
@@ -327,14 +380,54 @@ function startDelivery(check = false): void {
   }
 }
 
-// What the VM lacks of this computer, looked for: at the app's start, and at the line's Check again.
-// zstd counts only while the image's delivery has something left to unpack.
+// What the sandbox lacks of this computer, looked for: at the app's start, and at the line's Check
+// again. The file helper's tools first, then the VM's; zstd counts only while the image's delivery
+// has something left to unpack.
 function lookForTools(): void {
-  lackingFound = missingTools({}, delivery !== null && delivery.state.state !== "ready").then((found) => {
+  const unpacking = delivery !== null && delivery.state.state !== "ready";
+  // The folders are taken once, for the VM's tools and for the file helper's: the two looks then
+  // hold the same folders, and the line and a file tool name the same tools.
+  const held = boundFolders();
+  vmLacking = held.then((folders) => missingTools({}, unpacking, folders));
+  lookForFileTools(true, held);
+}
+
+// Each folder this computer's chats are bound to, as its file host holds it: by what it is now. One
+// that is not there or cannot be read has no file host, and none starts once the journal is closed.
+// Never looked at on this thread: a folder on a mount that has stopped answering would stop the app
+// with it. One that does not answer in time is not held (FolderLooks).
+const folderLooks = new FolderLooks(undefined, undefined, (folder) => report(new Error(`${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
+function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
+  let folders: string[] = [];
+  try {
+    folders = openStack()?.bindings.folders() ?? [];
+  } catch {
+    // The device is stopping.
+  }
+  return folderLooks.held(folders);
+}
+
+// The file helper's tools, looked for again beside what the VM was last found to lack: with each
+// look, once the device's folders are known, and at each change of them. They are looked for where
+// the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
+// relative entries, and without any entry in a folder a chat is bound to, where a command may have
+// written a program. So the line and a file tool's answer name the same tools. *said*: tell the
+// pages even when nothing changed, as Check again asks.
+let toolsOwedSaid = false;
+function lookForFileTools(said = false, folders = boundFolders()): void {
+  toolsOwedSaid ||= said;
+  const look: Promise<string[]> = Promise.all([vmLacking, folders]).then(([vm, held]) => {
+    const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, held)), ...vm];
+    // A look that a later one has overtaken says nothing: the later one's folders are the newer,
+    // and it tells the pages what this one owed them.
+    if (lackingFound !== look) return lackingFound;
+    const same = lacking !== null && lacking.join("\n") === found.join("\n");
     lacking = found;
-    changed();
+    if (toolsOwedSaid || !same) changed();
+    toolsOwedSaid = false;
     return found;
   });
+  lackingFound = look;
 }
 
 // Resolves once the VM can boot: it lacks nothing of this computer, and its image is here.
@@ -676,7 +769,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
-      tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(), changed }),
+      tools: appTools({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: join(cacheHome, "surogate"), env, vm: vmFor(), changed }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       staging: browserTemp(profilesOf(root, credential)),
       bindingOf: (bound) => bindings.get(bound),
@@ -692,6 +785,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       // Settings → Folders and permissions draws the chat's folder, mode and hosts again.
       main?.settingsContents()?.send("settings:changed");
       if (pageIs(credential)) main?.webContents()?.send("desktop:binding-changed", root);
+      // A folder bound or forgotten changes where the file hosts look for their tools.
+      lookForFileTools();
     },
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
@@ -711,6 +806,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
   changed();
   return started.then((stack) => {
     starting.stack = stack;
+    // This device's folders are known now: the ones its chats were bound to before it started.
+    lookForFileTools();
     return stack;
   }, (error: unknown) => {
     if (device === starting) device = null;
@@ -1487,6 +1584,7 @@ function state() {
     // While a quit waits for the threads working on this computer: how many it waits for.
     quitting: waiting ? (device?.stack?.working() ?? 0) : null,
     sandbox: sandboxLine(lacking, deliveryState(), boot),
+    update: updateLine(updates?.state ?? null),
   };
 }
 
@@ -2221,6 +2319,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:quit-now", () => waiting?.());
   handle("shell:link", openLink);
   handle("shell:sandbox", sandboxAction);
+  handle("shell:update", updateAction);
 }
 
 // Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
@@ -2246,6 +2345,18 @@ let askingAgain = false;
 let stopped = false;
 // Once the quit goes on: nothing shows the window again while the device stops.
 let leaving = false;
+// A quit that restarts the app into its update once it is done: the installed app started again from
+// its launcher, never process.execPath, which is the old version's own folder.
+let restarting = false;
+
+// A quit the user asked for stays a quit: once one is under way, an update that ends installed does
+// not turn it into a restart, nor ask "Quit now?" of a quit that waits. The update stays installed,
+// and the next start is the user's own.
+function restart(): void {
+  if (quitting) return;
+  restarting = true;
+  app.quit();
+}
 
 // A quit asked again while the first waits for the threads: quit now, or keep waiting.
 async function quitNow(): Promise<void> {
@@ -2266,7 +2377,11 @@ async function quit(): Promise<void> {
   const working = device?.stack?.working() ?? 0;
   if (working > 0) {
     const answer = await confirmQuit(working);
-    if (answer === "cancel") return;
+    if (answer === "cancel") {
+      // The update stays installed: the line's Restart asks again.
+      restarting = false;
+      return;
+    }
     if (answer === "wait" && (device?.stack?.working() ?? 0) > 0) {
       await new Promise<void>((resume) => {
         waiting = resume;
@@ -2300,6 +2415,10 @@ async function quit(): Promise<void> {
     await stopDevice(device?.started, vm);
   } finally {
     stopped = true;
+    if (restarting) {
+      const [execPath, ...args] = loginCommand();
+      app.relaunch({ execPath: execPath!, args });
+    }
     app.quit();
   }
 }
@@ -2352,6 +2471,7 @@ if (!app.requestSingleInstanceLock()) {
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();
+    startUpdates();
     const page = join(PAGES, "shell.html");
     main = new MainWindow({
       states, page, preload: PAGES_PRELOAD, panePreload: PANE_PRELOAD, dark: theme.dark, onChange: changed,

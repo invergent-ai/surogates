@@ -33,7 +33,8 @@ app.whenReady().then(async () => {
   const folder = mkdtempSync(join(homedir(), "probe-"));
   const { dev, ino } = statSync(folder);
   const options = {
-    bindingOf: () => ({ folder, dev, ino, boot: BOOT_ID }), dataDir: join(homedir(), ".probe-data"), env: { HOME: homedir(), LANG: "C.UTF-8" },
+    bindingOf: () => ({ folder, dev, ino, boot: BOOT_ID }), dataDir: join(homedir(), ".probe-data"), cacheDir: join(homedir(), ".cache", "surogate"),
+    env: { HOME: homedir(), LANG: "C.UTF-8" },
     // The probe runs no command: nothing of it reaches the VM.
     vm: { perform: () => Promise.reject(new Error("the probe runs no command")), teardown: () => Promise.resolve(), onProcesses: () => () => {}, onAsk: () => () => {} },
   };

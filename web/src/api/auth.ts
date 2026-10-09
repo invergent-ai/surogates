@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
+import { forgetChatFiles } from "@invergent/agent-chat-react";
 import { errorDetailMessage } from "./_errors";
 import {
   clearAuthTokens,
@@ -281,4 +282,6 @@ export async function exchangeWebCode(code: string): Promise<{
 
 export function logout(): void {
   clearAuthTokens();
+  // The page stays: what the file panel kept of each chat goes with the account.
+  forgetChatFiles();
 }
