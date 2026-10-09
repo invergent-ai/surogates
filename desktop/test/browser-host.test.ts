@@ -3626,6 +3626,18 @@ await navigator.serviceWorker.ready;`);
     expect(await watched(8_000)).toBe(0);
   }, 60_000);
 
+  it("gives a page no leave by letting go, at the take-over, a button the agent held down in it: the release reaches a busy page after its user has held the browser five seconds, and the page, which asks the moment it has leave, asks for nothing", async () => {
+    const { a, watched } = await stuck();
+    // Pressed by a `down` of the agent's, beside the file input, and held: the page is busy from then on.
+    expect(await op(a, "browser.mouse", { action: "down", x: 400, y: 300, button: "left" }, "chat-1")).toMatchObject({ ok: {} });
+    gate!(8_000);
+    await new Promise((done) => setTimeout(done, 300));
+    // Taken over, the button is let go, which reaches the page only once it is free. A press gives a page leave; a release gives it none.
+    host.pause("chat-1", true);
+    expect(await watched(8_000)).toBe(0);
+    expect(said.map(({ what }) => what)).toEqual(["free"]);
+  }, 60_000);
+
   it("lets a page be only five seconds after what the agent was doing there has reached it: a click still on its way to a busy page at the take-over arms no chooser of the browser's own", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/asks/later" }, "chat-1");
