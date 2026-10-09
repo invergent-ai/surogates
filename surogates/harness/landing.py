@@ -422,8 +422,8 @@ def prune_later(
     lock and is fenced as before, so that turn's landing, as any other
     thread's, waits at the lock until the pruning is done.  The landing's
     pod, *sandbox_id*, goes once it is, and no other pod of its session:
-    its delete is tried twice, and before anything else the pod is given a
-    deadline that fits a pruning, in place of a turn's day.
+    its delete is tried twice, and where a pruning runs the pod is first
+    given a deadline that fits one, in place of a turn's day.
     """
     pruning = asyncio.ensure_future(_pruned_then_gone(
         session_factory=session_factory, sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, session_id=session_id,
@@ -435,13 +435,6 @@ def prune_later(
 
 async def _pruned_then_gone(*, sandbox_pool: Any, sandbox_id: str, session_id: str, packs: int, **pruning: Any) -> None:
     try:
-        # First, a life that fits a pruning: the pod is a turn's, made to last a day, and in no session's
-        # keeping now.  The longest its pruning can take, and room: a delete never answered leaves it that long.
-        life = _PRUNE_PATIENCE + _PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30 + _PRUNING_POD_ROOM
-        try:
-            await asyncio.wait_for(sandbox_pool.expire_released(sandbox_id, life), _LET_GO_BOUND)
-        except Exception:
-            logger.warning("Could not give pod %s a pruning's life: it keeps a turn's", sandbox_id, exc_info=True)
         await prune_after(sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, packs=packs, **pruning)
     finally:
         # Also when the worker stops under it: its pod goes all the same, and that pod alone.  Each try
@@ -553,6 +546,14 @@ async def prune_after(
     try:
         if storage is not None and not await _due(storage, bucket, prefix):
             return
+        # A pruning runs.  First, a life that fits one: the pod is a turn's, made to last a day, and in
+        # no session's keeping now.  The longest its pruning can take, and room: a delete never
+        # answered leaves it that long.  Asked only here: on a day already pruned the pod just goes.
+        life = _PRUNE_PATIENCE + _PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30 + _PRUNING_POD_ROOM
+        try:
+            await asyncio.wait_for(sandbox_pool.expire_released(sandbox_id, life), _LET_GO_BOUND)
+        except Exception:
+            logger.warning("Could not give pod %s a pruning's life: it keeps a turn's", sandbox_id, exc_info=True)
         async with asyncio.timeout(_PRUNE_PATIENCE) as patience, project_lock(session_factory, workstream) as held:
             # The lock is had: the settle's waits and the pod's call have bounds of their own.
             patience.reschedule(None)

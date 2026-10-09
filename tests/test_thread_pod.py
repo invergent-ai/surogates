@@ -792,3 +792,22 @@ async def test_a_prunings_patience_is_for_the_lock_and_ends_once_the_lock_is_had
     # With the lock in hand its work has bounds of its own: it is not cut off in the middle by the
     # time it would have waited for the lock.
     assert done == ["pruned"] and "Could not prune" not in caplog.text
+
+
+@pytest.mark.parametrize("pruned", [3600, None])
+async def test_a_landings_pod_is_given_a_prunings_life_only_when_a_pruning_runs(monkeypatch, pruned):
+    monkeypatch.setattr(landing, "project_lock", a_lock_never_free)
+    monkeypatch.setattr(landing, "_PRUNE_PATIENCE", 0.1)
+    now = time.time()
+    bucket = Bucket(now, {}, pruned=None if pruned is None else now - pruned)
+    pool = PrunesNever()
+    landing.prune_later(
+        session_factory=None, sandbox_pool=pool, sandbox_id="pod-1", session_id="t1", workstream="w1", packs=0,
+        saga_settings=None, storage=bucket, bucket="b1", prefix="proj/",
+    )
+    [pruning] = landing._PRUNINGS
+    await asyncio.wait_for(pruning, 5)
+    # On a day already pruned the pod is let go at once: nothing is asked of the cluster for its deadline,
+    # at this landing or any other of the day.
+    assert len(pool.ends_within) == (0 if pruned else 1)
+    assert pool.let_go == [("pod-1", "t1", True)]
