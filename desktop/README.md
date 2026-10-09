@@ -193,6 +193,12 @@ took no update:
 
     <base>/desktop/latest.json is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
 
+The app says it in the same words, in its sidebar: of the newest release, where it finds one that
+no key of this computer's has signed, and of an update that its own helper refuses for that:
+
+    Surogate's newest release is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
+    Surogate could not install its update: the release's manifest is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
+
 A key is changed over two releases: one that the old key signs and that lists the new key beside
 it, and then the first that the new key alone signs. A computer that never installed the first
 of the two knows the old key alone, and takes nothing that the new one signs. Either install

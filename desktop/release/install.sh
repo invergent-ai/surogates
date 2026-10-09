@@ -423,11 +423,18 @@ unsigned() {
     ! signed_by "$2" "$3" "${keys[@]}" \
       || fail "$1 is signed by a release key that the update to $half brings, and that update was stopped before its end: run Surogate Desktop's install script with --version $half first"
   fi
-  # On a computer that has a helper, the keys asked were its helper's, and a release that lists a
-  # new key beside the old is signed by the old: a computer that never took that release does not
-  # know the new one, and takes nothing the new one signs. What mends it is said, as no one at
-  # that computer can know it: that release itself, which its keys do take, or a fresh install,
-  # which starts from the newest script's own list.
+  not_signed "$1"
+}
+
+# Ends with the words for $1, a release's manifest by its address or by what it is, that no
+# release key this computer trusts has signed: an install's, a rollback's and an apply's alike,
+# and the app's own line for one (updateLine in src/shell/updates.ts) says the same.
+# On a computer that has a helper, the keys asked were its helper's, and a release that lists a
+# new key beside the old is signed by the old: a computer that never took that release does not
+# know the new one, and takes nothing the new one signs. What mends it is said, as no one at
+# that computer can know it: that release itself, which its keys do take, or a fresh install,
+# which starts from the newest script's own list.
+not_signed() {
   [ ! -e "$HELPER" ] && [ ! -L "$HELPER" ] \
     || fail "$1 is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again"
   fail "$1 is not signed by Surogate's release key"
@@ -659,7 +666,7 @@ apply() {
   taken "$manifest" "$work/manifest.json" 4096 "$SMALL_WAIT" || fail "$(named "$manifest") is not a downloaded release's file"
   taken "$signature" "$work/manifest.json.sig" 64 "$SMALL_WAIT" || fail "$(named "$signature") is not a downloaded release's file"
 
-  signed "$work/manifest.json" "$work/manifest.json.sig" || fail "the release's manifest is not signed by Surogate's release key"
+  signed "$work/manifest.json" "$work/manifest.json.sig" || not_signed "the release's manifest"
   local release version sha256 size
   release="$(release_of "$work/manifest.json")" || fail "the release's manifest is not a release of Surogate Desktop for this computer"
   read -r version sha256 size <<<"$release"

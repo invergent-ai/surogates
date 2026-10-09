@@ -118,7 +118,7 @@ describe("a signed manifest", () => {
 });
 
 describe("a release that no key this computer trusts has signed", () => {
-  const LINE = { text: `Surogate's newest release is not signed by a key this computer trusts. ${KEY_CHANGED}`, button: null };
+  const LINE = { text: `Surogate's newest release is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`, button: null };
   it("has a line that says what mends it, as the install script says it: a computer that missed the release which brought a new key takes no later one, and no one at it can know why", async () => {
     base.publish("1.2.4", {}, next.privateKey);
     const states: string[] = [];
@@ -144,11 +144,33 @@ describe("a release that no key this computer trusts has signed", () => {
     expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
   });
 
-  it("says what mends it in the install script's own words for it, where the script has them", () => {
-    const said = /is not signed by Surogate's release key, as this computer has it\. ([^"]+)"/.exec(readFileSync(SCRIPT, "utf8"))?.[1];
-    expect([undefined, KEY_CHANGED]).toContain(said);
+  it("says it in the install script's own words, which the script has once, for its install, its rollback and its apply alike", () => {
+    // The script's one sentence, behind the name of what was not signed: the address of a manifest
+    // that an install or a rollback asked for, or "the release's manifest" where the app's own
+    // click had the helper apply one.
+    const said = [...readFileSync(SCRIPT, "utf8").matchAll(/fail "\$1( is not signed by Surogate's release key, as this computer has it\. [^"]+)"/g)].map(([, words]) => words);
+    expect(said).toEqual([` is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`]);
+    expect(LINE.text).toBe(`Surogate's newest release${said[0]}`);
     // And whole on the line: the sidebar's bound for a helper's words is not this line's.
     expect(LINE.text.endsWith("install it again")).toBe(true);
+    // The README quotes each of the three as it is said: the script's, the app's own, and the helper's on the app's line.
+    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    for (const named of ["<base>/desktop/latest.json", "Surogate's newest release", "Surogate could not install its update: the release's manifest"]) expect(readme).toContain(`\n    ${named}${said[0]}\n`);
+  });
+
+  it("shows the helper's own refusal of such a release whole, as its own line for one is: what mends it is the sentence's end", async () => {
+    base.publish("1.2.4");
+    const refused = `the release's manifest is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`;
+    const found = base.updates({ apply: () => Promise.resolve({ code: 1, said: `Surogate Desktop: ${refused}\n` }) });
+    await found.check();
+    await found.install();
+    expect([...refused].length).toBeGreaterThan(240);
+    expect(updateLine(found.state)).toEqual({ text: `Surogate could not install its update: ${refused}`, button: "Try again" });
+    // No other long line of a helper's is: one that only ends as the sentence does not begin is cut.
+    const other = base.updates({ apply: () => Promise.resolve({ code: 1, said: `Surogate Desktop: ${"a".repeat(300)} ${KEY_CHANGED}\n` }) });
+    await other.check();
+    await other.install();
+    expect((other.state as { why: string }).why).toHaveLength(240);
   });
 });
 

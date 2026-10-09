@@ -945,7 +945,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     const tarball = releaseOf("1.2.0");
     manifestOf("1.2.0", tarball, {}, other.privateKey);
-    expect(apply(tarball, "rotating.sh")).toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(apply(tarball, "rotating.sh")).toMatchObject({ status: 1, stderr: `Surogate Desktop: the release's manifest is not signed by Surogate's release key${MISSED}\n` });
     expect(current()).toBe("/opt/surogate/versions/1.1.0");
   });
 
@@ -1048,7 +1048,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // file that is no manifest's size; and the empty one, which no key's signature is taken for.
     const said = (manifest: string) => {
       if (Buffer.byteLength(manifest) > 4096) return "/home/tester/manifest.json is not a downloaded release's file";
-      return manifest === "" ? "the release's manifest is not signed by Surogate's release key" : "the release's manifest is not a release of Surogate Desktop for this computer";
+      return manifest === "" ? `the release's manifest is not signed by Surogate's release key${MISSED}` : "the release's manifest is not a release of Surogate Desktop for this computer";
     };
     for (const [what, manifest] of notOne) {
       const before = standing();
@@ -1468,7 +1468,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(root(`test ! -e ${helper} && test ! -L ${helper} && test ! -e /opt/surogate/current && cmp ${mark} /opt/surogate/versions/1.0.0/release.json`).status).toBe(0);
     const patch = releaseOf("1.0.1", listing([PUBLIC, pem(next.publicKey)]));
     manifestOf("1.0.1", patch, {}, other.privateKey);
-    expect(apply(patch)).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(apply(patch)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's manifest is not signed by Surogate's release key${MISSED}\n` });
     expect(root(`cmp ${helper} /opt/surogate/versions/1.0.0/bin/surogate-apply-update && stat -c '%a %U' ${helper} && test ! -e /opt/surogate/current && ls /opt/surogate/versions`).stdout).toBe("755 root\n1.0.0\n");
     manifestOf("1.0.1", patch, {}, next.privateKey);
     expect(apply(patch)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.1 is installed\n" });
@@ -1493,7 +1493,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       const before = standing();
       const third = releaseOf("1.2.0", listing([PUBLIC]));
       manifestOf("1.2.0", third);
-      expect(apply(third)).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+      expect(apply(third)).toMatchObject({ status: 1, stdout: "", stderr: `Surogate Desktop: the release's manifest is not signed by Surogate's release key${MISSED}\n` });
       // This is the one refusal that does not leave all as it was: the helper is the release's
       // that its mark names, and nothing else is changed.
       const after = standing();
@@ -1898,7 +1898,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(docker(["cp", join(box.dir, "signalling"), `${box.container}:/opt/surogate-test/signalling`]).status).toBe(0);
     const twice = root("mkdir -p /opt/hold && cp -L /usr/bin/rm /opt/hold/rm && mv /usr/bin/rm /usr/bin/rm.away && cp /opt/surogate-test/signalling /usr/bin/rm"
       + `; setsid -w /opt/surogate-test/install.sh --apply ${files()}; said=$?; mv -f /usr/bin/rm.away /usr/bin/rm; echo "$said $(ls -A /opt/surogate/staging | wc -l)"`);
-    expect(twice).toMatchObject({ stdout: "1 0\n", stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+    expect(twice).toMatchObject({ stdout: "1 0\n", stderr: `Surogate Desktop: the release's manifest is not signed by Surogate's release key${MISSED}\n` });
   }, 300_000);
 
   it("leaves no folder of its own when a signal comes as the folder is made, before the script has its name: the signal is let by, and the apply goes on", () => {
@@ -2942,7 +2942,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script, o
     publish("3.9.0", keys.privateKey, schema, [PUBLIC]);
     const retired = (when: string) => {
       latest("3.9.0");
-      expect(handed("3.9.0"), when).toMatchObject({ status: 1, stderr: "Surogate Desktop: the release's manifest is not signed by Surogate's release key\n" });
+      expect(handed("3.9.0"), when).toMatchObject({ status: 1, stderr: `Surogate Desktop: the release's manifest is not signed by Surogate's release key${MISSED}\n` });
       expect(install(), when).toMatchObject({ status: 1, stderr: `Surogate Desktop: ${base}/desktop/latest.json is not signed by Surogate's release key${MISSED}\n` });
       for (const version of ["3.9.0", "3.0.0"]) {
         expect(rollBack(version), `${when}: ${version}`)

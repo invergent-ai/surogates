@@ -162,8 +162,11 @@ function reason(code: number | null, said: string): string {
   return shown((code === NOT_AUTHORIZED ? lines[0] : lines.at(-1)) ?? `its helper exited ${code}`);
 }
 
-// *why* as the line shows it: WHY_MAX characters at most, counted as letters, its end marked where it was cut.
+// *why* as the line shows it: WHY_MAX characters at most, counted as letters, its end marked where
+// it was cut. But for the helper's refusal of a release no trusted key signed, which is shown
+// whole, as the app's own line for one is: what mends it is the sentence's end.
 function shown(why: string): string {
+  if (why === HELPER_UNSIGNED) return why;
   const letters = [...why];
   return letters.length <= WHY_MAX ? why : `${letters.slice(0, WHY_MAX - 1).join("")}\u2026`;
 }
@@ -187,6 +190,13 @@ export interface UpdateLine {
 export const KEY_CHANGED = "The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, "
   + "or remove Surogate Desktop with --uninstall and install it again";
 
+// What follows the name of a release that no key this computer trusts has signed, in the install
+// script's own sentence (not_signed in release/install.sh): its install's, its rollback's and its
+// helper's refusal, and the app's own line for one.
+export const NOT_SIGNED = ` is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`;
+// The helper's refusal of the release it was handed, in that sentence.
+const HELPER_UNSIGNED = `the release's manifest${NOT_SIGNED}`;
+
 // A release that none of the keys asked has signed.
 export class Unsigned extends Error {}
 
@@ -205,7 +215,7 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
     case "broken":
       return { text: "Surogate cannot update itself. Run the install script again.", button: null };
     case "unsigned":
-      return { text: `Surogate's newest release is not signed by a key this computer trusts. ${KEY_CHANGED}`, button: null };
+      return { text: `Surogate's newest release${NOT_SIGNED}`, button: null };
     default:
       return null;
   }
