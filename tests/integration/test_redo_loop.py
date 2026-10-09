@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.history as rows_module
+from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import WorkstreamHistory
 from surogates.harness import landing as landing_module
@@ -811,7 +812,8 @@ async def test_a_routine_run_of_a_project_over_the_cap_records_nothing(api, monk
     # Its wake marks it, as a thread's is marked: its end records nothing.
     [over] = woken
     assert over.config["history_off"] is True
-    await in_its_pod(api, pool, over, "echo tidied > notes.txt")
+    await in_its_pod(api, pool, over, "true")
+    (pods.project / "notes.txt").write_text("tidied\n")  # as a call of its turn wrote it
     await ends(api, pool, over)
     assert await pickups_of(api, master) == [] and main_of(pods) == before
 
@@ -844,6 +846,11 @@ async def test_your_edit_before_a_routine_run_is_recorded_by_you_and_not_as_the_
     earlier, _ = await a_routine_run(api, master, "Tidy up")
     await a_turn(api, monkeypatch, earlier, [calling(("terminal", {"command": "cat notes.txt"})), _final_response("Fine.")], pool=pool)
     await a_routine_run(api, master, "Not started")
+    # Nor is another project's run this project's.
+    elsewhere, _ = await a_routine_run(api, await master_of(api, await create(api)), "Elsewhere")
+    await api.app.state.session_store.emit_event(
+        elsewhere.id, EventType.TOOL_CALL, {"tool_call_id": "call_0_terminal", "name": "terminal", "arguments": {}},
+    )
     (pods.project / "brief.pdf").write_bytes(b"%PDF uploaded before the routine ran")
     run, schedule = await a_routine_run(api, master, "Health check")
     await a_turn(api, monkeypatch, run, [
@@ -1087,3 +1094,18 @@ async def test_only_a_projects_masters_pod_keeps_a_history_of_its_workspace(api)
     tenant = SimpleNamespace(org_id=chat.org_id, user_id=chat.user_id)
     assert chat.config.get("storage_bucket")
     assert "HISTORY_MAIN" not in (await _build_session_sandbox_spec(chat, tenant, str(chat.id))).env
+
+
+async def test_only_a_masters_scheduled_run_is_a_routine_run_over_the_real_files():
+    boundary = f"{PROJECT_BOUNDARY_PREFIX}5b0c1c1e-0000-4000-8000-000000000001"
+    its = {"scheduled_session_id": "r1", "workspace_boundary": boundary}
+
+    def run(channel="scheduled", **config):
+        return SimpleNamespace(channel=channel, config=config)
+
+    assert landing_module.routine_project(run(**its)) == project_of(boundary) is not None
+    # A thread's run is its helper, on a copy; a delegate of a run is no run; nor is a chat's schedule a project's.
+    assert landing_module.routine_project(run(**its, history_thread="t1")) is None
+    assert landing_module.routine_project(run("delegation", **its)) is None
+    assert landing_module.routine_project(run(workspace_boundary=boundary)) is None
+    assert landing_module.routine_project(run(scheduled_session_id="r1")) is None
