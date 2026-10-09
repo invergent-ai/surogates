@@ -622,15 +622,15 @@ describe("a chat's browser taken over, and handed back", () => {
       await promptsShown(app!), (await client.evaluate((chat) => window.surogateDesktop!.getBinding!(chat), CHAT))?.takenOver, await heldBack(asked),
     ];
     // Typed for the agent's browser, a key every 150 ms for three seconds: six times the input protection, which
-    // each key begins anew. Tab then Return, as a form takes them; Space; Escape; letters. Tab moves the keyboard,
-    // as in any window, onto Hand back and off it again; and none answers, wherever the keyboard is.
+    // each key begins anew. Tab then Return, as a form takes them; Space; Escape; letters. A Tab among them
+    // moves nothing, and none answers.
     for (let n = 0; n < 4; n += 1) {
       for (const name of ["a", "Tab", "Enter", " ", "Enter", "Escape"]) {
         await asked.keyboard.press(name);
         await sleep(150);
       }
     }
-    expect(await state()).toEqual([1, true, true]);
+    expect([await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id), await state()]).toEqual(["keep", [1, true, true]]);
     // The main process counts those keys by itself: its page's word that Hand back was pressed, right after one of
     // them, is not taken, though the confirmation has been up six times its protection.
     const word = () => asked.evaluate(() =>

@@ -53,6 +53,8 @@ let lastDown = Number.NEGATIVE_INFINITY;
 let lastInput = Number.NEGATIVE_INFINITY;
 let acts = false;
 let pressed: string | null = null;
+// Whether the key that went down last was a Tab that moves the keyboard.
+let walks = false;
 // The keys that went down held back and have not come up: their coming up does nothing either.
 const stilled = new Set<string>();
 let quiet: number | undefined;
@@ -100,6 +102,9 @@ function down(event: Event): void {
   if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
   const repeated = event instanceof KeyboardEvent && event.repeat;
   acts = repeated ? acts && pressed === named(event) : !held();
+  // A Tab walks where it acts, and where the key before it was a Tab that walked: a person moving through the
+  // buttons. One that follows any other key or press within the protection is a typing person's, and moves nothing.
+  if (!repeated) walks = event instanceof KeyboardEvent && event.key === "Tab" && armed && (acts || walks);
   if (!repeated) pressed = named(event);
   lastDown = lastInput = performance.now();
   hold();
@@ -113,16 +118,17 @@ function up(event: Event): void {
   lastInput = performance.now();
 }
 // What a key or a press that does not act would do next does not happen either: its key coming up, its click.
-// A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for Tab
-// once the prompt is armed, which moves the keyboard as in any window, however soon after another key; and
+// A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for a
+// Tab that walks (down), which moves the keyboard as in any window, however soon after the Tab before it; and
 // for the clipboard's and the selection's own keys: what a prompt shows can be read and copied at any time.
-// A Tab that comes before the prompt is armed is a typing person's like any other, and moves nothing: the
-// keyboard stays on the button that changes nothing, where the prompt put it. A press of the mouse is made where it lands, and one that
+// A Tab that comes before the prompt is armed, or within the protection of any other key, is a typing
+// person's like any other, and moves nothing: the keyboard stays where it was, as on the button that changes
+// nothing, where the prompt put it. A press of the mouse is made where it lands, and one that
 // does not act is held back from the buttons alone: a choice it lands on is taken.
 const CLIPBOARD = new Set(["a", "c", "v", "x"]);
 function still(event: Event): void {
   if (event instanceof KeyboardEvent) {
-    if (event.key === "Tab" && armed) return;
+    if (event.key === "Tab" && walks) return;
     if ((event.ctrlKey || event.metaKey) && !event.altKey && CLIPBOARD.has(event.key.toLowerCase())) return;
   } else if (!(event.target instanceof Element && event.target.closest("#prompt-buttons"))) return;
   event.preventDefault();

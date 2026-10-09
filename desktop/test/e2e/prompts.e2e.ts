@@ -784,6 +784,41 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
     expect(await outcome(id)).toEqual({ ok: null });
   });
 
+  it("moves nothing at a Tab in the middle of typing, once the prompt takes keys: letters and then Tab, or letters, Tab, letters and Tab, leave the keyboard on Deny, and Return or Space after a pause denies; a Tab after a pause, and the Tabs and Shift+Tabs that follow it at once, walk", async () => {
+    await bound(await signedIn(), folder);
+    // A key each 100 ms, as a form is filled; a pause, as before it is sent; and the key that sends it.
+    for (const [typed, sends] of [[["a", "b", "c", "Tab"], "Enter"], [["a", "b", "Tab", "c", "d", "Tab"], " "]] as const) {
+      const id = write("a.txt", "a");
+      const asked = await prompt(app!);
+      await expect.poll(() => heldBack(asked)).toBe(false);
+      for (const name of typed) {
+        await asked.keyboard.press(name);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(await active(asked)).toBe("deny");
+      await pause();
+      await asked.keyboard.press(sends).catch(() => {});
+      expect(await outcome(id)).toHaveProperty("error");
+      await gone();
+    }
+    expect(existsSync(join(folder, "a.txt"))).toBe(false);
+    // A person choosing: a pause, Tab, and at once Tab and Shift+Tab. Each moves the keyboard.
+    const id = write("a.txt", "a");
+    const asked = await prompt(app!);
+    await expect.poll(() => heldBack(asked)).toBe(false);
+    await asked.keyboard.press("a");
+    await pause();
+    const walked = [await active(asked)];
+    for (const name of ["Tab", "Tab", "Shift+Tab"]) {
+      await asked.keyboard.press(name);
+      walked.push(await active(asked));
+    }
+    expect([walked[0], walked[3], new Set(walked).size]).toEqual(["deny", walked[1], 3]);
+    await pause();
+    await key(asked, "Escape");
+    expect(await outcome(id)).toHaveProperty("error");
+  });
+
   it("takes a key that acts however long it is held: Space on a button, held until it repeats and then let go, answers", async () => {
     await bound(await signedIn(), folder);
     const id = write("a.txt", "a");
