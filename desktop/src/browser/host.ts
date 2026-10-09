@@ -918,6 +918,7 @@ export class BrowserHost {
     const operation = OPERATIONS[kind];
     if (!operation) return { error: { type: "unsupported", message: `This computer's browser does not handle ${kind}` } };
     let page: Page | undefined;
+    let stale = false;
     try {
       const found = await this.pageFor(launch, session, stop);
       // Its user took the browser over while it launched, or while its tab opened: it has no page, and does
@@ -938,6 +939,8 @@ export class BrowserHost {
         if ((await until(settled, stop, HELD)) === HELD) return PAUSED;
         if (signal.aborted) return CANCELLED;
       }
+      // A tab still at the error page of a navigation refused before: this one's own is told from it below.
+      stale = kind === "browser.navigate" && page.url().startsWith("chrome-error:");
       const work = this.doing(page, operation(page, args, stop));
       const value = BOUNDED.has(kind) ? await this.bounded(page, work, stop) : await work;
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
@@ -955,9 +958,20 @@ export class BrowserHost {
       // later still: the next operation would meet it arriving, a script or a shot (Edge). So it
       // is waited for, a moment, until it has drawn a frame, before the answer.
       if (page && said(error).includes("net::ERR_")) {
-        const drawn = page.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 })
-          .then(() => page?.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"));
+        const shown = page;
+        // In a tab that showed an error page already, the address says nothing: its next one is waited for as it comes.
+        let next = (_frame: Frame) => {};
+        const committed = stale
+          ? new Promise<void>((done) => {
+              next = (frame) => {
+                if (frame === shown.mainFrame() && frame.url().startsWith("chrome-error:")) done();
+              };
+              shown.on("framenavigated", next);
+            })
+          : shown.waitForURL((url) => url.protocol === "chrome-error:", { waitUntil: "commit", timeout: 2_000 });
+        const drawn = committed.then(() => shown.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"));
         await Promise.race([drawn, new Promise((done) => setTimeout(done, 2_000))]).catch(() => {});
+        shown.off("framenavigated", next);
       }
       // The browser says only net::ERR_* of what its proxy refused: a navigation's answer says why.
       return failed((await this.refused(args.url)) ?? said(error));

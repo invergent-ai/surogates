@@ -3071,6 +3071,14 @@ new Image().src = "http://" + own("image") + "/";
     }
   });
 
+  it("opens a page in a tab whose last navigations its proxy refused, one after another: the error page of the last has come before the answer", async () => {
+    for (let round = 0; round < 3; round += 1) {
+      const a = session();
+      for (const path of ["first", "second", "third"]) expect((await op(a, "browser.navigate", { url: `http://127.0.0.1:${ports.canary}/${path}` })).error?.type).toBe("browser");
+      expect(await op(a, "browser.navigate", { url: "http://fixture.test/second" })).toMatchObject({ ok: { title: "Second" } });
+    }
+  }, 60_000);
+
   it("opens only http and https addresses", async () => {
     const a = session();
     await op(a, "browser.navigate", { url: "http://fixture.test/" });
