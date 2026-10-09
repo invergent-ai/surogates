@@ -736,6 +736,10 @@ class AgentHarness(
         # and are discarded automatically on completion.
         self._background_tasks: set[asyncio.Task] = set()
 
+        # The message whose command this wake is answering, if any: each
+        # answer of the harness's names it.
+        self._answering: int | None = None
+
     # ------------------------------------------------------------------
     # Interrupt API (thread-safe)
     # ------------------------------------------------------------------
@@ -818,36 +822,41 @@ class AgentHarness(
             or _slash_command_name(text) not in (None, _COMMAND_FOR_THE_MODEL)
         )
 
-    def _waiting_command(self, session: Session, events: list) -> tuple[int, str] | None:
-        """The command of the harness's that waits in *events* for its
-        answer, as (its event's id, what the user typed); None when none
-        does.  It is the user's last message, or the last one of their own
-        when the harness queued a message after it (a goal's next turn).
-        That is work for a wake whatever the cursor says, and whatever the
-        session was in the middle of when it was typed."""
-        own = next((
-            event for event in reversed(events)
-            if event.type == EventType.USER_MESSAGE.value and not (event.data or {}).get("synthetic")
-        ), None)
-        for typed_at, text in (
-            (_latest_user_event_id(events), _latest_user_event_text(events)),
-            (own.id, _user_event_text(own.data)) if own is not None else (None, ""),
-        ):
-            if typed_at is not None and self._answers_itself(text, session) and not _command_answered(events, typed_at):
-                return typed_at, text
+    def _waiting_command(self, session: Session, events: list) -> Any | None:
+        """The oldest message of the user's in *events* that is a command
+        of the harness's no wake has answered; None when there is none.
+        Every command a user typed is run, once, in the order typed,
+        however many arrived before or during a wake.  One that waits is
+        work for a wake whatever the cursor says, and whatever the session
+        was in the middle of when it was typed."""
+        for event in events:
+            if (
+                event.type == EventType.USER_MESSAGE.value
+                and not (event.data or {}).get("synthetic")
+                and self._answers_itself(_user_event_text(event.data), session)
+                and not _command_answered(events, event.id)
+            ):
+                return event
         return None
 
     async def _has_waiting_command(self, session: Session) -> bool:
         """Whether a command typed during the turn that ended this session
         still waits: the turn left it for its own wake to answer."""
-        typed = await self._store.last_event(session.id, EventType.USER_MESSAGE)
-        if typed is None or (typed.data or {}).get("synthetic"):
+        typed = [
+            event for event in await self._store.get_events(session.id, types=[EventType.USER_MESSAGE])
+            if not (event.data or {}).get("synthetic")
+            and self._answers_itself(_user_event_text(event.data), session)
+        ]
+        if not typed:
             return False
         since = await self._store.get_events(
-            session.id, after=typed.id,
-            types=[EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.CODE_RUN_RESULT],
+            session.id, after=typed[0].id - 1,
+            types=[
+                EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
+                EventType.CODE_RUN_STARTED, EventType.CODE_RUN_RESULT,
+            ],
         )
-        return self._waiting_command(session, [typed, *since]) is not None
+        return self._waiting_command(session, since) is not None
 
     async def _expand_last_skill_again(self, session: Session, messages: list[dict], all_events: list) -> None:
         """Put back the skill the user's last message ran at its own wake,
@@ -1559,7 +1568,7 @@ class AgentHarness(
             waiting = self._waiting_command(session, all_events)
             typed_at = _latest_user_event_id(all_events) or 0
             if waiting is not None:
-                typed_at, last_user_content = waiting
+                typed_at, last_user_content = waiting.id, _user_event_text(waiting.data)
             slash_block = self._slash_command_block_reason(
                 last_user_content, session,
             )
@@ -1570,6 +1579,7 @@ class AgentHarness(
                 # since when this wake answers the command.
                 written = all_events
                 if is_new:
+                    self._answering = typed_at
                     if slash_block is not None:
                         await self._emit_loop_response(
                             session, lease, slash_block, user_content=last_user_content
@@ -1578,18 +1588,19 @@ class AgentHarness(
                         await self._run_command(
                             command, session, last_user_content, lease,
                             messages=messages, system_prompt=system_prompt,
-                            all_events=all_events,
+                            all_events=all_events, typed=waiting,
                         )
                     written = all_events + await self._store.get_events(
                         session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written)
                 if is_new and self._redis is not None and (
-                    self._goal_waits(session, written)
+                    self._waiting_command(session, written) is not None
+                    or self._goal_waits(session, written)
                     or is_project_master(session.config) and unread_reports(written)
                 ):
-                    # What still waits for the model, a goal's next turn or
-                    # a thread's report to its master, gets its wake: the
+                    # What still waits, another command, a goal's next turn
+                    # or a thread's report to its master, gets its wake: the
                     # one it queued may have come and gone, for nothing,
                     # while this command was the session's work.
                     from surogates.config import enqueue_session
@@ -4807,35 +4818,36 @@ class AgentHarness(
         self,
         command: str,
         session: Session,
-        typed: str,
+        text: str,
         lease: SessionLease,
         *,
         messages: list[dict],
         system_prompt: str,
         all_events: list,
+        typed: Any,
     ) -> None:
-        """Run the handler of the built-in *command* the user *typed*."""
+        """Run the handler of the built-in *command* the user typed as *text*, in the message *typed*."""
         if command == "compress":
+            if typed.id != _latest_user_event_id(all_events):
+                # The conversation as it was when the command was typed:
+                # the handler takes its last user message for the command.
+                messages = self._rebuild_messages(
+                    [event for event in all_events if event.id <= typed.id],
+                    workspace_path=(session.config or {}).get("workspace_path"),
+                )
             await self._handle_compress_command(session, messages, system_prompt, lease)
         elif command == "clear":
             await self._handle_clear_command(session, lease)
         elif command == "goal":
-            await self._handle_goal_command(session, typed, lease)
+            await self._handle_goal_command(session, text, lease)
         elif command == "mission":
-            await self._handle_mission_command(session, typed, lease)
+            await self._handle_mission_command(session, text, lease)
         elif command == "auto-research":
-            await self._handle_auto_research_command(session, typed, lease)
+            await self._handle_auto_research_command(session, text, lease)
         elif command == "code":
-            await self._handle_code_command(session, typed, lease, all_events)
+            await self._handle_code_command(session, text, lease, all_events)
         elif command == "loop":
-            typed_on = next(
-                (
-                    getattr(event, "created_at", None) for event in reversed(all_events)
-                    if event.type == EventType.USER_MESSAGE.value
-                ),
-                None,
-            )
-            await self._handle_loop_command(session, typed, lease, typed_on=typed_on)
+            await self._handle_loop_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
 
     async def _end_command_turn(
         self,
@@ -4957,6 +4969,7 @@ class AgentHarness(
             session.id,
             EventType.LLM_RESPONSE,
             {
+                **self._names_its_message(),
                 "message": {
                     "role": "assistant",
                     "content": "Conversation cleared.",
@@ -5122,7 +5135,7 @@ class AgentHarness(
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": assistant_message},
+            {"message": assistant_message, **self._names_its_message()},
         )
 
     async def _handle_compress_command(
@@ -5158,6 +5171,7 @@ class AgentHarness(
                 session.id,
                 EventType.LLM_RESPONSE,
                 {
+                    **self._names_its_message(),
                     "message": {
                         "role": "assistant",
                         "content": "Context is too small to compress — only "
@@ -5178,6 +5192,7 @@ class AgentHarness(
                 session.id,
                 EventType.LLM_RESPONSE,
                 {
+                    **self._names_its_message(),
                     "message": {
                         "role": "assistant",
                         "content": f"Compression failed: {exc}",
@@ -5206,6 +5221,7 @@ class AgentHarness(
             session.id,
             EventType.LLM_RESPONSE,
             {
+                **self._names_its_message(),
                 "message": {
                     "role": "assistant",
                     "content": (

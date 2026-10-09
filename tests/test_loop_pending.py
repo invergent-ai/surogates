@@ -8,8 +8,8 @@ from surogates.harness.loop_pending import _actionable_pending_events, _command_
 from surogates.session.events import EventType
 
 
-def event(id_: int, type_: EventType) -> SimpleNamespace:
-    return SimpleNamespace(id=id_, type=type_)
+def event(id_: int, type_: EventType, **data) -> SimpleNamespace:
+    return SimpleNamespace(id=id_, type=type_, data=data)
 
 
 def log(*types: EventType) -> list[SimpleNamespace]:
@@ -27,9 +27,33 @@ def test_a_user_message_still_does():
     assert [e.id for e in _actionable_pending_events(events, cursor=4)] == [6]
 
 
-@pytest.mark.parametrize("answer", [EventType.LLM_RESPONSE, EventType.CODE_RUN_RESULT])
-def test_a_command_is_answered_once_the_wake_that_took_it_up_has_written_its_answer(answer):
-    events = log(EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.CODE_RUN_STARTED, answer)
+def test_a_command_is_answered_by_the_answer_that_names_its_message():
+    events = [
+        event(1, EventType.USER_MESSAGE), event(2, EventType.USER_MESSAGE), event(3, EventType.HARNESS_WAKE),
+        event(4, EventType.LLM_RESPONSE, answers=1),
+    ]
+    # One wake read both commands and answered the first: the second is not answered by that.
+    assert (_command_answered(events, typed_at=1), _command_answered(events, typed_at=2)) == (True, False)
+    events.append(event(5, EventType.LLM_RESPONSE, answers=2))
+    assert _command_answered(events, typed_at=2) is True
+
+
+def test_a_coding_runs_result_answers_the_command_that_started_the_run():
+    events = [
+        event(1, EventType.USER_MESSAGE), event(2, EventType.USER_MESSAGE), event(3, EventType.HARNESS_WAKE),
+        event(4, EventType.CODE_RUN_STARTED, run_id="run-1", source_event_id=1),
+        event(5, EventType.CODE_RUN_RESULT, run_id="run-1"),
+        # A run the model started with its tool answers no command.
+        event(6, EventType.CODE_RUN_STARTED, run_id="run-2"),
+        event(7, EventType.CODE_RUN_RESULT, run_id="run-2"),
+    ]
+    assert (_command_answered(events, typed_at=1), _command_answered(events, typed_at=2)) == (True, False)
+    # A run begun and not finished is no answer.
+    assert _command_answered(events[:4], typed_at=1) is False
+
+
+def test_an_answer_written_before_answers_were_named_counts_for_the_message_it_follows():
+    events = log(EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.CONTEXT_COMPACT, EventType.LLM_RESPONSE)
     assert _command_answered(events, typed_at=1) is True
     # As the store gives them: an event's type is its name.
     assert _command_answered([event(e.id, e.type.value) for e in events], typed_at=1) is True

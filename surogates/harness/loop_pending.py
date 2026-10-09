@@ -37,39 +37,45 @@ def _event_type(event: Any) -> str:
     return event.type.value if isinstance(event.type, EventType) else str(event.type)
 
 
-#: What the harness writes to answer a command of the user's itself, with no
-#: model turn: its own words, or the result of the coding run the command was.
-_COMMAND_ANSWER_EVENT_TYPES = frozenset({
-    EventType.LLM_RESPONSE.value,
-    EventType.CODE_RUN_RESULT.value,
-})
-
-
 def _command_answered(events: list[Any], typed_at: int) -> bool:
     """Return True if the harness has answered the command the user typed at event *typed_at*.
 
-    The wake that takes a command up writes ``harness.wake`` and then the
-    command's answer, with no request to the model between them.  So an
-    answer after a wake after the message is that command's.  An answer
-    with no wake before it belongs to an earlier command, still being
-    answered when this one was typed, and one after a model's request is
-    the model's word in a turn of its own.
+    An answer names the message it answers: ``answers`` on the harness's
+    ``llm.response``, and for a coding run the ``source_event_id`` of the
+    ``code.run_started`` whose ``code.run_result`` is the answer.  So each
+    command is answered by its own answer and no other's, however many
+    commands one wake read.
 
     Nothing else says a command was answered.  Not the cursor: a tool's
     result, or a turn that was refused or failed, moves it past a message
     nobody read.  Not a model's request after it: a command is never the
     model's to read.
+
+    Answers written before they were named carry no name.  One of those
+    counts for the message it follows when a wake began between the two
+    and the model was not asked: the wake that takes a command up writes
+    ``harness.wake`` and then the answer, with no request between them.
     """
+    runs: dict[Any, Any] = {}
     taken_up = False
     for event in events:
         if event.id is None or event.id <= typed_at:
             continue
         event_type = _event_type(event)
-        if event_type == EventType.HARNESS_WAKE.value:
+        data = getattr(event, "data", None) or {}
+        if event_type == EventType.CODE_RUN_STARTED.value:
+            runs[data.get("run_id")] = data.get("source_event_id")
+        elif event_type == EventType.CODE_RUN_RESULT.value:
+            if data.get("run_id") in runs and runs[data.get("run_id")] == typed_at:
+                return True
+        elif event_type == EventType.LLM_RESPONSE.value and "answers" in data:
+            if data["answers"] == typed_at:
+                return True
+        elif event_type == EventType.HARNESS_WAKE.value:
             taken_up = True
         elif event_type == EventType.LLM_REQUEST.value:
             taken_up = False
-        elif taken_up and event_type in _COMMAND_ANSWER_EVENT_TYPES:
+        elif taken_up and event_type == EventType.LLM_RESPONSE.value:
             return True
     return False
 

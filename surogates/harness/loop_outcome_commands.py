@@ -327,7 +327,7 @@ class OutcomeCommandMixin:
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
+            {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
         )
 
         # /mission create writes its synthetic kickoff message after its
@@ -507,7 +507,7 @@ class OutcomeCommandMixin:
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
+            {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
         )
 
         # The synthetic kickoff after the answer, as /mission and /goal.
@@ -589,7 +589,7 @@ class OutcomeCommandMixin:
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
+            {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
         )
 
         if outcome_kickoff_needed:

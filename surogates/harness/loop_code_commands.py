@@ -83,8 +83,13 @@ class CodeCommandMixin:
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": {"role": "assistant", "content": message}},
+            {"message": {"role": "assistant", "content": message}, **self._names_its_message()},
         )
+
+    def _names_its_message(self) -> dict:
+        """What an answer carries to say which message it answers (the host's, when it has one)."""
+        answering = getattr(self, "_answering", None)
+        return {} if answering is None else {"answers": answering}
 
     def _code_credentials(self) -> CodingAgentCredentials | None:
         if getattr(self, "_credential_vault", None) is None:
@@ -146,7 +151,8 @@ class CodeCommandMixin:
 
         # Idempotency: a crash-recovery re-wake replays the same user.message;
         # if a run for this source event already started, do not relaunch.
-        source_event_id = _latest_user_event_id(all_events)
+        # The command's own message: another may have been typed since.
+        source_event_id = getattr(self, "_answering", None) or _latest_user_event_id(all_events)
         if source_event_id is not None and _code_run_already_started(
             all_events, source_event_id,
         ):

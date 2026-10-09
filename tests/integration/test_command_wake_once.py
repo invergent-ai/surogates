@@ -738,6 +738,77 @@ async def test_a_command_the_model_once_read_as_words_is_still_run(workers):
     assert ((await workers.missions(chat, mission.id))[0].status, workers.requests) == ("paused", [])
 
 
+async def test_two_commands_typed_before_any_wake_are_each_run_once_in_the_order_typed(workers):
+    chat = await a_coordinator(workers)
+    [mission] = await workers.missions(chat)
+    await workers.says(chat, "/mission pause")
+    await workers.says(chat, "/mission status")
+    await workers.nobody_is_queued()
+
+    await workers.wake(chat)
+    # One command a wake, the oldest first; the chat is queued while another waits.
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_mission_command"], "Mission paused.")
+    assert await queued(workers.api, await workers.session(chat))
+    for _ in range(2):
+        await workers.wake(chat)
+
+    assert workers.ran == ["_handle_mission_command"] * 2
+    paused, status = (await workers.said(chat))[-2:]
+    assert (paused, "status=paused" in status) == ("Mission paused.", True)
+    assert ((await workers.missions(chat, mission.id))[0].status, workers.requests) == ("paused", [])
+
+
+async def test_a_routine_asked_for_before_another_command_is_made(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/loop 1d Check the cash report")
+    await workers.says(chat, "/goal status")
+    for _ in range(3):
+        await workers.wake(chat)
+
+    [routine] = await workers.routines()
+    made, status = (await workers.said(chat))[-2:]
+    assert (made.startswith(f"Loop scheduled: `{routine.id}`"), status) == (True, "No active outcome. Set one with /goal <text>.")
+    assert (workers.ran, workers.requests, await workers.status(chat)) == (
+        ["_handle_loop_command", "_handle_goal_command"], [], "completed",
+    )
+
+
+async def test_three_commands_in_a_row_and_one_after_a_plain_message_are_each_run_once_in_order(workers):
+    chat = await workers.chat()
+    for words in ("/goal status", "/loop list", "/code status", "And Q1?", "/code help"):
+        await workers.says(chat, words)
+    for _ in range(6):
+        await workers.wake(chat)
+
+    assert workers.ran == ["_handle_goal_command", "_handle_loop_command", "_handle_code_command", "_handle_code_command"]
+    answers = [event.data["answers"] for event in await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE]) if "answers" in event.data]
+    typed = [event.id for event in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])]
+    # Each answer names the message it answers.
+    assert answers == [typed[-5], typed[-4], typed[-3], typed[-1]]
+
+
+async def test_a_command_whose_message_the_wake_could_not_yet_see_is_not_answered_by_the_first_ones_answer(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/goal status")
+    await workers.says(chat, "/loop list")
+    hidden = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
+
+    class NotYetCommitted(Meanwhile):
+        """The second command's event has its id, below the wake's own, and is committed only after the wake read the log."""
+
+        async def get_events(self, *args, **kwargs):
+            return [event for event in await self._store.get_events(*args, **kwargs) if event.id != hidden]
+
+        async def last_event(self, *args, **kwargs):
+            return None
+
+    await workers.worker(store=NotYetCommitted(workers.store)).wake(chat)
+    assert workers.ran == ["_handle_goal_command"]
+
+    await workers.wake(chat)
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command", "_handle_loop_command"], "No active loops.")
+
+
 async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_not_taken_for_answered(workers):
     chat = await workers.chat()
 
@@ -748,9 +819,12 @@ async def test_a_second_command_sent_as_the_first_ones_wake_begins_is_run_and_no
     # The second command lands after the wake read the log and before it says it began.
     await workers.worker(store=Meanwhile(workers.store, as_it_wakes=the_user_sets_a_goal)).wake(chat)
     await workers.wake(chat)
+    await workers.wake(chat)
 
-    # Whichever wake finds it runs it: no answer to another command counts as its own.
-    assert "Outcome defined (20 iterations): Ship the Q3 report" in await workers.said(chat)
+    # Both are run, the first one first: no answer to another command counts as its own.
+    said = await workers.said(chat)
+    first, second = "No active outcome. Set one with /goal <text>.", "Outcome defined (20 iterations): Ship the Q3 report"
+    assert (said.count(first), said.count(second), said.index(first) < said.index(second)) == (1, 1, True)
     assert ((await workers.session(chat)).config.get("outcome") or {}).get("description") == "Ship the Q3 report"
     assert workers.requests[0][-1] == {"role": "user", "content": "Ship the Q3 report"}
 
