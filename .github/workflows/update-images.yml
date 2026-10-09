@@ -10,8 +10,12 @@ on:
 jobs:
   update-agent-images:
     name: Update agent images on cluster nodes
-    # Run after a successful Release, or on manual dispatch.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # Run after a successful Release, or on manual dispatch. "Release" above is a name, and any
+    # workflow file may take it, one that a pull request or a pushed branch adds too; this file
+    # would then run from the default branch with the cluster's key. So the run that ended is
+    # asked what makes it the release: that it ended well, that a push started it, that it ran
+    # this repository's own code, from the release's own file, for a version's tag.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.path == '.github/workflows/release.yml' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       REMOTE_SCRIPT: /root/update-agent-images.sh

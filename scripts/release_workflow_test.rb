@@ -443,6 +443,25 @@ class ReleaseWorkflowTest < Minitest::Test
     end
   end
 
+  def test_the_cluster_s_update_runs_by_hand_or_after_this_repository_s_own_release_of_a_tag_and_after_no_other_run
+    # A workflow_run names a workflow by its name alone, and any workflow file may take that
+    # name: one a pull request adds, a fork's among them, or one pushed on a branch. This file
+    # then runs from the default branch, with the key to every node. So its one job asks the run
+    # that ended what makes it the release: that it ended well, that a push started it, that it
+    # ran this repository's own code, from the release's own file, for a version's tag.
+    workflow = workflows.fetch("update-images.yml")
+    assert_equal({ "workflow_run" => { "workflows" => ["Release"], "types" => ["completed"] }, "workflow_dispatch" => nil }, workflow.fetch(true))
+    assert_equal "Release", @workflow.fetch("name")
+    assert_equal ["update-agent-images"], workflow.fetch("jobs").keys
+    run = "github.event.workflow_run"
+    asked = [
+      "#{run}.conclusion == 'success'", "#{run}.event == 'push'", "#{run}.head_repository.full_name == github.repository",
+      "#{run}.path == '.github/workflows/release.yml'", "startsWith(#{run}.head_branch, 'v')",
+    ]
+    assert_equal "${{ github.event_name == 'workflow_dispatch' || (#{asked.join(" && ")}) }}", workflow.fetch("jobs").fetch("update-agent-images").fetch("if")
+    assert File.exist?(".github/workflows/release.yml")
+  end
+
   def test_one_job_alone_runs_in_the_desktop_s_environment_in_every_workflow_file
     # An Environment's secrets reach every job that names it, whatever letters it is named with.
     named = workflows.flat_map do |file, workflow|
