@@ -14,6 +14,10 @@ from surogates.storage.tenant import agent_session_bucket
 from surogates.workstreams import is_project_thread
 
 
+class NotHandedOn(RuntimeError):
+    """What a step set to run before it starts a session could not be done: the session is not made."""
+
+
 #: What the step now running does right before it starts a session, once it is known to start one.
 _BEFORE_CHILD: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar("before_child", default=None)
 

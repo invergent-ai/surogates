@@ -1836,19 +1836,23 @@ async def _run_single_tool(
                 # A helper hands nothing on for a helper of its own: its half-done copy stays its own
                 # until its turn's end, and that helper starts from the thread's hand-off as it is.
                 from surogates.harness.landing import keep_copy
-                from surogates.session.provisioning import before_a_child
+                from surogates.session.provisioning import NotHandedOn, before_a_child
 
                 async def hand_on() -> None:
-                    handed_on.append(True)
                     try:
                         kept = await keep_copy(
                             session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
                             # The fence its landings have, from the settings its turn's saga was made with.
                             saga_settings=saga.settings if saga is not None else None, action="hand_off",
                         )
-                        not_taken.extend((kept or {}).get("not_taken", []))
-                    except Exception:
+                    except Exception as exc:
+                        # A helper started now would work on old files with nobody told: none is started.
                         logger.warning("Could not put the copy of %s where its helper starts", session.id, exc_info=True)
+                        raise NotHandedOn(
+                            "This thread's work could not be handed to a helper, so none was started. Try the step again.",
+                        ) from exc
+                    handed_on.append(True)
+                    not_taken.extend((kept or {}).get("not_taken", []))
 
                 starting_a_helper = before_a_child(hand_on)
             else:

@@ -22,6 +22,7 @@ import surogates.harness.loop as loop_module
 from surogates.governance.policy import GovernanceGate
 from surogates.harness import agent_resolver, tool_exec
 from surogates.harness import landing as landing_module
+from surogates.sandbox.history import History, HistoryError
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
@@ -759,3 +760,27 @@ async def test_what_a_thread_has_no_other_way_to_do_is_refused_in_words_that_sen
         assert thread_refusal(name) == f"A thread can't start {name} {NO_OTHER_WAY}"
     for name in ("/loop", "/code", "cron_create"):
         assert thread_refusal(name) == f"A thread can't start {name} yet: do this step in the thread itself."
+
+
+@pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker", "spawn_task"])
+async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_says_so(api, monkeypatch, pods, tool):
+    thread = await a_coordinating_thread(api)
+    monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
+
+    def fails(self, **_):
+        raise HistoryError("the bucket did not answer")
+
+    monkeypatch.setattr(History, "hand_off", fails)
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo outline > outline.md"})),
+        calling((tool, {"goal": "Draft the sources from outline.md."})),
+        _final_response("Done."),
+    ], pool=SandboxPool(pods), saga_settings=FENCED), 120)
+    # A helper started now would work without this turn's outline, and nobody would know: none is started.
+    [result] = await results_of(api, thread, tool)
+    assert "error" in json.loads(result) and "could not be handed to a helper, so none was started" in result, result
+    assert await helpers_of(api, thread) == []
+    async with api.app.state.session_factory() as db:
+        assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": thread.id})).scalar() == 0
+    # The turn's own work lands as ever.
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md"]

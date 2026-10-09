@@ -89,9 +89,12 @@ async def create_task_and_spawn(
             # The task is known to be made, to start now or once its parents are done: what the
             # calling step set for the moment before it starts a session runs here, for a task
             # queued too.  The read above is ended first.
-            from surogates.session.provisioning import before_child
+            from surogates.session.provisioning import NotHandedOn, before_child
 
-            await before_child(db)
+            try:
+                await before_child(db)
+            except NotHandedOn as exc:
+                raise TaskSpawnError(str(exc)) from exc
 
             task = Task(
                 org_id=org_id,
