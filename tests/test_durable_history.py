@@ -2361,11 +2361,10 @@ def test_a_pickup_alone_from_a_masters_pod_is_pushed_by_its_author(tmp_path, pro
     (first.copy / "a.md").write_text("a")
     one = land(first)["commit"]
     (project / "notes.txt").write_text("checked by the routine\n")
-    out = a_masters_pod(tmp_path, project).pickup(
-        author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"], ["Surogate-Kind", "pickup"]], push=True,
-    )
+    master = a_masters_pod(tmp_path, project)
+    out = master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"], ["Surogate-Kind", "pickup"]], push=True)
     durable = project / "_history"
-    assert git(durable, "rev-parse", "refs/heads/main") == out["commit"]
+    assert git(durable, "rev-parse", "refs/heads/main") == git(master.repo, "rev-parse", "refs/heads/main") == out["commit"]
     assert git(durable, "log", "-1", "--format=%an <%ae>|%P", out["commit"]) == f"Health check <routine:r1@surogate>|{one}"
     assert [f["path"] for f in out["picked_up"]] == ["notes.txt"]
     assert git(durable, "fsck", "--no-dangling") == ""
@@ -2472,3 +2471,119 @@ def test_an_overlap_names_whoever_changed_a_file_whatever_its_name_holds(tmp_pat
         (mine.copy / name).write_text("by A")
     turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
     assert held(turn) == {name: {"kind": "thread", "id": "t2", "title": "Draft B"} for name in odd}
+
+
+def test_your_edit_before_the_projects_first_landing_is_that_landings_pickup(tmp_path, project):
+    pod = a_pod(tmp_path, project)
+    first = git(pod.repo, "rev-parse", "refs/heads/main")  # the pod's own first commit: there is no history yet
+    (project / "notes.txt").write_text("v2 notes, saved by you\n")
+    (pod.copy / "a.md").write_text("a")
+    picked = pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "pickup"]])
+    assert (picked["main"], [f["path"] for f in picked["picked_up"]]) == (None, ["notes.txt"])
+    one = land(pod)["commit"]
+    durable = project / "_history"
+    assert git(durable, "log", "-1", "--format=%ae|%P", f"{one}^1") == f"user:u1@surogate|{first}"
+    assert git(durable, "show", f"{one}:notes.txt") == "v2 notes, saved by you"
+
+
+def test_a_pickup_reads_again_no_file_its_pods_open_read(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    time.sleep(1.1)  # the pod opens a second after the landing wrote a.md
+    pod = a_pod(tmp_path, project)
+    (project / "notes.txt").write_text("v2 notes, saved by you\n")
+    seen = read_by(monkeypatch)
+    picked = pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:2"], ["Surogate-Kind", "pickup"]])
+    assert [f["path"] for f in picked["picked_up"]] == ["notes.txt"]
+    # The pod's own index knows a.md from its open.  The bucket's, kept at the landing that wrote it, knows it by no time.
+    assert [name for names in seen["readers"] for name in names] == ["notes.txt"]
+
+
+def test_a_file_another_threads_landing_left_out_is_not_by_that_thread(tmp_path, project):
+    a_history(tmp_path, project)
+    mine, theirs = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (project / "notes.txt").write_text("by you meanwhile\n")
+    (theirs.copy / "notes.txt").write_text("by B\n")
+    (theirs.copy / "b.md").write_text("b")
+    # Its landing records your notes, and leaves its own out: its turn is committed a second after its pickup.
+    trailers = [["Surogate-Saga", "saga:b"]]
+    theirs_picked = theirs.pickup(author=YOURS, trailers=[*trailers, ["Surogate-Kind", "pickup"]])
+    time.sleep(1.1)
+    theirs_turn = theirs.commit_turn(author=B, trailers=[*trailers, ["Surogate-Kind", "turn"]], pickup=theirs_picked["commit"])
+    assert held(theirs_turn) == {"notes.txt": {"kind": "you"}}
+    theirs.record(
+        turn=theirs_turn["commit"], applied=[theirs.apply(c["path"], c["before"], c["after"]) for c in theirs_turn["changes"]],
+        author=B, trailers=[*trailers, ["Surogate-Kind", "landing"]], main=theirs_picked["main"], pickup=theirs_picked["commit"],
+    )
+    assert (project / "notes.txt").read_text() == "by you meanwhile\n"
+    (mine.copy / "notes.txt").write_text("by A\n")
+    picked = mine.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # B's version is in the history, as its landing's second parent, but never reached main's files: yours did.
+    assert (picked["commit"], held(turn)) == (None, {"notes.txt": {"kind": "you"}})
+
+
+def test_your_save_over_another_threads_landed_file_is_by_you(tmp_path, project):
+    a_history(tmp_path, project)
+    mine, theirs = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (theirs.copy / "notes.txt").write_text("by B\n")
+    land(theirs, "saga:b", author=B)
+    (project / "notes.txt").write_text("by you, over B's\n")
+    (mine.copy / "notes.txt").write_text("by A\n")
+    picked = mine.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # This landing's own pickup is the newest change, on no ref yet: read before main's.
+    assert held(turn) == {"notes.txt": {"kind": "you"}}
+
+
+def test_a_file_you_saved_after_the_pickup_is_by_you(tmp_path, project):
+    a_history(tmp_path, project)
+    mine = a_pod(tmp_path, project, "t1")
+    (mine.copy / "notes.txt").write_text("by A\n")
+    picked = mine.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:a"]])
+    (project / "notes.txt").write_text("saved by you, after the pickup\n")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # No commit holds the save yet: nobody but you writes the real files outside a landing.
+    assert (picked["commit"], held(turn)) == (None, {"notes.txt": {"kind": "you"}})
+
+
+def test_a_file_under_a_folder_where_another_thread_made_a_file_is_by_that_thread(tmp_path, project):
+    a_history(tmp_path, project)
+    mine, theirs = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (theirs.copy / "Plans").write_text("one plan, by B")
+    land(theirs, "saga:b", author=B)
+    (mine.copy / "Plans").mkdir()
+    (mine.copy / "Plans" / "q1.md").write_text("q1")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    # B changed no file of that name: the one where its folder would be.
+    assert {o["path"]: (o["reason"], o.get("by")) for o in turn["overlapped"]} == {
+        "Plans/q1.md": ("shape", {"kind": "thread", "id": "t2", "title": "Draft B"}),
+    }
+
+
+def test_an_overlap_is_by_the_newest_of_those_who_changed_the_file(tmp_path, project):
+    a_history(tmp_path, project)
+    mine = a_pod(tmp_path, project, "t1")
+    (project / "notes.txt").write_text("checked by the routine\n")
+    a_masters_pod(tmp_path, project).pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"]], push=True)
+    theirs = a_pod(tmp_path, project, "t2")
+    (theirs.copy / "notes.txt").write_text("by B, over the routine's\n")
+    land(theirs, "saga:b", author=B)
+    (mine.copy / "notes.txt").write_text("by A\n")
+    turn = mine.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    assert held(turn) == {"notes.txt": {"kind": "thread", "id": "t2", "title": "Draft B"}}
+
+
+def test_a_pushed_pickup_keeps_the_index_and_the_next_pod_reads_no_file_again(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    (project / "notes.txt").write_text("checked by the routine\n")
+    time.sleep(1.1)  # the pickup reads a second after the save, and the next pod opens a second after it
+    a_masters_pod(tmp_path, project).pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"]], push=True)
+    time.sleep(1.1)
+    seen = read_by(monkeypatch)
+    pod = a_pod(tmp_path, project)
+    assert [name for names in seen["readers"] for name in names] == []
+    assert (pod.copy / "notes.txt").read_text() == "checked by the routine\n"
