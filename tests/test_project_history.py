@@ -96,17 +96,18 @@ def test_a_snapshot_is_the_branchs_tip_and_a_restore_brings_it_back_whole(tmp_pa
 
 
 def test_a_copy_that_could_not_be_made_is_made_on_the_next_try(tmp_path, project, monkeypatch):
-    main, failed = History._main, []
+    run = History._git
 
-    def a_read_fails_once(self, *args):
-        if args[:1] == ("add",) and not failed:
-            failed.append(args)
-            raise HistoryError("git add failed: a read error")
-        return main(self, *args)
+    def the_files_cannot_be_read(self, args, **kwargs):
+        # Whichever git reads the real files: the readers, and the one that reads alone after them.
+        if args[0] in ("update-index", "add") and kwargs["env"].get("GIT_WORK_TREE") == str(self.project):
+            raise HistoryError(f"git {args[0]} failed: a read error")
+        return run(self, args, **kwargs)
 
-    monkeypatch.setattr(History, "_main", a_read_fails_once)
-    with pytest.raises(HistoryError):
-        opened(tmp_path, project, "t1")
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_git", the_files_cannot_be_read)
+        with pytest.raises(HistoryError):
+            opened(tmp_path, project, "t1")
     history = opened(tmp_path, project, "t2")
     assert "Report.docx" in git(history, "ls-tree", "--name-only", "refs/heads/main")
     # A git that runs out of time is a history error, which a readiness check answers.

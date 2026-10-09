@@ -151,15 +151,24 @@ def a_messy_project(project: Path) -> None:
     (project / "uploads" / "deep" / "er").mkdir(parents=True)
     (project / "uploads" / "deep" / "er" / "notes.md").write_text("deep\n")
     (project / "empty folder").mkdir()
+    (project / "empty.md").write_bytes(b"")
+    (project / "archive").mkdir()
+    (project / "archive" / "old.md").write_text("old\n")
     (project / "scratch.tmp").write_text("left out\n")
     (project / "node_modules" / "x").mkdir(parents=True)
     (project / "node_modules" / "x" / "index.js").write_text("left out\n")
     (project / "latest").symlink_to("notes.txt")
+    (project / "run.sh").write_text("#!/bin/sh\n")
+    (project / "run.sh").chmod(0o755)
+    (project / "plain.sh").write_text("#!/bin/sh\n")
     (project / "vendor").mkdir()
     subprocess.run(["git", "init", "-q", str(project / "vendor" / "lib")], check=True)
     (project / "vendor" / "lib" / "lib.c").write_text("a repository of its own\n")
     for n in range(80):
         (project / "uploads" / f"scan {n:02}.pdf").write_bytes(b"%PDF " + bytes([n]) * 100)
+    for file in project.rglob("*"):
+        if "vendor" not in file.parts and not file.is_symlink():
+            os.utime(file, (time.time() - 60, time.time() - 60))
 
 
 def changed_since(project: Path) -> None:
@@ -172,16 +181,62 @@ def changed_since(project: Path) -> None:
     shutil.rmtree(project / "uploads" / "deep")
     (project / "uploads" / "deep").write_text("a file where a folder was\n")
     os.utime(project / "Annual report 2025.docx", (time.time() - 30, time.time() - 30))  # touched, not changed
+    (project / "run.sh").chmod(0o644)  # no longer to be run: nothing else of it changed
+    (project / "plain.sh").chmod(0o755)  # and one now to be run
+    (project / "latest").unlink()
+    (project / "latest").symlink_to("Annual report 2025.docx")  # a link that points elsewhere
+    (project / "empty.md").write_text("no longer empty\n")
+    (project / "archive").rename(project / "moved")
+    (project / "archive").symlink_to("moved")  # a link where a folder was: what was under it is under the link's folder now
+    for n in range(40, 80):  # saved again in place: the same size with other bytes, and another size
+        (project / "uploads" / f"scan {n:02}.pdf").write_bytes(b"%PDF " + bytes([n + 100]) * (100 if n % 2 else 150))
     for n in range(80):
         (project / "new" / f"{n % 4}").mkdir(parents=True, exist_ok=True)
         (project / "new" / f"{n % 4}" / f"upload {n:02}.docx").write_bytes(b"PK\x03\x04 " + bytes([n]) * 200)
+    for file in (project / "new").rglob("*"):
+        os.utime(file, (time.time() - 20, time.time() - 20))
+    for n in range(40, 80):
+        os.utime(project / "uploads" / f"scan {n:02}.pdf", (time.time() - 20, time.time() - 20))
 
 
 def mains_tree(history: History) -> str:
     return git(history.repo, "rev-parse", "refs/bases/t1^{tree}")
 
 
-@pytest.mark.parametrize("since", ["no history yet", "a landing", "a landing of many files"])
+def tree_git_alone_makes(project: Path, tmp_path: Path) -> str:
+    """The tree one ``git add -A`` makes of the real files, with the history's excludes and attributes."""
+    repo = tmp_path / f"alone-{len(list(tmp_path.glob('alone-*')))}.git"
+    env = {
+        **{name: value for name, value in os.environ.items() if not name.startswith("GIT_")},
+        "GIT_DIR": str(repo), "GIT_WORK_TREE": str(project), "GIT_LITERAL_PATHSPECS": "1",
+    }
+
+    def alone(*args: str) -> str:
+        return subprocess.run(["git", *args], env=env, cwd=project, check=True, capture_output=True, text=True).stdout.strip()
+
+    alone("init", "-q", "-b", "main")
+    (repo / "info" / "exclude").write_text("\n".join(history_module.HISTORY_EXCLUDES) + "\n/vendor/lib/\n")
+    (repo / "info" / "attributes").write_text(history_module._ATTRIBUTES)
+    alone("add", "-A")
+    return alone("write-tree")
+
+
+def read_by(monkeypatch) -> dict:
+    """Which gits read the real files from here on: each reader's files, and every ``git add -A`` over the real files."""
+    seen, run = {"readers": [], "alone": 0}, subprocess.run
+
+    def spied(args, **kwargs):
+        if args[:2] == ["git", "update-index"] and "--stdin" in args:
+            seen["readers"].append(sorted(n for n in kwargs["input"].split("\0") if n))
+        if args[:3] == ["git", "add", "-A"] and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
+            seen["alone"] += 1
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spied)
+    return seen
+
+
+@pytest.mark.parametrize("since", ["no history yet", "a landing", "a landing of many files", "files saved again in place"])
 def test_an_open_reads_many_real_files_several_at_once_and_makes_the_commit_git_alone_would(tmp_path, project, monkeypatch, since):
     a_messy_project(project)
     if since == "a landing":
@@ -196,44 +251,73 @@ def test_an_open_reads_many_real_files_several_at_once_and_makes_the_commit_git_
             (first.copy / f"part {n:02}.md").write_text(f"part {n}\n")
         land(first)
         (project / "Report.docx").unlink()  # and you removed a file since
-    time.sleep(1.1)  # saved before the second the pods open in: git reads again a file saved in that second
-    with monkeypatch.context() as patch:  # few enough to read, by this bound, for git to read them alone
-        patch.setattr(history_module, "_READ_ALONE", 10**9)
-        alone = a_pod(tmp_path, project)
-    run, readers = subprocess.run, []
-
-    def counted(args, **kwargs):
-        if args[:2] == ["git", "update-index"] and "--stdin" in args:
-            readers.append(sorted(n for n in kwargs["input"].split("\0") if n))
-        return run(args, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(subprocess, "run", counted)
-        pod = a_pod(tmp_path, project)
-    # Read by several gits at once, never more than the bound, each file by one of them.
-    read = [name for names in readers for name in names]
-    assert 1 < len(readers) <= history_module._READERS and len(read) == len(set(read)) > history_module._READ_ALONE
+    elif since == "files saved again in place":
+        # No new file and none a landing wrote: every one is in the history's index, by another size or time.
+        first = a_pod(tmp_path, project)
+        (first.copy / "a.md").write_text("a")
+        land(first)
+        for n in range(80):
+            (project / "uploads" / f"scan {n:02}.pdf").write_bytes(b"%PDF " + bytes([n + 100]) * (100 if n % 2 else 150))
+            os.utime(project / "uploads" / f"scan {n:02}.pdf", (time.time() - 20, time.time() - 20))
+    time.sleep(1.1)  # saved before the second the pod opens in: git reads again a file saved in that second
+    seen = read_by(monkeypatch)
+    pod = a_pod(tmp_path, project)
+    # Read by several gits at once, never more than the bound, each file by one of them: and by no git alone.
+    read = [name for names in seen["readers"] for name in names]
+    assert 1 < len(seen["readers"]) <= history_module._READERS and len(read) == len(set(read)) > history_module._READ_ALONE
+    assert seen["alone"] == 0
     assert not [name for name in read if name.startswith(("node_modules/", "vendor/")) or name.endswith(".tmp")]
-    # The pod's base is the commit git alone makes of the same files, and its copy is the same.
-    assert mains_tree(pod) == mains_tree(alone)
+    if since == "a landing":
+        # Those saved again in place, the one whose mode alone changed each way, the link and the file no longer
+        # empty are read; one only touched too; one neither saved nor touched is not.
+        assert {"uploads/scan 41.pdf", "uploads/scan 42.pdf", "run.sh", "plain.sh", "latest", "empty.md", "Annual report 2025.docx"} <= set(read)
+        assert "uploads/scan 05.pdf" not in read and "Report.docx" not in read and "uploads/scan 03.pdf" not in read
+    # The pod's base is the commit git alone makes of the same files.
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
     names = sorted(str(f.relative_to(pod.copy)) for f in pod.copy.rglob("*") if not f.is_dir())
-    assert names == sorted(str(f.relative_to(alone.copy)) for f in alone.copy.rglob("*") if not f.is_dir())
     assert "uploads/two\nlines.txt" in names and "latest" in names and "scratch.tmp" not in names
-    # Each file it read is known by its size and time from then on: a later look reads none of them again.
-    listed = git(pod.repo, "ls-files", "--stage")
-    for file in project.rglob("*"):
-        if file.is_file() and not file.is_symlink() and "_history" not in file.parts:
-            file.chmod(0)
-    try:
-        subprocess.run(
-            ["git", "add", "-A"], check=True, capture_output=True, cwd=project,
-            env={**os.environ, "GIT_DIR": str(pod.repo), "GIT_WORK_TREE": str(project)},
-        )
-    finally:
-        for file in project.rglob("*"):
-            if file.is_file() and not file.is_symlink():
-                file.chmod(0o644)
-    assert git(pod.repo, "ls-files", "--stage") == listed
+    # Each file is known by its size and time from then on: a later look finds none to read again.
+    assert git(pod.repo, f"--work-tree={project}", "diff-files", "--name-only") == ""
+
+
+def test_an_open_decides_what_to_read_after_its_look_and_reads_a_few_files_with_one_git(tmp_path, project, monkeypatch):
+    a_messy_project(project)
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    time.sleep(1.1)
+    seen = read_by(monkeypatch)
+    again = a_pod(tmp_path, project)
+    # A file the landing wrote is one the history's index does not know by size and time, as an empty
+    # file is, to git too: one git reads the two, and no git looks at the rest.
+    assert (seen["readers"], seen["alone"]) == ([["a.md", "empty.md"]], 0)
+    seen["readers"].clear()
+    (project / "notes.txt").write_text("v2 notes, saved by you\n")
+    (project / "uploads" / "scan 07.pdf").unlink()
+    time.sleep(1.1)
+    pod = a_pod(tmp_path, project)
+    assert (seen["readers"], seen["alone"]) == ([["a.md", "empty.md", "notes.txt"]], 0)
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path) != mains_tree(again)
+    assert not (pod.copy / "uploads" / "scan 07.pdf").exists() and (pod.copy / "notes.txt").read_text() == "v2 notes, saved by you\n"
+
+
+def test_a_file_no_older_than_the_index_is_read_however_its_size_and_time_match(tmp_path, project, monkeypatch):
+    # Saved in a second the clock has not passed: no index written now is newer than it.
+    second = int(time.time()) + 3600
+    os.utime(project / "notes.txt", (second, second))
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)  # the history's index knows notes.txt by that second and its size
+    look = History._look
+
+    def saved_again_first(self, paths):
+        (project / "notes.txt").write_text("v9 notes\n")  # again, in that second, at the same size
+        os.utime(project / "notes.txt", (second, second))
+        return look(self, paths)
+
+    monkeypatch.setattr(History, "_look", saved_again_first)
+    # Its size and time are the index's, and it may have been saved again unseen: it is read.
+    assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
 
 
 def test_a_file_that_changes_while_many_are_read_leaves_the_read_to_git_alone(tmp_path, project, monkeypatch):

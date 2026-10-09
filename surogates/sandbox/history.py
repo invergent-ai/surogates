@@ -81,10 +81,11 @@ _GIT_TIMEOUT = 120
 #: Through geesefs, a large project's read of its real files is bound by request latency.
 _OPEN_TIMEOUT = 570
 _TIMEOUT: ContextVar[int | None] = ContextVar("history_git_timeout", default=None)
-#: An open reads the real files it must read this many at once, once there
-#: are more of them than _READ_ALONE: git reads one file at a time, and
-#: through geesefs a file is a few requests, so ten thousand files read alone
-#: outlast the pod's ready bound.
+#: An open looks at the real files this many folders at once, and reads the
+#: files it must read with this many gits at once, once there are more of
+#: them than one git reads in _READ_ALONE: git looks and reads one file at a
+#: time, and through geesefs a file is a request or more, so ten thousand
+#: files looked at or read alone outlast the pod's ready bound.
 _READERS = 16
 _READ_ALONE = 64
 _ZERO = "0" * 40
@@ -306,10 +307,12 @@ class History:
                     self._main("read-tree", MAIN)
             if not start:
                 self._add_all(self._main)
-                if self._ref(MAIN) is None:
-                    self._main(*_as(you), "commit", "-q", "--allow-empty", "-m", "The project's files")
-                elif self._main("write-tree") != self._tree(MAIN):
-                    self._main(*_as(you), "commit", "-q", "-m", "Your changes")
+                # Committed from the index as it is: ``git commit`` would look at every real file once more.
+                tree, main = self._main("write-tree"), self._ref(MAIN)
+                if main is None:
+                    self._main("update-ref", MAIN, self._main(*_as(you), "commit-tree", tree, "-m", "The project's files"))
+                elif tree != self._tree(main):
+                    self._main("update-ref", MAIN, self._main(*_as(you), "commit-tree", tree, "-p", main, "-m", "Your changes"))
                 if (self.repo / "index").is_file():
                     # geesefs gives whole seconds: an entry from the second the
                     # open began may be saved again unseen, so git reads it again.
@@ -1189,8 +1192,8 @@ class History:
 
         Git takes such a folder for a submodule: a link to a commit, not
         its files, and an add that fails while it has none.  Each one is
-        written to the excludes, which ``main`` and every copy share.  Of
-        the real files, many to read are read several at once.
+        written to the excludes, which ``main`` and every copy share.  The
+        real files are looked at and read several at once, by no git alone.
         """
         # Listed file by file, git names a folder only for a repository it will not go into.
         new = [n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n]
@@ -1202,33 +1205,46 @@ class History:
             git("add", "-A")
 
     def _read_at_once(self, new: list[str]) -> bool:
-        """Make ``main``'s index the real files as ``git add -A`` would, reading the files to read several at once; whether it did.
+        """Make ``main``'s index the real files as ``git add -A`` would, with no git reading them alone; whether it did.
 
-        *new* are the files the index lacks.  The others to read are those
-        the index knows by no size and time, which a landing changed, and
-        those whose size or time changed since: ``git diff-files`` names
-        them from a look at each, with no file read.  Each reader is a git
-        of its own, with an index of its own for the files given to it, so
-        every entry is git's, with the size and time git saw as it read.
-        The entries are then put together, each whole as its git wrote it.
+        *new* are the files the index lacks.  What else is to be read is
+        decided by a look at every file the index names (:meth:`_look`),
+        each as its folder's listing has it, by its size and whole-second
+        time, as git compares them here.  To read are a file whose size,
+        time or kind is not the index's, one the index knows by no size and
+        time, which a landing wrote, and one saved in the second the index
+        was written or since.  A file no longer there leaves the index.
 
-        Few files to read are left to ``git add -A``, and so is anything
-        this cannot do: an index it does not read, a file that changed
-        under a reader.
+        The files to read are then read by sixteen gits at once, and a few
+        by one: git's own look and read go one file at a time, a request or
+        more each through geesefs.  Each reader is a git of its own, with an
+        index of its own for the files given to it, so every entry is git's,
+        with the size and time git saw as it read.  The entries are then put
+        together, each whole as its git wrote it.
+
+        Left to one ``git add -A`` is only what this cannot do: an index it
+        does not read, a file that changed under a reader.
         """
         index = self.repo / "index"
         entries = _entries(index)
-        if entries is None or len(new) + sum(_unseen(entry) for entry in entries.values()) <= _READ_ALONE:
+        if entries is None:
             return False
         work = self.repo / "reading"
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
         before = index.read_bytes() if index.exists() else None
         try:
-            changed = self._main("diff-files", "--name-status", "--no-renames", "-z").split("\0")
-            gone = [path for status, path in zip(changed[::2], changed[1::2]) if status == "D"]
-            read = [*new, *(path for status, path in zip(changed[::2], changed[1::2]) if status != "D")]
-            shares = [share for share in (read[n::_READERS] for n in range(_READERS)) if share]
+            written = int(index.stat().st_mtime) if before is not None else 0
+            found = self._look(entries)
+            gone = [path for path, seen in found.items() if seen is None or stat.S_ISDIR(seen.st_mode)]
+            read = [*new, *(
+                path.decode() for path, seen in found.items()
+                if seen is not None and not stat.S_ISDIR(seen.st_mode) and not _known(entries[path], seen, written)
+            )]
+            if not read and not gone:
+                return True
+            # A few are one git's: sixteen gits for a handful of files cost more than they spare.
+            shares = [read] if len(read) <= _READ_ALONE else [share for share in (read[n::_READERS] for n in range(_READERS)) if share]
 
             def reader(n: int) -> None:
                 # A file gone since it was listed is no error: --remove leaves it out.
@@ -1238,20 +1254,21 @@ class History:
                     cwd=self.project, input="".join(f"{path}\0" for path in shares[n]),
                 )
 
-            with ThreadPoolExecutor(len(shares)) as readers:
-                # Each with the open's own bound for its git, which a thread of its own would not have.
-                for done in [readers.submit(contextvars.copy_context().run, reader, n) for n in range(len(shares))]:
-                    done.result()
-            for path in (*gone, *read):
-                entries.pop(path.encode(), None)
-            for n in range(len(shares)):
+            if read:
+                with ThreadPoolExecutor(len(shares)) as readers:
+                    # Each with the open's own bound for its git, which a thread of its own would not have.
+                    for done in [readers.submit(contextvars.copy_context().run, reader, n) for n in range(len(shares))]:
+                        done.result()
+            for path in (*gone, *(path.encode() for path in read)):
+                entries.pop(path, None)
+            for n in range(len(shares) if read else 0):
                 if (theirs := _entries(work / str(n))) is None:
                     return False
                 entries.update(theirs)
             _replace(index, _index(entries))
             # A file and a folder of one name, from a change under the readers, is no index: git says so here.
             self._main("write-tree")
-        except (HistoryError, OSError):
+        except (HistoryError, OSError, UnicodeError):
             # The index as it was, for git to read the files alone.
             if before is None:
                 index.unlink(missing_ok=True)
@@ -1261,6 +1278,46 @@ class History:
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return True
+
+    def _look(self, paths: Iterable[bytes]) -> dict[bytes, os.stat_result | None]:
+        """What each of *paths* is in the real files now, None for one not there: by its folder's listing, sixteen folders at a time.
+
+        A folder is listed once and each of its files taken right from that
+        listing, which through geesefs is a request for a thousand files
+        where a look at each file alone is a request or two a file.  Only
+        the folders that hold one of *paths* are listed, from the top down,
+        and never through a link: a path under a folder that is now a link,
+        or a file, is not there, as git has it.
+        """
+        files: dict[bytes, dict[bytes, bytes]] = {}
+        folders: dict[bytes, set[bytes]] = {}
+        found: dict[bytes, os.stat_result | None] = {}
+        for path in paths:
+            found[path] = None
+            *above, name = path.split(b"/")
+            files.setdefault(b"/".join(above), {})[name] = path
+            for depth in range(len(above)):
+                folders.setdefault(b"/".join(above[:depth]), set()).add(above[depth])
+        root = os.fsencode(self.project)
+
+        def one(folder: bytes) -> list[bytes]:
+            inside, below, deeper = files.get(folder, {}), folders.get(folder, ()), []
+            try:
+                with os.scandir(os.path.join(root, folder) if folder else root) as listed:
+                    for entry in listed:
+                        if entry.name in inside:
+                            found[inside[entry.name]] = entry.stat(follow_symlinks=False)
+                        elif entry.name in below and entry.is_dir(follow_symlinks=False):
+                            deeper.append(os.path.join(folder, entry.name) if folder else entry.name)
+            except (FileNotFoundError, NotADirectoryError):
+                pass  # gone, or a file in its place, since the folder above was listed
+            return deeper
+
+        level = [b""]
+        with ThreadPoolExecutor(_READERS) as lookers:
+            while level:
+                level = [folder for deeper in lookers.map(one, level) for folder in deeper]
+        return found
 
     def _excluded(self) -> tuple[list[str], list[str]]:
         """The excluded files and folders in the copy, its folders holding a git repository, and whether it wrote any file history leaves out, the platform's folders included.
@@ -1439,9 +1496,22 @@ def _index(entries: dict[bytes, bytes]) -> bytes:
     return body + hashlib.sha1(body).digest()
 
 
-def _unseen(entry: bytes) -> bool:
-    """Whether an index entry holds no size and no time of its file: git reads the file to know it."""
-    return entry[8:12] == entry[36:40] == b"\0\0\0\0"
+def _known(entry: bytes, seen: os.stat_result, written: int) -> bool:
+    """Whether an index *entry* is its file as *seen* now, by what git compares with ``core.checkStat=minimal``.
+
+    The file's kind and whether it is to be run, its size and the whole
+    second it was saved.  Not known, so read: an entry with no size, which
+    is one git never looked at (a landing wrote the file) or an empty file;
+    and a file saved in the second the index was *written* or since, which
+    may have been saved again unseen.  The index holds 32 bits of each.
+    """
+    mode = int.from_bytes(entry[24:28], "big")
+    saved, size = int.from_bytes(entry[8:12], "big"), int.from_bytes(entry[36:40], "big")
+    if stat.S_ISLNK(mode) != stat.S_ISLNK(seen.st_mode) or stat.S_ISREG(mode) != stat.S_ISREG(seen.st_mode):
+        return False
+    if stat.S_ISREG(mode) and (mode ^ seen.st_mode) & 0o100:
+        return False
+    return size != 0 and size == seen.st_size & 0xFFFFFFFF and saved == int(seen.st_mtime) & 0xFFFFFFFF and saved < written
 
 
 def _environ(env: dict[str, str]) -> dict[str, str]:

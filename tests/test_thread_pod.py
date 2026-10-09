@@ -138,8 +138,9 @@ async def test_a_thread_pod_makes_its_copy_again_after_a_failed_read_of_the_real
     git = History._git
 
     def unreadable(self, args, **kwargs):
-        if args[0] == "add":
-            raise HistoryError("git add failed: Input/output error")
+        # Whichever git reads the real files: the readers, and the one that reads alone after them.
+        if args[0] in ("update-index", "add") and kwargs["env"].get("GIT_WORK_TREE") == str(self.project):
+            raise HistoryError(f"git {args[0]} failed: Input/output error")
         return git(self, args, **kwargs)
 
     monkeypatch.setattr(History, "_git", unreadable)
