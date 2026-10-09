@@ -15,7 +15,9 @@ from surogates.harness.loop_pending import (
     _left_behind, _read_as_words, _redo_unread, _shown_before_its_answer, _turn_for_a_hand_back, _turn_for_a_redo,
 )
 from surogates.harness.loop_attachments import _attachments_note
-from surogates.harness.loop_messages import _latest_message_is_a_follow_up, _latest_user_event_data, _latest_user_event_text
+from surogates.harness.loop_messages import (
+    _latest_message_is_a_follow_up, _latest_user_event_data, _latest_user_event_text, _view_context_note,
+)
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive, _session, _stub_store
 
@@ -579,7 +581,7 @@ def test_a_turn_no_redo_opened_is_not_the_redos():
 
 def test_the_latest_message_a_turn_answers_is_a_coordinators_follow_up_as_it_is_the_users():
     typed = said(1, "/report-writer Edit the report.")
-    typed.data.update(metadata={"mode": "sketch", "view_context": {"route": "/board"}}, attachments=[
+    typed.data.update(metadata={"mode": "sketch", "view_context": {"kind": "agent", "id": "a1", "name": "Ada"}}, attachments=[
         {"path": "/workspace/brief.pdf", "filename": "brief.pdf", "size": 10, "mime_type": "application/pdf"},
     ])
     assert not _latest_message_is_a_follow_up([typed])
@@ -590,6 +592,7 @@ def test_the_latest_message_a_turn_answers_is_a_coordinators_follow_up_as_it_is_
     assert _latest_user_event_data(events) == {"content": "[From the project's coordinator]\nKeep it to one page."}
     assert loop_module._latest_whiteboard_metadata(events) is None
     assert _attachments_note([typed]) is not None and _attachments_note(events) is None
+    assert _view_context_note([typed]) is not None and _view_context_note(events) is None
     # The user's own message after it is the latest again.
     assert not _latest_message_is_a_follow_up([*events, said(3)])
     assert _latest_user_event_text([*events, said(3)]) == "Open the report."
@@ -604,3 +607,40 @@ def test_a_coordinators_follow_up_is_never_a_command_whatever_its_words():
     # Only the user's own waits for an answer of the harness's.
     assert harness._waiting_commands(session, [typed, sent]) == [typed]
     assert loop_module.command_never_answered([sent]) is None
+
+
+async def test_a_commands_end_does_not_rest_over_a_coordinators_follow_up_no_turn_has_read():
+    session = _session()
+    store = _stub_store(session, [])
+    store.advance_harness_cursor = AsyncMock()
+    harness = _harness(store, _permissive())
+    harness._mission_has_pending_work = AsyncMock(return_value=False)
+    harness._release_command_turn = AsyncMock()
+    events = [
+        followed_up(1), said(2, "/goal status"),
+        SimpleNamespace(id=3, type=EventType.LLM_RESPONSE.value, data={"answers": 2, "message": {"content": "No active outcome."}}),
+    ]
+    lease = SimpleNamespace(lease_token=uuid4())
+    assert await harness._end_command_turn(session, lease, 2, events, ends_here=True) is False
+    # The cursor stops before the follow-up, and the thread stays as it is for the turn that reads it.
+    store.advance_harness_cursor.assert_awaited_once_with(session.id, through_event_id=0, lease_token=lease.lease_token, at_rest=False)
+    harness._release_command_turn.assert_not_awaited()
+
+
+async def test_a_hand_backs_wake_expands_no_skill_for_a_follow_up_with_the_words_its_user_typed_before(monkeypatch):
+    expanded = AsyncMock(return_value="Follow the report-writer skill: edit the report.")
+    monkeypatch.setattr(loop_module, "expand_skill_again", expanded)
+    session = _session()
+    harness = _harness(_stub_store(session, []), _permissive())
+    command = "/report-writer Edit the report."
+    events = [
+        said(1, command),
+        SimpleNamespace(id=2, type=EventType.SKILL_INVOKED.value, data={"skill": "report-writer", "raw_message": command}),
+    ]
+    messages = [{"role": "user", "content": command}]
+    await harness._expand_last_skill_again(session, messages, events)
+    assert messages[0]["content"] == "Follow the report-writer skill: edit the report."
+    # The same words in a follow-up ran no skill: the one before it was its user's message's.
+    messages = [{"role": "user", "content": command}, {"role": "user", "content": command}]
+    await harness._expand_last_skill_again(session, messages, [*events, followed_up(3, command)])
+    assert (expanded.await_count, [m["content"] for m in messages]) == (1, [command, command])

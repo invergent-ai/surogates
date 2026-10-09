@@ -557,6 +557,10 @@ async def test_a_projects_stream_carries_a_redo():
     assert EventType.HISTORY_REDO in STREAM_TYPES
 
 
+async def test_a_projects_stream_carries_a_coordinators_follow_up():
+    assert EventType.COORDINATOR_MESSAGE in STREAM_TYPES
+
+
 async def test_a_follow_up_wake_reads_the_follow_up_and_runs_no_command_of_the_users_again(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
@@ -648,6 +652,22 @@ async def test_a_second_clash_puts_the_thread_in_waiting_on_you(api, monkeypatch
     # The thread's turn has ended, and the sweeper leaves its wait.
     await expire_inbox_items(store)
     assert (await row_of(api, project, thread))["reason"] == "files"
+
+
+async def test_a_wait_over_a_second_clash_names_the_stuck_file_and_none_the_redo_turn_landed(api, monkeypatch, pods):
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    pool = SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    await open_pod(pool, thread)
+    (pods.project / "Report.docx").write_bytes(b"PK\x03\x04 report v3 by you")
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx && echo b > b.md"})),
+        _final_response("Redid the edit, and wrote a note."),
+    ], pool=pool)
+    assert (pods.project / "b.md").read_text() == "b\n"
+    [wait] = await waits_of(api, thread)
+    assert (wait.title, wait.payload["target"]) == ("Couldn't merge my changes to Report.docx", "Report.docx")
+    assert "b.md" not in wait.payload["instructions"]
 
 
 async def test_a_wait_on_you_is_answered_by_your_next_message_not_by_a_wake(api, monkeypatch, pods):
@@ -788,6 +808,10 @@ async def test_a_redo_turns_files_are_sorted_each_from_its_own_clash():
     outcome = landed_as([{"path": "Report.docx", "reason": "changed", "by": you}, {"path": "Final.docx", "reason": "with"}])
     landing_module._tell(outcome, {"Report.docx"})
     assert (outcome["stuck"], outcome["redo"], outcome["saved"]) == (["Report.docx"], [], False)
+    # One redone and held again only with a new clash is not stuck, and the new clash alone is redone.
+    outcome = landed_as([{"path": "Budget.xlsx", "reason": "changed", "by": you}, {"path": "Final.docx", "reason": "with"}])
+    landing_module._tell(outcome, {"Final.docx"})
+    assert (outcome["stuck"], [f["path"] for f in outcome["redo"]], outcome["saved"]) == ([], ["Budget.xlsx"], False)
     # A file redone and held again with no one's change behind it waits on nobody, and is not redone again.
     outcome = landed_as([{"path": "Plans", "reason": "shape"}])
     landing_module._tell(outcome, {"Plans"})
@@ -832,6 +856,8 @@ async def test_a_turn_is_the_redos_from_its_first_request_until_it_ends(api, sin
     thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
     store = api.app.state.session_store
     assert await landing_module.redo_files(store, thread.id) == set()
+    # The turn whose landing clashed.
+    await store.emit_event(thread.id, REQUEST, {})
     await store.emit_event(thread.id, COMPLETE, {"reason": "completed"})
     await store.emit_event(thread.id, EventType.HISTORY_REDO, {"saga": "saga:1", "files": [{"path": "Report.docx", "reason": "changed"}]})
     for kind in since:
@@ -849,6 +875,8 @@ async def test_your_message_answers_the_waits_over_files_before_it_and_no_other(
     # Raised after your message: not what it answered.
     await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Budget.xlsx"], escalated=True))
     assert await store.answer_file_waits(thread.id, before=said) == 1
+    # Once: a wait answered is not answered again by the next wake.
+    assert await store.answer_file_waits(thread.id, before=said) == 0
     assert {wait.title: wait.status for wait in await waits_of(api, thread)} == {
         "Send it?": "pending", "Couldn't merge my changes to Report.docx": "responded",
         "Couldn't finish landing my changes": "pending",

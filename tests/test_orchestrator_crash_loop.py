@@ -60,7 +60,8 @@ class FakeStore:
         self.statuses.append((session_id, status))
 
     async def get_events(self, session_id, *, after=None, types=None, limit=None):
-        return self.events_since_trip
+        # By type, as the store reads them.
+        return [event for event in self.events_since_trip if types is None or event.type in [kind.value for kind in types]]
 
 
 def _make_orchestrator(redis, store, harness_factory) -> Orchestrator:
