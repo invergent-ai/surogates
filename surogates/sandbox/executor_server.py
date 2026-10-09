@@ -78,6 +78,10 @@ _HISTORY_STEPS = {
     "keep": "keep", "prune": "prune", "hand_off": "hand_off", "hand_back": "hand_back",
     "keep_apart": "keep_apart", "take_up": "take_up", "drop_hand_off": "drop_hand_off", "opened": "opened",
 }
+# The steps a master's pod runs, which has no copy: a routine run's pickup,
+# what settles a landing left running before it, the look and a put-back,
+# and the day's pruning after it, which reads no copy.
+_MASTER_STEPS = frozenset({"pickup", "fetch", "unapply", "prune"})
 
 
 def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
@@ -204,9 +208,12 @@ def _run_history(args: dict, history: History | None) -> str:
     if history is None:
         return json.dumps({"error": "This pod has no copy of a project's files"})
     step = dict(args)
-    method = _HISTORY_STEPS.get(step.pop("action", None))
+    action = step.pop("action", None)
+    method = _HISTORY_STEPS.get(action)
     if method is None:
         return json.dumps({"error": f"Unknown history action: {args.get('action')}"})
+    if history.copy is None and action not in _MASTER_STEPS:
+        return json.dumps({"error": f"This pod has no copy of a project's files: it cannot {action}"})
     try:
         return json.dumps(getattr(history, method)(**step))
     # A real file's write can time out or fail on the mount, past git's own errors.
@@ -274,7 +281,8 @@ def run_tool(
     seeded into the child's tracker so read-dependent guards (blind
     overwrite, staleness) can see reads that happened in earlier forks.
 
-    *history* is a thread's pod's: its checkpoints are its copy's.
+    *history* is a thread's pod's: its checkpoints are its copy's.  A
+    master's pod's has no copy: its checkpoints stay its workspace's.
     """
     if read_timestamps:
         from surogates.tools.builtin.file_ops import seed_read_timestamps
@@ -282,7 +290,7 @@ def run_tool(
         seed_read_timestamps(read_timestamps)
 
     if name == "_checkpoint":
-        if history is not None:
+        if history is not None and history.copy is not None:
             return _run_copy_checkpoint(args, history)
         return _run_checkpoint(args, workspace)
     if name == "_history":
@@ -446,7 +454,8 @@ def create_app(
     app = FastAPI()
     sem = asyncio.Semaphore(max_concurrency)
     mount = str(history.project) if history is not None else workspace
-    opened = history is None
+    # A master's pod has nothing to open: its workspace is the real files.
+    opened = history is None or history.copy is None
     # Why the copy can never be made in this pod: it stays not ready.
     failed: str | None = None
     open_lock = asyncio.Lock()
@@ -562,6 +571,15 @@ def main() -> None:
             repo=_shadow_repo_path(project, base=Path.home() / ".surogates" / "history"),
             project=Path(project), copy=Path(workspace),
             thread=os.environ["HISTORY_THREAD"], user=user, helper=helper, turn=os.environ.get("HISTORY_TURN"),
+        )
+    elif os.environ.get("HISTORY_MAIN"):
+        from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
+
+        # A project's master pod: the real files are its workspace, and a
+        # routine run's end picks their changes up as the routine's.
+        history = History(
+            repo=_shadow_repo_path(workspace, base=Path.home() / ".surogates" / "history"),
+            project=Path(workspace), copy=None, thread=None, user=os.environ.get("USER_ID", ""),
         )
 
     logger.info("Loading tool registry...")
