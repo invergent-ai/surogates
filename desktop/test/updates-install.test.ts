@@ -193,7 +193,8 @@ describe("an update the helper says it installed", () => {
     const mark = join(base.dir, "release.json");
     const marked = (version: string) => writeFileSync(mark, `${JSON.stringify({ version })}\n`);
     marked("1.2.3");
-    const found = base.updates({ installed: mark });
+    const logged: string[] = [];
+    const found = base.updates({ installed: mark, log: (words) => logged.push(words) });
     await found.check();
     const { files } = found.state as { files: Staged };
     // As where its files were changed, after the app's look, to the installed release's own: the helper applies that one, and ends 0.
@@ -209,9 +210,13 @@ describe("an update the helper says it installed", () => {
     writeFileSync(mark, "not a mark\n");
     await found.install();
     expect(found.state).toMatchObject({ state: "failed", why: "the installed version's mark cannot be read" });
+    // Each is in the log, where the helper's own exit says nothing went wrong: what was offered, and what the mark said.
+    const CONTRADICTED = "Surogate 1.2.4 was not installed, though its helper ended 0: the installed version's mark";
+    expect(logged).toEqual([`${CONTRADICTED} names 1.2.3`, `${CONTRADICTED} names 1.2.5`, `${CONTRADICTED} cannot be read`, `${CONTRADICTED} cannot be read`]);
     marked("1.2.4");
     await found.install();
     expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+    expect(logged).toHaveLength(4);
   });
 
   it("is installed at the helper's word in a development build, which has no installed version to read", async () => {

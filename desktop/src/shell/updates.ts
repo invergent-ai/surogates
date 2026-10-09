@@ -420,6 +420,8 @@ export class Updates {
       // app's look: to the installed release's own, or to another that a trusted key signed.
       const marked = this.options.installed === null ? version : this.installedVersion();
       if (marked === version) return this.set({ state: "installed", version });
+      // Nothing the helper said tells of it: the log has what was offered, and what the mark says.
+      this.options.log?.(`Surogate ${version} was not installed, though its helper ended 0: the installed version's mark ${marked ? `names ${marked}` : "cannot be read"}`);
       return this.set({ state: "failed", version, files, why: marked ? `the installed version is ${marked}, not ${version}` : "the installed version's mark cannot be read" });
     }
     // What was said goes to the log whole: the line shows one line of a failure, and of a refusal none.
