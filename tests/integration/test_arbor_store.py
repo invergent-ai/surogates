@@ -137,6 +137,33 @@ async def test_prune_is_recursive_and_terminal(research_run):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_a_prune_stopped_at_any_of_its_waits_ends_with_the_whole_subtree_pruned_or_none_of_it(
+    research_run, stopping,
+):
+    store, run_id, org_id = research_run
+    await store.add_node(run_id, org_id=org_id, parent_key="ROOT", hypothesis="h1")
+    for _ in range(3):
+        await store.add_node(run_id, org_id=org_id, parent_key="1", hypothesis="child")
+    subtree = ["1", "1.1", "1.2", "1.3"]
+    # Four nodes whose insights are 32 KiB each: sent as one statement of many rows, the driver
+    # writes their updates in parts, four packets of 32 KiB or more at a time.
+    for key in subtree:
+        await store.update_node(run_id, key, insight="i" * 32 * 1024)
+    pruning = ResearchStore(stopping.session_factory)
+    for at in range(100):
+        await stopping.stop_at(at, pruning.prune(run_id, "1", reason="dead end"))
+        statuses = {(await store.get_node(run_id, key)).status for key in subtree}
+        if statuses == {"pruned"}:
+            break
+        # Stopped before its commit: none of it.
+        assert statuses == {"pending"}
+    else:
+        pytest.fail("the subtree was never pruned")
+    for key in subtree:
+        assert (await store.get_node(run_id, key)).insight.endswith("[Pruned: dead end]")
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_constraints_block_shows_hitl_mode(research_run):
     store, run_id, _ = research_run
     await store.set_meta(run_id, {"hitl_mode": "review"})
