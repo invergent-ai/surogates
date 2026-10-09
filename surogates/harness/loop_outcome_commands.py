@@ -101,6 +101,15 @@ class OutcomeCommandMixin:
             )
             return False
 
+    async def _mission_is_paused(self, session: Session) -> bool:
+        """True iff the session's mission is paused."""
+        if self._session_factory is None or not (session.config or {}).get("active_mission_id"):
+            return False
+        from surogates.missions.store import MissionStore
+
+        mission = await MissionStore(self._session_factory).get_active_for_session(session.id)
+        return mission is not None and mission.status == "paused"
+
     async def _handle_mission_command(
         self,
         session: Session,

@@ -359,6 +359,13 @@ def _slash_command_name(content: str | None) -> str | None:
 #: command itself, with no model turn.
 _COMMAND_FOR_THE_MODEL = "deep-research"
 
+#: What a paused mission's chat says when something wakes it: no turn of
+#: the model's runs, and a session whose last event is a helper's report
+#: would look to the sweeper like one whose worker died.
+MISSION_PAUSED_NOTE = (
+    "The mission is paused. What arrived is read when it is resumed with /mission resume."
+)
+
 #: Commands that do their work in the conversation itself.  A project's
 #: master works through threads: a goal, a mission or an auto-research run
 #: there could neither delegate nor do the work, ``/deep-research`` hands its
@@ -1548,6 +1555,14 @@ class AgentHarness(
                     )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written)
                 if is_new or at_rest:
+                    return
+                # A mission its user paused: its coordinator takes no turn
+                # on what arrives meanwhile.  A helper's report stays unread
+                # and past the cursor, for the turn the resume queues.
+                if await self._mission_is_paused(session):
+                    await self._emit_loop_response(
+                        session, lease, MISSION_PAUSED_NOTE, user_content=last_user_content
+                    )
                     return
 
             # 10b. /deep-research <topic> -- rewrite the user message to

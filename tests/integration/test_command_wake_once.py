@@ -771,6 +771,29 @@ async def test_a_coordinators_command_is_answered_once_and_a_wake_with_nothing_n
     assert conversation[-1] == {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."}
 
 
+async def test_a_paused_missions_coordinator_takes_no_turn_on_a_report_and_reads_it_when_the_mission_is_resumed(workers):
+    chat = await a_coordinator(workers)
+    assert await workers.types(chat, "/mission pause") == "Mission paused."
+
+    helpers = []
+    for _ in range(2):
+        helpers.append(await workers.a_helper_reports(chat))
+        await workers.wake(chat)
+        # No turn of the model's, the pause answered once, and nothing a sweeper would take for a death.
+        assert (workers.requests, workers.ran) == ([], ["_handle_mission_command"])
+        assert ((await workers.said(chat)).count("Mission paused."), await workers.looks_abandoned(chat)) == (1, False)
+    assert (await workers.missions(chat))[0].status == "paused"
+
+    assert await workers.types(chat, "/mission resume") == "Mission resumed."
+    # The command queues the coordinator: its turn reads the reports that waited.
+    await workers.wake(chat)
+
+    [conversation] = workers.requests
+    for helper in helpers:
+        assert {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} in conversation
+    assert workers.ran == ["_handle_mission_command"] * 2
+
+
 async def test_a_report_no_turn_has_read_is_not_passed_over_by_a_commands_end(workers):
     chat = await a_coordinator(workers)
     # A helper reports, and before any wake reads the report the user types a command.
