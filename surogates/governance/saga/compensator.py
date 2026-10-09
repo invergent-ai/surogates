@@ -126,15 +126,15 @@ async def compensate_history(
     """
     if step.tool_name != "history.apply":
         return None
+    # Imported here: the history's module reaches this one through the tools it imports.
+    from surogates.sandbox.history import step_result
+
     # The folders the apply made for its file go with it; a failed apply's are not known.
     made = step.execute_result.get("made", []) if isinstance(step.execute_result, dict) else []
-    raw = await sandbox_pool.execute(
+    # Its result, or it raises: a put-back the pod cut off, or never ran, is no put-back.
+    return step_result(await sandbox_pool.execute(
         session_id, "_history", json.dumps({**step.arguments, "made": made, "action": "unapply", "ran": ran}),
-    )
-    result = json.loads(raw)
-    if "error" in result:
-        raise SagaStateError(f"Could not put back {step.arguments.get('path')}: {result['error']}")
-    return result
+    ))
 
 
 async def compensate_step(

@@ -25,7 +25,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Delete
@@ -3365,21 +3365,63 @@ async def test_pausing_a_local_chat_cancels_what_waits_on_its_computer(laptop_ri
         await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})), 5.0)
 
 
-async def test_a_paused_chat_reads_paused_when_its_pause_event_is_written(laptop_rig, api, monkeypatch):
+async def test_a_paused_chat_reads_paused_when_its_pause_event_is_written(laptop_rig, api, session_factory, monkeypatch):
     rig = laptop_rig
     store = api.app.state.session_store
-    seen: list[str] = []
+    seen_with_the_event = text(
+        "SELECT s.status FROM sessions s WHERE s.id = :id "
+        "AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.type = 'session.pause')"
+    )
+
+    async def status_where_the_event_is() -> str | None:
+        # One statement on a connection of its own: the status as a reader that can see the event sees it.
+        async with session_factory() as db:
+            return (await db.execute(seen_with_the_event, {"id": rig.root})).scalar()
+
+    # A write of the status apart from the event's would leave a paused chat with no event, if the event's
+    # write then failed: with the event's write lost, no reader sees either.
     emit = store.emit_event
 
-    async def emit_reading_the_status(session_id, event_type, data, **kwargs):
-        if event_type == EventType.SESSION_PAUSE:
-            seen.append((await store.get_session(session_id)).status)
-        return await emit(session_id, event_type, data, **kwargs)
+    async def the_events_write_is_lost(*args, **kwargs):
+        raise ConnectionError("the database went away")
 
-    monkeypatch.setattr(store, "emit_event", emit_reading_the_status)
-    paused = await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+    with monkeypatch.context() as lost:
+        lost.setattr(store, "emit_event", the_events_write_is_lost)
+        with pytest.raises(ConnectionError):
+            await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+    assert (await store.get_session(rig.root)).status == "active" and await status_where_the_event_is() is None
+    monkeypatch.setattr(store, "emit_event", emit)
+
+    # Where a reader stands.  At the event's announcement, which a waiting call and the stream wake on:
+    announced: list[str | None] = []
+
+    async def reading_the_status(channel, message):
+        if str(message).endswith(f":{EventType.SESSION_PAUSE.value}"):
+            announced.append(await status_where_the_event_is())
+
+    # The store announces an event once it is committed; here to a listener that reads at once.
+    monkeypatch.setattr(store, "_redis", SimpleNamespace(publish=reading_the_status))
+    # And from a second connection that polls for the event's row all through the pause.
+    polled: list[str] = []
+
+    async def polling() -> None:
+        while True:
+            status = await status_where_the_event_is()
+            if status is not None:
+                polled.append(status)
+            await asyncio.sleep(0)
+
+    poller = asyncio.create_task(polling())
+    try:
+        paused = await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+        await asyncio.sleep(0.2)
+    finally:
+        poller.cancel()
+        await asyncio.gather(poller, return_exceptions=True)
     assert paused.status_code == 200, paused.text
-    assert seen == ["paused"]
+    # No reader that can see the session.pause event sees a status other than paused.
+    assert announced == ["paused"]
+    assert polled and set(polled) == {"paused"}
 
 
 async def test_a_chat_resumed_after_a_pause_reports_its_call_stopped(laptop_rig, api, session_factory, redis_client):

@@ -15,6 +15,7 @@ import base64
 import json
 from typing import Any
 
+from surogates.devices.binding import device_of
 from surogates.sandbox.base import MAX_FILE_BYTES, SandboxUnavailableError
 from surogates.sandbox.pool import SandboxPool
 from surogates.workstreams import is_project_thread
@@ -28,13 +29,20 @@ def has_copy(sandbox_pool: Any, owner: Any) -> bool:
 def writes_to_copy(sandbox_pool: Any, owner: Any, session_config: dict[str, Any] | None) -> bool:
     """Whether a file a harness tool makes goes to a thread's copy, or nowhere.
 
-    It does over a pod that holds a copy, a thread's delegate child's
-    included, and for a thread that works on one, whose pod may be gone:
-    a project's thread with a storage bucket.  A thread with none has the
-    real files for its workspace, as any other session.
+    It does over a pod that holds a copy, and for a session that works on
+    one, whose pod may be gone or not up yet: a project's thread, or a
+    thread's helper, with a storage bucket.  A thread with none has the
+    real files for its workspace, as any other session.  So has a thread
+    of a project too large for history: it works on the real files, and
+    what a tool makes for it is saved there.  And so has a thread on the
+    user's computer, in its folder there, with its helpers.
     """
     config = session_config or {}
-    return has_copy(sandbox_pool, owner) or (bool(config.get("storage_bucket")) and is_project_thread(config))
+    works_on_a_copy = (
+        bool(config.get("storage_bucket")) and (is_project_thread(config) or bool(config.get("history_thread")))
+        and not config.get("history_off") and device_of(config) is None
+    )
+    return has_copy(sandbox_pool, owner) or works_on_a_copy
 
 
 async def _file(sandbox_pool: SandboxPool, owner: Any, request: dict[str, Any], done: str) -> dict[str, Any]:
