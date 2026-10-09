@@ -234,7 +234,7 @@ describe("Settings → Folders and permissions", () => {
     expect(await binding(CHAT)).toMatchObject({ takenOver: true });
     expect(await navigate(CHAT)).toEqual(PAUSED);
     // Handed back, by its user: the agent drives the browser again, and the chat's next call asks its first use.
-    expect(await handBackAtClick(shell, client, CHAT, "hand_back")).toBe(true);
+    expect(await handBackAtClick(shell, client, CHAT, "hand_back")).toBe("confirmed");
     expect(await binding(CHAT)).toMatchObject({ takenOver: false });
     // Not one native box in any of it.
     expect(await boxes()).toBe(before);
