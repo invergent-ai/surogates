@@ -59,8 +59,9 @@ scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
 [project.optional-dependencies]
 # `surogates voice`: phone calls through LiveKit SIP. The other processes never import it.
+# The speech plugins are the providers a line can bring its own key for (surogates/voice/providers).
 voice = [
-    "livekit-agents[silero]~=1.8",
+    "livekit-agents[silero,elevenlabs,cartesia,deepgram,openai,gradium,fishaudio]~=1.8.5",
     "livekit-api~=1.2",
     "numpy>=2.0",
     "scipy>=1.14",

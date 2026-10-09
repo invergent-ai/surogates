@@ -22,6 +22,7 @@ from surogates.channels.constants import queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.interactive_input import try_resolve_text_answer
+from surogates.voice.lines import Lines, default_lines, language_name
 from surogates.voice.text import fold, words
 from surogates.tools.builtin.ask_user_question import ASK_USER_QUESTION_MAX_WAIT_SECONDS
 
@@ -35,13 +36,18 @@ class TurnFailed(Exception):
     """The agent's turn failed before it said anything (``session.fail``): the caller must hear an apology."""
 
 
-FILLER = "O clipă, verific."  # said for the agent when it starts a tool without a word
-SORRY_TURN = "Îmi pare rău, nu am reușit să răspund acum. Vă rog să mai întrebați o dată."
 ANONYMOUS = "anonymous"
-HEARD_NONE = "[Apelantul te-a întrerupt înainte să audă răspunsul tău anterior.] "
-HEARD_PART = "[Apelantul te-a întrerupt; din răspunsul tău anterior a auzit doar: «{}».] "
-GREETED = "[Ai răspuns deja la telefon cu: «{}».] "
-GREETING_CUT = "[Ai răspuns la telefon, dar apelantul te-a întrerupt după: «{}».] "
+# Notes to the agent, put before the caller's next words. Never spoken, so English on every line: the
+# model reads them in any language. The first one also says which language the call is in.
+HEARD_NONE = "[The caller interrupted you before hearing your previous answer.] "
+HEARD_PART = "[The caller interrupted you; of your previous answer they heard only: «{}».] "
+SPEAK = "[This call is in {0}: speak only {0}.] "
+
+
+def speak_note(language: str) -> str:
+    return SPEAK.format(language_name(language))
+GREETED = "[You already answered the phone with: «{}».] "
+GREETING_CUT = "[You answered the phone, but the caller interrupted you after: «{}».] "
 
 
 def normalize_caller(raw: str | None) -> str:
@@ -61,7 +67,7 @@ def _words(text: str) -> str:
     return " ".join(words(fold(text)))
 
 
-def question_text(arguments: Any, said: str = "") -> str:
+def question_text(arguments: Any, said: str = "", choices_line: str = default_lines("ro").choices) -> str:
     """An ``ask_user_question`` call as spoken questions, each with its choices read as a list.
 
     A prompt the agent already spoke in ``said`` is not repeated: only its choices are added. Models
@@ -83,7 +89,7 @@ def question_text(arguments: Any, said: str = "") -> str:
             continue
         labels = [str(c.get("label")).strip() for c in q.get("choices") or []
                   if isinstance(c, dict) and str(c.get("label") or "").strip()]
-        choices = f"Variante: {', '.join(labels)}." if labels else ""
+        choices = choices_line.replace("{}", ", ".join(labels), 1) if labels else ""  # the owner's text: not a template
         repeated = (asked and not spoken) or _words(str(q["prompt"])) in _words(said)
         prompt = "" if repeated else str(q["prompt"]).strip()
         spoken.append(" ".join(p for p in (prompt, choices) if p))
@@ -111,6 +117,8 @@ class CallSession:
     agent_id: str
     user_id: UUID
     caller: str
+    language: str = "ro"
+    lines: Lines = default_lines("ro")
     note: str = ""  # said to the agent before the caller's next words (greeting, what a barge-in cut)
     ending: bool = False  # the agent called end_call: hang up once its goodbye is spoken
     # told True when a tool starts and False when the answer resumes: LiveKit keeps the agent "speaking"
@@ -175,7 +183,7 @@ class CallSession:
                         said += data["content"]
                         yield data["content"]
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":
-                        if question := question_text(data.get("arguments"), said):
+                        if question := question_text(data.get("arguments"), said, self.lines.choices):
                             yield f" {question}" if said else question
                         return
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "end_call":
@@ -187,7 +195,7 @@ class CallSession:
                         if not said and not announced:
                             # a tool started in silence: the caller would hear only typing until it returns
                             announced = True
-                            yield FILLER + " "  # the space releases it from the sentence splitter now
+                            yield self.lines.filler + " "  # the space releases it from the sentence splitter now
                     elif _final_answer(e):
                         # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
                         if not said and (content := str((data.get("message") or {}).get("content") or "").strip()):
@@ -197,7 +205,7 @@ class CallSession:
                         return
                 if loop.time() - began > (turn_timeout if started else start_timeout):
                     await self.interrupt()
-                    yield SORRY_TURN
+                    yield self.lines.sorry_turn
                     return
                 try:
                     if await pubsub.get_message(ignore_subscribe_messages=True, timeout=POLL_SECONDS):
@@ -210,6 +218,7 @@ class CallSession:
             if looking:
                 self._lookup(False)
             await pubsub.aclose()
+
 
     def _lookup(self, on: bool) -> None:
         if self.on_lookup is not None:
@@ -249,7 +258,7 @@ class CallSession:
         """
         heard = heard.strip()
         if not self._user_event:  # nothing asked yet: it was the greeting
-            self.note = GREETING_CUT.format(heard) if heard else ""
+            self.note = speak_note(self.language) + (GREETING_CUT.format(heard) if heard else "")
             return
         events = await self.store.get_events(self.session_id, after=self._user_event)
         written = any(e.type == EventType.LLM_RESPONSE.value for e in events)
@@ -267,7 +276,7 @@ class VoiceSessions:
         self._store, self._redis, self._sf, self._storage, self._settings = store, redis, session_factory, storage, settings
 
     async def open_call(self, target: CallTarget, *, call_id: str, called: str, caller: str | None,
-                        greeting: str = "") -> CallSession:
+                        greeting: str = "", language: str = "ro", lines: Lines | None = None) -> CallSession:
         """A fresh session for this call. It is the call's own, identity and memory both, unless the agent
         remembers callers and the number is known: then the number is the identity and the memory scope.
 
@@ -279,7 +288,7 @@ class VoiceSessions:
         remember = target.remember_callers and caller_id != ANONYMOUS
         ident = await get_or_create_channel_identity(
             self._sf, platform="voice", platform_user_id=caller_id if remember else f"call:{call_id}",
-            org_id=target.org_id, display_name=caller_id if caller_id != ANONYMOUS else "apelant anonim")
+            org_id=target.org_id, display_name=caller_id if caller_id != ANONYMOUS else "anonymous caller")
         session_id = await get_or_create_channel_session(
             self._store, self._redis, session_key=f"agent:voice:call:{call_id}", user_id=ident.user_id,
             org_id=target.org_id, agent_id=target.agent_id, channel="voice",
@@ -287,5 +296,6 @@ class VoiceSessions:
                     "voice_call_id": call_id, "voice_called": called, "voice_caller": caller_id, "multi_party": False},
             session_factory=self._sf, storage=self._storage, settings=self._settings)
         return CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=target.org_id,
-                           agent_id=target.agent_id, user_id=ident.user_id, caller=caller_id,
-                           note=GREETED.format(greeting) if greeting else "")
+                           agent_id=target.agent_id, user_id=ident.user_id, caller=caller_id, language=language,
+                           lines=lines or default_lines(language),
+                           note=speak_note(language) + (GREETED.format(greeting) if greeting else ""))
