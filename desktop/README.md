@@ -278,12 +278,13 @@ release into `/opt/surogate`, and is each version's root helper for updates (`--
 A company whose network inspects TLS, or whose server has a certificate authority of its own, gives
 the script that CA as a PEM file. Every user's app then trusts it beside the public roots, and so do
 the user's Chrome, Edge and Brave, in the NSS database Chromium reads. The person's own curl must
-reach the script first (here with `--cacert`); `sudo rm /etc/surogate/ca.pem` stops trusting it.
-Where the only way out is a proxy that the computer must name (the desktop's proxy settings, a PAC
-file, `HTTPS_PROXY`), the window goes through it and the device link does not, so the computer is
-not linked there:
+reach the script first (here with `--cacert`); `sudo rm /etc/surogate/ca.pem` stops trusting it:
 
     curl --cacert company-ca.pem -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --ca-cert company-ca.pem
+
+Where the only way out is a proxy that the computer must name (the desktop's proxy settings, a PAC
+file, `HTTPS_PROXY`), the window goes through it and the device link does not: the computer is not
+linked there.
 
 ## When Surogate Desktop says to remove it and install it again
 
