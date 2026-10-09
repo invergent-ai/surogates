@@ -771,7 +771,7 @@ class AgentHarness(
         self._interrupt_requested = False
         self._interrupt_message = None
 
-    async def _has_stranded_user_message(self, session_id: UUID) -> bool:
+    async def _has_stranded_user_message(self, session: Session) -> bool:
         """Return True if a real user message landed past the harness cursor.
 
         Detects the completion race: a reply sent between the final
@@ -787,14 +787,26 @@ class AgentHarness(
         inbox.task_complete) always sit past the cursor and are
         excluded by the type filter.
         """
-        cursor = await self._store.get_harness_cursor(session_id)
+        cursor = await self._store.get_harness_cursor(session.id)
         events = await self._store.get_events(
-            session_id,
+            session.id,
             after=cursor,
-            types=[EventType.USER_MESSAGE],
+            types=[
+                EventType.USER_MESSAGE, EventType.HARNESS_WAKE, EventType.LLM_REQUEST,
+                EventType.LLM_RESPONSE, EventType.CODE_RUN_RESULT,
+            ],
         )
+        # A command the harness has answered is not stranded, though the
+        # cursor may lie before it: a command's end leaves the cursor
+        # before a report no turn has read.
         return any(
-            not (event.data or {}).get("synthetic") for event in events
+            event.type == EventType.USER_MESSAGE.value
+            and not (event.data or {}).get("synthetic")
+            and not (
+                self._answers_itself(_user_event_text(event.data), session)
+                and _command_answered(events, event.id)
+            )
+            for event in events
         )
 
     def _answers_itself(self, text: str, session: Session) -> bool:
@@ -806,17 +818,24 @@ class AgentHarness(
             or _slash_command_name(text) not in (None, _COMMAND_FOR_THE_MODEL)
         )
 
-    def _command_waits(self, session: Session, events: list) -> bool:
-        """Whether the user's last message in *events* is a command of the
-        harness's that no wake has answered.  That is work for a wake
-        whatever the cursor says, and whatever the session was in the
-        middle of when it was typed."""
-        typed_at = _latest_user_event_id(events)
-        return (
-            typed_at is not None
-            and self._answers_itself(_latest_user_event_text(events), session)
-            and not _command_answered(events, typed_at)
-        )
+    def _waiting_command(self, session: Session, events: list) -> tuple[int, str] | None:
+        """The command of the harness's that waits in *events* for its
+        answer, as (its event's id, what the user typed); None when none
+        does.  It is the user's last message, or the last one of their own
+        when the harness queued a message after it (a goal's next turn).
+        That is work for a wake whatever the cursor says, and whatever the
+        session was in the middle of when it was typed."""
+        own = next((
+            event for event in reversed(events)
+            if event.type == EventType.USER_MESSAGE.value and not (event.data or {}).get("synthetic")
+        ), None)
+        for typed_at, text in (
+            (_latest_user_event_id(events), _latest_user_event_text(events)),
+            (own.id, _user_event_text(own.data)) if own is not None else (None, ""),
+        ):
+            if typed_at is not None and self._answers_itself(text, session) and not _command_answered(events, typed_at):
+                return typed_at, text
+        return None
 
     async def _has_waiting_command(self, session: Session) -> bool:
         """Whether a command typed during the turn that ended this session
@@ -828,7 +847,7 @@ class AgentHarness(
             session.id, after=typed.id,
             types=[EventType.HARNESS_WAKE, EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.CODE_RUN_RESULT],
         )
-        return self._command_waits(session, [typed, *since])
+        return self._waiting_command(session, [typed, *since]) is not None
 
     async def _expand_last_skill_again(self, session: Session, messages: list[dict], all_events: list) -> None:
         """Put back the skill the user's last message ran at its own wake,
@@ -1272,7 +1291,7 @@ class AgentHarness(
             revived_by: str | None = None
             if session.status in ("paused", "completed", "failed", "archived"):
                 if session.status in ("completed", "failed"):
-                    if await self._has_stranded_user_message(session_id) or (
+                    if await self._has_stranded_user_message(session) or (
                         # A failed session is its user's to retry.
                         session.status == "completed" and await self._has_waiting_command(session)
                     ):
@@ -1388,7 +1407,7 @@ class AgentHarness(
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending and not resumable(session, all_events) and not self._command_waits(session, all_events):
+            if not pending and not resumable(session, all_events) and self._waiting_command(session, all_events) is None:
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -1537,13 +1556,16 @@ class AgentHarness(
             # it open, and goes on to the model's turn only where the
             # session works between its user's messages, as a mission's
             # coordinator does.
+            waiting = self._waiting_command(session, all_events)
+            typed_at = _latest_user_event_id(all_events) or 0
+            if waiting is not None:
+                typed_at, last_user_content = waiting
             slash_block = self._slash_command_block_reason(
                 last_user_content, session,
             )
             command = _slash_command_name(last_user_content)
             if slash_block is not None or command not in (None, _COMMAND_FOR_THE_MODEL):
-                typed_at = _latest_user_event_id(all_events) or 0
-                is_new = not _command_answered(all_events, typed_at)
+                is_new = waiting is not None
                 # The log as this wake found it, or with what was written
                 # since when this wake answers the command.
                 written = all_events
@@ -1562,9 +1584,14 @@ class AgentHarness(
                         session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
                     )
                 at_rest = await self._end_command_turn(session, lease, typed_at, written)
-                if is_new and self._redis is not None and self._goal_waits(session, written):
-                    # The wake the goal's turn queued may have come and
-                    # gone while this command held the session.
+                if is_new and self._redis is not None and (
+                    self._goal_waits(session, written)
+                    or is_project_master(session.config) and unread_reports(written)
+                ):
+                    # What still waits for the model, a goal's next turn or
+                    # a thread's report to its master, gets its wake: the
+                    # one it queued may have come and gone, for nothing,
+                    # while this command was the session's work.
                     from surogates.config import enqueue_session
 
                     await enqueue_session(

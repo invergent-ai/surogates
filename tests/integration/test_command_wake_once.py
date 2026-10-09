@@ -35,7 +35,7 @@ from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
 
 from .test_devices import AGENT_ID, api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import TODO_CALL, answered, start, turn_ends
+from .test_workstream_threads import TODO_CALL, answered, queued, start, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -108,6 +108,7 @@ class Workers:
         self.during_the_request = None
         self.during_the_tool_call = None
         self._workers = 0
+        self._taken_from_the_queue = False
         self._work_done = asyncio.Event()
         monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
 
@@ -218,6 +219,13 @@ class Workers:
         """The chat's user sends *words*, as the web client does."""
         sent = await self.api.client.post(f"/v1/sessions/{chat}/messages", json={"content": words}, headers=self.api.auth())
         assert sent.status_code == 202, sent.text
+        if self._taken_from_the_queue:
+            await self.nobody_is_queued()
+
+    async def nobody_is_queued(self) -> None:
+        """From now on a dispatcher takes each wake a message queues: what is queued after is the harness's doing."""
+        self._taken_from_the_queue = True
+        await self.api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
 
     async def types(self, chat: UUID, command: str, commands: SlashCommandConfig | None = None) -> str:
         """The chat's user sends *command*, and the wake their message queued answers it: the answer."""
@@ -776,14 +784,54 @@ async def test_a_goal_in_flight_goes_on_after_a_command_typed_between_its_turns(
     waiting = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1]
     assert (waiting.data.get("synthetic"), await workers.status(chat)) == ("outcome_continuation", "active")
 
+    await workers.nobody_is_queued()
     await workers.types(chat, command)
-    # The command is answered, and the chat does not rest on it: the goal's turn still waits.
+    # The command is answered, and the chat does not rest on it: the goal's turn still waits, and is queued.
     assert (await workers.status(chat), await workers.nothing_waits(chat)) == ("active", False)
+    assert await queued(workers.api, await workers.session(chat))
     await workers.wake(chat)
 
     assert len(workers.requests) == 2
     assert {"role": "user", "content": waiting.data["content"]} in workers.requests[1]
     assert workers.ran == ["_handle_goal_command", ANSWERED[command]]
+
+
+@pytest.mark.parametrize("moment", MOMENTS)
+async def test_a_command_typed_during_a_goals_turn_is_run_though_the_goals_next_turn_was_queued_after_it(workers, moment):
+    chat = await workers.chat()
+    await workers.types(chat, "/goal Ship the Q3 report")
+
+    async def the_user_asks():
+        await workers.says(chat, "/goal status")
+
+    workers.replies.append(TODO_CALL)
+    if moment == "a tool call":
+        workers.during_the_tool_call = the_user_asks
+    else:
+        workers.during_the_request = the_user_asks
+    await workers.wake(chat)
+    # The goal's turn ended with more to do: the message that queues its next turn is the log's last.
+    waiting = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1]
+    assert (waiting.data.get("synthetic"), workers.ran, len(workers.requests)) == ("outcome_continuation", ["_handle_goal_command"], 2)
+
+    await workers.wake(chat)
+    # The command first: it is its user's last word, and nothing has answered it.
+    assert (workers.ran, len(workers.requests)) == (["_handle_goal_command"] * 2, 2)
+    assert (await workers.said(chat))[-1].startswith("Outcome (active, ")
+
+    await workers.wake(chat)
+    assert (workers.ran, len(workers.requests)) == (["_handle_goal_command"] * 2, 3)
+    assert {"role": "user", "content": waiting.data["content"]} in workers.requests[2]
+
+
+@pytest.mark.parametrize("status", ["paused", "failed"])
+async def test_a_command_typed_in_a_chat_that_was_stopped_or_had_failed_is_run_once(workers, status):
+    chat = await workers.chat()
+    await workers.store.update_session_status(chat, status)
+    await workers.types(chat, "/goal status")
+    await workers.its_browser_is_handed_back(chat)
+    await workers.wake(chat)
+    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_goal_command"], [], "completed")
 
 
 MISSION = "/mission Audit the Q3 figures\n\nRubric:\n- every figure is sourced"
@@ -1001,6 +1049,29 @@ async def test_a_command_whose_turn_was_refused_before_any_wake_read_it_is_run_w
     # No wake had taken the command up: the cursor behind which it lies is the failure's.
     assert workers.ran == ["_handle_compress_command"]
     assert (workers.requests, await workers.status(master.id)) == ([], "completed")
+
+
+async def test_a_report_that_reached_a_master_before_its_command_was_answered_is_read_after_it(api, workers):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await workers.types(master.id, "/goal status")
+    workers.ran.clear()
+    # The master's thread reports, and before any wake reads the report its user types a command.
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await workers.nobody_is_queued()
+    await workers.says(master.id, "/compress")
+
+    # One wake answers the command, rests the master, and queues it for the report still unread.
+    await workers.wake(master.id)
+    assert (workers.ran, workers.requests, await workers.status(master.id)) == (["_handle_compress_command"], [], "completed")
+    assert await queued(api, await workers.session(master.id))
+
+    await workers.wake(master.id)
+    assert workers.ran == ["_handle_compress_command"]
+    assert [conversation[-1]["content"].split("]")[0] for conversation in workers.requests] == [
+        f'[Thread "Draft A" ({thread.id}) reported',
+    ]
 
 
 # -- The sweeper --
