@@ -23,7 +23,7 @@ from surogates.session.store import SessionStore
 from surogates.tools.builtin import file_ops
 
 from .test_desktop_file_operations import journal_dir  # noqa: F401  (fixture)
-from .test_desktop_link_client import built_client, client, connected  # noqa: F401  (fixture)
+from .test_desktop_link_client import built_client, client, connected, ended  # noqa: F401  (fixture)
 from .test_device_transfers import PDF_TEXT, StoppingStore, big_text, consumed_of, pdf
 from .test_device_writes import big_file, reporting
 from .test_devices import (  # noqa: F401  (fixtures)
@@ -52,20 +52,6 @@ async def operations_of(session_factory, root: UUID) -> int:
         return (await db.execute(
             select(func.count()).select_from(DeviceOperation).where(DeviceOperation.root_session_id == root)
         )).scalar_one()
-
-
-async def ended(task: asyncio.Task | None, within: float = 30.0) -> None:
-    """Stop *task* if it still runs, and wait until it has ended, *within* seconds at most.
-
-    For a test's ``finally``, so that a test that failed leaves no task behind
-    either: a task still pending when the run's loop closes is cancelled there
-    once, and waited for without a bound.
-    """
-    if task is None or task.done():
-        return
-    task.cancel()
-    done, _ = await asyncio.wait({task}, timeout=within)
-    assert done, "stopped, the task did not end"
 
 
 async def test_a_worker_stopped_after_the_app_sent_a_30_mib_pdf_resumes_with_the_same_bytes(
