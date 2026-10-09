@@ -143,8 +143,8 @@ async def tell_pane(
 
 def of_a_sub_agent(event: Any) -> bool:
     """Whether a browser event in a session's log names another session: a sub-agent's tab, written to
-    its root chat's log for the chat's pane."""
-    named = event.data.get("session_id")
+    its root chat's log for the chat's pane.  One with no data names none."""
+    named = (event.data or {}).get("session_id")
     return named is not None and str(named) != str(event.session_id)
 
 

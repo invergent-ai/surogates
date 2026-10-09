@@ -304,6 +304,18 @@ def test_a_sub_agents_tab_closed_on_the_computer_is_not_told_to_its_root_chats_a
         assert "The browser was closed" in note
 
 
+def test_a_browser_event_with_no_data_names_no_session_and_does_not_stop_the_replay() -> None:
+    from surogates.devices.browser import of_a_sub_agent
+    from surogates.harness.loop import AgentHarness
+
+    # As no writer makes it. Read as the session's own, as one that names no session is.
+    bare = SimpleNamespace(id=1, session_id=uuid4(), type=EventType.BROWSER_DESTROYED.value, data=None)
+
+    assert of_a_sub_agent(bare) is False
+    [note] = AgentHarness._rebuild_messages(SimpleNamespace(), [bare])
+    assert "The browser was closed" in note["content"]
+
+
 async def test_a_pane_that_cannot_be_told_leaves_the_browser_call_answered(computer) -> None:
     rig = computer({"ok": {"url": "https://example.com/", "title": "Example", "opened": True, "notices": []}})
 
