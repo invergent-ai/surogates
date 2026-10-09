@@ -77,9 +77,9 @@ describe("the folder sheet", () => {
     // Each mode is named by its label alone, and described by its description.
     expect(await sheet.getByRole("radio", { name: "Work freely", exact: true }).isChecked()).toBe(true);
     expect(await sheet.getAttribute('input[value="free"]', "aria-describedby")).toBe("choice-free");
-    // What allows is held back at first, and the keyboard starts on the mode chosen.
+    // What allows is held back at first, and the keyboard starts on Cancel.
     expect(await sheet.getAttribute("#prompt-buttons", "data-held")).toBe("true");
-    expect(await sheet.evaluate(() => (document.activeElement as HTMLInputElement).value)).toBe("free");
+    expect(await sheet.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("cancel");
     expect(await sheet.getAttribute(".prompt", "role")).toBe("alertdialog");
     // Described by what it asks about too, not by its lead alone: a screen reader names the folder as it opens.
     expect(await sheet.evaluate(() => document.querySelector(".prompt")!.getAttribute("aria-describedby")!.split(" ")
@@ -103,11 +103,12 @@ describe("the folder sheet", () => {
     expect(await prepared).toMatchObject({ folder, mode: "free" });
   });
 
-  it("takes no Enter before its input protection has passed, nor one held down, and Enter accepts after", async () => {
+  it("takes no Enter before its input protection has passed, nor one held down, and Enter on Use this folder accepts after", async () => {
     const client = await signedIn();
     const prepared = prepare(client);
     const sheet = await prompt(app!);
     expect(await sheet.getAttribute("#prompt-buttons", "data-held")).toBe("true");
+    await sheet.focus('[data-id="accept"]');
     // Typed as it opened, then held: the key repeats once it may answer.
     await sheet.keyboard.down("Enter");
     await expect.poll(() => sheet.getAttribute("#prompt-buttons", "data-held")).toBe("false");
@@ -184,6 +185,41 @@ describe("the folder sheet", () => {
     await touch("touchStart");
     await touch("touchEnd");
     expect(await prepared).toBeNull();
+  });
+
+  it("starts with the keyboard on Cancel and takes Return only on a button: a sentence typed once the sheet takes keys, a pause and Return leave the folder unbound; a person who picks the mode and walks to Use this folder binds it in that mode, by keys alone", async () => {
+    const client = await signedIn();
+    const on = (sheet: Page) => sheet.evaluate(() => (document.activeElement as HTMLElement).dataset.id ?? (document.activeElement as HTMLInputElement).value ?? null);
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 650));
+    let prepared = prepare(client);
+    let sheet = await prompt(app!);
+    // The mode shown is Work freely, and the keyboard is not on it.
+    expect([await on(sheet), await sheet.getByRole("radio", { name: "Work freely", exact: true }).isChecked()]).toEqual(["cancel", true]);
+    await expect.poll(() => heldBack(sheet)).toBe(false);
+    await sheet.keyboard.type("and also the docs", { delay: 100 });
+    await pause();
+    await sheet.keyboard.press("Enter").catch(() => {});
+    expect(await prepared).toBeNull();
+    // Return on the mode's own radios does nothing, a pause after the key before it.
+    prepared = prepare(client);
+    sheet = await prompt(app!);
+    await expect.poll(() => heldBack(sheet)).toBe(false);
+    await sheet.keyboard.press("Shift+Tab");
+    expect(await on(sheet)).toBe("free");
+    await pause();
+    await sheet.keyboard.press("Enter");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await promptsShown(app!)).toBe(1);
+    // An arrow picks the other mode; Tab walks to Use this folder; Return there, a pause on, binds it so.
+    await pause();
+    await sheet.keyboard.press("ArrowDown");
+    expect(await on(sheet)).toBe("ask");
+    await pause();
+    for (let n = 0; n < 4 && (await on(sheet)) !== "accept"; n += 1) await sheet.keyboard.press("Tab");
+    expect(await on(sheet)).toBe("accept");
+    await pause();
+    await sheet.keyboard.press("Enter").catch(() => {});
+    expect(await prepared).toMatchObject({ folder, mode: "ask" });
   });
 
   it("holds back what allows again once focus leaves it, and takes the focus back from the app's window", async () => {
@@ -365,7 +401,6 @@ describe("a prompt's text", () => {
           buttons: [{ id: "deny", label: "Deny", allows: false }, { id: "allow", label: "Allow once", allows: true }],
           focus: "deny",
           cancel: "deny",
-          enter: null,
           height: 400,
         },
         queue: { waiting: () => 0, onChange: () => () => {} },
@@ -835,6 +870,7 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
     const client = await signedIn();
     // To *button*, by Tab once the prompt takes keys, and one key on it once the protection has passed since the last.
     const reach = async (asked: Page, button: string, with_: string) => {
+      await pause();
       await expect.poll(() => heldBack(asked)).toBe(false);
       for (let n = 0; n < 8 && (await active(asked)) !== button; n += 1) await asked.keyboard.press("Tab");
       expect(await active(asked)).toBe(button);
@@ -845,13 +881,14 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
     const prepared = prepare(client);
     let asked = await prompt(app!);
     await expect.poll(() => heldBack(asked)).toBe(false);
-    // The mode: an arrow moves the choice, and Enter accepts.
+    // The mode: Shift+Tab from Cancel reaches it, an arrow moves the choice, and Enter on Use this folder accepts.
+    await asked.keyboard.press("Shift+Tab");
     const first = await active(asked);
+    await pause();
     await asked.keyboard.press("ArrowDown");
     const chosen = await active(asked);
-    expect(chosen).not.toBe(first);
-    await pause();
-    await asked.keyboard.press("Enter").catch(() => {});
+    expect([first, chosen]).toEqual(["free", "ask"]);
+    await reach(asked, "accept", "Enter");
     const ready = (await prepared)!;
     expect(ready).toMatchObject({ folder, mode: chosen });
     expect(await outcome(send("bind", { folder: ready.folder, nonce: ready.nonce }))).toEqual({ ok: null });

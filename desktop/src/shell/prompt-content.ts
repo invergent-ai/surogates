@@ -39,9 +39,8 @@ export interface PromptContent {
   notes: string[]; // what the user should know before answering
   choice: PromptChoice | null;
   buttons: PromptButton[]; // left to right; the last is drawn as the main one
-  focus: string; // the button focused as it opens, or "choice": the option chosen
+  focus: string; // the button focused as it opens
   cancel: string; // Escape's, and a window closed some other way
-  enter: string | null; // what Enter does from anywhere but a button
   height: number; // the window's, in px
 }
 
@@ -92,9 +91,9 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
       notes: [],
       choice: null,
       buttons: [button("cancel", "Cancel"), button("change", "Change…")],
-      focus: "change",
+      // Change opens the system's folder dialog over the app: Cancel is the one that does nothing.
+      focus: "cancel",
       cancel: "cancel",
-      enter: null,
       height: 280 + room,
     };
   }
@@ -105,10 +104,10 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     notes: sheet.links ? [linked(sheet.links)] : [],
     choice: { ...MODES, value: sheet.mode },
     buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
-    // On the mode, not on Use this folder: a space typed as the sheet opens only picks the mode already picked.
-    focus: "choice",
+    // On Cancel, as every prompt starts on the button that changes nothing: a Return of a person who was typing
+    // elsewhere binds no folder. The mode is theirs to pick, and Use this folder theirs to walk to.
+    focus: "cancel",
     cancel: "cancel",
-    enter: "accept",
     height: (sheet.links ? 550 : 490) + room,
   };
 }
@@ -144,7 +143,6 @@ const OPERATION = {
   buttons: [button("deny", "Deny"), button("stop_asking", "Allow and stop asking", true), button("allow", "Allow once", true)],
   focus: "deny",
   cancel: "deny",
-  enter: null,
 };
 
 /** The prompt for one operation or network destination (spec, Section 4): its buttons' ids are the answers. */
@@ -217,7 +215,6 @@ export function approval(request: ApprovalRequest): PromptContent {
     buttons: [button("deny", "Deny"), button("allow_session", "Allow all its ports for this chat", true), button("allow", "Allow", true)],
     focus: "deny",
     cancel: "deny",
-    enter: null,
     // Tall enough to show the title, the lead, the warning and the whole address as it opens: a title past
     // 30 characters wraps to three lines of 25 px, and a line of 19 px in the address's block holds about 40.
     height: 245 + (title.length > 30 ? 75 : 25) + (request.privateNetwork ? 70 : 0) + Math.ceil(address.length / 40) * 19,
@@ -273,7 +270,6 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
       focus: "deny",
       cancel: "deny",
-      enter: null,
       height: 380,
     };
   }
@@ -354,7 +350,6 @@ export function handBack(request: HandBackRequest): PromptContent {
     buttons: [button("keep", "Keep control"), button("hand_back", "Hand back", true)],
     focus: "keep",
     cancel: "keep",
-    enter: null,
     // With room for the field's two lines, which the longest title it shows takes: one size for any title.
     height: details.length > 0 ? 300 : 230,
   };
@@ -371,7 +366,6 @@ export function freeMode(chat: ChatLabel): PromptContent {
     buttons: [button("keep", "Keep asking"), button("free", "Work freely", true)],
     focus: "keep",
     cancel: "keep",
-    enter: null,
     height: 300,
   };
 }

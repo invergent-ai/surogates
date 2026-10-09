@@ -19,7 +19,6 @@ interface Content {
   buttons: Array<{ id: string; label: string; allows: boolean }>;
   focus: string;
   cancel: string;
-  enter: string | null;
 }
 
 interface State {
@@ -199,8 +198,7 @@ function draw(state: State): void {
   }));
   waiting(state.waiting);
   hold();
-  const focus = content.focus === "choice" ? "#prompt-choice input:checked" : `#prompt-buttons button[data-id="${content.focus}"]`;
-  document.querySelector<HTMLElement>(focus)?.focus();
+  document.querySelector<HTMLElement>(`#prompt-buttons button[data-id="${content.focus}"]`)?.focus();
 }
 
 document.addEventListener("keydown", (event) => {
@@ -208,9 +206,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     answer(content.cancel);
-  } else if (event.key === "Enter" && content.enter !== null && !(event.target instanceof HTMLButtonElement)) {
-    event.preventDefault();
-    answer(content.enter);
   }
 });
 

@@ -11,14 +11,14 @@ const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map
 const allowing = (content: { buttons: Array<{ id: string; allows: boolean }> }) => content.buttons.filter((b) => b.allows).map((b) => b.id);
 
 describe("the folder sheet", () => {
-  it("shows the folder and both modes, focused on the mode, with Use this folder held back and on Enter", () => {
+  it("shows the folder and both modes, focused on Cancel, with Use this folder held back", () => {
     const content = folderSheet(SHEET);
     expect(content.title).toBe("Work in notes?");
     expect(content.details).toEqual([{ label: "Folder", value: "/home/me/notes", code: true, keep: "" }]);
     expect(content.choice?.options.map((option) => option.value)).toEqual(["free", "ask"]);
     expect(content.choice?.value).toBe("free");
     expect([ids(content), allowing(content)]).toEqual([["cancel", "change", "accept"], ["accept"]]);
-    expect([content.focus, content.cancel, content.enter]).toEqual(["choice", "cancel", "accept"]);
+    expect([content.focus, content.cancel]).toEqual(["cancel", "cancel"]);
   });
 
   it("names the project's thread the folder is for, each name in a field of its own, and makes room for them", () => {
@@ -40,7 +40,7 @@ describe("the folder sheet", () => {
     const content = folderSheet({ ...SHEET, folder: "/home/me", refusal: "the folder /home/me holds this computer's home folder or the app's own data" });
     expect(content.title).toBe("me cannot be used");
     expect(content.lead).toContain("holds this computer's home folder");
-    expect([ids(content), allowing(content), content.choice, content.enter]).toEqual([["cancel", "change"], [], null, null]);
+    expect([ids(content), allowing(content), content.choice, content.focus]).toEqual([["cancel", "change"], [], null, "cancel"]);
   });
 
   it.each([
@@ -65,7 +65,7 @@ describe("an approval prompt", () => {
       { label: "In", value: "/home/me/notes/web", code: true, keep: "" },
     ]);
     expect([ids(content), allowing(content)]).toEqual([["deny", "stop_asking", "allow"], ["stop_asking", "allow"]]);
-    expect([content.focus, content.cancel, content.enter]).toEqual(["deny", "deny", null]);
+    expect([content.focus, content.cancel]).toEqual(["deny", "deny"]);
   });
 
   it.each([
@@ -191,7 +191,7 @@ describe("the hand back's confirmation", () => {
     // What it frees is every chat's browser here, not one chat's.
     expect(content.lead).toBe(`${LEAD} It was taken over from this chat.`);
     expect(content.details).toEqual([{ label: "Chat", value: "Quarterly report", code: true, keep: "" }]);
-    expect([ids(content), allowing(content), content.focus, content.cancel, content.enter]).toEqual([["keep", "hand_back"], ["hand_back"], "keep", "keep", null]);
+    expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["keep", "hand_back"], ["hand_back"], "keep", "keep"]);
     expect(content.buttons.map((button) => button.label)).toEqual(["Keep control", "Hand back"]);
   });
 
