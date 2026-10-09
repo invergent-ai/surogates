@@ -415,6 +415,27 @@ async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_w
     assert len(await workers.said(chat)) == len(before) + 1
 
 
+@pytest.mark.parametrize("command", ["/loop 1d Check the cash report", "/loop Check the cash report"])
+async def test_a_routine_is_made_once_also_when_the_worker_dies_before_it_says_so(workers, command):
+    chat = await workers.chat()
+    before = await workers.said(chat)
+    await workers.says(chat, command)
+    # The routine's row is written; the worker stops as it writes the answer.
+    await workers.wake_of_a_worker_that_dies(chat, "answering")
+    [routine] = await workers.routines()
+    assert await workers.said(chat) == before
+
+    assert await workers.swept(chat)
+    await workers.wake(chat)
+
+    # The command is still to answer, and its answer names the routine it had made.
+    assert [made.id for made in await workers.routines()] == [routine.id]
+    assert (await workers.said(chat))[-1].startswith(f"Loop scheduled: `{routine.id}`")
+    # The same words typed again are a second routine.
+    await workers.types(chat, command)
+    assert len(await workers.routines()) == 2
+
+
 DIED = ["/compress", "/clear", "/goal status", "/mission status", "/code status", "/loop 1d Check the cash report"]
 
 

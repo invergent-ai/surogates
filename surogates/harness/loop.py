@@ -235,6 +235,11 @@ def _mcp_tool_component(name: str) -> str:
 
 
 
+def _aware(moment: datetime) -> datetime:
+    """*moment* in UTC: the store gives some timestamps without their zone."""
+    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
+
+
 def _format_loop_list(rows: list[Any]) -> str:
     if not rows:
         return "No active loops."
@@ -4795,7 +4800,14 @@ class AgentHarness(
         elif command == "code":
             await self._handle_code_command(session, typed, lease, all_events)
         elif command == "loop":
-            await self._handle_loop_command(session, typed, lease)
+            typed_on = next(
+                (
+                    getattr(event, "created_at", None) for event in reversed(all_events)
+                    if event.type == EventType.USER_MESSAGE.value
+                ),
+                None,
+            )
+            await self._handle_loop_command(session, typed, lease, typed_on=typed_on)
 
     async def _end_command_turn(
         self,
@@ -4905,7 +4917,13 @@ class AgentHarness(
         session: Session,
         content: str,
         lease: SessionLease,
+        *,
+        typed_on: datetime | None = None,
     ) -> None:
+        """Answer ``/loop``.  *typed_on* is when the user sent it: a routine
+        this session made for the same prompt since then is the one a
+        worker made for this very command before it died, and is not made
+        a second time."""
         from surogates.scheduled.prompt_guard import (
             ScheduledPromptBlocked,
             validate_scheduled_prompt,
@@ -4970,9 +4988,21 @@ class AgentHarness(
             try:
                 parsed = parse_loop_command(raw)
                 validate_scheduled_prompt(parsed.prompt, source="loop")
+                made = None
+                if typed_on is not None:
+                    made = next((
+                        row for row in await store.list_for_user(
+                            org_id=self._tenant.org_id,
+                            user_id=principal_user_id,
+                            service_account_id=principal_sa_id,
+                            agent_id=session.agent_id,
+                            created_from_session_id=session.id,
+                        )
+                        if row.prompt == parsed.prompt and _aware(row.created_at) >= _aware(typed_on)
+                    ), None)
                 if parsed.interval is None:
                     schedule = parse_dynamic_loop_schedule(timezone_name="UTC")
-                    created = await store.create_dynamic_loop(
+                    created = made or await store.create_dynamic_loop(
                         org_id=self._tenant.org_id,
                         user_id=principal_user_id,
                         service_account_id=principal_sa_id,
@@ -4991,7 +5021,7 @@ class AgentHarness(
                     )
                 else:
                     schedule = parse_schedule(parsed.interval, timezone_name="UTC")
-                    created = await store.create_loop(
+                    created = made or await store.create_loop(
                         org_id=self._tenant.org_id,
                         user_id=principal_user_id,
                         service_account_id=principal_sa_id,
