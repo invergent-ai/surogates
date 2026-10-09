@@ -105,7 +105,7 @@ def _make_session() -> Session:
 
 
 def _steer_event(eid: int, text: str):
-    return SimpleNamespace(id=eid, data={"content": text})
+    return SimpleNamespace(id=eid, type=EventType.USER_MESSAGE.value, data={"content": text})
 
 
 async def _drive(harness, responses, monkeypatch, *, all_events=None):

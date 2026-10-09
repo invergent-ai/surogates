@@ -300,6 +300,55 @@ class SessionStore:
         # Populated lazily when a deliverable event is emitted.
         self._channel_cache: dict[UUID, tuple[str, dict]] = {}
 
+    async def answer_file_waits(self, session_id: UUID, *, before: int) -> int:
+        """Retire *session_id*'s waits on you over its files raised before event *before*; how many.
+
+        A message to the thread after the wait began is your answer.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                update(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id, InboxItem.kind == "action_required",
+                    InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files"}),
+                    InboxItem.source_event_id < before,
+                )
+                .values(status="responded", responded_at=func.now(), updated_at=func.now())
+            )
+            await db.commit()
+        return result.rowcount
+
+    async def land_file_waits(self, session_id: UUID, landed: set[str]) -> int:
+        """Take *landed*, the files a landing of *session_id*'s just landed, off its waits on you
+        over files that clashed again; how many waits that ended.
+
+        A wait whose files have all landed since asks nothing any more:
+        it is over, expired and not answered.  One over a landing that
+        could not be put back stays: its files are the user's to check.
+        """
+        ended = 0
+        async with self._sf() as db:
+            waits = (await db.execute(
+                select(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id, InboxItem.kind == "action_required",
+                    InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files", "escalated": False}),
+                )
+                .with_for_update()
+            )).scalars()
+            for wait in waits:
+                files = wait.payload.get("files") or []
+                left = [path for path in files if path not in landed]
+                if left == files:
+                    continue
+                if left:
+                    wait.payload = {**wait.payload, "files": left}
+                else:
+                    wait.status, ended = "expired", ended + 1
+                wait.updated_at = func.now()
+            await db.commit()
+        return ended
+
     _INBOX_TERMINAL = frozenset({"acknowledged", "responded", "expired"})
     _INBOX_ALLOWED_TRANSITIONS = {
         "pending": frozenset({"acknowledged", "responded", "expired"}),
@@ -2151,6 +2200,8 @@ class SessionStore:
             EventType.LLM_RESPONSE.value,
             EventType.TOOL_RESULT.value,
             EventType.USER_MESSAGE.value,
+            # A project coordinator's follow-up is something new said, too.
+            EventType.COORDINATOR_MESSAGE.value,
         )
         last_progress_id = (
             select(func.max(EventRow.id))
@@ -2915,8 +2966,8 @@ class SessionStore:
 #: The events a turn under way writes.  A log that ends on one of them, with
 #: no lease held, is a turn its worker left.
 _TURN_EVENT_TYPES = (
-    "user.message", "harness.wake", "llm.request", "llm.thinking", "llm.delta", "llm.response",
-    "tool.call", "tool.result",
+    "user.message", "coordinator.message", "harness.wake", "llm.request", "llm.thinking", "llm.delta",
+    "llm.response", "tool.call", "tool.result",
 )
 
 #: How long what a session's user asked for is still run once the session

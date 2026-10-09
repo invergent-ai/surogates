@@ -10,6 +10,7 @@ export const WORKSPACE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
 
 export const AGENT_CHAT_LISTENED_EVENTS = [
   "user.message",
+  "coordinator.message",
   "llm.request",
   "llm.response",
   "llm.thinking",

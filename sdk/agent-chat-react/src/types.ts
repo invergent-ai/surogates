@@ -138,7 +138,7 @@ export interface AgentChatThreadRow {
   id: string;
   title: string;
   group: "waiting" | "working" | "idle" | "resolved";
-  reason: "question" | "approval" | "failed" | "computer" | null;
+  reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: { kind: "file" | "artifact"; label: string; ref: string }[];
@@ -569,6 +569,7 @@ export interface AgentChatInboxEventStream {
 
 export type AgentChatEventType =
   | "user.message"
+  | "coordinator.message"
   | "llm.request"
   | "llm.response"
   | "llm.thinking"
