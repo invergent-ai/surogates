@@ -3,14 +3,14 @@
 // a test says who owns a path and what its mode is; every other call is real.
 
 import type { Stats } from "node:fs";
-import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { releaseKeys } from "../src/shell/updates.js";
+import { releaseKeys, updateLine } from "../src/shell/updates.js";
 import { installBase } from "../src/vm/image.js";
-import { servedBase } from "./updates-base.js";
+import { helperWith, keys, servedBase } from "./updates-base.js";
 
 const told = vi.hoisted(() => ({
   // A path's owner and mode, as a look at it is to find them; *once*, at the next look alone.
@@ -31,53 +31,82 @@ vi.mock("node:fs", async (original) => {
 
 const base = servedBase();
 const NOT_ROOTS = "is not the install script's: only root may write it";
-// What root's own reader of each asks, and no other mode (roots_own in release/install.sh).
-const NOT_AS_LEFT = (mode: string) => `is not the install script's: an install leaves a file there, at mode ${mode}`;
+const NO_FILE = "is not the install script's: it is no file";
+const NOT_RUN = "is not the install script's: it cannot be run";
 const own = process.getuid!();
 // The path as root's own, at *mode*; or as *uid*'s.
 const roots = (path: string, mode: number, uid = 0) => void told.paths.set(path, { uid, mode });
 
 describe("what an installed app reads as root's own", () => {
-  it("takes the release keys of a helper that root owns and no other may write, by its owner and by its mode, each alone", () => {
+  it("takes the release keys of a helper that root owns, that no other may write and that can be run, at whatever mode", () => {
     expect(() => releaseKeys(base.helper, true)).toThrow(`${base.helper} ${NOT_ROOTS}`);
-    roots(base.helper, 0o755);
-    expect(releaseKeys(base.helper, true)).toHaveLength(1);
+    // Root's alone to write, and a program: as an install leaves it, read-only, root's alone to run, with a set-id bit.
+    for (const mode of [0o755, 0o555, 0o700, 0o500, 0o744, 0o711, 0o4755]) {
+      roots(base.helper, mode);
+      expect(releaseKeys(base.helper, true), mode.toString(8)).toHaveLength(1);
+    }
     // Root's, and its group may write it; root's, and anyone may; and another's that none but its owner may.
-    for (const [mode, uid] of [[0o775, 0], [0o757, 0], [0o755, own], [0o700, own]] as const) {
+    for (const [mode, uid] of [[0o775, 0], [0o757, 0], [0o777, 0], [0o755, own], [0o700, own]] as const) {
       roots(base.helper, mode, uid);
       expect(() => releaseKeys(base.helper, true), `${mode.toString(8)} ${uid}`).toThrow(`${base.helper} ${NOT_ROOTS}`);
     }
-    // Root's alone to write, and not at the mode an install leaves its helper: the helper refuses its
-    // own list then, and every release with it, so the app offers none.
-    for (const mode of [0o700, 0o555, 0o744, 0o644, 0o4755]) {
-      told.paths.set(base.helper, { uid: 0, mode });
-      expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${NOT_AS_LEFT("755")}`);
+    // Root's alone to write, and no program: pkexec could not run it.
+    for (const mode of [0o644, 0o444, 0o600, 0o400]) {
+      roots(base.helper, mode);
+      expect(() => releaseKeys(base.helper, true), mode.toString(8)).toThrow(`${base.helper} ${NOT_RUN}`);
     }
     // A development build's helper is its test's own.
     expect(releaseKeys(base.helper)).toHaveLength(1);
   });
 
-  it("takes the base of a record that root owns and no other may write, by its owner and by its mode, each alone", () => {
+  it("takes the base of a record that root owns and no other may write, at whatever mode", () => {
     expect(() => installBase(base.record, true)).toThrow(`${base.record} ${NOT_ROOTS}`);
-    roots(base.record, 0o644);
-    expect(installBase(base.record, true)).toBe(base.url);
-    for (const [mode, uid] of [[0o664, 0], [0o646, 0], [0o644, own], [0o600, own]] as const) {
+    // As an install leaves it, and as an administrator who keeps it read-only does.
+    for (const mode of [0o644, 0o444, 0o600, 0o640, 0o400, 0o755]) {
+      roots(base.record, mode);
+      expect(installBase(base.record, true), mode.toString(8)).toBe(base.url);
+    }
+    for (const [mode, uid] of [[0o664, 0], [0o646, 0], [0o666, 0], [0o644, own], [0o600, own]] as const) {
       roots(base.record, mode, uid);
       expect(() => installBase(base.record, true), `${mode.toString(8)} ${uid}`).toThrow(`${base.record} ${NOT_ROOTS}`);
-    }
-    for (const mode of [0o600, 0o444, 0o640, 0o755, 0o2644]) {
-      told.paths.set(base.record, { uid: 0, mode });
-      expect(() => installBase(base.record, true), mode.toString(8)).toThrow(`${base.record} ${NOT_AS_LEFT("644")}`);
     }
     expect(installBase(base.record)).toBe(base.url);
   });
 
-  it("takes for either a file alone: a folder of root's at the same mode is not one", () => {
+  it("takes for either a file alone: a folder of root's is not one", () => {
     mkdirSync(join(base.dir, "folder"));
     roots(join(base.dir, "folder"), 0o755);
-    expect(() => releaseKeys(join(base.dir, "folder"), true)).toThrow(`${join(base.dir, "folder")} ${NOT_AS_LEFT("755")}`);
-    roots(join(base.dir, "folder"), 0o644);
-    expect(() => installBase(join(base.dir, "folder"), true)).toThrow(`${join(base.dir, "folder")} ${NOT_AS_LEFT("644")}`);
+    expect(() => releaseKeys(join(base.dir, "folder"), true)).toThrow(`${join(base.dir, "folder")} ${NO_FILE}`);
+    expect(() => installBase(join(base.dir, "folder"), true)).toThrow(`${join(base.dir, "folder")} ${NO_FILE}`);
+  });
+
+  it("says to run the install script again where the helper is not one it can take, and why in what its check rejects with: it is not silent where the helper itself would explain", async () => {
+    base.publish("1.2.4");
+    roots(base.record, 0o644);
+    const LINE = { text: "Surogate cannot update itself. Run the install script again.", button: null };
+    // Each helper pkexec could not run, or whose keys are not root's own word, or that lists none.
+    const helpers: Array<[string, () => void, string]> = [
+      ["one no one may run", () => roots(base.helper, 0o644), `${base.helper} ${NOT_RUN}`],
+      ["one its group may write", () => roots(base.helper, 0o775), `${base.helper} ${NOT_ROOTS}`],
+      ["one that lists no release key", () => (writeFileSync(base.helper, helperWith([])), roots(base.helper, 0o755)), `${base.helper} trusts no release key`],
+      ["none", () => (rmSync(base.helper), told.paths.delete(base.helper)), "ENOENT: no such file or directory"],
+    ];
+    for (const [name, make, why] of helpers) {
+      writeFileSync(base.helper, helperWith([keys.publicKey]));
+      make();
+      const states: string[] = [];
+      const found = base.updates({ rootOwned: true }, () => states.push(found.state.state));
+      base.heard = [];
+      await expect(found.check(), name).rejects.toThrow(why);
+      expect([name, found.state, updateLine(found.state), states, base.heard]).toEqual([name, { state: "broken" }, LINE, ["broken"], []]);
+      // Nothing is installed from it, and once the helper is as an install leaves it the line goes.
+      await found.install();
+      expect(found.state).toEqual({ state: "broken" });
+      writeFileSync(base.helper, helperWith([keys.publicKey]));
+      roots(base.helper, 0o755);
+      await found.check();
+      expect([name, found.state.state, updateLine(found.state)?.text]).toEqual([name, "available", "Update available: Surogate 1.2.4"]);
+    }
   });
 
   it("reads neither through a link, wherever it leads: a link to a file of root's is not root's own word", () => {
@@ -122,19 +151,22 @@ describe("what an installed app reads as root's own", () => {
     roots(base.helper, 0o755);
     const mark = join(base.dir, "release.json");
     writeFileSync(mark, `${JSON.stringify({ version: "1.2.9" })}\n`);
-    // The test's own file, and root's at another mode than an install leaves: neither says what is installed.
-    for (const said of [null, { uid: 0, mode: 0o664 }, { uid: 0, mode: 0o600 }, { uid: own, mode: 0o644 }]) {
+    // The test's own file, and root's that another may write: neither says what is installed.
+    for (const said of [null, { uid: 0, mode: 0o664 }, { uid: 0, mode: 0o646 }, { uid: own, mode: 0o644 }]) {
       if (said) told.paths.set(mark, said);
       const found = base.updates({ rootOwned: true, installed: mark });
       await found.check();
       expect(found.state, JSON.stringify(said)).toMatchObject({ state: "available", version: "1.2.4" });
     }
-    roots(mark, 0o644);
-    base.heard = [];
-    const found = base.updates({ rootOwned: true, installed: mark });
-    await found.check();
-    expect(found.state).toEqual({ state: "installed", version: "1.2.9" });
-    expect(base.heard).toEqual([]);
+    // Root's alone to write, at whatever mode: as an install leaves it, and read-only.
+    for (const mode of [0o644, 0o444, 0o600]) {
+      roots(mark, mode);
+      base.heard = [];
+      const found = base.updates({ rootOwned: true, installed: mark });
+      await found.check();
+      expect(found.state, mode.toString(8)).toEqual({ state: "installed", version: "1.2.9" });
+      expect(base.heard).toEqual([]);
+    }
   });
 
   it("updates an installed app whose record and helper are root's own", async () => {

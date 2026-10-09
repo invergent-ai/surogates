@@ -62,7 +62,10 @@ export type UpdateState =
   | { state: "refused"; version: string; files: Staged }
   | { state: "failed"; version: string; files: Staged; why: string }
   // Installed for every user of this computer: the app runs it once it restarts.
-  | { state: "installed"; version: string };
+  | { state: "installed"; version: string }
+  // The helper pkexec would run is not one the app can take: nothing is installed until the
+  // install script has put it right.
+  | { state: "broken" };
 
 // What the root helper's run came to: its exit code, null when it did not run or a signal ended
 // it; and the last of what it said, with how it ended where no exit code says.
@@ -99,6 +102,8 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
       return { text: `Surogate could not install its update: ${state.why}`, button: "Try again" };
     case "installed":
       return { text: `Surogate ${state.version} is installed.`, button: "Restart" };
+    case "broken":
+      return { text: "Surogate cannot update itself. Run the install script again.", button: null };
     default:
       return null;
   }
@@ -137,11 +142,11 @@ export function newer(a: string, b: string): boolean {
  * The release keys *helper* lists, the ones this computer trusts when it is the helper pkexec
  * runs: each Ed25519 public key in its RELEASE_KEYS list, as release/install.sh writes it, and
  * none from anywhere else in the script. An entry that is no such key is skipped, as the helper
- * skips it. With *rootOwned*, a helper that is not root's own as an install leaves it (rootsOwn)
- * is not read: the helper refuses its own list then, and with it every release.
+ * skips it. With *rootOwned*, a helper that is not root's own word, or that pkexec could not run
+ * (rootsOwn), is not read.
  */
 export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
-  if (rootOwned) rootsOwn(helper, 0o755);
+  if (rootOwned) rootsOwn(helper, true);
   const list = /^[ \t]*RELEASE_KEYS=\(\n([^)]*)\)/m.exec(readFileSync(helper, "utf8"))?.[1] ?? "";
   const keys = (list.match(/-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----/g) ?? []).flatMap((pem) => {
     try {
@@ -339,7 +344,18 @@ export class Updates {
     if (installed && newer(installed, this.options.version)) return this.set({ state: "installed", version: installed });
     const { record, rootOwned, helper } = this.options;
     const base = installBase(record, rootOwned);
-    const keys = releaseKeys(helper, rootOwned);
+    let keys: KeyObject[];
+    try {
+      keys = releaseKeys(helper, rootOwned);
+    } catch (error) {
+      // The helper is not one the app can take, and at an install it would say so itself, or
+      // pkexec would for it. The app is not silent meanwhile: its line says what to do, and its
+      // log, where this check's failure goes, says why.
+      this.set({ state: "broken" });
+      throw error;
+    }
+    // Put right since, as the install script leaves it: the line goes.
+    if (this.state.state === "broken") this.set({ state: "none" });
     const channel = channelOf(record, helper);
     const latest = `${base}/desktop/latest.json`;
     const manifest = await this.small(latest, MANIFEST_MAX);
@@ -408,7 +424,7 @@ export class Updates {
     const { installed, rootOwned } = this.options;
     if (!installed || !existsSync(installed)) return null;
     try {
-      if (rootOwned) rootsOwn(installed, 0o644);
+      if (rootOwned) rootsOwn(installed);
       const version = oneObject(readFileSync(installed))?.version;
       return typeof version === "string" && VERSION.test(version) ? version : null;
     } catch {

@@ -52,30 +52,28 @@ export function readManifest(path: string): ImageManifest {
 }
 
 /**
- * Throws unless *path* is a file as the install script leaves one, which is what root's own
- * reader of it asks (roots_own in release/install.sh): root's, with no other who may write it; a
- * file, and no link, wherever one leads; and at *mode* exactly, 0644 for a record or a mark and
- * 0755 for the helper. What the app took and root's reader refused would be offered, and then
- * refused.
+ * Throws unless *path* is root's own word: root's, with no other who may write it, and a file and
+ * no link, wherever one leads. At whatever mode: an administrator may keep one read-only. With
+ * *run*, as the helper must be, it is a program too: pkexec could run no other.
  */
-export function rootsOwn(path: string, mode: number): void {
+export function rootsOwn(path: string, run = false): void {
   const found = lstatSync(path);
   if (found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
   if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not the install script's: only root may write it`);
-  if (!found.isFile() || (found.mode & 0o7777) !== mode) throw new Error(`${path} is not the install script's: an install leaves a file there, at mode ${mode.toString(8)}`);
+  if (!found.isFile()) throw new Error(`${path} is not the install script's: it is no file`);
+  if (run && (found.mode & 0o111) === 0) throw new Error(`${path} is not the install script's: it cannot be run`);
 }
 
 /**
  * The base URL in the install record at *path*, which the install script writes:
  * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
- * installed app's /etc/surogate/install.json is: a record that is not root's own as an install
- * leaves it (rootsOwn) is not taken, as it would say where each of this computer's users
- * downloads from.
+ * installed app's /etc/surogate/install.json is: a record that is not root's own word
+ * (rootsOwn) is not taken, as it would say where each of this computer's users downloads from.
  */
 export function installBase(path: string, rootOwned = false): string {
   let text: string;
   try {
-    if (rootOwned) rootsOwn(path, 0o644);
+    if (rootOwned) rootsOwn(path);
     text = readFileSync(path, "utf8");
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;

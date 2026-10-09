@@ -189,6 +189,17 @@ describe("updates, through the app", () => {
     await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible())), { timeout: 10_000 }).toBe(true);
   });
 
+  it("says to run the install script again where its helper is not one it can take, and offers nothing", async () => {
+    publish("0.0.1");
+    // A helper that lists no release key: no release is one it would install.
+    writeFileSync(join(home, "surogate-apply-update"), ["#!/usr/bin/env bash", "CHANNEL=stable", "RELEASE_KEYS=(", "  )", ""].join("\n"), { mode: 0o755 });
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-text").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Surogate cannot update itself. Run the install script again.");
+    await expect.poll(() => page.isVisible("#update"), { timeout: 10_000 }).toBe(true);
+    expect(await page.isVisible("#update-button")).toBe(false);
+    expect(existsSync(join(home, "k", "surogate"))).toBe(false);
+  });
+
   it("keeps running when no administrator approves, and says so; and says why when the helper fails, with Try again", async () => {
     publish("0.0.1");
     writeFileSync(join(home, "answer"), "126\n");
