@@ -111,7 +111,8 @@ _TURN = "Surogate-Turn"
 #: The commits followed down from the history's hand-off, by a stop or an open, at most: all of them together.
 _HAND_BACKS = 256
 _PACKED = "# pack-refs with: peeled fully-peeled sorted \n"
-#: The pruning window: main's commits of this many days, never fewer than its last _PRUNE_LEAST.
+#: The pruning window: main's commits of this many days, never fewer than its last _PRUNE_LEAST,
+#: a routine's pickups not counted among them inside the window.
 PRUNE_DAYS = 90
 _PRUNE_LEAST = 20
 #: A project's history is pruned at most this often.
@@ -1018,7 +1019,8 @@ class History:
 
         Kept: ``main``'s commits of the last 90 days and never fewer than its
         last 20, cut further while the history is more than twice the size
-        of ``main``'s files, never below those 20; every ``main`` a thread's
+        of ``main``'s files, never below those 20, which inside the 90 days
+        are its last 20 that are no routine's pickup; every ``main`` a thread's
         pod alive now may have opened on, those of a pod's deadline and the
         one before them; and the refs in *keep*, each live thread's branch
         and base, with their history inside the window.  Every other ref
@@ -1071,13 +1073,21 @@ class History:
                 # A kept name ending in / keeps every ref under it: a thread's helpers' copies kept apart.
                 if ref != MAIN and ref not in keep and not any(ref.startswith(k) for k in keep if k.endswith("/")):
                     git("update-ref", "-d", ref)
-            mains = [line.split() for line in git("log", "--first-parent", "--format=%H %ct", MAIN).splitlines()]
+            # Each its id, its time and its author's address, which may be empty.
+            mains = [line.split(maxsplit=2) for line in git("log", "--first-parent", "--format=%H %ct %ae", MAIN).splitlines()]
+            times = [int(m[1]) for m in mains]
+            window = sum(t >= now - PRUNE_DAYS * 86_400 for t in times)
+            # A routine's pickup is none of the least kept while the window holds them: a routine that
+            # runs every few minutes would be all of them within hours.  Past the window it is one,
+            # or a project few others change would keep every pickup for good.
+            others = [n for n, m in enumerate(mains, 1) if not "".join(m[2:]).startswith("routine:")]
+            twenty = others[_PRUNE_LEAST - 1] if len(others) >= _PRUNE_LEAST else len(mains)
             # A pod lives at most THREAD_POD_DEADLINE: the main it opened on is one of these, or the one before.
-            least = max(_PRUNE_LEAST, 1 + sum(int(t) >= now - THREAD_POD_DEADLINE for _, t in mains))
-            kept = max(least, sum(int(t) >= now - PRUNE_DAYS * 86_400 for _, t in mains))
+            least = max(_PRUNE_LEAST, min(twenty, window), 1 + sum(t >= now - THREAD_POD_DEADLINE for t in times))
+            kept = max(least, window)
             size = sum(int(e.split()[3]) for e in git("ls-tree", "-r", "-l", MAIN).splitlines() if e.split()[1] == "blob")
             while True:
-                packed = self._cut(git, work, mains=[c for c, _ in mains], kept=kept)
+                packed = self._cut(git, work, mains=[m[0] for m in mains], kept=kept)
                 if packed <= 2 * size or kept <= least:
                     break
                 kept = max(least, kept // 2)

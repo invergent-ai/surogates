@@ -2613,3 +2613,37 @@ def test_across_a_prunings_cut_a_file_no_commit_left_explains_is_by_no_one(tmp_p
     # change, and what was changed behind it is not known.  A file a commit left names is by its author;
     # one none explains is by no one, never by whoever landed the cut's commit.
     assert held(turn) == {"Budget.xlsx": {"kind": "thread", "id": "t2", "title": "Draft B"}, "a.md": None, "notes.txt": None}
+
+
+def test_a_routines_pickups_are_none_of_the_twenty_a_pruning_keeps(tmp_path, project):
+    landings = []
+    for n in range(25):
+        history = a_pod(tmp_path, project)
+        (history.copy / "Budget.xlsx").write_bytes(os.urandom(50_000))  # an office file: no delta between versions
+        landings.append(land(history, f"saga:{n}")["commit"])
+    master = a_masters_pod(tmp_path, project)
+    for n in range(60):  # a routine that runs every five minutes, for five hours
+        with open(project / "notes.txt", "a") as notes:
+            notes.write(f"checked {n}\n")
+        master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+    durable = project / "_history"
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    # Twenty-five versions are more than twice the files: cut, but not into the last twenty changes that are no routine's.
+    assert (out["pruned"], out["commits"]) == (True, 80)
+    authors = git(durable, "log", "--first-parent", "--format=%ae", "refs/heads/main").splitlines()
+    assert (authors.count("routine:r1@surogate"), authors.count("thread:t1@surogate")) == (60, 20)
+    assert git(durable, "cat-file", "-s", f"{landings[-20]}:Budget.xlsx") == "50000" and not in_history(durable, landings[4])
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_routines_pickups_older_than_the_window_go_though_the_twenty_are_not_reached(tmp_path, project):
+    history = a_pod(tmp_path, project)
+    (history.copy / "a.md").write_text("a")
+    land(history)
+    master = a_masters_pod(tmp_path, project)
+    for n in range(30):
+        (project / "notes.txt").write_text(f"checked {n}\n")
+        master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+    # Two changes that are no routine's, in all: past ninety days the twenty are the last twenty commits, whoever made them.
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + 100 * 86_400, spare=0)
+    assert (out["pruned"], out["commits"]) == (True, 20)
