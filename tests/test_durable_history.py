@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -336,6 +337,81 @@ def test_a_file_that_changes_while_many_are_read_leaves_the_read_to_git_alone(tm
     # Whatever the several readers could not finish, the copy is the real files as they are.
     assert (pod.copy / "uploads" / "scan 07.pdf" / "page.png").read_bytes() == b"\x89PNG"
     assert (pod.copy / "uploads" / "scan 08.pdf").exists()
+
+
+def a_reader_fails(monkeypatch, name: str, *, times: int) -> dict:
+    """The reader given the file *name* fails its first *times* tries, as a read the mount refused does; what each git did from here on."""
+    seen, run = {"tries": 0, "alone": 0, "readers": 0}, subprocess.run
+
+    def refused(args, **kwargs):
+        if args[:2] == ["git", "update-index"] and "--stdin" in args:
+            seen["readers"] += 1
+            if name in kwargs["input"].split("\0"):
+                seen["tries"] += 1
+                if seen["tries"] <= times:
+                    return subprocess.CompletedProcess(args, 128, "", f"error: unable to read {name}: Input/output error")
+        if args[:3] == ["git", "add", "-A"] and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
+            seen["alone"] += 1
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", refused)
+    return seen
+
+
+def test_a_reader_that_fails_is_tried_once_more_before_the_read_is_left_to_one_git(tmp_path, project, monkeypatch, caplog):
+    a_messy_project(project)
+    time.sleep(1.1)
+    seen = a_reader_fails(monkeypatch, "uploads/scan 07.pdf", times=1)
+    with caplog.at_level(logging.WARNING, logger=history_module.__name__):
+        pod = a_pod(tmp_path, project)
+    # One read the mount refused is not sixteen readers' work thrown away: that reader alone reads again.
+    assert (seen["tries"], seen["alone"]) == (2, 0) and seen["readers"] == history_module._READERS + 1
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+    assert "is tried once more" in caplog.text and "Input/output error" in caplog.text
+    assert "read by one git" not in caplog.text
+
+
+def test_a_reader_that_fails_twice_leaves_the_read_to_one_git_and_the_pods_log_says_why(tmp_path, project, monkeypatch, caplog):
+    a_messy_project(project)
+    time.sleep(1.1)
+    seen = a_reader_fails(monkeypatch, "uploads/scan 07.pdf", times=2)
+    with caplog.at_level(logging.WARNING, logger=history_module.__name__):
+        pod = a_pod(tmp_path, project)
+    assert (seen["tries"], seen["alone"]) == (2, 1)
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+    # Whoever reads the pod's log to learn why an open was slow finds the fallback, and its reason.
+    [said] = [r.getMessage() for r in caplog.records if "read by one git" in r.getMessage()]
+    assert "unable to read uploads/scan 07.pdf: Input/output error" in said
+
+
+@pytest.mark.parametrize("index", ["of another version", "with a merge's entries"])
+def test_a_kept_index_the_readers_cannot_use_is_made_again_from_main_and_no_git_reads_alone(tmp_path, project, monkeypatch, caplog, index):
+    a_messy_project(project)
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    kept = project / "_history" / "index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(kept), "GIT_DIR": str(first.repo), "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    if index == "of another version":
+        # As a thread's command can leave it: git reads it, and keeps its version at every write.
+        subprocess.run(["git", "update-index", "--index-version", "4"], env=env, check=True)
+    else:
+        blob = git(first.repo, "rev-parse", "refs/heads/main:notes.txt")
+        staged = "".join(f"100644 {blob} {stage}\tnotes.txt\n" for stage in (1, 2, 3))
+        subprocess.run(["git", "update-index", "--index-info"], env=env, input=staged, text=True, check=True)
+    changed_since(project)
+    time.sleep(1.1)
+    seen = read_by(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger=history_module.__name__):
+        pod = a_pod(tmp_path, project)
+    # Not left to one git, which a large project's pod would not outlast at every open from then on:
+    # the index is made again from main, and every file read by the readers.
+    assert seen["alone"] == 0 and len(seen["readers"]) == history_module._READERS
+    assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+    assert "made again from main" in caplog.text
+    # And the index the pod leaves is one the next open reads as it is.
+    assert history_module._entries(pod.repo / "index") is not None
+    assert git(pod.repo, f"--work-tree={project}", "diff-files", "--name-only") == ""
 
 
 def test_a_pod_looks_again_at_each_folder_main_has_before_it_reads_the_real_files(tmp_path, project, monkeypatch):

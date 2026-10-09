@@ -35,6 +35,7 @@ import contextvars
 import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -50,6 +51,9 @@ from itertools import takewhile
 from pathlib import Path, PurePosixPath
 
 from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES
+
+#: The pod's log: what an open did that a person reading it later must be able to find.
+logger = logging.getLogger(__name__)
 
 #: Where a thread's pod mounts the project's real files.
 PROJECT_MOUNT = "/project"
@@ -305,8 +309,9 @@ class History:
                 # The index made main's: an entry that matches keeps its size and time.
                 try:
                     self._main("read-tree", "-m", "-i", MAIN)
-                except HistoryError:
+                except HistoryError as unread:
                     # A cache git cannot read: left out, every real file is read.
+                    logger.warning("The project's kept index is made again from main, and every real file read: %s", unread)
                     (self.repo / "index").unlink(missing_ok=True)
                     self._main("read-tree", MAIN)
             if not start:
@@ -1260,12 +1265,26 @@ class History:
         with the size and time git saw as it read.  The entries are then put
         together, each whole as its git wrote it.
 
-        Left to one ``git add -A`` is only what this cannot do: an index it
-        does not read, a file that changed under a reader.
+        An index git reads and this does not, of another version or with a
+        merge's entries, is made again from ``main``, and every file read:
+        left to one git it would be at every open from then on, since git
+        keeps what it finds, and a large project's pod would outlast none
+        of them.  A reader that fails is tried once more.  Left to one
+        ``git add -A`` is only what this cannot do, a file that changed
+        under a reader among it; the pod's log then says why.
         """
         index = self.repo / "index"
         entries = _entries(index)
+        if entries is None and self._ref(MAIN) is not None:
+            logger.warning(
+                "The project's kept index is made again from main, and every real file read: "
+                "it is of another version, or holds a merge's entries",
+            )
+            index.unlink()
+            self._main("read-tree", MAIN)
+            entries = _entries(index)
         if entries is None:
+            logger.warning("The real files are read by one git, not several at once: the index is not one the readers use")
             return False
         work = self.repo / "reading"
         shutil.rmtree(work, ignore_errors=True)
@@ -1284,13 +1303,23 @@ class History:
             # A few are one git's: sixteen gits for a handful of files cost more than they spare.
             shares = [read] if len(read) <= _READ_ALONE else [share for share in (read[n::_READERS] for n in range(_READERS)) if share]
 
-            def reader(n: int) -> None:
+            def once(n: int) -> None:
                 # A file gone since it was listed is no error: --remove leaves it out.
                 self._git(
                     ["update-index", "--add", "--remove", "-z", "--stdin"],
                     env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(work / str(n))},
                     cwd=self.project, input="".join(f"{path}\0" for path in shares[n]),
                 )
+
+            def reader(n: int) -> None:
+                try:
+                    once(n)
+                except HistoryError as first:
+                    # Once more, from nothing: one read the mount refused is not every reader's work thrown away.
+                    logger.warning("A reader of the real files failed, and is tried once more: %s", first)
+                    for left in (work / str(n), work / f"{n}.lock"):
+                        left.unlink(missing_ok=True)
+                    once(n)
 
             if read:
                 with ThreadPoolExecutor(len(shares)) as readers:
@@ -1301,13 +1330,14 @@ class History:
                 entries.pop(path, None)
             for n in range(len(shares) if read else 0):
                 if (theirs := _entries(work / str(n))) is None:
-                    return False
+                    raise HistoryError("a reader's index is not one this reads")
                 entries.update(theirs)
             _replace(index, _index(entries))
             # A file and a folder of one name, from a change under the readers, is no index: git says so here.
             self._main("write-tree")
-        except (HistoryError, OSError, UnicodeError):
+        except (HistoryError, OSError, UnicodeError) as why:
             # The index as it was, for git to read the files alone.
+            logger.warning("The real files are read by one git, not several at once: %s", why)
             if before is None:
                 index.unlink(missing_ok=True)
             else:
