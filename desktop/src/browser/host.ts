@@ -66,11 +66,16 @@ const SHOW_MS = 2_000;
 // How long a page whose question was left to its user may take to show that it has been answered.
 const ASKING_MS = 500;
 // How long a page of the agent's must have been quiet, once its user holds the browser, before a file
-// input in it opens the browser's own chooser: counted from the take-over, from the end of what the
-// agent was doing in it then, and from each file it asks for meanwhile, whichever is last. It is how
-// long a page keeps the leave to ask for a file by itself that a click gives it (five seconds in
-// Chromium), and each ask heard gives it that leave anew: Playwright reads the input as a user would.
-// So a page lets be has no leave left that the agent, or this host, gave it.
+// input in it opens the browser's own chooser. It is how long a page keeps the leave to ask for a file by
+// itself that a click gives it (five seconds in Chromium), and three things give a page that leave when
+// they reach it, which a busy page lets happen late: what the agent does in it; what this host does in it
+// for an upload, the look at where its file input is and each step that gives the files (doing counts
+// both, until they have reached the page); and Playwright's own reading of an input the page asked with,
+// which is how each ask is heard (asks). So the five seconds are counted from the take-over, from when
+// the last of the first two reached the page, and from each ask heard, whichever is last; and when they
+// have passed the page is let be only once it has answered that nothing of the third is still on its way
+// (quiet). What this host reads of a page by itself gives it no leave (read). So a page let be has none
+// left that the agent, or this host, gave it.
 export const OWN_CHOOSER_MS = 5_000;
 // How long a page may take to say where a file input of its is, for an upload's prompt: less than the
 // prompt waits for this host's answer (the approvals' ADDRESS_MS), which then gives the upload up. Its
@@ -702,7 +707,8 @@ export class BrowserHost {
     }
     // A file input is its user's while they hold the browser, opening the browser's own chooser: but in each
     // page only once nothing the agent did there can open one (quiet). Until then a page's ask is still
-    // heard, and kept for no one (asks). A page the agent is still doing something in waits for that to end.
+    // heard, and kept for no one (asks). A page in which something of the agent's, or of this host's for an
+    // upload, is still on its way waits for that to reach it (doing).
     for (const [page, kept] of this.hearing) {
       if (kept.acting === 0) this.quiet(page);
     }
@@ -997,9 +1003,11 @@ export class BrowserHost {
     kept.quiet = mine;
   }
 
-  // *work* is what an operation of the agent's does in *page*, until it ends. Taken over meanwhile, the
-  // operation is answered at once, but what it had sent the page can reach it later, as a click does that
-  // waits on a busy page: so the page's quiet is counted only from the end of the last such work.
+  // *work* is something done in *page* that gives it leave when it reaches it, until it ends: an operation
+  // of the agent's, or what this host does there for an upload (placed, fill). Taken over meanwhile, the
+  // operation is answered at once, but what was sent the page can reach it later, as a click does that
+  // waits on a busy page: so the page's quiet is counted only from the end of the last such work, whatever
+  // bound the one that waited for it had.
   private doing<T>(page: Page, work: Promise<T>): Promise<T> {
     const kept = this.hearing.get(page);
     if (!kept) return work;
