@@ -92,10 +92,11 @@ class Meanwhile:
 
 
 class DiesWriting:
-    """The store of a worker that dies as it writes the first event *of* a kind: ``of(type, data)`` says which."""
+    """The store of a worker that dies as it writes the first event *of* a kind: ``of(type, data)`` says which.
+    With *error*, the worker lives and that one write fails with it."""
 
-    def __init__(self, store, of) -> None:
-        self._store, self._of, self._died = store, of, False
+    def __init__(self, store, of, error: type[BaseException] = asyncio.CancelledError) -> None:
+        self._store, self._of, self._died, self._error = store, of, False, error
 
     def __getattr__(self, name: str):
         return getattr(self._store, name)
@@ -103,7 +104,7 @@ class DiesWriting:
     async def emit_event(self, session_id, event_type, data, **kwargs):
         if not self._died and self._of(event_type, data):
             self._died = True
-            raise asyncio.CancelledError
+            raise self._error
         return await self._store.emit_event(session_id, event_type, data, **kwargs)
 
     async def emit_synthetic_user_message(self, session_id, *, content, synthetic, metadata=None):
@@ -1927,12 +1928,33 @@ async def test_a_command_whose_handler_leaves_without_an_answer_is_answered_by_i
     # One answer, the wake's own, names the command; the chat rests and nobody is queued.
     [typed] = [event for event in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]) if event.data["content"] == command]
     last = (await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE]))[-1]
-    assert (last.data.get("answers"), last.data["message"]["content"]) == (typed.id, f"{command.split()[0]} could not be finished. Type it again.")
+    look = {"/goal": "`/goal status`", "/mission": "`/mission status`", "/loop": "`/loop list`", "/code": "`/code status`"}
+    assert (last.data.get("answers"), last.data["message"]["content"]) == (
+        typed.id,
+        f"{command.split()[0]} was cut off before it could answer. "
+        f"Check {look.get(command.split()[0], 'the conversation')} before typing it again.",
+    )
     assert (await workers.status(chat), await queued(workers.api, await workers.session(chat))) == ("completed", False)
 
     await workers.its_browser_is_handed_back(chat)
     await workers.wake(chat)
     assert (ran, workers.ran, workers.requests) == ([command], [], [])
+
+
+async def test_the_wakes_own_answer_sends_its_user_to_look_before_typing_again_a_command_that_took_effect(workers):
+    chat = await a_coordinator(workers)
+    await workers.says(chat, "/mission pause")
+    # The mission is paused, and the database is away as the handler writes its answer.
+    its_answer = lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" in data  # noqa: E731
+    await workers.worker(store=DiesWriting(workers.store, its_answer, error=ConnectionError("the database is away"))).wake(chat)
+
+    assert (await workers.missions(chat))[0].status == "paused"
+    # The wake cannot know what the command did: its words claim nothing, and name what says.
+    assert (await workers.said(chat))[-1] == (
+        "/mission was cut off before it could answer. Check `/mission status` before typing it again."
+    )
+    assert (await workers.types(chat, "/mission status")).startswith("Mission ")
+    assert workers.ran == ["_handle_mission_command"] * 2
 
 
 async def test_a_commands_end_releases_what_a_turns_end_releases(workers, monkeypatch):

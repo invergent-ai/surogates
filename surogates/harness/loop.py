@@ -367,6 +367,26 @@ def _slash_command_name(content: str | None) -> str | None:
     return None
 
 
+#: What says how a command left things, for its user to look at when the
+#: command could not say so itself.
+_SAYS_HOW_IT_STANDS = {
+    "goal": "`/goal status`",
+    "mission": "`/mission status`",
+    "auto-research": "`/auto-research status`",
+    "loop": "`/loop list`",
+    "code": "`/code status`",
+}
+
+
+def _cut_off_before_its_answer(typed: str) -> str:
+    """The wake's own answer to the command *typed*, whose handler left
+    without one.  The wake cannot know whether the command took effect
+    before its handler failed, so the words claim neither: they send its
+    user to look before typing it again."""
+    look = _SAYS_HOW_IT_STANDS.get(_slash_command_name(typed) or "", "the conversation")
+    return f"{typed.split()[0]} was cut off before it could answer. Check {look} before typing it again."
+
+
 #: The one built-in command the model answers: the wake rewrites its message
 #: and runs the model's turn on it.  The harness answers every other built-in
 #: command itself, with no model turn.
@@ -1633,8 +1653,7 @@ class AgentHarness(
                         # later wake would run it again and take up nothing
                         # typed after it.
                         await self._emit_loop_response(
-                            session, lease,
-                            f"{last_user_content.split()[0]} could not be finished. Type it again.",
+                            session, lease, _cut_off_before_its_answer(last_user_content),
                             user_content=last_user_content,
                         )
                         written = all_events + await self._store.get_events(
