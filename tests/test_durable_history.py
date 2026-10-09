@@ -765,7 +765,8 @@ def test_pruning_keeps_the_window_and_cuts_at_the_size_rule_and_kept_ids_still_o
         (history.copy / "Budget.xlsx").write_bytes(os.urandom(50_000))  # an office file: no delta between versions
         landings.append(land(history, f"saga:{n}")["commit"])
     durable = project / "_history"
-    out = a_pod(tmp_path, project).prune(keep=["refs/heads/threads/live", "refs/bases/live"], now=time.time() + LATER)
+    # The days pass in what the pruning is told: its packs are seconds old, so it is told to spare none.
+    out = a_pod(tmp_path, project).prune(keep=["refs/heads/threads/live", "refs/bases/live"], now=time.time() + LATER, spare=0)
     # All forty are inside 90 days, but forty versions are more than twice the files: cut, never below twenty.
     assert (out["pruned"], out["commits"]) == (True, 20)
     assert git(durable, "rev-list", "--first-parent", "--count", "refs/heads/main") == "20"
@@ -815,16 +816,16 @@ def test_a_pod_open_across_a_pruning_lands_and_the_history_stays_whole(tmp_path,
         land(other, f"saga:o{n}", author={"name": f"O{n}", "email": f"thread:o{n}@surogate"})
     base = git(slow.repo, "rev-parse", "refs/bases/slow")
     # While a pod opened on them may be alive, main's commits stay.
-    assert a_pod(tmp_path, project, "p1").prune(keep=[], now=time.time())["commits"] == 27
+    assert a_pod(tmp_path, project, "p1").prune(keep=[], now=time.time(), spare=0)["commits"] == 27
     assert in_history(durable, base)
     # Past that, a pruning cuts the slow pod's base; the pod, left alive, still lands.
-    assert a_pod(tmp_path, project, "p2").prune(keep=[], now=time.time() + LATER + 86_400)["commits"] == 20
+    assert a_pod(tmp_path, project, "p2").prune(keep=[], now=time.time() + LATER + 86_400, spare=0)["commits"] == 20
     assert not in_history(durable, base)
     land(slow, "saga:slow")
     assert (project / "slow.md").read_text() == "the slow thread's work"
     # Its base joined the history's cut: the history reads whole, and prunes again.
     assert git(durable, "fsck", "--no-dangling") == ""
-    assert a_pod(tmp_path, project, "p3").prune(keep=[], now=time.time() + LATER + 3 * 86_400)["pruned"] is True
+    assert a_pod(tmp_path, project, "p3").prune(keep=[], now=time.time() + LATER + 3 * 86_400, spare=0)["pruned"] is True
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
@@ -925,7 +926,8 @@ def test_a_pruning_leaves_the_packs_younger_than_the_fence_so_a_push_it_ran_unde
         put(self, name, source)
         if self.thread == "t1" and name.endswith(".idx") and not pruned:
             # This push lost its lock unseen: its pack is up, its refs are not, and another holder prunes.
-            pruned.append(pruner.prune(keep=keep, now=time.time(), spare=300))
+            # Asked as a caller that names no fence asks, a day on by its own count: the pod's clock decides.
+            pruned.append(pruner.prune(keep=keep, now=time.time() + 90_000))
 
     monkeypatch.setattr(History, "_put_durable", a_pruning_runs_whole)
     turn = pusher.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
