@@ -45,6 +45,13 @@ settings() {
   # Who reads the files an apply is handed, by user and group number, by name, and by the numbers
   # of all its groups: root, unless the helper was run for another user (asker).
   READER=(0 0 root 0)
+  # How a command is run as that reader: perl's own line, handed the user's number, their group's
+  # and the numbers of all their groups, then the command. The groups are set first, as numbers
+  # (perl writes them from the list it is given, and looks no name up: setpriv reads each as a
+  # group's name before it reads it as a number); then the group and the user, each in all three
+  # of a process's numbers, so that nothing of root's is kept to go back to; then the command in
+  # the process's place. 126 where one could not be set, and 127 for a command that is not there.
+  AS_READER='use POSIX (); ($u, $g, $l) = splice(@ARGV, 0, 3); $l =~ tr/,/ /; $) = join(q( ), $g, $l); POSIX::setgid($g) && POSIX::setuid($u) or exit 126; exec { $ARGV[0] } @ARGV; exit 127'
   # What is said of a base with a user or a password in it. The base is written into the install
   # record, which every user of the computer reads and the app reads its base from: a password
   # there would be every user's, and the app takes no base that has one.
@@ -564,13 +571,17 @@ asker() {
     # The name is that number's, and no other user's: the groups are looked up by the name, and
     # where two users have one name, the name's number is the first one's. The second would read
     # in the first's groups.
+    # Where two names have one number, the list gives the first name for it, and the reader is in
+    # that name's groups, whichever of the two asked: to the kernel the two are one user, and
+    # each can already do as that user whatever the other can. So the second name's own
+    # group-only folder is not read, and the first's is.
     number="$(listing id -u -- "${entry%%:*}")" || unlisted "$?" "$name"
     [ "$number" = "$uid" ] || fail "$name names no user of this computer"
     groups="$(listing id -G -- "${entry%%:*}")" || unlisted "$?" "$name"
     [[ "$groups" =~ ^[0-9]+(\ [0-9]+)*$ ]] || fail "$name names no user of this computer"
     READER=("$uid" "$gid" "${entry%%:*}" "${groups// /,}")
-    # The reader is that user, and no other: setpriv takes digits for a user's name where one is so
-    # named, and counts a number past the last one from 0 again. Asked in two commands, as wherever
+    # The reader is that user, and no other: a number past the last one is counted from 0 again
+    # where it is set. Asked in two commands, as wherever
     # this script would put two $( ) in one: a signal that comes while the first is answered ends
     # Ubuntu 24.04's bash with an error of its own, before this script's handler has run.
     number="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || number=
@@ -596,8 +607,9 @@ unlisted() {
 # Runs what follows $1 as the user who reads an apply's files, as that user's own login would run
 # it: as that user, in their own group, and in the other groups the system's own list gives them,
 # which is root's word and no more than the user's own rights. Root asked the list for them once
-# (asker), and hands them on: no question to that list is inside this bound, which is on what
-# the reader reads. In their own group
+# (asker), and hands them on as numbers, which are set as numbers (AS_READER, in settings): no
+# question to that list is inside this bound, which is on what the reader reads, and a group
+# that is named in digits is not taken for the group of that number. In their own group
 # alone, a user who reaches their cache home only as a member of another, as under a folder that a
 # department's group alone may enter, could read the update themselves and never have it applied.
 # Never in a group of root's, which the helper's own are, and never in one its caller names. With
@@ -606,7 +618,7 @@ unlisted() {
 # (--foreground): GNU's timeout otherwise kills itself with it, and bash says so in words of its
 # own.
 as_reader() {
-  timeout --foreground -s KILL "$1" setpriv --reuid "${READER[0]}" --regid "${READER[1]}" --groups "${READER[3]}" "${@:2}" 9<&- </dev/null
+  timeout --foreground -s KILL "$1" /usr/bin/perl -e "$AS_READER" "${READER[0]}" "${READER[1]}" "${READER[3]}" "${@:2}" 9<&- </dev/null
 }
 
 # Refuses file $1, which the reader could not read as a file. Root never looks at a file it is

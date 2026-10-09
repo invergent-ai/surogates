@@ -702,10 +702,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(root(`PKEXEC_UID=${past} /opt/surogate-test/install.sh --apply ${files()}`), past)
         .toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
     }
-    // And digits are a user's name first, where a user is so named, as a company's directory may name one.
+    // Digits are a number, and never a user's name, where a user is so named, as a company's
+    // directory may name one: the reader is the user of that number, who is refused the files of
+    // the user of that name, as their own login is.
     expect(root(`echo "${user}:x:1600:1600::/nonexistent:/bin/sh" >>/etc/passwd && mkdir -m 700 /srv/numbered && cp ${files()} /srv/numbered/ && chown -R 1600 /srv/numbered`).status).toBe(0);
     const numbered = root(`PKEXEC_UID=${user} /opt/surogate-test/install.sh --apply /srv/numbered/manifest.json /srv/numbered/manifest.json.sig /srv/numbered/release.tar.gz; said=$?; sed -i '$d' /etc/passwd; exit $said`);
-    expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: PKEXEC_UID names no user of this computer\n" });
+    expect(numbered).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /srv/numbered/manifest.json cannot be read by tester: name it by its whole path, in a folder of that user's own\n" });
     expect(root("test -e /opt/surogate/current").status).toBe(1);
     // So it is with a release kept in root's home, as a root shell that sudo started would name one;
     // with a name that is no whole path, which under pkexec is looked for in root's home; and with
@@ -809,7 +811,10 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     const traced = root(`PKEXEC_UID=${user} strace -f -qq -v -s 300 -o /tmp/trace -e trace=execve /opt/surogate-test/install.sh --apply ${files()} >/dev/null && grep -F 'execve("/usr/bin/timeout"' /tmp/trace`);
     expect(traced.status, traced.stderr).toBe(0);
     const asked = traced.stdout.trim().split("\n").map((line) => [...(/\[(.*)\], \[/.exec(line)?.[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).join(" "));
-    const as = `setpriv --reuid ${user} --regid ${user} --groups ${root("id -G tester").stdout.trim().replaceAll(" ", ",")}`;
+    // The reader's own line of perl, as the script's settings have it, handed the user's number, their group's and their groups'.
+    const line = /^ {2}AS_READER='([^'\n]+)'$/m.exec(readFileSync(SCRIPT, "utf8"))?.[1];
+    expect(line).toMatch(/^use POSIX \(\); /);
+    const as = `/usr/bin/perl -e ${line} ${user} ${user} ${root("id -G tester").stdout.trim().replaceAll(" ", ",")}`;
     const read = "iflag=nofollow,nonblock bs=64K status=none";
     expect(asked).toEqual([
       // Root's own three questions to the system's list of users and groups, each under the same bound.
@@ -856,6 +861,41 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     // Started by a root that has groups of its own, as sudo's root has: none of them is the reader's.
     expect(root(`(getent group closed >/dev/null || groupadd closed) && PKEXEC_UID=${user} setpriv --groups 0,$(getent group closed | cut -d: -f3),$(getent group shadow | cut -d: -f3) `
       + `bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 id -G'`).stdout).toBe(root("id -G tester").stdout);
+    // The groups are handed on as numbers and set as numbers. A group may be named in digits, as a
+    // directory may hold one, and that name be another group's number: the reader is in the group
+    // of that number, which the user is in, and not in the group of that name, which they are not.
+    expect(root("groupadd -g 4242 wing && gpasswd -a tester wing >/dev/null && echo '4242:x:5555:' >>/etc/group && getent group 4242 5555 | cut -d: -f1,3 | tr '\n' ' '").stdout).toBe("wing:4242 4242:5555 ");
+    try {
+      expect(root("id -G tester").stdout.trim().split(" ")).toContain("4242");
+      expect(reader(`PKEXEC_UID=${user}`).stdout).toBe(root("id -G tester").stdout);
+      // What the group of that name alone may read is not the reader's to read, as it is not the user's own login's.
+      expect(root("printf closed >/srv/five && chown root:5555 /srv/five && chmod 640 /srv/five && ! runuser -u tester -- cat /srv/five 2>/dev/null").status).toBe(0);
+      expect(root(`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 cat /srv/five'`)).toMatchObject({ status: 1, stdout: "" });
+      // And what the group of that number alone may read is.
+      expect(root(`chgrp wing /srv/five && PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 cat /srv/five'`)).toMatchObject({ status: 0, stdout: "closed" });
+      // The reader is that user in all three of a process's numbers and all three of its groups': nothing of root's is kept to go back to.
+      expect(root(`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 grep -E "^[UG]id:" /proc/self/status' | tr -s '\t ' ' '`).stdout)
+        .toBe(`Uid: ${Array(4).fill(root("id -u tester").stdout.trim()).join(" ")}\nGid: ${Array(4).fill(root("id -g tester").stdout.trim()).join(" ")}\n`);
+    } finally {
+      root("sed -i '/^4242:x:5555:$/d' /etc/group; gpasswd -d tester wing >/dev/null; groupdel wing; rm -f /srv/five");
+    }
+    // The groups the reader has are the ones root was told, handed on, and never ones looked up
+    // again as the reader is made: here an id that tells root of the user's own group alone.
+    // The reader is then in that group alone, by the system's own id.
+    const fewer = '#!/bin/sh\n[ "$1" != -G ] || exec /opt/hold/id -g -- "$3"\nexec /opt/hold/id "$@"\n';
+    expect(swapped("id", fewer, [`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 /opt/hold/id -G'`]).stdout).toBe(root("id -g tester").stdout);
+    expect(root("id -G tester").stdout).not.toBe(root("id -g tester").stdout);
+    // Two names of one number, as a directory may have: the list gives the first name for the
+    // number, and the reader is in that name's groups, whichever of the two asked. What the second
+    // name's own group alone may read is not read; to the kernel the two are one user.
+    expect(root(`echo "twin:x:${user}:${user}::/nonexistent:/bin/sh" >>/etc/passwd && groupadd twins && gpasswd -a twin twins >/dev/null && printf closed >/srv/twins && chgrp twins /srv/twins && chmod 640 /srv/twins`).status).toBe(0);
+    try {
+      expect(root("getent passwd $(id -u tester) | cut -d: -f1; id -Gn twin | tr ' ' '\n' | grep -c twins").stdout).toBe("tester\n1\n");
+      expect(reader(`PKEXEC_UID=${user}`).stdout).toBe(root("id -G tester").stdout);
+      expect(root(`PKEXEC_UID=${user} bash -c '. <(sed "\\$d" /opt/surogate-test/install.sh) && settings && asker && as_reader 5 cat /srv/twins'`)).toMatchObject({ status: 1, stdout: "" });
+    } finally {
+      root("sed -i '/^twin:x:/d' /etc/passwd; groupdel twins; rm -f /srv/twins");
+    }
     // Where the reader's groups cannot be asked at all, here with an id that answers nothing of
     // groups, none is taken on trust: the reader is refused.
     const silent = '#!/bin/sh\n[ "$1" != -G ] || exit 1\nexec /opt/hold/id "$@"\n';
