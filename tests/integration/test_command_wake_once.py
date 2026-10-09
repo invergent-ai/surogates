@@ -715,9 +715,10 @@ async def test_a_command_left_behind_past_the_cursor_does_not_revive_its_chat(wo
 
 async def test_a_wake_of_a_finished_chat_looks_for_a_waiting_command_from_its_last_command_on(workers):
     chat = await workers.chat()
+    await workers.types(chat, "/loop list")
     await workers.types(chat, "/goal status")
     typed = (await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
-    # The chat goes on long after the command, and comes to rest.
+    # The chat goes on long after its commands, and comes to rest.
     for question in ("And Q1?", "And Q0?"):
         await workers.says(chat, question)
         await workers.wake(chat)
@@ -736,7 +737,7 @@ async def test_a_wake_of_a_finished_chat_looks_for_a_waiting_command_from_its_la
 
     # The wake has nothing to do.  Beside its user's messages it read the log from the last command
     # on: commands are answered in the order typed, so none waits unless the last one does.
-    assert (workers.ran, len(workers.requests)) == (["_handle_goal_command"], 2)
+    assert (workers.ran, len(workers.requests)) == (["_handle_loop_command", "_handle_goal_command"], 2)
     assert [read.get("after") for read in reads if read.get("types") != [EventType.USER_MESSAGE]] == [typed - 1]
 
 
@@ -1466,6 +1467,49 @@ async def test_a_mission_command_that_took_effect_as_its_worker_died_is_answered
     assert (await workers.said(chat))[-1] == answer
     assert (await workers.log(chat)).count(done.value) == 1
     assert workers.ran == ["_handle_mission_command"] * 2
+
+
+async def its_worker_dies():
+    raise asyncio.CancelledError
+
+
+@pytest.mark.parametrize("behind", ["/loop list", "And Q1?"])
+async def test_what_was_typed_behind_a_command_gets_its_wake_though_the_commands_worker_died_once_it_had_answered(workers, behind):
+    chat = await workers.chat()
+    await workers.says(chat, "/goal status")
+    await workers.says(chat, behind)
+    await workers.nobody_is_queued()
+    with pytest.raises(asyncio.CancelledError):
+        await workers.worker(store=Meanwhile(workers.store, then=its_worker_dies)).wake(chat)
+
+    # The chat ends on an answer, which is nothing the sweeper recovers: the wake queued it before
+    # the command was run, for what its user had typed behind the command.
+    assert (await queued(workers.api, await workers.session(chat)), await workers.swept(chat)) == (True, False)
+    for _ in range(2):
+        await workers.wake(chat)
+    if behind.startswith("/"):
+        assert workers.ran == ["_handle_goal_command", "_handle_loop_command"]
+    else:
+        assert workers.requests[0][-1] == {"role": "user", "content": behind}
+    assert (await workers.status(chat), len(await workers.said(chat))) == ("completed", len(TALK) + 2)
+
+
+@pytest.mark.parametrize("paused, command, answer", [
+    (False, "/mission pause", "Mission paused."), (True, "/mission resume", "Mission resumed."),
+    (True, "/goal status", "No active outcome. Set one with /goal <text>."),
+])
+async def test_a_command_in_a_paused_missions_chat_gets_its_wake_though_its_worker_died_before_answering(workers, paused, command, answer):
+    chat = await a_coordinator(workers)
+    if paused:
+        await pause(workers, chat, "typed")
+    await workers.says(chat, command)
+    await workers.nobody_is_queued()
+    await workers.wake_of_a_worker_that_dies(chat, "answering")
+
+    # The sweeper spares a paused mission's chat that ends in no turn: the wake queued it before the command was run.
+    assert await queued(workers.api, await workers.session(chat))
+    await workers.wake(chat)
+    assert (await workers.said(chat))[-1] == answer
 
 
 async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers):

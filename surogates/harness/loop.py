@@ -1656,6 +1656,22 @@ class AgentHarness(
                     # moves once the handler has begun is caught only at
                     # the answer.
                     await self._store.renew_lease(session_id, lease.lease_token, ttl_seconds=_LEASE_TTL_SECONDS)
+                    # A wake for what this worker's death would leave where
+                    # the sweeper does not look: something typed behind the
+                    # command, once the command is answered, and a command
+                    # of a paused mission's chat.  The sweeper takes a log
+                    # that ends on an answer, or a paused mission's on no
+                    # turn, for one at rest.
+                    if self._redis is not None and (
+                        self._more_was_said(session, all_events, typed_at)
+                        or await self._mission_may_be_paused(session)
+                    ):
+                        from surogates.config import enqueue_session
+
+                        await enqueue_session(
+                            self._redis, org_id=str(session.org_id),
+                            agent_id=session.agent_id, session_id=session.id,
+                        )
                     try:
                         if slash_block is not None:
                             await self._emit_loop_response(
@@ -4980,15 +4996,7 @@ class AgentHarness(
         """
         if not _command_answered(events, typed_at):
             return False
-        asked = max((event.id for event in events if event.type == EventType.LLM_REQUEST.value), default=0)
-        commands = {id(event) for event in self._waiting_commands(session, events)}
-        if any(
-            event.type == EventType.USER_MESSAGE.value and event.id > typed_at and (
-                id(event) in commands
-                or event.id > asked and ((event.data or {}).get("synthetic") or self._is_plain_message(session, event))
-            )
-            for event in events
-        ):
+        if self._more_was_said(session, events, typed_at):
             return False
         goal_waits = self._goal_waits(session, events)
         # What no turn has read: a helper's report, a goal's next turn, a
@@ -5020,6 +5028,21 @@ class AgentHarness(
         if at_rest:
             await self._release_command_turn(session)
         return at_rest
+
+    def _more_was_said(self, session: Session, events: list, typed_at: int) -> bool:
+        """Whether something said after the command typed at event
+        *typed_at* still waits in *events*, the session's log: a message
+        no request has read, the user's own or the harness's, or another
+        command."""
+        asked = max((event.id for event in events if event.type == EventType.LLM_REQUEST.value), default=0)
+        commands = {id(event) for event in self._waiting_commands(session, events)}
+        return any(
+            event.type == EventType.USER_MESSAGE.value and event.id > typed_at and (
+                id(event) in commands
+                or event.id > asked and ((event.data or {}).get("synthetic") or self._is_plain_message(session, event))
+            )
+            for event in events
+        )
 
     async def _release_command_turn(self, session: Session) -> None:
         """Let go of what a turn holds, at the end of a command's turn as at

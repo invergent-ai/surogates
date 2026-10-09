@@ -1,7 +1,8 @@
 """Wherever a command is typed against a turn, its chat comes out whole.
 
 A placement is a built-in command, the moment of a turn its user types it at,
-what they type with it, and where the worker that answers it dies.  Every
+what they type with it, and where the worker that answers it dies, or fails
+to write its answer.  Every
 placement is built by the loop at the foot of this file and run through the
 real wake, handlers, replay, queue and sweeper; only the model is scripted,
 and each of its replies is its own, so a later request shows where it stands.
@@ -17,8 +18,10 @@ Of every placement:
 * each request is one a provider takes: a call's results follow it at once,
   a request starts on a user's message and ends on a user's message or a
   result, no command is shown that still waits, and nothing is shown twice;
-* the chat ends at rest: nobody queued, nothing for the sweeper, the cursor
-  at the end.
+* the chat comes to rest with nothing of its user's left waiting for their
+  next message, and ends at rest: nobody queued, nothing for the sweeper,
+  the cursor at the end; and the sweeper recovered it only where a worker
+  died.
 """
 
 from __future__ import annotations
@@ -221,6 +224,7 @@ class Placement:
         self.typed: list[str] = []
         self.chat: UUID | None = None
         self.began = 0
+        self.left_waiting: list[str] = []
 
     async def begin(self, moment: str) -> None:
         """The chat as it stands before anything of the placement is typed."""
@@ -303,8 +307,20 @@ class Placement:
             if moment == TURN_ENDED:
                 await typing()
         await self.settles()
+        self.left_waiting = await self.still_waiting()
         await self.says(ASKED_LAST)
         await self.settles()
+
+    async def still_waiting(self) -> list[str]:
+        """What its user typed that the chat came to rest over: a command with no answer, a message no request holds."""
+        self.events = await self.workers.store.get_events(self.chat)
+        return [
+            words.split("\n")[0] for words in self.typed
+            if not (
+                self.answers_to(self.message_of(words).id) if words.startswith("/")
+                else any(told(message)[1] == words for request in self.model.requests for message in request)
+            )
+        ]
 
     # -- What is asserted of it --
 
@@ -312,7 +328,8 @@ class Placement:
         self.events = await self.workers.store.get_events(self.chat)
         self.asked = [event for event in self.events if event.type == EventType.LLM_REQUEST.value and event.id > self.began]
         faults = await self.of_the_commands() + self.of_the_messages() + self.of_the_requests() + await self.of_its_rest()
-        return faults
+        # Not one that waits until its user says something more.
+        return faults + [f"{words} waited for its user's next message" for words in self.left_waiting]
 
     def answers_to(self, typed_at: int) -> list:
         return [
@@ -507,6 +524,10 @@ class Placement:
         for ended_badly in (EventType.SESSION_FAIL.value, EventType.HARNESS_CRASH.value):
             if ended_badly in types:
                 faults.append(f"the log holds {ended_badly}")
+        # Where no worker died the sweeper has nothing to recover: what waits gets its wake from the queue.
+        recovered = types.count(EventType.HARNESS_RECOVERED.value)
+        if recovered > (self.dies in (BEFORE_THE_ANSWER, AFTER_THE_ANSWER)):
+            faults.append(f"the sweeper recovered the chat {recovered} times")
         in_flight = bool(await self.workers.missions(self.chat))
         status = await self.workers.status(self.chat)
         # A mission's chat stays active between its turns.

@@ -128,6 +128,27 @@ class OutcomeCommandMixin:
         mission = await MissionStore(self._session_factory).get_active_for_session(session.id)
         return mission is not None and mission.status == "paused"
 
+    async def _mission_may_be_paused(self, session: Session) -> bool:
+        """``_mission_is_paused``, and True where the mission cannot be
+        read: not knowing is not "no"."""
+        try:
+            return await self._mission_is_paused(session)
+        except Exception:
+            logger.debug("Session %s: its mission could not be read", session.id, exc_info=True)
+            return True
+
+    async def _queue_behind_a_pause(self, session: Session, result: Any) -> None:
+        """Queue a wake once a command has paused the session's mission:
+        the sweeper spares a paused mission's chat, so nothing else would
+        answer the command if this worker died before it has."""
+        if result is None or not result.ok or self._redis is None:
+            return
+        from surogates.config import enqueue_session
+
+        await enqueue_session(
+            self._redis, org_id=str(session.org_id), agent_id=session.agent_id, session_id=session.id,
+        )
+
     async def _handle_mission_command(
         self,
         session: Session,
@@ -256,6 +277,7 @@ class OutcomeCommandMixin:
                         session_store=self._store,
                         mission_store=mission_store,
                     )
+                    await self._queue_behind_a_pause(session, result)
                     message = result.message or result.error
                 elif command.action == "resume":
                     if redis_client is None:
@@ -505,6 +527,7 @@ class OutcomeCommandMixin:
                         session_id=session.id, reason=command.reason,
                         session_store=self._store, mission_store=mission_store,
                     )
+                    await self._queue_behind_a_pause(session, result)
                     message = result.message or result.error
                 elif command.action == "resume":
                     if redis_client is None:
