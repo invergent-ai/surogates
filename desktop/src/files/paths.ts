@@ -6,7 +6,7 @@
 import { lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { posix } from "node:path";
 
-import { osError, sandboxError, valueError } from "./answers.js";
+import { NUL_REFUSED, osError, sandboxError, valueError } from "./answers.js";
 
 // os.path.split and os.path.join, for absolute POSIX paths.
 function pySplit(path: string): [string, string] {
@@ -131,7 +131,7 @@ export function inside(path: string, folder: string): boolean {
 
 // resolve: a path as the model wrote it, as a key in the folder.
 export function resolveInFolder(folder: string, home: string, userPath: string): string {
-  if (userPath.includes("\0")) throw valueError("embedded null byte");
+  if (userPath.includes("\0")) throw valueError(NUL_REFUSED);
   const expanded = expandUser(userPath, home).replace(/\/{2,}/g, "/");
   const { path, loop } = realpath(expanded.startsWith("/") ? expanded : pyJoin(folder, expanded));
   if (loop && stillLoops(path)) throw osError("ELOOP", path);
@@ -145,7 +145,7 @@ export function resolveInFolder(folder: string, home: string, userPath: string):
 
 // A key the server sent: only resolve's output, a resolved path in the folder, is one.
 export function keyInFolder(folder: string, key: string): string {
-  if (key.includes("\0")) throw valueError("embedded null byte");
+  if (key.includes("\0")) throw valueError(NUL_REFUSED);
   const resolved = key.startsWith("/") ? realpath(key) : null;
   if (!resolved || resolved.loop || resolved.path !== key || !inside(key, folder)) {
     throw sandboxError(`Not a path in this folder: '${key}'`);

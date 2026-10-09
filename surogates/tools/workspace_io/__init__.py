@@ -6,6 +6,7 @@ from typing import Any
 
 from surogates.devices.binding import device_of, device_owners
 from surogates.tools.workspace_io.base import (
+    NUL_REFUSED,
     FileStat,
     LinePage,
     RevisionConflict,
@@ -19,6 +20,7 @@ from surogates.tools.workspace_io.local import LocalWorkspaceIO
 from surogates.tools.workspace_io.storage import StorageWorkspaceIO
 
 __all__ = [
+    "NUL_REFUSED",
     "FileStat",
     "LinePage",
     "LocalWorkspaceIO",

@@ -234,6 +234,21 @@ SAME = [
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "gamma", "glob": "*.md", "context": 0}),
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "(", "glob": None, "context": 0}),
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "a\0", "glob": None, "context": 0}),
+    ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "gamma", "glob": "*\0", "context": 0}),
+    # A key with a NUL, which resolve never gives: refused in the same sentence as a path with one.
+    ("read", {"key": "{f}/a\0b", "max_bytes": None}),
+    ("read_lines", {"key": "{f}/a\0b", **PAGE}),
+    ("list_dir", {"key": "{f}/a\0b"}),
+    ("walk", {"key": "{f}/a\0b", "skip": [], "skip_top": [], "skip_hidden": False, "since": None}),
+    ("ripgrep", {"key": "{f}/a\0b", "mode": "count", "pattern": "gamma", "glob": None, "context": 0}),
+    # A stat of one alone answers that nothing is there, as it answers any key it cannot stat.
+    ("stat", {"key": "{f}/a\0b"}),
+    ("stat", {"key": "a\0b"}),
+    # A NUL and another argument that is refused: the NUL first.
+    ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "a\0", "glob": None, "context": -1}),
+    ("ripgrep", {"key": "{f}/sub", "mode": "regex", "pattern": "a\0", "glob": None, "context": 0}),
+    ("read_lines", {"key": "{f}/a\0b", **PAGE, "encoding": "latin-1"}),
+    ("walk", {"key": "{f}/a\0b", "skip": "x", "skip_top": [], "skip_hidden": False, "since": None}),
 ]
 
 # Changes that fail the same way on both and change nothing.
@@ -247,6 +262,9 @@ SAME_FAILURES = [
     ("delete", {"key": "{f}/missing"}),
     ("delete", {"key": "{f}/sub"}),
     ("delete", {"key": "{f}"}),
+    ("write", {"key": "{f}/a\0b", "data": b64(b"x")}),
+    ("write", {"key": "{f}/a\0b", "data": b64(b"x"), "expected_revision": "0:0:0:0:0"}),
+    ("delete", {"key": "{f}/a\0b"}),
 ]
 
 
@@ -270,6 +288,11 @@ SAME_RUN = [
     ("run", {"command": "pwd", "workdir": "link-out", "timeout": 10}),
     ("run", {"command": "a\0b", "workdir": None, "timeout": 10}),
     ("run", {"command": "pwd", "workdir": "a\0b", "timeout": 10}),
+    # A NUL is refused before the workdir is looked at: one outside the folder is a refusal of its own.
+    ("run", {"command": "a\0b", "workdir": "/etc", "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "/etc/a\0b", "timeout": 10}),
+    ("run", {"command": "a\0b", "workdir": None, "timeout": 0}),
+    ("run", {"command": "pwd", "workdir": "a\0b", "timeout": 0}),
     ("run", {"command": "exit 0", "workdir": None, "timeout": 10}),
 ]
 
@@ -340,6 +363,10 @@ PROCESS_CASES = [
         ("start", {"command": "true", "workdir": "a.txt", "task_id": "cross-6", "pty": False,
                    "notify_on_complete": False, "watcher_interval": None}),
         ("start", {"command": "a\0b", "workdir": None, "task_id": "cross-6", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("start", {"command": "true", "workdir": "a\0b", "task_id": "cross-6", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("start", {"command": "a\0b", "workdir": "/etc", "task_id": "cross-6", "pty": False,
                    "notify_on_complete": False, "watcher_interval": None}),
         ("list_processes", {"task_id": "cross-6"}),
     ],
