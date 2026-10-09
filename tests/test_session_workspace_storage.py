@@ -20,7 +20,7 @@ from surogates.artifacts.store import ArtifactStore
 from surogates.config import Settings
 from surogates.devices.operations import DeviceOperations
 from surogates.tenant.context import TenantContext
-from surogates.tools.workspace_io import StorageWorkspaceIO
+from surogates.tools.workspace_io import NUL_REFUSED, StorageWorkspaceIO
 
 pytestmark = pytest.mark.asyncio
 
@@ -561,8 +561,7 @@ class _ReadOnlyStorage(_RecordingStorage):
         raise AssertionError("a cloud chat's open reads the object directly")
 
     async def read(self, bucket: str, key: str) -> bytes:
-        if "\x00" in key:
-            raise ValueError("embedded null byte")
+        assert "\x00" not in key, "a path with a NUL reached storage"
         return await super().read(bucket, key)
 
 
@@ -587,10 +586,10 @@ async def test_a_cloud_chats_file_is_opened_with_one_read_as_before():
     with pytest.raises(HTTPException) as missing:
         await workspace_route.get_workspace_file(session_id, request, path="missing.txt", tenant=tenant)
     assert (missing.value.status_code, missing.value.detail) == (404, "File not found: missing.txt")
-    # A path storage cannot take is the user's error, not the server's.
+    # A path with a NUL is the user's error, not the server's, and storage is never asked for it.
     with pytest.raises(HTTPException) as bad:
         await workspace_route.get_workspace_file(session_id, request, path="a\x00b.txt", tenant=tenant)
-    assert bad.value.status_code == 400
+    assert (bad.value.status_code, bad.value.detail) == (400, NUL_REFUSED)
 
 
 async def test_an_uploads_change_is_named_off_the_event_loop(monkeypatch):

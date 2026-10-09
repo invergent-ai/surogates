@@ -28,6 +28,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+# Where a NUL is refused, and in what words: said once, beside the sandbox's path rules.
+from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, refuse_nul
+
+__all__ = ["NUL_REFUSED", "refuse_nul"]
+
 RipgrepMode = Literal["files", "count", "json"]
 
 

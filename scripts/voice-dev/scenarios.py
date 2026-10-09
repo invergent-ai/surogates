@@ -129,7 +129,7 @@ def turns(events) -> list[dict]:
 
 async def greeting(call: Call, r: Result) -> None:
     g = r.heard("(dial)", await call.listen(call.dialed_at))
-    r.check("greeting heard", "buna ziua" in plain(g.text), g.text)
+    r.check("greeting heard", len(g.text.split()) >= 2, g.text)  # any greeting: lines are the agent's own
     r.check("greeting within 4 s of answering", g.delay is not None and g.delay < 4, f"{g.delay}")
 
 
@@ -180,7 +180,7 @@ async def barge_in(call: Call, r: Result) -> None:
     ev = await DB().events(call.room_name)
     users = [data(e).get("content", "") for e in ev if e["type"] == "user.message"]
     heard_reply = any(data(e).get("synthetic") == "voice_heard" for e in ev)
-    noted = any("te-a întrerupt" in u for u in users[1:])
+    noted = any("interrupted you" in u for u in users[1:])
     r.check("history says what the caller heard", heard_reply or noted,
             "synthetic reply" if heard_reply else "note on next message" if noted else "neither")
 
@@ -198,7 +198,7 @@ async def backchannel(call: Call, r: Result) -> None:
     # working. What matters is in the session: the "Da" became no turn and cut no reply.
     ev = await DB().events(call.room_name)
     users = [data(e).get("content", "") for e in ev if e["type"] == "user.message"]
-    cut = any(data(e).get("synthetic") == "voice_heard" for e in ev) or any("te-a întrerupt" in u for u in users)
+    cut = any(data(e).get("synthetic") == "voice_heard" for e in ev) or any("interrupted you" in u for u in users)
     r.check("a short 'da' does not stop the agent", len(users) == 1 and not cut,
             f"{len(users)} caller turns, {'a reply was cut' if cut else 'nothing cut'}")
 
@@ -299,7 +299,7 @@ def report(results: list[Result], previous: dict | None) -> None:
 
 async def main(names: list[str]) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    runs = sorted(OUT.glob("*.json"))
+    runs = sorted(OUT.glob("[0-9]*-[0-9]*.json"))  # past runs only, not other notes kept there
     previous = None
     if runs:
         prev = json.loads(runs[-1].read_text())

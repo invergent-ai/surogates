@@ -472,7 +472,6 @@ export class Root {
   run(args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
     return answered(async () => {
       const checked = runArgs(args);
-      if (!("command" in checked)) return checked;
       // One for the whole run, its folder lookup and its command.
       const backstop = this.backstop(checked.timeout * 1000);
       try {

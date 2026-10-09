@@ -14,11 +14,12 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
 from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
+from surogates.devices import operations as operations_module
 from surogates.devices.link import TRANSFER_WINDOW
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
@@ -30,10 +31,12 @@ from surogates.devices.operations import (
 )
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import CHUNK_BYTES
+from surogates.runtime.turn_slots import current_turn
 from surogates.session.store import SessionStore
 from surogates.tools.builtin import file_ops
 from surogates.tools.registry import ToolSchema
 from surogates.tools.workspace_io import RevisionConflict
+from tests.test_turn_slots import as_tool_call, held_turn
 
 from .test_device_transfers import StoppingStore, big_text, stored, transfers_of
 from .test_devices import (  # noqa: F401  (fixtures)
@@ -111,7 +114,9 @@ async def test_a_writes_data_is_kept_without_a_second_copy_of_it():
 
     class Recording:
         async def execute(self, statement, parameters=None):
-            rows.extend(parameters or [])
+            if parameters is not None:
+                # One chunk a statement.
+                rows.append(parameters)
 
     transfer = named(BIG)
     tracemalloc.start()
@@ -171,6 +176,156 @@ async def test_a_write_whose_data_cannot_be_kept_is_not_recorded(laptop_rig, eng
             .where(DeviceOperation.invocation_id == request.invocation_id)
         )).scalar_one() == 0
     assert await transfers_of(session_factory, rig.device_id) == 0
+
+
+# A write whose chunks, sent as one statement of many rows, the driver writes in parts: asyncpg puts
+# the rows in packets of 32 KiB or more and writes four packets at a time.  Four chunks, the last of
+# them a packet's worth, fill the four, and it waits before it writes what ends the statement.  The
+# smallest such write is some 60 bytes less: each row's message has bytes of its own.
+IN_PARTS = os.urandom(CHUNK_BYTES * 3 + 32 * 1024)
+
+
+@pytest.mark.parametrize("handed_over", [False, True], ids=["by its user", "for another worker to resume"])
+async def test_a_write_stopped_at_any_wait_of_its_recording_ends_with_all_of_it_recorded_or_none(
+    laptop_rig, stopping, session_factory, redis_client, handed_over, unguarded,
+):
+    # Without the engines' guard: the recording's own statements are what end when stopped.
+    rig = laptop_rig
+    ops = DeviceOperations(stopping.session_factory, redis_client)
+    for at in range(500):
+        request = write_request(rig, IN_PARTS)
+        slots, _, _ = await held_turn()
+
+        async def in_its_turn():
+            current_turn.set(slots)
+            async with as_tool_call(slots):
+                return await ops.run(request)
+
+        def hand_over():
+            # As the dispatcher hands a turn to another worker: detached, then cancelled.
+            slots.detach()
+            asyncio.current_task().cancel()
+
+        # No computer answers: the call waits until it is stopped.
+        assert await stopping.stop_at(at, in_its_turn(), **({"stop": hand_over} if handed_over else {}))
+        async with session_factory() as db:
+            operation = (await db.execute(
+                select(DeviceOperation.id, DeviceOperation.outcome)
+                .where(DeviceOperation.invocation_id == request.invocation_id)
+            )).one_or_none()
+        if operation is None:
+            # Stopped before its commit: nothing of the write, so the same call asks for it afresh.
+            assert await transfers_of(session_factory, rig.device_id) == 0
+            continue
+        # Stopped once committed: all of it.  Closed, so its computer is never sent it; or left open
+        # for the worker that resumes the turn, which asks for the same operation and joins it.
+        assert operation.outcome == (None if handed_over else CANCELLED_OUTCOME)
+        assert await stored(session_factory, str(operation.id)) == IN_PARTS
+        break
+    else:
+        pytest.fail("the write was never recorded")
+
+
+async def recorded(session_factory, request):
+    """The request's operation in the journal: its id and outcome, or None."""
+    async with session_factory() as db:
+        return (await db.execute(
+            select(DeviceOperation.id, DeviceOperation.outcome)
+            .where(DeviceOperation.invocation_id == request.invocation_id)
+        )).one_or_none()
+
+
+async def test_a_write_stopped_twice_around_its_commit_is_never_left_open_for_its_computer(
+    laptop_rig, stopping, session_factory, redis_client,
+):
+    """A second stop while the first one's connection is being ended: the pool hands the
+    dead connection to the call that closes the write, which must not give up on it."""
+    rig = laptop_rig
+    ops = DeviceOperations(stopping.session_factory, redis_client)
+    # Where the commit is: the first wait a stop at which leaves the write recorded.
+    for commit in range(500):
+        request = write_request(rig, IN_PARTS)
+        assert await stopping.stop_at(commit, ops.run(request))
+        if await recorded(session_factory, request) is not None:
+            break
+    else:
+        pytest.fail("the write was never recorded")
+    # Stopped again one wait after each of its waits; around the commit many times, since
+    # which of the two the second stop meets there is down to timing.
+    for at in (*range(commit - 1), *(commit - 1, commit, commit + 1) * 8):
+        request = write_request(rig, IN_PARTS)
+        assert await stopping.stop_at(at, ops.run(request), again=1)
+
+        async def never_open() -> bool:
+            operation = await recorded(session_factory, request)
+            return operation is None or operation.outcome == CANCELLED_OUTCOME
+
+        # Nothing of it, or all of it and closed: its user stopped it, so its computer is never sent it.
+        # Closed within the patience of the call that closes it, which a second stop does not end.
+        await eventually(never_open, timeout=operations_module._CANCEL_PATIENCE_S + 1)
+
+
+async def test_closing_a_stopped_write_waits_for_a_commit_still_on_its_way(laptop_rig, engine, session_factory, redis_client):
+    rig = laptop_rig
+    reached, let_go = asyncio.Event(), asyncio.Event()
+
+    class Held(AsyncSession):
+        async def commit(self):
+            if not reached.is_set():
+                # The recording's commit, held as one whose answer is slow to come.
+                reached.set()
+                await let_go.wait()
+            await super().commit()
+
+    ops = DeviceOperations(async_sessionmaker(engine, class_=Held, expire_on_commit=False), redis_client)
+    request = write_request(rig)
+    recording = asyncio.create_task(ops._record(request))
+    await asyncio.wait_for(reached.wait(), 5.0)
+    closing = asyncio.create_task(ops._cancel_own(request))
+    try:
+        # Not yet in the journal for anyone else: closing it now would close nothing, and leave it open.
+        await asyncio.sleep(0.3)
+        assert not closing.done()
+    finally:
+        let_go.set()
+        await asyncio.wait_for(asyncio.gather(recording, closing), 5.0)
+    assert (await recorded(session_factory, request)).outcome == CANCELLED_OUTCOME
+
+
+async def test_a_backend_ended_between_two_chunks_is_waited_out_and_the_write_recorded_whole(
+    laptop_rig, stopping, session_factory, redis_client,
+):
+    rig = laptop_rig
+    ended = []
+
+    class Dropped(AsyncSession):
+        async def execute(self, statement, parameters=None, **kwargs):
+            if (
+                not ended and isinstance(statement, Insert) and statement.table.name == "device_transfer_chunks"
+                and parameters["seq"] == 2
+            ):
+                # As a failover ends it: this recording's own backend, between two of its statements.
+                pid = (await super().execute(text("SELECT pg_backend_pid()"))).scalar_one()
+                async with session_factory() as other:
+                    await other.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+                ended.append(pid)
+            return await super().execute(statement, parameters, **kwargs)
+
+    ops = DeviceOperations(
+        # An engine of its own: the pool keeps the connection whose backend ended.
+        async_sessionmaker(stopping.engine, class_=Dropped, expire_on_commit=False), redis_client, recheck_interval_s=0.2,
+    )
+    request = write_request(rig, IN_PARTS)
+    waiting = asyncio.create_task(ops.run(request))
+    try:
+        # Asked again once the database is back, not failed: recorded whole, once.
+        await eventually(lambda: open_count(rig, 1), timeout=10.0)
+        assert ended and not waiting.done()
+        [op] = await rig.ops.pending(rig.device_id, 1)
+        assert await stored(session_factory, str(op.id)) == IN_PARTS
+        assert await transfers_of(session_factory, rig.device_id) == 1
+    finally:
+        await stop(waiting)
 
 
 async def test_a_resumed_write_asks_for_the_same_operation_and_its_data_is_kept_once(laptop_rig, session_factory):
