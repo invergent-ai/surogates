@@ -337,3 +337,11 @@ def test_a_caller_talking_over_a_lookup_cuts_its_typing():
     s.caller_speaking(True)
     run(s, 0.1)
     assert not run(s, 1).any()
+
+
+def test_the_background_track_is_sent_whole_never_cut_as_silence():
+    # Opus DTX (on unless set) takes a quiet room for silence and drops it: the caller heard the room
+    # 11 dB under its level (2026-10-09)
+    from surogates.voice.soundscape import publish_options
+    options = publish_options()
+    assert options.HasField("dtx") and not options.dtx
