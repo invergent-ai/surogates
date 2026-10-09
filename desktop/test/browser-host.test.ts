@@ -3935,6 +3935,9 @@ await navigator.serviceWorker.ready;`);
     host.pause("chat-1", true);
     expect(await host.address(a, true)).toBe("http://fixture.test/");
     host.pause("chat-1", false);
+    // Once the page has answered after the hand back: what it asks for before that is kept for no one, and this
+    // click is the test's own, which waits for nothing, where the agent's would wait.
+    await expect.poll(() => (host as unknown as { settling: Map<Page, unknown> }).settling.has(page), { timeout: 15_000 }).toBe(false);
     await asksFor(a, () => page.click("#file"));
     expect(await upload()).toMatchObject({ ok: { files: 1 } });
     // Handed back before a file input was let be for them: it is not let be after, under the agent's hand.
