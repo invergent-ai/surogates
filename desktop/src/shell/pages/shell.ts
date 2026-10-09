@@ -3,7 +3,7 @@
 // its own. All text comes from the main process and is set with textContent, or with showText
 // where it may hold the user's paths or QEMU's words.
 
-import { ago } from "../text.js";
+import { ago, asShown } from "../text.js";
 import { aged, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
@@ -24,7 +24,7 @@ interface ThreadRow {
   reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
-  files: Array<{ label: string }>;
+  files: Array<{ label: string; landing: "landed" | "redoing" | "not_merged" | "undone" | null }>;
   place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean };
   updatedAt: string;
 }
@@ -173,6 +173,19 @@ const kilobytes = (size: number | null): string => (size === null ? "" : ` · ${
 const REASONS = { question: "Question", approval: "Approval", failed: "Failed", computer: "Computer away", files: "Files" } as const;
 const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
 let tab = "threads";
+// A file's state in the project's files, after its name, where it has one to say.
+const MARKS = { landed: null, redoing: "being redone", not_merged: "not merged", undone: "undone" } as const;
+
+// A row's file: its name, and its mark after it. The name is data: with a mark it is shown as the
+// app's prompts show text, so that none of its characters reorders or hides the mark, and a name
+// too long for its row is cut before the mark.
+function chip(file: ThreadRow["files"][number]): HTMLElement {
+  const mark = file.landing ? MARKS[file.landing] : null;
+  if (mark === null) return element("span", "chip", file.label);
+  const made = element("span", "chip marked");
+  made.append(element("span", "name", asShown(file.label)), element("span", "state", ` · ${mark}`));
+  return made;
+}
 
 // A thread's, or a file's, on the user's computer: a laptop, titled with the computer and whether it is online.
 function laptop(place: ThreadRow["place"]): HTMLElement[] {
@@ -198,7 +211,7 @@ function threadRow(thread: ThreadRow): HTMLElement {
   row.append(element("span", "mark"), title, element("span", "status", thread.statusLine ? `${words} · ${thread.statusLine}` : words), side);
   if (thread.files.length > 0) {
     const chips = element("span", "chips");
-    for (const file of thread.files.slice(0, 2)) chips.append(element("span", "chip", file.label));
+    for (const file of thread.files.slice(0, 2)) chips.append(chip(file));
     if (thread.files.length > 2) chips.append(element("span", "chip", `+${thread.files.length - 2}`));
     row.append(chips);
   }
