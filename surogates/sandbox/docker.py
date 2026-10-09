@@ -205,7 +205,7 @@ class DockerSandbox:
         )
         return sandbox_id
 
-    async def execute(self, sandbox_id: str, name: str, input: str) -> str:
+    async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         entry = self._entries.get(sandbox_id)
         if entry is None:
             raise ValueError(f"Unknown sandbox: {sandbox_id}")
@@ -216,7 +216,7 @@ class DockerSandbox:
                 token=entry.token,
                 name=name,
                 args_str=input,
-                timeout=entry.spec.timeout,
+                timeout=timeout or entry.spec.timeout,
             )
         except SandboxUnavailableError:
             entry.status = SandboxStatus.FAILED

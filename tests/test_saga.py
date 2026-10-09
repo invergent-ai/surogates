@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from surogates.governance.saga.compensator import compensate_step
 from surogates.governance.saga.state_machine import (
+    Saga,
     SagaState,
     SagaStep,
     StepState,
@@ -335,6 +337,64 @@ class TestRetryAllExhausted:
         assert step.retry_count == 2
 
 
+class TestAttempt:
+    """A call outside any saga, tried as a step is."""
+
+    @pytest.mark.asyncio
+    async def test_a_look_that_fails_or_runs_out_of_time_is_tried_again_as_a_step_is(self):
+        orch = SagaOrchestrator(default_step_timeout=1, default_max_retries=2, retry_delay=0.01)
+        tries = []
+
+        async def answers_the_third_time():
+            tries.append(len(tries))
+            if len(tries) == 1:
+                raise RuntimeError("the pod did not answer")
+            if len(tries) == 2:
+                await asyncio.sleep(10)  # past a try's bound
+            return "looked"
+
+        assert await orch.attempt(answers_the_third_time) == "looked"
+        assert tries == [0, 1, 2]
+        assert orch.active_sagas == []  # no saga, and no step, is made for it
+
+    @pytest.mark.asyncio
+    async def test_a_look_that_never_answers_raises_its_last_error(self):
+        orch = SagaOrchestrator(default_max_retries=1, retry_delay=0.01)
+        tries = []
+
+        async def never():
+            tries.append(len(tries))
+            raise RuntimeError(f"fail #{len(tries)}")
+
+        with pytest.raises(RuntimeError, match="fail #2"):
+            await orch.attempt(never)
+        assert tries == [0, 1]
+
+    @pytest.mark.asyncio
+    async def test_a_look_can_ask_for_a_second_try_where_a_step_has_none(self, monkeypatch):
+        orch = SagaOrchestrator(default_max_retries=0, retry_delay=0.25)
+        tries, sleep, waits = [], asyncio.sleep, []
+
+        async def answers_the_second_time():
+            tries.append(len(tries))
+            if len(tries) == 1:
+                raise RuntimeError("not there yet")
+            return "looked"
+
+        async def counted(seconds, *args):
+            waits.append(seconds)
+            return await sleep(0)
+
+        monkeypatch.setattr(asyncio, "sleep", counted)
+        with pytest.raises(RuntimeError, match="not there yet"):
+            await orch.attempt(answers_the_second_time)
+        tries.clear()
+        waits.clear()
+        # At least two tries, the pause of a step's retry between them.
+        assert await orch.attempt(answers_the_second_time, least=2) == "looked"
+        assert tries == [0, 1] and waits == [0.25]
+
+
 class TestCompensateStep:
 
     @pytest.mark.asyncio
@@ -353,3 +413,34 @@ class TestCompensateStep:
         )
         await compensate_step(step, sandbox_pool=Pool(), session_id="s")
         assert calls == ["delete_ticket", "_checkpoint"]
+
+
+class TestSagaRecord:
+
+    def test_a_saga_rebuilt_from_its_record_is_the_saga_as_it_stood(self):
+        orch = SagaOrchestrator(default_step_timeout=7, default_max_retries=1)
+        saga = orch.create_saga(uuid4(), kind="landing")
+        done = orch.add_step(saga.saga_id, tool_name="history.apply", tool_call_id="", arguments={"path": "a.md", "before": None, "after": "b1"})
+        done.transition(StepState.EXECUTING)
+        done.execute_result = {"path": "a.md", "before": None, "after": "b1", "made": ["notes"]}
+        done.transition(StepState.COMMITTED)
+        orch.add_step(saga.saga_id, tool_name="history.record", tool_call_id="", arguments={"main": None})
+        again = Saga.from_dict(saga.to_dict())
+        assert again.to_dict() == saga.to_dict()
+        assert (again.kind, again.steps[0].execute_result["made"], again.steps[0].timeout_seconds) == ("landing", ["notes"], 7)
+        assert [s.state for s in again.steps] == [StepState.COMMITTED, StepState.PENDING]
+        # Taken over, it compensates as the saga it was.
+        other = SagaOrchestrator()
+        assert other.adopt(again) is other.get_saga(saga.saga_id)
+
+    def test_a_turns_saga_is_of_tools_and_its_start_event_says_so(self):
+        from surogates.governance.events import saga_start_event
+
+        orch = SagaOrchestrator()
+        saga = orch.create_saga(uuid4())
+        assert saga.kind == "tools"
+        assert saga_start_event(saga.saga_id, str(saga.session_id), saga.kind)["kind"] == "tools"
+        # A log written before sagas had kinds rebuilds tool sagas.
+        rebuilt = SagaOrchestrator()
+        rebuilt.reconstruct_from_events([SimpleNamespace(type="saga.start", data={"saga_id": "s1", "session_id": str(uuid4())})])
+        assert rebuilt.get_saga("s1").kind == "tools"

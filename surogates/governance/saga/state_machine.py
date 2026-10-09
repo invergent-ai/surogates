@@ -146,7 +146,12 @@ class SagaStep:
 
 @dataclass
 class Saga:
-    """A saga consisting of ordered steps, bound to a session."""
+    """A saga consisting of ordered steps, bound to a session.
+
+    *kind* is ``tools`` for a turn's tool calls, whose record is the
+    session's log, or ``landing`` for a project thread's landing, whose
+    record is its ``workstream_history`` row.
+    """
 
     saga_id: str
     session_id: UUID
@@ -155,6 +160,7 @@ class Saga:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     error: str | None = None
+    kind: str = "tools"
 
     def transition(self, new_state: SagaState) -> None:
         """Transition the saga to *new_state*."""
@@ -179,10 +185,11 @@ class Saga:
         return [s for s in reversed(self.steps) if s.state == StepState.COMMITTED]
 
     def to_dict(self) -> dict:
-        """Serialise for event payloads and debugging."""
+        """Serialise, whole enough for :meth:`from_dict` to rebuild it: a landing's durable record."""
         return {
             "saga_id": self.saga_id,
             "session_id": str(self.session_id),
+            "kind": self.kind,
             "state": self.state.value,
             "created_at": self.created_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
@@ -192,12 +199,40 @@ class Saga:
                     "step_id": s.step_id,
                     "tool_name": s.tool_name,
                     "tool_call_id": s.tool_call_id,
+                    "arguments": s.arguments,
+                    "checkpoint_hash": s.checkpoint_hash,
+                    "compensation_tool": s.compensation_tool,
+                    "compensation_args": s.compensation_args,
                     "state": s.state.value,
+                    "result": s.execute_result,
                     "error": s.error,
+                    "timeout_seconds": s.timeout_seconds,
+                    "max_retries": s.max_retries,
                 }
                 for s in self.steps
             ],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Saga:
+        """The saga :meth:`to_dict` wrote, each step in the state it was in."""
+        saga = cls(
+            saga_id=data["saga_id"], session_id=UUID(data["session_id"]), kind=data["kind"],
+            state=SagaState(data["state"]), created_at=datetime.fromisoformat(data["created_at"]),
+            completed_at=datetime.fromisoformat(data["completed_at"]) if data["completed_at"] else None,
+            error=data["error"],
+        )
+        saga.steps = [
+            SagaStep(
+                step_id=s["step_id"], tool_name=s["tool_name"], tool_call_id=s["tool_call_id"],
+                arguments=s["arguments"], checkpoint_hash=s["checkpoint_hash"],
+                compensation_tool=s["compensation_tool"], compensation_args=s["compensation_args"],
+                state=StepState(s["state"]), execute_result=s["result"], error=s["error"],
+                timeout_seconds=s["timeout_seconds"], max_retries=s["max_retries"],
+            )
+            for s in data["steps"]
+        ]
+        return saga
 
 
 # ---------------------------------------------------------------------------

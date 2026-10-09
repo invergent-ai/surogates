@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -9,6 +12,43 @@ from surogates.session.models import Session
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import agent_session_bucket
 from surogates.workstreams import is_project_thread
+
+
+class NotHandedOn(RuntimeError):
+    """What a step set to run before it starts a session could not be done: the session is not made."""
+
+
+#: What the step now running does right before it starts a session, once it is known to start one.
+_BEFORE_CHILD: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar("before_child", default=None)
+
+
+@contextmanager
+def before_a_child(run: Callable[[], Awaitable[None]]):
+    """Have *run* awaited before each session the enclosed step starts, and before each task it queues.
+
+    A project thread's step hands its copy on there: after the tool's own
+    refusals, so a call that starts nothing hands nothing on.
+    """
+    token = _BEFORE_CHILD.set(run)
+    try:
+        yield
+    finally:
+        _BEFORE_CHILD.reset(token)
+
+
+async def before_child(reading: Any = None) -> None:
+    """Run what the step now running set to happen before it starts a session; nothing outside such a step.
+
+    *reading* is a database session whose read is ended first: what runs
+    may wait for the project's lock, and no transaction is left open
+    through that wait.
+    """
+    run = _BEFORE_CHILD.get()
+    if run is None:
+        return
+    if reading is not None:
+        await reading.rollback()
+    await run()
 
 
 # Fields that pin a child session to its root's workspace.  Callers must
@@ -100,7 +140,9 @@ async def create_agent_session(
     # sandbox.  Only :func:`create_child_session` stamps it, from the real
     # parent.
     merged_config.pop("sandbox_root_session_id", None)
-    merged_config.pop("sandbox_root_thread", None)
+    merged_config.pop("history_thread", None)
+    merged_config.pop("history_project", None)
+    merged_config.pop("under_thread", None)
     # Server-owned too: where a session runs is decided from a device the API
     # checked, never by caller-supplied config.
     merged_config.pop("execution", None)
@@ -157,7 +199,8 @@ async def create_child_session(
     ``workspace_path`` and stamps ``sandbox_root_session_id`` to the
     ultimate ancestor (via :func:`sandbox_session_key`).  No new
     ``sessions/{child_id}/`` prefix is allocated on storage; tools
-    write into the root's workspace prefix.
+    write into the root's workspace prefix.  A project thread's helper is
+    its own sandbox root instead, over the thread's boundary.
 
     Identity is inherited from *parent*: ``agent_id``, ``org_id``,
     ``user_id``, and ``service_account_id`` (unless explicitly
@@ -204,12 +247,27 @@ async def create_child_session(
     if "execution" in parent_config:
         merged_config["execution"] = parent_config["execution"]
 
-    merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
-    # A project thread's helpers run in its pod, over its copy: whichever of
-    # them provisions that pod, on whichever worker, gives it the thread's layout.
-    merged_config.pop("sandbox_root_thread", None)
-    if is_project_thread(parent_config) or parent_config.get("sandbox_root_thread"):
-        merged_config["sandbox_root_thread"] = True
+    # A project thread's helper, and a helper's helper, works on a copy of
+    # its own, of the thread's work, in a pod of its own on whichever worker
+    # takes it: what it keeps there lands with the thread's next landing.
+    # A helper of a thread on the user's computer works in the thread's
+    # folder there, through its binding, as a local chat's helper does.
+    merged_config.pop("history_thread", None)
+    merged_config.pop("history_project", None)
+    # Every session under a thread says which, on the user's computer too, where it has no copy:
+    # it is refused what its thread is refused.  Never from *config*.
+    merged_config.pop("under_thread", None)
+    under = str(parent.id) if is_project_thread(parent_config) else parent_config.get("under_thread")
+    if under:
+        merged_config["under_thread"] = under
+    thread = str(parent.id) if is_project_thread(parent_config) else parent_config.get("history_thread")
+    if thread and "execution" not in parent_config:
+        session_id = session_id or uuid4()
+        merged_config["history_thread"] = thread
+        merged_config["history_project"] = parent_config.get("workstream_id") or parent_config["history_project"]
+        merged_config["sandbox_root_session_id"] = str(session_id)
+    else:
+        merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
 
     effective_service_account_id = (
         service_account_id
@@ -219,6 +277,9 @@ async def create_child_session(
     if effective_service_account_id is not None:
         merged_config["service_account_id"] = str(effective_service_account_id)
 
+    # Past every refusal, the tool's and this function's: what the step that makes the child set
+    # for this moment runs first.
+    await before_child()
     return await store.create_session(
         session_id=session_id,
         user_id=parent.user_id,
@@ -247,8 +308,8 @@ async def create_thread_session(
 
     A child made by :func:`create_child_session` runs in its root's pod, so
     the project's threads would share the master's.  A thread is its own
-    sandbox root instead: ``sandbox_root_session_id`` is its own id, and the
-    children it delegates to share its pod.  It keeps the master's workspace
+    sandbox root instead: ``sandbox_root_session_id`` is its own id, and each
+    child it delegates to has a pod of its own.  It keeps the master's workspace
     fields and boundaries, so every pod mounts the project's one workspace,
     the master's identity and the user's package.  It runs in the cloud
     whatever the master does, unless *device_id* names the user's computer:

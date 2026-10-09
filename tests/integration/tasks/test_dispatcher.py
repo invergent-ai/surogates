@@ -179,7 +179,8 @@ async def test_finalize_completed_session_marks_task_done_with_result(
 
     async with session_factory() as db:
         finalized = await _finalize_ended_sessions(db, session_store=session_store)
-    assert finalized == 1
+    # Its own task among them: the tick works on every running task in the database the tests share.
+    assert finalized >= 1
 
     async with session_factory() as db:
         t = await db.get(Task, tid)
@@ -284,8 +285,8 @@ async def test_finalize_skips_running_sessions(
         tid = t.id
 
     async with session_factory() as db:
-        finalized = await _finalize_ended_sessions(db, session_store=session_store)
-        assert finalized == 0
+        # Whatever else in the shared database the tick finalizes, this task is not among it.
+        await _finalize_ended_sessions(db, session_store=session_store)
         t = await db.get(Task, tid)
         assert t.status == "running"
 
