@@ -430,12 +430,22 @@ async def test_a_recovery_from_a_row_behind_its_landing_puts_back_what_it_knows_
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
     assert (pods.project / "a.md").read_text() == "saved by you since\n"
     [row] = await rows(api, first)
+    told = [report for report in await reports(api, master) if report.get("landing") == "escalated"]
     if row_is == "exact":
         # A row that shows the applies done knows the folders they made, and that your save is a conflict.
         assert not (pods.project / "made").exists() and row.saga_state == "escalated"
+        # The master is told of it, in a report of the dead landing's thread: B's own turn landed.
+        [report] = told
+        assert (report["worker_id"], report["recovered"], "gone" in report) == (str(first.id), True, False)
+        assert [f["ref"] for f in report["files"]] == ["a.md", "made/deep/b.md", "notes.txt", "Report.docx"]
+        assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"] == (
+            f'[Thread "Draft A" ({first.id}): a landing its worker left unfinished was settled]\n'
+            "Could not finish landing these; check them: a.md, made/deep/b.md, notes.txt, Report.docx"
+        )
     else:
         # A row behind them knows neither: the folders stay, empty, and the landing reads as put back.
         assert list((pods.project / "made").rglob("*")) == [pods.project / "made" / "deep"] and row.saga_state == "compensated"
+        assert told == []
 
 
 async def test_a_worker_killed_right_after_its_push_is_completed_and_its_thread_told(api, monkeypatch, pods):
@@ -1238,9 +1248,10 @@ async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands
         await ends(api, pool, second)
     # B's turn did not land, and is not lost with its pod: it is on B's branch, as a failed turn's is,
     # kept without waiting on A's landing a second time: the settle that failed had waited out its fence,
-    # and the mark its look left on A's row is no sign of life.
-    assert len(looks) == 1 and "B.md" not in pods.real_names()
-    assert [wait for wait in waits[looks[0]:] if wait > 0.5] == []
+    # and the mark its looks left on A's row is no sign of life.  The look is tried twice, as one that
+    # did not see the base is.
+    assert len(looks) == 2 and "B.md" not in pods.real_names()
+    assert [wait for wait in waits[looks[-1]:] if wait > 0.5] == []
     assert git(pods.project / "_history", "show", f"refs/heads/threads/{second.id}:B.md") == "by B"
     assert [done["saved"] for done in await turn_ends(api, second)] == [True]
     [report] = await reports(api, master)
@@ -1344,7 +1355,23 @@ async def test_a_landing_settled_whose_row_cannot_be_written_is_left_to_the_next
 
 
 #: Why a landing left running is given up: its row's applies say so.
-GONE = "The project's history no longer has this landing's turn or its base: its files cannot be put back"
+GONE = "The project's history no longer has the versions from before this landing: its files cannot be put back"
+
+
+def looks_for_commits(monkeypatch, *, unseen: int = 0) -> list[list[str]]:
+    """The commits each look of a settle asks the pod for; the first *unseen* looks do not see them, as a listing behind would not."""
+    call, looks = landing_module._call, []
+
+    async def watched(sandbox_pool, owner, action, **arguments):
+        answer = await call(sandbox_pool, owner, action, **arguments)
+        if action == "fetch" and arguments.get("commits"):
+            looks.append(list(arguments["commits"]))
+            if len(looks) <= unseen:
+                return {**answer, "missing": list(arguments["commits"])}
+        return answer
+
+    monkeypatch.setattr(landing_module, "_call", watched)
+    return looks
 
 
 async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up_and_others_land(api, monkeypatch, pods):
@@ -1353,19 +1380,61 @@ async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up
     pool = SandboxPool(pods)
     await edited(pool, first, "echo a > a.md && echo b > b.md")
     await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    [row] = await rows(api, first)
+    base = row.steps[0]["result"]["base"]
     # The history is deleted, as the master's own tools can delete it: nobody has the versions from before.
     shutil.rmtree(pods.project / "_history")
+    looks = looks_for_commits(monkeypatch)
     for thread, name in ((second, "B"), (third, "C")):
         await edited(pool, thread, f"echo by {name} > {name}.md")
         await ends(api, pool, thread)
-    # Given up once, with why, rather than failing every later landing of the project.
+    # Given up once, with why, rather than failing every later landing of the project:
+    # after a second look, and for the base alone, the only versions a put-back writes.
     [row] = await rows(api, first)
-    assert row.saga_state == "escalated"
+    assert row.saga_state == "escalated" and looks == [[base], [base]]
     assert {(s["state"], s["error"]) for s in row.steps if s["tool_name"] == "history.apply"} == {("compensation_failed", GONE)}
     assert [(await rows(api, thread))[-1].saga_state for thread in (second, third)] == ["completed", "completed"]
-    assert all("landing" not in report for report in await reports(api, master))
+    # The master is told, in a report of the dead landing's thread: its files, and that they could not be put back.
+    told = [report for report in await reports(api, master) if "landing" in report]
+    assert [(r["worker_id"], r["title"], r["landing"], r["recovered"], r["gone"]) for r in told] == [
+        (str(first.id), "Draft A", "escalated", True, True),
+    ]
+    assert told[0]["files"] == [
+        {"kind": "file", "label": name, "ref": name, "landing": "not_merged"} for name in ("a.md", "b.md")
+    ]
+    assert worker_note(EventType.WORKER_COMPLETE.value, told[0])["content"] == (
+        f'[Thread "Draft A" ({first.id}): a landing its worker left unfinished was settled]\n'
+        "Could not finish landing these; check them: a.md, b.md\n"
+        "The project's history no longer has their versions from before the landing, so none could be put back"
+    )
     # What it half landed stays, for a person to check; nothing is written over.
     assert pods.real_names() == ["B.md", "C.md", "Report.docx", "a.md", "notes.txt"]
+
+
+async def test_a_landing_left_running_is_not_given_up_while_the_history_is_only_slow_to_show_its_commits(api, monkeypatch, pods):
+    paused = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0.25)
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    [row] = await rows(api, first)
+    base = row.steps[0]["result"]["base"]
+    await edited(pool, second, "echo by B > B.md")
+    looks, sleep, waits = looks_for_commits(monkeypatch, unseen=1), asyncio.sleep, []
+
+    async def counted(seconds, *args):
+        waits.append((len(looks), seconds))
+        return await sleep(seconds, *args)
+
+    monkeypatch.setattr(asyncio, "sleep", counted)
+    await ends(api, pool, second, settings=paused)
+    # One look that did not see the base is no word to give a landing up on: it is looked for again,
+    # a step's pause later, and the landing is put back as any dead landing is.
+    assert looks == [[base], [base]] and (1, 0.25) in waits
+    [row] = await rows(api, first)
+    assert row.saga_state == "compensated" and pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
+    assert all("landing" not in report for report in await reports(api, master))
 
 
 async def test_a_landing_whose_commit_step_failed_keeps_the_turn_on_its_branch(api, monkeypatch, tmp_path):

@@ -70,7 +70,7 @@ _PRUNE_PER_GIB = 180
 _ROW_EVERY = 5
 _ROW_SHARE = 20
 #: What a landing left running says, on each apply it could not put back, when it is given up.
-_GONE = "The project's history no longer has this landing's turn or its base: its files cannot be put back"
+_GONE = "The project's history no longer has the versions from before this landing: its files cannot be put back"
 #: Each thread's put-back still running, kept until done: a cancel never cuts one short.
 _PUTTING_BACK: dict[str, asyncio.Future] = {}
 #: A cancelled landing's pod going, once its slow put-back is done.
@@ -190,7 +190,7 @@ async def land_turn(
     waited: set[int] = set()
     try:
         async with project_lock(session_factory, workstream) as held:
-            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited)
+            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited)
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception as exc:
@@ -251,7 +251,7 @@ async def keep_copy(
         fenced = False
         if settle:
             try:
-                await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited)
+                await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited)
                 fenced = True
             except Exception:
                 logger.warning("Could not settle the landings left running in project %s", workstream, exc_info=True)
@@ -548,13 +548,21 @@ async def _settle(
     was in, or had done since, shows ``pending``.  Its put-backs ask *held*
     first, as a landing's applies do.
     """
-    async def look(**arguments: Any) -> dict:
-        """A look at the history through the pod, tried as a step is, each try marking the row alive first."""
+    async def look(*, found: bool = False, **arguments: Any) -> dict:
+        """A look at the history through the pod, tried as a step is, each try marking the row alive first.
+
+        With *found*, a look that does not see the commits it asks for is
+        a failed try, and they are looked for twice at least, a step's
+        pause apart: _Unseen when the last look lacks them still.
+        """
         async def once() -> dict:
             await _written(row.alive)
-            return await _call(sandbox_pool, owner, "fetch", **arguments)
+            looked = await _call(sandbox_pool, owner, "fetch", **arguments)
+            if found and looked["missing"]:
+                raise _Unseen(looked["missing"])
+            return looked
 
-        return await orchestrator.attempt(once)
+        return await orchestrator.attempt(once, least=2 if found else 1)
 
     if not recovered:
         # Where it stopped, before anything goes back: its own row may be seconds behind.
@@ -564,8 +572,12 @@ async def _settle(
         (s.execute_result for s in saga.steps if s.tool_name == "history.commit" and s.state is StepState.COMMITTED), None,
     )
     if recovered and committed is not None and committed["commit"] is not None:
-        # The turn and its base, the versions a put-back writes: fetched by id, since this pod never had them.
-        gone = (await look(commits=[c for c in (committed["commit"], committed["base"]) if c]))["missing"]
+        # The base alone: a put-back writes its versions and reads no other.  Fetched by id, since this
+        # pod never had it; and not taken for lost on one look's word.
+        try:
+            await look(commits=[committed["base"]], found=True)
+        except _Unseen as unseen:
+            gone = unseen.missing
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
     # Whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
     if record is not None:
@@ -590,6 +602,44 @@ async def _settle(
     return state, None
 
 
+class _Unseen(Exception):
+    """A look did not see the commits it asked the history for."""
+
+    def __init__(self, missing: list[str]) -> None:
+        super().__init__(f"the project's history lacks {', '.join(missing)}")
+        self.missing = missing
+
+
+async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any) -> None:
+    """Report a landing a settle left ``escalated`` to its thread's master, as a turn's own is reported.
+
+    No turn of the thread ends here, so the report has no words of its:
+    it is ``recovered``, names the files the landing was writing, each to
+    check, and says ``gone`` when the history had nothing to put back.  The
+    master reads it at its next wake, and the thread's row shows it as the
+    thread's last report.  As best it can: the row reads ``escalated``
+    whatever comes of the telling.
+    """
+    from surogates.session.store import SessionStore
+    from surogates.workstreams.store import WorkstreamStore
+
+    try:
+        store = SessionStore(session_factory)
+        thread = await store.get_session(thread_id)
+        named = await WorkstreamStore(session_factory).get_thread(thread_id)
+        if thread.parent_id is None:
+            return
+        paths = [s.arguments["path"] for s in saga.steps if s.tool_name == "history.apply"]
+        await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
+            "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
+            "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in paths],
+            "landing": "escalated", "recovered": True,
+            **({"gone": True} if any(s.error == _GONE for s in saga.steps) else {}),
+        })
+    except Exception:
+        logger.warning("Could not tell the master of thread %s that its landing escalated", thread_id, exc_info=True)
+
+
 async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
     """Write a landing's row, or mark it alive, as best it can: an outcome already known stands without it.
 
@@ -605,17 +655,19 @@ async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
 
 async def settle_running(
     session_factory: Any, sandbox_pool: Any, owner: str, workstream_id: Any, saga_settings: Any, held: Any,
-    waited: set[int] | None = None,
+    *, waited: set[int] | None = None,
 ) -> list[dict]:
     """Settle the project's landings left running, through *owner*'s pod; each ``{thread, state, files}``.
 
     A row written within the fence is waited for: its worker may still be
     in a step, or putting files back past its bound.  A settle that loses
-    the lock stops, its row left for the next holder.  A landing whose turn
-    or base the history no longer has is given up, ``escalated``: no one
-    can put its files back, and no later landing waits on it.  *waited*
-    takes the rows found quiet for the fence, whose landings are dead
-    whatever comes of settling them.
+    the lock stops, its row left for the next holder.  A landing whose
+    base the history no longer has, looked for twice, is given up,
+    ``escalated``: no one can put its files back, and no later landing
+    waits on it.  A landing left ``escalated`` here, given up or with a
+    put-back that failed, is reported to its thread's master, whichever
+    lock holder found it so.  *waited* takes the rows found quiet for the
+    fence, whose landings are dead whatever comes of settling them.
     """
     fence = _fence(saga_settings)
     settled: list[dict] = []
@@ -637,6 +689,8 @@ async def settle_running(
         )
         done.add(row.id)
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
+        if state == "escalated" and row.thread_id is not None:
+            await _tell_escalated(session_factory, row.thread_id, saga)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
     return settled
 

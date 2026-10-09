@@ -551,8 +551,8 @@ class History:
 
         ``has_saga`` says whether ``main`` is the landing of *saga*: the only
         proof that a landing pushed.  ``missing`` are those of *commits* the
-        history no longer has, which no fetch can bring: a landing whose turn
-        or base is among them can be put back by no one.
+        history does not have now, which no fetch can bring: a landing whose
+        base stays among them can be put back by no one.
         """
         main = self._take().get(MAIN)
         wanted = [_checked_id(c, "a fetch") for c in commits]

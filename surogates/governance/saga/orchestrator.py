@@ -208,13 +208,14 @@ class SagaOrchestrator:
             raise last_error
         raise SagaStateError("Step execution failed with no error captured")
 
-    async def attempt(self, executor: Callable[..., Any]) -> Any:
+    async def attempt(self, executor: Callable[..., Any], *, least: int = 1) -> Any:
         """Run *executor* as a step is tried, with a step's timeout, retries and waits, outside any saga.
 
         For a call that changes nothing and is safe to repeat: a look that
-        a saga's settling needs.  Raises the last try's error.
+        a saga's settling needs.  Raises the last try's error.  It is
+        tried *least* times at least, where a step's retries are fewer.
         """
-        attempts = 1 + self._default_max_retries
+        attempts = max(least, 1 + self._default_max_retries)
         for attempt in range(attempts):
             try:
                 return await asyncio.wait_for(executor(), timeout=self._default_step_timeout)

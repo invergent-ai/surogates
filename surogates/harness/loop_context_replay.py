@@ -172,6 +172,8 @@ _NOT_LANDED = {
     "escalated": "Could not finish landing these; check them",
     "failed": "Not saved, because the landing failed",
 }
+#: What a report adds of a landing left running whose versions from before the history had lost.
+_NONE_PUT_BACK = "The project's history no longer has their versions from before the landing, so none could be put back"
 #: A landing that failed with the turn's work kept all the same.
 _FAILED_KEPT = "Not landed, because the landing failed"
 #: What a report adds when the work that did not land is in the history, on the thread's branch.
@@ -265,11 +267,19 @@ def worker_note(event_type: str, data: dict) -> dict:
                 landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
                 (kept if landing == "not_merged" else deleted if change == "deleted" else made).append(f)
             listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
-            content = (
-                f"{named} reported]\n"
-                f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
-                f"Files: {listed}"
-            ) + _landing_lines(data, kept, deleted)
+            if data.get("recovered"):
+                # No turn of the thread ended: a later lock holder settled what its lost worker left, and
+                # the harness alone speaks.
+                content = (
+                    f"{named}: a landing its worker left unfinished was settled]" + _landing_lines(data, kept, deleted)
+                    + (f"\n{_NONE_PUT_BACK}" if data.get("gone") else "")
+                )
+            else:
+                content = (
+                    f"{named} reported]\n"
+                    f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
+                    f"Files: {listed}"
+                ) + _landing_lines(data, kept, deleted)
     return {"role": "user", "content": content}
 
 

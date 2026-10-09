@@ -370,6 +370,30 @@ class TestAttempt:
             await orch.attempt(never)
         assert tries == [0, 1]
 
+    @pytest.mark.asyncio
+    async def test_a_look_can_ask_for_a_second_try_where_a_step_has_none(self, monkeypatch):
+        orch = SagaOrchestrator(default_max_retries=0, retry_delay=0.25)
+        tries, sleep, waits = [], asyncio.sleep, []
+
+        async def answers_the_second_time():
+            tries.append(len(tries))
+            if len(tries) == 1:
+                raise RuntimeError("not there yet")
+            return "looked"
+
+        async def counted(seconds, *args):
+            waits.append(seconds)
+            return await sleep(0)
+
+        monkeypatch.setattr(asyncio, "sleep", counted)
+        with pytest.raises(RuntimeError, match="not there yet"):
+            await orch.attempt(answers_the_second_time)
+        tries.clear()
+        waits.clear()
+        # At least two tries, the pause of a step's retry between them.
+        assert await orch.attempt(answers_the_second_time, least=2) == "looked"
+        assert tries == [0, 1] and waits == [0.25]
+
 
 class TestCompensateStep:
 
