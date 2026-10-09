@@ -607,7 +607,8 @@ describe("a page's download, as the host stages it", () => {
   const state = () => host as unknown as {
     roots: Map<string, string>; tabs: Map<string, Page[]>; unseen: Map<string, string[]>; interrupt: AbortController; arriving: Set<unknown>;
     open: Map<unknown, unknown>;
-    hearing: Map<Page, unknown>; choosers: Map<string, FileChooser>; named: Map<string, { input: { chooser: FileChooser } | null }>;
+    hearing: Map<Page, unknown>; choosers: Map<string, FileChooser>; named: Map<string, { input: { chooser: FileChooser } | null; of: string | undefined }>;
+    prompted: Set<string>;
     live: BrowserContext | null;
     adopt(session: string, page: Page): void;
     arrived(page: Page, download: unknown): Promise<void>;
@@ -1372,6 +1373,37 @@ describe("a page's download, as the host stages it", () => {
       expect(letGo(fifth, sixth)).toEqual([1, 1]);
       // And each once.
       expect(letGo(held, early, first, second, third, fourth)).toEqual([1, 1, 1, 1, 1, 1]);
+    });
+
+    it("keeps nothing for an upload that was told not coming before this host had said where its input is: its prompt gave up while the question waited its turn in the session's line, or while the page was still saying", async () => {
+      const tab = taken();
+      const asked = tab.input();
+      const slow: { says?: (place: unknown) => void } = {};
+      Object.assign(asked.element(), { evaluate: () => new Promise((resolve) => {
+        slow.says = resolve;
+      }) });
+      const here = { here: true, href: FORM_URL, origin: new URL(FORM_URL).origin };
+      const keeps = () => [[...state().prompted], state().named.get(SESSION)?.of ?? null, (asked.element() as unknown as { letGo: number }).letGo];
+      // The session's line is held by a prompt's naming whose page is slow to say; a second upload's waits behind it,
+      // and its prompt gives up before its turn comes.
+      const first = host.address(SESSION, true, "upload-1");
+      await vi.waitFor(() => expect(slow.says).toBeDefined());
+      const second = host.address(SESSION, true, "upload-2");
+      host.notComing("upload-2");
+      slow.says!(here);
+      expect([await first, await second]).toEqual([FORM_URL, FORM_URL]);
+      // Only the first is known here, and the input is named for it alone.
+      expect(keeps()).toEqual([["upload-1"], "upload-1", 0]);
+      // The first is told not coming while its page is still saying, for another prompt of its: nothing is kept for it after.
+      delete slow.says;
+      const again = host.address(SESSION, true, "upload-1");
+      await vi.waitFor(() => expect(slow.says).toBeDefined());
+      host.notComing("upload-1");
+      slow.says!(here);
+      await again;
+      expect(keeps()).toEqual([[], null, 0]);
+      // The input is kept still for an upload nobody is asked about.
+      expect(state().choosers.get(SESSION)).toBe(asked);
     });
 
     it("names no input for an upload's prompt where the browser was taken over while its page was still saying where the input is, though it was handed back before the page said: the upload that prompt is about is given to nothing", async () => {

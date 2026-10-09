@@ -513,6 +513,9 @@ export class BrowserHost {
   // opens no file chooser of its own there. Null once its user holds the browser and the page has been quiet
   // for OWN_CHOOSER_MS: a file input is theirs then. *acting*: how many operations of the agent's are still
   // doing something in it. *quiet*: what lets it be, while it is held and heard.
+  // The uploads whose prompts have asked this host where their input is and have no answer yet, by their
+  // operations' ids: whether each is still coming.
+  private readonly sought = new Map<string, { coming: boolean }>();
   // The inputs an upload is giving files to now: held until it has.
   private readonly giving = new Set<FileChooser>();
   // Those whose handle this host has let go.
@@ -589,11 +592,16 @@ export class BrowserHost {
    * is told a new tab's, as its operation there would be refused (perform). Never rejects.
    */
   address(session: string, upload = false, of?: string, root?: string): Promise<string | { refused: string }> {
+    // This waits its turn in the session's line, and for the page: its prompt, which waits less long, can
+    // have given the upload up before it answers (notComing). Nothing is kept then for an upload that is
+    // not coming: it is not known as asked about, and no input is named for it.
+    const sought = { coming: true };
+    if (upload && of !== undefined) this.sought.set(of, sought);
     return this.inLine(session, async () => {
       const open = (this.tabs.get(session) ?? []).filter((page) => !page.isClosed());
       if (root !== undefined && open.length > 0 && this.roots.get(session) !== root) return NEW_TAB;
       const tab = open.at(-1)?.url() ?? NEW_TAB;
-      if (!upload) return tab;
+      if (!upload || !sought.coming) return tab;
       // Asked about from here on, whatever is named for it.
       if (of !== undefined) this.prompted.add(of);
       const chooser = this.choosers.get(session);
@@ -603,6 +611,7 @@ export class BrowserHost {
       // Its user holds the browser, or took it over since this began, handed back or not: no input is named,
       // or kept, for any upload. The one that had asked did so before they held it.
       if (this.held !== null || taken.aborted) return tab;
+      if (!sought.coming) return tab;
       // The input named for the prompt before this one, if any, is named no more.
       const before = this.named.get(session)?.input?.chooser;
       if (!chooser || !at?.here) {
@@ -615,7 +624,9 @@ export class BrowserHost {
       this.named.set(session, site === null ? { input: null, why: NO_SITE, of } : { input: { chooser, href: at.href, origin: at.origin }, why: NOT_AS_ASKED, of });
       this.release(before);
       return site ?? { refused: NO_SITE };
-    }).catch(() => NEW_TAB);
+    }).catch(() => NEW_TAB).finally(() => {
+      if (of !== undefined && this.sought.get(of) === sought) this.sought.delete(of);
+    });
   }
 
   /**
@@ -623,6 +634,8 @@ export class BrowserHost {
    * out or went, or it ended before it came here. It is known no more, and no input is kept for it.
    */
   notComing(of: string): void {
+    const sought = this.sought.get(of);
+    if (sought) sought.coming = false;
     this.prompted.delete(of);
     for (const [session, kept] of this.named) {
       if (kept.of !== of) continue;
