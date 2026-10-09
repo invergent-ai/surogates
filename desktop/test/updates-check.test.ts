@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { CHECK_MS, KEY_CHANGED, keepChecked, listedKeys, nextCheckIn, signedRelease, updateLine } from "../src/shell/updates.js";
+import { CHECK_MS, keepChecked, listedKeys, nextCheckIn, NOT_SIGNED, signedRelease, updateLine } from "../src/shell/updates.js";
 import { helperWith, keys, next, ranged, servedBase, sha256 } from "./updates-base.js";
 
 const base = servedBase();
@@ -119,8 +119,8 @@ describe("a signed manifest", () => {
 });
 
 describe("a release that no key this computer trusts has signed", () => {
-  const LINE = { text: `Surogate's newest release is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`, button: null };
-  it("has a line that says what mends it, as the install script says it: a computer that missed the release which brought a new key takes no later one, and no one at it can know why", async () => {
+  const LINE = { text: `Surogate's newest release${NOT_SIGNED}`, button: null };
+  it("has a line that says what is so and the way on, as the install script says it: a computer that missed the release which brought a new key takes no later one, and no one at it can know why", async () => {
     base.publish("1.2.4", {}, next.privateKey);
     const states: string[] = [];
     const found = base.updates({}, () => states.push(found.state.state));
@@ -145,30 +145,38 @@ describe("a release that no key this computer trusts has signed", () => {
     expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
   });
 
-  it("says it in the install script's own words, which the script has once, for its install, its rollback and its apply alike", () => {
-    // The script's one sentence, behind the name of what was not signed: the address of a manifest
+  it("says it in the install script's own words for an install and an apply: what is so, and the one way on that this computer's own keys check", () => {
+    // The script's sentences, behind the name of what was not signed: the address of a manifest
     // that an install or a rollback asked for, or "the release's manifest" where the app's own
-    // click had the helper apply one.
-    const said = [...readFileSync(SCRIPT, "utf8").matchAll(/fail "\$1( is not signed by Surogate's release key, as this computer has it\. [^"]+)"/g)].map(([, words]) => words);
-    expect(said).toEqual([` is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`]);
-    expect(LINE.text).toBe(`Surogate's newest release${said[0]}`);
-    // And whole on the line: the sidebar's bound for a helper's words is not this line's.
-    expect(LINE.text.endsWith("install it again")).toBe(true);
+    // click had the helper apply one. A rollback is told the first alone; an install and an
+    // apply the second, which is the first and the way on.
+    const script = readFileSync(SCRIPT, "utf8");
+    const said = [...script.matchAll(/fail "\$1( is not signed by a release key this computer trusts: [^"]+)"/g)].map(([, words]) => words);
+    expect(said).toEqual([NOT_SIGNED.slice(0, NOT_SIGNED.indexOf(". If ")), NOT_SIGNED]);
+    expect(LINE.text).toBe(`Surogate's newest release${said[1]}`);
+    expect(LINE.text.endsWith("--version of the release that brought the new key")).toBe(true);
+    // No sentence of the script's or of the app's for a release that is not signed sends a person
+    // to remove Surogate Desktop: the install after it trusts whatever list its base serves.
+    const unsigned = [...script.matchAll(/fail "\$1 is (?:not )?signed by [^"]+"/g)].map(([words]) => words);
+    expect(unsigned).toHaveLength(5);
+    for (const words of [...unsigned, LINE.text]) expect(words).not.toMatch(/uninstall|remove|install it again/i);
     // The README quotes each of the three as it is said: the script's, the app's own, and the helper's on the app's line.
     const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
-    for (const named of ["<base>/desktop/latest.json", "Surogate's newest release", "Surogate could not install its update: the release's manifest"]) expect(readme).toContain(`\n    ${named}${said[0]}\n`);
+    for (const named of ["<base>/desktop/latest.json", "Surogate's newest release", "Surogate could not install its update: the release's manifest"]) expect(readme).toContain(`\n    ${named}${said[1]}\n`);
+    // And the removal is the README's alone, behind a condition that a person can check elsewhere.
+    expect(readme.replace(/\s+/g, " ")).toContain("Do it only once Surogate's release notes say that the release key has changed");
   });
 
-  it("shows the helper's own refusal of such a release whole, as its own line for one is: what mends it is the sentence's end", async () => {
+  it("shows the helper's own refusal of such a release whole, as its own line for one is: the way on is the sentence's end", async () => {
     base.publish("1.2.4");
-    const refused = `the release's manifest is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`;
+    const refused = `the release's manifest${NOT_SIGNED}`;
     const found = base.updates({ apply: () => Promise.resolve({ code: 1, said: `Surogate Desktop: ${refused}\n` }) });
     await found.check();
     await found.install();
     expect([...refused].length).toBeGreaterThan(240);
     expect(updateLine(found.state)).toEqual({ text: `Surogate could not install its update: ${refused}`, button: "Try again" });
     // No other long line of a helper's is: one that only ends as the sentence does not begin is cut.
-    const other = base.updates({ apply: () => Promise.resolve({ code: 1, said: `Surogate Desktop: ${"a".repeat(300)} ${KEY_CHANGED}\n` }) });
+    const other = base.updates({ apply: () => Promise.resolve({ code: 1, said: `Surogate Desktop: ${"a".repeat(300)}${NOT_SIGNED}\n` }) });
     await other.check();
     await other.install();
     expect((other.state as { why: string }).why).toHaveLength(240);

@@ -183,23 +183,21 @@ export interface UpdateLine {
   button: string | null;
 }
 
-/** The sidebar's line for *state*, or null for none. */
-// What mends a computer that missed the release which brought a new release key: it takes nothing
-// the new key signs, and no one at it can know why. The install script's own words for it
-// (unsigned in release/install.sh), which the same computer's administrator reads there.
-export const KEY_CHANGED = "The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, "
-  + "or remove Surogate Desktop with --uninstall and install it again";
-
 // What follows the name of a release that no key this computer trusts has signed, in the install
-// script's own sentence (not_signed in release/install.sh): its install's, its rollback's and its
-// helper's refusal, and the app's own line for one.
-export const NOT_SIGNED = ` is not signed by Surogate's release key, as this computer has it. ${KEY_CHANGED}`;
+// script's own sentence for an install and an apply (not_signed in release/install.sh): what is
+// so, that nothing was installed and the version here stays, and the one way on that this
+// computer's own keys check. A computer that missed the release which brought a new release key
+// takes nothing the new key signs, and no one at it can know why. Nothing here names a removal:
+// that throws the computer's keys away, and what they did not sign may be a forgery as well.
+export const NOT_SIGNED = " is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version. "
+  + "If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key";
 // The helper's refusal of the release it was handed, in that sentence.
 const HELPER_UNSIGNED = `the release's manifest${NOT_SIGNED}`;
 
 // A release that none of the keys asked has signed.
 export class Unsigned extends Error {}
 
+/** The sidebar's line for *state*, or null for none. */
 export function updateLine(state: UpdateState | null): UpdateLine | null {
   switch (state?.state) {
     case "available":

@@ -415,7 +415,7 @@ paired() {
 }
 
 # Ends an install or a rollback whose release, $1 by its address, with manifest $2 and signature
-# $3, no release key this computer trusts has signed. Before any lock is held, the keys asked are
+# $3, no release key this computer trusts has signed (not_signed). Before any lock is held, the keys asked are
 # those of the helper that is there, and a helper's pair that is half done is finished only by an
 # apply: where the release that the pair's mark names lists a key that did sign this one, an
 # update that added the key was stopped before its end, and what is said is what ends it. Not for
@@ -429,21 +429,41 @@ unsigned() {
     ! signed_by "$2" "$3" "${keys[@]}" \
       || fail "$1 is signed by a release key that the update to $half brings, and that update was stopped before its end: run Surogate Desktop's install script with --version $half first"
   fi
-  not_signed "$1"
+  not_signed "$1" "$2" "$3" "${4:+rollback}"
 }
 
-# Ends with the words for $1, a release's manifest by its address or by what it is, that no
-# release key this computer trusts has signed: an install's, a rollback's and an apply's alike,
-# and the app's own line for one (updateLine in src/shell/updates.ts) says the same.
-# On a computer that has a helper, the keys asked were its helper's, and a release that lists a
-# new key beside the old is signed by the old: a computer that never took that release does not
-# know the new one, and takes nothing the new one signs. What mends it is said, as no one at
-# that computer can know it: that release itself, which its keys do take, or a fresh install,
-# which starts from the newest script's own list.
+# Ends with the words for $1, a release's manifest by its address or by what it is, with manifest
+# $2 and signature $3, that no release key this computer trusts has signed: an install's and an
+# apply's alike, and the app's own line for one (updateLine in src/shell/updates.ts) says the
+# same. No sentence here sends a person to remove Surogate Desktop and install it again: that
+# throws away the keys this computer has, and what is not signed by them may be a forgery as well
+# as a release from after a change of key. Each says what is so: nothing was installed, and the
+# version that is here stays.
+# - At a first install there is no helper, and the keys asked were this script's own.
+# - A release that a key signed which this computer trusted once, and which a later release
+#   dropped: found by the lists of the older versions that are still here, each root's own.
+#   Their keys are asked for these words alone, and never for what is installed.
+# - A rollback, $4: no more than that it is not signed. Which release an administrator asked for
+#   is theirs to know.
+# - Any other, of an install or an apply: a computer that never took the release which lists a
+#   new key beside the old does not know the new one, and takes nothing the new one signs. The
+#   one way on is said that this computer's own keys check: that release itself.
 not_signed() {
-  [ ! -e "$HELPER" ] && [ ! -L "$HELPER" ] \
-    || fail "$1 is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again"
-  fail "$1 is not signed by Surogate's release key"
+  local other its newest keys
+  [ -e "$HELPER" ] || [ -L "$HELPER" ] || fail "$1 is not signed by Surogate's release key"
+  # Only the versions older than the release the helper is of, by its mark: a newer one that is
+  # here is an update that did not end, and its keys are ones to come.
+  newest="$(marked)" || newest=
+  for other in "$ROOT"/versions/*/bin/surogate-apply-update; do
+    its="${other#"$ROOT"/versions/}"
+    its="${its%%/*}"
+    [ -n "$newest" ] && a_version "$its" && dpkg --compare-versions "$its" lt "$newest" && roots_alone "$other" || continue
+    listed keys "$other"
+    ! signed_by "$2" "$3" "${keys[@]}" \
+      || fail "$1 is signed by a release key that Surogate has retired, which this computer no longer trusts: nothing was installed, and Surogate Desktop stays at its version"
+  done
+  [ -z "${4:-}" ] || fail "$1 is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version"
+  fail "$1 is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version. If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key"
 }
 
 # The state schema of what the installed version keeps in each user's home, as its mark names it:
@@ -672,7 +692,7 @@ apply() {
   taken "$manifest" "$work/manifest.json" 4096 "$SMALL_WAIT" || fail "$(named "$manifest") is not a downloaded release's file"
   taken "$signature" "$work/manifest.json.sig" 64 "$SMALL_WAIT" || fail "$(named "$signature") is not a downloaded release's file"
 
-  signed "$work/manifest.json" "$work/manifest.json.sig" || not_signed "the release's manifest"
+  signed "$work/manifest.json" "$work/manifest.json.sig" || not_signed "the release's manifest" "$work/manifest.json" "$work/manifest.json.sig"
   local release version sha256 size
   release="$(release_of "$work/manifest.json")" || fail "the release's manifest is not a release of Surogate Desktop for this computer"
   read -r version sha256 size <<<"$release"

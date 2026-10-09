@@ -210,24 +210,39 @@ script then unpacks again a version's folder that has lost its program or its `r
 Where the installed version is newer than the base's newest, the script keeps it as it is
 ("kept the installed ..., newer than the server's ..."), and mends nothing of it.
 
-A different line, with two ways on, is said where the release key changed while this computer
-took no update:
+A different line is said of a release that no release key of this computer's has signed. The
+install script says it, of the base's newest release:
 
-    <base>/desktop/latest.json is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
+    <base>/desktop/latest.json is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version. If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key
 
-The app says it in the same words, in its sidebar: of the newest release, where it finds one that
-no key of this computer's has signed, and of an update that its own helper refuses for that:
+and the app says it in the same words, in its sidebar: of the newest release, once that has stood
+for a day of failed checks, and of an update that its own helper refuses for it:
 
-    Surogate's newest release is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
-    Surogate could not install its update: the release's manifest is not signed by Surogate's release key, as this computer has it. The key may have changed since this computer's last update: run Surogate Desktop's install script with --version of the first release that lists the new key, or remove Surogate Desktop with --uninstall and install it again
+    Surogate's newest release is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version. If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key
+    Surogate could not install its update: the release's manifest is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version. If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key
+
+Nothing was installed, and Surogate goes on at the version it has. The line cannot tell why the
+release is not signed: a release from after a change of the release key, on a computer that took
+no update while the key changed, reads the same as one that someone else put on the server.
 
 A key is changed over two releases: one that the old key signs and that lists the new key beside
 it, and then the first that the new key alone signs. A computer that never installed the first
-of the two knows the old key alone, and takes nothing that the new one signs. Either install
-that first release, which its own key signed, and then update as ever:
+of the two knows the old key alone, and takes nothing that the new one signs. What mends it is
+that first release, which this computer's own key signed, and then an update as ever:
 
     curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --version <that release>
     curl -fsSL https://surogate.ai/desktop/install.sh | bash
 
-or remove Surogate Desktop and install it again, as above. Which release that is, the line
-cannot say: it is the one whose notes say that the release key changes.
+Which release that is, the line cannot say: it is the one whose notes say that the release key
+changes. That way is safe whatever the cause, since this computer's own keys check what it
+installs.
+
+Removing Surogate Desktop and installing it again also ends the line, and is not safe whatever
+the cause: a removal forgets the keys this computer trusts, and the install after it trusts the
+keys that the server's install script lists. Do it only once Surogate's release notes say that the
+release key has changed, read somewhere other than the server the line names.
+
+A rollback (`--version`) to a release that is not signed is told so plainly, with no way on. And
+a release that a key signed which Surogate has since retired is told as that: "... is signed by a
+release key that Surogate has retired, which this computer no longer trusts".
+
