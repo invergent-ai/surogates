@@ -1504,41 +1504,35 @@ class AgentHarness(
             slash_block = self._slash_command_block_reason(
                 last_user_content, session,
             )
+            answered_here = True
             if slash_block is not None:
                 await self._emit_loop_response(
                     session, lease, slash_block, user_content=last_user_content
                 )
-                return
 
-            if last_user_content == "/compress":
+            elif last_user_content == "/compress":
                 await self._handle_compress_command(
                     session, messages, system_prompt, lease,
                 )
-                return
 
-            if last_user_content == "/clear":
+            elif last_user_content == "/clear":
                 await self._handle_clear_command(session, lease)
-                return
 
-            if last_user_content == "/goal" or last_user_content.startswith("/goal "):
+            elif last_user_content == "/goal" or last_user_content.startswith("/goal "):
                 await self._handle_goal_command(session, last_user_content, lease)
-                return
 
-            if last_user_content == "/mission" or last_user_content.startswith("/mission "):
+            elif last_user_content == "/mission" or last_user_content.startswith("/mission "):
                 await self._handle_mission_command(session, last_user_content, lease)
-                return
 
-            if last_user_content == "/auto-research" or last_user_content.startswith("/auto-research "):
+            elif last_user_content == "/auto-research" or last_user_content.startswith("/auto-research "):
                 await self._handle_auto_research_command(session, last_user_content, lease)
-                return
 
-            if last_user_content == "/code" or last_user_content.startswith("/code "):
+            elif last_user_content == "/code" or last_user_content.startswith("/code "):
                 await self._handle_code_command(
                     session, last_user_content, lease, all_events,
                 )
-                return
 
-            if last_user_content.startswith("/loop"):
+            elif last_user_content.startswith("/loop"):
                 # Idempotency guard: ``_handle_loop_command`` creates a fresh
                 # scheduled-loop row each time it runs against a ``/loop ...``
                 # user message.  If the harness wakes a second time on the
@@ -1547,6 +1541,27 @@ class AgentHarness(
                 if not _slash_loop_already_processed(all_events):
                     await self._handle_loop_command(
                         session, last_user_content, lease,
+                    )
+
+            else:
+                answered_here = False
+
+            if answered_here:
+                # A command's wake asks the model nothing, and may be the one
+                # wake the queue held for the command and for a hand back of
+                # the browser made right after it was typed.  The turn that
+                # hand back gave still waits for the model: it gets its wake.
+                written = all_events + await self._store.get_events(
+                    session_id, after=all_events[-1].id, exclude_types=[EventType.LLM_DELTA],
+                )
+                if self._redis is not None and (
+                    device_of(session.config) is not None and _hand_back_unread(written)
+                ):
+                    from surogates.config import enqueue_session
+
+                    await enqueue_session(
+                        self._redis, org_id=str(session.org_id),
+                        agent_id=session.agent_id, session_id=session.id,
                     )
                 return
 

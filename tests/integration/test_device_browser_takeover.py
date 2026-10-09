@@ -1060,6 +1060,10 @@ class Asking:
             member = encode_queue_member(org_id=str(self.api.org_id), agent_id=AGENT_ID, session_id=str(chat))
             await self.api.app.state.redis.zrem(SHARED_WORK_QUEUE_KEY, member)
 
+    async def queued(self, chat: UUID) -> bool:
+        member = encode_queue_member(org_id=str(self.api.org_id), agent_id=AGENT_ID, session_id=str(chat))
+        return await self.api.app.state.redis.zscore(SHARED_WORK_QUEUE_KEY, member) is not None
+
     @property
     def user(self) -> tuple[str, dict[str, str]]:
         """The chats' own user, as the web client in a browser calls their routes."""
@@ -1427,6 +1431,50 @@ async def test_a_hand_back_given_its_turn_as_a_commands_wake_began_runs_no_comma
         assert [conversation[-2:] for conversation in handed] == [[{"role": "assistant", "content": answer}, HANDED_BACK]]
     finally:
         await asking.unqueue(chat)
+
+
+@pytest.mark.parametrize("command", [*COMMANDS, SWITCHED_OFF])
+async def test_a_hand_back_made_before_a_commands_wake_came_is_given_its_turn_once_the_command_is_answered(
+    asking, monkeypatch, command,
+):
+    chat = await asking.held()
+    # Typed, and the browser handed back before a wake took the command: the queue holds one wake for both.
+    await asking.says(chat, command)
+    await asking.hands_back(chat)
+    await asking.unqueue(chat)
+
+    try:
+        # That wake answers the command, and asks the model nothing. The hand back's turn is queued.
+        harness, handed = answering(asking, monkeypatch, command)
+        await harness.wake(chat)
+        assert handed == []
+        assert await asking.queued(chat)
+        await asking.unqueue(chat)
+        # Its wake runs no command again, reads the hand back once, and queues nothing more.
+        harness, handed = answering(asking, monkeypatch, command)
+        watched = watching(harness, monkeypatch)
+        await harness.wake(chat)
+        assert ran(watched) == []
+        assert [conversation.count(HANDED_BACK) for conversation in handed] == [1]
+        assert not await asking.queued(chat)
+    finally:
+        await asking.unqueue(chat)
+
+
+@pytest.mark.parametrize("command", [*COMMANDS, SWITCHED_OFF])
+async def test_a_commands_wake_queues_nothing_more_where_no_hand_back_waits_for_a_turn(asking, monkeypatch, command):
+    # Its user still holds the browser; and in another chat a hand back's turn was read before the command.
+    held, read = await asking.held(), await asking.stopped_while_held()
+    await asking.hands_back(read)
+    await asking.store.emit_event(read, EventType.LLM_REQUEST, {})
+    await asking.unqueue(read)
+
+    try:
+        for chat in (held, read):
+            await command_answered(asking, monkeypatch, chat, command)
+            assert not await asking.queued(chat)
+    finally:
+        await asking.unqueue(held, read)
 
 
 async def test_a_hand_back_a_turn_ended_over_without_reading_is_read_at_the_wake_it_queued(asking, monkeypatch):
