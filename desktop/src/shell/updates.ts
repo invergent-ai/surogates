@@ -330,11 +330,13 @@ export class Updates {
   }
 
   private async look(): Promise<void> {
+    // An install under way, or done, is not undone by a later check, and its line stays its own
+    // to the helper's end: the helper's last rename shows the installed version's mark changed
+    // before the helper has ended, and how it ends is what the line then says.
+    if (this.settled()) return;
     // Installed for every user already, as another user's update leaves it: a restart runs it.
     const installed = this.installedVersion();
     if (installed && newer(installed, this.options.version)) return this.set({ state: "installed", version: installed });
-    // An install under way, or done, is not undone by a later check.
-    if (this.settled()) return;
     const { record, rootOwned, helper } = this.options;
     const base = installBase(record, rootOwned);
     const keys = releaseKeys(helper, rootOwned);

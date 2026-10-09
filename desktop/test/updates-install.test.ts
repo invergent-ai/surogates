@@ -1,6 +1,7 @@
 // Installing an update, beyond updates.test.ts: what stands between its user's click and the root
 // helper's run. The files a check downloaded may be hours old by then, and the helper is handed
-// their paths: they are looked at once more first.
+// their paths: they are looked at once more first. And from the click to the helper's end the
+// line is the install's, whatever a check finds meanwhile.
 
 import { linkSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -95,6 +96,32 @@ describe("the files the root helper is handed", () => {
 });
 
 describe("an install under way", () => {
+  it("keeps its line to its helper's end: a check that finds the installed version's mark changed, as the helper's last rename leaves it, says nothing before the helper has ended", async () => {
+    base.publish("1.2.4");
+    const mark = join(base.dir, "release.json");
+    writeFileSync(mark, `${JSON.stringify({ version: "1.2.3" })}\n`);
+    let applied!: (answer: Applied) => void;
+    const told: string[] = [];
+    const found = base.updates({ installed: mark, apply: () => new Promise((resolve) => {
+      applied = resolve;
+    }) }, () => told.push(found.state.state));
+    await found.check();
+    const installing = found.install();
+    // The helper has switched the computer to the release, and still runs: its last steps are after that rename.
+    writeFileSync(mark, `${JSON.stringify({ version: "1.2.4" })}\n`);
+    base.heard = [];
+    await found.check();
+    expect(found.state).toEqual({ state: "installing", version: "1.2.4" });
+    expect(base.heard).toEqual([]);
+    // It fails at its end: the line says so, and never said the update was installed.
+    applied({ code: 1, said: "Surogate Desktop: stopped, as this step failed: rm -rf -- /opt/surogate/staging/apply.x" });
+    await installing;
+    expect(told).toEqual(["available", "installing", "failed"]);
+    // The check after it reads the mark, and says what is installed.
+    await found.check();
+    expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
+  });
+
   it("is one at a time: a second click while the helper runs starts no second helper", async () => {
     base.publish("1.2.4");
     let applied!: (answer: Applied) => void;
