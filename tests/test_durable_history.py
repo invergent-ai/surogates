@@ -321,6 +321,64 @@ def test_a_file_no_older_than_the_index_is_read_however_its_size_and_time_match(
     assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
 
 
+class ChangedAfterTheListing:
+    """A folder's listing in which *change* is made to the file *name* once it is listed and before it is looked at."""
+
+    def __init__(self, listing, name: bytes, change) -> None:
+        self.listing, self.name, self.change = listing, name, change
+
+    def __enter__(self):
+        self.listing.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.listing.__exit__(*exc)
+
+    def __iter__(self):
+        for entry in self.listing:
+            if entry.name == self.name:
+                self.change()
+            yield entry
+
+
+@pytest.mark.parametrize("becomes", ["nothing", "a folder", "a link"])
+def test_a_file_that_goes_between_its_folders_listing_and_the_look_at_it_takes_no_other_file_with_it(tmp_path, project, monkeypatch, becomes):
+    a_messy_project(project)
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    land(first)
+    time.sleep(1.1)
+    gone, scandir, changed = project / "uploads" / "scan 07.pdf", os.scandir, []
+
+    def change() -> None:
+        changed.append(becomes)
+        gone.unlink()
+        if becomes == "a folder":
+            gone.mkdir()
+            (gone / "page.png").write_bytes(b"\x89PNG")
+        elif becomes == "a link":
+            gone.symlink_to("scan 08.pdf")
+
+    def listed(path):
+        return ChangedAfterTheListing(scandir(path), b"scan 07.pdf", change) if not changed else scandir(path)
+
+    monkeypatch.setattr(os, "scandir", listed)
+    pod = a_pod(tmp_path, project)
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert changed == [becomes]
+    # That file alone is as it is now: every other file of its folder, listed before it or after, is in the copy.
+    names = {f.name for f in (pod.copy / "uploads").iterdir()}
+    assert {f"scan {n:02}.pdf" for n in range(80)} - {"scan 07.pdf"} <= names and "Écran d'accueil.png" in names
+    if becomes == "a link":
+        assert os.readlink(pod.copy / "uploads" / "scan 07.pdf") == "scan 08.pdf"
+    else:
+        # Gone, as git alone finds a file gone; what a folder in its place holds comes with the next open.
+        assert "scan 07.pdf" not in names
+    if becomes != "a folder":
+        assert mains_tree(pod) == tree_git_alone_makes(project, tmp_path)
+    assert mains_tree(a_pod(tmp_path, project)) == tree_git_alone_makes(project, tmp_path)
+
+
 def test_a_file_that_changes_while_many_are_read_leaves_the_read_to_git_alone(tmp_path, project, monkeypatch):
     a_messy_project(project)
     run = subprocess.run

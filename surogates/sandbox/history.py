@@ -1360,7 +1360,10 @@ class History:
         where a look at each file alone is a request or two a file.  Only
         the folders that hold one of *paths* are listed, from the top down,
         and never through a link: a path under a folder that is now a link,
-        or a file, is not there, as git has it.
+        or a file, is not there, as git has it.  A file gone between its
+        folder's listing and the look at it is not there either, and takes
+        no other file of the folder with it; one that became a folder or a
+        link in that time is seen as what it is now.
         """
         files: dict[bytes, dict[bytes, bytes]] = {}
         folders: dict[bytes, set[bytes]] = {}
@@ -1379,7 +1382,9 @@ class History:
                 with os.scandir(os.path.join(root, folder) if folder else root) as listed:
                     for entry in listed:
                         if entry.name in inside:
-                            found[inside[entry.name]] = entry.stat(follow_symlinks=False)
+                            # Gone since it was listed: that file alone, and the rest of its folder as usual.
+                            with contextlib.suppress(FileNotFoundError):
+                                found[inside[entry.name]] = entry.stat(follow_symlinks=False)
                         elif entry.name in below and entry.is_dir(follow_symlinks=False):
                             deeper.append(os.path.join(folder, entry.name) if folder else entry.name)
             except (FileNotFoundError, NotADirectoryError):
