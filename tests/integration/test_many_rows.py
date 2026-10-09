@@ -240,3 +240,21 @@ async def test_rows_of_3_mib_each_sent_alone_end_when_stopped_at_any_wait(stoppi
         assert left == 0
     else:
         pytest.fail("the rows were never inserted")
+
+
+async def test_a_statement_sent_in_groups_on_an_autocommit_connection_leaves_no_row_when_it_fails(pg_url, session_factory, table):
+    """The driver makes one statement of many rows all or nothing by itself; its groups are too."""
+    autocommit = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with autocommit.connect() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    sqlalchemy.insert(table), [{"id": n, "body": BODY, "amount": 1} for n in (1, 2, 1)]
+                )
+            assert await kept(session_factory) == 0
+            # And one that does not fail is kept, with nothing left open on the connection.
+            await connection.execute(sqlalchemy.insert(table), [{"id": n, "body": BODY, "amount": 1} for n in (1, 2, 3)])
+            assert await kept(session_factory) == 3
+            assert not (await connection.get_raw_connection()).driver_connection.is_in_transaction()
+    finally:
+        await autocommit.dispose()

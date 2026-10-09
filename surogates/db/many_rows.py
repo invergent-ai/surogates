@@ -11,7 +11,8 @@ of statements that are "small enough" holds.
 
 So every engine of this process sends such a statement in groups of rows that
 together cannot fill those four packets, each group a statement of its own in
-the caller's transaction; a row that could fill them alone goes alone, as a
+the caller's transaction (on a connection that commits each statement by
+itself, in one of the driver's, so that the statement stays all or nothing); a row that could fill them alone goes alone, as a
 statement of many rows that has one, which the driver writes whole.  A statement small enough
 is sent as it always was.  The listener is on every engine made in a process
 that imports ``surogates.db``, the tests' engines too; it acts for asyncpg only.
@@ -19,6 +20,7 @@ that imports ``surogates.db``, the tests' engines too; it acts for asyncpg only.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import decimal
 import uuid
@@ -27,6 +29,7 @@ from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from sqlalchemy.util import await_only
 
 # What fills the driver's first write: _EXECUTE_MANY_BUF_NUM packets of
 # _EXECUTE_MANY_BUF_SIZE bytes (asyncpg/protocol/consts.pxi).
@@ -113,6 +116,22 @@ def _send_whole(cursor: Any, statement: str, parameters: Any, context: Any) -> b
     # Each group as a statement of many rows, a lone row as a list of one: what the
     # cursor then answers (its rowcount, no result) is what the whole statement
     # answered.  One row cannot fill four packets, so the driver writes it whole.
-    for group in groups:
-        cursor.executemany(statement, group)
+    connection = getattr(cursor, "_adapt_connection", None)
+    if getattr(connection, "isolation_level", None) != "autocommit":
+        # In the caller's transaction: all of the statement or none of it, as before.
+        for group in groups:
+            cursor.executemany(statement, group)
+        return True
+    # No transaction of the caller's: the driver makes one statement of many rows all
+    # or nothing by itself, so its groups go in a transaction of the driver's own.
+    transaction = connection._connection.transaction()
+    await_only(transaction.start())
+    try:
+        for group in groups:
+            cursor.executemany(statement, group)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await_only(transaction.rollback())
+        raise
+    await_only(transaction.commit())
     return True
