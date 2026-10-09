@@ -205,7 +205,7 @@ def _stop() -> None:
 class _StoppedAt:
     """Awaits a call, asking for its task's cancellation as the call reaches one of its waits."""
 
-    def __init__(self, call, at: int, stop) -> None:
+    def __init__(self, call, at: frozenset[int], stop) -> None:
         self._call, self._at, self._stop = call, at, stop
 
     def __await__(self):
@@ -216,7 +216,7 @@ class _StoppedAt:
                 waited = call.send(send) if throw is None else call.throw(throw)
             except StopIteration as ended:
                 return ended.value
-            if waits == self._at:
+            if waits in self._at:
                 # Asked for by the task itself as it suspends: the stop lands at this
                 # wait and no other, as one from outside does when it comes during it.
                 self._stop()
@@ -245,16 +245,19 @@ class Stopping:
         })
         self.session_factory = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def stop_at(self, at: int, call, *, stop=_stop, within: float = 10.0) -> bool:
+    async def stop_at(self, at: int, call, *, again: int | None = None, stop=_stop, within: float = 10.0) -> bool:
         """Run *call* in a task of its own, stopped at its wait number *at*, counted from 0.
 
         Returns once the task ended with its connections given back: True when
         it was stopped, False when the call ended before that wait.  A sweep of
         *at* from 0 stops a call at each of its waits in turn.  *stop* is what
-        stops it, run in the task itself: its cancellation, unless given.
+        stops it, run in the task itself: its cancellation, unless given.  With
+        *again*, it is stopped a second time that many waits later.
         """
+        waits = frozenset({at} if again is None else {at, at + again})
+
         async def stopped():
-            return await _StoppedAt(call, at, stop)
+            return await _StoppedAt(call, waits, stop)
 
         # A connection in the pool first: the waits counted are the call's own, not those of connecting.
         async with self.engine.connect() as connection:
@@ -274,6 +277,11 @@ class Stopping:
                         {"name": self._name},
                     )
                 await asyncio.wait({task}, timeout=within)
+        # At once, but for a call stopped again while it closed what it left: that goes on, briefly, without it.
+        for _ in range(int(within / 0.02)):
+            if self.engine.pool.checkedout() == 0 or again is None:
+                break
+            await asyncio.sleep(0.02)
         assert self.engine.pool.checkedout() == 0, "the stopped call kept a connection"
         if task.cancelled():
             return True

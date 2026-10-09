@@ -77,6 +77,8 @@ _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
 _CANCEL_PATIENCE_S = 5.0
+# How soon it asks again when the database was out of reach.
+_CANCEL_RETRY_S = 0.05
 
 # The invocation of an operation asked for outside any tool call: the user's
 # own request on a chat's files.  A tool call's invocation starts with its
@@ -1118,8 +1120,15 @@ class DeviceOperations:
                 )
             )).scalars())
 
-    async def _cancel_where(self, *conditions: Any) -> int:
+    async def _cancel_where(self, *conditions: Any, decided_for: UUID | None = None) -> int:
         async with self._sf() as db:
+            if decided_for is not None:
+                # A recording holds its device's row FOR SHARE until its commit is
+                # decided: waited for here, so one whose commit is still on its
+                # way is seen, and closed, rather than missed.
+                await db.execute(
+                    select(Device.id).where(Device.id == decided_for).with_for_update(key_share=True)
+                )
             rows = (await db.execute(
                 update(DeviceOperation)
                 .where(DeviceOperation.completed_at.is_(None), *conditions)
@@ -1133,16 +1142,34 @@ class DeviceOperations:
         return len(rows)
 
     async def _cancel_own(self, request: OperationRequest) -> None:
-        """Close a stopped call's operation, best effort: a failure leaves it open as before."""
-        try:
+        """Close a stopped call's operation, within _CANCEL_PATIENCE_S: past it, it stays open as before.
+
+        Asked again while the database is out of reach: the stop that brought
+        the call here may have ended the connection its recording was on, and
+        the pool lends that connection to the next caller, which is this one.
+        Giving up on it would leave an operation its user stopped open, for
+        its computer to run.
+        """
+        async def close() -> None:
             async with asyncio.timeout(_CANCEL_PATIENCE_S):
-                # Shielded: a second cancel of the stopping task must not
-                # abandon the write half-way.
-                await asyncio.shield(self._cancel_where(
-                    DeviceOperation.calling_session_id == request.calling_session_id,
-                    DeviceOperation.invocation_id == request.invocation_id,
-                    DeviceOperation.ordinal == request.ordinal,
-                ))
+                while True:
+                    try:
+                        await self._cancel_where(
+                            DeviceOperation.calling_session_id == request.calling_session_id,
+                            DeviceOperation.invocation_id == request.invocation_id,
+                            DeviceOperation.ordinal == request.ordinal,
+                            decided_for=request.device_id,
+                        )
+                        return
+                    except Exception as exc:
+                        if not _database_unavailable(exc):
+                            raise
+                        await asyncio.sleep(_CANCEL_RETRY_S)
+
+        try:
+            # Shielded, the asking again with it: a second cancel of the
+            # stopping task must not abandon the write half-way.
+            await asyncio.shield(asyncio.ensure_future(close()))
         except Exception:
             logger.warning(
                 "could not cancel operation %s of %s; it stays open",
