@@ -99,8 +99,12 @@ export const SETTLE_MS = 10_000;
 // reads it (handle.evaluate, by ExecutionContext._evaluateWithArguments), which first makes Playwright's
 // helper in that world where it has made none yet (_utilityScript sends Runtime.evaluate: two; made once
 // in each world of each document, so only a frame Playwright has evaluated nothing in takes this step),
-// and then reads the input (evaluateWithArguments sends Runtime.callFunctionOn with userGesture: three,
-// the one that gives the page leave). And by measuring: for a frame that takes all three, with two
+// and then reads the input (evaluateWithArguments sends Runtime.callFunctionOn with userGesture: three).
+// It reads it twice, each as a gesture that gives the page leave, on two chains: whether the input takes
+// several files, after which Playwright says the page asked; and the handle's own description, after
+// which it says nothing. Both wait for the helper, so three commands one after the other at most, and the
+// second reading can reach a busy page after the first has been heard of (quiet counts from the page's
+// answer for that). And by measuring: for a frame that takes all three, with two
 // answers the browser's own chooser opened in 7 runs of 9, with three in none of 4. A test fails where
 // the Playwright installed is another than this: the steps are to be counted again then, the two headed
 // tests of a page and of a frame "that asked for a file on the agent's click and was busy from then on"
@@ -575,7 +579,7 @@ export class BrowserHost {
   private readonly giving = new Set<FileChooser>();
   // Those whose handle this host has let go.
   private readonly released = new WeakSet<FileChooser>();
-  private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null; acting: number; quiet?: NodeJS.Timeout }>();
+  private readonly hearing = new Map<Page, { session: string; heard: ((chooser: FileChooser) => void) | null; acting: number; quiet?: NodeJS.Timeout; turn?: object }>();
   // The pages that have not answered yet since the browser was last handed back (settle): what one of them
   // asks for is kept for no one, and no operation of the agent's acts in it, until it has.
   private readonly settling = new Map<Page, Promise<void>>();
@@ -735,6 +739,7 @@ export class BrowserHost {
       for (const [page, kept] of this.hearing) {
         clearTimeout(kept.quiet);
         delete kept.quiet;
+        delete kept.turn;
         this.hear(page);
         this.settle(page);
       }
@@ -1022,9 +1027,9 @@ export class BrowserHost {
   // frame where it has none yet, and reads the input, which gives the page leave and is when the ask is
   // heard. A busy page keeps the first of them waiting, and the rest follow once it is free. Each answer
   // here comes after one more of those steps was sent, this host's reading being sent later than the step
-  // it follows: so three cover the three, and one more is to spare.
-  private async heardOut(page: Page): Promise<void> {
-    for (let n = 0; n < READS; n += 1) await this.read(page);
+  // it follows: so three cover the three, and one more is to spare. *still*: asked no more once it is not so.
+  private async heardOut(page: Page, still: () => boolean = () => true): Promise<void> {
+    for (let n = 0; n < READS && still(); n += 1) await this.read(page);
   }
 
   // *page* is asked to answer, wherever its frames run: the page, and each frame of it that a process of
@@ -1048,23 +1053,30 @@ export class BrowserHost {
     }));
   }
 
-  // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before: and
-  // then only once it has answered, with nothing heard of it meanwhile (heardOut). A page that asked for a
-  // file and was busy from then on is heard of only when Playwright's reading of its input reaches it,
-  // which gives it leave to ask again: let be before that, it would ask on that leave and the browser's own
-  // chooser would open. Heard of before the page has answered, it begins the page's quiet anew (asks).
-  // With no bound: a page one of whose frames never answers is not let be, and a file input in it opens
-  // nothing for its user while they hold the browser.
+  // *page*, held and heard, is let be OWN_CHOOSER_MS after it has answered for all that was sent it before
+  // now (heardOut), unless it is heard of again before: and then only once it has answered again, with
+  // nothing heard of it meanwhile. Counted from its answer, and not from now: Playwright reads an input
+  // that asked twice, each as a gesture, and says the page asked after the first. A page busy from then on
+  // gets the second late, and with it leave: five seconds from the ask it would be let be with that leave
+  // fresh, ask on it, and the browser's own chooser would open. And answered again before it is let be: a
+  // page that asked and was busy from then on is heard of only when the first reading reaches it, which
+  // begins its quiet anew (asks). With no bound: a page one of whose frames never answers is not let be, and
+  // a file input in it opens nothing for its user while they hold the browser.
   private quiet(page: Page): void {
     const kept = this.hearing.get(page);
     if (!kept?.heard) return;
     clearTimeout(kept.quiet);
-    const mine: NodeJS.Timeout = setTimeout(() => {
-      void this.heardOut(page).then(() => {
-        if (this.hearing.get(page) === kept && kept.quiet === mine && kept.acting === 0) this.unhear(page);
-      });
-    }, OWN_CHOOSER_MS);
-    kept.quiet = mine;
+    const turn = {};
+    kept.turn = turn;
+    const mine = () => this.hearing.get(page) === kept && kept.turn === turn && kept.heard !== null;
+    void this.heardOut(page, mine).then(() => {
+      if (!mine()) return;
+      kept.quiet = setTimeout(() => {
+        void this.heardOut(page, mine).then(() => {
+          if (mine() && kept.acting === 0) this.unhear(page);
+        });
+      }, OWN_CHOOSER_MS);
+    });
   }
 
   // *work* is something done in *page* that gives it leave when it reaches it, until it ends: an operation

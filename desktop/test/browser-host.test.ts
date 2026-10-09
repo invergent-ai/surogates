@@ -107,6 +107,39 @@ setInterval(() => {
 say("ready");
 </script>`;
 
+// A page that asks for a file once, on the leave the agent's navigation gave it; then watches, task after task, for
+// leave to come back, which is Playwright's first reading of the input that asked, and is busy from that very task
+// on, for as long as its address says. Free again, it asks once more, a moment later, if it finds it has leave.
+const TWICE_READ = `<!doctype html><title>TWICE</title><body style="margin:0">
+<input id="file" type="file" style="position:absolute;left:0;top:0">
+<script>
+const say = (what) => navigator.sendBeacon("/said", what);
+const input = document.getElementById("file");
+const busy = Number(new URLSearchParams(location.search).get("busy"));
+let stage = "waiting";
+const channel = new MessageChannel();
+channel.port1.onmessage = () => {
+  const has = navigator.userActivation.isActive;
+  if (stage === "waiting" && has) {
+    stage = "asked";
+    input.click();
+  } else if (stage === "asked" && has) {
+    const until = performance.now() + busy;
+    while (performance.now() < until) {}
+    stage = "free";
+    say("free");
+    setTimeout(() => {
+      if (!navigator.userActivation.isActive) return;
+      input.click();
+      say("asked");
+    }, 800);
+    return;
+  }
+  channel.port2.postMessage(0);
+};
+channel.port2.postMessage(0);
+</script>`;
+
 let site: Server;
 let canary: Server;
 let ports: { site: number; canary: number };
@@ -145,6 +178,7 @@ beforeEach(async () => {
       });
     }
     if (req.url?.startsWith("/acts")) return void res.writeHead(200, { "content-type": "text/html" }).end(ACTS(req.url === "/acts?framing"));
+    if (req.url?.startsWith("/twice-read")) return void res.writeHead(200, { "content-type": "text/html" }).end(TWICE_READ);
     if (req.url === "/stuck") return void res.writeHead(200, { "content-type": "text/html" }).end(STUCK);
     // The stuck page in a frame of a page of its own site: a frame nothing of this host's has read before it asks.
     if (req.url === "/framed-stuck") {
@@ -568,8 +602,10 @@ describe("how many times over a page is asked to answer, as it was counted", () 
       "chooser can open in front of its user with no click of theirs.",
       "Count again the commands Playwright sends a page, one after the other, between Chrome's Page.fileChooserOpened and its",
       "own filechooser event (in lib/coreBundle.js: CRPage._onFileChooserOpened, _adoptBackendNodeId, Page._onFileChooserOpened,",
-      "ExecutionContext._utilityScript and evaluateWithArguments). Then run, headed, the tests of a page and of a frame \"that",
-      "asked for a file on the agent's click and was busy from then on\" in test/browser-host.test.ts, several times each.",
+      "ExecutionContext._utilityScript and evaluateWithArguments), and which of them are sent as a gesture: on 1.63.0 two",
+      "readings of the input are, on two chains, and Playwright says the page asked after the first alone. Then run, headed,",
+      "the tests of a page and of a frame \"that asked for a file on the agent's click and was busy from then on\" and of",
+      "\"a page the agent only opened\" in test/browser-host.test.ts, several times each.",
       "Write the count and the version at PLAYWRIGHT_READ_STEPS and PLAYWRIGHT_MEASURED in src/browser/host.ts, where the",
       "count made on 1.63.0 is written, and how it was made.",
     ].join("\n")).toBe(PLAYWRIGHT_MEASURED);
@@ -1422,7 +1458,7 @@ describe("a page's download, as the host stages it", () => {
       }
     });
 
-    it("lets a page its user holds be only once it has answered, four times over, with nothing heard of it meanwhile: a file it asked for before, heard of only then, begins its five seconds anew; and not once the browser is handed back", async () => {
+    it("lets a page its user holds be five seconds after it has answered, four times over, and only once it has answered so again with nothing heard of it meanwhile: a file heard of meanwhile begins all of it anew; and not once the browser is handed back", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
         const tab = taken();
@@ -1434,33 +1470,46 @@ describe("a page's download, as the host stages it", () => {
         // One more than the three steps Playwright takes, at most, to read an input that asked.
         expect(READS).toBe(4);
         host.pause("chat-2", true);
-        vi.advanceTimersByTime(OWN_CHOOSER_MS);
         await turn();
-        // Its five seconds have passed: it is asked to answer, one time after the other, and heard until the last.
+        // It is asked to answer at once, one time after the other. Its five seconds begin at its last answer, not
+        // before: however long it takes over them, it is heard, and not asked again.
         for (let n = 1; n < READS; n += 1) {
           expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
           await answers();
         }
+        vi.advanceTimersByTime(3 * OWN_CHOOSER_MS);
+        await turn();
         expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
-        // What it asked for before it was busy is heard of now, before it has answered the last time.
-        tab.input();
         await answers();
-        expect([tab.heard(), tab.reads.length, state().choosers.size]).toEqual([1, 0, 0]);
-        // Its five seconds begin from that: asked again then, it answers each time with nothing heard, and is let be.
         vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
         await turn();
-        expect(tab.reads.length).toBe(0);
+        expect([tab.heard(), tab.reads.length]).toEqual([1, 0]);
+        // The five seconds passed, it is asked again, and heard until its last answer. A file it asks for is heard of
+        // before that: all of it begins anew, and nothing is let be by the answers still to come.
         vi.advanceTimersByTime(1);
         await turn();
         for (let n = 1; n < READS; n += 1) await answers();
         expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
+        tab.input();
+        await turn();
         await answers();
-        expect(tab.heard()).toBe(0);
-        // Handed back while it is asked: its answer after that lets nothing be. It is heard for the agent.
-        host.pause("chat-2", false);
-        host.pause("chat-2", true);
+        expect([tab.heard(), state().choosers.size]).toEqual([1, 0]);
+        // Anew: its answers, the five seconds, its answers again with nothing heard, and it is let be.
+        while (tab.reads.length > 0) await answers();
         vi.advanceTimersByTime(OWN_CHOOSER_MS);
         await turn();
+        for (let n = 1; n < READS; n += 1) await answers();
+        expect(tab.heard()).toBe(1);
+        await answers();
+        expect([tab.heard(), tab.reads.length]).toEqual([0, 0]);
+        // Handed back while it is asked the second time over: its answers after that let nothing be. It is heard for the agent.
+        host.pause("chat-2", false);
+        host.pause("chat-2", true);
+        await turn();
+        while (tab.reads.length > 0) await answers();
+        vi.advanceTimersByTime(OWN_CHOOSER_MS);
+        await turn();
+        expect(tab.reads.length).toBe(1);
         host.pause("chat-2", false);
         while (tab.reads.length > 0) await answers();
         expect(tab.heard()).toBe(1);
@@ -1746,28 +1795,31 @@ describe("a page's download, as the host stages it", () => {
       }
     });
 
-    it("hears of the file a busy page asked for before it lets the page be, by nothing but the order in which Playwright's steps and this host's readings reach the page: for each number of steps Playwright takes, and where the last of them is heard of one answer late", async () => {
+    it("keeps for no one the file a busy page asked for before a hand back, by nothing but the order in which Playwright's steps and this host's readings reach the page: for each number of steps Playwright takes, and where the last of them is heard of one answer late", async () => {
       // No browser, and no race: the page a test plays answers what waits in it one at a time, in the order sent.
       // Playwright sends each of its steps the moment the one before has answered; this host sends each reading
       // only once the one before has answered and its line to the page is made, so later than Playwright's step
       // of that round. The file is heard of when the last step has answered. *late*: only once whatever the page
-      // answers next has been answered too, as where the word of it is slow to reach the listener. Whether the
-      // page is heard still once all has been answered: let be before that, it would have opened the browser's
-      // own chooser.
-      const heardStill = async (steps: number, late: boolean): Promise<number> => {
+      // answers next has been answered too, as where the word of it is slow to reach the listener. How many inputs
+      // are kept for the agent once all has been answered: one, where the page was taken for answered before the
+      // file it had asked for under its user's hand was heard of.
+      const keptAfter = async (steps: number, late: boolean): Promise<number> => {
         host = new BrowserHost({ downloaded: (download) => staged.push(download) });
         fresh();
         const tab = taken();
         tab.answering.slow = true;
-        host.pause("chat-2", true);
-        vi.advanceTimersByTime(OWN_CHOOSER_MS);
-        await turn();
-        // The page was busy since it asked: Playwright's first step waits in it, and behind it whatever this host
-        // has sent it by now, and sends it from here on, each where it was sent.
+        // The page asked, and was busy from then on: Playwright's first step waits in it. Taken over and handed back
+        // meanwhile, it has behind that step whatever this host has sent it by now, and sends it from here on, each
+        // where it was sent.
         const waiting: Array<"playwright" | "host"> = ["playwright"];
         const sent = () => {
           while (waiting.filter((who) => who === "host").length < tab.reads.length) waiting.push("host");
         };
+        host.pause("chat-2", true);
+        await turn();
+        sent();
+        host.pause("chat-2", false);
+        await turn();
         sent();
         let step = 1;
         let unheard = false;
@@ -1787,21 +1839,16 @@ describe("a page's download, as the host stages it", () => {
           }
           sent();
         }
-        return tab.heard();
+        return state().choosers.size;
       };
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      try {
-        // As many answers as steps cover the steps: so the three Playwright takes at most, and fewer.
-        for (let steps = 1; steps <= PLAYWRIGHT_READ_STEPS; steps += 1) expect([steps, await heardStill(steps, false)]).toEqual([steps, 1]);
-        // The one more is what covers the last step heard of late. Nothing in the order of what reaches the
-        // page needs it, so no test that plays only that order can show it: this one plays the lateness too.
-        expect(await heardStill(PLAYWRIGHT_READ_STEPS, true)).toBe(1);
-        // And no more than that is covered: a step more than was counted, heard of late, and the page is let be
-        // first. That is what the count's tie to the Playwright installed is for.
-        expect(await heardStill(READS, true)).toBe(0);
-      } finally {
-        vi.useRealTimers();
-      }
+      // As many answers as steps cover the steps: so the three Playwright takes at most, and fewer.
+      for (let steps = 1; steps <= PLAYWRIGHT_READ_STEPS; steps += 1) expect([steps, await keptAfter(steps, false)]).toEqual([steps, 0]);
+      // The one more is what covers the last step heard of late. Nothing in the order of what reaches the page
+      // needs it, so no test that plays only that order can show it: this one plays the lateness too.
+      expect(await keptAfter(PLAYWRIGHT_READ_STEPS, true)).toBe(0);
+      // And no more than that is covered: a step more than was counted, heard of late, and the page is taken for
+      // answered first. That is what the count's tie to the Playwright installed is for.
+      expect(await keptAfter(READS, true)).toBe(1);
     });
 
     it("answers an upload's question at once, in words that say why, where an earlier operation of its session still runs: nothing is kept for that upload, and one asked about once the operation has answered is named its site as ever", async () => {
@@ -1985,6 +2032,7 @@ describe("a page's download, as the host stages it", () => {
         expect(lateFrom).toEqual([1_700_000_000_000 + 250, 1_700_000_000_000 - 3_600_000 + 250]);
         // The five seconds after a take-over are a timer's: neither clock put on an hour ends them, and the timer does.
         host.pause("chat-2", true);
+        await turn();
         wall += 3_600_000;
         steady += 3_600_000;
         vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
@@ -4077,6 +4125,29 @@ await navigator.serviceWorker.ready;`);
     await new Promise((done) => setTimeout(done, 300));
     host.pause("chat-1", true);
     expect(await watched(8_000)).toBe(0);
+  }, 60_000);
+
+  it("opens no chooser of the browser's own for a page the agent only opened, which asked on that and was busy from Playwright's first reading of its input on: Playwright reads the input a second time, as a gesture too and with nothing said after, and the page is let be only five seconds after it has answered for that", async () => {
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://fixture.test/twice-read?busy=12000" }, "chat-1");
+    // It has asked, on the leave the navigation's own reading of its title gave it, and the input is kept for the agent.
+    await expect.poll(() => kept(a) !== undefined, { timeout: 5_000 }).toBe(true);
+    await new Promise((done) => setTimeout(done, 1_000));
+    host.pause("chat-1", true);
+    const seen: number[] = [];
+    const freed = () => said.some(({ what }) => what === "free");
+    for (const until = performance.now() + 25_000; performance.now() < until && !freed();) {
+      seen.push(ownChoosers().length);
+      await new Promise((done) => setTimeout(done, 250));
+    }
+    expect(freed()).toBe(true);
+    // Free again, it asks 0.8 s on, on the leave the second reading gave it when it landed: heard still, for no one.
+    for (let n = 0; n < 12; n += 1) {
+      seen.push(ownChoosers().length);
+      await new Promise((done) => setTimeout(done, 250));
+    }
+    expect([Math.max(...seen), said.map(({ what }) => what)]).toEqual([0, ["free", "asked"]]);
+    expect(kept(a)).toBeUndefined();
   }, 60_000);
 
   it("gives a page no leave by letting go, at the take-over, a button the agent held down in it: the release reaches a busy page after its user has held the browser five seconds, and the page, which asks the moment it has leave, asks for nothing", async () => {
