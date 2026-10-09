@@ -492,6 +492,23 @@ async def test_a_nul_in_a_path_or_a_pattern_is_refused_alike_by_every_file_tool(
     assert os.listdir(ws.real) == []
 
 
+async def test_a_command_whose_workspace_fails_is_reported_at_once_and_run_once(monkeypatch):
+    ran = []
+
+    class NoShell:
+        async def run(self, command, *, workdir, timeout):
+            ran.append(command)
+            raise RuntimeError("no shell on this host")
+
+    monkeypatch.setattr(terminal, "workspace_io_from", lambda kwargs: NoShell())
+    out = json.loads(await terminal._terminal_handler({"command": "pwd"}))
+    assert out["status"] == "error"
+    assert out["error"] == "Failed to execute command: no shell on this host"
+    assert "traceback" in out
+    # Not tried again: the command may already have run.
+    assert ran == ["pwd"]
+
+
 @pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestTerminal:
     async def test_runs_in_workspace_with_home_there(self, ws):
@@ -510,19 +527,6 @@ class TestTerminal:
         assert out["status"] == "blocked"
         assert "All commands must run within the workspace directory" in out["error"]
         assert time.monotonic() - started < 1.0
-
-    async def test_setup_failure_is_reported_at_once_not_retried(self, ws, monkeypatch):
-        class NoShell:
-            async def run(self, command, *, workdir, timeout):
-                raise RuntimeError("no shell on this host")
-
-        monkeypatch.setattr(terminal, "workspace_io_from", lambda kwargs: NoShell())
-        started = time.monotonic()
-        out = await call(terminal._terminal_handler, ws, command="pwd")
-        assert time.monotonic() - started < 1.0
-        assert out["status"] == "error"
-        assert out["error"] == "Failed to execute command: no shell on this host"
-        assert "traceback" in out
 
     @pytest.mark.parametrize("arguments", [
         {"command": "a\x00b"},
