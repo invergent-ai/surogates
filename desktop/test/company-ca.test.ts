@@ -6,13 +6,13 @@
 
 import { spawnSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { chromiumDatabase, companyCertificates, DatabaseRefusal, NICKNAME, trustInChromium } from "../src/shell/company-ca.js";
+import { chromiumDatabase, COMPANY_CA, companyCaFile, companyCertificates, DatabaseRefusal, NICKNAME, trustInChromium } from "../src/shell/company-ca.js";
 import { certificate } from "./certificates.js";
 
 // Each program started here, by what was handed to spawnSync: the real one starts it.
@@ -24,6 +24,26 @@ vi.mock("node:child_process", async (original) => {
     return real.spawnSync(file, args, options);
   }) as typeof real.spawnSync;
   return { ...real, spawnSync };
+});
+
+// What happens to a file once while it is read, and the files whose names say they are root's: the
+// real calls read and look.
+const meanwhile = vi.hoisted(() => ({ during: undefined as (() => void) | undefined, roots: new Set<string>() }));
+vi.mock("node:fs", async (original) => {
+  const real = await original<typeof import("node:fs")>();
+  const readSync = ((...args: Parameters<typeof real.readSync>) => {
+    const read = real.readSync(...args);
+    const during = meanwhile.during;
+    meanwhile.during = undefined;
+    during?.();
+    return read;
+  }) as typeof real.readSync;
+  const lstatSync = ((path: string, ...rest: []) => {
+    const found = real.lstatSync(path, ...rest);
+    if (meanwhile.roots.has(path)) found.uid = 0;
+    return found;
+  }) as typeof real.lstatSync;
+  return { ...real, default: { ...real, readSync, lstatSync }, readSync, lstatSync };
 });
 
 const CERTUTIL = "/usr/bin/certutil";
@@ -87,6 +107,68 @@ describe("the company's CA file", () => {
     expect(() => companyCertificates(link, true)).toThrow(`${link} is not the install script's: it is a link`);
     // No file is still no company CA.
     expect(companyCertificates(join(certs, "missing.pem"), true)).toEqual([]);
+  });
+
+  it("is judged as root's own word again as the file that was opened, and taken when it is: a name that passed is not enough", () => {
+    // Root's own file, in root's folders, is read: it holds no certificate.
+    expect(() => companyCertificates("/etc/passwd", true)).toThrow("/etc/passwd holds no certificate");
+    // By its name root's, and no one else's to write; the file itself is this test's user's.
+    const named = join(certs, "named.pem");
+    writeFileSync(named, pem(company));
+    chmodSync(named, 0o644);
+    meanwhile.roots.add(named);
+    try {
+      if (process.getuid?.() !== 0) expect(() => companyCertificates(named, true)).toThrow(`${named} is not the install script's: only root may write it`);
+    } finally {
+      meanwhile.roots.clear();
+    }
+  });
+
+  it("is read as it is by a development build, whose file is the developer's own, through a link too", () => {
+    const link = join(certs, "developers.pem");
+    symlinkSync(company, link);
+    expect(companyCertificates(link)).toEqual([pem(company).trim()]);
+  });
+
+  it("is /etc/surogate/ca.pem for an installed app whatever its environment names, and for a development build only the file SUROGATE_CA_CERT names", () => {
+    expect(companyCaFile(true, { SUROGATE_CA_CERT: company })).toBe(COMPANY_CA);
+    expect(COMPANY_CA).toBe("/etc/surogate/ca.pem");
+    expect(companyCaFile(false, { SUROGATE_CA_CERT: company })).toBe(company);
+    expect(companyCaFile(false, {})).toBeUndefined();
+    expect(companyCaFile(false, { SUROGATE_CA_CERT: "" })).toBeUndefined();
+  });
+
+  it("refuses a file that holds a private key, an empty one, a folder or a pipe in its place, and more than a megabyte", () => {
+    const keyed = join(certs, "keyed.pem");
+    writeFileSync(keyed, `${pem(company)}${pem(join(certs, "company.key"))}`);
+    expect(() => companyCertificates(keyed)).toThrow(`${keyed} holds a private key`);
+    const empty = join(certs, "empty.pem");
+    writeFileSync(empty, "");
+    expect(() => companyCertificates(empty)).toThrow(`${empty} holds no certificate`);
+    const folder = join(certs, "folder.pem");
+    mkdirSync(folder);
+    expect(() => companyCertificates(folder)).toThrow(`${folder} is no file`);
+    // Never waited for: nothing writes to it.
+    const pipe = join(certs, "pipe.pem");
+    expect(spawnSync("mkfifo", [pipe]).status).toBe(0);
+    expect(() => companyCertificates(pipe)).toThrow(`${pipe} is no file`);
+    const huge = join(certs, "huge.pem");
+    writeFileSync(huge, pem(company).padEnd(1024 * 1024 + 1, "\n"));
+    expect(() => companyCertificates(huge)).toThrow(`${huge} holds more than a megabyte`);
+    // A megabyte whole is read.
+    writeFileSync(huge, pem(company).padEnd(1024 * 1024, "\n"));
+    expect(companyCertificates(huge)).toEqual([pem(company).trim()]);
+  });
+
+  it("refuses a file that changes while it is read, by more certificates or by fewer", () => {
+    const changing = join(certs, "changing.pem");
+    writeFileSync(changing, pem(company));
+    meanwhile.during = () => appendFileSync(changing, pem(another));
+    expect(() => companyCertificates(changing)).toThrow(`${changing} changed while Surogate read it`);
+    meanwhile.during = () => writeFileSync(changing, "");
+    expect(() => companyCertificates(changing)).toThrow(`${changing} changed while Surogate read it`);
+    writeFileSync(changing, pem(company));
+    expect(companyCertificates(changing)).toEqual([pem(company).trim()]);
   });
 });
 
