@@ -1446,6 +1446,12 @@ body.about-page {
   white-space: nowrap;
 }
 
+/* A failure's reason is the helper's own words, which may name a path with no space in it: it
+   wraps inside the sidebar. */
+#update-text {
+  overflow-wrap: anywhere;
+}
+
 /* Empty, the waiting quit's line and the update's take no room, and stay live regions. */
 #quitting:has(#quitting-text:empty),
 #update:has(#update-text:empty) {

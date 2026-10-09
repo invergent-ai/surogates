@@ -189,6 +189,33 @@ describe("updates, through the app", () => {
     await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible())), { timeout: 10_000 }).toBe(true);
   });
 
+  it("keeps a failure's reason inside the sidebar, whatever its helper said: a line that names a long path wraps, and the user's row stays in the window", async () => {
+    publish("0.0.1");
+    // One unbroken word of 3000 characters, as a path with no space in it is.
+    writeFileSync(join(home, "answer"), `1 /${"folder/".repeat(428)}x\n`);
+    const page = await launched();
+    await expect.poll(() => page.locator("#update-button").textContent({ timeout: 1_000 }).catch(() => null), { timeout: 30_000 }).toBe("Restart to update");
+    await page.click("#update-button");
+    await expect.poll(() => page.textContent("#update-button"), { timeout: 10_000 }).toBe("Try again");
+    const text = (await page.textContent("#update-text"))!;
+    expect(text.startsWith("Surogate could not install its update: /folder/folder/")).toBe(true);
+    expect(text.length).toBe("Surogate could not install its update: ".length + 240);
+    // Drawn inside the sidebar: the line is no wider than its own box, which is inside the sidebar,
+    // and the sidebar's last row is still in the window.
+    const drawn = await page.evaluate(() => {
+      const line = document.querySelector("#update")!;
+      const box = line.getBoundingClientRect();
+      const words = document.querySelector("#update-text")!.getBoundingClientRect();
+      const user = document.querySelector("#user")!.getBoundingClientRect();
+      return {
+        wider: line.scrollWidth > line.clientWidth || words.right > box.right, inside: box.right <= document.querySelector("#sidebar")!.getBoundingClientRect().right,
+        height: box.height, user: user.bottom <= window.innerHeight,
+      };
+    });
+    expect(drawn).toMatchObject({ wider: false, inside: true, user: true });
+    expect(drawn.height).toBeLessThan(260);
+  });
+
   it("says to run the install script again where its helper is not one it can take, and offers nothing", async () => {
     publish("0.0.1");
     // A helper that lists no release key: no release is one it would install.

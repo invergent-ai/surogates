@@ -86,6 +86,11 @@ const AS_ANOTHER_USER = "Error executing command as another user:";
 const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.startsWith(AS_ANOTHER_USER));
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
+// The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest
+// (240 px, of which the line's text has 200 at 12.5 px) a line holds some 31 characters, so this
+// is about eight lines there, and five at its widest (370 px). The helper's own lines fit, but for
+// one that names a long path; the whole of what was said is in the log.
+const WHY_MAX = 240;
 
 // Why an install failed, of all that was said: one line. How the run ended, where no exit code
 // says: the system's words for a helper that could not be started, or a signal's name. Else the
@@ -93,10 +98,16 @@ const HELPER_SAYS = "Surogate Desktop: ";
 // Else pkexec's first line, for its own failure, or the last line said.
 function reason(code: number | null, said: string): string {
   const lines = said.split("\n").map((line) => line.trim()).filter((line) => line !== "");
-  if (code === null) return lines.at(-1) ?? "its helper did not run";
+  if (code === null) return shown(lines.at(-1) ?? "its helper did not run");
   const own = lines.findLast((line) => line.startsWith(HELPER_SAYS));
-  if (own !== undefined) return own.slice(HELPER_SAYS.length);
-  return (code === NOT_AUTHORIZED ? lines[0] : lines.at(-1)) ?? `its helper exited ${code}`;
+  if (own !== undefined) return shown(own.slice(HELPER_SAYS.length));
+  return shown((code === NOT_AUTHORIZED ? lines[0] : lines.at(-1)) ?? `its helper exited ${code}`);
+}
+
+// *why* as the line shows it: WHY_MAX characters at most, counted as letters, its end marked where it was cut.
+function shown(why: string): string {
+  const letters = [...why];
+  return letters.length <= WHY_MAX ? why : `${letters.slice(0, WHY_MAX - 1).join("")}\u2026`;
 }
 // How an installed app runs the root helper: pkexec, by its whole path, on the helper at the path
 // with no link in it that the install script's polkit action names. Never with pkexec's own agent:

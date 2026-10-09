@@ -220,6 +220,30 @@ describe("why an install failed, of all that was said", () => {
   });
 });
 
+describe("the reason the line shows", () => {
+  it("is no longer than some eight lines of the sidebar at its narrowest, 240 characters, and the whole of it is in the log", async () => {
+    base.publish("1.2.4");
+    let answer: Applied = { code: 0, said: "" };
+    const logged: string[] = [];
+    const found = base.updates({ apply: () => Promise.resolve(answer), log: (words) => logged.push(words) });
+    await found.check();
+    // A helper's line that names a long path, as one of its own can.
+    const long = `/home/${"folder/".repeat(500)}manifest.json cannot be read by tester: name it by its whole path, in a folder of that user's own`;
+    answer = { code: 1, said: `tar: oops\nSurogate Desktop: ${long}` };
+    await found.install();
+    const { why } = found.state as { why: string };
+    expect([why.length, why.at(-1), long.startsWith(why.slice(0, -1))]).toEqual([240, "\u2026", true]);
+    expect(logged.at(-1)).toBe(`Surogate 1.2.4 was not installed (exit 1): ${answer.said}`);
+    // One of 240 characters is shown whole, and a letter of two code units is not cut in half.
+    answer = { code: 1, said: `Surogate Desktop: ${"a".repeat(240)}` };
+    await found.install();
+    expect((found.state as { why: string }).why).toBe("a".repeat(240));
+    answer = { code: 1, said: `Surogate Desktop: ${"a".repeat(238)}\u{1F600}\u{1F600}b` };
+    await found.install();
+    expect((found.state as { why: string }).why).toBe(`${"a".repeat(238)}\u{1F600}\u2026`);
+  });
+});
+
 describe("a helper that cannot be run", () => {
   it("ends in a failure that says why, and never in a line left at Installing: its run rejected, or thrown", async () => {
     base.publish("1.2.4");
