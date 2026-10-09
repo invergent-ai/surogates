@@ -17,6 +17,7 @@ from surogates.sandbox.history import THREAD_POD_DEADLINE, History, HistoryConfl
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
 
 A = {"name": "Draft A", "email": "thread:t1@surogate"}
+YOURS = {"name": "u1", "email": "user:u1@surogate"}
 
 
 @pytest.fixture()
@@ -46,13 +47,13 @@ def a_pod(tmp_path: Path, project: Path, thread: str = "t1", **more) -> History:
 
 
 def land(history: History, saga: str = "saga:1", author=A) -> dict:
-    """*history*'s turn landed whole, as the landing saga runs it."""
-    main = history.fetch()["main"]
+    """*history*'s turn landed whole, as the landing saga runs it: your edits picked up first."""
+    picked = history.pickup(author=YOURS, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "pickup"]])
     turn = history.commit_turn(author=author, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "turn"]])
     applied = [history.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]]
     return history.record(
         turn=turn["commit"], applied=applied, author=author,
-        trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "landing"]], main=main,
+        trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "landing"]], main=picked["main"], pickup=picked["commit"],
     )
 
 
@@ -126,8 +127,10 @@ def test_your_changes_since_the_last_landing_are_in_the_next_copy(tmp_path, proj
     (pod.copy / "threads").mkdir()
     (pod.copy / "threads" / "plan.md").write_text("plan")
     two = land(pod, "saga:2")["commit"]
-    # Only the landing goes on main, on main's tip: the pickup is no record of yours.
-    assert git(project / "_history", "rev-parse", f"{two}^1") == one
+    # Your changes are recorded on main before the landing, by you: its first parent.
+    pickup = git(project / "_history", "rev-parse", f"{two}^1")
+    assert git(project / "_history", "log", "-1", "--format=%an <%ae>|%P", pickup) == f"u1 <user:u1@surogate>|{one}"
+    assert git(project / "_history", "log", "-1", "--format=%(trailers:key=Surogate-Kind,valueonly)", pickup) == "pickup"
     assert (project / "threads" / "plan.md").read_text() == "plan"
     assert (project / "notes.txt").read_text() == "v2 notes, saved by you\n"
 
@@ -2262,3 +2265,112 @@ def test_a_threads_pod_must_be_told_its_turn(tmp_path, project):
         untold.open()
     # A helper's pod has none: it hands back, and takes up nothing by turn.
     a_helper(tmp_path, project)
+
+
+def a_masters_pod(tmp_path: Path, project: Path) -> History:
+    """A project's master pod: its workspace is the real files, with no copy."""
+    return History(
+        repo=_shadow_repo_path(str(project), base=tmp_path / "master"), project=project, copy=None, thread=None, user="u1",
+    )
+
+
+ROUTINE = {"name": "Health check", "email": "routine:r1@surogate"}
+
+
+def test_your_edits_are_picked_up_on_main_by_you_and_land_as_the_landings_first_parent(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    one = land(first)["commit"]
+    pod = a_pod(tmp_path, project)  # opened before your edits: its copy has none of them
+    (project / "uploads" / "brief.pdf").write_bytes(b"%PDF uploaded")
+    (project / "notes.txt").write_text("v2 notes, saved by you\n")
+    picked = pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:look"], ["Surogate-Kind", "pickup"]])
+    assert picked["main"] == one
+    assert [f["path"] for f in picked["picked_up"]] == ["notes.txt", "uploads/brief.pdf"]
+    # A commit on main's tip by you, and no ref moved, here or in the bucket.
+    assert git(pod.repo, "log", "-1", "--format=%an <%ae>|%P", picked["commit"]) == f"u1 <user:u1@surogate>|{one}"
+    assert git(project / "_history", "rev-parse", "refs/heads/main") == git(pod.repo, "rev-parse", "refs/heads/main") == one
+    (pod.copy / "plan.md").write_text("plan")
+    two = land(pod, "saga:2")["commit"]
+    assert git(project / "_history", "ls-tree", "-r", "--name-only", two).splitlines() == [
+        "Report.docx", "a.md", "notes.txt", "plan.md", "uploads/brief.pdf",
+    ]
+    # main is the real files now: the next pickup finds nothing.
+    nothing = a_pod(tmp_path, project).pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:3"]])
+    assert (nothing["main"], nothing["commit"], nothing["picked_up"]) == (two, None, [])
+
+
+def test_a_pickup_looks_again_at_each_folder_main_has_before_it_reads_the_real_files(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "threads" / "Draft A").mkdir(parents=True)
+    (first.copy / "threads" / "Draft A" / "Y.md").write_text("by A")
+    land(first)
+    pod = a_pod(tmp_path, project)
+    asked: list[tuple[str, str]] = []
+    add_all = History._add_all
+    monkeypatch.setattr(os, "setxattr", lambda path, name, value: asked.append((str(path), name)))
+    monkeypatch.setattr(History, "_add_all", lambda self, git: (asked.append(("the real files", "read")), add_all(self, git))[1])
+    pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:2"]])
+    # geesefs trusts a listing for a second: one taken just before another pod's landing would hide its files.
+    read = asked.index(("the real files", "read"))
+    folders = {path for path, name in asked[:read] if name == ".invalidate"}
+    assert {str(project), str(project / "threads"), str(project / "threads" / "Draft A")} <= folders
+
+
+def test_a_save_in_the_second_a_pickup_read_the_file_reaches_history(tmp_path, project, monkeypatch):
+    first = a_pod(tmp_path, project)
+    (first.copy / "A.md").write_text("by A")
+    land(first, "saga:a")
+    pod = a_pod(tmp_path, project)
+    add_all = History._add_all
+
+    def a_large_projects_read(self, git):
+        add_all(self, git)
+        time.sleep(1.1)
+        os.utime(self.repo / "index")  # git writes the index seconds after it read notes.txt
+
+    time.sleep(1.2)  # the pod opened well before
+    time.sleep(1 - time.time() % 1)  # the start of a second
+    second = int(time.time())
+    (project / "notes.txt").write_text("v8 notes\n")
+    os.utime(project / "notes.txt", (second, second))  # geesefs shows whole seconds
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_add_all", a_large_projects_read)
+        picked = pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:b"], ["Surogate-Kind", "pickup"]])
+    assert [f["path"] for f in picked["picked_up"]] == ["notes.txt"]
+    (project / "notes.txt").write_text("v9 notes\n")  # saved again in that second, the same size
+    os.utime(project / "notes.txt", (second, second))
+    (pod.copy / "B.md").write_text("by B")
+    turn = pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:b"], ["Surogate-Kind", "turn"]])
+    pod.record(
+        turn=turn["commit"], applied=[pod.apply(c["path"], c["before"], c["after"]) for c in turn["changes"]],
+        author=A, trailers=[["Surogate-Saga", "saga:b"], ["Surogate-Kind", "landing"]], main=picked["main"],
+        pickup=picked["commit"],
+    )
+    time.sleep(1.1)  # the next pod comes later
+    assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
+
+
+def test_a_pickup_alone_from_a_masters_pod_is_pushed_by_its_author(tmp_path, project):
+    first = a_pod(tmp_path, project)
+    (first.copy / "a.md").write_text("a")
+    one = land(first)["commit"]
+    (project / "notes.txt").write_text("checked by the routine\n")
+    out = a_masters_pod(tmp_path, project).pickup(
+        author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"], ["Surogate-Kind", "pickup"]], push=True,
+    )
+    durable = project / "_history"
+    assert git(durable, "rev-parse", "refs/heads/main") == out["commit"]
+    assert git(durable, "log", "-1", "--format=%an <%ae>|%P", out["commit"]) == f"Health check <routine:r1@surogate>|{one}"
+    assert [f["path"] for f in out["picked_up"]] == ["notes.txt"]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # The next pod's copy has it, and finds nothing to pick up.
+    pod = a_pod(tmp_path, project)
+    assert (pod.copy / "notes.txt").read_text() == "checked by the routine\n"
+    assert pod.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:2"]])["commit"] is None
+
+
+def test_a_masters_pod_with_no_history_yet_picks_up_nothing(tmp_path, project):
+    out = a_masters_pod(tmp_path, project).pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:r"]], push=True)
+    assert out == {"main": None, "commit": None, "picked_up": [], "packs": 0}
+    assert not (project / "_history").exists()

@@ -206,8 +206,8 @@ def step_result(answer: str) -> dict:
 class History:
     repo: Path      # the shadow repository: main, the branches, the objects
     project: Path   # the real files
-    copy: Path      # this thread's worktree
-    thread: str
+    copy: Path | None   # this thread's worktree; None in a master's pod, whose workspace is the real files
+    thread: str | None
     user: str       # who started the thread: main's first commit is theirs
     helper: str | None = None  # a thread's helper's own session: its pod and copy are its own
     turn: str | None = None    # the thread's turn this pod is opened for: required but in a helper's pod
@@ -303,17 +303,7 @@ class History:
         begun = int(time.time())
         fresh = not (self.repo / "HEAD").exists()
         try:
-            if fresh:
-                self.repo.mkdir(parents=True, exist_ok=True)
-                self._main("init", "-q", "-b", "main")
-                self._main("config", "user.name", "Surogates Checkpoint")
-                self._main("config", "user.email", "surogates@local")
-                # The kept index decides by size and time alone: geesefs's
-                # inode numbers and change times differ from pod to pod.
-                self._main("config", "core.checkStat", "minimal")
-                (self.repo / "info").mkdir(exist_ok=True)
-                (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
-                (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
+            self._init()
             refs = self._take()
             self._check_durable()
             start = (refs.get(self.handoff) or refs.get(self.branch) or refs.get(MAIN)) if self.helper else None
@@ -321,28 +311,8 @@ class History:
             you = {"name": self.user, "email": f"user:{self.user}@surogate"}
             if not start and MAIN in refs:
                 self._main("update-ref", MAIN, refs[MAIN])
-                # geesefs trusts a listing for a second: one taken just before
-                # another pod's landing would hide that landing's files.
-                for folder in {"", *self._main("ls-tree", "-r", "-d", "-z", "--name-only", MAIN).split("\0")}:
-                    _invalidate(self.project / folder)
-                with self._folder() as history:
-                    fd = _opened("index", "index", dir_fd=history) if history is not None else None
-                if fd is not None:
-                    with open(fd, "rb") as kept, open(self.repo / "index", "wb") as out:
-                        shutil.copyfileobj(kept, out, 1 << 20)
-                        dated = os.fstat(fd)
-                    # Its own time: git reads again an entry no older than the index.
-                    os.utime(self.repo / "index", ns=(dated.st_atime_ns, dated.st_mtime_ns))
-                # The index made main's: an entry that matches keeps its size and time.
-                try:
-                    self._main("read-tree", "-m", "-i", MAIN)
-                except HistoryError as unread:
-                    # A cache git cannot read: left out, every real file is read.
-                    logger.warning("The project's kept index is made again from main, and every real file read: %s", unread)
-                    (self.repo / "index").unlink(missing_ok=True)
-                    self._main("read-tree", MAIN)
             if not start:
-                self._add_all(self._main)
+                self._read_real(refs.get(MAIN))
                 # Committed from the index as it is: ``git commit`` would look at every real file once more.
                 tree, main = self._main("write-tree"), self._ref(MAIN)
                 if main is None:
@@ -379,6 +349,96 @@ class History:
         (self.copy / ".git").unlink()
         if not self.helper and refs.get(self.handoff) not in (None, refs.get(self.handoff_from)):
             self.take_up()
+
+    def _init(self) -> None:
+        """Make the pod's repository, once."""
+        if (self.repo / "HEAD").exists():
+            return
+        self.repo.mkdir(parents=True, exist_ok=True)
+        self._main("init", "-q", "-b", "main")
+        self._main("config", "user.name", "Surogates Checkpoint")
+        self._main("config", "user.email", "surogates@local")
+        # The kept index decides by size and time alone: geesefs's
+        # inode numbers and change times differ from pod to pod.
+        self._main("config", "core.checkStat", "minimal")
+        (self.repo / "info").mkdir(exist_ok=True)
+        (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
+        (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
+
+    def _read_real(self, main: str | None) -> None:
+        """The index made the real files, from *main*: only a file whose size or time changed since is read.
+
+        The kept index is the bucket's, read as data, never through a link.  A
+        pod's own index, made at its open, is newer than the bucket's, and kept.
+        """
+        if main is not None:
+            # geesefs trusts a listing for a second: one taken just before
+            # another pod's landing would hide that landing's files.
+            for folder in {"", *self._main("ls-tree", "-r", "-d", "-z", "--name-only", main).split("\0")}:
+                _invalidate(self.project / folder)
+            fd = None
+            if not (self.repo / "index").exists():
+                with self._folder() as history:
+                    fd = _opened("index", "index", dir_fd=history) if history is not None else None
+            if fd is not None:
+                with open(fd, "rb") as kept, open(self.repo / "index", "wb") as out:
+                    shutil.copyfileobj(kept, out, 1 << 20)
+                    dated = os.fstat(fd)
+                # Its own time: git reads again an entry no older than the index.
+                os.utime(self.repo / "index", ns=(dated.st_atime_ns, dated.st_mtime_ns))
+            # The index made main's: an entry that matches keeps its size and time.
+            try:
+                self._main("read-tree", "-m", "-i", main)
+            except HistoryError as unread:
+                # A cache git cannot read: left out, every real file is read.
+                logger.warning("The project's kept index is made again from main, and every real file read: %s", unread)
+                (self.repo / "index").unlink(missing_ok=True)
+                self._main("read-tree", main)
+        self._add_all(self._main)
+
+    def pickup(self, *, author: dict[str, str], trailers: list[list[str]], push: bool = False) -> dict:
+        """Commit on ``main`` what the real files changed since it, by *author*: your edits, a landing's first step.
+
+        ``main`` is the durable history's now, which this first look reads;
+        before the first landing, the pod's own first commit.  ``commit`` is
+        the pickup, its parent ``main``, or None when the real files are
+        ``main``'s; ``picked_up`` are its files, each ``{path, before, after}``;
+        ``packs`` the size of the history's packs, as :meth:`fetch` gives it.
+        No ref moves: the landing's record lands on the pickup and pushes
+        both.  With *push*, a routine run's pickup alone, it is pushed now,
+        and ``main`` moves to it.  A pod with no history and none of its own
+        picks up nothing: the first thread's pod makes the first commit.
+        """
+        self._init()
+        begun = int(time.time())
+        main = self._take().get(MAIN)
+        self._fetch(main)
+        # The size of the history's packs, which a pruning's bound is sized from.
+        packs = sum(p.stat().st_size for p in (self._taken / "objects" / "pack").glob("*.pack"))
+        on = main or self._ref(MAIN)
+        if on is None:
+            return {"main": None, "commit": None, "picked_up": [], "packs": packs}
+        self._read_real(on)
+        tree = self._main("write-tree")
+        # geesefs gives whole seconds: an entry from the second the read began
+        # may be saved again unseen, so git reads it again.  After the
+        # write-tree, which rewrites the index.
+        os.utime(self.repo / "index", (begun, begun))
+        if tree == self._tree(on):
+            return {"main": main, "commit": None, "picked_up": [], "packs": packs}
+        # The message on stdin: a trailer may hold any name.
+        commit = self._git(
+            [*_as(author), "commit-tree", tree, "-p", on, "-F", "-"],
+            env={"GIT_DIR": str(self.repo)}, cwd=self.repo, input=f"Your changes\n\n{_block(trailers)}\n",
+        )
+        versions, _ = self._diff(on, commit)
+        picked = [{"path": p, "before": before, "after": after} for p, (before, after) in sorted(versions.items())]
+        if push:
+            self._push({MAIN: commit}, expect={MAIN: main})
+            self._main("update-ref", MAIN, commit)
+            with contextlib.suppress(HistoryError, OSError):
+                self._keep_index(commit)
+        return {"main": main, "commit": commit, "picked_up": picked, "packs": packs}
 
     def snapshot(self, reason: str) -> str:
         """Commit the copy on the branch if it changed; the branch's tip."""
@@ -541,7 +601,7 @@ class History:
 
     def record(
         self, *, turn: str, applied: list[dict], author: dict[str, str], trailers: list[list[str]],
-        main: str | None,
+        main: str | None, pickup: str | None = None,
     ) -> dict:
         """Write the landing on ``main`` and push it: main's files with *applied*, the turn its second parent.
 
@@ -549,10 +609,11 @@ class History:
         (None: there was none yet).  The push is the commit point: the
         rewrite of ``packed-refs``, which also moves the branch and its base
         to the landing, and is refused if ``main`` moved since.  The first
-        parent is *main*: this pod's pickup of your changes stays its own, as
-        the base of its copy, and is never recorded on ``main``.  With no
-        history yet, it is ``main``'s first commit, the real files by you.
-        Safe to repeat: a landing already pushed is found by its saga.
+        parent is *pickup*, your changes the landing's first step committed on
+        *main*, else *main*: the pod's own pickup at its open stays its own, as
+        the base of its copy.  With no history yet, it is ``main``'s first
+        commit, the real files by you.  Safe to repeat: a landing already
+        pushed is found by its saga.
         """
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
         now = self._take().get(MAIN)
@@ -565,7 +626,7 @@ class History:
                 return {"commit": now}
             raise HistoryConflict("main moved in the project's history since the landing began")
         self._fetch(main)
-        main_tip = main or self._main("rev-parse", MAIN)
+        main_tip = pickup or main or self._main("rev-parse", MAIN)
         index = self.repo / "landing.index"
         index.unlink(missing_ok=True)
         env = {"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(index)}
@@ -1461,7 +1522,7 @@ class History:
         since; an entry the landing changed has neither, so it is read.
         """
         kept = self.repo / "kept.index"
-        # With its time: the second its pod's open began.
+        # With its time: the second the pod's read of the real files began, at its open or its landing's pickup.
         shutil.copy2(self.repo / "index", kept)
         try:
             self._git(
