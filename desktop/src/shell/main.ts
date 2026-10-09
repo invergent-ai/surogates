@@ -376,7 +376,8 @@ function startDelivery(check = false): void {
 // again. The file helper's tools first, then the VM's; zstd counts only while the image's delivery
 // has something left to unpack.
 function lookForTools(): void {
-  vmLacking = missingTools({}, delivery !== null && delivery.state.state !== "ready");
+  const unpacking = delivery !== null && delivery.state.state !== "ready";
+  vmLacking = boundFolders().then((held) => missingTools({}, unpacking, held));
   lookForFileTools(true);
 }
 

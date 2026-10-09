@@ -13,7 +13,9 @@ import { connect, type Socket } from "node:net";
 import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+import { findOnPath } from "../files/operations.js";
 import type { Share } from "../guest/protocol.js";
+import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
 import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 
@@ -60,10 +62,18 @@ export function sweep(run: string): void {
   mkdirSync(run, { recursive: true, mode: 0o700 });
 }
 
-// What QEMU and virtiofsd are given of the app's environment: its PATH, where setpriv finds QEMU and
-// virtiofsd finds newuidmap and newgidmap, and nothing else: the user's shell may export what either
-// acts on, OPENSSL_CONF and the loader's variables among them.
-const toolEnv = () => ({ PATH: process.env.PATH ?? "" });
+// Where the VM's tools are looked for: where the file helper's are, by the one rule (pathOutside).
+// The app's PATH without its relative entries, and without any entry in one of *held*, the folders
+// a chat is bound to, where a command may have written a program. The app's check holds them all.
+// This process, which starts the VM, knows none of them: it drops the relative entries.
+const toolPath = (held: Held = []) => pathOutside(process.env.PATH, held);
+type Held = Array<{ dev: number; ino: number }>;
+// What QEMU and virtiofsd are given of the app's environment: that PATH, where virtiofsd finds
+// newuidmap and newgidmap, and nothing else: the user's shell may export what either acts on,
+// OPENSSL_CONF and the loader's variables among them.
+const toolEnv = (held: Held = []) => ({ PATH: toolPath(held) });
+// QEMU by its whole path, as that PATH finds it, or null: it is run by that path and no other.
+const qemuOn = (path: string) => findOnPath("qemu-system-x86_64", path, "/");
 
 // A child that dies with this process, and the end of what it said on stderr.
 function launch(argv: string[]): { child: ChildProcess; said: () => string } {
@@ -76,22 +86,14 @@ function launch(argv: string[]): { child: ChildProcess; said: () => string } {
   return { child, said: () => said.trim() };
 }
 
-// Whether *name* is a program on the PATH, where virtiofsd looks for newuidmap and newgidmap.
-function onPath(name: string): boolean {
-  return (process.env.PATH ?? "").split(":").some((folder) => {
-    try {
-      accessSync(join(folder || ".", name), constants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
+// Whether *name* is a program on *path*, where virtiofsd looks for newuidmap and newgidmap.
+const onPath = (name: string, path = toolPath()) => findOnPath(name, path, "/") !== null;
 
 // The major and minor version *program* says it is, as `--version` prints it, or null: one that has
 // not answered in 5 s is killed, as a SIGTERM may be ignored.
-const versionOf = (program: string, args: string[]) => new Promise<[number, number] | null>((resolve) => {
-  execFile(program, args, { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => {
+const versionOf = (program: string | null, args: string[], held: Held = []) => new Promise<[number, number] | null>((resolve) => {
+  if (program === null) return resolve(null);
+  execFile(program, args, { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv(held) }, (error, stdout) => {
     const found = error ? null : /(\d+)\.(\d+)/.exec(stdout);
     resolve(found ? [Number(found[1]), Number(found[2])] : null);
   });
@@ -104,12 +106,14 @@ const atLeast = (version: [number, number] | null, [major, minor]: [number, numb
  * named as the install script installs it: QEMU 8.2 or later; Ubuntu's virtiofsd 1.10 or
  * later; newuidmap and newgidmap, which virtiofsd runs for its id maps; and, while the image
  * has something left to unpack (*unpacking*), zstd, which unpacks its download. Checked at
- * the app's start, and at the status line's Check again.
+ * the app's start, and at the status line's Check again. QEMU and the two id-map tools are looked
+ * for by the PATH rule of the file helper's tools, with *held* the folders chats are bound to.
  */
-export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true): Promise<string[]> {
+export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true, held: Held = []): Promise<string[]> {
+  const path = toolPath(held);
   const [qemu, virtiofsd] = await Promise.all([
-    versionOf("qemu-system-x86_64", ["--version"]),
-    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"]),
+    versionOf(qemuOn(path), ["--version"], held),
+    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"], held),
   ]);
   let zstd = true;
   try {
@@ -120,7 +124,7 @@ export async function missingTools(paths: { virtiofsd?: string; zstd?: string } 
   return [
     ...(atLeast(qemu, [8, 2]) ? [] : ["QEMU 8.2 or later"]),
     ...(atLeast(virtiofsd, [1, 10]) ? [] : ["virtiofsd 1.10 or later"]),
-    ...(onPath("newuidmap") && onPath("newgidmap") ? [] : ["newuidmap and newgidmap"]),
+    ...(onPath("newuidmap", path) && onPath("newgidmap", path) ? [] : ["newuidmap and newgidmap"]),
     ...(zstd || !unpacking ? [] : ["zstd"]),
   ];
 }
@@ -201,7 +205,9 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
     closeSync(fd);
   }
   mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
-  const { child: qemu, said } = launch(["qemu-system-x86_64", ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
+  const program = qemuOn(toolPath());
+  if (program === null) throw new Error("QEMU is not on the PATH (the qemu-system-x86 package)");
+  const { child: qemu, said } = launch([program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
   const halt = () => qemu.kill("SIGKILL");
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;
