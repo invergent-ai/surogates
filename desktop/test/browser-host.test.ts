@@ -3252,6 +3252,24 @@ await navigator.serviceWorker.ready;`);
     expect(await page.evaluate(() => [...(document.getElementById("top") as HTMLInputElement).files!].map((file) => file.name))).toEqual(["report.pdf"]);
   }, 60_000);
 
+  it("gives an operation its whole bound once its page has been waited for after a hand back: the wait for a page one of whose frames is stuck is not taken from it", async () => {
+    host = hostWith({ boundMs: SETTLE_MS + 2_000 });
+    const a = session();
+    await op(a, "browser.navigate", { url: "http://other.test/fileframe" }, "chat-1");
+    const page = tabs().get(a)![0]!;
+    const framed = page.frames().find((frame) => frame.url() === "http://fixture.test/fileinput")!;
+    // The framed site is stuck for a long while: the page is waited for the full ten seconds after the hand back.
+    await framed.evaluate("void setTimeout(() => { const until = Date.now() + 40000; while (Date.now() < until) {} }, 0)");
+    await new Promise((done) => setTimeout(done, 100));
+    host.pause("chat-1", true);
+    host.pause("chat-1", false);
+    const started = performance.now();
+    // A script of five seconds in the page itself, which answers: with the wait before it, more than the bound in all.
+    expect(await script(a, "await new Promise((done) => setTimeout(done, 5000)); return document.title;", "chat-1")).toBe("Framing");
+    expect(performance.now() - started).toBeGreaterThan(SETTLE_MS + 4_000);
+    expect(page.isClosed()).toBe(false);
+  }, 60_000);
+
   it("gives no page what a click of its user's gives it at a hand back: not the page handed back, a frame of its own site in it nor one of another's, nor another chat's tab that nobody touched", async () => {
     const [a, b] = [session(), session()];
     await op(a, "browser.navigate", { url: "http://fixture.test/acts?framing" }, "chat-1");

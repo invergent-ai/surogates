@@ -755,9 +755,15 @@ export class BrowserHost {
         if (!(await this.answers(page))) return ASKING;
         if (stop.aborted) return PAUSED;
       }
-      // Handed back a moment ago, its page may not have answered yet for what it did before: it acts once it has.
+      // Handed back a moment ago, its page may not have answered yet for what it did before: it acts once it
+      // has. That wait has its own bound (settle), and the operation's begins after it: a page slow to answer
+      // after a hand back is not closed for it, and the operation has all the time it is meant to.
       const settled = this.settling.get(page);
-      const work = this.doing(page, settled ? settled.then(() => (stop.aborted ? undefined : operation(found, args, stop))) : operation(page, args, stop));
+      if (settled) {
+        if ((await until(settled, stop, HELD)) === HELD) return PAUSED;
+        if (signal.aborted) return CANCELLED;
+      }
+      const work = this.doing(page, operation(page, args, stop));
       const value = BOUNDED.has(kind) ? await this.bounded(page, work, stop) : await work;
       // Taken over while it acted: what its pages did meanwhile stays for its session's next answer.
       if (stop.aborted) return PAUSED;
