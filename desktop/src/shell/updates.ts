@@ -23,6 +23,17 @@ const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 // A manifest is one short line, and its signature Ed25519's 64 bytes: anything longer is not one.
 const MANIFEST_MAX = 4096;
 const SIGNATURE_MAX = 64;
+// What jq makes of a byte that is no UTF-8: the root helper takes no manifest that holds one.
+const REPLACEMENT = "\uFFFD";
+// A manifest as JSON spells one: its tokens, with JSON's own blanks between them, and each number
+// in 17 digits at most. It is the root helper's own pattern (one_object in release/install.sh),
+// which holds jq to JSON: jq also reads +1, 01, 1., .5, nan and infinity, and rounds a number of
+// more digits to 17 before it makes a number of it, so that 137438953472.000015 is whole to
+// JSON.parse and not to jq.
+const SPELLED = /^(?:[ \t\r\n[\]{}:,]|"(?:[^"\\]|\\[^\n])*"|(?:true|false|null|-?(?!(?:[0-9]\.?){18})(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)(?![^ \t\r\n[\]{}:,"]))*$/;
+// How many fields and places down a manifest's values go at most: jq reads to a depth of its own,
+// which changes with jq, and the helper to this one.
+const DOWN_MAX = 64;
 // How long the base may take to answer for either.
 const ASK_MS = 30_000;
 // A version: x.y.z in the ten digits, and no part with a zero before it, as the root helper has it:
@@ -205,18 +216,39 @@ export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
   return keys;
 }
 
+// Whether *text* escapes the first half of a pair with no escape of its second half behind it: jq
+// refuses such a text, and JSON.parse takes the half alone. Each escape is found from the text's
+// start, so that the backslash an escape writes begins none.
+function halfAlone(text: string): boolean {
+  for (const [, first, second] of text.matchAll(/\\(?:u([0-9a-f]{4})(?=(?:\\u([0-9a-f]{4}))?)|[^u])/gi)) {
+    if (first !== undefined && /^d[89ab]/i.test(first) && !(second !== undefined && /^d[c-f]/i.test(second))) return true;
+  }
+  return false;
+}
+
+// Whether none of *value*'s values is more than *steps* fields and places down, as jq counts a path.
+function within(value: unknown, steps: number): boolean {
+  if (typeof value !== "object" || value === null) return true;
+  return Object.values(value).every((held) => steps > 0 && within(held, steps - 1));
+}
+
 /**
  * The one JSON object that *bytes* are, as the root helper reads a manifest and a mark (one_object
  * in release/install.sh): 4096 bytes at most, on one line whose newline is their last byte, and
- * one JSON document, which is an object. Null where they are not. They are read as UTF-8 or not
- * at all, so that what counts as 4096 bytes here is never more to the helper.
+ * one JSON document, which is an object. Null where they are not. The helper reads with jq and
+ * the app with JSON.parse, and each takes what the other takes and nothing else: UTF-8 or nothing,
+ * with no replacement character, which is what jq makes of any other byte; JSON as it is spelled,
+ * each number in 17 digits at most (SPELLED); no first half of a pair escaped alone (halfAlone);
+ * and no value more than 64 fields and places down.
  */
 function oneObject(bytes: Buffer): Record<string, unknown> | null {
   if (bytes.length > MANIFEST_MAX || bytes.indexOf(0x0a) !== bytes.length - 1) return null;
   try {
-    const named: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    if (text.includes(REPLACEMENT) || !SPELLED.test(text) || halfAlone(text)) return null;
+    const named: unknown = JSON.parse(text);
     // JSON's null is null here too.
-    return typeof named === "object" && !Array.isArray(named) ? named as Record<string, unknown> | null : null;
+    return typeof named === "object" && !Array.isArray(named) && within(named, DOWN_MAX) ? named as Record<string, unknown> | null : null;
   } catch {
     return null; // not UTF-8, or not one JSON document
   }

@@ -184,26 +184,38 @@ signed() {
 # those and one byte. Of two documents, the first would be applied and both kept as a mark; and
 # each would name a version, where dpkg calls a version of two lines older than any other. With
 # "any" as $2 the object may be on any number of lines, as the install record is written.
+#
+# It is JSON as JSON is written, and no more of what jq reads besides: the app reads a manifest
+# with a reader of its own (oneObject in src/shell/updates.ts), and takes what this takes and
+# nothing else. So: no byte order mark before it; no replacement character, which is what jq makes
+# of a byte that is no UTF-8, and counts three bytes for; each number in JSON's own spelling (jq
+# also reads +1, 01, 1., .5, nan and infinity) and in 17 digits at most (jq rounds a longer one to
+# 17 digits before it makes a number of it: 137438953472.000015 is whole to another reader, and
+# not to jq); and no value more than 64 fields and places down (how deep jq reads at all is its
+# own, and changes with jq).
 one_object() {
   head -c 4097 -- "$1" 2>/dev/null \
-    | jq -ceRs --arg lines "${2:-one}" 'select(utf8bytelength <= 4096 and ($lines == "any" or test("\\A[^\\n]*\\n\\z"))) | fromjson | select(type == "object")' 2>/dev/null
+    | jq -ceRs --arg lines "${2:-one}" '
+      select(utf8bytelength <= 4096 and ($lines == "any" or test("\\A[^\\n]*\\n\\z")) and (test("\ufffd") | not)
+        and test("\\A(?:[ \\t\\r\\n\\[\\]{}:,]|\"(?:[^\"\\\\]|\\\\.)*\"|(?:true|false|null|-?(?!(?:[0-9]\\.?){18})(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)(?![^ \\t\\r\\n\\[\\]{}:,\"]))*\\z"))
+      | fromjson | select(type == "object" and ([paths | length] | max // 0) <= 64)' 2>/dev/null
 }
 
 # A signed manifest's fields: a release of this channel for this platform, its version x.y.z with
 # no zero before a part (dpkg reads 1.2.03 as 1.2.3, and a version has one spelling), its tarball
 # where every release's is, its hash, each whole (jq's $ also matches before a last newline), its
-# tarball's size in bytes, a whole number above 0 and below 10^15, which jq writes in digits
+# tarball's size in bytes, a whole number from 1 and below 10^15, which jq writes in digits
 # alone, and the state schema of what the app keeps in each user's home, a whole number from 1
-# and below 10^15 as it rounds: jq compares a number as it is written, and 999999999999999.99 is
-# 10^15. The manifest is one JSON object on one line (one_object). Printed as
-# "<version> <sha256> <size>".
+# and below 10^15, each as it rounds: jq compares a number as it is written, where
+# 999999999999999.99 is 10^15 and 1e-400 is nothing. The manifest is one JSON object on one line
+# (one_object). Printed as "<version> <sha256> <size>".
 release_of() {
   one_object "$1" | jq -er --arg channel "$CHANNEL" '
     select((.version | type == "string" and test("\\A(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))
       and .channel == $channel and .platform == "linux" and .arch == "x64"
       and .url == "releases/\(.version)/surogate-desktop-\(.version)-linux-x64.tar.gz"
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
-      and (.size | type == "number" and . > 0 and . == floor and . < 1e15)
+      and (.size | type == "number" and . == floor and (floor | . >= 1 and . < 1e15))
       and (.stateSchema | type == "number" and . == floor and (floor | . >= 1 and . < 1e15)))
     | "\(.version) \(.sha256) \(.size | floor)"' 2>/dev/null
 }

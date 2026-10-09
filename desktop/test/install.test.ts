@@ -923,6 +923,50 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
   });
 
+  it("takes a manifest as JSON is written, and no more of what jq reads besides: the app reads one with another reader, and takes what the helper takes and nothing else", () => {
+    const tarball = releaseOf("1.0.0");
+    const object = manifestOf("1.0.0", tarball).toString().trimEnd();
+    const size = String(statSync(tarball).size);
+    expect(object.endsWith(`"size":${size},"stateSchema":1}`)).toBe(true);
+    // A manifest as it is written here, signed: this test's own JSON would write none of these.
+    const handed = (manifest: string | Buffer) => {
+      writeFileSync(join(box.dir, "manifest.json"), manifest);
+      writeFileSync(join(box.dir, "manifest.json.sig"), sign(null, Buffer.from(manifest), keys.privateKey));
+      return apply(tarball);
+    };
+    // The release's manifest with one more field, *text* as it is where its value goes; and with
+    // its size as *written*.
+    const more = (...text: Array<string | Buffer>) => Buffer.concat([`${object.slice(0, -1)},"more":`, ...text, "}\n"].map((part) => Buffer.from(part)));
+    const sized = (written: string) => `${object.replace(`"size":${size},`, `"size":${written},`)}\n`;
+    const refused: Array<[string, string | Buffer]> = [
+      ["a byte order mark before it", `\uFEFF${object}\n`],
+      ["a byte that is no UTF-8", more('"', Buffer.from([0xff]), '"')],
+      ["a replacement character", more('"\uFFFD"')],
+      ...["+1", "01", "1.", ".5", "nan", "infinity"].map((number): [string, Buffer] => [`a number written ${number}`, more(number)]),
+      ["a number in 18 digits", more("123456789012345678")],
+      ["a number 65 fields and places down", more("[".repeat(64), "1", "]".repeat(64))],
+      ["its size with a zero before it", sized(`0${size}`)],
+      ["its size with a plus before it", sized(`+${size}`)],
+      ["its size in 18 digits", sized(`${size}.${"0".repeat(18 - size.length)}`)],
+      // As they are written, the one is above nothing and the other below 10^15.
+      ["a size that rounds to nothing", sized("1e-400")],
+      ["a size that rounds to 10^15", sized("999999999999999.99")],
+    ];
+    for (const [what, manifest] of refused) {
+      expect(handed(manifest), what).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: the release's manifest is not a release of Surogate Desktop for this computer\n" });
+    }
+    expect(root("test -e /opt/surogate/current").status).toBe(1);
+    const taken: Array<[string, string | Buffer]> = [
+      ["a replacement character's escape", more('"\\ufffd"')],
+      ["a number in 17 digits", more("12345678901234567")],
+      ["a number 64 fields and places down", more("[".repeat(63), "1", "]".repeat(63))],
+      ["its size in 17 digits", sized(`${size}.${"0".repeat(17 - size.length)}`)],
+    ];
+    for (const [what, manifest] of taken) {
+      expect(handed(manifest), what).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    }
+  });
+
   it("refuses what is no file where the helper's mark goes, on a computer with no helper and on one that has one, before it switches to any version: a first install is never left with a version and no helper", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball);
