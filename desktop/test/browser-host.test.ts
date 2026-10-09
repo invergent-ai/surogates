@@ -23,7 +23,7 @@ import { CANCELLED, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PROXY_BYPASSED, SETTLE_MS, WEAKENING,
+  type Launch, NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PROXY_BYPASSED, READS, SETTLE_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
@@ -145,6 +145,11 @@ beforeEach(async () => {
     }
     if (req.url?.startsWith("/acts")) return void res.writeHead(200, { "content-type": "text/html" }).end(ACTS(req.url === "/acts?framing"));
     if (req.url === "/stuck") return void res.writeHead(200, { "content-type": "text/html" }).end(STUCK);
+    // The stuck page in a frame of a page of its own site: a frame nothing of this host's has read before it asks.
+    if (req.url === "/framed-stuck") {
+      return void res.writeHead(200, { "content-type": "text/html" })
+        .end(`<title>Framing</title><body style="margin:0"><iframe src="/stuck" style="position:absolute;left:0;top:0;width:900px;height:600px;border:0"></iframe>`);
+    }
     if (req.url === "/gate") {
       return void (gate = (ms, first = false) => res.writeHead(200, { "content-type": "text/plain" }).end(first ? `${ms} first` : String(ms)));
     }
@@ -1344,7 +1349,7 @@ describe("a page's download, as the host stages it", () => {
       }
     });
 
-    it("lets a page its user holds be only once it has answered, twice over, with nothing heard of it meanwhile: a file it asked for before, heard of only then, begins its five seconds anew; and not once the browser is handed back", async () => {
+    it("lets a page its user holds be only once it has answered, four times over, with nothing heard of it meanwhile: a file it asked for before, heard of only then, begins its five seconds anew; and not once the browser is handed back", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
         const tab = taken();
@@ -1353,25 +1358,29 @@ describe("a page's download, as the host stages it", () => {
           tab.reads.shift()!();
           await turn();
         };
+        // One more than the three steps Playwright takes, at most, to read an input that asked.
+        expect(READS).toBe(4);
         host.pause("chat-2", true);
         vi.advanceTimersByTime(OWN_CHOOSER_MS);
         await turn();
-        // Its five seconds have passed: it is asked to answer, and heard until it has, a second time too.
+        // Its five seconds have passed: it is asked to answer, one time after the other, and heard until the last.
+        for (let n = 1; n < READS; n += 1) {
+          expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
+          await answers();
+        }
         expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
-        await answers();
-        expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
-        // What it asked for before it was busy is heard of now, before it has answered the second time.
+        // What it asked for before it was busy is heard of now, before it has answered the last time.
         tab.input();
         await answers();
         expect([tab.heard(), tab.reads.length, state().choosers.size]).toEqual([1, 0, 0]);
-        // Its five seconds begin from that: asked again then, it answers twice with nothing heard, and is let be.
+        // Its five seconds begin from that: asked again then, it answers each time with nothing heard, and is let be.
         vi.advanceTimersByTime(OWN_CHOOSER_MS - 1);
         await turn();
         expect(tab.reads.length).toBe(0);
         vi.advanceTimersByTime(1);
         await turn();
-        await answers();
-        expect(tab.heard()).toBe(1);
+        for (let n = 1; n < READS; n += 1) await answers();
+        expect([tab.heard(), tab.reads.length]).toEqual([1, 1]);
         await answers();
         expect(tab.heard()).toBe(0);
         // Handed back while it is asked: its answer after that lets nothing be. It is heard for the agent.
@@ -3745,9 +3754,9 @@ await navigator.serviceWorker.ready;`);
 
   // The fixture's stuck page, opened for a new session of chat-1's; and what the display shows of the browser's own
   // choosers from now until the page has been free again for two seconds: it asks the moment it finds it has leave.
-  const stuck = async () => {
+  const stuck = async (at = "/stuck") => {
     const a = session();
-    await op(a, "browser.navigate", { url: "http://fixture.test/stuck" }, "chat-1");
+    await op(a, "browser.navigate", { url: `http://fixture.test${at}` }, "chat-1");
     await expect.poll(() => gate !== null, { timeout: 5_000 }).toBe(true);
     const watched = async (busy: number) => {
       const seen: number[] = [];
@@ -3803,6 +3812,15 @@ await navigator.serviceWorker.ready;`);
   it("opens no chooser of the browser's own for a page that asked for a file on the agent's click and was busy from then on: what it asked for is heard of only after its user has held the browser five seconds, and gives it leave to ask again then", async () => {
     const { a, watched } = await stuck();
     // The agent's click, beside the file input, gives the page leave: it asks on it, and is busy at once.
+    await op(a, "browser.mouse", { action: "click", x: 400, y: 300, button: "left", clicks: 1 }, "chat-1");
+    gate!(8_000, true);
+    await new Promise((done) => setTimeout(done, 300));
+    host.pause("chat-1", true);
+    expect(await watched(8_000)).toBe(0);
+  }, 60_000);
+
+  it("opens no chooser of the browser's own for a frame that asked for a file on the agent's click and was busy from then on, where nothing had read that frame before: Playwright takes one step more to read its input, and the page is let be only after the last of them", async () => {
+    const { a, watched } = await stuck("/framed-stuck");
     await op(a, "browser.mouse", { action: "click", x: 400, y: 300, button: "left", clicks: 1 }, "chat-1");
     gate!(8_000, true);
     await new Promise((done) => setTimeout(done, 300));

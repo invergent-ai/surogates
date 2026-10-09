@@ -85,6 +85,8 @@ export const LOOK_MS = 800;
 // all the same and what it asks for is kept again: a frame of it that is stuck would else keep the agent
 // out of the page for good.
 export const SETTLE_MS = 10_000;
+// How many times over a page is asked to answer before what it had asked for counts as heard (heardOut).
+export const READS = 4;
 // How long a closing browser's processes may take to exit (Edge's take about 5 s on xvfb), below the client's STOP_MS.
 const RELEASE_MS = 6_000;
 export const PROXY_BYPASSED =
@@ -943,24 +945,33 @@ export class BrowserHost {
     kept.heard = null;
   }
 
-  // *page* is asked to answer, twice over, now that the browser is handed back (read).
+  // *page* is asked to answer, READS times over, now that the browser is handed back (heardOut).
   // Playwright says a page asked for a file only once it has read the input, which a busy page keeps
   // waiting: so what a page asked for while its user held the browser, or before they took it, can be
-  // heard of only after the hand back. That reading was sent before these, so it is heard of before they
-  // answer; until they have, what the page asks for is kept for no one (asks) and nothing of the agent's
-  // acts in it (act). Twice: what the page still had to do when the first was sent, as a click that waited
-  // on it, is heard of before the second answers. And for SETTLE_MS at most: a page one of whose frames is
-  // stuck is the agent's again then, and what it asked for before, if it says so only after, is kept.
+  // heard of only after the hand back. Until the page has answered, what it asks for is kept for no one
+  // (asks) and nothing of the agent's acts in it (act). And for SETTLE_MS at most: a page one of whose
+  // frames is stuck is the agent's again then, and what it asked for before, if it says so only after, is kept.
   private settle(page: Page): void {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, SETTLE_MS);
     });
-    const settled: Promise<void> = Promise.race([this.read(page).then(() => this.read(page)), late]).then(() => {
+    const settled: Promise<void> = Promise.race([this.heardOut(page), late]).then(() => {
       clearTimeout(timer);
       if (this.settling.get(page) === settled) this.settling.delete(page);
     });
     this.settling.set(page, settled);
+  }
+
+  // *page* is asked to answer READS times over, one after the other: by the last answer, what it had asked
+  // for before the first was sent has been heard of. Playwright reads an input that asked in up to three
+  // steps, each sent when the one before has answered: it finds the input, makes its own helper in that
+  // frame where it has none yet, and reads the input, which gives the page leave and is when the ask is
+  // heard. A busy page keeps the first of them waiting, and the rest follow once it is free. Each answer
+  // here comes after one more of those steps was sent, this host's reading being sent later than the step
+  // it follows: so three cover the three, and one more is to spare.
+  private async heardOut(page: Page): Promise<void> {
+    for (let n = 0; n < READS; n += 1) await this.read(page);
   }
 
   // *page* is asked to answer, wherever its frames run: the page, and each frame of it that a process of
@@ -985,18 +996,18 @@ export class BrowserHost {
   }
 
   // *page*, held and heard, is let be OWN_CHOOSER_MS from now, unless it is heard of again before: and
-  // then only once it has answered, twice over, with nothing heard of it meanwhile (settle says why twice).
-  // A page that asked for a file and was busy from then on is heard of only when Playwright's reading of
-  // its input reaches it, which gives it leave to ask again: let be before that, it would ask on that leave
-  // and the browser's own chooser would open. That reading was sent before these, so it is heard of before
-  // they answer, and the page's quiet begins anew (asks). With no bound: a page one of whose frames never
-  // answers is not let be, and a file input in it opens nothing for its user while they hold the browser.
+  // then only once it has answered, with nothing heard of it meanwhile (heardOut). A page that asked for a
+  // file and was busy from then on is heard of only when Playwright's reading of its input reaches it,
+  // which gives it leave to ask again: let be before that, it would ask on that leave and the browser's own
+  // chooser would open. Heard of before the page has answered, it begins the page's quiet anew (asks).
+  // With no bound: a page one of whose frames never answers is not let be, and a file input in it opens
+  // nothing for its user while they hold the browser.
   private quiet(page: Page): void {
     const kept = this.hearing.get(page);
     if (!kept?.heard) return;
     clearTimeout(kept.quiet);
     const mine: NodeJS.Timeout = setTimeout(() => {
-      void this.read(page).then(() => this.read(page)).then(() => {
+      void this.heardOut(page).then(() => {
         if (this.hearing.get(page) === kept && kept.quiet === mine && kept.acting === 0) this.unhear(page);
       });
     }, OWN_CHOOSER_MS);
