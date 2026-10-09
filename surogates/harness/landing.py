@@ -360,6 +360,16 @@ async def _pruned_then_gone(*, sandbox_pool: Any, sandbox_id: str, session_id: s
             logger.warning("Could not let pod %s go after its pruning", sandbox_id, exc_info=True)
 
 
+class _Released:
+    """A pod its session has let go of, asked as a session's pod is asked: for a settle through the pod that prunes."""
+
+    def __init__(self, sandbox_pool: Any, sandbox_id: str) -> None:
+        self._pool, self._sandbox_id = sandbox_pool, sandbox_id
+
+    async def execute(self, owner: str, name: str, input: str, **kwargs: Any) -> str:
+        return await self._pool.execute_released(self._sandbox_id, name, input, **kwargs)
+
+
 async def prune_after(
     *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, workstream: Any, packs: int, saga_settings: Any,
 ) -> None:
@@ -371,18 +381,20 @@ async def prune_after(
     refuses when the history's refs moved under it.  It never fails its
     caller: the landing stands, and the history is pruned on a later day.
 
-    It is fenced as a landing is.  A landing of the project still running
-    began after this one, or lost the lock unseen, and may be writing a
-    pack whose commits no ref names yet: the pruning then waits for
-    another completed landing, the day not marked.  And the pod leaves
-    every pack younger than the fence, for a push no row tells of: a keep's
-    or a hand-off's.
+    It is fenced as a landing is: the landings left running are settled
+    first, through this pod.  One written within the fence lost the lock
+    unseen, and may be writing a pack whose commits no ref names yet: it
+    is waited for, then settled.  One left ``escalated``, or settled here
+    with a row that could still not be written, holds no pruning back.  A
+    settle that fails leaves the pruning to the next landing, the day not
+    marked.  And the pod leaves every pack younger than the fence, for a
+    push no row tells of: a keep's or a hand-off's.
     """
     try:
         async with project_lock(session_factory, workstream) as held:
-            if await running_landings(session_factory, workstream):
-                logger.info("Not pruning the history of project %s: a landing of it is still running", workstream)
-                return
+            await settle_running(
+                session_factory, _Released(sandbox_pool, sandbox_id), sandbox_id, workstream, saga_settings, held,
+            )
             request = {
                 "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
                 "spare": _fence(saga_settings),

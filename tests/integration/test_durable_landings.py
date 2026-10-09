@@ -446,6 +446,8 @@ async def test_a_recovery_from_a_row_behind_its_landing_puts_back_what_it_knows_
             f'[Thread "Draft A" ({first.id}): a landing its worker left unfinished was settled]\n'
             "Could not finish landing these; check them: a.md"
         )
+        # A landing left escalated is no landing running: the day's pruning ran after B's.
+        assert (pods.project / "_history" / "pruned").exists()
     else:
         # A row behind them knows neither: the folders stay, empty, and the landing reads as put back.
         assert list((pods.project / "made").rglob("*")) == [pods.project / "made" / "deep"] and row.saga_state == "compensated"
@@ -1752,7 +1754,7 @@ async def test_a_turns_end_and_the_threads_next_turn_do_not_wait_for_the_days_pr
     assert pods.real_names() == ["Report.docx", "a.md", "b.md", "notes.txt"]
 
 
-async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_running(api, monkeypatch, pods):
+async def test_the_days_pruning_waits_out_and_settles_a_landing_left_running_as_a_landing_does_then_prunes(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     lander, other = await a_thread(api, "Lander", master), await a_thread(api, "Draft B", master)
     pool, factory = SandboxPool(pods), api.app.state.session_factory
@@ -1770,23 +1772,50 @@ async def test_the_days_pruning_waits_for_another_landing_while_one_is_still_run
         return await prune(**kwargs)
 
     async def watched(sandbox_id, name, input, **kwargs):
-        asked.append(json.loads(input).get("action"))
+        if json.loads(input).get("action") == "prune":
+            asked.extend(quiet for _, quiet in await rows_module.running_landings(factory, other.config["workstream_id"]))
+            asked.append("prune")
         return await execute(sandbox_id, name, input, **kwargs)
 
     begun: list[int] = []
     monkeypatch.setattr(landing_module, "prune_after", another_landing_has_begun)
     monkeypatch.setattr(pool, "execute_released", watched)
+    began = time.monotonic()
     await ends(api, pool, lander)
-    # Fenced, as a landing is: the pod is not asked, and the day is not marked pruned.
-    assert begun and asked == [] and not (pods.project / "_history" / "pruned").exists()
-    # That landing done, the next completed landing prunes.
-    async with factory() as db:
-        await db.execute(text("DELETE FROM workstream_history WHERE id = :id"), {"id": begun[0]})
-        await db.commit()
-    monkeypatch.setattr(landing_module, "prune_after", prune)
-    await edited(pool, lander, "echo again > again.md")
-    await ends(api, pool, lander)
-    assert asked == ["prune"] and (pods.project / "_history" / "pruned").exists()
+    # Fenced, as a landing is: the row is waited for through its fence, then settled, and only then is
+    # the pod asked to prune.  No landing was running by then.
+    assert begun and asked == ["prune"] and time.monotonic() - began >= landing_module._fence(FENCED) - 0.5
+    assert [row.saga_state for row in await rows(api, other)] == ["compensated"]
+    assert (pods.project / "_history" / "pruned").exists()
+
+
+async def test_a_landing_whose_row_stays_running_holds_no_pruning_back(api, monkeypatch, pods):
+    master = await master_of(api, await create(api))
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    await edited(pool, first, "echo a > a.md && echo b > b.md")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply a.md")
+    [dead] = await rows(api, first)
+    save, asked, execute = landing_module.save_landing, [], pool.execute_released
+
+    async def its_outcome_cannot_be_written(session_factory, row, saga, **values):
+        if row == dead.id and values.get("state", "running") != "running":
+            raise ConnectionError("the database blinked")
+        await save(session_factory, row, saga, **values)
+
+    async def watched(sandbox_id, name, input, **kwargs):
+        asked.append(json.loads(input).get("action"))
+        return await execute(sandbox_id, name, input, **kwargs)
+
+    monkeypatch.setattr(landing_module, "save_landing", its_outcome_cannot_be_written)
+    monkeypatch.setattr(pool, "execute_released", watched)
+    await edited(pool, second, "echo by B > B.md")
+    await asyncio.wait_for(ends(api, pool, second), 60)
+    # B's landing put A's files back and could not write A's row, which reads running for good.
+    # The pruning settles it again, as B's landing did, and then runs: the history does not only grow.
+    assert [row.saga_state for row in await rows(api, first)] == ["running"]
+    assert asked[-1] == "prune" and (pods.project / "_history" / "pruned").exists()
+    assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
 
 
 @pytest.mark.parametrize("unreadable", ["once", "at every try"])
