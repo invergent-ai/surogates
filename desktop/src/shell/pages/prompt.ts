@@ -44,23 +44,18 @@ let content: Content | null = null;
 let armed = false;
 // The input protection, in milliseconds. *lastDown*: when a key last went down here, or a press began.
 // *acts*: whether that one acts, having come once the prompt was armed and a protection time after the one
-// before it; one that does not act changes no choice and answers nothing. *lastInput*: when a key or a press
-// last went down or came up. *pressed*: the key or press that went down last and has not come up. The main
-// process counts the same keys and presses by itself, and decides by its own count.
+// before it; one that does not act changes no choice and moves nothing. *pressed*: the key or press that
+// went down last and has not come up. Whether a button's press answers is not decided here: the main process
+// counts the same keys and presses by itself, and its count is the rule (answer).
 let protection = 500;
 let lastDown = Number.NEGATIVE_INFINITY;
-let lastInput = Number.NEGATIVE_INFINITY;
 let acts = false;
 let pressed: string | null = null;
 // Whether the key that went down last was a Tab that moves the keyboard.
 let walks = false;
-// The keys that went down held back and have not come up: their coming up does nothing either.
-const stilled = new Set<string>();
 let quiet: number | undefined;
 // A key or a press that came now would be held back.
 const held = (): boolean => !armed || performance.now() - lastDown < protection;
-// A button pressed now answers: by the key or press that acts, or with none at all for a protection time.
-const answering = (): boolean => armed && (acts || performance.now() - lastInput >= protection);
 
 const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] => {
   const made = document.createElement(tag);
@@ -71,11 +66,17 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: strin
 
 const chosen = (): string | null => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")?.value ?? null;
 
+// A button was pressed, by a key, a press, or with neither as assistive technology presses one: the main
+// process says whether it is taken. One it refuses came too soon, and the prompt says so in a line a screen
+// reader reads by itself: a person who pressed with no key hears why nothing happened.
 function answer(id: string): void {
   const offered = content?.buttons.find((button) => button.id === id);
-  if (!offered || !answering()) return;
-  void prompt.answer(id, content?.choice ? chosen() : null);
+  if (!offered) return;
+  void prompt.answer(id, content?.choice ? chosen() : null).then((taken) => {
+    if (!taken) byId("prompt-refused").textContent = TOO_SOON;
+  }, () => {});
 }
+const TOO_SOON = "Not yet. Press it again in a moment.";
 
 // Whether a key or a press would be held back now is said on the buttons' row, for how they are drawn; no
 // button is marked unavailable for it: each can be reached and pressed at any time, and what is pressed too
@@ -105,25 +106,22 @@ function down(event: Event): void {
   // buttons. One that follows any other key or press within the protection is a typing person's, and moves nothing.
   if (!repeated) walks = event instanceof KeyboardEvent && event.key === "Tab" && armed && (acts || walks);
   if (!repeated) pressed = named(event);
-  lastDown = lastInput = performance.now();
+  lastDown = performance.now();
   hold();
-  if (acts) return;
-  if (event instanceof KeyboardEvent) stilled.add(named(event));
-  still(event);
+  if (!acts) still(event);
 }
 function up(event: Event): void {
-  if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
   if (pressed === named(event)) pressed = null;
-  lastInput = performance.now();
 }
-// What a key or a press that does not act would do next does not happen either: its key coming up, its click.
-// A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for a
+// What a key that does not act would do does not happen: its going down is cancelled, and nothing follows
+// from its coming up. A key changes nothing and answers nothing: keys are what a person typing elsewhere sends here. But for a
 // Tab that walks (down), which moves the keyboard as in any window, however soon after the Tab before it; and
 // for the clipboard's and the selection's own keys: what a prompt shows can be read and copied at any time.
 // A Tab that comes before the prompt is armed, or within the protection of any other key, is a typing
 // person's like any other, and moves nothing: the keyboard stays where it was, as on the button that changes
-// nothing, where the prompt put it. A press of the mouse is made where it lands, and one that
-// does not act is held back from the buttons alone: a choice it lands on is taken.
+// nothing, where the prompt put it. A press of the mouse is made where it lands, and a choice it lands on is
+// taken; one that does not act leaves the keyboard where it was when it lands on a button, and the main
+// process says whether its click answers.
 const CLIPBOARD = new Set(["a", "c", "v", "x"]);
 function still(event: Event): void {
   if (event instanceof KeyboardEvent) {
@@ -135,14 +133,6 @@ function still(event: Event): void {
 }
 document.addEventListener("keydown", down, true);
 document.addEventListener("pointerdown", down, true);
-// A click with a key or a press behind it goes by that one; with none, by how long none has come. Looked at
-// before the key's or the press's coming up is counted: the click that ends a press is that press's.
-for (const after of ["keyup", "click"]) {
-  document.addEventListener(after, (event) => {
-    if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
-    if (event instanceof KeyboardEvent ? stilled.delete(named(event)) : !answering()) still(event);
-  }, true);
-}
 for (const after of ["keyup", "pointerup", "pointercancel"]) document.addEventListener(after, up, true);
 
 // More may wait than the line here holds: each chat keeps its own later prompts back until this one is answered.

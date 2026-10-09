@@ -854,6 +854,102 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
     expect(await outcome(id)).toHaveProperty("error");
   });
 
+  it("refuses by the main process's own count, whatever its page sends: its page's word right after a press, a key or a touch that began too soon comes up, however long each was held, and right after the repeats of a key it did not see go down, is not taken; a quiet time on, it is", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    const asked = await prompt(app!);
+    // The page's own word that Cancel was pressed: what the main process answers it.
+    const word = () => asked.evaluate(() =>
+      (window as unknown as { surogatePrompt: { answer(b: string, c: string | null): Promise<boolean> } }).surogatePrompt.answer("cancel", "free"));
+    const line = await asked.context().newCDPSession(asked);
+    await expect.poll(() => heldBack(asked)).toBe(false);
+    // A press on the title, begun right after a key and held past the protection: let go, and the word at once.
+    await asked.keyboard.press("a");
+    await asked.mouse.move(20, 20);
+    await asked.mouse.down();
+    await pause();
+    await asked.mouse.up();
+    expect(await word()).toBe(false);
+    // A key, the same way.
+    await asked.keyboard.press("a");
+    await asked.keyboard.down("b");
+    await pause();
+    await asked.keyboard.up("b");
+    expect(await word()).toBe(false);
+    // A finger, the same way.
+    await asked.keyboard.press("a");
+    await line.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: 20, y: 20 }] });
+    await pause();
+    await line.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    expect(await word()).toBe(false);
+    // A key that acts, let go; then the repeats of another key, whose going down this window never saw.
+    await pause();
+    await asked.keyboard.press("a");
+    for (let n = 0; n < 3; n += 1) await line.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "F8", code: "F8", windowsVirtualKeyCode: 119, autoRepeat: true });
+    expect([await word(), await promptsShown(app!)]).toEqual([false, 1]);
+    // And the repeats of that same key, which came up since: no press of this window's either.
+    await line.send("Input.dispatchKeyEvent", { type: "keyUp", key: "F8", code: "F8", windowsVirtualKeyCode: 119 });
+    await pause();
+    await asked.keyboard.press("a");
+    for (let n = 0; n < 3; n += 1) await line.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, autoRepeat: true });
+    expect([await word(), await promptsShown(app!)]).toEqual([false, 1]);
+    // A quiet time after the last of them, the word is taken.
+    await line.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65 });
+    await pause();
+    expect(await word().catch(() => true)).toBe(true);
+    expect(await prepared).toBeNull();
+  });
+
+  it("changes nothing at the repeats of a key the prompt did not see go down, though a key that acts came before them: the mode chosen stays", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    const asked = await prompt(app!);
+    const line = await asked.context().newCDPSession(asked);
+    await expect.poll(() => heldBack(asked)).toBe(false);
+    // Shift+Tab acts, and puts the keyboard on the mode. Then an arrow's repeats, as of a key held since elsewhere.
+    await asked.keyboard.press("Shift+Tab");
+    expect(await active(asked)).toBe("free");
+    for (let n = 0; n < 3; n += 1) await line.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40, autoRepeat: true });
+    await line.send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+    expect(await asked.evaluate(() => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")!.value)).toBe("free");
+    // The arrow pressed anew, a pause on, picks the other mode.
+    await pause();
+    await asked.keyboard.press("ArrowDown");
+    expect(await asked.evaluate(() => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")!.value)).toBe("ask");
+    // Its own repeats, once it has come up, are no press of this prompt's either.
+    for (let n = 0; n < 3; n += 1) await line.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40, autoRepeat: true });
+    await line.send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+    expect(await asked.evaluate(() => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")!.value)).toBe("ask");
+    await pause();
+    await key(asked, "Escape");
+    expect(await prepared).toBeNull();
+  });
+
+  it("says so, once, in a line a screen reader reads by itself, where a button pressed with no key and no press comes too soon; the line is empty where nothing was refused", async () => {
+    const client = await signedIn();
+    const prepared = prepare(client);
+    const asked = await prompt(app!);
+    const said = () => asked.$eval("#prompt-refused", (line) => [line.textContent, line.getAttribute("aria-live"), line.getAttribute("role")]);
+    expect(await said()).toEqual(["", "polite", "status"]);
+    // Pressed as it shows: refused, and said.
+    await activate(asked, "cancel");
+    await expect.poll(() => said()).toEqual(["Not yet. Press it again in a moment.", "polite", "status"]);
+    expect(await promptsShown(app!)).toBe(1);
+    // A key that is held back says nothing more, and a press that is taken closes the prompt.
+    await expect.poll(() => heldBack(asked)).toBe(false);
+    await pause();
+    await activate(asked, "cancel");
+    expect(await prepared).toBeNull();
+    // A prompt nothing was refused in says nothing.
+    const again = prepare(client);
+    const next = await prompt(app!);
+    await expect.poll(() => heldBack(next)).toBe(false);
+    await asked.waitForEvent("close").catch(() => {});
+    expect(await next.$eval("#prompt-refused", (line) => line.textContent)).toBe("");
+    await press(next, "cancel");
+    expect(await again).toBeNull();
+  });
+
   it("takes a key that acts however long it is held: Space on a button, held until it repeats and then let go, answers", async () => {
     await bound(await signedIn(), folder);
     const id = write("a.txt", "a");
