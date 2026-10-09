@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -676,3 +678,114 @@ def test_a_stop_puts_the_copy_back_and_takes_away_what_the_turn_made(tmp_path, f
     with refused("failed", "git read-tree failed"):
         one.restore("f" * 40)
     assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
+
+
+THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f"
+
+
+def ask(tree: Path, request: dict) -> dict:
+    """One request to the history as the guest's agent runs it: the tree its disk carries, on a python that
+    reads nothing of its user's, with no environment but a PATH."""
+    ran = subprocess.run(
+        [sys.executable, "-I", str(tree / "main.py")], input=json.dumps(request), capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin"}, cwd="/", timeout=120,
+    )
+    assert ran.returncode == 0, ran.stderr
+    return json.loads(ran.stdout)
+
+
+@pytest.fixture()
+def tree(tmp_path: Path) -> Path:
+    made = tmp_path / "agent-disk" / "history"
+    subprocess.run([str(Path(__file__).parents[1] / "desktop" / "vm" / "history-tree.sh"), str(made)], check=True)
+    return made
+
+
+def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, folder, tree):
+    # The cloud's two modules and the one they import, and nothing else of the platform.
+    assert sorted(str(p.relative_to(tree)) for p in tree.rglob("*.py") if p.stat().st_size) == [
+        "main.py", "surogates/sandbox/history.py", "surogates/sandbox/local_history.py",
+        "surogates/tools/utils/checkpoint_manager.py",
+    ]
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
+    copy = tmp_path / "store" / "threads" / THREAD
+    (copy / "notes.txt").write_text("the thread's\n")
+    taken = ask(tree, {**place, "action": "snapshot", "args": {"reason": "before a step"}})
+    assert re.fullmatch(r"[0-9a-f]{40}", taken["hash"])
+    picked = ask(tree, {**place, "action": "pickup", "args": {"author": YOURS, "trailers": [["Surogate-Saga", "s1"]]}})
+    assert picked == {"main": None, "commit": None, "picked_up": [], "packs": 0}
+    turn = ask(tree, {**place, "action": "commit", "args": {"author": A, "trailers": [["Surogate-Saga", "s1"]], "pickup": None}})
+    assert [(c["path"], c["after"] is not None) for c in turn["changes"]] == [("notes.txt", True)]
+
+
+@pytest.mark.parametrize("change, said", [
+    ({"thread": "t1"}, "it names no thread"),
+    ({"thread": "../../etc"}, "it names no thread"),
+    ({"user": "u1; rm -rf /"}, "it names no user"),
+    ({"store": "relative/place"}, "it names no place"),
+    ({"action": "apply"}, "it names no action this computer's history takes"),
+    ({"action": "prune"}, "it names no action this computer's history takes"),
+    ({"action": "pickup", "args": {"author": YOURS, "trailers": [], "push": True}}, "it names no action this computer's history takes"),
+    ({"action": "restore", "args": {"commit": "--upload-pack=/planted"}}, "its commit holds what is not a commit id"),
+    ({"action": "fetch", "args": {"commits": ["-o", "x"]}}, "its commits holds what is not a commit id"),
+    ({"action": "record", "args": {
+        "turn": "0" * 40, "applied": [{"path": "a\0b", "before": None, "after": None}], "author": A, "trailers": [], "main": None,
+    }}, "a file it applied has no path"),
+])
+def test_a_request_that_names_no_thread_action_or_id_of_the_historys_is_refused(tmp_path, folder, tree, change, said):
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1", "action": "open", "args": {}}
+    answer = ask(tree, {**place, **change})
+    assert answer["error"]["code"] == "not_a_request" and said in answer["error"]["message"], answer
+    assert not (tmp_path / "store").exists()
+
+
+def test_a_name_that_is_not_utf8_is_answered_as_the_agent_runs_the_history(tmp_path, folder, tree):
+    # With no environment but a PATH, a name that is UTF-8 is one history carries.
+    (folder / "Résumé.docx").write_bytes(b"PK\x03\x04 a name that is")
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
+    copy = tmp_path / "store" / "threads" / THREAD
+    assert (copy / "Résumé.docx").exists()
+    open(os.fsencode(copy) + b"/caf\xe9.txt", "wb").close()
+    refused = ask(tree, {**place, "action": "snapshot", "args": {"reason": "before a step"}})
+    assert refused == {"error": {
+        "code": "name_not_utf8", "message": "refused the request: a file's name is not UTF-8, which history cannot record",
+    }}
+    open(os.fsencode(folder) + b"/caf\xe9.txt", "wb").close()
+    other = {**place, "thread": THREAD.replace("0b6c", "1b6c")}
+    assert ask(tree, {**other, "action": "open", "args": {}}) == {"history": "off", "reason": "names"}
+
+
+def test_a_request_not_answered_says_which_way_by_its_code_and_to_a_person_by_its_words(tmp_path, folder, tree):
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    snapshot = {**place, "action": "snapshot", "args": {"reason": "before a step"}}
+    assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
+    # The request is none this history takes.
+    assert ask(tree, {**place, "action": "prune", "args": {}}) == {"error": {
+        "code": "not_a_request", "message": "refused the request: it names no action this computer's history takes",
+    }}
+    # Git could not do what was asked: a snapshot the repository does not hold.
+    failed = ask(tree, {**place, "action": "restore", "args": {"commit": "f" * 40}})["error"]
+    assert failed["code"] == "failed" and failed["message"].startswith("git read-tree failed: "), failed
+    # The thread's copy is gone: its next open makes it.
+    shutil.rmtree(tmp_path / "store" / "threads" / THREAD)
+    assert ask(tree, snapshot) == {"error": {
+        "code": "no_whole_copy", "message": "refused the request: this thread has no whole copy, and its next open makes one",
+    }}
+    # The folder's history is not one the platform wrote: here, it holds a link.
+    (tmp_path / "store" / "history.git").mkdir(exist_ok=True)
+    (tmp_path / "store" / "history.git" / "kept").symlink_to(tmp_path)
+    assert ask(tree, snapshot) == {"error": {
+        "code": "history_refused", "message": "refused the project's history: something in it is neither a file nor a folder",
+    }}
+
+
+def test_a_request_that_is_not_one_is_answered_never_raised(tree):
+    for raw, code in (("", "failed"), ("[]", "not_a_request"), ('"open"', "not_a_request"), ("{", "failed")):
+        ran = subprocess.run(
+            [sys.executable, "-I", str(tree / "main.py")], input=raw, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, cwd="/",
+        )
+        assert ran.returncode == 0, (raw, ran.stderr)
+        answer = json.loads(ran.stdout)["error"]
+        assert answer["code"] == code and isinstance(answer["message"], str) and set(answer) == {"code", "message"}, (raw, ran.stdout)

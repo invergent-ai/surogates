@@ -22,9 +22,12 @@ again a repository it finds redirected, and overrides the rest.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +37,7 @@ from surogates.sandbox.history import (
     _ATTRIBUTES,
     _OPEN_TIMEOUT,
     _TIMEOUT,
+    FAILED,
     HISTORY_CAP,
     HISTORY_EXCLUDES,
     HISTORY_REFUSED,
@@ -41,15 +45,18 @@ from surogates.sandbox.history import (
     History,
     HistoryError,
     _as,
+    _checked_id,
     _name,
     _replace,
 )
 
 #: Why a request was not answered, beside the cloud's two codes (history.py): a thread with no
-#: whole copy, which its next open makes; and a file whose name history cannot record, which
-#: nothing lands past until it is renamed.  Whoever asked goes by the code, never by the words.
+#: whole copy, which its next open makes; a file whose name history cannot record, which
+#: nothing lands past until it is renamed; and a request that is none this history takes.
+#: Whoever asked goes by the code, never by the words.
 NO_WHOLE_COPY = "no_whole_copy"
 NAME_NOT_UTF8 = "name_not_utf8"
+NOT_A_REQUEST = "not_a_request"
 
 #: On a folder of the user's these are the platform's: the whiteboard's
 #: canvas, the harness's own files, and where a coding tool checks a
@@ -92,6 +99,21 @@ _EXCLUDED = re.compile("|".join(
     f"(?:^|/){_name(p)}(?:/|$)"
     for p in LOCAL_EXCLUDES
 ))
+
+_THREAD = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_USER = re.compile(r"[A-Za-z0-9_.@-]{1,128}")
+#: Each action a request may name, the method it runs and the arguments it takes.
+_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "open": ("open", frozenset()),
+    "changed": ("changed", frozenset()),
+    "snapshot": ("snapshot", frozenset({"reason"})),
+    "restore": ("restore", frozenset({"commit"})),
+    "fetch": ("fetch", frozenset({"commits", "saga"})),
+    "pickup": ("pickup", frozenset({"author", "trailers"})),
+    "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
+    "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup"})),
+    "keep": ("keep", frozenset({"author", "trailers", "base"})),
+}
 
 
 @dataclass(frozen=True)
@@ -375,3 +397,69 @@ def _removed(path: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def _ids(value: Any, where: str) -> None:
+    """Refuse a request whose commit and blob ids are anything else: git would read one as an option."""
+    for item in value if isinstance(value, list) else [value]:
+        if item is not None:
+            if not isinstance(item, str):
+                raise HistoryError(f"refused the request: {where} holds what is not a commit id", code=NOT_A_REQUEST)
+            try:
+                _checked_id(item, where)
+            except HistoryError as refused:
+                # The id is the request's, not the history's: so is the refusal.
+                raise HistoryError(str(refused), code=NOT_A_REQUEST) from None
+
+
+def run(request: dict[str, Any]) -> dict[str, Any]:
+    """One request of the desktop's, as the guest's agent passes it; its answer.
+
+    ``{store, folder, thread, user, action, args}``: the folder's place and
+    the folder as the guest mounts them, and the action with its arguments.
+    Every id is checked before git sees it, and a path with a NUL is refused.
+    """
+    if not isinstance(request, dict):
+        raise HistoryError("refused the request: it is not one", code=NOT_A_REQUEST)
+    store, folder = request.get("store"), request.get("folder")
+    thread, user, action, args = request.get("thread"), request.get("user"), request.get("action"), request.get("args", {})
+    if not (isinstance(store, str) and isinstance(folder, str) and os.path.isabs(store) and os.path.isabs(folder)):
+        raise HistoryError("refused the request: it names no place", code=NOT_A_REQUEST)
+    if not (isinstance(thread, str) and _THREAD.fullmatch(thread)):
+        raise HistoryError("refused the request: it names no thread", code=NOT_A_REQUEST)
+    if not (isinstance(user, str) and _USER.fullmatch(user)):
+        raise HistoryError("refused the request: it names no user", code=NOT_A_REQUEST)
+    method, takes = _ACTIONS.get(action, (None, frozenset())) if isinstance(action, str) else (None, frozenset())
+    if method is None or not isinstance(args, dict) or not args.keys() <= takes:
+        raise HistoryError("refused the request: it names no action this computer's history takes", code=NOT_A_REQUEST)
+    for key in ("commit", "turn", "main", "pickup", "commits"):
+        _ids(args.get(key), f"its {key}")
+    for change in args.get("applied", []):
+        if not isinstance(change, dict) or not isinstance(change.get("path"), str) or "\0" in change["path"]:
+            raise HistoryError("refused the request: a file it applied has no path", code=NOT_A_REQUEST)
+        _ids([change.get("before"), change.get("after")], "a file it applied")
+    history = LocalHistory.at(Path(store), Path(folder), thread=thread, user=user)
+    answer = getattr(history, method)(**args)
+    if action == "snapshot":
+        return {"hash": answer}
+    return answer if isinstance(answer, dict) else {}
+
+
+def main() -> int:
+    """One JSON request on stdin, its answer on stdout; ``{"error": {"code": ..., "message": ...}}`` for one refused or failed.
+
+    The code is the history's own for the refusal, and ``failed`` for
+    anything else that went wrong; the message is its words, as they were.
+    """
+    try:
+        answer = run(json.loads(sys.stdin.buffer.read()))
+    except HistoryError as exc:
+        answer = {"error": {"code": exc.code, "message": str(exc)}}
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError, KeyError) as exc:
+        answer = {"error": {"code": FAILED, "message": str(exc)}}
+    sys.stdout.write(json.dumps(answer))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
