@@ -50,6 +50,21 @@ settings() {
   # The release keys' public halves: a release's manifest is signed by the private half of one of
   # them (Ed25519). A rotation lists the old key and the new for one release, which the old signs.
   # On a computer that has a helper, the helper's list is the one that counts, and not this one.
+  #
+  # The list has one form, and what is not in it is no list to any reader: to this script's own
+  # (listed), which reads a helper's list and never runs it; to the release job, which writes and
+  # signs no manifest for a script whose list reads otherwise (publish.sh); and to the app
+  # (releaseKeys in src/shell/updates.ts). Bash would take more, and a list that bash alone
+  # reads gives a helper that lists no key: a computer that installed it takes no later release.
+  # The form, line by line:
+  # - one line that opens the list, blanks and then the list's name, an equals sign and an
+  #   opening bracket, and nothing after; the script assigns the list nowhere else, and adds to
+  #   it nowhere;
+  # - each key as OpenSSL writes a public key (openssl pkey -pubout): a line of blanks, a single
+  #   quote and the BEGIN line; its lines of base64 from the line's start; and the END line from
+  #   the line's start, with a single quote and nothing after;
+  # - one line that closes it, blanks and a closing bracket.
+  # No comment, no empty line and no other quoting in it, and at least one key.
   RELEASE_KEYS=(
     '-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA9SZBZHM7o/wDBWPfbhPMxucA2139J9j+nFHJYNwPA1w=
@@ -145,8 +160,8 @@ roots_alone() {
 
 # The release keys this computer trusts, into the array $1 names. One file says which: the helper
 # pkexec runs, whose own list they are, whichever script asks, that helper or an install script
-# of any age. Its list is read as settings writes one, each entry between its two quotes, and the
-# helper is not run. Only a computer with no helper and no version, at its first install, takes
+# of any age. Its list is read where it is in the list's one form (listed), and the helper is not
+# run. Only a computer with no helper and no version, at its first install, takes
 # this script's own list. A helper that is not as an apply leaves one, or lists nothing, is
 # refused, and so is a version that has no helper, which an apply puts in before it switches to
 # one: this script's list never stands in for the helper's, and would be an older one where the
@@ -165,18 +180,40 @@ trusted() {
   [ "${#list[@]}" -gt 0 ] || fail "$HELPER lists no release key: remove Surogate Desktop with --uninstall, and install it again"
 }
 
-# The release keys that helper $2 lists, into the array $1 names: its list as settings writes one,
-# each entry between its two quotes. The helper is read, and not run.
+# The release keys that helper $2 lists, into the array $1 names: each entry of its list, where
+# the list is in its one form (see the list, in settings), and none where it is not, or where the
+# script assigns the list a second time or adds to it. The helper is read line by line, and not
+# run. Each line is asked letter for letter, in no locale of the caller's.
 listed() {
   local -n entries="$1"
-  local text
+  local LC_ALL=C name=RELEASE_KEYS line entry="" at=before lists=0 blank=$'^[ \t]*'
+  # A key's first line and its last, as OpenSSL writes them. Put together here, so that the
+  # script has the first only where a key is.
+  local begin="-----BEGIN" end="-----END"
+  begin+=" PUBLIC KEY-----" end+=" PUBLIC KEY-----"
   entries=()
-  text="$(sed -n '/^[[:space:]]*RELEASE_KEYS=($/,/^[[:space:]]*)$/p' "$2")"
-  while [[ "$text" == *\'*\'* ]]; do
-    text="${text#*\'}"
-    entries+=("${text%%\'*}")
-    text="${text#*\'}"
-  done
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ${blank}${name}\+?= ]]; then
+      lists=$(( lists + 1 ))
+      if [ "$at" = before ] && [[ "$line" =~ ${blank}${name}=\($ ]]; then at=open; continue; fi
+      at=wrong
+    fi
+    case "$at" in
+      open)
+        if [[ "$line" =~ ${blank}\'"$begin"$ ]]; then entry="$begin"; at=key
+        elif [[ "$line" =~ ${blank}\)$ ]]; then at=closed
+        else at=wrong
+        fi
+        ;;
+      key)
+        if [[ "$line" =~ ^[A-Za-z0-9+/=]+$ ]]; then entry+=$'\n'"$line"
+        elif [ "$line" = "$end'" ] && [ "$entry" != "$begin" ]; then entries+=("$entry"$'\n'"$end"); at=open
+        else at=wrong
+        fi
+        ;;
+    esac
+  done <"$2"
+  [ "$at" = closed ] && [ "$lists" -eq 1 ] || entries=()
 }
 
 # Whether manifest $1 is signed, in signature $2, by the private half of one of the release keys

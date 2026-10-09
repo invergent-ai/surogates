@@ -65,6 +65,24 @@ manifest() {
       url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size, stateSchema: $schema}'
 }
 
+# Whether the install script beside this one lists its release keys in the one form that an
+# install reads (see the list, in install.sh): read by the script's own reader of a helper's list
+# (listed, from its functions without its last line, which runs it), they are the list as bash
+# set it, key for key, at least one, and each is a public key as OpenSSL writes one. Every install
+# asks that reader, and the app asks one of its own that takes the same form: a list that bash
+# alone reads would be signed for, installed, and trust no key. With $1, that key is one of them.
+keys_listed() {
+  bash -c '. <(sed "\$d" "$1") && settings && listed read "$1" && [ "${#read[@]}" -gt 0 ] && [ "${#read[@]}" -eq "${#RELEASE_KEYS[@]}" ] || exit 1
+    among="${2:+no}"
+    for at in "${!read[@]}"; do
+      [ "${read[at]}" = "${RELEASE_KEYS[at]}" ] || exit 1
+      written="$(openssl pkey -pubin -pubout -in <(printf "%s\n" "${read[at]}") 2>/dev/null)" && [ "$written" = "${read[at]}" ] || exit 1
+      [ "${read[at]}" != "${2:-}" ] || among=
+    done
+    [ -z "$among" ] || exit 3' _ "$HERE/install.sh" "${1:-}"
+}
+NOT_LISTED="install.sh's list of release keys is not in the one form that an install reads (see the list in install.sh): a computer that installed this release would take no later one"
+
 case "$VERB" in
   describe)
     : "${DESKTOP_TARBALL_SHA256:?}"
@@ -80,6 +98,7 @@ case "$VERB" in
     # that runs it would be left in, and its refusal taken for a package that names no schema
     # (see sign). Said before anything is unpacked.
     [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): no package is read with it'
+    keys_listed || fail "$NOT_LISTED"
     # The tarball's root helper is the install script beside this one, byte for byte: installed,
     # it is what pkexec runs as root at the next update, and its release keys are the ones every
     # later update is checked against. The build holds no key, and a helper of its own would need
@@ -144,15 +163,16 @@ case "$VERB" in
     # where it is no such word.
     [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
     [[ "$DESKTOP_TARBALL_SIZE" =~ ^[1-9][0-9]{0,14}$ ]] || fail "DESKTOP_TARBALL_SIZE is not a size in bytes, as the build's job gives its tarball's"
-    # The release keys the installed apps and the install script trust: install.sh's RELEASE_KEYS,
-    # read as install.sh sets them, from its functions alone: its last line, which runs it, is left
-    # out. Were its last line any other, as after a blank line at its end, the line that runs it
+    # The release keys the installed apps and the install script trust: install.sh's list, read as
+    # every install reads a helper's (keys_listed), from its functions alone: its last line, which
+    # runs it, is left out. Were its last line any other, as after a blank line at its end, the line that runs it
     # would be left in: handed this call's two arguments, the script stops at its own usage, and
     # the key would be said not to be trusted. So the script's end is looked at first, and said.
     [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
     public="$(openssl pkey -pubout -in <(printf '%s\n' "$DESKTOP_RELEASE_KEY"))"
-    bash -c '. <(sed "\$d" "$1") && settings && for key in "${RELEASE_KEYS[@]}"; do [ "$key" != "$2" ] || exit 0; done; exit 1' _ "$HERE/install.sh" "$public" \
-      || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
+    keys_listed "$public" && listing=0 || listing="$?"
+    [ "$listing" -ne 3 ] || fail "DESKTOP_RELEASE_KEY is not a key whose public half install.sh trusts"
+    [ "$listing" -eq 0 ] || fail "$NOT_LISTED"
     # The manifest is a file that another job wrote, where the build's tarball was read, and no
     # tarball is opened here. So it is signed only where it is, byte for byte, the manifest of this
     # version and of the tarball the build made, by the build's own words for its hash and its

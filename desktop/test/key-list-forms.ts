@@ -1,0 +1,37 @@
+// The spellings of a script's list of release keys that each of its readers is asked about: the
+// install script's own (listed, in release/install.sh), the release job, which refuses a script
+// whose list reads otherwise (release/publish.sh), and the app (releaseKeys, in
+// src/shell/updates.ts). One list, as manifest-forms.ts is for a manifest: a release whose
+// helper's list one reader takes and another does not is installed, and takes no later release.
+//
+// The list has one form, said at the list itself in install.sh, and every other spelling is no
+// list: all three read no key of it, whatever bash would make of it.
+
+// *script* with *keys* as its list, in the list's form: each a PEM as OpenSSL writes one.
+export const inForm = (script: string, keys: string[]) =>
+  script.replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${keys.map((key) => `    '${key}'`).join("\n")}\n  )`);
+// The list of *script* as it is written, and *script* with *list* in its place.
+const LIST = /^ *RELEASE_KEYS=\(\n[^)]*\)\n/m;
+const rewritten = (script: string, change: (list: string) => string) => script.replace(LIST, (list) => change(list));
+
+// Each spelling: its name, the script it makes of one whose list holds *keys* in the list's form,
+// and how many of two keys every reader reads of it.
+export type KeyList = [name: string, written: (script: string) => string, read: number];
+export const KEY_LISTS: KeyList[] = [
+  ["as it is", (script) => script, 2],
+  ["with spaces after an entry's quote", (script) => rewritten(script, (list) => list.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'  \n")), 0],
+  ["with a comment in it", (script) => rewritten(script, (list) => list.replace("(\n", "(\n    # the first key, since 2026\n")), 0],
+  ["with a comment that has an apostrophe in it", (script) => rewritten(script, (list) => list.replace("(\n", "(\n    # Surogate's release key since 2026\n")), 0],
+  ["with a comment that has a parenthesis in it", (script) => rewritten(script, (list) => list.replace("(\n", "(\n    # the first key (2026)\n")), 0],
+  ["with a comment between two keys", (script) => rewritten(script, (list) => list.replace("-----END PUBLIC KEY-----'\n", "-----END PUBLIC KEY-----'\n    # the next\n")), 0],
+  ["with its keys in double quotes", (script) => rewritten(script, (list) => list.replaceAll("'", '"')), 0],
+  ["on one line", (script) => rewritten(script, (list) => `${list.trim().replace("(\n", "( ").replace(/\n *\)$/, " )")}\n`), 0],
+  ["with its closing bracket behind the last key", (script) => rewritten(script, (list) => list.replace(/'\n *\)\n$/, "' )\n")), 0],
+  ["with a key's lines indented", (script) => rewritten(script, (list) => list.replace(/\n(?=[A-Za-z0-9+/=]+\n|-----END)/g, "\n    ")), 0],
+  ["with an empty line in it", (script) => rewritten(script, (list) => list.replace("(\n", "(\n\n")), 0],
+  ["with no key in it", (script) => rewritten(script, (list) => `${list.split("\n")[0]}\n  )\n`), 0],
+  ["with a second list added to it", (script) => rewritten(script, (list) => `${list}${list.replace("RELEASE_KEYS=(", "RELEASE_KEYS+=(")}`), 0],
+  ["with the list given twice", (script) => rewritten(script, (list) => `${list}${list}`), 0],
+  ["with a carriage return at each of its lines' ends", (script) => rewritten(script, (list) => list.replaceAll("\n", "\r\n")), 0],
+  ["with a key that is no key", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nbm90IGEga2V5\n")), 1],
+];
