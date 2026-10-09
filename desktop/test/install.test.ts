@@ -350,6 +350,29 @@ describe("the install script's waits", () => {
   });
 });
 
+describe("the install script's refusals that only a removal mends", () => {
+  it("are each said in the README as the script says them, and the README says none that the script does not", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+    // The two files that these refusals name, as the script's own settings place them.
+    const placed = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && echo "$HELPER" && echo "$HELPER_MARK"`, "_", SCRIPT], { encoding: "utf8" }).stdout.trim().split("\n");
+    expect(placed).toEqual(["/opt/surogate/bin/surogate-apply-update", "/opt/surogate/bin/release.json"]);
+    const [helper = "", mark = ""] = placed;
+    // Each sentence of the script's that ends in the removal, with those two files' names in it.
+    const said = [...new Set([...script.matchAll(/"([^"\n]*: remove Surogate Desktop with --uninstall, and install it again)"/g)]
+      .map((match) => (match[1] ?? "").replaceAll("$HELPER_MARK", mark).replaceAll("$HELPER", helper)))].sort();
+    expect(said.length).toBe(4);
+    for (const sentence of said) expect(sentence).not.toContain("$");
+    // The README's section quotes each on a line of its own, and no other line of that kind.
+    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    const section = readme.slice(readme.indexOf("\n## When Surogate Desktop says to remove it and install it again\n"));
+    expect(section.startsWith("\n## ")).toBe(true);
+    const quoted = [...new Set(section.split("\n").filter((line) => line.startsWith("    /opt/") && line.includes("--uninstall")).map((line) => line.trim()))].sort();
+    expect(quoted).toEqual(said);
+    // And it says what to do, in the install script's own two commands.
+    expect(section).toContain("    curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall\n    curl -fsSL https://surogate.ai/desktop/install.sh | bash\n");
+  });
+});
+
 describe("the install script's reader of one JSON object", () => {
   it("reads by no bound but a number of bytes in the ten digits, from 1 to a megabyte: its bound goes into the shell's own arithmetic, where any other word is a command", () => {
     const dir = mkdtempSync(join(tmpdir(), "install-test-"));

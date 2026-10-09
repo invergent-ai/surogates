@@ -106,3 +106,70 @@ helper for updates (`--apply`):
 
     curl -fsSL https://surogate.ai/desktop/install.sh | bash
     curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall
+
+## When Surogate Desktop says to remove it and install it again
+
+An update, the install script and its `--version` can each stop with a line that ends "remove
+Surogate Desktop with --uninstall, and install it again". The app shows the same line after
+"Surogate could not install its update:". It is about two files that only root writes, and the
+folder of the release they belong to:
+
+    /opt/surogate/bin/surogate-apply-update    the helper that an update runs as root, which lists the release keys this computer trusts
+    /opt/surogate/bin/release.json             its mark: the manifest of the release that the helper is of
+    /opt/surogate/versions/<version>/          that release's folder, with a copy of the helper and of the manifest in it
+
+The line means that one of them is not as an install or an update leaves it. No install, update
+or rollback leaves them so, wherever it is stopped: each of the states below needs root's own
+hand on those files, a damaged disk, or an install script from before the mark was written.
+Nothing short of a removal mends them, because what is damaged is what says which release keys
+this computer trusts. Do what the line says:
+
+    curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall
+    curl -fsSL https://surogate.ai/desktop/install.sh | bash
+
+The removal takes the app away for every user of the computer. It asks before it deletes your
+sign-in, your device token and your browser profiles, and chat folders stay.
+
+There are fourteen such states, under three lines. The first line is said of eleven:
+
+    /opt/surogate/bin/surogate-apply-update is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again
+
+- the helper is gone, and a version is installed;
+- the helper is a link;
+- the helper is not root's own file at mode 0755: its group or others may write it, or it is
+  another user's;
+- the folder of the release that the mark names has lost its own copy of the helper,
+  `bin/surogate-apply-update`, and the install is otherwise whole;
+- a link is where that copy was;
+- the same loss after a rollback, where that folder is not the running version's;
+- an update was stopped half way, between the mark's writing and the helper's, and the update's
+  folder has lost its program, `surogate`;
+- an update was stopped so, and the `release.json` in its folder is not root's own file at mode
+  0644;
+- an update was stopped so, and its own copy of the helper is another user's, or one that its
+  group or others may write, or has a set-id bit;
+- an update was stopped so, and its folder has lost its own copy of the helper;
+- the mark names an older release than the helper is of.
+
+The second, of one:
+
+    /opt/surogate/bin/surogate-apply-update lists no release key: remove Surogate Desktop with --uninstall, and install it again
+
+- the helper lists no release key.
+
+The third, of two:
+
+    /opt/surogate/bin/release.json does not say which release /opt/surogate/bin/surogate-apply-update is of: remove Surogate Desktop with --uninstall, and install it again
+
+- the mark is gone;
+- the mark is not root's own file at mode 0644, or names no release.
+
+One more line of the kind is said where nothing is installed yet, and something that is no file,
+a link or a folder, stands where the mark goes:
+
+    /opt/surogate/bin/release.json is not as Surogate Desktop's install leaves it: remove Surogate Desktop with --uninstall, and install it again
+
+An update that was only stopped half way is none of these: the next update, or the install
+script, finishes it. And a line that ends "run Surogate Desktop's install script again" means
+what it says: the install script mends a version's folder that has lost its program or its
+`release.json`.
