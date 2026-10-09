@@ -2351,3 +2351,24 @@ async def test_a_turn_cut_off_leaves_no_hand_off_of_its_for_a_later_stop_to_take
         await harness.wake(thread.id)
     # The worker lets go of what it knew of that turn: a later turn's stop here is not this one's.
     assert not landing_module.handed_on(thread)
+
+
+async def test_a_stop_gives_up_taking_the_hand_off_back_when_the_projects_lock_is_not_had_in_time(api, monkeypatch, pods, caplog):
+    thread = await a_thread(api)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo outline > outline.md")
+    await handed_off(api, pool, thread)
+    before = git(pods.project / "_history", "for-each-ref", "--format=%(refname) %(objectname)")
+    harness = harness_of(api)
+    harness._sandbox_pool, harness._saga_settings = pool, FENCED
+    harness._tenant = SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id)
+    monkeypatch.setattr(loop_module, "_STOP_HAND_OFF_BOUND", 0.5)
+    # Another thread's landing, or the day's pruning, holds the project's lock for minutes.
+    async with rows_module.project_lock(api.app.state.session_factory, thread.config["workstream_id"]):
+        began = time.monotonic()
+        await asyncio.wait_for(harness._take_back_what_the_turn_handed_on(thread), 30)
+        assert time.monotonic() - began < 5
+    # The stop goes on.  The hand-off is as the turn left it, and the log says what that means.
+    assert git(pods.project / "_history", "for-each-ref", "--format=%(refname) %(objectname)") == before
+    assert "its handed-on files come into the thread's next copy" in caplog.text
+    assert not landing_module.handed_on(thread)

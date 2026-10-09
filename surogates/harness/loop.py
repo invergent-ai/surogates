@@ -362,6 +362,10 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "auto-research", "code", "deep-research",
 })
 
+#: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
+#: pod's answer together.  Past it the stop goes on, and the hand-off stays as the turn left it.
+_STOP_HAND_OFF_BOUND = 60.0
+
 # The commands a project's thread refuses.  A routine's runs would start from
 # old files, and their work would land only when someone next speaks to the
 # thread.  A coding agent's turn ends outside the thread's landing, so its
@@ -964,12 +968,13 @@ class AgentHarness(
         step that started a helper put its copy on the hand-off, which the
         thread's next turn would take up and land.  The pod that made the
         hand-off knows it; where that pod went under the turn, one is opened
-        to drop it.  As best it can: a hand-off left is a stopped turn's
-        work landing at the next turn, and the log says so.  A turn that
+        to drop it.  As best it can, and within a bound: a hand-off left is
+        a stopped turn's handed-on files in the thread's next copy, and the
+        log says so.  A turn that
         handed nothing on, as every turn of a session that is no thread
         with a copy, is done here at once: no pod is asked, and none opened.
         """
-        from surogates.harness.landing import drop_hand_off, handed_on
+        from surogates.harness.landing import drop_hand_off, handed_on, turn_ended
         from surogates.sandbox.pool import sandbox_session_key
 
         if not handed_on(session):
@@ -980,14 +985,24 @@ class AgentHarness(
             # The turn's pod, or one in its place where it is gone: a pod made now is told which
             # hand-offs the turn made.
             owner = sandbox_session_key(session)
-            spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
-            await self._sandbox_pool.ensure(owner, spec)
-            await drop_hand_off(
-                session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, session=session,
-                saga_settings=self._saga_settings,
-            )
+
+            async def taken_back() -> None:
+                spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
+                await self._sandbox_pool.ensure(owner, spec)
+                await drop_hand_off(
+                    session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, session=session,
+                    saga_settings=self._saga_settings,
+                )
+
+            # A stop stops: behind another thread's landing or the day's pruning the lock is minutes away.
+            await asyncio.wait_for(taken_back(), _STOP_HAND_OFF_BOUND)
         except Exception:
-            logger.warning("Could not drop what the stopped turn of %s handed on: it lands with its next turn", session.id, exc_info=True)
+            logger.warning(
+                "Could not take back what the stopped turn of %s handed on: its handed-on files come into the "
+                "thread's next copy, with its helpers' work", session.id, exc_info=True,
+            )
+        finally:
+            turn_ended(session)
 
     # ------------------------------------------------------------------
     # Lease renewal (background task)
