@@ -4922,8 +4922,9 @@ class AgentHarness(
         """Let go of what a turn holds, at the end of a command's turn as at
         the end of a model's (``_complete_session``): the sandbox a command
         may have made, and the holds its message was admitted on.  The
-        holds go back with nothing spent: a command asks the model nothing
-        on the agent's account.
+        holds go back with nothing spent.  Most commands ask the model
+        nothing; /compress asks it for a summary, as the compaction at the
+        start of every turn does, and neither is counted against a turn.
 
         Nothing else of a model's turn end belongs here.  A command has no
         tool saga, no summary and no files to land, and it reports to
