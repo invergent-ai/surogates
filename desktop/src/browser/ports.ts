@@ -6,8 +6,9 @@
 import { SANDBOX_PORTS } from "../guest/listeners.js";
 
 // The names a chat's own server is opened by, as a URL spells them: decimal, octal, hex and short
-// forms of 127.0.0.1 are that address. Not a name under localhost, 0.0.0.0, another address of
-// 127.0.0.0/8, an IPv4 address inside an IPv6 one, or a name that only resolves here.
+// forms of 127.0.0.1 are that address. Not a name under localhost, localhost with a dot after it
+// (another origin to the browser), 0.0.0.0, another address of 127.0.0.0/8, an IPv4 address
+// inside an IPv6 one, or a name that only resolves here.
 export const CHAT_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // The sandbox's own proxies for its chat's commands: never the browser's to open, and the guest carries no connection to them.
 export { SANDBOX_PORTS };
@@ -17,7 +18,7 @@ export function chatPort(host: string, port: number): number | null {
   if (!Number.isInteger(port) || port < 1 || port > 65_535 || !/^[A-Za-z0-9.\-[\]:]+$/.test(host)) return null;
   let name: string;
   try {
-    name = new URL(`http://${host}/`).hostname.replace(/\.$/, "");
+    name = new URL(`http://${host}/`).hostname;
   } catch {
     return null;
   }

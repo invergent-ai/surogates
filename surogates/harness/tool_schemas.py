@@ -14,6 +14,7 @@ from typing import Any
 
 from surogates.channels.constants import ADAPTER_CHANNELS, VOICE_TOOLS
 from surogates.devices.binding import device_of
+from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
 
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
@@ -131,7 +132,8 @@ def describe_for_device(
     schemas: list[dict[str, Any]],
     config: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Return *schemas* with the terminal told what git and shared mappings cannot do in a folder of the user's computer.
+    """Return *schemas* with the terminal told what git and shared mappings cannot do in a folder of the user's computer,
+    and browser_navigate how the browser there opens the session's own servers.
 
     Only for a session whose ``config`` names a device; a cloud session's
     list is returned without DEVICE_ONLY_TOOLS.  Input is never mutated.
@@ -143,5 +145,8 @@ def describe_for_device(
         if schema["function"]["name"] == "terminal":
             schema = copy.deepcopy(schema)
             schema["function"]["description"] += f"{DEVICE_GIT_NOTE}\n{DEVICE_MAPPING_NOTE}\n"
+        elif schema["function"]["name"] == "browser_navigate":
+            schema = copy.deepcopy(schema)
+            schema["function"]["description"] += f" {DEVICE_SERVERS_NOTE}"
         described.append(schema)
     return described

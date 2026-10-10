@@ -1248,7 +1248,7 @@ class AgentHarness(
                 await self._sandbox_pool.ensure(owner, spec)
                 await drop_hand_off(
                     session_factory=self._session_factory, sandbox_pool=self._sandbox_pool, session=session,
-                    saga_settings=self._saga_settings,
+                    saga_settings=self._saga_settings, redis=self._redis,
                 )
 
             # A stop stops: behind another thread's landing or the day's pruning the lock is minutes away.

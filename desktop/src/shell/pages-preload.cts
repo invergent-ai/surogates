@@ -59,6 +59,7 @@ if (location.protocol === "file:") {
     takeBack: (root: string, host: string) => ipcRenderer.invoke("settings:take-back", root, host),
     takeBrowserBack: (root: string) => ipcRenderer.invoke("settings:take-back-browser", root),
     handBrowserBack: () => ipcRenderer.invoke("settings:hand-back-browser"),
+    takePortBack: (root: string, port: number) => ipcRenderer.invoke("settings:take-back-port", root, port),
     stop: (root: string, id: string) => ipcRenderer.invoke("settings:stop", root, id),
     set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
     link: (which: string) => ipcRenderer.invoke("settings:link", which),

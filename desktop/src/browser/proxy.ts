@@ -14,7 +14,11 @@
 // port first of all. The profile is every chat's, so the proxy cannot tell whose tab asks;
 // what it can read, on a request its own browser signed, is where that browser says the
 // request comes from, and it carries only what comes from a page of a chat's own server, its
-// user or its agent (ownRequest).
+// user or its agent (ownRequest). A tunnel says nothing of that at its CONNECT, so its first
+// bytes are read: only a WebSocket such a page opens is carried (ownSocket).
+//
+// A port not allowed is refused, and nobody is asked: a tab that goes there is shown a short
+// page of the proxy's own, which says what the port is (notOpenPage).
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
@@ -27,7 +31,12 @@ import { chatPort, chatPortOf, SANDBOX_PORTS } from "./ports.js";
 
 export interface BrowserProxyOptions extends ReachOptions {
   connect?: Dial; // the connection to a judged address; net.connect by default
+  handshakeMs?: number; // how long a tunnel to a chat's port has to send its WebSocket's handshake
 }
+
+// How long a tunnel to a chat's port has to say what it is, and the most a WebSocket's handshake holds.
+const HANDSHAKE_MS = 5_000;
+const MAX_HANDSHAKE = 16 * 1024;
 
 // The ports of chats' own servers a browser may open, and how its connections to them are carried:
 // the VM manager's door, and the key its device knocks with there.
@@ -36,6 +45,14 @@ interface Forwards {
   door: string;
   key: string;
 }
+
+// Why a connection to a chat's port is not carried: the port is not allowed here, or the door does not open
+// it for this device; the sandbox holds every connection it takes from the browser, the device's (the door's
+// "busy") or the chat's (the guest's EMFILE); or nothing took it, and there may be no door.
+export type NotCarried = "refused" | "busy" | "unreachable";
+// What the browser is answered for each.
+const NOT_CARRIED: Record<NotCarried, number> = { refused: 403, busy: 503, unreachable: 502 };
+const FULL = new Set(["busy", "EMFILE"]);
 
 /**
  * Whether a plain request to a chat's port comes from where the port was allowed for: a page of a
@@ -58,6 +75,33 @@ export function ownRequest(method: string, headers: IncomingHttpHeaders, allowed
   const page = typeof from === "string" ? chatPortOf(from) : null;
   return page !== null && allowed.has(page);
 }
+
+/**
+ * Whether *head*, a tunnel's first bytes up to their empty line, is a WebSocket's handshake (RFC 6455)
+ * from a page of a chat's own server, on a port *allowed* now: a GET that upgrades, with one Origin,
+ * which the browser writes and no page's code can set. The browser sends no fetch metadata with it.
+ * Every line is a header's own: one folded into the line before, or that names nothing, refuses it.
+ */
+export function ownSocket(head: string, allowed: ReadonlySet<number>): boolean {
+  const [first = "", ...lines] = head.split("\r\n");
+  if (!/^GET \S+ HTTP\/1\.1$/.test(first) || lines.some((line) => !/^[!#-'*+\-.0-9A-Z^-z|~]+:/.test(line))) return false;
+  const named = (name: string) => lines.filter((line) => line.toLowerCase().startsWith(`${name}:`)).map((line) => line.slice(name.length + 1).trim());
+  const [origin, ...others] = named("origin");
+  if (origin === undefined || others.length > 0 || !named("upgrade").some((value) => value.toLowerCase() === "websocket")) return false;
+  const page = chatPortOf(origin);
+  return page !== null && allowed.has(page);
+}
+
+/** The page a tab is shown at *port* of a chat's servers when it is not allowed: made of the port's number alone, with nothing of the request. */
+export function notOpenPage(port: number): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Port ${port} is not open</title></head>`
+    + `<body><h1>Port ${port} of a chat's servers is not open in this browser</h1><p>It opens when that chat's agent navigates to it and the chat's user allows it.</p>`
+    + "<p>The ports allowed now are listed in Surogate's Settings, under Folders and permissions.</p></body></html>";
+}
+// What it is sent with: nothing in it runs or loads, and no copy of it is kept past a port's allowing.
+const NOT_OPEN_HEADERS = {
+  "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
+};
 
 // The names the proxy answers itself, <token>.proxy-check.invalid: what a launch asks for, to
 // prove its browser's requests come here. No resolver answers them (RFC 6761), so a browser
@@ -191,17 +235,17 @@ export class BrowserProxy {
   }
 
   // A connection to *port* of the chat's servers it is forwarded to, through the manager's door, the
-  // loopback's family *first* tried first there; or the status that refuses it: 403 for a port not
-  // allowed and for the door's own refusal, 502 for a port nothing took. Nothing here is dialed.
-  private async toChat(port: number, first: 4 | 6, gone: AbortSignal): Promise<Socket | 403 | 502> {
+  // loopback's family *first* tried first there; or why there is none, in the door's own words for a
+  // sandbox that is full. Nothing here is dialed.
+  private async toChat(port: number, first: 4 | 6, gone: AbortSignal): Promise<Socket | NotCarried> {
     const chats = this.chats;
-    if (!chats?.ports.has(port)) return 403;
+    if (!chats?.ports.has(port)) return "refused";
     const opened = await knock(chats.door, `${chats.key} ${port}${first === 6 ? " 6" : ""}`, gone);
-    if ("status" in opened) return opened.status === 403 ? 403 : 502;
+    if ("status" in opened) return opened.status === 403 ? "refused" : opened.status === 502 && FULL.has(opened.reason) ? "busy" : "unreachable";
     // Taken back, or its browser gone, while the door answered.
     if (!this.chats?.ports.has(port) || gone.aborted) {
       opened.socket.destroy();
-      return 403;
+      return "refused";
     }
     const carried = this.toChats.get(port) ?? new Set<Duplex>();
     this.toChats.set(port, carried.add(opened.socket));
@@ -214,12 +258,11 @@ export class BrowserProxy {
 
   /**
    * Whether a connection to *port* of a chat's servers is carried now, asked by one made through the door
-   * and let go: "open"; "refused" for a port not allowed here or one the door does not open for this
-   * device; "unreachable" where nothing took it, or there is no door. Never rejects.
+   * and let go: "open", or why not (NotCarried). Never rejects.
    */
-  async reaches(port: number): Promise<"open" | "refused" | "unreachable"> {
-    const carried = await this.toChat(port, 4, new AbortController().signal).catch(() => 502 as const);
-    if (typeof carried === "number") return carried === 403 ? "refused" : "unreachable";
+  async reaches(port: number): Promise<"open" | NotCarried> {
+    const carried = await this.toChat(port, 4, new AbortController().signal).catch(() => "unreachable" as const);
+    if (typeof carried === "string") return carried;
     carried.destroy();
     return "open";
   }
@@ -280,6 +323,9 @@ export class BrowserProxy {
     }
     // The https upgrade's try at a check comes here; the plain request after it is answered.
     if (to && this.answered(to.host)) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+    // Signed in, or it was challenged above: a chat's own server is carried into its sandbox, and never dialed here.
+    const chat = to && !addresses ? chatPort(to.host, to.port) : null;
+    if (to && chat !== null) return void this.socketToChat(chat, to.host === "[::1]" ? 6 : 4, client, head, gone.signal);
     if (!to || !addresses) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     let upstream: Socket;
     try {
@@ -296,6 +342,55 @@ export class BrowserProxy {
     if (head.length > 0) upstream.write(head);
     upstream.pipe(client);
     client.pipe(upstream);
+  }
+
+  // A tunnel to a chat's port: only a WebSocket that a page of a chat's own server opens is carried. The browser
+  // says nothing of who asks with the CONNECT itself, so the tunnel is taken and its first bytes read, a moment
+  // and so many of them: another site's socket, https, whose inside cannot be read, and anything else end it,
+  // with no knock at the door.
+  private async socketToChat(port: number, first: 4 | 6, client: Duplex, early: Buffer, gone: AbortSignal): Promise<void> {
+    if (!this.chats?.ports.has(port)) return void client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+    client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    const head = await new Promise<Buffer | null>((resolve) => {
+      let read = early;
+      const timer = setTimeout(() => settle(null), this.options.handshakeMs ?? HANDSHAKE_MS);
+      const settle = (whole: Buffer | null) => {
+        clearTimeout(timer);
+        client.off("data", more);
+        client.off("close", left);
+        client.pause();
+        resolve(whole);
+      };
+      const left = () => settle(null);
+      const more = (chunk: Buffer) => {
+        read = Buffer.concat([read, chunk]);
+        // A handshake begins with its GET, as a TLS hello does not.
+        if (read.length > MAX_HANDSHAKE || !"GET ".startsWith(read.subarray(0, 4).toString("latin1"))) return settle(null);
+        if (read.includes("\r\n\r\n")) settle(read);
+      };
+      client.on("data", more);
+      client.once("close", left);
+      more(Buffer.alloc(0));
+    });
+    const allowed = this.chats?.ports;
+    if (!head || !allowed || !ownSocket(head.subarray(0, head.indexOf("\r\n\r\n")).toString("latin1"), allowed)) return void client.destroy();
+    const upstream = await this.toChat(port, first, gone);
+    if (typeof upstream === "string") return void client.destroy();
+    this.keep(upstream);
+    upstream.once("close", () => client.destroy());
+    client.once("close", () => upstream.destroy());
+    // A browser closes a tunnel whole, never half: its end ends the tunnel. A chat's server that ends its
+    // half has said all it will: the tunnel goes once the browser has every byte of it.
+    client.once("end", () => upstream.destroy());
+    upstream.once("end", () => {
+      if (client.writableFinished) client.destroy();
+      else client.once("finish", () => client.destroy());
+    });
+    upstream.write(head);
+    upstream.pipe(client);
+    client.pipe(upstream);
+    upstream.resume();
+    client.resume();
   }
 
   // Plain http, as a browser sends it to a proxy: the absolute address, one request a connection.
@@ -329,9 +424,14 @@ export class BrowserProxy {
       // of a chat's own page, and never dialed here; whatever else needs the sign-in is carried for nobody.
       const chat = chatPort(url.hostname, port);
       const allowed = this.chats?.ports;
+      // A tab sent to a port not allowed, by its user or by a page: nobody is asked, and the tab is told what the port is.
+      if (chat !== null && !allowed?.has(chat) && !SANDBOX_PORTS.has(chat) && request.headers["sec-fetch-mode"] === "navigate" && request.headers["sec-fetch-dest"] === "document") {
+        const page = notOpenPage(chat);
+        return void response.writeHead(403, { ...NOT_OPEN_HEADERS, "content-length": Buffer.byteLength(page) }).end(page);
+      }
       if (chat === null || !allowed?.has(chat) || !ownRequest(request.method ?? "", request.headers, allowed)) return void response.writeHead(403).end();
       const carried = await this.toChat(chat, url.hostname === "[::1]" ? 6 : 4, gone.signal);
-      if (typeof carried === "number") return void (response.headersSent || response.writeHead(carried).end());
+      if (typeof carried === "string") return void (response.headersSent || response.writeHead(NOT_CARRIED[carried]).end());
       socket = carried;
     }
     this.keep(socket);

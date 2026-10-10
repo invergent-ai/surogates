@@ -63,10 +63,15 @@ function placeOf(value: unknown): ThreadPlace {
   return { kind: "device", deviceId, deviceName, online } as ThreadPlace;
 }
 
+const MARKS = ["landed", "redoing", "not_merged", "undone"] as const;
+
+// A file's mark is taken only when it is one the app knows. A page of an older agent serves none,
+// and a later one's may be new: either is no mark, never a row refused, so its projects still show
+// their threads.
 function fileOf(value: unknown): ProducedFile {
-  const { kind, label, ref, threadId } = fields(value);
+  const { kind, label, ref, threadId, landing } = fields(value);
   need(one(kind, ["file", "artifact"]) && text(label, 500) && text(ref, 4096) && named(threadId));
-  return { kind, label, ref, threadId } as ProducedFile;
+  return { kind, label, ref, threadId, landing: one(landing, MARKS) ? landing : null } as ProducedFile;
 }
 
 function threadOf(value: unknown): ThreadRow {

@@ -154,12 +154,43 @@ describe("the Overview pane", () => {
       "Failed · The PDF could not be opened: it is encrypted",
     ]);
     const first = `[data-thread="${QUESTION}"]`;
-    expect(await texts(page, `${first} .chip`)).toEqual(["revenue.xlsx"]);
+    // A file its thread's landing left out says so; one that landed, and an artifact, say nothing.
+    expect(await texts(page, `${first} .chip`)).toEqual(["revenue.xlsx · not merged"]);
+    expect(await texts(page, `[data-thread="${FIXTURE_IDS.working}"] .chip`)).toEqual(["summary.docx · being redone", "Sales chart"]);
     expect(await page.textContent(`${first} .progress`)).toBe("2/5");
     expect(await page.textContent(`${first} .age`)).toBe("17m");
     // A thread on this computer carries its laptop; a thread with many files shows two and a count.
     expect(await page.getAttribute(`[data-thread="${FIXTURE_IDS.computer}"] .place`, "title")).toBe("On thinkpad, which is offline");
     expect(await texts(page, `[data-thread="${FIXTURE_IDS.idle}"] .chip`)).toEqual(["north.csv", "south.csv", "+1"]);
+  });
+
+  it("marks a file as its row's change leaves it, shows its name as text, and keeps the mark of a long name in view", async () => {
+    const idle = agent.projects!.threads[REPORT]!.find((thread) => thread.id === IDLE)!;
+    const markup = '<img src=x onerror="document.title=1">\u202Egpj.md';
+    const long = `${"regional_sales_".repeat(12)}north.csv`;
+    idle.files = [
+      { kind: "file", label: markup, ref: "a.md", threadId: IDLE, landing: "redoing" },
+      { kind: "file", label: long, ref: "north.csv", threadId: IDLE, landing: "not_merged" },
+    ];
+    const { page, client } = await opened();
+    const chips = `[data-thread="${IDLE}"] .chip`;
+    // A name is data: its markup is text, and a character that would reorder the mark after it shows as its code point.
+    expect(await texts(page, chips)).toEqual(['<img src=x onerror="document.title=1">U+202Egpj.md · being redone', `${long} · not merged`]);
+    expect(await page.$$eval(`[data-thread="${IDLE}"] img`, (found) => found.length)).toBe(0);
+    // The long name is cut, never its mark.
+    const [chip, name, mark] = await page.$$eval(`${chips}:nth-child(2), ${chips}:nth-child(2) .name, ${chips}:nth-child(2) .state`, (found) =>
+      found.map((part) => ({ left: part.getBoundingClientRect().left, right: part.getBoundingClientRect().right, cut: part.scrollWidth > part.clientWidth })));
+    expect(mark!.right - mark!.left).toBeGreaterThan(40);
+    expect(mark!.right).toBeLessThanOrEqual(chip!.right);
+    expect(name!.cut).toBe(true);
+    // The redo lands the file: its row's change takes the mark away.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
+      row.files = row.files.map((file) => ({ ...file, landing: "landed" }));
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => texts(page, chips)).toEqual(['<img src=x onerror="document.title=1">\u202Egpj.md', long]);
   });
 
   it("shows the project's library, and its routines only when it has some", async () => {
@@ -254,7 +285,7 @@ describe("the Overview pane", () => {
     await client.evaluate(([project, thread]) => {
       const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
       const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
-      row.files = [...row.files, { kind: "file", label: "west.csv", ref: "threads/sales/west.csv", threadId: thread! }];
+      row.files = [...row.files, { kind: "file", label: "west.csv", ref: "threads/sales/west.csv", threadId: thread!, landing: "landed" }];
       fake.data.library[project!] = [...fake.data.library[project!]!, {
         path: "threads/sales/west.csv", origin: "produced", threadId: thread!, size: 1024, updatedAt: new Date().toISOString(), place: { kind: "cloud" },
       }];
