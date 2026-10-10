@@ -744,8 +744,9 @@ async def start_proposed_thread(
     is news to the master, and wakes nobody but itself.
 
     With *execution*, a folder its user confirmed on their computer, the
-    thread is made there and its computer asked to bind it.  It begins once
-    bound, from ``…/threads/{thread_id}/start``, and this answers its id.
+    thread is made there and its computer asked to bind it to a copy of the
+    folder of its own, never to the folder itself.  It begins once bound,
+    from ``…/threads/{thread_id}/start``, and this answers its id.
     """
     project = await _project(request, workstream_id, tenant, ctx)
     # A card proposed for the user's computer runs in the cloud without one:
@@ -773,7 +774,7 @@ async def start_proposed_thread(
             if thread is not None:
                 await DeviceOperations(state.session_factory, redis).bind(
                     session_id=thread.id, device_id=device.id,
-                    folder=body.execution.folder, nonce=body.execution.nonce,
+                    folder=body.execution.folder, nonce=body.execution.nonce, history=thread.id,
                 )
     if thread is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")

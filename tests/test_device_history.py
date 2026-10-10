@@ -20,6 +20,7 @@ from surogates.devices.binding import THREAD_ACTIONS, THREAD_KINDS
 from surogates.devices.history import (
     ACTIONS,
     HISTORY_CODES,
+    MADE_BEFORE_COPIES,
     MAX_ASIDE,
     MAX_LISTED,
     MAX_LOOKED,
@@ -770,7 +771,7 @@ def test_an_asking_a_worker_left_unanswered_is_waited_for_and_is_not_asked_again
 
 
 def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_what_to_do():
-    assert set(NOWHERE) == {"cap", "names", "history_off", NO_COPY, "gone", "revoked", "again", "refused"}
+    assert set(NOWHERE) == {"cap", "names", "history_off", NO_COPY, "gone", "revoked", "again", "refused", MADE_BEFORE_COPIES}
     for why, words in NOWHERE.items():
         assert str(NowhereToWork(why)) == words and len(words) <= 200, why
         # A Retry only where asking again can pass.
@@ -779,6 +780,7 @@ def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_
     assert NOWHERE[NO_COPY].endswith("Update Surogate Desktop.")
     assert "choose it again" in NOWHERE["gone"] and "Sign this computer in again" in NOWHERE["revoked"]
     assert NOWHERE["again"].endswith("Try again.") and "Try again" not in NOWHERE["refused"]
+    assert NOWHERE[MADE_BEFORE_COPIES].endswith("Start a new thread.")
 
 
 def test_the_bounds_of_an_answer_are_the_ones_said():

@@ -9,22 +9,26 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 
 import surogates.devices.operations as operations_module
 import surogates.harness.loop as loop_module
+from surogates.db.models import WorkstreamHistory
 from surogates.devices.binding import THREAD_KINDS
 from surogates.devices.history import NO_COPY, NOWHERE, OPEN_TRIES, thread_copy
 from surogates.devices.operations import OperationRequest
+from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.landing import TURN_ENDS
 from surogates.harness.tool_exec import _open_local_copy
 from surogates.runtime import SlashCommandConfig
+from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tools.builtin import delegate as delegate_module
@@ -33,12 +37,15 @@ from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.threads import stop_thread
 from tests.test_steer_loop import _final_response
 from tests.test_wake_slash_command_gate import _harness as a_waking_harness
+from tests.thread_pods import ThreadPods
 
 from .test_device_sessions import is_bound
 from .test_devices import FOLDER, NONCE, api, eventually, link_url  # noqa: F401  (api and link_url are fixtures)
+from .test_durable_landings import ends
 from .test_local_history_threads import computer, made_with_copy, picture  # noqa: F401  (computer is a fixture)
-from .test_local_threads import begin, begun_local, confirmed, journal, laptop  # noqa: F401  (laptop is a fixture)
+from .test_local_threads import begin, begun_local, confirmed, journal, laptop, made_before_copies  # noqa: F401  (laptop is a fixture)
 from .test_turn_sagas import calling
+from .test_workstream_overview import rows
 from .test_workstream_threads import children_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -621,10 +628,42 @@ async def test_only_a_threads_own_turn_opens_its_copy_and_no_other_sessions_turn
     assert (computer.folder / "Notes.md").read_text() == "notes\n" and (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
 
 
-async def test_a_thread_or_a_chat_bound_to_its_folder_itself_asks_no_open_and_works_there_as_before(api, laptop, monkeypatch):
+async def test_a_thread_made_before_threads_had_copies_works_nowhere_and_a_chat_on_its_folder_works_there_as_before(
+    api, laptop, monkeypatch, tmp_path,
+):
     store = api.app.state.session_store
-    _, _, thread = await begun_local(api, laptop)
-    await woken(api, monkeypatch, thread, [calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})), _final_response("Done.")])
+    project, master, thread = await made_before_copies(api, laptop.device_id)
+    await laptop.app.connect()
+    await eventually(lambda: is_bound(api, str(thread.id)))
+    assert (await begin(api, project, str(thread.id))).status_code == 201
+    helper = await create_child_session(store=store, parent=thread, channel="worker")
+    folder = picture(laptop.folder)
+    # Bound to the folder itself, it would write the user's files with nothing kept: no turn of it, nor of its helper's, runs.
+    for session, said in ((thread, None), (helper, "Write the notes.")):
+        worker = await woken(api, monkeypatch, session, [WRITES], said=said)
+        assert worker.model_asked == 0 and await steps_of(api, session) == []
+        failed = await failure(api, session)
+        assert (failed["reason"], failed["why"], failed["error_title"], failed["retryable"]) == (
+            "nowhere_to_work", "made_before_copies", NOWHERE["made_before_copies"], False,
+        )
+    assert NOWHERE["made_before_copies"].endswith("Start a new thread.")
+    # Nor does a turn end of its land anything anywhere, though a landing a killed worker left in the project's
+    # files in the cloud waits for a thread's turn end to settle it.
+    async with api.app.state.session_factory() as db:
+        db.add(WorkstreamHistory(
+            workstream_id=UUID(thread.config["workstream_id"]), kind="landing", saga_id=f"left-{uuid4()}",
+            saga_state="running", steps=[], agent_id=thread.agent_id, user_id=thread.user_id,
+            updated_at=datetime.now(UTC) - timedelta(hours=1),
+        ))
+        await db.commit()
+    pods = ThreadPods(tmp_path / "pods")
+    await ends(api, SandboxPool(pods), await store.get_session(thread.id))
+    assert (pods.pods, pods.copies) == ({}, {})
+    [*_, told] = await store.get_events(master.id, types=[EventType.WORKER_COMPLETE])
+    assert (told.data["worker_id"], "landing" in told.data) == (str(thread.id), False)
+    # Its computer was asked for nothing but its bind, and its folder is as the user left it.
+    assert await operations_of(api, thread) == [("bind", "bind")] and await operations_of(api, helper) == []
+    assert picture(laptop.folder) == folder
     laptop.app.prepare("chat-binding-nonce-0001", FOLDER)
     created = await api.client.post(
         "/v1/sessions", json={"execution": confirmed(laptop.device_id, nonce="chat-binding-nonce-0001")}, headers=api.auth(),
@@ -633,12 +672,82 @@ async def test_a_thread_or_a_chat_bound_to_its_folder_itself_asks_no_open_and_wo
     await eventually(lambda: is_bound(api, created.json()["id"]))
     chat = await store.get_session(UUID(created.json()["id"]))
     await woken(api, monkeypatch, chat, [calling(("write_file", {"path": "Notes.md", "content": "notes\n"})), _final_response("Noted.")], said="Note it.")
-    for session, name, data in ((thread, "Budget.xlsx", "Total,42\n"), (chat, "Notes.md", "notes\n")):
-        assert (laptop.folder / name).read_text() == data
-        assert (await store.get_session(session.id)).status == "completed"
-        # Its computer was asked none of a thread's own kinds, and nothing of its turn waited for one.
-        assert [kind for kind, _ in await operations_of(api, session) if kind in THREAD_KINDS] == []
+    assert (laptop.folder / "Notes.md").read_text() == "notes\n"
+    assert (await store.get_session(chat.id)).status == "completed"
+    # A chat is asked none of a thread's own kinds, and nothing of its turn waited for one.
+    assert [kind for kind, _ in await operations_of(api, chat) if kind in THREAD_KINDS] == []
     assert not set(laptop.app.ran) & THREAD_KINDS
+
+
+async def test_a_thread_the_routes_make_on_a_folder_with_no_history_is_refused_told_why_and_asked_to_choose_a_folder_inside_it(
+    api, laptop, monkeypatch,
+):
+    # More files than its history keeps, as its computer's history finds the folder.
+    laptop.app.places.off = "cap"
+    project, _, thread = await begun_local(api, laptop)
+    folder = picture(laptop.folder)
+    worker = await woken(api, monkeypatch, thread, [WRITES])
+    assert worker.model_asked == 0 and await steps_of(api, thread) == []
+    assert picture(laptop.folder) == folder and not laptop.app.places.copy(str(thread.id)).exists()
+    assert await operations_of(api, thread) == [("bind", "bind"), ("history", "open:0")]
+    failed = await failure(api, thread)
+    assert (failed["why"], failed["error_title"], failed["retryable"]) == ("cap", NOWHERE["cap"], False)
+    assert NOWHERE["cap"].endswith("Choose a folder inside it.") and NOWHERE["names"].endswith("Choose a folder inside it.")
+    # Its row says so where the person reads the project's threads.
+    [row] = await rows(api, project)
+    assert (row["group"], row["reason"], row["status_line"]) == ("waiting", "failed", NOWHERE["cap"])
+
+
+# -- a thread's first copy, said while it is made ---------------------------------------------------------------
+
+
+async def waits_of(api, session) -> list[dict]:
+    """What *session*'s chat was told of its waits on its computer, oldest first: each wait, or ``resumed``."""
+    events = await api.app.state.session_store.get_events(session.id, types=[EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED])
+    return [e.data if e.type == EventType.DEVICE_WAITING.value else "resumed" for e in events]
+
+
+async def test_a_threads_first_copy_is_said_in_its_chat_while_it_is_made_and_no_later_turn_says_it(api, computer, monkeypatch):
+    project, _, thread = await begun_with_copy(api, computer)
+    held, let_go = holding_opens(computer, thread)
+    turn = asyncio.create_task(woken(api, monkeypatch, thread, [WRITES]))
+
+    async def holding() -> bool:
+        return len(held) == 1
+
+    await eventually(holding)
+    making = {"device_id": computer.device_id, "device_name": "Flavius's ThinkPad", "reason": "copying", "folder": FOLDER}
+    # Where the person sees the turn wait: in the thread's chat, and on its row.
+    assert await waits_of(api, thread) == [making]
+    [row] = await rows(api, project)
+    assert (row["group"], row["reason"], row["status_line"]) == ("working", None, f"Making this thread's copy of {FOLDER}…")
+    await let_go()
+    await asyncio.wait_for(turn, 30)
+    assert await waits_of(api, thread) == [making, "resumed"]
+    assert (computer.app.places.copy(str(thread.id)) / "Budget.xlsx").is_file()
+    # The copy is made: a later turn's open says nothing of it.
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Anything else?")
+    assert await waits_of(api, thread) == [making, "resumed"]
+
+
+async def test_a_first_copy_whose_computer_goes_away_says_it_waits_for_the_computer_and_again_that_it_is_made_once_back(api, computer):
+    _, _, thread = await begun_with_copy(api, computer)
+    store, factory = api.app.state.session_store, api.app.state.session_factory
+    notice = DeviceWaitNotice(store, factory)
+    waited = SimpleNamespace(calling_session_id=thread.id, device_id=UUID(computer.device_id))
+    await notice.copying(thread.id, UUID(computer.device_id), FOLDER)
+    await notice.away(waited)
+    await notice.back(waited)
+    await notice.copied(thread.id, UUID(computer.device_id))
+    making = {"device_id": computer.device_id, "device_name": "Flavius's ThinkPad", "reason": "copying", "folder": FOLDER}
+    offline = {"device_id": computer.device_id, "device_name": "Flavius's ThinkPad", "reason": "offline"}
+    assert await waits_of(api, thread) == [making, offline, making, "resumed"]
+    # A making begun and ended while the computer is away says nothing over the wait for it, which ends as before.
+    await notice.away(waited)
+    await notice.copying(thread.id, UUID(computer.device_id), FOLDER)
+    await notice.copied(thread.id, UUID(computer.device_id))
+    await notice.back(waited)
+    assert (await waits_of(api, thread))[4:] == [offline, "resumed"]
 
 
 # -- the open asked alone -----------------------------------------------------------------------------------------

@@ -90,7 +90,9 @@ class Binding:
 
 # Why a thread bound with a copy of its own has nowhere to work: its computer
 # did not say it keeps the copy, as an app older than copies binds the folder
-# itself and says yes.  A thread never works in the folder itself.
+# itself and says yes; or its app did not say it keeps copies as it connected,
+# and was never sent the bind (surogates.devices.link).  A thread never works
+# in the folder itself.
 KEEPS_NO_COPY = "This computer keeps no copy of the folder for a thread: update Surogate Desktop"
 
 

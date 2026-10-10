@@ -1126,6 +1126,22 @@ class DeviceOperations:
                 )
             )).scalar_one()
 
+    async def last_opened(self, calling_session_id: UUID) -> dict[str, Any] | None:
+        """The outcome of *calling_session_id*'s latest open of its copy that its computer answered with a yes, as recorded; None before any.
+
+        Its computer's word, unchecked: whoever reads it checks it
+        (``surogates.devices.history.answered``).
+        """
+        async with self._sf() as db:
+            return await db.scalar(
+                select(DeviceOperation.outcome).where(
+                    DeviceOperation.calling_session_id == calling_session_id,
+                    DeviceOperation.kind == "history",
+                    DeviceOperation.invocation_id.startswith(OPEN_PREFIX, autoescape=True),
+                    DeviceOperation.outcome["ok"].is_not(None),
+                ).order_by(DeviceOperation.created_at.desc()).limit(1)
+            )
+
     async def complete(
         self,
         device_id: UUID,

@@ -436,8 +436,9 @@ class FakeLaptop:
     With *data*, the app's data, it keeps a copy of the folder for a
     project's thread whose bind names one (``tests.fake_places``): the
     thread's operations work in its copy, and it has the thread's own kinds.
-    Without, it is an app older than copies: it binds every chat to the
-    folder itself, and has none of those kinds.
+    It says so in its hello.  Without, it is an app older than copies: it
+    says nothing of them, binds every chat to the folder itself, and has
+    none of those kinds.
     """
 
     def __init__(
@@ -501,7 +502,9 @@ class FakeLaptop:
         )
         self._ws = ws
         unfinished = [i for i in self.received if i not in self.outcomes and i not in self.cancelled]
-        await ws.send(json.dumps({"type": "hello", "protocols": [1], "open": unfinished}))
+        # As the app says it: it keeps a copy of the folder for each thread, so the server may bind a thread to one.
+        copies = {"copies": True} if self.places is not None else {}
+        await ws.send(json.dumps({"type": "hello", "protocols": [1], "open": unfinished, **copies}))
         welcome = json.loads(await ws.recv())
         assert welcome["type"] == "welcome", welcome
         self.connected = True

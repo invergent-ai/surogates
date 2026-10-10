@@ -3,13 +3,16 @@
 Protocol version 1, JSON text frames of at most MAX_FRAME_CHARS (2 MiB); the app must
 accept frames that large.
 
-  app -> server   {"type": "hello", "protocols": [1], "open": [ids]}
+  app -> server   {"type": "hello", "protocols": [1], "open": [ids], "copies": true}
                                                         first frame, within HELLO_TIMEOUT_S; "open"
                                                         lists the operations the app holds
                                                         unfinished, and is optional: an empty
                                                         list is the same as none.  An app that
                                                         holds more than MAX_OPEN_REPORTED lists
-                                                        the newest MAX_OPEN_REPORTED
+                                                        the newest MAX_OPEN_REPORTED.  "copies"
+                                                        says the app keeps a copy of a folder
+                                                        for a project's thread to work in: a
+                                                        bind that names one is sent to no other
   server -> app   {"type": "welcome", "protocol": 1, "device_id", "org_id",
                    "agent_id", "user_id", "name", "heartbeat_s": 15}
   app -> server   {"type": "ping"}                      every heartbeat_s
@@ -150,6 +153,7 @@ from uuid import UUID
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio.client import PubSub
 
+from surogates.devices.binding import BIND, KEEPS_NO_COPY
 from surogates.devices.operations import DeviceOperations, OpenOperation
 from surogates.devices.presence import (
     HEARTBEAT_INTERVAL_S,
@@ -197,6 +201,9 @@ TRANSFER_WINDOW = 4
 DAMAGED_OUTCOME: dict[str, Any] = {
     "error": {"type": "other", "message": "The computer's result did not match its SHA-256"},
 }
+# What a bind that names a thread's copy is recorded as where the app did not say it keeps copies:
+# an app older than copies binds the thread to the folder itself, so it is sent nothing of it.
+NO_COPIES_OUTCOME: dict[str, Any] = {"error": {"type": "binding", "message": KEEPS_NO_COPY}}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 CLOSE_PROTOCOL = 4400
@@ -294,6 +301,8 @@ class _Link:
         self._acked = 0
         # Set on each acknowledgement, and whenever an operation stops being delivered.
         self._heard = asyncio.Event()
+        # Whether the app said in its hello that it keeps a copy of a folder for a project's thread.
+        self.copies = False
 
     async def send(self, frame: dict[str, Any]) -> None:
         async with self._send_lock:
@@ -338,6 +347,13 @@ class _Link:
             # Another delivery may have sent it while this one's query ran.
             # Checked and marked with no await between, so only one sends it.
             if operation.id in self._delivered:
+                continue
+            if operation.kind == BIND and "history" in operation.args and not self.copies:
+                # Recorded refused for the app, which never hears of it: it would bind the thread to the
+                # folder itself.  The thread is then not bound, and nothing else of it is sent.
+                await _bounded(self._operations.complete(
+                    self._device.id, self._device.credential_generation, operation.id, operation.digest, NO_COPIES_OUTCOME,
+                ))
                 continue
             self._delivered.add(operation.id)
             sent_at = time.monotonic()
@@ -608,7 +624,7 @@ async def serve_device_link(
     pubsub: PubSub | None = None
     claimed = False
     try:
-        reported = await _hello(websocket)
+        reported, link.copies = await _hello(websocket)
         # Listen before claiming, so every message sent after the claim is seen.
         pubsub = await _bounded(presence.subscribe(device.id))
         # Set before the claim: release is compare-and-delete, so it is safe
@@ -687,8 +703,8 @@ async def _receive_frame(websocket: WebSocket) -> dict[str, Any]:
     return frame
 
 
-async def _hello(websocket: WebSocket) -> list[UUID]:
-    """Read the app's hello; returns the operations it reports unfinished."""
+async def _hello(websocket: WebSocket) -> tuple[list[UUID], bool]:
+    """Read the app's hello: the operations it reports unfinished, and whether it keeps threads' copies."""
     try:
         frame = await asyncio.wait_for(_receive_frame(websocket), HELLO_TIMEOUT_S)
     except TimeoutError:
@@ -705,7 +721,7 @@ async def _hello(websocket: WebSocket) -> list[UUID]:
     if not isinstance(reported, list) or len(reported) > MAX_OPEN_REPORTED:
         raise _Close(CLOSE_PROTOCOL, "malformed open list")
     try:
-        return [UUID(str(value)) for value in reported]
+        return [UUID(str(value)) for value in reported], frame.get("copies") is True
     except ValueError:
         raise _Close(CLOSE_PROTOCOL, "malformed open list") from None
 

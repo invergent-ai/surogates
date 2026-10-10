@@ -43,39 +43,44 @@ from .test_devices import (  # noqa: F401  (api and link_url are fixtures)
     link_url,
     register,
 )
-from .test_local_threads import begin, confirmed, device_card, journal, laptop, made_local, own_root  # noqa: F401  (laptop is a fixture)
+from .test_local_threads import (  # noqa: F401  (older_app is a fixture)
+    begin,
+    confirmed,
+    device_card,
+    journal,
+    made_before_copies,
+    made_local,
+    older_app,
+    own_root,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def made_with_copy(api, device_id: str) -> tuple[dict, object, object]:
-    """A project, its master and a thread made on the computer *device_id*, marked as one that works in a copy of its own.
+    """A project, its master and a thread made on the computer *device_id*, which works in a copy of its own there.
 
-    As the route that makes a thread will mark one: its ``execution`` names
+    As every thread made on a computer is marked: its ``execution`` names
     the thread whose copy it works in, which is itself.  Not bound yet.
     """
     project, master, proposal_id = await device_card(api)
-    store = api.app.state.session_store
     thread = await make_thread(
-        session_store=store, session_factory=api.app.state.session_factory, master=master, live_config=None,
-        title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=FOLDER,
-        card={"proposal_id": proposal_id, "key": "2"},
+        session_store=api.app.state.session_store, session_factory=api.app.state.session_factory, master=master,
+        live_config=None, title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"),
+        folder=FOLDER, card={"proposal_id": proposal_id, "key": "2"},
     )
-    await store.update_session_config_key(
-        thread.id, "execution", {**thread.config["execution"], "history": {"thread": str(thread.id)}},
-    )
-    return project, master, await store.get_session(thread.id)
+    return project, master, thread
 
 
 async def bind_with_copy(api, thread) -> None:
-    """Ask *thread*'s computer to bind it to a copy of its own, as the route that makes a thread will."""
+    """Ask *thread*'s computer to bind it to a copy of its own, as the route that makes a thread does."""
     await journal(api).bind(
         session_id=thread.id, device_id=UUID(thread.config["execution"]["device_id"]), folder=FOLDER, nonce=NONCE,
         history=thread.id,
     )
 
 
-async def test_no_bind_the_routes_send_names_a_copy(api):
+async def test_a_thread_the_route_makes_on_a_computer_is_bound_to_a_copy_of_its_own_and_a_chat_to_its_folder(api):
     device = await register(api)
     project, _, proposal_id = await device_card(api)
     made = await api.client.post(
@@ -85,12 +90,16 @@ async def test_no_bind_the_routes_send_names_a_copy(api):
     assert made.status_code == 201, made.text
     chat = await api.client.post("/v1/sessions", json={"execution": confirmed(device["id"])}, headers=api.auth())
     assert chat.status_code == 201, chat.text
-    binds = await journal(api).pending(UUID(device["id"]), 1)
-    # A thread and a chat, each bound to the folder itself: no route asks a computer for a copy.
-    assert sorted(str(bind.root_session_id) for bind in binds) == sorted([made.json()["thread_id"], chat.json()["id"]])
-    assert [(bind.kind, bind.args) for bind in binds] == [("bind", {"folder": FOLDER, "nonce": NONCE})] * 2
-    for session_id in (made.json()["thread_id"], chat.json()["id"]):
-        assert copy_of((await api.app.state.session_store.get_session(UUID(session_id))).config) is None
+    thread_id, chat_id = made.json()["thread_id"], chat.json()["id"]
+    binds = {str(bind.root_session_id): (bind.kind, bind.args) for bind in await journal(api).pending(UUID(device["id"]), 1)}
+    # The thread's bind names its copy, which is its own; a chat's names the folder alone, as before.
+    assert binds == {
+        thread_id: ("bind", {"folder": FOLDER, "nonce": NONCE, "history": {"thread": thread_id}}),
+        chat_id: ("bind", {"folder": FOLDER, "nonce": NONCE}),
+    }
+    store = api.app.state.session_store
+    assert copy_of((await store.get_session(UUID(thread_id))).config) == UUID(thread_id)
+    assert copy_of((await store.get_session(UUID(chat_id))).config) is None
 
 
 async def test_a_bind_that_names_the_threads_copy_carries_it_and_the_thread_says_whose_copy_it_works_in(api):
@@ -111,20 +120,20 @@ async def test_a_bind_that_names_the_threads_copy_carries_it_and_the_thread_says
 async def test_a_root_is_bound_with_a_copy_only_as_the_server_marked_it(api):
     device = await register(api)
     _, _, marked = await made_with_copy(api, device["id"])
-    _, _, _, plain_id = await plain_thread(api, device["id"])
+    _, _, plain = await made_before_copies(api, device["id"])
     ops = journal(api)
     bound = {"device_id": UUID(device["id"]), "folder": FOLDER, "nonce": NONCE}
     for case, (session_id, history) in {
         "a thread marked for a copy, bound to the folder itself": (marked.id, None),
         "a thread marked for a copy, bound to another's": (marked.id, uuid4()),
-        "a thread bound to its folder, asked for a copy": (UUID(plain_id), UUID(plain_id)),
+        "a thread made before threads had copies, asked for one": (plain.id, plain.id),
     }.items():
         with pytest.raises(ValueError, match="A root is bound with a copy only where the server made it a thread that works in one"):
             await ops.bind(session_id=session_id, history=history, **bound)
             pytest.fail(case)
-    # The route's own bind of the plain thread stands as it was, and nothing was recorded for the marked one.
+    # That thread's own bind to its folder stands as it was, and nothing was recorded for the marked one.
     [bind] = await ops.pending(UUID(device["id"]), 1)
-    assert (bind.root_session_id, bind.args) == (UUID(plain_id), {"folder": FOLDER, "nonce": NONCE})
+    assert (bind.root_session_id, bind.args) == (plain.id, {"folder": FOLDER, "nonce": NONCE})
     assert await binding(api, marked.id) == Binding("failed", "The computer was never asked to set it up")
 
 
@@ -180,16 +189,12 @@ async def test_a_thread_whose_computer_says_it_keeps_the_copy_is_bound(api):
 
 async def test_a_chat_on_the_folder_itself_is_bound_whatever_its_computer_says_beside_yes(api):
     device = await register(api)
-    _, _, _, thread_id = await plain_thread(api, device["id"])
-    thread = await api.app.state.session_store.get_session(UUID(thread_id))
-    # As on master: a binding is its computer's yes, and nothing it says beside it is read.
-    await answered_bind(api, thread, {"ok": {"history": {"thread": thread_id}}})
-    assert await binding(api, thread.id) == Binding("bound")
-
-
-async def plain_thread(api, device_id: str) -> tuple[dict, object, str, str]:
-    """A thread made by the route on the computer *device_id*: bound to its folder itself."""
-    return await made_local(api, SimpleNamespace(device_id=device_id))
+    chat_id = await own_root(api, UUID(device["id"]))
+    await journal(api).bind(session_id=chat_id, device_id=UUID(device["id"]), folder=FOLDER, nonce=NONCE)
+    chat = await api.app.state.session_store.get_session(chat_id)
+    # A binding is its computer's yes, and nothing it says beside it is read.
+    await answered_bind(api, chat, {"ok": {"history": {"thread": str(chat_id)}}})
+    assert await binding(api, chat.id) == Binding("bound")
 
 
 async def bound_with_copy(api, device: dict | None = None) -> tuple[dict, dict, object]:
@@ -270,9 +275,8 @@ async def test_a_threads_snapshot_is_asked_by_any_session_of_the_threads_and_its
 
 async def test_none_of_a_threads_kinds_is_asked_for_a_session_that_is_not_a_thread_bound_with_a_copy(api, session_factory):
     device = await register(api)
-    # A project's thread bound to its folder itself, as every thread on master is.
-    _, _, _, plain_id = await plain_thread(api, device["id"])
-    plain = await api.app.state.session_store.get_session(UUID(plain_id))
+    # A project's thread bound to its folder itself, as threads were before each had a copy of its own.
+    _, _, plain = await made_before_copies(api, device["id"])
     await answered_bind(api, plain, {"ok": None})
     # A chat on the folder.
     chat_id = await own_root(api, UUID(device["id"]))
@@ -590,17 +594,28 @@ async def test_a_folder_with_no_history_has_its_thread_work_nowhere(api, compute
     assert not computer.app.places.copy(str(thread.id)).exists()
 
 
-async def test_an_app_that_keeps_no_copies_binds_a_thread_that_works_nowhere(api, laptop):
-    # As an app older than copies binds: the folder itself, and its yes says nothing of a copy.
-    assert laptop.app.places is None
-    project, _, thread = await made_with_copy(api, laptop.device_id)
-    await bind_with_copy(api, thread)
-    await laptop.app.connect()
-    await eventually(lambda: has_failed(api, str(thread.id)))
-    assert laptop.app.bindings == {str(thread.id): FOLDER}
-    refused = await begin(api, project, str(thread.id))
+async def test_an_app_that_does_not_say_it_keeps_copies_is_sent_no_threads_bind_and_the_thread_works_nowhere(api, older_app):
+    # An app older than copies would bind the thread to the folder itself: it says nothing of copies as it connects.
+    project, master, _, thread_id = await made_local(api, older_app)
+    older_app.app.prepare("chat-binding-nonce-0001", FOLDER)
+    made = await api.client.post(
+        "/v1/sessions", json={"execution": confirmed(older_app.device_id, nonce="chat-binding-nonce-0001")}, headers=api.auth(),
+    )
+    assert made.status_code == 201, made.text
+    chat_id = made.json()["id"]
+    await older_app.app.connect()
+    await eventually(lambda: has_failed(api, thread_id))
+    await eventually(lambda: is_bound(api, chat_id))
+    # The thread's bind never reached it, and nothing else of the thread's will: it works nowhere, and says so.
+    # A chat on the folder there is bound to it as before.
+    assert (len(older_app.app.received), older_app.app.bindings) == (1, {chat_id: FOLDER})
+    assert await binding(api, UUID(thread_id)) == Binding(
+        "failed", "This computer keeps no copy of the folder for a thread: update Surogate Desktop",
+    )
+    refused = await begin(api, project, thread_id)
     assert (refused.status_code, refused.json()["detail"]) == (409, KEEPS_NO_COPY)
-    assert sorted(path.name for path in laptop.folder.iterdir()) == []
+    assert sorted(path.name for path in older_app.folder.iterdir()) == []
+    assert await journal(api).pending(UUID(older_app.device_id), 1) == []
 
 
 async def test_a_computer_that_lies_is_answered_by_the_servers_own_refusal_and_nothing_of_the_lie_is_kept(api, computer, caplog):

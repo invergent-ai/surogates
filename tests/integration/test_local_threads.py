@@ -1,4 +1,4 @@
-"""A project's threads that work in a folder on the user's computer."""
+"""A project's threads that work on a folder of the user's computer, each in a copy of its own there."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 
+from sqlalchemy import select
+
 import surogates.devices.operations as operations_module
 from surogates.db.models import WorkstreamHistory
-from surogates.devices.binding import Binding
+from surogates.devices.binding import Binding, copy_of
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
 from surogates.harness import landing as landing_module
@@ -26,6 +28,7 @@ from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tools.builtin import delegate as delegate_module
 from surogates.tools.workspace_io import LocalWorkspaceIO
+from surogates.workstreams.threads import make_thread
 from tests.fake_laptop import FakeLaptop
 from tests.test_steer_loop import _final_response
 from tests.thread_pods import ThreadPods
@@ -44,8 +47,10 @@ from .test_devices import (  # noqa: F401  (api and link_url are fixtures)
     link_url,
     register,
 )
-from .test_workstream_library import library, upload
+from .test_redo_loop import a_history, a_routine_run, changed, pickups_of
+from .test_thread_copies import pods  # noqa: F401  (a fixture)
 from .test_turn_sagas import a_turn, calling
+from .test_workstream_library import library, upload
 from .test_workstream_overview import rows
 from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start, turn_ends
 from .test_workstreams import create, master_of
@@ -115,7 +120,7 @@ async def make_local(api, project: dict, proposal_id: str, execution: dict, *, k
     )
 
 
-async def test_a_card_makes_its_thread_in_the_folder_the_user_confirmed_waiting_for_its_binding(api):
+async def test_a_card_makes_its_thread_in_a_copy_of_the_folder_the_user_confirmed_waiting_for_its_binding(api):
     device = await register(api)
     project, master, proposal_id = await device_card(api)
     response = await make_local(api, project, proposal_id, confirmed(device["id"]))
@@ -124,13 +129,18 @@ async def test_a_card_makes_its_thread_in_the_folder_the_user_confirmed_waiting_
     # A child of the master for its report, and its own root for its computer.
     assert (thread.parent_id, thread.user_id) == (master.id, master.user_id)
     config = thread.config
-    assert config["execution"] == {"kind": "device", "device_id": device["id"], "device_name": "Flavius's ThinkPad"}
+    # It works in a copy of the folder of its own there, never in the folder itself: the server says so once, as it makes it.
+    assert config["execution"] == {
+        "kind": "device", "device_id": device["id"], "device_name": "Flavius's ThinkPad", "history": {"thread": str(thread.id)},
+    }
     assert (config["workspace_path"], config["sandbox_root_session_id"]) == (FOLDER, str(thread.id))
     assert (config["workstream_role"], config["memory_boundary"]) == ("thread", master.config["memory_boundary"])
     assert config["workstream_card"] == {"proposal_id": proposal_id, "key": "2"}
     assert await binding(api, thread.id) == Binding("pending")
     [bind] = await journal(api).pending(UUID(device["id"]), 1)
-    assert (bind.kind, bind.root_session_id, bind.args) == ("bind", thread.id, {"folder": FOLDER, "nonce": NONCE})
+    assert (bind.kind, bind.root_session_id, bind.args) == (
+        "bind", thread.id, {"folder": FOLDER, "nonce": NONCE, "history": {"thread": str(thread.id)}},
+    )
     # Not started: it has no goal, the master has not heard of it, nothing runs it, and no row lists it.
     assert await events_of(api, thread.id) == []
     assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
@@ -201,14 +211,50 @@ async def test_the_coordinator_cannot_make_a_thread_on_the_users_computer(api):
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def laptop(api, link_url, tmp_path):
-    """A registered computer's fake app, where the user confirmed ``FOLDER`` under ``NONCE``, not connected yet."""
+    """A registered computer's fake app, where the user confirmed ``FOLDER`` under ``NONCE``, not connected yet.
+
+    It keeps a copy of the folder for each thread in its data, and says so
+    when it connects.
+    """
     device = await register(api)
     folder = (tmp_path / "laptop").resolve()
+    folder.mkdir()
+    app = FakeLaptop(link_url, device["token"], LocalWorkspaceIO(str(folder)), data=tmp_path / "laptop-data")
+    app.prepare(NONCE, FOLDER)
+    yield SimpleNamespace(app=app, device_id=device["id"], folder=folder)
+    await app.disconnect()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def older_app(api, link_url, tmp_path):
+    """As ``laptop``, with an app older than threads' copies: it binds every chat to the folder itself, and says nothing of copies."""
+    device = await register(api)
+    folder = (tmp_path / "older").resolve()
     folder.mkdir()
     app = FakeLaptop(link_url, device["token"], LocalWorkspaceIO(str(folder)))
     app.prepare(NONCE, FOLDER)
     yield SimpleNamespace(app=app, device_id=device["id"], folder=folder)
     await app.disconnect()
+
+
+async def made_before_copies(api, device_id: str) -> tuple[dict, object, object]:
+    """A project, its master and a thread on the computer *device_id* as threads were made before each had a copy of its own.
+
+    Its ``execution`` names no copy, and its bind, to the folder itself, is
+    asked of its computer.  No route makes one now.
+    """
+    project, master, proposal_id = await device_card(api)
+    store = api.app.state.session_store
+    thread = await make_thread(
+        session_store=store, session_factory=api.app.state.session_factory, master=master, live_config=None,
+        title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=FOLDER,
+        card={"proposal_id": proposal_id, "key": "2"},
+    )
+    await store.update_session_config_key(
+        thread.id, "execution", {key: value for key, value in thread.config["execution"].items() if key != "history"},
+    )
+    await journal(api).bind(session_id=thread.id, device_id=UUID(device_id), folder=FOLDER, nonce=NONCE)
+    return project, master, await store.get_session(thread.id)
 
 
 async def begin(api, project: dict, thread_id: str, token: str | None = None):
@@ -242,7 +288,8 @@ async def test_a_thread_on_the_users_computer_begins_once_its_computer_has_bound
 
     await laptop.app.connect()
     await eventually(lambda: is_bound(api, thread_id))
-    assert laptop.app.bindings == {thread_id: FOLDER}
+    # Bound to a copy of the folder of its own, which its app keeps.
+    assert (laptop.app.bindings, laptop.app.places.threads) == ({thread_id: FOLDER}, {thread_id: thread_id})
     response = await begin(api, project, thread_id)
     assert response.status_code == 201, response.text
     assert (response.json()["id"], response.json()["title"], response.json()["group"]) == (thread_id, "Check the totals", "working")
@@ -351,7 +398,9 @@ async def test_a_threads_row_names_its_computer_and_says_when_its_work_waits_for
     await asyncio.wait_for(step, 10.0)
     [row] = await rows(api, project)
     assert (row["reason"], row["place"]["online"]) == (None, True)
-    assert (laptop.folder / "Totals.md").read_text() == "42\n"
+    # Written in the thread's copy: the folder has it once the thread's turn lands.
+    assert (laptop.app.places.copy(str(thread.id)) / "Totals.md").read_text() == "42\n"
+    assert not (laptop.folder / "Totals.md").exists()
 
 
 async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_clouds_as_they_are(api, laptop):
@@ -385,17 +434,21 @@ async def answered_by_the_journal(api, project: dict, master) -> object:
     thread_id = (await make_local(api, project, proposal_id, confirmed(device["id"]))).json()["thread_id"]
     ops = journal(api)
     [bind] = await ops.pending(UUID(device["id"]), 1)
-    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, {"ok": None}) == "completed"
+    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, {"ok": {"history": {"thread": thread_id}}}) == "completed"
     assert (await begin(api, project, thread_id)).status_code == 201
     return await api.app.state.session_store.get_session(UUID(thread_id))
 
 
-async def test_a_thread_on_the_users_computer_works_in_its_folder_and_reports_to_its_master(api, laptop, monkeypatch, tmp_path):
+async def test_a_thread_on_the_users_computer_works_in_its_copy_and_its_turn_lands_in_the_folder_and_reports_to_its_master(
+    api, laptop, monkeypatch, tmp_path,
+):
     _, master, thread = await begun_local(api, laptop)
-    # A landing a killed worker left running in the project, long quiet: a cloud thread's turn end settles it.
+    # A landing a killed worker left running in the project's files in the cloud, long quiet: a cloud thread's turn
+    # end settles it, through the master's pod; a turn end on the user's computer lands there, and leaves it.
+    left = f"left-{uuid4()}"
     async with api.app.state.session_factory() as db:
         db.add(WorkstreamHistory(
-            workstream_id=UUID(thread.config["workstream_id"]), kind="landing", saga_id=f"left-{uuid4()}",
+            workstream_id=UUID(thread.config["workstream_id"]), kind="landing", saga_id=left,
             saga_state="running", steps=[], agent_id=thread.agent_id, user_id=thread.user_id,
             updated_at=datetime.now(UTC) - timedelta(hours=1),
         ))
@@ -411,25 +464,38 @@ async def test_a_thread_on_the_users_computer_works_in_its_folder_and_reports_to
     monkeypatch.setattr(test_turn_sagas, "_make_loop_harness", with_storage)
     pods = ThreadPods(tmp_path / "pods")
     pool = SandboxPool(pods)
+    written: list[bool] = []
+
+    async def during(harness) -> None:
+        # While it works its file is in its copy alone: the folder is as the user left it.
+        written.append((laptop.app.places.copy(str(thread.id)) / "Budget.xlsx").is_file() and not (laptop.folder / "Budget.xlsx").exists())
+
     harness = await a_turn(api, monkeypatch, thread, [
         calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})),
+        calling(("memory", {"action": "add", "content": "Checked."})),
         _final_response("The totals are in Budget.xlsx."),
-    ], pool=pool)
+    ], pool=pool, during=during)
+    assert written == [True]
+    # Its turn's end landed it in the folder, through its computer: no pod, and no copy in the cloud.
     assert (laptop.folder / "Budget.xlsx").read_text() == "Total,42\n"
-    # Its work is the folder's: no pod, no copy, nothing landed.
     assert (pods.pods, pods.copies) == ({}, {})
+    async with api.app.state.session_factory() as db:
+        landed = (await db.execute(select(WorkstreamHistory).where(WorkstreamHistory.thread_id == thread.id))).scalars().all()
+        assert await db.scalar(select(WorkstreamHistory.saga_state).where(WorkstreamHistory.saga_id == left)) == "running"
+    assert [(row.saga_state, str(row.device_id), row.folder) for row in landed] == [("completed", laptop.device_id, FOLDER)]
     [report] = await events_of(api, master.id, EventType.WORKER_COMPLETE)
     assert (report.data["worker_id"], report.data["title"], report.data["result"]) == (
         str(thread.id), "Check the totals", "The totals are in Budget.xlsx.",
     )
-    assert "landing" not in report.data, report.data
+    assert [(f["ref"], f["landing"]) for f in report.data["files"] if f["kind"] == "file"] == [("Budget.xlsx", "landed")]
     assert await queued(api, master)
-    # Nor is the project's history counted for its wake, nor a file of its tools written to a copy.
+    # The project's files in the cloud are not counted for its wake: its folder's history says, at each turn's open,
+    # whether it can keep them.  And a file of its tools goes to its copy on its computer, never through a pod.
     assert "history_off" not in (await harness._with_history_cap(thread)).config
     assert not writes_to_copy(pool, sandbox_session_key(thread), thread.config)
 
 
-async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_folder(api, laptop):
+async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_copy(api, laptop):
     _, _, thread = await begun_local(api, laptop)
     store = api.app.state.session_store
     helper = await create_child_session(store=store, parent=thread, channel="worker")
@@ -439,9 +505,10 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_f
         tools=builtin_tools(), tenant=MagicMock(asset_root="/tmp/test"),
         redis=api.app.state.redis, session_factory=api.app.state.session_factory,
     )
-    assert (laptop.folder / "Notes.md").is_file(), written["content"]
-    assert (laptop.folder / "Notes.md").read_text() == "42\n"
-    # Through the thread's binding: the helper names the thread as its root, and is never bound itself.
+    copy = laptop.app.places.copy(str(thread.id))
+    assert (copy / "Notes.md").is_file(), written["content"]
+    assert (copy / "Notes.md").read_text() == "42\n" and not (laptop.folder / "Notes.md").exists()
+    # Through the thread's binding: the helper names the thread as its root and its copy, and is never bound itself.
     assert (helper.config["execution"], sandbox_session_key(helper)) == (thread.config["execution"], str(thread.id))
     assert "history_thread" not in helper.config
     with pytest.raises(ValueError, match="Only a root session is bound to a folder"):
@@ -449,7 +516,7 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_f
 
 
 @pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker", "spawn_task"])
-async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_folder_and_hands_no_copy_on(api, laptop, monkeypatch, tmp_path, tool):
+async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_hands_no_copy_on(api, laptop, monkeypatch, tmp_path, tool):
     _, _, thread = await begun_local(api, laptop)
     store = api.app.state.session_store
     await store.update_session_config_key(thread.id, "coordinator", True)  # offered the tools that start workers and tasks
@@ -466,8 +533,9 @@ async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_folder_and_
         _final_response("The helper has it."),  # asked once more for the file its goal names
     ], pool=pool), 60)
     [helper] = await children_of(api, thread)
-    # It works in the thread's folder, through the thread's binding: no copy of its own to start from.
+    # It works in the thread's copy on its computer, through the thread's binding: no copy of its own to start from.
     assert (helper.config["execution"], sandbox_session_key(helper)) == (thread.config["execution"], str(thread.id))
+    assert copy_of(helper.config) == thread.id
     assert "history_thread" not in helper.config
     # So nothing is handed on or taken up: no pod, no copy, and the step asks for neither.
     assert (pods.pods, pods.copies, asked) == ({}, {}, [])
@@ -493,3 +561,32 @@ async def test_a_thread_on_the_users_computer_is_not_offered_a_research_runs_too
     assert offered is not None and "dispatch_experiments" not in offered and "delegate_task" in offered
     assert await events_of(api, thread.id, EventType.TOOL_CALL) == []
     assert (await children_of(api, thread), pods.pods, asked) == ([], {}, [])
+
+
+async def test_a_routine_run_of_a_project_whose_thread_works_on_a_folder_runs_on_the_projects_own_files_and_asks_the_computer_nothing(
+    api, laptop, monkeypatch, pods,
+):
+    _, master, thread = await begun_local(api, laptop)
+    (laptop.folder / "notes.txt").write_text("the folder's notes\n")
+    pool = SandboxPool(pods)
+    await a_history(api, pool, master)
+    run, _ = await a_routine_run(api, master, "Health check")
+    heard = len(laptop.app.received)
+    await a_turn(api, monkeypatch, run, [
+        calling(("terminal", {"command": "printf ' checked' >> notes.txt"})), _final_response("Checked."),
+    ], pool=pool)
+    # It ran in the master's pod, on the project's own files, and its change is recorded there as the routine's.
+    assert (pods.project / "notes.txt").read_text() == "v1 notes\n checked"
+    [*_, picked] = await pickups_of(api, master)
+    assert (changed(picked), picked.steps[0]["arguments"]["author"]["name"], picked.device_id) == (["notes.txt"], "Health check", None)
+    # The thread's computer heard nothing of it: its folder is as the user left it, and the thread has no copy yet.
+    assert len(laptop.app.received) == heard
+    assert sorted(p.name for p in laptop.folder.iterdir()) == ["notes.txt"]
+    assert (laptop.folder / "notes.txt").read_text() == "the folder's notes\n"
+    assert not laptop.app.places.copy(str(thread.id)).exists()
+    # The thread's own turn lands in its folder what it did, and nothing of the routine's.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})), _final_response("Done."),
+    ])
+    assert sorted(p.name for p in laptop.folder.iterdir()) == ["Budget.xlsx", "notes.txt"]
+    assert (laptop.folder / "notes.txt").read_text() == "the folder's notes\n"
