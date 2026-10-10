@@ -178,23 +178,38 @@ describe("the projects the page serves", () => {
     ]);
   });
 
-  it("take the rows of an agent older than the app, whose files carry no mark, with none", async () => {
+  it("take the rows of an agent older than the app, whose files carry no mark and whose rows name no landing, with neither", async () => {
     const { source } = page();
     const asked = source.threads(REPORT);
-    // As a page built before file history maps a row: no landing on a file.
-    const older = threads[REPORT]!.map(({ files, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
+    // As a page built before file history maps a row: no landing on a file, and none for its card's Undo.
+    const older = threads[REPORT]!.map(({ files, landingId: _none, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
     source.answered(1, { ok: older });
     const rows = await asked;
     expect(rows.map((row) => row.id)).toEqual(threads[REPORT]!.map((row) => row.id));
     expect(rows.flatMap((row) => row.files).length).toBeGreaterThan(0);
-    expect(rows.every((row) => row.files.every((file) => file.landing === null))).toBe(true);
+    expect(rows.every((row) => row.landingId === null && row.files.every((file) => file.landing === null))).toBe(true);
+  });
+
+  it("take the landing a row's card undoes, and refuse one that is no id", async () => {
+    const { source } = page();
+    const asked = source.threads(REPORT);
+    source.answered(1, { ok: threads[REPORT] });
+    const rows = await asked;
+    expect(rows.find((found) => found.id === FIXTURE_IDS.idle)!.landingId).toBe("41");
+    expect(rows.find((found) => found.id === FIXTURE_IDS.approval)!.landingId).toBeNull();
+    const row = threads[REPORT]![0]!;
+    for (const [at, landingId] of [41, "", "4".repeat(41), { id: "41" }].entries()) {
+      const odd = source.threads(REPORT);
+      source.answered(at + 2, { ok: [{ ...row, landingId }] });
+      await expect(odd, JSON.stringify(landingId)).rejects.toThrow("The agent's page answered threads with something Surogate cannot use");
+    }
   });
 
   it("take a row of an agent newer than the app, leaving out what it does not know of", async () => {
     const { source } = page();
     const asked = source.threads(REPORT);
     const row = threads[REPORT]![0]!;
-    source.answered(1, { ok: [{ ...row, landingId: "41", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
+    source.answered(1, { ok: [{ ...row, waitingSince: "2026-10-06T11:00:00Z", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
     expect(await asked).toEqual([row]);
   });
 

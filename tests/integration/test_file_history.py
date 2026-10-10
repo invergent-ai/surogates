@@ -13,7 +13,7 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import quote, unquote
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, text
@@ -160,6 +160,45 @@ async def test_a_threads_row_lists_what_its_landing_changed_each_as_it_landed(ap
     assert listed["files"][0] == {
         "kind": "file", "label": "Report.docx", "ref": "Report.docx", "thread_id": str(thread.id), "landing": "landed",
     }
+    # Its card's Undo undoes that landing.
+    assert listed["landing_id"] == str(row.id)
+
+
+async def an_undo_recorded(api, landing, *, undoes: list[int], paths: list[str], **columns: str) -> int:
+    """An Undo's record made by hand, as a landing by you records it, of *paths* and the rows it *undoes*; its id.
+
+    A column is given as SQL, as :func:`recorded` takes it.
+    """
+    given = {"saga_state": "'completed'", "device_id": "NULL", **columns}
+    files = [{"path": path, "before": None, "after": blob_of(path.encode()), "merged": True} for path in paths]
+    async with api.app.state.session_factory() as db:
+        made = (await db.execute(text(
+            "INSERT INTO workstream_history (workstream_id, device_id, kind, saga_id, saga_state, agent_id, undoes, files) "
+            f"SELECT workstream_id, {given['device_id']}, 'undo', :saga, {given['saga_state']}, agent_id, :undoes, cast(:files AS jsonb) "
+            "FROM workstream_history WHERE id = :id RETURNING id"
+        ), {"saga": f"saga:undo:{uuid4()}", "undoes": undoes, "files": json.dumps(files), "id": landing.id})).scalar_one()
+        await db.commit()
+    return made
+
+
+async def test_a_file_the_projects_undo_put_back_is_undone_and_the_card_undoes_none_of_its_landing_put_back(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && echo a > a.md")
+    # Records that are no Undo of the cloud's files: a computer's, and one that did not complete.
+    await an_undo_recorded(api, row, undoes=[row.id], paths=["Report.docx", "a.md"], device_id="gen_random_uuid()")
+    await an_undo_recorded(api, row, undoes=[row.id], paths=["Report.docx", "a.md"], saga_state="'running'")
+    first = await an_undo_recorded(api, row, undoes=[row.id], paths=["Report.docx"])
+    [listed] = await thread_rows(api, project, thread_id=str(thread.id))
+    assert ([(f["ref"], f["landing"]) for f in listed["files"]], listed["landing_id"]) == ([("Report.docx", "undone"), ("a.md", "landed")], str(row.id))
+    await an_undo_recorded(api, row, undoes=[row.id], paths=["a.md"])
+    [listed] = await thread_rows(api, project, thread_id=str(thread.id))
+    assert ([(f["ref"], f["landing"]) for f in listed["files"]], listed["landing_id"]) == ([("Report.docx", "undone"), ("a.md", "undone")], None)
+    # An Undo of the first brings its file back as it landed.
+    await an_undo_recorded(api, row, undoes=[first], paths=["Report.docx"])
+    [listed] = await thread_rows(api, project, thread_id=str(thread.id))
+    assert ([(f["ref"], f["landing"]) for f in listed["files"]], listed["landing_id"]) == ([("Report.docx", "landed"), ("a.md", "undone")], str(row.id))
+    # A read that takes no files reads no Undo either.
+    [bare] = await WorkstreamStore(api.app.state.session_factory).thread_facts(UUID(project["id"]), with_files=False)
+    assert (bare.landings, bare.undone) == ((), frozenset())
 
 
 async def test_a_file_your_edit_clashed_with_is_being_redone_until_the_redo_lands_it(api, monkeypatch, pods):

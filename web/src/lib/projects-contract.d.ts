@@ -47,6 +47,9 @@ export interface ThreadRow {
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: ProducedFile[];
+  // The thread's newest landing with a file still as it landed: what its card's Undo undoes; null when it has
+  // none. Optional, as a file's landing is: a page built before file history serves none.
+  landingId?: string | null;
   place: ThreadPlace;
   createdAt: string;
   updatedAt: string;

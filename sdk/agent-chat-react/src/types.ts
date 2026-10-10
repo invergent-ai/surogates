@@ -143,6 +143,8 @@ export interface AgentChatThreadRow {
   progress: { done: number; total: number } | null;
   /** Each file's state in the project's files, from the thread's landings: null for an artifact. */
   files: { kind: "file" | "artifact"; label: string; ref: string; landing?: "landed" | "redoing" | "not_merged" | "undone" | null }[];
+  /** The thread's newest landing with a file still as it landed: what its card's Undo undoes. Another adapter's rows carry none. */
+  landingId?: string | null;
 }
 
 export interface AgentChatIterationSummary {

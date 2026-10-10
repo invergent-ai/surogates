@@ -83,16 +83,17 @@ function fileOf(value: unknown): ProducedFile {
   return { kind, label, ref, threadId, landing: one(landing, MARKS) ? landing : null } as ProducedFile;
 }
 
+// A row of an agent older than this app names no landing for its card's Undo: that is none.
 function threadOf(value: unknown): ThreadRow {
-  const { id, title, group, reason, statusLine, progress, files, place, createdAt, updatedAt, resolvedAt } = fields(value);
+  const { id, title, group, reason, statusLine, progress, files, landingId = null, place, createdAt, updatedAt, resolvedAt } = fields(value);
   const { done, total } = fields(progress);
   need(named(id) && text(title, 500) && one(group, ["waiting", "working", "idle", "resolved"])
     && one(reason, ["question", "approval", "failed", "computer", "files", null]) && (statusLine === null || text(statusLine, 2_000))
-    && (progress === null || (count(done) && count(total))) && time(createdAt) && time(updatedAt)
-    && (resolvedAt === null || time(resolvedAt)));
+    && (progress === null || (count(done) && count(total))) && (landingId === null || (text(landingId, 40) && landingId !== ""))
+    && time(createdAt) && time(updatedAt) && (resolvedAt === null || time(resolvedAt)));
   return {
     id, title, group, reason, statusLine, progress: progress === null ? null : { done, total }, files: listOf(files, 200, fileOf),
-    place: placeOf(place), createdAt, updatedAt, resolvedAt,
+    landingId, place: placeOf(place), createdAt, updatedAt, resolvedAt,
   } as ThreadRow;
 }
 

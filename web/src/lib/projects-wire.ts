@@ -20,6 +20,7 @@ export interface ThreadRowResponse {
   progress: { done: number; total: number } | null;
   // A server from before file history sends a file with no landing, and a later one may send a mark not known here.
   files: { kind: "file" | "artifact"; label: string; ref: string; thread_id: string; landing?: ProducedFile["landing"] }[];
+  landing_id?: string | null;
   place: { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean };
   created_at: string;
   updated_at: string;
@@ -48,6 +49,8 @@ export function threadRowOf(row: ThreadRowResponse): ThreadRow {
     statusLine: row.status_line,
     progress: row.progress,
     files: row.files.map(({ kind, label, ref, thread_id, landing }) => ({ kind, label, ref, threadId: thread_id, landing: markOf(landing) })),
+    // A landing that is no id the routes give is none: the card offers no Undo of it.
+    landingId: typeof row.landing_id === "string" && row.landing_id !== "" ? row.landing_id : null,
     place: placeOf(row.place),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

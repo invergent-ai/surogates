@@ -216,12 +216,14 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     status_line: "Waiting for thinkpad", progress: { done: 1, total: 2 },
     files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", thread_id: "t-1", landing: "redoing" }],
+    landing_id: "41",
     place: { kind: "device", device_id: "d-1", device_name: "thinkpad", online: false },
     created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }), {
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     statusLine: "Waiting for thinkpad", progress: { done: 1, total: 2 },
     files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1", landing: "redoing" }],
+    landingId: "41",
     place: { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false },
     createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z", resolvedAt: null,
   });
@@ -238,12 +240,19 @@ test("a row maps to the shell's ThreadRow field by field", () => {
   }).files[0].landing;
   assert.deepEqual(["kept_apart", "toString", "", 7].map(marked), [null, null, null, null]);
   assert.deepEqual(["landed", "redoing", "not_merged", "undone", null].map(marked), ["landed", "redoing", "not_merged", "undone", null]);
-  // A server from before file history sends a file with no mark: the page serves none.
-  assert.deepEqual(threadRowOf({
+  // A server from before file history sends a file with no mark, and a row with no landing: the page serves neither.
+  const older = threadRowOf({
     id: "t-3", title: "Draft B", group: "idle", reason: null, status_line: null, progress: null,
     files: [{ kind: "file", label: "b.md", ref: "b.md", thread_id: "t-3" }],
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
-  }).files, [{ kind: "file", label: "b.md", ref: "b.md", threadId: "t-3", landing: null }]);
+  });
+  assert.deepEqual([older.files, older.landingId], [[{ kind: "file", label: "b.md", ref: "b.md", threadId: "t-3", landing: null }], null]);
+  // A landing that is no id the routes give is none: the card offers no Undo of it.
+  const landed = (landing_id) => threadRowOf({
+    id: "t-5", title: "Draft D", group: "idle", reason: null, status_line: null, progress: null, files: [], landing_id,
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).landingId;
+  assert.deepEqual([7, "", { id: "41" }, "41"].map(landed), [null, null, null, "41"]);
 });
 
 // The project routes over a fake fetch: *answer* gives each request's response, and every
