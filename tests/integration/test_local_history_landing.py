@@ -439,7 +439,7 @@ async def test_a_landing_whose_row_cannot_be_written_where_it_must_be_writes_no_
 async def test_an_apply_cancelled_after_it_wrote_is_put_back_and_the_landing_is_not_tried_again(api, here, monkeypatch):
     _, master, thread = await begun_with_copy(api, here)
     folder = seen(here.folder)
-    # As a Stop's pause closes an operation its computer had already run: the file was written, and its answer is lost.
+    # As a cancel closes an operation its computer had already run: the file was written, and its answer is lost.
     lie_at(here, "apply", lambda frame, outcome: {"error": {"type": "cancelled", "message": "Cancelled"}} if frame["args"]["step"] == 0 else None)
     await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
     assert ran(here, "land:0") == ["changed", "revisions", "pickup", "commit", "apply", "unapply", "forget"] and ran(here, "land:0:2") == []

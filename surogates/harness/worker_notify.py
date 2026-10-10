@@ -149,8 +149,9 @@ async def notify_parent_on_completion(
     the folders inside a git repository it wrote into, the helpers' files
     its copy did not take up, and the landing's state when it did not
     complete.  A landing on the user's computer also says why it did not
-    land, with its computer's word for a refusal, and what its folder's
-    helper found there, left by a landing cut short.
+    land, with its computer's word for a refusal, what its folder's helper
+    found there, left by a landing cut short, and whether its thread was
+    stopped once it was under way.
 
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
@@ -214,6 +215,9 @@ async def notify_parent_on_completion(
                     if landing.get(key):
                         # Why a landing on the user's computer did not land, and its computer's word for a refusal.
                         payload[f"landing_{key}"] = landing[key]
+            if landing is not None and landing.get("stopped"):
+                # Stopped once its landing had written a file: the landing was not interrupted.
+                payload["landing_stopped"] = True
             if landing is not None and landing.get("recovery"):
                 # What its folder's helper found, left there by a landing cut short: told whatever came of this one.
                 payload["recovery"] = {key: found[:_MAX_LEFT_OUT_NAMED] for key, found in landing["recovery"].items()}

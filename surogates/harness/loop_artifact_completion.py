@@ -1084,7 +1084,9 @@ class ArtifactCompletionMixin:
         A thread that works in a copy of its own on its user's computer lands
         in its folder there, through its computer (``local_landing``); a
         worker that finds the thread's turn another's there stands down where
-        it is, and ends nothing.
+        it is, and ends nothing.  A Stop heard while it lands leaves the
+        thread as the Stop left it, and its end says whether its landing was
+        already under way.
         """
         landing: dict[str, Any] | None = None
         # The turn is over: what it handed on lands with it, and is no later Stop's to drop.
@@ -1096,7 +1098,7 @@ class ArtifactCompletionMixin:
                 landing = await land_local_turn(
                     store=self._store, session_factory=self._session_factory, redis=self._redis, session=session,
                     lease_token=str(lease.lease_token), saga_settings=self._saga_settings,
-                    tool_saga_id=tool_saga.saga_id if tool_saga is not None else None,
+                    tool_saga_id=tool_saga.saga_id if tool_saga is not None else None, stopped=self._check_interrupt,
                 )
             except LeaseLost:
                 # Another worker runs this thread now, and goes on with its landing from the journal.
@@ -1258,6 +1260,9 @@ class ArtifactCompletionMixin:
             # leaves work the next copy lacks.  A turn that never used its
             # pod is no such turn end.
             complete_data["saved"] = bool(landing.get("saved"))
+        if landing is not None and landing.get("stopped"):
+            # Stopped once its landing had written a file: the landing was not interrupted.
+            complete_data["stopped"] = "landing"
 
         # Two independent best-effort settlements (neither raises); run
         # them concurrently to halve the session-complete round trip when
@@ -1334,7 +1339,9 @@ class ArtifactCompletionMixin:
                 },
             )
         try:
-            await self._store.update_session_status(session.id, "completed")
+            # A thread stopped while it landed stays as the Stop left it.
+            if not (landing is not None and (landing.get("stopped") or landing.get("reason") == "stopped")):
+                await self._store.update_session_status(session.id, "completed")
         except Exception:
             logger.warning(
                 "Failed to update session status to completed for %s",
