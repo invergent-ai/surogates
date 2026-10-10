@@ -16,6 +16,7 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { kinds } from "../src/files/operations.js";
 import { FINISHED_TTL_SECONDS } from "../src/guest/processes.js";
+import { keyOf } from "../src/history/place.js";
 import { LOCK_WAIT_MS, lockFolder, readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
@@ -1424,6 +1425,106 @@ describe("what a landing cut short left, when the next landing's host starts", {
     }, 40_000)).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
     expect(Date.now() - began).toBeGreaterThanOrEqual(READY_MS + 2_500);
     expect([readFileSync(join(reports, "a.txt"), "utf8"), lstatSync(join(reports, "a.txt"), { bigint: true }).ino]).toEqual(["the user's own\n", ino]);
+  });
+});
+
+describe("a tool host that puts back what a landing cut short, on the folder with what its landings keep and no copy", { timeout: 60_000 }, () => {
+  beforeEach(lay);
+  // What the folder's landings keep, where the app keeps it for that folder.
+  const keeps = () => join(data, "landings", keyOf(reports));
+  const forRecovery = (more: Partial<HostStart> = {}) =>
+    host({ folder: reports, recovery: { kept: keeps() }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", `${keyOf(reports)}.recover`), ...more });
+  const ONLY = { error: { type: "unsupported", message: "This computer only puts back here what a landing cut short in the folder" } };
+
+  it("puts back, when it is asked, what a helper killed between an apply's two renames left in the folder, and does nothing else", async () => {
+    const ino = await cut(keeps());
+    const harness = forRecovery();
+    await ready(harness);
+    const elsewhere = seen(base, [reports, keeps(), ...hostsOwn()]);
+    // Its helper works in the folder itself, and is told of the kept folder and of no copy: which one each was when checked.
+    expect(startedWith(harness)).toEqual({ told: { SUROGATE_FOLDER: reports, SUROGATE_FOLDER_IS: is(reports), SUROGATE_KEPT: keeps(), SUROGATE_KEPT_IS: is(keeps()) }, cwd: reports });
+    // Any kind but the land kind its host refuses, and any action of it but the put-back its helper does: before anything is touched.
+    for (const kind of [...kinds().filter((one) => one !== "land"), "run", "bind"]) {
+      expect(await harness.op(kind, kind, { key: `${reports}/a.txt`, path: "a.txt", data: b64("over the user's\n"), max_bytes: null }), kind).toEqual({
+        error: { type: "unsupported", message: `This computer cannot do '${kind}' here` },
+      });
+    }
+    for (const [id, args] of [{ action: "revisions", paths: ["a.txt"] }, { action: "unapply", saga: SAGA, step: 1, path: "a.txt" }, { action: "forget", saga: SAGA }].entries()) {
+      expect(await harness.op(`l${id}`, "land", args), JSON.stringify(args)).toEqual(ONLY);
+    }
+    harness.send({ type: "refusal", id: "r", run: true });
+    expect(await result(harness, "r")).toEqual({ error: { type: "unsupported", message: "This computer cannot run a command here" } });
+    expect(existsSync(join(reports, "a.txt"))).toBe(false);
+    expect(await harness.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
+    const now = lstatSync(join(reports, "a.txt"), { bigint: true });
+    expect([readFileSync(join(reports, "a.txt"), "utf8"), now.ino, now.nlink, readdirSync(reports).sort(), readdirSync(keeps())]).toEqual(["the user's own\n", ino, 1n, ["a.txt", "sub"], []]);
+    harness.send({ type: "stop" });
+    expect(await harness.exited).toBe(0);
+    // Nothing else of the user's, or of the app's, changed; and no record of a folder's is kept for it.
+    expect(seen(base, [reports, keeps(), ...hostsOwn()])).toEqual(elsewhere);
+    expect(existsSync(join(data, "folders"))).toBe(false);
+  });
+
+  it.skipIf(!enters)("reaches from its helper's sandbox the folder and what its landings keep, and nothing else of the app's data: no thread's copy, nor the history", async () => {
+    mkdirSync(keeps(), { recursive: true });
+    const harness = forRecovery();
+    await ready(harness);
+    expect(inSandbox(harness, [{ act: "capabilities" }])).toEqual([{ ok: "0000000000000000" }]);
+    expect(inSandbox(harness, [
+      { act: "write", path: join(reports, "probe.txt"), data: "into the folder\n" }, { act: "write", path: join(keeps(), "probe"), data: "into the kept folder\n" },
+    ])).toEqual([{ ok: null }, { ok: null }]);
+    const before = seen(base, [reports, keeps(), ...hostsOwn()]);
+    for (const [what, dir, file, answers] of [
+      ["the thread's copy", copy, "a.txt", NOT_THERE],
+      ["another thread's copy", other, "a.txt", NOT_THERE],
+      ["the folder's history", join(place, "history.git"), "HEAD", NOT_THERE],
+      ["the rest of the app's data", join(data, "devices"), "credentials.json", NOT_THERE],
+      ["the user's home", home, "secret.txt", ownFolder("Reports")],
+      ["where the app keeps every folder's replaced files", join(data, "landings"), "fedcba9876543210", ownFolder(keyOf(reports))],
+    ] as const) {
+      expect(inSandbox(harness, tries(dir, file)), what).toEqual(answers);
+      expect(seen(base, [reports, keeps(), ...hostsOwn()]), what).toEqual(before);
+    }
+  });
+
+  it("takes the folder's lock as every host does: a chat that holds the folder makes it wait for as long as it is told, then it says the folder is busy, having put nothing back", async () => {
+    await cut(keeps());
+    const chat = host({ folder: reports, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") });
+    await ready(chat);
+    const began = Date.now();
+    const waited = forRecovery({ lockWaitMs: 700 });
+    expect(await failed(waited)).toEqual({ type: "failed", message: "another chat on this computer is working in this folder; this one can use it once that one is done", busy: true });
+    expect(Date.now() - began).toBeGreaterThanOrEqual(700);
+    expect(await waited.exited).toBe(1);
+    expect(existsSync(join(reports, "a.txt"))).toBe(false);
+    // Once the chat lets the folder go, it starts, and puts the file back.
+    await chat.stop();
+    const after = forRecovery({ lockWaitMs: 0 });
+    await ready(after);
+    expect(await after.op("1", "land", { action: "recover" })).toMatchObject({ ok: { restored: ["a.txt"] } });
+  });
+
+  it("says the folder is not there, or is not the one a landing was cut short in, and touches nothing of it or of what its landings keep", async () => {
+    await cut(keeps());
+    const was = bound(reports);
+    renameSync(reports, join(home, "Reports moved"));
+    const before = [seen(join(home, "Reports moved")), seen(data, hostsOwn())];
+    const gone = forRecovery({ expect: was });
+    expect(await failed(gone)).toEqual({ type: "failed", folder: true, message: `the folder ${reports} is not there` });
+    mkdirSync(reports);
+    const replaced = forRecovery({ expect: was });
+    expect(await failed(replaced)).toEqual({ type: "failed", folder: true, message: `the folder at ${reports} is not the one a landing was cut short in` });
+    for (const harness of [gone, replaced]) expect(await harness.exited).toBe(1);
+    expect([seen(join(home, "Reports moved")), seen(data, hostsOwn())]).toEqual(before);
+  });
+
+  it("is refused before it holds anything for what is kept of another folder, and leaves nothing", async () => {
+    mkdirSync(join(data, "landings", "fedcba9876543210"), { recursive: true });
+    const before = seen(base);
+    const harness = forRecovery({ recovery: { kept: join(data, "landings", "fedcba9876543210") } });
+    expect(await failed(harness)).toEqual({ type: "failed", message: `what this recovery is given is not where the app keeps what ${reports}'s landings replaced` });
+    expect(await harness.exited).toBe(1);
+    expect(seen(base)).toEqual(before);
   });
 });
 

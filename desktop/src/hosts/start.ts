@@ -3,13 +3,15 @@
 // its folder, which lies in the app's data, where no chat's folder may: it is taken only at the
 // one path the app makes for it, as a folder of its own, since the guest writes there. A landing's
 // host holds the folder itself, and is given the thread's copy to read and a folder of the app's
-// to keep replaced files in. A copy and a kept folder are named by the real path of the app's
-// data, as the app makes them: through a link, neither is taken.
+// to keep replaced files in. A recovery's host holds the folder itself too, and is given that
+// folder of the app's and no copy: it puts back what a landing there cut short. A copy and a kept
+// folder are named by the real path of the app's data, as the app makes them: through a link,
+// neither is taken.
 //
 //   <data>/history/<key>/threads/<thread>/   a thread's copy of the folder with that key
 //   <data>/landings/<key>/                   what that folder's landings keep of the files they replace
 //
-// Which of the three a start is, it says by what it carries beside its folder (STARTS). Each
+// Which of the four a start is, it says by what it carries beside its folder (STARTS). Each
 // answers the same things of itself (Start), and the host goes by those alone.
 
 import { lstatSync, mkdirSync, realpathSync, rmdirSync, type Stats } from "node:fs";
@@ -19,6 +21,7 @@ import { checkFolder, type FolderCheck, type FolderGuards } from "../binding/fol
 import { said, whole } from "../files/edge.js";
 import { inside, realpath } from "../files/paths.js";
 import { PLACE_KEY } from "../guest/protocol.js";
+import { KEPT_NAME, keyOf } from "../history/place.js";
 // A thread's id, as the app names its copy by: the one spelling the folder's place has too (history/place.ts).
 import { THREAD } from "../vm/history.js";
 import type { HostStart } from "./messages.js";
@@ -274,18 +277,55 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
   };
 }
 
+// The folder a landing was cut short in, as a chat's, with what that folder's landings keep, where the app keeps it for
+// that folder and a folder of its own that is there: its helper puts back what the landing cut short by those records,
+// and does nothing else. It is given no copy, runs no command, and is asked the land kind alone.
+function onRecovery(message: HostStart, guards: FolderGuards, uid: number): StartCheck {
+  const held = checkFolder(message.folder, guards);
+  if (!held.ok) return held;
+  const { kept } = (typeof message.recovery === "object" && message.recovery !== null ? message.recovery : {}) as Partial<NonNullable<HostStart["recovery"]>>;
+  const data = realData(guards.dataDir);
+  const landings = data === null ? null : join(data, "landings");
+  const name = typeof kept === "string" && landings !== null && kept.startsWith(`${landings}/`) ? kept.slice(landings.length + 1) : "";
+  // Only the folder's own: one kept for another folder names files that are not this one's, and would put them here.
+  if (landings === null || KEPT_NAME.exec(name)?.[1] !== keyOf(message.folder) || kept !== join(landings, name)) {
+    return refused(`what this recovery is given is not where the app keeps what ${held.path}'s landings replaced`);
+  }
+  const notOwn = `what the app keeps of ${held.path}'s landings is not a folder of the app's own`;
+  // The kept folder, and the folder that holds every folder's: there, as folders of the app's own. Nothing is made.
+  const there = (): Stats | null => {
+    const [all, its] = [own(landings, uid), own(kept, uid)];
+    return all === null || all === "missing" || its === null || its === "missing" ? null : its;
+  };
+  if (there() === null) return refused(notOwn);
+  // Its sandbox holds, of the app's data, what the folder's landings keep alone: no thread's copy, nor the folder's history.
+  const through = given(message, guards.appDirs, keptApart(guards.dataDir));
+  if (through !== null) return refused(`this recovery's sandbox would be given ${through}, and by it what the app keeps of other threads and folders`);
+  // Looked at again once the host holds the folder: a link put at it since would have its records read wherever it leads.
+  const make = (): ReturnType<Start["make"]> => {
+    const found = there();
+    if (found === null) throw new Error(notOwn);
+    return { made: [], env: { SUROGATE_KEPT_IS: isOf(found) } };
+  };
+  return {
+    ...held, reads: [], writes: [kept], env: { SUROGATE_KEPT: kept }, commands: false, only: "land", readyMs: READY_MS, make,
+    replaced: `the folder at ${message.folder} is not the one a landing was cut short in`, named: asSaid,
+  };
+}
+
 // The starts that are no chat's, each by the field of its message that says so.
-const STARTS = { at: onCopy, landing: onLanding } as const;
+const STARTS = { at: onCopy, landing: onLanding, recovery: onRecovery } as const;
 
 /**
  * What *message* starts a host on, checked as what it is: the folder it holds, as it resolves,
  * with its identity, and what the host needs of the start; or why no host may hold it. A chat's
- * folder and a landing's are checked as any chat's. A thread's copy, and what a landing is given,
- * must be the app's own, where the app keeps them: *uid* is the user whose they are.
+ * folder, a landing's and a recovery's are checked as any chat's. A thread's copy, and what a
+ * landing or a recovery is given, must be the app's own, where the app keeps them: *uid* is the
+ * user whose they are.
  */
 export function startOn(message: HostStart, home: string, appDirs: string[], uid = process.getuid?.() ?? -1): StartCheck {
   const guards: FolderGuards = { home, dataDir: message.dataDir, cacheDir: message.cacheDir, appDirs };
   const said = (Object.keys(STARTS) as Array<keyof typeof STARTS>).filter((field) => message[field] !== undefined);
-  if (said.length > 1) return refused("a tool host is started on a chat's folder, on a thread's copy of one, or on a folder for a landing: this start names more than one");
+  if (said.length > 1) return refused("a tool host is started on a chat's folder, on a thread's copy of one, or on a folder for a landing or a recovery: this start names more than one");
   return said[0] === undefined ? onFolder(message, guards) : STARTS[said[0]](message, guards, uid);
 }

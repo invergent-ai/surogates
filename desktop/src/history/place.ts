@@ -75,6 +75,12 @@ export interface Placed {
 
 export const keyOf = (folder: string): string => createHash("sha256").update(folder).digest("hex").slice(0, 16);
 
+/**
+ * What a folder's landings keep, by its name in <data>/landings: the folder's key; or, once another folder took the
+ * folder's path and its place was set aside with what its landings kept, that key and when.
+ */
+export const KEPT_NAME = /^([0-9a-f]{16})(?:\.was-[0-9]+)?$/;
+
 /** *thread*'s copy in *place*: where its tools and commands work. */
 export function copyOf(place: Place, thread: string): string {
   // A name that is no session's id could lead out of the place, or to another thread's copy.
