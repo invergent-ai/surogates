@@ -7,7 +7,7 @@
 // lost guest was running.
 
 import { readFileSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
@@ -15,7 +15,7 @@ import { Worker } from "node:worker_threads";
 import { confirmedFolder } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
-import { type FromAgent, HELD, type HostUser, type Share } from "../guest/protocol.js";
+import { type FromAgent, HELD, type HostUser, PLACE_KEY, type Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
@@ -101,8 +101,10 @@ export interface VmBackend {
    * folder's owner to *uid* (protocol.ts, Share), or rejects with why not, by
    * *deadline* (performance.now()). A share whose server goes takes the VM with it,
    * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
+   * *uid* 0 is the guest's root, for the agent's own git on a folder's place; with *readonly*
+   * the share refuses every write of the guest's, where the backend's server can.
    */
-  share(folder: string, uid: number, deadline: number): Promise<Share>;
+  share(folder: string, uid: number, deadline: number, readonly?: boolean): Promise<Share>;
   /**
    * *share*, as share gave it, out of the running guest once the guest has let it go, and
    * its folder served no more: its place takes the next share. Rejects with why not by
@@ -142,10 +144,21 @@ export interface Folder {
   boot?: string;
 }
 
+// A folder's place for the agent's own git (spec, Section 13, "The user's computer"): its key,
+// its history's folder in the app's data, and the folder itself as its threads were bound to it.
+export interface Place {
+  key: string;
+  history: string;
+  real: Folder;
+}
+
 export interface VmOperation {
   id: string;
   root: string;
+  // What is shared into the guest for the root: its chat's folder, or a project thread's copy of one.
   folder: Folder;
+  // Where its commands see it: the path of the folder a copy is of. Without it, the folder's own.
+  at?: string;
   kind: string;
   args: Record<string, unknown>;
   // The handles the host keeps of the root's background processes: a root new to the guest answers for them.
@@ -159,6 +172,8 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 
 // The folder is not the one its chat was bound to: its share would serve whatever is at the path now.
 class FolderGone extends Error {}
+
+const NO_HISTORY = "could not add this folder's history";
 
 // Settles with "late" once *ms* pass, its timer not holding the process.
 const late = (ms: number) => new Promise<"late">((resolve) => {
@@ -175,6 +190,20 @@ interface Root {
   share: Promise<Share>; // how the agent mounts its folder, once added
   setup: Promise<Outcome | null> | null; // null once set up, or why not
 }
+
+// A place's two shares, once the agent has mounted them, and the folder its history's share serves.
+interface Placed {
+  history: Share;
+  real: Share;
+  store: { dev: number; ino: number };
+}
+
+// Whether the folder at *path* is *other*, or lies in it: both real paths.
+const within = (path: string, other: string) => path === other || path.startsWith(other.endsWith(sep) ? other : other + sep);
+
+// Whether two places are one folder's, with one history. The folder's device is left out: a
+// restart of this computer between two threads' binds may have renumbered it.
+const samePlace = (a: Place, b: Place) => a.history === b.history && a.real.path === b.real.path && a.real.ino === b.real.ino;
 
 // What a look at a folder found: its identity, and its real path.
 interface Looked {
@@ -225,6 +254,8 @@ export class Guest {
   private leave: () => void = () => {};
   private left = false;
   private readonly roots = new Map<string, Root>();
+  // Each folder's place in this guest, by its key, from when it is asked for: what was asked, and its shares.
+  private readonly places = new Map<string, { place: Place; placed: Promise<Placed> }>();
   private keepalive: NodeJS.Timeout | undefined;
   // Pings in a row the agent has not answered.
   private missed = 0;
@@ -348,7 +379,7 @@ export class Guest {
    * Null once *root* is set up, its folder added and its processes' *ended* handles
    * given; otherwise the answer that says why not, and the next asks again.
    */
-  ready(root: string, folder: Folder, ended: ProcessHandle[] = []): Promise<Outcome | null> {
+  ready(root: string, folder: Folder, ended: ProcessHandle[] = [], at = folder.path): Promise<Outcome | null> {
     let known = this.roots.get(root);
     if (!known) {
       const entry: Root = { share: this.share(root, folder), setup: null };
@@ -373,7 +404,7 @@ export class Guest {
       // A namespace of its own, with nothing met yet: a connection of the one torn down can
       // land after its teardown.
       this.proxy.forget(root);
-      const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, this.setupMs);
+      const answer = await this.request({ type: "setup", root, folder: at, share, ended }, this.setupMs);
       if (answer?.type === "done") {
         this.up.add(root);
         return null;
@@ -412,6 +443,95 @@ export class Guest {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
     return this.vm.share(folder.path, uid, deadline);
+  }
+
+  /**
+   * Null once *place* is in the guest, for every thread on its folder: its history and the
+   * folder itself, shared with the guest's root, the folder read-only, and mounted by the agent
+   * for its own git. Otherwise the answer that says why not, and the next asks again.
+   */
+  async place(place: Place): Promise<Outcome | null> {
+    let known = this.places.get(place.key);
+    const held = known !== undefined;
+    if (!known) {
+      const entry = { place, placed: this.placed(place) };
+      entry.placed.catch(() => {
+        if (this.places.get(place.key) === entry) this.places.delete(place.key);
+      });
+      this.places.set(place.key, entry);
+      known = entry;
+    }
+    // A key is one folder's: its mounts are never answered as another folder's, or another history's.
+    if (!samePlace(known.place, place)) return unavailable(`${NO_HISTORY}: its key is another folder's place in the sandbox`);
+    try {
+      const placed = await known.placed;
+      if (held) await this.still(place, placed);
+      return null;
+    } catch (error) {
+      if (this.left) return SANDBOX_STOPPED;
+      return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`${NO_HISTORY}: ${describe(error)}`);
+    }
+  }
+
+  // Throws unless the history of *place*, held as *placed*, is still the folder at its path. A share
+  // serves the folder it was made on wherever that is moved: a history renamed aside, with another
+  // made at its path, would be answered as held while the guest's git wrote the one set aside.
+  private async still(place: Place, placed: Placed): Promise<void> {
+    const store = await Promise.race([look(place.history), late(this.shareMs)]);
+    if (store === "late") throw new Error(`its place in the app's data did not answer within ${this.shareMs / 1000} s`);
+    const { found } = store;
+    if (!found?.directory || store.real !== place.history || found.dev !== placed.store.dev || found.ino !== placed.store.ino) {
+      throw new Error("it was moved while the sandbox holds it, and must be let go first");
+    }
+  }
+
+  private async placed(place: Place): Promise<Placed> {
+    if (!PLACE_KEY.test(place.key)) throw new Error("it has no key of a folder's");
+    const deadline = performance.now() + this.shareMs;
+    // Each looked at as a root's folder is, and given up on at the deadline: the one that did not answer is named.
+    const looked = (path: string) => Promise.race([look(path), late(deadline - performance.now())]);
+    const [store, real] = await Promise.all([looked(place.history), looked(place.real.path)]);
+    if (store === "late") throw new Error(`its place in the app's data did not answer within ${this.shareMs / 1000} s`);
+    if (real === "late") throw new Error(`the folder did not answer within ${this.shareMs / 1000} s`);
+    // The app's own data: a link there would share whatever it leads to with the guest's root.
+    if (!store.found?.directory || store.real !== place.history) throw new Error("it is not where the app keeps it");
+    if (!real.found?.directory || !confirmedFolder(place.real, real.found) || real.real !== place.real.path) throw new FolderGone();
+    // Neither in the other: the agent's git would write the user's folder, or the history's share serve it for writing.
+    if (within(place.history, place.real.path) || within(place.real.path, place.history)) throw new Error("it is not kept apart from the folder");
+    const history = await this.vm.share(place.history, 0, deadline);
+    const shares = [history];
+    try {
+      const folder = await this.vm.share(place.real.path, 0, deadline, true);
+      shares.push(folder);
+      const answer = await this.request({ type: "place", key: place.key, history, real: folder }, this.setupMs);
+      if (answer?.type === "done") return { history, real: folder, store: store.found };
+      if (!answer) {
+        this.lose();
+        throw new Error("the guest did not answer");
+      }
+      throw new Error(answer.type === "failed" ? answer.message : "the guest refused it");
+    } catch (error) {
+      // Not mounted: neither is the guest's.
+      if (!this.left) for (const share of shares.reverse()) await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+      throw error;
+    }
+  }
+
+  /**
+   * *place* leaves the guest: the agent lets both mounts go, then the two shares are removed. Only
+   * the place it holds for that folder and history: false for any other, which is left as it is.
+   */
+  async unplace(place: Place): Promise<boolean> {
+    const known = this.places.get(place.key);
+    if (!known || !samePlace(known.place, place)) return false;
+    const placed = await known.placed.catch(() => null);
+    if (this.places.get(place.key) !== known) return false;
+    this.places.delete(place.key);
+    if (!placed || this.left) return true;
+    // Unanswered: the agent is stuck, and the guest goes.
+    if (!(await this.request({ type: "unplace", key: place.key }, this.setupMs))) this.lose();
+    else for (const share of [placed.real, placed.history]) await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+    return true;
   }
 
   /**
@@ -492,9 +612,9 @@ export class Guest {
     return this.left && this.stopping === null;
   }
 
-  // Whether it holds no root, and runs on: nothing of any chat is in it.
+  // Whether it holds no root and no folder's place, and runs on: nothing of any chat is in it.
   get idle(): boolean {
-    return this.roots.size === 0 && !this.ended;
+    return this.roots.size === 0 && this.places.size === 0 && !this.ended;
   }
 
   /**
@@ -546,6 +666,10 @@ export class VmManager {
   private working = 0;
   // The chats told that their commands run emulated: once a chat, whichever boot it was in.
   private readonly noticed = new Set<string>();
+  // Each place the guest is letting go, until it has: asked for again meanwhile, it is added once it has gone.
+  private readonly leaving = new Map<string, Promise<unknown>>();
+  // Each place being asked for, by its key, until it is answered: let go meanwhile, it goes once it is.
+  private readonly placing = new Map<string, Set<Promise<unknown>>>();
   // What each device's browser may open of its chats' own servers, whichever guest runs.
   private readonly forwarded = new Forwarded();
 
@@ -566,6 +690,68 @@ export class VmManager {
    * at once. Never rejects.
    */
   async perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
+    return this.inGuest(signal, async (guest) => {
+      const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended, operation.at), aborted(signal)]);
+      if (failure === "aborted") return CANCELLED;
+      if (failure) return this.stopping ? unavailable("is stopping") : failure;
+      const outcome = await guest.op(operation.root, operation.kind, operation.args, signal);
+      if (!guest.emulated || operation.kind !== "run" || !("ok" in outcome) || this.noticed.has(operation.root)) return outcome;
+      this.noticed.add(operation.root);
+      return withNotice(outcome, EMULATED_NOTICE);
+    });
+  }
+
+  /**
+   * Null once *place* is in the guest, booted for it if none runs: a folder's history and the
+   * folder itself, for the agent's own git. Otherwise the answer that says why not. Never rejects.
+   */
+  async place(place: Place, signal: AbortSignal): Promise<Outcome | null> {
+    // What was asked of its key before this: a place on its way out has gone before it is added anew.
+    const gone = this.leaving.get(place.key) ?? Promise.resolve();
+    const asked = this.inGuest(signal, async (guest) => {
+      if ((await Promise.race([gone, aborted(signal)])) === "aborted") return CANCELLED;
+      const failed = await Promise.race([guest.place(place), aborted(signal)]);
+      if (failed === "aborted") return CANCELLED;
+      return failed ?? { ok: null };
+    });
+    const placing = this.placing.get(place.key) ?? new Set();
+    this.placing.set(place.key, placing.add(asked));
+    const failure = await asked;
+    placing.delete(asked);
+    if (placing.size === 0 && this.placing.get(place.key) === placing) this.placing.delete(place.key);
+    return "ok" in failure ? null : failure;
+  }
+
+  /**
+   * *place* leaves the guest, if one runs: no thread works on its folder any more. True once it
+   * has; false where the guest holds no place for that folder and history under its key, as for a
+   * folder that was refused the key: nothing of the one that holds it is let go. What is asked of
+   * a key is done in the order it was asked: a place asked for before this is answered first, and
+   * goes; one asked for meanwhile is another place, added once this one has gone. Never rejects.
+   */
+  unplace(place: Place): Promise<boolean> {
+    const { key } = place;
+    const before = [this.leaving.get(key), ...(this.placing.get(key) ?? [])];
+    const gone = Promise.all(before).then(() => this.letGo(place));
+    this.leaving.set(key, gone);
+    void gone.then(() => {
+      if (this.leaving.get(key) === gone) this.leaving.delete(key);
+    });
+    return gone;
+  }
+
+  private async letGo(place: Place): Promise<boolean> {
+    this.working += 1;
+    try {
+      const guest = await this.guest?.catch(() => null);
+      return (await guest?.unplace(place)) ?? false;
+    } finally {
+      this.done();
+    }
+  }
+
+  // *work* in the guest that runs, booted for it if none does; or why there is none to work in.
+  private async inGuest(signal: AbortSignal, work: (guest: Guest) => Promise<Outcome>): Promise<Outcome> {
     if (this.stopping) return unavailable("is stopping");
     // No backend for this OS yet: answered as a VM that cannot start is.
     if (!this.boot) return unavailable("is not available on this platform yet");
@@ -579,13 +765,7 @@ export class VmManager {
         return unavailable(this.stopping ? "is stopping" : `did not start: ${describe(error)}`);
       }
       if (guest === "aborted") return CANCELLED;
-      const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
-      if (failure === "aborted") return CANCELLED;
-      if (failure) return this.stopping ? unavailable("is stopping") : failure;
-      const outcome = await guest.op(operation.root, operation.kind, operation.args, signal);
-      if (!guest.emulated || operation.kind !== "run" || !("ok" in outcome) || this.noticed.has(operation.root)) return outcome;
-      this.noticed.add(operation.root);
-      return withNotice(outcome, EMULATED_NOTICE);
+      return await work(guest);
     } finally {
       this.done();
     }

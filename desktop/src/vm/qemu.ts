@@ -77,10 +77,13 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
 // with. Unprivileged, the daemon holds a descriptor for each file the guest keeps, up to
 // the user's hard limit; with cache=auto the guest kept every file it had looked at, and a
 // 150 000-file node_modules ran it out of them.
-export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }): string[] {
+// *guestUid* 0: the guest's root, for the agent's own git on a folder's place. *readonly*: the
+// daemon refuses every write, whatever the guest mounts (a virtiofsd that has the option).
+export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }, readonly = false): string[] {
   return [
     `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never",
     `--uid-map=:${guestUid}:${host.uid}:1:`, `--gid-map=:${guestUid}:${host.gid}:1:`,
+    ...(readonly ? ["--readonly"] : []),
   ];
 }
 
