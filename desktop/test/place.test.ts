@@ -429,14 +429,28 @@ describe("one ask for a folder's place", () => {
     replaced();
     const record = join(data, "history", `${first.key}.json`);
     const { counts, options } = counting(bound(), 50);
-    const changing: PlaceOptions = { ...options, letGo: async (place) => {
+    const changing: PlaceOptions = { ...options, letGo: async (place, store) => {
       // Another thread's ask, as it seems: the record is another's again by the time the sandbox has let go.
       writeFileSync(record, recordOf({ path: join(base, `Elsewhere-${counts.letGo}`), dev: 1, ino: 1, boot: BOOT_ID }));
-      return options.letGo(place);
+      return options.letGo(place, store);
     } };
     await expect(placeOf(data, bound(), changing)).rejects.toThrow(`The history of the folder ${folder} was changed each time it was looked at, so it was not found`);
     expect(counts.letGo).toBeLessThanOrEqual(8);
     expect([setAside(), readdirSync(first.history)]).toEqual([[], ["history.git"]]);
+  });
+});
+
+describe("a place let go for another folder's", () => {
+  it("is named to whoever lets it go by its folder's inode, as the ask read it: a place made at its path since is another", async () => {
+    const first = await placed();
+    const { ino } = statSync(first.history);
+    replaced();
+    const stores: number[] = [];
+    await placeOf(data, bound(), { letGo: (_place, store) => {
+      stores.push(store);
+      return Promise.resolve(true);
+    } });
+    expect(stores).toEqual([ino]);
   });
 });
 

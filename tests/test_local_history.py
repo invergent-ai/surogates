@@ -262,6 +262,56 @@ def test_a_copy_that_was_removed_is_made_again_from_its_branch(tmp_path, folder)
     assert [c["path"] for c in land(one, "saga:1")["changes"]] == ["Draft.md"]
 
 
+def test_an_open_that_does_not_move_leaves_a_clean_copy_where_its_branch_is(tmp_path, folder):
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open(moves=False) == {"copy": "made"}
+    one, two = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"), a_copy(tmp_path, folder, "t2")
+    (two.copy / "notes.txt").write_text("v2 notes, by B\n")
+    land(two, "saga:1", B)
+    (folder / "yours.txt").write_text("saved by you since\n")
+    refs = [git(one.repo, "rev-parse", ref) for ref in ("refs/heads/threads/t1", "refs/bases/t1")]
+    # Asked inside a turn, as the app asks before a step: the copy stays on the base its turn began on, though
+    # what landed meanwhile and your save are the folder's now.
+    assert one.open(moves=False) == {"copy": "kept"}
+    assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
+    assert not (one.copy / "yours.txt").exists()
+    assert [git(one.repo, "rev-parse", ref) for ref in ("refs/heads/threads/t1", "refs/bases/t1")] == refs
+    # Made again from its branch where it was removed, and not moved either.
+    shutil.rmtree(one.copy)
+    assert one.open(moves=False) == {"copy": "kept"}
+    assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
+    assert not (one.copy / ".git").exists()
+    assert [git(one.repo, "rev-parse", ref) for ref in ("refs/heads/threads/t1", "refs/bases/t1")] == refs
+    # Its next turn starts on the folder as it is now.
+    assert one.open() == {"copy": "moved"}
+    assert (one.copy / "notes.txt").read_text() == "v2 notes, by B\n"
+    assert (one.copy / "yours.txt").read_text() == "saved by you since\n"
+
+
+def test_an_open_that_does_not_move_still_finishes_a_record_cut_after_its_push(tmp_path, folder):
+    again, cut = a_record_cut_after_its_push(tmp_path, folder)
+    theirs = files_of(folder)
+    # A host works in the copy right after this open: it is the landing's files first, the newer report among them.
+    assert again.open(moves=False) == {"copy": "kept"}
+    assert git(again.repo, "rev-parse", "refs/landed/t2") == cut["landing"]
+    assert (again.copy / "Report.docx").read_bytes() == b"PK\x03\x04 A's report"
+    assert (again.copy / "A-new.md").read_text() == "A's new file\n"
+    assert again.changed() == {"paths": []}
+    # Its next landing deletes no file another thread landed, and writes no old version over another's change.
+    after = land(again, "saga:3", B)
+    assert (after["commit"], after["changes"], after["overlapped"]) == (None, [], [])
+    assert files_of(folder) == theirs
+
+
+def test_an_open_that_does_not_move_is_one_the_agent_runs(tmp_path, folder, tree):
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    assert ask(tree, {**place, "action": "open", "args": {"moves": False}}) == {"copy": "made"}
+    (folder / "yours.txt").write_text("saved by you since\n")
+    assert ask(tree, {**place, "action": "open", "args": {"moves": False}}) == {"copy": "kept"}
+    assert not (tmp_path / "store" / "threads" / THREAD / "yours.txt").exists()
+    assert ask(tree, {**place, "action": "open", "args": {"moves": True}}) == {"copy": "moved"}
+    assert (tmp_path / "store" / "threads" / THREAD / "yours.txt").read_text() == "saved by you since\n"
+
+
 def test_the_harness_folder_and_the_whiteboard_stay_out_and_a_users_own_artifacts_folder_is_tracked(tmp_path, folder):
     for name in (".surogates-results", "_whiteboard", "_artifacts", "_history", "node_modules"):
         (folder / name).mkdir()
@@ -864,6 +914,9 @@ def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, fo
     ({"action": "apply"}, "it names no action this computer's history takes"),
     ({"action": "prune"}, "it names no action this computer's history takes"),
     ({"action": "pickup", "args": {"author": YOURS, "trailers": [], "push": True}}, "it names no action this computer's history takes"),
+    ({"action": "open", "args": {"moves": "no"}}, "whether it moves the copy is neither true nor false"),
+    ({"action": "open", "args": {"moves": 0}}, "whether it moves the copy is neither true nor false"),
+    ({"action": "open", "args": {"moves": None}}, "whether it moves the copy is neither true nor false"),
     ({"action": "restore", "args": {"commit": "--upload-pack=/planted"}}, "its commit holds what is not a commit id"),
     ({"action": "fetch", "args": {"commits": ["-o", "x"]}}, "its commits holds what is not a commit id"),
     ({"action": "fetch", "args": {"saga": "s1", "since": "--not"}}, "its since holds what is not a commit id"),
@@ -2449,7 +2502,7 @@ def test_an_open_that_moves_a_clean_copy_killed_at_any_step_leaves_the_copy_and_
         the_folder_goes_back_and_the_thread_lands_its_own_file_alone(root, at)
 
 
-@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "commit", "keep"])
+@pytest.mark.parametrize("first", ["open", "open that does not move", "changed", "snapshot", "commit", "keep"])
 @pytest.mark.parametrize("written_since", [False, True])
 def test_a_move_of_a_clean_copy_cut_part_way_through_its_files_is_finished_by_whichever_act_comes_first(tmp_path, first, written_since):
     root = tmp_path / "whole"
@@ -2465,7 +2518,8 @@ def test_a_move_of_a_clean_copy_cut_part_way_through_its_files_is_finished_by_wh
         (ours.copy / "late.md").write_text("written by a command still running\n")
         (ours.copy / "b.txt").write_text("b, written by a command still running\n")
     answer = {
-        "open": ours.open, "changed": ours.changed, "snapshot": lambda: ours.snapshot("before a step"),
+        "open": ours.open, "open that does not move": lambda: ours.open(moves=False),
+        "changed": ours.changed, "snapshot": lambda: ours.snapshot("before a step"),
         "commit": lambda: ours.commit_turn(author=B, trailers=SAGA, pickup=None),
         "keep": lambda: ours.keep(author=B, trailers=SAGA, base=True),
     }[first]()
