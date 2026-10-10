@@ -834,6 +834,8 @@ describe("the agent's own bounds", () => {
     const emulated = boundsFor(slowerFor(cmdline(true)));
     expect(kvm).toEqual({
       emptyMs: 3_000, killedMs: 1_000, flushMs: 3_000, mountMs: 5_000, runnerReadyMs: 5_000, questionMs: 10_000, backstopMs: 10_000, ruleMs: 12_000,
+      // One request to a folder's history: ten minutes, past the history's own bound for a copy's first making.
+      historyMs: 600_000,
     });
     expect(emulated).toEqual(Object.fromEntries(Object.entries(kvm).map(([name, ms]) => [name, ms * 6])));
     // Only the flag itself: another value of it, or a word that ends in it, is a guest with KVM.
