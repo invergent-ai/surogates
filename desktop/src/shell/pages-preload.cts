@@ -28,6 +28,7 @@ if (location.protocol === "file:") {
     reopen: (id: string) => ipcRenderer.invoke("shell:reopen", id),
     history: (path: string) => ipcRenderer.invoke("shell:history", path),
     closeHistory: () => ipcRenderer.invoke("shell:history-close"),
+    openVersion: (id: string) => ipcRenderer.invoke("shell:history-open", id),
     back: () => ipcRenderer.invoke("shell:back"),
     forward: () => ipcRenderer.invoke("shell:forward"),
     reload: () => ipcRenderer.invoke("shell:reload"),

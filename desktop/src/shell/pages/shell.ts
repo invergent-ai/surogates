@@ -32,6 +32,7 @@ interface ThreadRow {
 // A version of a file, as Section 13's FileVersion has it; by null: someone the app has no name for.
 interface Version {
   id: string;
+  path: string;
   by: { kind: "you" } | { kind: "thread"; title: string } | { kind: "routine"; name: string } | null;
   at: string;
   change: "added" | "changed" | "deleted" | "restored" | "undone";
@@ -52,11 +53,13 @@ interface State {
       place: ThreadRow["place"];
     }>;
     routines: Array<{ name: string; scheduleDisplay: string }>;
+    // Its files that are gone, each the version that deleted it; more: others, deleted longer ago, may not be listed.
+    deleted: { files: Version[]; more: boolean };
   } | null;
   reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
   // A file's History, shown in the Library in place of its files: its versions, null until they are
-  // read, and why they could not be.
-  history: { path: string; versions: Version[] | null; failure: string | null } | null;
+  // read, why what was last asked of it did not happen, and the version on its way to be saved.
+  history: { path: string; versions: Version[] | null; failure: string | null; opening: string | null } | null;
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
@@ -85,6 +88,7 @@ interface Shell {
   reopen(id: string): Promise<void>;
   history(path: string): Promise<void>;
   closeHistory(): Promise<void>;
+  openVersion(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
@@ -207,10 +211,10 @@ function chip(file: ThreadRow["files"][number]): HTMLElement {
 // shown as the app's prompts show text (asShown), so that none of its characters reorders or hides
 // the words around it. Someone the app has no name for is not named.
 const CHANGES = { added: "Added", changed: "Changed", deleted: "Deleted", restored: "Restored", undone: "Undone" } as const;
-function what(version: Version): string {
+function what(version: Version, change: keyof typeof CHANGES = version.change): string {
   const by = version.by;
-  if (by === null) return CHANGES[version.change];
-  return `${CHANGES[version.change]} by ${by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${asShown(by.title)}` : `the routine ${asShown(by.name)}`}`;
+  if (by === null) return CHANGES[change];
+  return `${CHANGES[change]} by ${by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${asShown(by.title)}` : `the routine ${asShown(by.name)}`}`;
 }
 
 // A file's History opens in the Library, in place of its files.
@@ -270,11 +274,11 @@ function listRow(first: string, second: string, third: string, place: ThreadRow[
   return item;
 }
 
-// A cloud file's row in the Library, which opens its History.
-function historyRow(path: string, item: HTMLElement): HTMLElement {
+// A cloud file's row in the Library, which opens its History: one of its files, or of those deleted from them.
+function historyRow(path: string, item: HTMLElement, list: "file" | "deleted" = "file"): HTMLElement {
   const open = button("file", "", () => openHistory(path));
   open.dataset.file = path;
-  open.dataset.focus = `file:${path}`;
+  open.dataset.focus = `${list}:${path}`;
   open.setAttribute("aria-label", `History of ${asShown(path)}`);
   open.append(...item.childNodes);
   const row = element("li", "");
@@ -283,12 +287,24 @@ function historyRow(path: string, item: HTMLElement): HTMLElement {
 }
 
 // A version of the file whose History is shown: how it came to be and by whom, when, and whether
-// it landed and is still kept.
-function versionRow(version: Version): HTMLElement {
+// it landed and is still kept. One still kept that left a file is opened, to be saved: none that is
+// no longer kept, and no deletion, which left nothing to open. While one is on its way no other is
+// opened: its buttons wait, without their use, so that the keyboard stays where it is.
+function versionRow(version: Version, opening: boolean): HTMLElement {
   const item = element("li", "version");
   item.dataset.version = version.id;
   const tags = [...(version.merged ? [] : ["Not merged"]), ...(version.available ? [] : ["No longer kept"])];
-  item.append(element("span", "what", what(version)), aged(element("span", "age"), version.at), element("span", "from", tags.join(" · ")));
+  const acts = element("span", "acts");
+  if (version.available && version.change !== "deleted") {
+    const open = button("act", "Open version", () => {
+      // One the History no longer shows, or shows as no longer kept, is refused there: the pane is drawn again with it.
+      if (!opening) void shell.openVersion(version.id).catch(() => {});
+    });
+    open.dataset.focus = `version:${version.id}:open`;
+    if (opening) open.setAttribute("aria-disabled", "true");
+    acts.append(open);
+  }
+  item.append(element("span", "what", what(version)), aged(element("span", "age"), version.at), element("span", "from", tags.join(" · ")), acts);
   return item;
 }
 
@@ -304,10 +320,11 @@ function renderHistory(state: State): void {
   byId("files").hidden = history !== null;
   if (history !== null) {
     byId("no-files").hidden = true;
+    byId("deleted").hidden = true;
     showText(byId("history-path"), history.path);
     byId("history-failure").hidden = history.failure === null;
     byId("history-failure").textContent = history.failure ?? "";
-    byId("versions").replaceChildren(...(history.versions ?? []).map(versionRow));
+    byId("versions").replaceChildren(...(history.versions ?? []).map((version) => versionRow(version, history.opening !== null)));
     byId("no-versions").hidden = history.versions?.length !== 0;
   }
   const was = historyShown;
@@ -350,6 +367,17 @@ function renderOverview(state: State): void {
     return entry.place.kind === "cloud" ? historyRow(entry.path, item) : item;
   }));
   byId("no-files").hidden = library.length > 0;
+  // The files that are gone, under those that are there. One that is among the files again, as one its
+  // user uploaded anew and no landing has recorded yet, is not gone.
+  const there = new Set(library.filter((entry) => entry.place.kind === "cloud").map((entry) => entry.path));
+  const deleted = (overview?.deleted.files ?? []).filter((version) => !there.has(version.path));
+  byId("deleted-files").replaceChildren(...deleted.map((version) => historyRow(
+    version.path, listRow(version.path, what(version, "deleted"), ago(version.at)), "deleted",
+  )));
+  // Where the agent looked no further back, it is said, though none is listed.
+  const more = overview?.deleted.more === true;
+  byId("deleted").hidden = deleted.length === 0 && !more;
+  byId("more-deleted").hidden = !more;
   const routines = overview?.routines ?? [];
   byId("routine-list").replaceChildren(...routines.map((routine) => listRow(routine.name, routine.scheduleDisplay, "")));
   document.querySelector<HTMLElement>('[data-tab="routines"]')!.hidden = routines.length === 0;
