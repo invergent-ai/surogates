@@ -1,8 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +17,7 @@ import {
   APP_DIRS, CANCELLED, forkHost, type Guard, HOST_STOPPED, type HostProcess, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
   type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
+import { asItLies } from "./as-it-lies.js";
 
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
 const ROOT_B = "22222222-2222-4222-8222-222222222222";
@@ -1187,7 +1185,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
   it("gives two threads on one folder a copy each to work in at once, named by the folder's path, and leaves the folder as it was", async () => {
     const executor = threads();
     const folder = folders[ROOT_A] ?? "";
-    const before = looked(folder);
+    const before = asItLies(folder);
     const key = join(folder, "a.txt");
     expect(await Promise.all([executor.run(op("resolve", { path: "a.txt" }), signal()), executor.run(op("resolve", { path: "a.txt" }, ROOT_B), signal())])).toEqual([{ ok: key }, { ok: key }]);
     expect(await executor.run(op("write", { key, data: data64("A's\n") }), signal())).toEqual({ ok: null });
@@ -1214,22 +1212,6 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
       "The page downloaded \"page.txt\". It is saved in the chat's folder as Downloads/page.txt.",
     );
     expect(readFileSync(join(copies[ROOT_A] ?? "", "Downloads", "page.txt"), "utf8")).toBe("from a page\n");
-    expect(looked(folder)).toEqual(before);
+    expect(asItLies(folder)).toEqual(before);
   });
 });
-
-// A folder as it lies, to compare: each name under it with its kind, mode, size, times and bytes, no link followed.
-function looked(path: string): Record<string, unknown> {
-  const found: Record<string, unknown> = {};
-  const walk = (at: string, name: string) => {
-    const stat = lstatSync(at);
-    found[name] = {
-      mode: stat.mode, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs,
-      ...(stat.isFile() ? { bytes: createHash("sha256").update(readFileSync(at)).digest("hex") } : {}),
-      ...(stat.isSymbolicLink() ? { link: readlinkSync(at) } : {}),
-    };
-    if (stat.isDirectory()) for (const entry of readdirSync(at).sort()) walk(join(at, entry), join(name, entry));
-  };
-  walk(path, ".");
-  return found;
-}
