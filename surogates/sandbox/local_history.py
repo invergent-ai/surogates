@@ -232,9 +232,9 @@ class LocalHistory(History):
 
         Before the copy is read as anything's base, a landing of the
         thread's that the history holds and the copy was never made the
-        files of is finished (:meth:`_catch_up`).  ``finished`` then
-        names it, once, with what was set aside: by this open, or by an
-        act that came before it.
+        files of is finished, by the snapshot the move to ``main`` begins
+        with (:meth:`_catch_up`).  ``finished`` then names it, once, with
+        what was set aside: by this open, or by an act that came before it.
         """
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
@@ -264,7 +264,6 @@ class LocalHistory(History):
                     env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
                 )
                 (self.copy / ".git").unlink()
-            self._catch_up()
             if len(list((self.repo / "objects" / "pack").glob("*.pack"))) > _PACKS:
                 self._git(["repack", "-a", "-d", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
             moved = self._to_main()
@@ -289,10 +288,6 @@ class LocalHistory(History):
     def snapshot(self, reason: str) -> str:
         self._catch_up()
         return super().snapshot(reason)
-
-    def restore(self, commit: str) -> None:
-        self._catch_up()
-        super().restore(commit)
 
     def commit_turn(self, **step: Any) -> dict:
         self._catch_up()
@@ -329,22 +324,23 @@ class LocalHistory(History):
             self._catch_up()
         aside = self._asides().get(step["turn"], (None, None))[1]
         # Told here, by this answer: the thread's next open has nothing left to say of it.
-        self._said(commit)
+        self._said()
         return {"commit": commit, "set_aside": aside}
 
     def _landing(self, refs: dict[str, str]) -> tuple[str, str, list[str]] | None:
         """The thread's landing where *refs*, the history's, still have its branch: it, its turn, and its message.
 
-        A record's push moves the thread's branch and its base to the
-        landing together, and the thread's next push, of a turn or of a
-        kept one, moves the branch off its base again.  Read in the history
-        itself: this repository may not hold the landing yet.
+        A record's push moves the thread's branch to the landing, which has
+        two parents, the turn its second.  The thread's next push puts a
+        turn there, or a kept one, which has one here: no helper's hand-off
+        stands behind it.  Read in the history itself: this repository may
+        not hold the landing yet.
         """
         landing = refs.get(self.branch)
-        if landing is None or refs.get(self.base) != landing:
+        if landing is None:
             return None
         parents, message = self._stored(landing)
-        if len(parents) != 2 or message[:1] != ["Landing"]:
+        if len(parents) != 2:
             return None
         return landing, parents[1], message
 
@@ -450,14 +446,14 @@ class LocalHistory(History):
                 kept[ref[-40:]] = (ref, commit)
         return kept
 
-    def _said(self, only: str | None = None) -> dict | None:
-        """The record that was finished and not yet told of, with what it set aside; told once.  With *only*, that landing's alone."""
+    def _said(self) -> dict | None:
+        """The record that was finished and not yet told of, with what it set aside; told once."""
         note = self.repo / _FINISHED
         try:
             landing, turn = note.read_text().split()
         except (FileNotFoundError, ValueError):
             return None
-        if not (_ID.fullmatch(landing) and _ID.fullmatch(turn)) or only not in (None, landing):
+        if not (_ID.fullmatch(landing) and _ID.fullmatch(turn)):
             return None
         said = {"landing": landing, "set_aside": self._asides().get(turn, (None, None))[1]}
         note.unlink()
