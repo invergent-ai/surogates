@@ -7,7 +7,7 @@ import { lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 import { edgeRefused } from "./edge.js";
-import { recover } from "./land.js";
+import { ONLY_RECOVERS } from "./land.js";
 import { type Context, perform } from "./operations.js";
 
 const {
@@ -55,19 +55,14 @@ for (const [is, path, what] of checked) {
     process.exit(2);
   }
 }
-// A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing.
+// A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing. A
+// recovery's is given where they are kept and no copy: it puts back what a landing in the folder cut short, and does
+// nothing else. Either puts that back by the first thing it is asked, not before it says it is ready (files/land.ts).
+const recovers = kept !== undefined && copy === undefined;
 const context: Context = {
-  folder, home, env: { ...rest, HOME: home }, ...(at !== undefined ? { at } : {}), ...(copy && kept ? { landing: { copy, kept } } : {}),
+  folder, home, env: { ...rest, HOME: home }, ...(at !== undefined ? { at } : {}),
+  ...(copy && kept ? { landing: { copy, kept } } : recovers && kept ? { landing: { kept } } : {}),
 };
-// Before it says it is ready: what an earlier helper's landing left cut short is put back while nothing else looks at
-// the folder. A failure here is answered by the first `land` asked, which tries again.
-if (context.landing) {
-  try {
-    recover(context);
-  } catch {
-    // Said when it is asked.
-  }
-}
 const running = new Map<string, AbortController>();
 const say = (line: unknown) => process.stdout.write(`${JSON.stringify(line)}\n`);
 
@@ -87,6 +82,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (typeof id !== "string") return;
   if (typeof kind !== "string" || typeof args !== "object" || args === null) {
     say({ id, outcome: { error: { type: "value", message: "malformed request" } } });
+    return;
+  }
+  // A recovery's helper is in the user's folder for its put-back alone.
+  if (recovers && (kind !== "land" || (args as { action?: unknown }).action !== "recover")) {
+    say({ id, outcome: { error: { type: "unsupported", message: ONLY_RECOVERS } } });
     return;
   }
   const controller = new AbortController();

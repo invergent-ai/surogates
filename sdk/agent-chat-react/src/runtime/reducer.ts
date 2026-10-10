@@ -1217,7 +1217,7 @@ function applyTerminalEvent(
       status: event.type === "session.fail" ? "error" : "complete",
       errorInfo: errorInfo ?? doneMsg.errorInfo,
     };
-  } else if (event.type === "session.fail" && errorInfo) {
+  } else if (errorInfo) {
     messages.push({
       id: `error-${event.eventId}`,
       role: "system",
@@ -1237,11 +1237,12 @@ function applyTerminalEvent(
   };
 }
 
+/** A turn's failure, or a stop that says what it could not take back of its turn, drawn as one. */
 function buildErrorInfo(
   event: AgentChatRuntimeEvent,
 ): AgentChatErrorInfo | undefined {
   if (
-    event.type !== "session.fail" ||
+    (event.type !== "session.fail" && event.type !== "session.pause") ||
     typeof event.data.error_category !== "string"
   ) {
     return undefined;
