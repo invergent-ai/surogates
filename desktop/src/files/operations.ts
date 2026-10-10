@@ -22,12 +22,17 @@ import {
   MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, NUL_REFUSED, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
+import { retold, saidInFailing, searched, spared } from "./edge.js";
 import { land } from "./land.js";
-import { keyInFolder, resolveInFolder } from "./paths.js";
+import { type Edge, edgeOf, keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
 
 export interface Context {
   folder: string; // resolved
+  // A thread's copy alone: the path of the folder it is a copy of, by which every request and answer names its files
+  // (spec, Section 13). The app's own, given once at the helper's start, never a request's. Without it, the folder is
+  // named by its own path. A landing's helper has none: it works in the folder itself.
+  at?: string;
   home: string;
   env: Record<string, string | undefined>;
   // A landing's helper alone (land.ts): the thread's copy its files come from, and where the files it
@@ -38,8 +43,8 @@ export interface Context {
 type Kind = (args: Record<string, unknown>, context: Context, signal: AbortSignal) => unknown;
 
 const KINDS: Record<string, Kind> = {
-  resolve: (args, { folder, home }) => resolveInFolder(folder, home, text(args, "path")),
-  check_write: (args, { folder, home }) => checkWrite(folder, home, text(args, "path")),
+  resolve: (args, { folder, home, at }) => resolveInFolder(folder, home, text(args, "path"), at),
+  check_write: (args, { folder, home, at }) => checkWrite(folder, home, text(args, "path"), at),
   stat,
   read,
   read_lines: readLines,
@@ -50,6 +55,9 @@ const KINDS: Record<string, Kind> = {
   ripgrep,
   land,
 };
+
+/** Every kind the helper has, by name: the table itself, for whoever must look at each one's answers. */
+export const kinds = (): string[] => Object.keys(KINDS);
 
 // The helper's own files beside a user's: a write's temp file, and a landing's (land.ts). A helper killed at the wrong
 // moment leaves one, so no listing names it as a file of the folder's.
@@ -93,11 +101,12 @@ export async function perform(
   try {
     outcome = { ok: (await handle(args, context, signal)) ?? null };
   } catch (error) {
-    outcome = {
-      error: error instanceof Failure
-        ? error.refusal
-        : { type: "other", message: error instanceof Error ? `${error.name}: ${error.message}` : String(error) },
-    };
+    const refusal = error instanceof Failure
+      ? error.refusal
+      : { type: "other", message: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+    // A copy's helper answers in the words of the folder it is a copy of, whatever kind failed and however.
+    const edge = edgeOf(context.folder, context.at ?? context.folder);
+    outcome = { error: edge ? retold(refusal, error, edge) : refusal };
   }
   // A read is bounded by MAX_READ_BYTES instead: its data over MAX_PAYLOAD_BYTES goes as a transfer.
   if (kind !== "read" && JSON.stringify(outcome).length > MAX_MESSAGE_CHARS) {
@@ -143,9 +152,9 @@ function revisionAt(key: string): string | null {
   }
 }
 
-function stat(args: Record<string, unknown>, { folder }: Context): unknown {
+function stat(args: Record<string, unknown>, { folder, at }: Context): unknown {
   try {
-    const st = statSync(keyInFolder(folder, text(args, "key")), { bigint: true });
+    const st = statSync(keyInFolder(folder, text(args, "key"), at), { bigint: true });
     // st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus
     // nanoseconds * 1e-9, with tv_nsec never negative.
     let seconds = st.mtimeNs / 1_000_000_000n;
@@ -171,8 +180,8 @@ function regular(fd: number, key: string): Stats {
   return st;
 }
 
-function read(args: Record<string, unknown>, { folder }: Context): string {
-  const key = keyInFolder(folder, text(args, "key"));
+function read(args: Record<string, unknown>, { folder, at }: Context): string {
+  const key = keyInFolder(folder, text(args, "key"), at);
   const wanted = wholeOrNull(args, "max_bytes");
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
   const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
@@ -203,8 +212,8 @@ const isInteger = (value: unknown): value is number => Number.isInteger(value);
 // whole lines Python's lines[offset - 1:min(offset - 1 + limit, total)] selects that fit in max_bytes, or, when not
 // even the first does, its first max_bytes; and how many lines the file has. Only line ends are found here: the cloud
 // decodes the page and applies every rule.
-function readLines(args: Record<string, unknown>, { folder }: Context): { data: string; total_lines: number } {
-  const key = keyInFolder(folder, text(args, "key"));
+function readLines(args: Record<string, unknown>, { folder, at }: Context): { data: string; total_lines: number } {
+  const key = keyInFolder(folder, text(args, "key"), at);
   const { encoding, offset, limit, max_bytes: maxBytes } = args;
   const unit = typeof encoding === "string" && Object.hasOwn(CODE_UNITS, encoding) ? CODE_UNITS[encoding] : undefined;
   if (
@@ -320,8 +329,8 @@ function pageOf(
 }
 
 // Temp file and atomic rename, keeping the replaced file's mode, as the cloud does.
-function write(args: Record<string, unknown>, { folder }: Context): null {
-  const key = keyInFolder(folder, text(args, "key"));
+function write(args: Record<string, unknown>, { folder, at }: Context): null {
+  const key = keyInFolder(folder, text(args, "key"), at);
   // Only the in-folder protected names are re-checked here. A key is proven to be inside the folder; a folder that
   // holds the home folder's credentials is refused at host start, and the system paths on the cloud's list are
   // left to the operating system's own permissions.
@@ -413,8 +422,8 @@ function create(key: string, data: Buffer): null {
   return null;
 }
 
-function remove(args: Record<string, unknown>, { folder }: Context): null {
-  const key = keyInFolder(folder, text(args, "key"));
+function remove(args: Record<string, unknown>, { folder, at }: Context): null {
+  const key = keyInFolder(folder, text(args, "key"), at);
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
   if (key === folder) throw osError("EISDIR", key);
   io(key, () => unlinkSync(key));
@@ -445,8 +454,8 @@ function makeDirs(dir: string): void {
   }
 }
 
-function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
-  const key = keyInFolder(folder, text(args, "key"));
+function listDir(args: Record<string, unknown>, { folder, at }: Context): string[] {
+  const key = keyInFolder(folder, text(args, "key"), at);
   return io(key, () => readdirSync(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
 }
 
@@ -464,8 +473,8 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 // most. Each folder is read an entry at a time, so one of a million entries costs no more than the walk looks at. A
 // folder it may not read, or one a link took the place of, is left out, and the walk goes on. Out of handles, it
 // stops, said truncated: what the rest holds is unknown, and the walk must not be taken for whole.
-function walk(args: Record<string, unknown>, { folder }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
-  const key = keyInFolder(folder, text(args, "key"));
+function walk(args: Record<string, unknown>, { folder, at }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
+  const key = keyInFolder(folder, text(args, "key"), at);
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
   if (
     !names(skip) || !names(top) || typeof hidden !== "boolean"
@@ -616,8 +625,8 @@ function runnable(path: string): boolean {
 }
 
 // The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-".
-async function ripgrep(args: Record<string, unknown>, { env, folder }: Context, signal: AbortSignal): Promise<string> {
-  const key = keyInFolder(folder, text(args, "key"));
+async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Context, signal: AbortSignal): Promise<string> {
+  const key = keyInFolder(folder, text(args, "key"), at);
   const mode = text(args, "mode");
   if (mode !== "files" && mode !== "count" && mode !== "json") throw valueError(`unknown search mode '${mode}'`);
   const pattern = text(args, "pattern");
@@ -638,7 +647,9 @@ async function ripgrep(args: Record<string, unknown>, { env, folder }: Context, 
   argv.push(key);
   // A user's rg config could change the results or add --pre, which runs a program.
   const { RIPGREP_CONFIG_PATH: _config, ...clean } = env;
-  return searchWith(rg, argv, clean, signal);
+  // rg is given the key where it lies, and names what it finds from there: on a copy, by the copy's path.
+  const edge = edgeOf(folder, at ?? folder);
+  return searchWith(rg, argv, clean, signal, edge && { mode, edge });
 }
 
 // ENOENT is no rg to run (or no interpreter for it); any other spawn error
@@ -649,7 +660,10 @@ function spawnFailure(error: unknown, rg: string): unknown {
     : fromNode(error, rg);
 }
 
-function searchWith(rg: string, argv: string[], env: Record<string, string | undefined>, signal: AbortSignal): Promise<string> {
+// *copy*: a search of a thread's copy, in its mode. What rg says of it is answered by the folder's path (edge.ts).
+function searchWith(
+  rg: string, argv: string[], env: Record<string, string | undefined>, signal: AbortSignal, copy?: { mode: string; edge: Edge },
+): Promise<string> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(CANCELLED);
@@ -672,6 +686,9 @@ function searchWith(rg: string, argv: string[], env: Record<string, string | und
     let size = 0;
     let errSize = 0;
     let over = false;
+    // What each line of a copy's search loses of its length as it is answered, and the lines so far, the one being written too.
+    const spare = copy ? spared(copy.mode, copy.edge) : 0;
+    let lines = 1;
     const kill = () => {
       try {
         child.kill("SIGKILL");
@@ -687,9 +704,10 @@ function searchWith(rg: string, argv: string[], env: Record<string, string | und
     // A child that could not start (EMFILE) has no streams.
     child.stdout?.on("data", (chunk: Buffer) => {
       size += chunk.length;
+      if (spare > 0) for (const byte of chunk) if (byte === 10) lines += 1;
       // Every byte costs at least one character on the wire, so past the cap in
       // bytes the answer is already known.
-      if (size > OUTPUT_CAP_CHARS) {
+      if (size - lines * spare > OUTPUT_CAP_CHARS) {
         over = true;
         kill();
       } else {
@@ -712,11 +730,14 @@ function searchWith(rg: string, argv: string[], env: Record<string, string | und
       }
       const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
       if (status !== 0 && status !== 1) {
-        const stderr = [...UTF8.decode(Buffer.concat(err))].slice(0, 200).join("");
-        reject(new Failure({ type: "ripgrep", message: `rg exited ${status}: ${stderr}` }));
+        const wrote = copy
+          ? saidInFailing(Buffer.concat(err), errSize > STDERR_BYTES, (bytes) => UTF8.decode(bytes), copy.edge)
+          : UTF8.decode(Buffer.concat(err));
+        const refusal = { type: "ripgrep", message: `rg exited ${status}: ${[...wrote].slice(0, 200).join("")}` };
+        reject(new Failure(refusal, copy && (() => refusal)));
         return;
       }
-      const found = UTF8.decode(Buffer.concat(out));
+      const found = copy ? searched(copy.mode, UTF8.decode(Buffer.concat(out)), copy.edge) : UTF8.decode(Buffer.concat(out));
       if (pyJsonLength(found) > OUTPUT_CAP_CHARS) reject(NARROW);
       else resolve(found);
     });
