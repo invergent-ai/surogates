@@ -700,12 +700,42 @@ describe("the processes on a profile", () => {
       // This test's own process stands for one blocked in its read: its command line never comes.
       const stuck = `/proc/${process.pid}/cmdline`;
       const asked: string[] = [];
-      const read = (path: string) => (asked.push(path), path === stuck ? new Promise<string>(() => {}) : readFile(path, "utf8"));
-      const started = performance.now();
+      // When the last of the others came: how long the reads take is the computer's, and its load's.
+      let answered = 0;
+      const read = (path: string) => {
+        asked.push(path);
+        if (path === stuck) return new Promise<string>(() => {});
+        return readFile(path, "utf8").finally(() => (answered = performance.now()));
+      };
       expect(await holding(join(folder, "profile"), read)).toEqual([on.pid]);
-      expect(performance.now() - started).toBeLessThan(3_000);
+      // It waits on the silent one a second past the others' last answer, and no longer: three seconds spare a busy computer's late timer.
+      expect(performance.now() - answered).toBeLessThan(3_000);
       expect(await holding(join(folder, "profile"), read)).toEqual([on.pid]);
       expect(asked.filter((path) => path === stuck)).toHaveLength(1);
+    } finally {
+      on.kill("SIGKILL");
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("finds them on a computer too busy to answer its reads at once: each comes in its turn, the last long after a second, and none is taken for one that does not come", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "sb-holding-"));
+    const on = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(folder, "profile", "x")], { stdio: "ignore" });
+    try {
+      await new Promise((done) => on.once("spawn", done));
+      const mine = `/proc/${on.pid}/cmdline`;
+      // Every read answers in its turn, one after another over a second and a half, as reads queued on libuv's
+      // four threads do on a busy computer; the one of the process on the profile last of all.
+      const count = readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).length;
+      const gap = 1_500 / count;
+      const busy = () => {
+        const began = performance.now();
+        let turns = 0;
+        const turn = (at: number) => new Promise<void>((done) => setTimeout(done, began + at - performance.now()));
+        return (path: string) => (path === mine ? turn(1_500 + gap).then(() => readFile(path, "utf8")) : turn(gap * (turns += 1)).then(() => ""));
+      };
+      expect(await holding(join(folder, "profile"), busy())).toEqual([on.pid]);
+      expect(await holding(join(folder, "profile"), busy())).toEqual([on.pid]);
     } finally {
       on.kill("SIGKILL");
       rmSync(folder, { recursive: true, force: true });
