@@ -696,7 +696,19 @@ async def test_refs_at_their_bound_are_checked_off_the_loop_a_line_at_a_time_wha
     del refs, cut
     # Each waits its turn for as long as it takes: this is what the six cost, not who is told to try again.
     monkeypatch.setattr(module, "_PATIENCE", 120.0)
-    stalls = []
+    stalls, checking, most, checked_in, check = [], 0, 0, set(), module._checked
+
+    def checked(scratch, clone):
+        nonlocal checking, most
+        checking += 1
+        most = max(most, checking)
+        checked_in.add(threading.current_thread().name.rsplit("_", 1)[0])
+        try:
+            return check(scratch, clone)
+        finally:
+            checking -= 1
+
+    monkeypatch.setattr(module, "_checked", checked)
 
     async def tick() -> None:
         while True:
@@ -710,8 +722,9 @@ async def test_refs_at_their_bound_are_checked_off_the_loop_a_line_at_a_time_wha
     answers = await asyncio.gather(*(copy.held(["0" * 40]) for copy in copies))
     ticking.cancel()
     assert answers == [set()] * 6
-    # The loop went on serving every other request meanwhile.
-    assert max(stalls) < 0.1, max(stalls)
+    # Each was checked in the refs' own turn, one at a time, and the loop went on serving every other request meanwhile.
+    assert (checked_in, most) == ({"history-refs"}, 1)
+    assert max(stalls) < 0.25, max(stalls)
     # Each copy has its own refs and cut, as git reads them.
     for copy in copies:
         assert (copy.clone / "packed-refs").stat().st_size > REFS_BOUND - 128
@@ -876,13 +889,19 @@ async def test_a_copys_bound_counts_what_it_holds_on_the_apis_disk_with_the_inde
 async def test_a_pack_the_copy_has_no_room_left_for_is_refused_before_it_is_read(tmp_path, storage, monkeypatch):
     durable = by_hand(storage, "two")
     packs = durable / "objects" / "pack"
-    many = a_pack(packs, (struct.pack(">I", n) for n in range(20_000)))
-    # A second pack, read after the first: the copy takes the bucket's packs in the order of their names.
-    plain = min(name for name in (a_pack(packs, [os.urandom(100_000)]) for _ in range(40)) if name > many)
-    for other in packs.glob("pack-*.pack"):
-        if other.stem not in (many, plain):
-            other.unlink()
-            other.with_suffix(".idx").unlink()
+    def one_of(made, wanted) -> str:
+        """A pack as *made* makes one, of a name *wanted* takes: the copy takes the bucket's packs in the order of their names."""
+        for attempt in range(256):
+            name = a_pack(packs, made(attempt))
+            if wanted(name):
+                return name
+            for kind in ("pack", "idx"):
+                (packs / f"{name}.{kind}").unlink()
+        raise AssertionError("no pack of such a name in 256 tries")
+
+    # Twenty thousand small files, read first, and one plain file, read after.
+    many = one_of(lambda attempt: (struct.pack(">II", attempt, n) for n in range(20_000)), lambda name: name < "pack-8")
+    plain = one_of(lambda attempt: [os.urandom(100_000)], lambda name: name > many)
     listed = sum(pack.stat().st_size for pack in packs.glob("*.pack"))
     index = 1072 + 28 * 20_000
     # Room for what the bucket lists, and for the first pack with its index, but not for the second after it.
