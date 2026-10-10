@@ -2416,8 +2416,9 @@ function wire(window: MainWindow, page: string): void {
     return fileHistory.open(open.id, path);
   });
   handle("shell:history-close", () => fileHistory.close());
-  // A version of the file whose History is shown, handed by the agent's page to its user to save.
+  // A version of the file whose History is shown, handed by the agent's page to its user to save, or restored.
   handle("shell:history-open", (id) => fileHistory.openVersion(id));
+  handle("shell:history-restore", (id) => fileHistory.restore(id));
   // Back and Forward move the web client; on the Projects page they leave it, for what the centre
   // showed before it, as the client still is there. A failure the choice cleared is drawn away.
   const move = (step: () => void) => {

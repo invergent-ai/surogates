@@ -139,6 +139,8 @@ interface Served {
   lag: number;
   asked: string[][];
   unopened: string | null;
+  unrestored: string | null;
+  put: { applied: string[]; skipped: Array<{ path: string; by: unknown }>; pickedUp: string[] } | null;
   changed(id: string, threadId: string | null): void;
   register(lacks?: string[]): void;
 }
@@ -1329,7 +1331,8 @@ describe("a file's History in the Library", () => {
   // What the fake page was asked to open.
   const asked = (client: Page) => client.evaluate(() => (window as unknown as { fakeProjects: Served }).fakeProjects.asked);
   const focused = (page: Page) => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus ?? null);
-  const waiting = (page: Page) => page.$$eval("#versions .act", (found) => found.map((act) => act.getAttribute("aria-disabled")));
+  const waiting = (page: Page, act = "open") =>
+    page.$$eval(`#versions [data-act="${act}"]`, (found) => found.map((button) => button.getAttribute("aria-disabled")));
 
   it("offers Open version on each version still kept that left a file, and hands the one chosen to the agent's page to save", async () => {
     agent.projects!.history[REPORT]![REVENUE]!.unshift(
@@ -1341,7 +1344,9 @@ describe("a file's History in the Library", () => {
     // Nothing on a deletion, which left nothing to open, nor on a version no longer kept.
     expect(await page.$$eval("#versions .version", (found) => found.map((version) => [
       (version as HTMLElement).dataset.version, [...version.querySelectorAll(".act")].map((act) => act.textContent),
-    ]))).toEqual([["20:f", []], ["12:f", ["Open version"]], ["12:p", ["Open version"]], ["9:f", ["Open version"]], ["3:p", []]]);
+    ]))).toEqual([
+      ["20:f", []], ["12:f", ["Open version", "Restore"]], ["12:p", ["Open version", "Restore"]], ["9:f", ["Open version", "Restore"]], ["3:p", []],
+    ]);
     await page.click('[data-version="12:p"] .act');
     await expect.poll(() => asked(client)).toEqual([["openVersion", "12:p", REVENUE]]);
     await expect.poll(() => waiting(page)).toEqual([null, null, null]);
@@ -1393,7 +1398,7 @@ describe("a file's History in the Library", () => {
     // Read again, it offers no save that would fail; the keyboard goes to what took the button's place.
     await expect.poll(() => texts(page, '[data-version="9:f"] .from')).toEqual(["No longer kept"]);
     expect(await texts(page, '[data-version="9:f"] .act')).toEqual([]);
-    expect(await focused(page)).toBe("version:12:p:open");
+    expect(await focused(page)).toBe("version:12:p:restore");
     // Why it did not open stays said through the project's next change, until another version is opened.
     await (await served(client)).evaluate((fake, project) => {
       fake.unopened = null;
@@ -1401,6 +1406,7 @@ describe("a file's History in the Library", () => {
     }, REPORT);
     await page.waitForSelector("#versions .version");
     expect(await page.textContent("#history-failure")).toBe(gone);
+    await page.focus('[data-version="12:p"] [data-act="open"]');
     await page.keyboard.press("Enter");
     await expect.poll(() => page.isVisible("#history-failure")).toBe(false);
     expect(await asked(client)).toEqual([["openVersion", "9:f", REVENUE], ["openVersion", "12:p", REVENUE]]);
@@ -1474,6 +1480,107 @@ describe("a file's History in the Library", () => {
       const raw = (await downloaded(shell, client, path)).name;
       expect([raw, /[\\/\u0000-\u001f]/.test(raw), [".", "..", ""].includes(raw)], JSON.stringify(path).slice(0, 40)).toEqual([raw, false, false]);
     }
+  });
+
+  it("restores a version, one at a time with the keyboard still on the one pressed, and says what it did over the History drawn again", async () => {
+    const { shell, page, client } = await opened();
+    await (await served(client)).evaluate((fake, path) => {
+      fake.lag = 1_500;
+      fake.put = { applied: [path], skipped: [], pickedUp: [path] };
+    }, REVENUE);
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.focus('[data-version="9:f"] [data-act="restore"]');
+    expect(await focused(page)).toBe("version:9:f:restore");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => waiting(page, "restore")).toEqual(["true", "true", "true"]);
+    // Pressed again, on this version or another, it restores nothing more; nor when the pane is drawn again meanwhile.
+    await page.keyboard.press("Enter");
+    await page.click('[data-version="12:p"] [data-act="restore"]', { force: true });
+    await page.focus('[data-version="9:f"] [data-act="restore"]');
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    // A version still opens meanwhile.
+    expect(await waiting(page)).toEqual([null, null, null]);
+    // Landed: its newest version is the restore, by you, and the pane says what it did, and that your edit was kept.
+    await expect.poll(() => texts(page, "#versions .what")).toEqual([
+      "Restored by you", "Changed by the thread Check the revenue figures", "Changed by you", "Changed by the thread Check the revenue figures",
+      "Added by the routine Nightly import",
+    ]);
+    await expect.poll(() => texts(page, "#history-told p")).toEqual([
+      `Restored ${REVENUE}.`, `Your changes to ${REVENUE} were recorded first: they are a version in this History.`,
+    ]);
+    expect(await waiting(page, "restore")).toEqual([null, null, null, null]);
+    expect(await focused(page)).toBe("version:9:f:restore");
+    expect(await asked(client)).toEqual([["restore", "9:f", REVENUE]]);
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    // What it said stays through the project's next change, and goes as the next thing is asked of the History.
+    await (await served(client)).evaluate((fake, project) => fake.changed(project, null), REPORT);
+    await expect.poll(() => texts(page, "#history-told p")).toHaveLength(2);
+    await page.click('[data-version="12:p"] [data-act="open"]');
+    await expect.poll(() => texts(page, "#history-told p")).toEqual([]);
+  });
+
+  it("says a file is already that version, why a version was not restored in the agent's words, and a name in what it says as text", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake) => { fake.put = { applied: [], skipped: [], pickedUp: [] }; });
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.click('[data-version="12:f"] [data-act="restore"]');
+    await expect.poll(() => texts(page, "#history-told p")).toEqual(["The file is already this version."]);
+    const busy = "Your project's files are being saved right now. Try again in a moment.";
+    await (await served(client)).evaluate((fake, why) => { fake.unrestored = why; }, busy);
+    await page.click('[data-version="9:f"] [data-act="restore"]');
+    await expect.poll(() => page.textContent("#history-failure")).toBe(busy);
+    expect(await texts(page, "#history-told p")).toEqual([]);
+    expect(await texts(page, "#versions .what")).toHaveLength(4);
+    // A name is data in the app's own words, whoever is said to have changed it since.
+    const markup = '<img src=x onerror="document.title=1">\u202Egpj.md';
+    await (await served(client)).evaluate((fake, path) => {
+      fake.unrestored = null;
+      fake.put = { applied: [path], skipped: [{ path, by: { kind: "thread", threadId: "t-9", title: "you" } }, { path, by: null }], pickedUp: [path] };
+    }, markup);
+    await page.click('[data-version="9:f"] [data-act="restore"]');
+    const shown = '<img src=x onerror="document.title=1">U+202Egpj.md';
+    await expect.poll(() => texts(page, "#history-told p")).toEqual([
+      `Restored ${shown}.`, `Your changes to ${shown} were recorded first: they are a version in this History.`,
+      `${shown} was changed after this, by the thread you. It was left as it is. Restore an earlier version from its History.`,
+      `${shown} was left as it is.`,
+    ]);
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    expect(await page.$$eval("#file-history img", (found) => found.length)).toBe(0);
+    expect(await page.title()).not.toBe("1");
+  });
+
+  it("says an agent that opens a version but restores none cannot yet, and its History still lists the versions", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake, project) => {
+      fake.register(["restore"]);
+      fake.changed(project, null);
+    }, REPORT);
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.click('[data-version="9:f"] [data-act="restore"]');
+    await expect.poll(() => page.textContent("#history-failure")).toBe("This agent cannot restore a version yet");
+    expect(await texts(page, "#versions .what")).toHaveLength(4);
+    expect(await asked(client)).toEqual([]);
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
+  it("brings a deleted file back from its History: it is among the files again, and the Deleted list holds it no more", async () => {
+    const { page, client } = await opened();
+    await page.click('[data-tab="library"]');
+    await page.click('#deleted-files [data-file="old-forecast.xlsx"]');
+    await page.waitForSelector("#versions .version");
+    // The deletion left nothing to restore; the version it took away is restored.
+    expect(await texts(page, '[data-version="14:p"] .act')).toEqual([]);
+    await page.focus('[data-version="5:f"] [data-act="restore"]');
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, "#history-told p")).toEqual(["Restored old-forecast.xlsx."]);
+    expect(await texts(page, "#versions .what")).toEqual(["Restored by you", "Deleted by you", "Added by the thread Collect the sales data"]);
+    expect(await asked(client)).toEqual([["restore", "5:f", "old-forecast.xlsx"]]);
+    await page.click("#history-back");
+    await expect.poll(() => texts(page, "#files .path")).toContain("old-forecast.xlsx");
+    expect(await page.isVisible("#deleted")).toBe(false);
   });
 
   it("lists a deleted file under the Library's files, and opens its History as any file's", async () => {

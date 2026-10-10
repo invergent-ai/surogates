@@ -599,6 +599,50 @@ test("a version the agent cannot open says why in the agent's words, and nothing
   assert.deepEqual([down.saved, cut.saved], [[], []]);
 });
 
+test("a Restore is asked at its route and answers what it restored, what it left as it was and the edit it recorded first", async () => {
+  const { asked, routes } = routesOver(() => Response.json({
+    applied: ["threads/Draft A/A.docx"], picked_up: ["threads/Draft A/A.docx"],
+    skipped: [{ path: "b.md", by: { kind: "thread", thread_id: "t-2", title: "Draft B" } }, { path: "c.md", by: null }],
+  }));
+  assert.deepEqual(await routes.restore("p-1", { versionId: "12:f", path: "threads/Draft A/A.docx" }), {
+    applied: ["threads/Draft A/A.docx"], pickedUp: ["threads/Draft A/A.docx"],
+    skipped: [{ path: "b.md", by: { kind: "thread", threadId: "t-2", title: "Draft B" } }, { path: "c.md", by: null }],
+  });
+  // The version and the path are the body's, as they are: neither is any part of the address.
+  await routes.restore("p-1", { versionId: "../../sessions?x=1#y", path: "a b/c&d.md" });
+  assert.deepEqual(asked, [
+    ["POST", "/api/v1/workstreams/p-1/history/restore", { version: "12:f", path: "threads/Draft A/A.docx" }, "application/json"],
+    ["POST", "/api/v1/workstreams/p-1/history/restore", { version: "../../sessions?x=1#y", path: "a b/c&d.md" }, "application/json"],
+  ]);
+});
+
+test("a Restore's answer says only what this page knows: a field or someone it has no name for is left out, never the answer refused", async () => {
+  // As a server newer than this page may answer.
+  const { routes } = routesOver(() => Response.json({
+    applied: ["a.md"], picked_up: [], skipped: [{ path: "b.md", by: { kind: "agent", name: "Reviewer" }, why: "kept" }], said_later: true,
+  }));
+  assert.deepEqual(await routes.restore("p-1", { versionId: "1:f", path: "a.md" }), { applied: ["a.md"], pickedUp: [], skipped: [{ path: "b.md", by: null }] });
+});
+
+test("a Restore the agent refuses says why in the agent's words, and an answer that is not a Restore's is the route's own failure", async () => {
+  for (const [status, detail] of [
+    [409, "Your project's files are being saved right now. Try again in a moment."],
+    [409, "Nothing was changed. Report.docx is larger than Surogate can read here."],
+    [410, "This version is no longer kept in the project's history."],
+    [404, "This version deleted the file: there is nothing to restore."],
+    // A server from before Restore has no such route.
+    [404, "Not Found"],
+  ]) {
+    const { routes } = routesOver(() => Response.json({ detail }, { status }));
+    await assert.rejects(routes.restore("p-1", { versionId: "3:p", path: "a.md" }), { message: detail });
+  }
+  for (const body of [null, [], { applied: "a.md", skipped: [], picked_up: [] }, { applied: [1], skipped: [], picked_up: [] },
+    { applied: [], skipped: [{ by: null }], picked_up: [] }, { applied: [], skipped: [], picked_up: [null] }, { applied: [], picked_up: [] }]) {
+    const odd = routesOver(() => Response.json(body));
+    await assert.rejects(odd.routes.restore("p-1", { versionId: "3:p", path: "a.md" }), { message: "The version could not be restored." }, JSON.stringify(body));
+  }
+});
+
 test("a version is saved under its file's own name, which is a name and no more", () => {
   for (const [path, name] of [
     ["Report.docx", "Report.docx"],
