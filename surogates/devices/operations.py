@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from asyncpg.exceptions import InternalClientError
 from redis.asyncio import Redis
@@ -83,8 +83,8 @@ CANCELLED_OUTCOME: dict[str, Any] = {
 
 # A calling session in one of these records none of the agent's operations.  A
 # cancellation of it then cannot miss one recorded beside it.  The user's own
-# requests, and a thread's snapshots and landing, are refused only for a
-# deleted chat (see _check_session).
+# requests, and a thread's put-back of its copy and its landing, are refused
+# only for a deleted chat (see _check_session).
 _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
@@ -175,6 +175,19 @@ class OperationConflict(RuntimeError):
     """The same invocation and ordinal were recorded with a different request."""
 
 
+class LeaseLost(DeviceOperationError):
+    """Another worker holds the session's lease now: this one's operation, or its write, is refused.
+
+    No step failed.  Whoever is refused so stands its turn down where it
+    is, and writes nothing more: the worker that holds the lease goes on
+    from the journal.  *session_id* is the session whose lease it lost.
+    """
+
+    def __init__(self, session_id: UUID) -> None:
+        super().__init__("Another worker runs this session now")
+        self.session_id = session_id
+
+
 class TransferGone(DeviceOperationError):
     """A read's or a screenshot's recorded result names a transfer whose data is no longer kept."""
 
@@ -187,9 +200,10 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
 
     Returns whether the session is stopped for this request: for the agent's
     operations, paused, deleted or failed, or under a deleted root; for the
-    user's own request and for a thread's snapshots and landing, deleted, or
-    under a deleted root.  The rows stay locked FOR SHARE until the operation commits,
-    so a pause or a delete waits for the operation it must cancel.
+    user's own request and for a thread's put-back of its copy and its
+    landing, deleted, or under a deleted root.  The rows stay locked FOR
+    SHARE until the operation commits, so a pause or a delete waits for the
+    operation it must cancel.
     """
     rows = (await db.execute(
         select(
@@ -241,17 +255,25 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         # Recorded once its chat is deleted, for its computer to forget the folder.
         return False
     if request.invocation_id.startswith(REQUEST_PREFIX) or (
-        request.kind in THREAD_KINDS and not request.invocation_id.startswith(OPEN_PREFIX)
+        request.kind in THREAD_KINDS and not _starts_work(request)
     ):
         # The user's own look at the folder: a paused or failed chat's files
         # are still theirs to open.  A deleted chat's are not.  Nor are a
-        # thread's own snapshots and landing stopped with its turn, which no
-        # tool asks: a Stop pauses the thread before its turn hears of it,
-        # and what the turn must still do on its computer comes after, a
-        # snapshot put back or a landing finished.  A turn's open is new work,
-        # refused once the thread is stopped, so none outlives the Stop.
+        # thread's own put-back of its copy and its landing stopped with its
+        # turn, which no tool asks: a Stop pauses the thread before its turn
+        # hears of it, and what the turn must still do on its computer comes
+        # after, a snapshot put back or a landing finished.  A turn's open
+        # and a step's snapshot are new work, refused once the thread is
+        # stopped, so none outlives the Stop.
         return "archived" in (calling.status, root.status)
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
+
+
+def _starts_work(request: OperationRequest) -> bool:
+    """Whether one of a thread's own kinds is new work of its turn: the turn's open, or the snapshot a step starts from."""
+    return request.invocation_id.startswith(OPEN_PREFIX) or (
+        request.kind == "checkpoint" and request.args.get("action") == "take"
+    )
 
 
 def _its_own_turn(request: OperationRequest, root: dict[str, Any] | None) -> bool:
@@ -333,7 +355,7 @@ async def _check_lease(db: AsyncSession, request: OperationRequest) -> None:
         {"id": request.calling_session_id},
     )).scalar_one_or_none()
     if current is None or str(current) != request.lease_token:
-        raise DeviceOperationError("Another worker runs this session now")
+        raise LeaseLost(request.calling_session_id)
 
 
 async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device: Any) -> None:
@@ -484,15 +506,15 @@ class DeviceOperations:
         it, or at once if it already has.
 
         A new operation of the agent's from a stopped session (paused, deleted
-        or failed), a turn's open among them, or a new request of the user's
-        or a thread's snapshot or landing from a deleted one, raises "This
-        session was stopped" and records nothing.  A caller that is
-        stopped while it waits, or while its request is being recorded, closes
-        its own operation unless its turn is detached, handed to another
-        worker that carries the wait on, or it is *keep_open*: a request whose
-        HTTP wait ended before its computer answered, which the same request
-        joins again later.  The call returns, or raises, only after its wait's
-        subscription is closed.
+        or failed), a turn's open and a step's snapshot among them, or a new
+        request of the user's or a thread's put-back or landing from a
+        deleted one, raises "This session was stopped" and records nothing.
+        A caller that is stopped while it waits, or while its request is
+        being recorded, closes its own operation unless its turn is detached,
+        handed to another worker that carries the wait on, or it is
+        *keep_open*: a request whose HTTP wait ended before its computer
+        answered, which the same request joins again later.  The call
+        returns, or raises, only after its wait's subscription is closed.
         """
         waiter: asyncio.Future | None = None
         try:
@@ -1179,6 +1201,49 @@ class DeviceOperations:
             DeviceOperation.calling_session_id == calling_session_id,
             DeviceOperation.invocation_id == invocation_id,
         )
+
+    async def close_landing(self, calling_session_id: UUID, saga_id: str) -> list[tuple[str, dict[str, Any], dict[str, Any] | None]]:
+        """Close what a landing of a thread's left open on its computer; each of its operations, as the journal holds it then.
+
+        A landing's operations are those of the invocation its saga is named
+        after (``saga:<uuid5(thread, invocation)>``), whatever each says: its
+        first steps name no saga.  Each still open is cancelled first, so
+        that none of it runs when its computer is back, whoever asked it
+        last.  Then each, asked or answered, as ``(kind, args, outcome)`` in
+        the order asked: an outcome is its computer's word, and whoever reads
+        one checks it as an answer given now.
+        """
+        mine = (DeviceOperation.calling_session_id == calling_session_id, DeviceOperation.kind.in_(THREAD_KINDS))
+        async with self._sf() as db:
+            names = (await db.execute(
+                select(DeviceOperation.invocation_id).where(*mine, DeviceOperation.invocation_id.startswith("land:")).distinct()
+            )).scalars().all()
+        its = [name for name in names if f"saga:{uuid5(calling_session_id, name)}" == saga_id]
+        if not its:
+            return []
+        mine = (*mine, DeviceOperation.invocation_id.in_(its))
+        await self._cancel_where(*mine)
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(DeviceOperation.kind, DeviceOperation.args, DeviceOperation.outcome).where(*mine).order_by(DeviceOperation.ordinal)
+            )).all()
+        return [(row.kind, row.args, row.outcome) for row in rows]
+
+    async def settling(self, device_id: UUID, saga_id: str) -> bool:
+        """Whether a turn, any thread's, has asked the computer *device_id* a step of settling the landing *saga_id*.
+
+        A settle asks its steps under ``land:<turn>:settle:<saga>``: once it
+        asked one, the landing's own turn may not go on with it as its run
+        left it, since its own journal holds none of what the settle did.
+        """
+        async with self._sf() as db:
+            return (await db.execute(
+                select(DeviceOperation.id).where(
+                    DeviceOperation.device_id == device_id, DeviceOperation.kind.in_(THREAD_KINDS),
+                    DeviceOperation.invocation_id.startswith("land:"),
+                    DeviceOperation.invocation_id.endswith(f":settle:{saga_id}", autoescape=True),
+                ).limit(1)
+            )).first() is not None
 
     async def closed_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
         """Which of these operations of the device the server has closed.

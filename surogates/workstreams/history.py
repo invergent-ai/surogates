@@ -7,7 +7,10 @@ saga's durable record, written as the saga runs, so the next holder of the
 lock can finish or undo a landing whose worker died.  Its steps are written
 whole, so not at each: every five seconds, or every twenty times what a
 write of them takes when that is longer.  Between those writes a try of a
-step only marks the row alive.
+step only marks the row alive.  A landing on a computer holds no lock of
+the server's: its row is written only while its writer holds the lease of
+the thread it is of, so a worker that lost it writes nothing over the one
+that runs the thread now.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from itertools import islice
@@ -83,11 +86,26 @@ async def project_lock(
         await asyncio.sleep(LOCK_POLL)
 
 
+async def _holds(db: Any, held: tuple[UUID, str] | None) -> bool:
+    """Whether *held*, a session and a lease token, is that session's lease now; true where nothing is held.
+
+    The lease's row stays locked FOR SHARE until the write commits, so a
+    worker taking the session over waits for the write, then reads it.
+    """
+    if held is None:
+        return True
+    current = (await db.execute(
+        text("SELECT lease_token FROM session_leases WHERE session_id = :id FOR SHARE"), {"id": held[0]},
+    )).scalar_one_or_none()
+    return current is not None and str(current) == str(held[1])
+
+
 async def start_landing(
     session_factory: Any, saga: Saga, *, workstream_id: UUID | str, thread_id: UUID | None, agent_id: str,
     user_id: UUID | None, tool_saga_id: str | None, events: tuple[int, int] | None,
     kind: str = "landing", undoes: list[int] | None = None, device_id: UUID | None = None, folder: str | None = None,
-) -> int:
+    held: tuple[UUID, str] | None = None,
+) -> int | None:
     """The row of a landing about to take its first step, the saga ``running``; its id.
 
     *kind* is ``landing`` for a thread's.  A landing by you has no thread:
@@ -95,9 +113,13 @@ async def start_landing(
     written over, and ``restore`` or ``undo`` for the landing that follows;
     an Undo names the rows it *undoes*.  A landing in *folder* on the
     computer *device_id* names both (:mod:`surogates.harness.local_landing`);
-    neither, it is of the project's cloud files.
+    neither, it is of the project's cloud files.  With *held*, a session
+    and the lease token its writer holds it by, the row is made only while
+    that is the session's lease: None where it is not.
     """
     async with session_factory() as db, db.begin():
+        if not await _holds(db, held):
+            return None
         return (await db.execute(
             insert(WorkstreamHistory).values(
                 workstream_id=workstream_id, kind=kind, saga_id=saga.saga_id, saga_state="running",
@@ -121,8 +143,13 @@ async def landing_row(session_factory: Any, saga_id: str) -> WorkstreamHistory |
 async def save_landing(
     session_factory: Any, row: int, saga: Saga, *, state: str = "running",
     commit: str | None = None, files: list[dict] | None = None, picked_up: list[dict] | None = None,
-) -> None:
-    """Write the saga's steps as they are into its row, and its outcome once it has one."""
+    held: tuple[UUID, str] | None = None,
+) -> bool:
+    """Write the saga's steps as they are into its row, and its outcome once it has one; whether it was written.
+
+    With *held*, a session and the lease token its writer holds it by, only
+    while that is the session's lease.
+    """
     values: dict[str, Any] = {"steps": saga.to_dict()["steps"], "saga_state": state}
     if commit is not None:
         values["commit"] = commit
@@ -131,13 +158,22 @@ async def save_landing(
     if picked_up is not None:
         values["picked_up"] = picked_up
     async with session_factory() as db, db.begin():
+        if not await _holds(db, held):
+            return False
         await db.execute(update(WorkstreamHistory).where(WorkstreamHistory.id == row).values(**values))
+        return True
 
 
-async def drop_landing(session_factory: Any, row: int) -> None:
-    """Take away the row of a landing that changed no file: it is no change to the project's files."""
+async def drop_landing(session_factory: Any, row: int, *, held: tuple[UUID, str] | None = None) -> bool:
+    """Take away the row of a landing that changed no file: it is no change to the project's files; whether it was.
+
+    With *held*, only while that is the session's lease, as :func:`save_landing` writes.
+    """
     async with session_factory() as db, db.begin():
+        if not await _holds(db, held):
+            return False
         await db.execute(delete(WorkstreamHistory).where(WorkstreamHistory.id == row))
+        return True
 
 
 async def saved_through(session_factory: Any, thread_id: UUID) -> int | None:
@@ -180,10 +216,16 @@ async def record_pickup(
         )).scalar_one()
 
 
-async def touch_landing(session_factory: Any, row: int) -> None:
-    """Mark the row alive, its steps as they were: a try of a step is starting."""
+async def touch_landing(session_factory: Any, row: int, *, held: tuple[UUID, str] | None = None) -> bool:
+    """Mark the row alive, its steps as they were: a try of a step is starting; whether it was.
+
+    With *held*, only while that is the session's lease, as :func:`save_landing` writes.
+    """
     async with session_factory() as db, db.begin():
+        if not await _holds(db, held):
+            return False
         await db.execute(update(WorkstreamHistory).where(WorkstreamHistory.id == row).values(updated_at=func.now()))
+        return True
 
 
 async def running_landings(session_factory: Any, workstream_id: UUID | str) -> list[tuple[WorkstreamHistory, float]]:
@@ -204,6 +246,47 @@ async def running_landings(session_factory: Any, workstream_id: UUID | str) -> l
             .order_by(WorkstreamHistory.id)
         )
         return [(row, float(seconds)) for row, seconds in rows.all()]
+
+
+async def running_in(session_factory: Any, device_id: UUID, folder: str) -> list[WorkstreamHistory]:
+    """The landings of threads still ``running`` in *folder* on the computer *device_id*, whichever project's, oldest first.
+
+    Whether one is its turn's own to finish is not read here: whoever
+    settles it takes its thread's lease first, and so learns it.
+    """
+    async with session_factory() as db:
+        return list((await db.execute(
+            select(WorkstreamHistory)
+            .where(
+                WorkstreamHistory.device_id == device_id, WorkstreamHistory.folder == folder,
+                WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state == "running",
+            )
+            .order_by(WorkstreamHistory.id)
+        )).scalars())
+
+
+async def unforgotten_in(
+    session_factory: Any, device_id: UUID, folder: str, *, besides: Collection[str] = (), most: int,
+) -> list[WorkstreamHistory]:
+    """The landings ended in *folder* on the computer *device_id* that no forgetting let go yet, oldest first; *most* of them.
+
+    Recorded or put back whole, and with no step ``history.forget`` that
+    was answered: what the app kept of the files each replaced is still
+    kept.  One left ``escalated`` keeps it until a person settles it, and is
+    not among them; nor the sagas *besides*.
+    """
+    forgot = [{"tool_name": "history.forget", "state": "committed"}]
+    async with session_factory() as db:
+        return list((await db.execute(
+            select(WorkstreamHistory)
+            .where(
+                WorkstreamHistory.device_id == device_id, WorkstreamHistory.folder == folder,
+                WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state.in_(("completed", "compensated")),
+                ~WorkstreamHistory.steps.contains(forgot), WorkstreamHistory.saga_id.not_in(list(besides)),
+            )
+            .order_by(WorkstreamHistory.id)
+            .limit(most)
+        )).scalars())
 
 
 def saga_of(row: WorkstreamHistory) -> Saga:
