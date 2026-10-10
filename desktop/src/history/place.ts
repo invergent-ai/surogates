@@ -56,9 +56,11 @@ export interface Looked {
 export interface PlaceOptions {
   /**
    * Everything of this computer's that works in *place* lets it go, the sandbox last (VmManager.unplace):
-   * settled once it has. A place is renamed aside only after, and not at all where this rejects.
+   * settled once it has. A place is renamed aside only after, and not at all where this rejects. *store*
+   * is the inode of the place's folder in the app's data as this ask read it: the folder it renames, if
+   * that is still the one there, and no other made at its path since.
    */
-  letGo(place: Place): Promise<unknown>;
+  letGo(place: Place, store: number): Promise<unknown>;
   // How a folder is looked at, and how long the look may take; node's lstat and LOOK_MS unless a test says.
   look?(path: string): Promise<Looked>;
   lookMs?: number;
@@ -254,7 +256,7 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     if (!(await live(bound, options))) throw new FolderReplaced(`The folder ${bound.folder} is not the one this thread was bound to`);
     // The place as the sandbox may hold it: the recorded folder's, or this folder's where no record says.
     const was: Place = { key, history, real: recorded ? { path: recorded.path, dev: recorded.dev, ino: recorded.ino, boot: recorded.boot } : real };
-    if (there !== null) await options.letGo(was);
+    if (there !== null) await options.letGo(was, there);
     // Looked at again: while the folder was looked at and the sandbox let the place go, another thread of the
     // folder may have done all of this. From here to the place's making nothing waits.
     if ((lstatSync(history, { throwIfNoEntry: false })?.ino ?? null) !== there || textOf(record) !== text) continue;
