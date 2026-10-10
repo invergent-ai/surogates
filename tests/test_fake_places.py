@@ -122,7 +122,7 @@ class Twin:
         self.helper: Any = None
 
     def picture(self) -> dict[str, Any]:
-        """The folder and what is kept, entry by entry: kind, mode, size and bytes; and the kept files' names and the bytes of each that is a file a landing replaced."""
+        """The folder, entry by entry: kind, mode, size and bytes; and what is kept: each file's name, and a replaced file's mode and bytes."""
         seen: dict[str, Any] = {}
         for path in sorted(self.folder.rglob("*")):
             info = path.lstat()
@@ -205,7 +205,8 @@ def test_the_tests_computers_land_rules_answer_and_leave_the_folder_as_the_apps_
     assert both("a step that left no record", {"action": "unapply", "saga": saga, "step": 9, "path": "a.txt"}) == {
         "ok": {"path": "a.txt", "put_back": False},
     }
-    assert both("a deletion put back, its folders made again with their modes", {"action": "unapply", "saga": saga, "step": 2, "path": "old/deep/gone.md"})["ok"]["put_back"]
+    deletion = {"action": "unapply", "saga": saga, "step": 2, "path": "old/deep/gone.md"}
+    assert both("a deletion put back, its folders made again with their modes", deletion)["ok"]["put_back"]
     assert both("the forgetting", {"action": "forget", "saga": saga}) == {"ok": {}}
     # The next landing: a file you change after it was written is not put back, and what was kept stays kept.
     hold()
@@ -220,7 +221,8 @@ def test_the_tests_computers_land_rules_answer_and_leave_the_folder_as_the_apps_
     for twin in (real, fake):
         (twin.folder / "Plans" / "Q3.md").write_text("Q3 plan, by you\n")
     # Asked again as after a lost answer, a step whose file you changed since is not taken for done.
-    assert both("a step asked again over your change", apply(2, "Plans/Q3.md", b"Q3 plan\n", b"Q3 plan v2\n", expected="absent", saga_id=second))["error"]["type"] == "conflict"
+    again = apply(2, "Plans/Q3.md", b"Q3 plan\n", b"Q3 plan v2\n", expected="absent", saga_id=second)
+    assert both("a step asked again over your change", again)["error"]["type"] == "conflict"
     assert both("a put-back over your change", {"action": "unapply", "saga": second, "step": 2, "path": "Plans/Q3.md"})["error"]["type"] == "conflict"
     # A record the disk lost cannot be read: the forgetting is refused, and so it is at the next helper's start.
     for twin in (real, fake):

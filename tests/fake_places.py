@@ -10,9 +10,9 @@ on a place in a folder of the test's; the land kind is the file helper's rules
 (``desktop/src/files/land.ts``) in Python, which ``tests/test_fake_places.py``
 runs against the real helper, step by step.
 
-What this stands in for that is not built yet, as each unit's plan has it.
-Each is checked first by the switch's demo through the real app; a unit that
-settles one otherwise changes this file in the same pull request.
+What this stands in for that the app does not do yet, as it is to do it.
+Each is checked first through the real app; a change of the app's that
+settles one otherwise changes this file with it.
 
 - The bind: the app's binder takes a bind's ``history`` only for the chat's
   own root, and answers it ``{"ok": {"history": {"thread": <root>}}}``: it
@@ -84,11 +84,7 @@ BUSY = {"error": {"type": "busy", "message": "Another chat is working in this fo
 NOT_A_FORGETTING = {"error": {
     "type": "value", "message": "This is no answer of a folder's history to forgetting a landing, so what the landing kept was not forgotten",
 }}
-# As an app older than copies answers a kind it does not have (desktop/src/files/operations.ts).
-def cannot(kind: str) -> dict[str, Any]:
-    return {"error": {"type": "unsupported", "message": f"This computer cannot do '{kind}' yet"}}
-
-
+# The actions of each of a thread's kinds the app takes.
 ACTIONS = {
     "checkpoint": {"take", "restore"},
     "history": {"open", "changed", "fetch", "pickup", "commit", "record", "keep", "forget"},
@@ -96,6 +92,11 @@ ACTIONS = {
 }
 #: How long the folder is held for a landing with no step, as the app lets a landing's host idle.
 IDLE_S = 120.0
+
+
+def cannot(kind: str) -> dict[str, Any]:
+    """What an app older than copies answers a kind it does not have (desktop/src/files/operations.ts)."""
+    return {"error": {"type": "unsupported", "message": f"This computer cannot do '{kind}' yet"}}
 
 
 class Places:

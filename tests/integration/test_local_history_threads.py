@@ -279,7 +279,15 @@ async def test_none_of_a_threads_kinds_is_asked_for_a_session_that_is_not_a_thre
     await journal(api).bind(session_id=chat_id, device_id=UUID(device["id"]), folder=FOLDER, nonce=NONCE)
     chat = await api.app.state.session_store.get_session(chat_id)
     await answered_bind(api, chat, {"ok": None})
-    for session in (plain, chat):
+    # A chat marked as working in a copy of its own, though no thread: it binds so, and has none of a thread's kinds.
+    marked_id = await own_root(api, UUID(device["id"]))
+    store = api.app.state.session_store
+    marked = await store.get_session(marked_id)
+    await store.update_session_config_key(marked_id, "execution", {**marked.config["execution"], "history": {"thread": str(marked_id)}})
+    marked = await store.get_session(marked_id)
+    await bind_with_copy(api, marked)
+    await answered_bind(api, marked, {"ok": {"history": {"thread": str(marked_id)}}})
+    for session in (plain, chat, marked):
         assert await binding(api, session.id) == Binding("bound")
         for kind, action in EACH:
             with pytest.raises(ValueError, match=NOT_ITS_OWN):
@@ -470,13 +478,13 @@ async def test_a_threads_own_kinds_reach_its_folders_history_and_the_land_kind_a
     [[path, token]] = (await landing.land("revisions", paths=["Plans/Q4.md"]))["revisions"]
     assert (path, token) == ("Plans/Q4.md", "absent")
     picked = await landing.history("pickup", author={"name": "you", "email": "user:you@surogate"}, trailers=trailers)
-    turn = await landing.history("commit", author={"name": "Check the totals", "email": f"thread:{thread.id}@surogate"}, trailers=trailers, pickup=picked["commit"])
+    author = {"name": "Check the totals", "email": f"thread:{thread.id}@surogate"}
+    turn = await landing.history("commit", author=author, trailers=trailers, pickup=picked["commit"])
     [change] = turn["changes"]
     assert await landing.land("apply", saga=saga, step=0, expected=token, **change) == {**change, "made": []}
     assert (computer.folder / "Plans" / "Q4.md").read_text() == "Q4 plan\n"
     recorded = await landing.history(
-        "record", turn=turn["commit"], applied=[change], author={"name": "Check the totals", "email": f"thread:{thread.id}@surogate"},
-        trailers=trailers, main=picked["main"], pickup=picked["commit"],
+        "record", turn=turn["commit"], applied=[change], author=author, trailers=trailers, main=picked["main"], pickup=picked["commit"],
     )
     assert await landing.land("forget", saga=saga, applied=[change]) == {}
     assert computer.app.places.holder is None
