@@ -136,6 +136,7 @@ interface Served {
   refusal: string | null;
   unreachable: boolean;
   changed(id: string, threadId: string | null): void;
+  register(old?: boolean): void;
 }
 
 describe("the Overview pane", () => {
@@ -1121,3 +1122,173 @@ describe("an account's projects", () => {
     await page.waitForSelector(`#projects [data-project="${BUDGET}"]`);
   });
 });
+
+describe("a file's History in the Library", () => {
+  const REVENUE = "threads/revenue/revenue.xlsx";
+  // The fake page's source, to change what it serves from the test.
+  const served = (client: Page) => client.evaluateHandle(() => (window as unknown as { fakeProjects: Served }).fakeProjects);
+  const history = async (page: Page, path = REVENUE) => {
+    await page.click('[data-tab="library"]');
+    await page.click(`#files [data-file="${path}"]`);
+    await page.waitForSelector("#file-history:not([hidden])");
+  };
+
+  it("opens from its Library file, newest first, with who changed each version and when, and which are not merged or no longer kept", async () => {
+    const { page } = await opened();
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    expect(await page.isVisible("#files")).toBe(false);
+    expect(await page.textContent("#history-path")).toBe(REVENUE);
+    expect(await texts(page, "#versions .what")).toEqual([
+      "Changed by the thread Check the revenue figures", "Changed by you", "Changed by the thread Check the revenue figures",
+      "Added by the routine Nightly import",
+    ]);
+    expect(await texts(page, "#versions .from")).toEqual(["Not merged", "", "", "No longer kept"]);
+    expect(await texts(page, "#versions .age")).toEqual(["17m", "17m", "2h", "97d"]);
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    expect(await page.isVisible("#no-versions")).toBe(false);
+    await page.click("#history-back");
+    await expect.poll(() => page.isVisible("#files")).toBe(true);
+    expect(await page.isVisible("#file-history")).toBe(false);
+    // A file with no change recorded says so; one on a computer has its History there, and opens none here.
+    await history(page, "brief.docx");
+    await expect.poll(() => page.isVisible("#no-versions")).toBe(true);
+    expect(await page.textContent("#no-versions")).toBe("No change to this file is recorded yet.");
+    expect(await texts(page, "#versions .version")).toEqual([]);
+  });
+
+  it("is read again at the project's change, and goes with its project", async () => {
+    const { page, client } = await opened();
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await (await served(client)).evaluate((fake, [project, path]) => {
+      fake.data.history[project!]![path!]!.find((version) => version.id === "9:f")!.available = false;
+      fake.changed(project!, null);
+    }, [REPORT, REVENUE]);
+    await expect.poll(() => texts(page, '[data-version="9:f"] .from')).toEqual(["No longer kept"]);
+    // Another project has no History of this one's file to show.
+    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await expect.poll(() => page.textContent("#greeting-line")).toBe("Nothing is waiting on you.");
+    await page.click(`#projects [data-project="${REPORT}"] .project`);
+    await page.click('[data-tab="library"]');
+    await expect.poll(() => page.isVisible("#files")).toBe(true);
+    expect(await page.isVisible("#file-history")).toBe(false);
+  });
+
+  it("says in the agent's words why a project shows none, with the way back to its files", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake) => { fake.refusal = "History is off: this project has more than 50,000 files."; });
+    await history(page);
+    await expect.poll(() => page.textContent("#history-failure")).toBe("History is off: this project has more than 50,000 files.");
+    expect(await page.textContent("#history-path")).toBe(REVENUE);
+    expect(await page.isVisible("#no-versions")).toBe(false);
+    // Once the agent reads it, the reason goes.
+    await (await served(client)).evaluate((fake, project) => {
+      fake.refusal = null;
+      fake.changed(project, null);
+    }, REPORT);
+    await page.waitForSelector("#versions .version");
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    await page.click("#history-back");
+    await expect.poll(() => texts(page, "#files .path")).toContain(REVENUE);
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
+  it("says why an agent older than the app shows none, and its projects still serve", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake) => fake.register(true));
+    await expect.poll(() => texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["revenue.xlsx · not merged"]);
+    await history(page);
+    await expect.poll(() => page.textContent("#history-failure")).toBe("This agent cannot show a file's History yet");
+    await page.click("#history-back");
+    await expect.poll(() => texts(page, "#files .path")).toContain(REVENUE);
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
+  it("shows a name from the history as text, a thread as a thread whatever its title, and one it has no name for as a plain change", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake, [project, path]) => {
+      const [first] = fake.data.history[project!]![path!]!;
+      fake.data.history[project!]![path!] = [
+        { ...first!, id: "30:f", by: { kind: "thread", threadId: "t-9", title: '<img src=x onerror="document.title=1">\u202Eyou' }, merged: true },
+        { ...first!, id: "29:f", by: { kind: "thread", threadId: "t-8", title: "you" }, merged: true },
+        { ...first!, id: "28:p", by: { kind: "routine", name: "you\u200B" }, merged: true },
+        // As the page of an agent newer than the app may serve them.
+        { ...first!, id: "27:f", by: { kind: "agent", name: "Reviewer" } as never, change: "merged_by_hand" as never, merged: true },
+        { ...first!, id: "26:f", by: null, change: "deleted", merged: true },
+      ];
+    }, [REPORT, REVENUE]);
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    expect(await texts(page, "#versions .what")).toEqual([
+      'Changed by the thread <img src=x onerror="document.title=1">U+202Eyou', "Changed by the thread you", "Changed by the routine youU+200B",
+      "Changed", "Deleted",
+    ]);
+    expect(await page.$$eval("#versions img", (found) => found.length)).toBe(0);
+    expect(await page.title()).not.toBe("1");
+  });
+
+  it("opens from a waiting thread's row when a file of it did not merge, and reads the thread when none did", async () => {
+    const { shell, page, client } = await opened();
+    await (await served(client)).evaluate((fake, [project, thread]) => {
+      Object.assign(fake.data.threads[project!]!.find((found) => found.id === thread)!, {
+        reason: "files", statusLine: "Couldn't merge my changes to revenue.xlsx",
+      });
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => page.textContent(`[data-thread="${QUESTION}"] .status`)).toBe("Files · Couldn't merge my changes to revenue.xlsx");
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await page.waitForSelector("#versions .version");
+    expect(await page.textContent("#history-path")).toBe(REVENUE);
+    expect(await page.isVisible("#library")).toBe(true);
+    expect(await pane(shell)).toBeNull();
+    // A thread that waits over files with none left unmerged (its landing escalated) is read, as any other row.
+    await page.click("#history-back");
+    await page.click('[data-tab="threads"]');
+    await (await served(client)).evaluate((fake, [project, thread]) => {
+      const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
+      row.files = row.files.map((file) => ({ ...file, landing: "landed" as const }));
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["revenue.xlsx"]);
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
+  });
+
+  it("takes the keyboard to All files as it opens, keeps it there as the History is drawn again, and gives it back to the file's row", async () => {
+    const { shell, page } = await opened();
+    await page.click('[data-tab="library"]');
+    await page.focus(`#files [data-file="${REVENUE}"]`);
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#versions .version");
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe("history-back");
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    await page.waitForSelector("#versions .version");
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("history-back");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.file)).toBe(REVENUE);
+    // A Library file keeps the keyboard when the pane is drawn again.
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.file)).toBe(REVENUE);
+    expect(await page.getAttribute(`#files [data-file="${REVENUE}"]`, "aria-label")).toBe(`History of ${REVENUE}`);
+  });
+
+  it("opens no History of a file the open project does not list", async () => {
+    agent.projects!.library[REPORT]!.push({
+      path: "threads/tidy/notes.md", origin: "produced", threadId: FIXTURE_IDS.computer, size: null, updatedAt: null,
+      place: { kind: "device", deviceId: "d", deviceName: "thinkpad", online: false },
+    });
+    const { page } = await opened();
+    // A file on a computer has its History there: its row opens none.
+    await page.click('[data-tab="library"]');
+    expect(await page.$$eval("#files [data-file]", (found) => found.map((file) => (file as HTMLElement).dataset.file))).not.toContain("threads/tidy/notes.md");
+    // Asked past the page's own rows, as a page gone wrong might: that file, and a path of no file.
+    for (const path of ["threads/tidy/notes.md", "../other/secret.docx"]) {
+      const refused = await page.evaluate((asked) => (window as unknown as { surogateShell: { history(path: string): Promise<void> } })
+        .surogateShell.history(asked).then(() => null, (error: Error) => error.message), path);
+      expect(refused).toContain("No such file in the open project");
+    }
+    expect(await page.isVisible("#file-history")).toBe(false);
+  });
+});
+

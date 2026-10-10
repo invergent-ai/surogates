@@ -46,6 +46,7 @@ import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
 import { PreferencesStore } from "./preferences.js";
+import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
@@ -190,6 +191,8 @@ function pageIs(who: { orgId: string; userId: string }): boolean {
   return owner?.orgId === who.orgId && owner.userId === who.userId;
 }
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
+// The History of a file of the open project's Library, while the pane shows it.
+const fileHistory = new FileHistory(projects, () => changed());
 let served = false;
 // Settled once the page serves its projects: a project chosen while it loads waits for this.
 let serving = Promise.withResolvers<void>();
@@ -578,6 +581,8 @@ async function refreshProjects(threadId: string | null = null): Promise<void> {
         } else {
           for (const id of asked) await refreshThread(id!);
         }
+        // A History shown is read again: any change in the project may have changed its file.
+        await fileHistory.read();
         stale = false;
       } catch (error) {
         stale = true;
@@ -683,6 +688,8 @@ function remember(project: Project): void {
 }
 
 function show(next: View): void {
+  // A History is of the open project's file: it goes with the project.
+  if (next.kind !== "project" || view.kind !== "project" || next.id !== view.id) fileHistory.close();
   // The pane's transcript is the open project's: anything else the centre shows closes it, its own thread included.
   if (reading && !(next.kind === "project" && view.kind === "project" && next.id === view.id && next.thread?.id !== reading.id)) {
     reading = null;
@@ -1588,6 +1595,7 @@ function state() {
     account: sidebarAccount(),
     view,
     overview: view.kind === "project" && overview?.project.id === view.id ? overview : null,
+    history: view.kind === "project" ? fileHistory.shown : null,
     reading,
     projects: listed,
     failure,
@@ -2369,6 +2377,17 @@ function wire(window: MainWindow, page: string): void {
   };
   handle("shell:resolve", settle("resolve"));
   handle("shell:reopen", settle("reopen"));
+  // A file's History: of a file the open project lists among its cloud files, or among a cloud thread's.
+  handle("shell:history", (path) => {
+    const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
+    const listed = open && overview && (
+      overview.library.some((entry) => entry.path === path && entry.place.kind === "cloud")
+      || overview.threads.some((row) => row.place.kind === "cloud" && row.files.some((file) => file.kind === "file" && file.ref === path))
+    );
+    if (!open || typeof path !== "string" || !listed) throw new Error("No such file in the open project");
+    return fileHistory.open(open.id, path);
+  });
+  handle("shell:history-close", () => fileHistory.close());
   // Back and Forward move the web client; on the Projects page they leave it, for what the centre
   // showed before it, as the client still is there. A failure the choice cleared is drawn away.
   const move = (step: () => void) => {
