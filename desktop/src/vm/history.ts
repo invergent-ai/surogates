@@ -198,7 +198,10 @@ const ANSWERS: Record<string, Parse<unknown>> = {
   // found, and a pruning's cut hid where it would be. *missing*: those of the commits asked for that the
   // history does not hold, which no fetch can bring.
   fetch: fields({ main: idOrNull, landing: idOrNull, hidden: flag, packs: count, missing: list(id) }),
-  pickup: fields({ main: idOrNull, commit: idOrNull, picked_up: list(version), packs: count }),
+  // Your edits since main, committed on it: the first part of its files, and *more*, how many are left for the parts after
+  // it; each *picked* part is asked from the file the last one ended at, and says how many are left after it.
+  pickup: fields({ main: idOrNull, commit: idOrNull, picked_up: list(version), packs: count, more: count }),
+  picked: fields({ picked_up: list(version), more: count }),
   commit: turn,
   // *set_aside*: a snapshot of what the copy held beyond its turn, where making it the landing's files took that away.
   record: fields({ commit: id, set_aside: idOrNull }),

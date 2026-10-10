@@ -71,8 +71,14 @@ HONEST: dict[tuple[str, str], list[dict[str, Any]]] = {
         {"main": A, "landing": B, "hidden": True, "packs": 123_456, "missing": [C]},
     ],
     ("history", "pickup"): [
-        {"main": None, "commit": None, "picked_up": [], "packs": 0},
-        {"main": A, "commit": B, "picked_up": [VERSION, {"path": "new.md", "before": None, "after": C}], "packs": 7},
+        {"main": None, "commit": None, "picked_up": [], "packs": 0, "more": 0},
+        {"main": A, "commit": B, "picked_up": [VERSION, {"path": "new.md", "before": None, "after": C}], "packs": 7, "more": 0},
+        # Its first part, and how many of your edits are left for the parts after it.
+        {"main": A, "commit": B, "picked_up": [VERSION], "packs": 7, "more": 19_999},
+    ],
+    ("history", "picked"): [
+        {"picked_up": [{"path": "new.md", "before": None, "after": C}], "more": 0},
+        {"picked_up": [VERSION, {"path": "Reports/Q4.docx", "before": A, "after": None}], "more": 12_345},
     ],
     ("history", "commit"): [
         {"commit": None, "base": A, "changes": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": []},
@@ -168,13 +174,15 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("checkpoint", "take", {"hash": None}),
     ("history", "record", {"commit": "refs/heads/main; anything the computer likes", "set_aside": None}),
     ("history", "record", {"commit": A}),
-    ("history", "pickup", {"main": "--upload-pack=/x", "commit": None, "picked_up": [], "packs": 0}),
-    ("history", "pickup", {"main": A, "commit": None, "picked_up": [{"path": "a", "before": "HEAD", "after": None}], "packs": 0}),
+    ("history", "pickup", {"main": "--upload-pack=/x", "commit": None, "picked_up": [], "packs": 0, "more": 0}),
+    ("history", "pickup", {"main": A, "commit": None, "picked_up": [{"path": "a", "before": "HEAD", "after": None}], "packs": 0, "more": 0}),
+    ("history", "picked", {"picked_up": [{"path": "a", "before": A, "after": "main"}], "more": 0}),
     ("history", "commit", {**HONEST["history", "commit"][0], "base": None}),
     ("history", "fetch", {**HONEST["history", "fetch"][0], "missing": [A, "HEAD"]}),
     ("history", "open", {"copy": "kept", "set_asides": [A, 7]}),
     # A version that is not said is not "none".
-    ("history", "pickup", {"main": A, "commit": None, "picked_up": [{"path": "a", "after": None}], "packs": 0}),
+    ("history", "pickup", {"main": A, "commit": None, "picked_up": [{"path": "a", "after": None}], "packs": 0, "more": 0}),
+    ("history", "picked", {"picked_up": [{"path": "a", "before": A}], "more": 0}),
     ("history", "commit", {**HONEST["history", "commit"][0], "changes": [{"path": "a", "before": A}]}),
     ("land", "apply", {"path": "a.txt", "after": B, "made": []}),
     ("history", "fetch", {"landing": None, "hidden": False, "packs": 0, "missing": []}),
@@ -189,6 +197,7 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("history", "changed", {"paths": [""]}),
     ("history", "changed", {"paths": ["half a character \ud83d"]}),
     ("history", "changed", {"paths": ["x" * (MAX_PATH + 1)]}),
+    ("history", "picked", {"picked_up": [{"path": "../../.ssh/id_rsa", "before": None, "after": A}], "more": 0}),
     ("history", "changed", {"paths": "Report.docx"}),
     ("history", "changed", {"paths": [["Report.docx"]]}),
     ("history", "commit", {**HONEST["history", "commit"][0], "changes": [{"path": "..", "before": A, "after": B}]}),
@@ -207,10 +216,20 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("land", "recover", {**HONEST["land", "recover"][0], "unread": [["saga:1", -1, None]]}),
     ("land", "recover", {**HONEST["land", "recover"][0], "unread": [["saga:1", 0, "/etc/passwd"]]}),
     # A number, or a yes, that is none.
-    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": -1}),
-    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": True}),
-    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": 1.5}),
-    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": 2**80}),
+    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": -1, "more": 0}),
+    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": True, "more": 0}),
+    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": 1.5, "more": 0}),
+    ("history", "pickup", {"main": A, "commit": None, "picked_up": [], "packs": 2**80, "more": 0}),
+    # How many are left, said as no count, or not said.
+    ("history", "pickup", {"main": A, "commit": B, "picked_up": [VERSION], "packs": 0}),
+    ("history", "pickup", {"main": A, "commit": B, "picked_up": [VERSION], "packs": 0, "more": -1}),
+    ("history", "pickup", {"main": A, "commit": B, "picked_up": [VERSION], "packs": 0, "more": True}),
+    ("history", "pickup", {"main": A, "commit": B, "picked_up": [VERSION], "packs": 0, "more": 1.5}),
+    ("history", "pickup", {"main": A, "commit": B, "picked_up": [VERSION], "packs": 0, "more": "3"}),
+    ("history", "pickup", {"main": A, "commit": B, "picked_up": [VERSION], "packs": 0, "more": 2**80}),
+    ("history", "picked", {"picked_up": [VERSION]}),
+    ("history", "picked", {"picked_up": [VERSION], "more": None}),
+    ("history", "picked", {"picked_up": [VERSION], "more": -2}),
     ("history", "fetch", {**HONEST["history", "fetch"][0], "hidden": "no"}),
     ("history", "fetch", {**HONEST["history", "fetch"][0], "hidden": 0}),
     ("land", "unapply", {"path": "a.txt", "put_back": "yes"}),
@@ -227,6 +246,8 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("history", "changed", {"paths": ["a"] * (MAX_LISTED + 1)}),
     ("history", "changed", {"paths": ["a"] * 1_000_000}),
     ("history", "commit", {**HONEST["history", "commit"][0], "changes": [VERSION] * (MAX_LISTED + 1)}),
+    ("history", "picked", {"picked_up": [VERSION] * (MAX_LISTED + 1), "more": 0}),
+    ("history", "picked", {"picked_up": {"path": "a", "before": None, "after": A}, "more": 0}),
     ("land", "revisions", {"revisions": [["a.txt", "absent"]] * (MAX_LOOKED + 1)}),
     ("history", "open", {"copy": "kept", "set_aside_folders": [f"{ASIDE}.copy"] * (MAX_ASIDE + 1)}),
     ("history", "commit", {**HONEST["history", "commit"][0], "overlapped": [
@@ -1008,6 +1029,31 @@ def test_what_the_app_passes_on_of_the_folders_own_history_is_taken_whole_and_ea
         taken_whole(kind, action, passed, thread)
     commits = [passed["ok"] for (_, action, _, _, _), passed in zip(asked, said, strict=True) if action == "commit"]
     assert [entry["path"] for entry in commits[0]["overlapped"] if entry["reason"] == "protected"] == [".vscode/tasks.json"]
+
+
+@pytest.mark.desktop
+def test_each_part_of_a_pickup_the_app_passes_on_is_taken_whole_and_a_part_of_no_pickup_by_its_code(tmp_path, built_desktop, monkeypatch):
+    folder = Folder(tmp_path, ("Report.docx", b"PK report v1"))
+    one = str(uuid4())
+    folder.taken(one, "history", "open")
+    (folder.real / "Photos").mkdir()
+    for n in range(30):
+        (folder.real / "Photos" / f"IMG_{n:06d}.jpg").write_bytes(b"\xff\xd8 photo %d" % n)
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", 1_000)
+    trailers = [["Surogate-Saga", f"saga:{uuid4()}"], ["Surogate-Kind", "pickup"]]
+    asked = [("pickup", folder.run(one, "pickup", author={"name": "u1", "email": "user:u1@surogate"}, trailers=trailers))]
+    pickup, left = asked[0][1]["ok"]["commit"], asked[0][1]["ok"]["more"]
+    while left:
+        asked.append(("picked", folder.run(one, "picked", pickup=pickup, after=asked[-1][1]["ok"]["picked_up"][-1]["path"])))
+        left = asked[-1][1]["ok"]["more"]
+    asked.append(("picked", folder.run(one, "picked", pickup="f" * 40, after="Photos")))
+    said = the_app({"vm/history.js": ["checked"]}, "return given.map(([action, outcome]) => checked(action, outcome));", asked)
+    # The app passes each on as its guest's history gave it, and the server takes each whole: your edits in parts, then a refusal.
+    assert len(asked) > 3 and said == [outcome for _, outcome in asked]
+    for (action, _), passed in zip(asked, said, strict=True):
+        taken_whole("history", action, passed)
+    assert said[-1]["error"]["code"] == "not_a_request"
+    assert [entry["path"] for _, part in asked[:-1] for entry in part["ok"]["picked_up"]] == [f"Photos/IMG_{n:06d}.jpg" for n in range(30)]
 
 
 @pytest.mark.desktop

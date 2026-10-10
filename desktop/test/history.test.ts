@@ -490,7 +490,7 @@ describe("a request to a folder's history", () => {
 describe("what the guest answered, checked on this computer", () => {
   const version = { path: "Report.docx", before: BLOB, after: ID };
   const turn = { commit: ID, base: ID, changes: [], overlapped: [], excluded: [], repositories: [], not_taken: [] };
-  const picked = { main: null, commit: ID, picked_up: [], packs: 0 };
+  const picked = { main: null, commit: ID, picked_up: [], packs: 0, more: 0 };
   // Each action's answers, as the history gives them (local_history.py, _ACTIONS).
   const answers: Record<string, unknown[]> = {
     open: [{ copy: "made" }, { copy: "moved" }, { copy: "kept" }, { copy: "kept", set_asides: [BLOB, ID] }],
@@ -498,7 +498,12 @@ describe("what the guest answered, checked on this computer", () => {
     snapshot: [{ hash: ID }],
     restore: [{}],
     fetch: [{ main: ID, landing: BLOB, hidden: false, packs: 12, missing: [BLOB] }, { main: null, landing: null, hidden: true, packs: 0, missing: [] }],
-    pickup: [{ main: null, commit: ID, picked_up: [version], packs: 0 }, { main: ID, commit: null, picked_up: [], packs: 7 }],
+    // A pickup's first part of your edits, and how many are left for the parts after it, each asked from where the last ended.
+    pickup: [
+      { main: null, commit: ID, picked_up: [version], packs: 0, more: 0 }, { main: ID, commit: null, picked_up: [], packs: 7, more: 0 },
+      { main: ID, commit: ID, picked_up: [version], packs: 7, more: 19_999 },
+    ],
+    picked: [{ picked_up: [version], more: 0 }, { picked_up: [version, { path: "Reports/Q4.docx", before: BLOB, after: null }], more: 12_345 }],
     commit: [
       {
         commit: ID, base: ID, changes: [version, { path: "gone.txt", before: BLOB, after: null }, { path: "gone before.txt", before: null, after: null }],
@@ -524,8 +529,9 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("open", { ok: { history: "off", reason: "cap", planted: "x" } })).toEqual({ ok: { history: "off", reason: "cap" } });
     expect(checked("open", { ok: { history: "off", reason: "names" } })).toEqual({ ok: { history: "off", reason: "names" } });
     expect(checked("snapshot", { ok: { hash: ID, also: { deep: [1] } } })).toEqual({ ok: { hash: ID } });
-    expect(checked("pickup", { ok: { main: null, commit: null, picked_up: [{ ...version, mode: "100755" }], packs: 0 } }))
-      .toEqual({ ok: { main: null, commit: null, picked_up: [version], packs: 0 } });
+    expect(checked("pickup", { ok: { main: null, commit: null, picked_up: [{ ...version, mode: "100755" }], packs: 0, more: 0 } }))
+      .toEqual({ ok: { main: null, commit: null, picked_up: [version], packs: 0, more: 0 } });
+    expect(checked("picked", { ok: { picked_up: [{ ...version, mode: "100755" }], more: 3, pickup: ID } })).toEqual({ ok: { picked_up: [version], more: 3 } });
     expect(checked("fetch", { ok: { main: ID, landing: null, hidden: false, packs: 0, missing: [], has_saga: true } }))
       .toEqual({ ok: { main: ID, landing: null, hidden: false, packs: 0, missing: [] } });
     expect(checked("restore", { ok: { commit: ID } })).toEqual({ ok: {} });
@@ -680,6 +686,8 @@ describe("what the guest answered, checked on this computer", () => {
     ["pickup", { ...picked, picked_up: [{ path: "a/./b", before: null, after: ID }] }],
     ["pickup", { ...picked, picked_up: [{ path: "a\0b", before: null, after: ID }] }],
     ["pickup", { ...picked, picked_up: "all" }],
+    ["picked", { picked_up: [{ path: "../../.ssh/id_rsa", before: null, after: ID }], more: 0 }],
+    ["picked", { picked_up: [{ path: "a.txt", before: "HEAD", after: ID }], more: 0 }],
     ["changed", { paths: ["Report.docx", "../../.ssh/authorized_keys"] }],
     ["changed", { paths: { length: 1, 0: "Report.docx" } }],
     ["keep", { commit: ID, not_taken: ["../outside.txt"] }],
@@ -716,6 +724,15 @@ describe("what the guest answered, checked on this computer", () => {
     ["fetch", { main: ID, landing: null, hidden: false, packs: 1.5, missing: [] }],
     ["fetch", { main: ID, landing: null, hidden: false, packs: 2 ** 60, missing: [] }],
     ["fetch", { main: ID, landing: null, hidden: false, packs: "0", missing: [] }],
+    // How many of a pickup's files are left, said as no count, or not said.
+    ["pickup", { main: null, commit: ID, picked_up: [], packs: 0 }],
+    ["pickup", { ...picked, more: -1 }],
+    ["pickup", { ...picked, more: 1.5 }],
+    ["pickup", { ...picked, more: "3" }],
+    ["pickup", { ...picked, more: 2 ** 60 }],
+    ["picked", { picked_up: [version] }],
+    ["picked", { picked_up: [version], more: null }],
+    ["picked", { picked_up: version, more: 0 }],
     ["commit", { ...turn, overlapped: [{ path: "a", reason: "changed", before: null, after: ID, by: { kind: "root" } }] }],
     ["commit", { ...turn, overlapped: [{ path: "a", reason: "changed", before: null, after: ID, by: { kind: "thread", id: "t1" } }] }],
     ["commit", { ...turn, overlapped: [{ path: "a", reason: "changed", before: null, after: ID, by: { kind: "thread", id: "t1", title: "x".repeat(4_097) } }] }],
@@ -730,6 +747,7 @@ describe("what the guest answered, checked on this computer", () => {
     // More than any answer names.
     ["changed", { paths: Array<string>(1_000_000).fill("a.txt") }],
     ["commit", { ...turn, changes: Array<unknown>(50_001).fill({ path: "a.txt", before: null, after: ID }) }],
+    ["picked", { picked_up: Array<unknown>(50_001).fill({ path: "a.txt", before: null, after: ID }), more: 0 }],
     ["open", { copy: "kept", set_asides: Array<string>(50_001).fill(ID) }],
     // An action that is none of this computer's history.
     ["prune", { pruned: true }],
