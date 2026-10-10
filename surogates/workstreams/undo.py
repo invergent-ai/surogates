@@ -77,9 +77,20 @@ HALF = "Some files could not be put back as they were. Open a file's History to 
 WORKING = "Stop the thread to undo its changes."
 UNDONE = "This change was undone already."
 NO_CHANGE = "No such change."
-#: The most files one Undo puts back.  Each is a step of its own under the project's lock, its edit looked
-#: at first in one try of a step: past this many, a person waits longer than the page gives a landing.
-UNDO_MOST = 500
+#: How long an Undo may hold the project's lock, in ms: a person waits on it, and the page gives a landing two
+#: minutes, the wait for the lock among them; what is left is room for the files' bytes.
+LOCK_BUDGET_MS = 60_000
+#: A call of the cloud's store at its slowest that an Undo is planned for, and what else each file costs it under
+#: the lock (its version written out by git, its row marked alive), as measured on node1; in ms.
+CALL_MS = 40
+FILE_MS = 30
+#: The calls of the store an Undo makes under the lock.  Once an act: the history's refs and packs asked of
+#: by its look, its pickup and its record, and each push's pack, index and refs.  Once a file: the look's ask
+#: and read, the check's ask and read, and the write, or the delete with its asks before and after.
+CALLS_AN_ACT = 30
+CALLS_A_FILE = 7
+#: The most files one Undo puts back: all it does under the lock, at that call, within its time.
+UNDO_MOST = (LOCK_BUDGET_MS - CALLS_AN_ACT * CALL_MS) // (CALLS_A_FILE * CALL_MS + FILE_MS)
 #: The most files a refusal names: the rest it counts.
 _NAMED_MOST = 3
 CUT_SHORT = "This was cut short: the files are put back as they were when the project's files are next saved. Try again in a moment."
@@ -329,12 +340,14 @@ async def _act(
     refused: Refused | None = None
     try:
         async with project_lock(session_factory, project.id, patience=LOCK_PATIENCE) as held:
-            try:
-                answer = await _landed(
-                    state, place, project, user_id, you, audit, held, kind=kind, paths=paths, decide=decide, picked=picked,
-                )
-            except Refused as exc:
-                refused = exc
+            # The lock's holder alone moves the history: the copy is brought to it once, not once a file.
+            with place.steady():
+                try:
+                    answer = await _landed(
+                        state, place, project, user_id, you, audit, held, kind=kind, paths=paths, decide=decide, picked=picked,
+                    )
+                except Refused as exc:
+                    refused = exc
     except ProjectBusy as exc:
         raise Refused(BUSY) from exc
     except Exception as exc:

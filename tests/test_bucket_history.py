@@ -1778,6 +1778,50 @@ async def test_an_apply_and_its_record_land_on_main_and_the_next_pod_has_them(tm
     assert (a_pod(tmp_path, project).copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
 
 
+async def test_held_steady_the_copy_asks_the_bucket_of_the_history_once_and_what_moves_main_still_asks_afresh(
+    tmp_path, storage, project, monkeypatch,
+):
+    files = {f"part-{n}.md": f"{n} landed\n".encode() for n in range(3)}
+    landed(tmp_path, project, "saga:1", files)
+    landed(tmp_path, project, "saga:2", {"part-0.md": b"0 landed again\n"})
+    history = bucket(tmp_path, storage)
+    listed, asked, list_entries, exists = [], [], storage.list_entries, storage.exists
+
+    async def listing(bucket_name, prefix, **more):
+        listed.append(prefix.split("_history/")[-1] if "_history/" in prefix else "a file's folder")
+        return await list_entries(bucket_name, prefix, **more)
+
+    async def there(bucket_name, key):
+        asked.append(key)
+        return await exists(bucket_name, key)
+
+    monkeypatch.setattr(storage, "list_entries", listing)
+    monkeypatch.setattr(storage, "exists", there)
+    main = (await history.fetch())["main"]
+    # Not held steady, each step asks: as a request or another holder's settle does.
+    for path in files:
+        await history.recorded(main, [path])
+    assert listed.count("objects/pack/") == 1 + len(files)
+    listed.clear()
+    with history.steady():
+        now = await history.recorded(main, list(files))
+        # The first written back as it was, the others taken away.
+        applies = [await history.apply(path, now[path], blob_of(files[path]) if path == "part-0.md" else None) for path in files]
+        assert await history.held([now["part-1.md"], blob_of(b"never kept\n")]) == {now["part-1.md"]}
+        # Asked once in the block, by its first step; a file expected there is no question of folders.
+        assert (listed.count("objects/pack/"), listed.count("a file's folder")) == (1, 0)
+        # A file the real files are to take is asked of once, whatever asks.
+        assert await history.takes("new/deep.md") and await history.takes("new/deep.md")
+        assert (listed.count("a file's folder"), [key for key in asked if key.endswith("/new")]) == (1, [f"{PREFIX}new"])
+        await history.record(applied=applies, author=YOU, trailers=by_saga("saga:r", "restore"), main=main)
+        # The record moves main: it asks afresh.
+        assert listed.count("objects/pack/") == 2
+    # And once the block is left, every step asks again.
+    listed.clear()
+    await history.recorded(main, ["part-0.md"])
+    assert listed.count("objects/pack/") == 1
+
+
 async def test_a_version_the_history_already_holds_is_not_sent_to_the_bucket_again(tmp_path, storage, project):
     old = os.urandom(2**20)
     one = landed(tmp_path, project, "saga:1", {"Report.docx": old})

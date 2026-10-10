@@ -11,6 +11,8 @@ import fcntl
 import json
 import os
 import re
+import time
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
@@ -2709,3 +2711,57 @@ async def test_a_save_while_a_put_back_checks_a_file_the_undo_had_made_is_kept_a
     assert seen == [1] and (pods.project / "notes.txt").read_bytes() == SAVED
     assert (pods.project / "Report.docx").read_bytes() == REPORT_BY_A and undos_on_main(pods) == 0
     assert [r.saga_state for r in await rows_of(api, project)][-1] == "escalated"
+
+
+def calls_under_the_lock(monkeypatch) -> tuple[Counter, dict]:
+    """Each call of the store, by its kind, and how many of them, and how long, the project's lock was held for."""
+    calls: Counter = Counter()
+    for name in ("stat", "download", "upload", "delete", "exists", "list_entries", "read", "write"):
+        method = getattr(LocalBackend, name)
+
+        def counted(method=method, name=name):
+            async def run(self, *args, **more):
+                calls[name] += 1
+                return await method(self, *args, **more)
+            return run
+
+        monkeypatch.setattr(LocalBackend, name, counted())
+    held: dict = {}
+    lock = undo_module.project_lock
+
+    class Counted:
+        def __init__(self, *args, **more):
+            self.inner = lock(*args, **more)
+
+        async def __aenter__(self):
+            value = await self.inner.__aenter__()
+            held["began"], held["from"] = time.monotonic(), sum(calls.values())
+            return value
+
+        async def __aexit__(self, *exc):
+            held["seconds"], held["calls"] = time.monotonic() - held["began"], sum(calls.values()) - held["from"]
+            return await self.inner.__aexit__(*exc)
+
+    monkeypatch.setattr(undo_module, "project_lock", Counted)
+    return calls, held
+
+
+async def test_an_undo_asks_the_store_a_bounded_number_of_times_a_file_under_the_projects_lock(api, monkeypatch, tmp_path):
+    many = 40
+    project, thread, pods, pool, first = await a_landing(api, tmp_path, f"mkdir -p data && for i in $(seq 1 {many}); do echo v1 $i > data/f$i.txt; done")
+    await edited(pool, thread, f"for i in $(seq 1 {many}); do echo v2 $i >> data/f$i.txt; done")
+    await ends(api, pool, thread)
+    [_, second] = await rows(api, thread)
+    calls, held = calls_under_the_lock(monkeypatch)
+    # Each file written back as it was, then each taken away: what the copy holds of the history is asked once an act.
+    assert len((await undone(api, project, landing=str(second.id)))["applied"]) == many
+    assert held["calls"] <= undo_module.CALLS_AN_ACT + undo_module.CALLS_A_FILE * many, dict(calls)
+    calls.clear()
+    assert len((await undone(api, project, thread=str(thread.id)))["applied"]) == many
+    assert held["calls"] <= undo_module.CALLS_AN_ACT + undo_module.CALLS_A_FILE * many, dict(calls)
+    # So the most files an Undo takes keep the lock, at the slowest call of a store it is planned for, within its share
+    # of what the page gives a landing.
+    most = undo_module.UNDO_MOST
+    planned = (undo_module.CALLS_AN_ACT + undo_module.CALLS_A_FILE * most) * undo_module.CALL_MS + undo_module.FILE_MS * most
+    assert planned <= undo_module.LOCK_BUDGET_MS < (120 - undo_module.LOCK_PATIENCE) * 1000
+    assert planned + (undo_module.CALLS_A_FILE * undo_module.CALL_MS + undo_module.FILE_MS) > undo_module.LOCK_BUDGET_MS
