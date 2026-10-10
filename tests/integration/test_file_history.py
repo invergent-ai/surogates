@@ -2366,6 +2366,10 @@ async def test_undo_answers_only_its_owner_and_only_a_change_of_its_own_project(
     files = [{"path": "Report.docx", "before": blob_of(b"x"), "after": blob_of(b"y"), "merged": True}]
     running = await recorded(api, row, saga="saga:running", files=files, saga_state="'running'")
     theirs = await recorded(api, row, saga="saga:theirs", files=files, device_id="gen_random_uuid()")
+    async with api.app.state.session_factory() as db:
+        # Each as on main as the landing it was made like.
+        await db.execute(text("UPDATE workstream_history SET commit = :commit WHERE id = ANY(:ids)"), {"commit": row.commit, "ids": [picked, running, theirs]})
+        await db.commit()
     for made in (picked, running, theirs):
         assert (await undone(api, project, status=404, landing=str(made)))["detail"] == "No such change."
     assert acts == []
@@ -2389,6 +2393,24 @@ async def test_a_change_undone_already_is_not_undone_again(api, tmp_path):
     # Its version offers no Undo of it again; the other thread's does.
     [by_b, the_undo, by_a, _] = await history_of(api, project, "Report.docx")
     assert [(v["by"].get("title"), v["landing_id"] is not None) for v in (by_b, the_undo, by_a)] == [("Draft B", True), (None, True), ("Draft A", False)]
+
+
+async def test_a_change_put_back_while_an_undo_waited_for_the_projects_lock_is_not_undone_twice(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    await undone(api, project, landing=str(row.id))
+    other = await a_thread(api, "Draft B", await master_of(api, project))
+    await edited(pool, other, "printf ' by A' >> Report.docx")
+    await ends(api, pool, other)
+    # Asked before that Undo landed, this one read it as not undone yet: it is asked again under the lock.
+    read, asked = undo_module.undone_of, []
+
+    async def as_before_it_landed(*args, **more):
+        asked.append(args)
+        return frozenset() if len(asked) == 1 else await read(*args, **more)
+
+    monkeypatch.setattr(undo_module, "undone_of", as_before_it_landed)
+    assert (await undone(api, project, status=409, landing=str(row.id)))["detail"] == "This change was undone already."
+    assert len(asked) == 2 and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A and undos_on_main(pods) == 1
 
 
 async def test_the_stream_announces_an_undo_as_its_threads_and_one_of_no_thread_as_the_masters(api, monkeypatch, tmp_path):
