@@ -1,4 +1,4 @@
-"""A project's history as the api reaches it: through the storage backend.
+"""A project's history and its real files as the api reaches them: through the storage backend.
 
 The api has no mount of the project's files.  It reads the project's
 history, ``_history/`` in the bucket, as data, into a bare repository of
@@ -7,6 +7,15 @@ and ref checked as a pod checks them (``History._take``), and nothing else.
 Git runs only in that copy, under its own ``HEAD`` and config: a
 ``config``, ``HEAD`` or hook a thread's command wrote into the bucket never
 reaches it, and each pack's index is made here, never copied.
+
+It lands too, as a pod does: its actions are a pod's ``_history`` actions,
+called as a pod's are (:meth:`BucketHistory.execute`), so a landing by the
+user runs here as a thread's runs in its pod, and each settles what the
+other left running.  The real files are read and written through the
+backend, as the upload route writes them.  A commit is made of objects
+kept apart from the copy's own, and pushed as a pod pushes: a pack of what
+the bucket lacks, then ``packed-refs``.  The copy itself holds only what
+the bucket holds.
 
 The api is one process for every tenant, and a thread's command can write
 anything into its project's history.  So what a history costs the api is
@@ -31,6 +40,9 @@ bounded, whatever it holds:
   file a piece at a time.  The file is counted with the copy, within a
   bound of its own, and is gone once the version is sent, when who asked
   for it leaves first, and after a process that died with it;
+- a real file: it is read to such a file a piece at a time, to be told
+  from a version or kept as one, and a version is written to it from one,
+  each within a version's bound and gone as soon;
 - its patience: one request has a copy at a time, to bring it in or to ask
   it, and one that finds it held, or finds no turn for git, waits a few
   seconds, then is told to try again.
@@ -62,7 +74,22 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, TypeVar
 
-from surogates.sandbox.history import _ID, _PACKED, _REF, MAIN, HistoryError, _checked_id, _checked_ref, _environ, _replace
+from surogates.sandbox.history import (
+    _ID,
+    _PACKED,
+    _REF,
+    _ZERO,
+    MAIN,
+    HistoryConflict,
+    HistoryError,
+    _as,
+    _block,
+    _checked_id,
+    _checked_ref,
+    _environ,
+    _replace,
+    tracked,
+)
 from surogates.storage.backend import TooLarge
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams.history import REFS_BOUND
@@ -134,6 +161,13 @@ VERSION_TOO_LARGE = f"This version is larger {_HERE}"
 NOT_KEPT = "This version is no longer kept in the project's history."
 #: What a request is told when it waited its patience for a copy, or for a turn: nothing is wrong with the history.
 BUSY = "This project's history is being read just now. Try again in a moment."
+#: A landing's actions as a pod runs them, which this copy runs too, each by the method of its name.
+_ACTIONS = frozenset({"fetch", "pickup", "apply", "unapply", "record"})
+#: The most of ``main``'s own commits a look for a landing reads back through: far more than go over a
+#: landing left running, and what bounds the look whatever a command made of the history.
+_LOOKED_MOST = 10_000
+#: The most files one question of a commit's files names at once.
+_ASKED_AT_ONCE = 64
 #: What the copy notes of the bucket's refs: what the bucket said of each file when it was last read.
 _SEEN = "refs-seen"
 #: The copies this process is reading now, which nothing removes: a version on its way out of one counts
@@ -224,7 +258,7 @@ class Staged:
 
     def __init__(self, path: Path, held: int, size: int, clone: Path) -> None:
         self.size = size
-        self._held = held
+        self._path, self._held = path, held
         _use(clone)
         # Let go with its last hold too: one made and never sent keeps neither its file nor its copy.
         self._let_go = weakref.finalize(self, _let_go, path, held, clone)
@@ -331,6 +365,226 @@ class BucketHistory:
         """
         return (await self._brought([]))[0]
 
+    # ------------------------------------------------------------------
+    # As a pod: a landing's steps, its put-backs and its settling
+    # ------------------------------------------------------------------
+
+    async def execute(self, owner: str, name: str, input: str, *, timeout: float | None = None) -> str:
+        """A pod's ``_history`` command, run here: what a landing's steps, its put-backs and its settling call.
+
+        Answered as a pod answers: a step's result, or its ``error`` in words.
+        """
+        request = json.loads(input or "{}")
+        action = request.pop("action", None) if name == "_history" and isinstance(request, dict) else None
+        if action not in _ACTIONS:
+            return json.dumps({"error": f"Unknown history action: {action}"})
+        try:
+            return json.dumps(await getattr(self, action)(**request))
+        except (HistoryError, TypeError, OSError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    @_using
+    async def fetch(self, commits: Iterable[str] = (), saga: str | None = None, since: str | None = None) -> dict:
+        """``main`` in the bucket's history now, as a pod's look answers: ``{main, landing, hidden, packs, missing}``.
+
+        ``landing`` is the landing of *saga* among ``main``'s own commits,
+        looked for back to *since*, ``main`` as that landing began on it;
+        ``hidden`` says it was not found and may be where the look did not
+        reach.  The copy holds every commit the bucket does, so *commits*
+        need no fetch: ``missing`` are those of them the history lacks.  A
+        settle's look, as patient as a step: the step it settles may still
+        be at work in the copy.
+        """
+        wanted = [_checked_id(commit, "a fetch") for commit in commits]
+        if since is not None:
+            _checked_id(since, "a fetch")
+
+        async def look() -> dict:
+            main, _ = await self._current([])
+            missing = await self._lacked(wanted) if wanted and main is not None else wanted
+            landing, hidden = await self._landing_of(saga, main, since) if main is not None and saga else (None, False)
+            packs = await asyncio.to_thread(_packs, self.clone)
+            return {"main": main, "landing": landing, "hidden": hidden, "packs": packs, "missing": missing}
+
+        return await self._held(look, patient=True)
+
+    @_using
+    async def edits(self, paths: Iterable[str]) -> dict:
+        """What the real files at *paths* changed since ``main``: ``{main, picked_up}``, each ``{path, before, after}``.
+
+        Your edits to the files a landing by you is about to write, as its
+        pickup records them.  Only those files: the rest of your edits are
+        the next landing's to pick up.  Nothing of them is kept here: the
+        pickup reads each again.  ``main`` is the bucket's now, None before
+        the project's first landing, when no edit is told from it.
+        """
+        wanted = sorted(set(paths))
+        for path in wanted:
+            self._key(path)
+
+        async def look() -> dict:
+            main, _ = await self._current([])
+            if main is None:
+                return {"main": None, "picked_up": []}
+            recorded = await self._entries(main, wanted)
+            picked = []
+            for path in wanted:
+                before, after = recorded.get(path, (None, None))[1], await self._real(path)
+                if before != after:
+                    picked.append({"path": path, "before": before, "after": after})
+            return {"main": main, "picked_up": picked}
+
+        return await self._held(look)
+
+    @_using
+    async def pickup(self, *, main: str, picked_up: list[dict], author: dict[str, str], trailers: list[list[str]]) -> dict:
+        """Commit *picked_up* on *main*, by *author*, and push it: ``{main, commit, picked_up, packs}``, as a pod's pickup answers.
+
+        Your edits as :meth:`edits` told of them, recorded on ``main``
+        before a file of them is written over: a put-back, by any holder of
+        the project's lock, then finds the version it writes back in the
+        history.  Each file is read again as it is kept, and must still be
+        what was told of: one saved since is refused, and nothing is pushed.
+        Refused where ``main`` moved since *main*; safe to repeat, since a
+        pickup already pushed is found by its saga.
+        """
+        _checked_id(main, "a pickup")
+        self._changes(picked_up, "a pickup")
+        saga = _saga_of(trailers)
+
+        async def push() -> dict:
+            now, _ = await self._current([])
+            if now != main:
+                pushed = (await self._landing_of(saga, now, main))[0] if now is not None else None
+                if pushed is None:
+                    raise HistoryConflict("main moved in the project's history since the pickup began")
+                commit = pushed
+            else:
+                async with self._apart() as (scratch, new):
+                    for change in picked_up:
+                        if await self._real(change["path"], new) != change["after"]:
+                            raise HistoryConflict(f"{change['path']} changed while it was picked up")
+                    commit = await self._commit(main, picked_up, author, "Your changes", trailers, scratch, new)
+                    await self._push(commit, expect=main, scratch=scratch, new=new)
+            return {"main": main, "commit": commit, "picked_up": picked_up, "packs": await asyncio.to_thread(_packs, self.clone)}
+
+        return await self._held(push, patient=True)
+
+    @_using
+    async def apply(self, path: str, before: str | None, after: str | None) -> dict:
+        """Make the real file at *path* its version *after*, if it is still *before*: None is no file.
+
+        Safe to repeat: a real file that is already *after* is left as it
+        is.  A bucket has no folders of its own to make, so ``made`` is none.
+        """
+        self._changes([{"path": path, "before": before, "after": after}], "an apply")
+
+        async def write() -> dict:
+            kept = (await self._current([blob for blob in (before, after) if blob]))[1]
+            real = await self._real(path)
+            if real != after:
+                if real != before:
+                    raise HistoryConflict(f"{path} changed since the landing began")
+                await self._write(path, after, kept, there=real is not None)
+            return {"path": path, "before": before, "after": after, "made": []}
+
+        return await self._held(write, patient=True)
+
+    @_using
+    async def unapply(
+        self, path: str, before: str | None, after: str | None, *, ran: bool = True, made: Iterable[str] = (),
+    ) -> dict:
+        """Put back *path*'s version from before the landing, where the real file is still the landing's.
+
+        Safe to repeat: a real file that is already *before* is left as it
+        is.  A real file that is neither is someone else's change: a
+        conflict, unless the apply failed (*ran* false), and then it found
+        the file changed and wrote nothing.  A bucket has no folder of its
+        own to take away, so *made* is none of its to read.
+        """
+        self._changes([{"path": path, "before": before, "after": after}], "a put-back")
+
+        async def write() -> dict:
+            kept = (await self._current([blob for blob in (before, after) if blob]))[1]
+            real = await self._real(path)
+            if real != before:
+                if real == after:
+                    await self._write(path, before, kept, there=real is not None)
+                elif ran:
+                    raise HistoryConflict(f"{path} changed after the landing wrote it")
+            return {"path": path, "before": before, "after": after}
+
+        return await self._held(write, patient=True)
+
+    @_using
+    async def record(
+        self, *, applied: list[dict], author: dict[str, str], trailers: list[list[str]], main: str | None,
+    ) -> dict:
+        """Write the landing on ``main`` and push it, ``main``'s files with *applied*: the moment it counts.
+
+        Its one parent is *main*: a landing by the user has no thread's
+        turn to merge.  Refused where ``main`` moved since *main*; safe to
+        repeat, since a landing already pushed is found by its saga.
+        """
+        if main is not None:
+            _checked_id(main, "a record")
+        self._changes(applied, "a record")
+        saga, title = _saga_of(trailers), str(dict(map(tuple, trailers)).get("Surogate-Kind", "landing")).capitalize()
+
+        async def push() -> dict:
+            now, _ = await self._current([])
+            if now != main:
+                pushed = (await self._landing_of(saga, now, main))[0] if now is not None else None
+                if pushed is None:
+                    raise HistoryConflict("main moved in the project's history since the landing began")
+                return {"commit": pushed}
+            if main is None:
+                raise HistoryError("the project has no history yet for a landing to be recorded in")
+            async with self._apart() as (scratch, new):
+                commit = await self._commit(main, applied, author, title, trailers, scratch, new)
+                await self._push(commit, expect=main, scratch=scratch, new=new)
+            return {"commit": commit}
+
+        return await self._held(push, patient=True)
+
+    # ------------------------------------------------------------------
+    # The real files, and a commit's, for whoever lands here
+    # ------------------------------------------------------------------
+
+    @_using
+    async def real(self, path: str) -> str | None:
+        """The blob id of the real file at *path*, None when there is none.
+
+        The file goes to the api's disk a piece at a time and is hashed
+        there: one larger than a version may be is refused in words.
+        """
+        self._key(path)
+
+        async def read() -> str | None:
+            await self._current([])
+            return await self._real(path)
+
+        return await self._held(read)
+
+    @_using
+    async def recorded(self, main: str | None, path: str) -> str | None:
+        """The blob of *path* in the files of *main*, a commit of the history's; None when it has none there."""
+        self._key(path)
+        if main is None:
+            return None
+        _checked_id(main, "a commit")
+
+        async def read() -> str | None:
+            await self._current([])
+            return (await self._entries(main, [path])).get(path, (None, None))[1]
+
+        return await self._held(read)
+
+    @_using
+    async def takes(self, path: str) -> bool:
+        """Whether the real files can take a file at *path*: no folder is there, and no file where a folder of it would be."""
+        return await self._fits(self._key(path))
+
     def _brought(self, wanted: list[str]) -> Awaitable[tuple[str | None, dict[str, int]]]:
         """The copy brought to the bucket's history and asked which of *wanted* it holds, by a task its request does not end."""
         bringing = asyncio.ensure_future(self._bring(wanted))
@@ -370,22 +624,69 @@ class BucketHistory:
             size = (await self._current([blob]))[1].get(blob)
             if size is None:
                 raise NotKept(NOT_KEPT)
-            staged = Staged(*await asyncio.to_thread(_room_for, self.clone, size, self.bounds), size, self.clone)
+            return await self._written_out(blob, size)
+
+    async def _written_out(self, blob: str, size: int) -> Staged:
+        """The version *blob*, of *size* bytes, written out by git to a file of the copy's, which is this request's alone."""
+        staged = Staged(*await asyncio.to_thread(_room_for, self.clone, size, self.bounds), size, self.clone)
+        try:
+            await self._git(_BRINGING, _seconds(size), "cat-file", "blob", blob, into=staged._held)
+            if os.fstat(staged._held).st_size != size:
+                raise HistoryError("git cat-file wrote a version out at another size than the history holds it at")
+        except BaseException as exc:
+            await staged.gone()
+            # Past git's memory, or its seconds, it is a version larger than is read here: said as the bounds are.
+            if isinstance(exc, Slow) or (isinstance(exc, HistoryError) and said(exc) is not None):
+                raise HistoryError(VERSION_TOO_LARGE) from exc
+            raise
+        return staged
+
+    async def _held(self, work: Callable[[], Awaitable[T]], *, patient: bool = False) -> T:
+        """Run *work* with the copy this request's alone, to its end.
+
+        The copy is waited for as a request waits for one; a landing's
+        step is *patient*, and waits as long as its saga gives it, since
+        the step before it may still be at work there.  One that leaves
+        while it waits begins nothing.  Once it has the copy its work ends
+        in its own time, though its request leaves: what it began to write
+        is never left half made with the copy let go under it, and
+        whoever has the copy next finds what it wrote.
+        """
+        hold = _alone(self.clone, patient=patient)
+        await hold.__aenter__()
+
+        async def to_its_end() -> T:
             try:
-                await self._git(_BRINGING, _seconds(size), "cat-file", "blob", blob, into=staged._held)
-                if os.fstat(staged._held).st_size != size:
-                    raise HistoryError("git cat-file wrote a version out at another size than the history holds it at")
-            except BaseException as exc:
-                await staged.gone()
-                # Past git's memory, or its seconds, it is a version larger than is read here: said as the bounds are.
-                if isinstance(exc, Slow) or (isinstance(exc, HistoryError) and said(exc) is not None):
-                    raise HistoryError(VERSION_TOO_LARGE) from exc
-                raise
-            return staged
+                return await work()
+            finally:
+                await hold.__aexit__(None, None, None)
+
+        working = asyncio.ensure_future(to_its_end())
+        # One its request left is ended by no one: what it raises is then no one's to hear.
+        working.add_done_callback(lambda done: done.cancelled() or done.exception())
+        return await asyncio.shield(working)
 
     @property
     def _durable(self) -> str:
         return f"{self.prefix}_history/"
+
+    def _key(self, path: str) -> str:
+        """*path*'s key among the real files; refused where it is none of the project's files, which no landing writes."""
+        try:
+            path.encode()
+        except UnicodeEncodeError:
+            raise HistoryError("a path that cannot be written is not one of the project's files") from None
+        if not path or "\0" in path or any(part in ("", ".", "..") for part in path.split("/")) or not tracked(path):
+            raise HistoryError(f"{path} is not one of the project's files")
+        return f"{self.prefix}{path}"
+
+    def _changes(self, changes: list[dict], where: str) -> None:
+        """Refuse *changes*, each ``{path, before, after}``, unless each path is a file of the project's and each version an id."""
+        for change in changes:
+            self._key(change["path"])
+            for blob in (change.get("before"), change.get("after")):
+                if blob is not None:
+                    _checked_id(blob, where)
 
     async def _opened(self) -> None:
         """Make the copy's own repository, where there is none yet: bare, with no hook of any template's."""
@@ -409,14 +710,7 @@ class BucketHistory:
         read again: the copy has them, or the refusal they were met with,
         which is said again as it was.
         """
-        seen: dict[str, list | None] = {}
-        for name in ("packed-refs", "shallow"):
-            try:
-                of = await self.storage.stat(self.bucket, f"{self._durable}{name}")
-            except KeyError:
-                seen[name] = None
-            else:
-                seen[name] = [of["size"], str(of.get("modified")), of.get("etag")]
+        seen = await self._seen()
         if seen["packed-refs"] is None:
             return False, None
         note = self.clone / _SEEN
@@ -434,6 +728,18 @@ class BucketHistory:
             raise
         _replace(note, json.dumps({"seen": seen, "main": main}).encode())
         return True, main
+
+    async def _seen(self) -> dict[str, list | None]:
+        """What the bucket says of the history's ``packed-refs`` and ``shallow`` now: None for one it has not."""
+        seen: dict[str, list | None] = {}
+        for name in ("packed-refs", "shallow"):
+            try:
+                of = await self.storage.stat(self.bucket, f"{self._durable}{name}")
+            except KeyError:
+                seen[name] = None
+            else:
+                seen[name] = [of["size"], str(of.get("modified")), of.get("etag")]
+        return seen
 
     async def _read(self, seen: dict[str, list | None]) -> str | None:
         """Read the bucket's refs into the copy, each id and ref checked; its ``main``.  Refused past what a history's hold.
@@ -538,15 +844,213 @@ class BucketHistory:
         )
         return {blob: int(size) for blob, kind, size in (line.split() for line in out.splitlines() if " blob " in line)}
 
+    async def _lacked(self, commits: list[str]) -> list[str]:
+        """Those of *commits* the copy does not hold as commits."""
+        out = await self._git(
+            _READING, _READ_SECONDS, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+            input="".join(f"{commit}\n" for commit in commits).encode(),
+        )
+        have = {line.split()[0] for line in out.splitlines() if line.endswith(" commit")}
+        return [commit for commit in commits if commit not in have]
+
+    async def _landing_of(self, saga: str, main: str, since: str | None) -> tuple[str | None, bool]:
+        """The landing of *saga* among ``main``'s own commits back to *since*, and whether it may be where the look did not reach.
+
+        As a pod looks: by first parents alone, the newest commit that
+        carries the saga, its name whole as its trailer has it.  Not found,
+        it did not push where the look met *since*, or the first commit
+        ``main`` ever had.  Where the look ended at a pruning's cut
+        instead, or at the most commits a look reads, it may be behind.
+        """
+        out = await self._git(
+            _READING, _READ_SECONDS, "log", "--first-parent", f"--max-count={_LOOKED_MOST + 1}",
+            "--format=%H %(trailers:key=Surogate-Saga,valueonly,separator=%x2C)", "--end-of-options", main,
+        )
+        own = [line.partition(" ")[::2] for line in out.splitlines()]
+        for commit, carried in own[:_LOOKED_MOST]:
+            if carried == saga:
+                return commit, False
+            if commit == since:
+                return None, False
+        if len(own) > _LOOKED_MOST:
+            return None, True
+        return None, await asyncio.to_thread(_cut_at, self.clone / "shallow", own[-1][0])
+
+    async def _entries(self, commit: str, paths: list[str]) -> dict[str, tuple[str, str]]:
+        """Each of *paths* that is a file in *commit*'s files: its mode there, and its blob.
+
+        A path is asked of git as it is spelt, never as a pattern.
+        """
+        found: dict[str, tuple[str, str]] = {}
+        for at in range(0, len(paths), _ASKED_AT_ONCE):
+            asked = paths[at:at + _ASKED_AT_ONCE]
+            out = await self._git(_READING, _READ_SECONDS, "ls-tree", "-z", commit, "--", *asked)
+            for entry in out.split("\0"):
+                meta, _, path = entry.partition("\t")
+                if path in asked and meta.split()[1] == "blob":
+                    found[path] = (meta.split()[0], meta.split()[2])
+        return found
+
+    @contextlib.asynccontextmanager
+    async def _apart(self) -> AsyncIterator[tuple[Path, Path]]:
+        """A folder of the copy's for a commit on its way, and in it one for the objects it is made of; gone with the block.
+
+        Git writes the commit's objects there, apart from the copy's own:
+        so the copy holds only what the bucket holds, and what goes up is
+        what the bucket lacks.  Counted with the copy meanwhile, and
+        removed off the loop: a large file's bytes are among them.
+        """
+        scratch = Path(tempfile.mkdtemp(prefix="scratch-", dir=self.clone))
+        try:
+            new = scratch / "objects"
+            (new / "pack").mkdir(parents=True)
+            yield scratch, new
+        finally:
+            await asyncio.shield(asyncio.to_thread(shutil.rmtree, scratch, True))
+
+    @contextlib.asynccontextmanager
+    async def _on_its_way(self, size: int, *, beside: int = 0, too_large: str = VERSION_TOO_LARGE) -> AsyncIterator[Staged]:
+        """A file of the copy's for *size* bytes on their way to or from the real files; gone with the block, however it ends."""
+        made = await asyncio.to_thread(functools.partial(_room_for, self.clone, size, self.bounds, beside=beside, too_large=too_large))
+        staged = Staged(*made, size, self.clone)
+        try:
+            yield staged
+        finally:
+            await staged.gone()
+
+    async def _real(self, path: str, new: Path | None = None) -> str | None:
+        """The blob id of the real file at *path*, None when there is none; kept among the objects in *new*, when given.
+
+        The file goes to a file of the copy's a piece at a time, within
+        what a version may be and what the copy has room for, and is
+        hashed there: by the api, or by git as it keeps it.  History keeps
+        a file's bytes as they are.  One kept is counted twice on its way:
+        its object, then the pack that takes it to the bucket.
+        """
+        key = self._key(path)
+        try:
+            size = (await self.storage.stat(self.bucket, key))["size"]
+        except KeyError:
+            return None
+        async with self._on_its_way(size, beside=size if new else 0, too_large=f"{path} is larger {_HERE}") as staged:
+            try:
+                await self.storage.download(self.bucket, key, staged._path, limit=size)
+            except KeyError:
+                return None  # gone since it was asked of
+            except TooLarge as exc:
+                raise HistoryConflict(f"{path} changed while it was read") from exc
+            if new is None:
+                return await asyncio.to_thread(_blob_id, staged._path)
+            return await self._git(_BRINGING, _seconds(size), "hash-object", "-w", "--no-filters", "--", str(staged._path), new=new)
+
+    async def _write(self, path: str, blob: str | None, kept: dict[str, int], *, there: bool) -> None:
+        """Make the real file at *path* the version *blob*, one of *kept*, the versions the copy holds; take it away for None.
+
+        A version goes from the copy to the bucket through a file of the
+        copy's, a piece at a time.  A file is written where one is *there*
+        already, or where the real files can take one.
+        """
+        key = self._key(path)
+        if blob is None:
+            await self.storage.delete(self.bucket, key)
+            # A store may swallow a delete's failure: the landing must not record what did not happen.
+            if await self.storage.exists(self.bucket, key):
+                raise HistoryError(f"{path} could not be deleted")
+            return
+        if blob not in kept:
+            raise NotKept(NOT_KEPT)
+        if not there and not await self._fits(key):
+            raise HistoryConflict(f"{path} cannot be written: a folder is there, or a file where its folder would be")
+        staged = await self._written_out(blob, kept[blob])
+        try:
+            await self.storage.upload(self.bucket, key, staged._path)
+        finally:
+            await staged.gone()
+
+    async def _fits(self, key: str) -> bool:
+        """Whether the real files can take a file at *key*, as a landing asks before it writes one."""
+        if await self.storage.list_entries(self.bucket, f"{key}/", limit=1):
+            return False
+        folders = key[len(self.prefix):].split("/")[:-1]
+        for depth in range(1, len(folders) + 1):
+            if await self.storage.exists(self.bucket, f"{self.prefix}{'/'.join(folders[:depth])}"):
+                return False
+        return True
+
+    async def _commit(
+        self, parent: str, changes: list[dict], author: dict[str, str], title: str, trailers: list[list[str]],
+        scratch: Path, new: Path,
+    ) -> str:
+        """A commit on *parent*, by *author*, of its files with *changes*, each ``{path, after}``: None takes the file away.
+
+        Its objects go among those in *new*.  A file keeps the mode
+        *parent* has for its path, and is a plain file where it has none.
+        The paths reach git on its input, and the message too: a trailer
+        may hold any name.
+        """
+        index = scratch / "index"
+        modes = await self._entries(parent, [change["path"] for change in changes])
+        entries = "".join(
+            f"0 {_ZERO}\t{change['path']}\0" if change["after"] is None
+            else f"{modes.get(change['path'], ('100644',))[0]} {change['after']}\t{change['path']}\0"
+            for change in changes
+        )
+        await self._git(_READING, _READ_SECONDS, "read-tree", parent, index=index, new=new)
+        await self._git(_READING, _READ_SECONDS, "update-index", "-z", "--index-info", input=entries.encode(), index=index, new=new)
+        tree = await self._git(_READING, _READ_SECONDS, "write-tree", index=index, new=new)
+        message = f"{title}\n\n{_block(trailers)}\n".encode()
+        return await self._git(_READING, _READ_SECONDS, *_as(author), "commit-tree", tree, "-p", parent, "-F", "-", input=message, new=new)
+
+    async def _push(self, commit: str, *, expect: str, scratch: Path, new: Path) -> None:
+        """Make the bucket's ``main`` *commit*, where it is still *expect*: a pack of what the bucket lacks, then ``packed-refs``.
+
+        As a pod pushes.  The pack is made apart, of the objects in *new*
+        alone, and is the copy's too once the bucket has it.  Only the
+        holder of the project's lock pushes; a lock can be lost unseen, so
+        the bucket is asked of its refs again right before they are
+        written: a push that finds them moved while its pack went up writes
+        none of its own over them.  The rewrite of ``packed-refs`` is the
+        moment a push counts.
+        """
+        size = await asyncio.to_thread(_size, new)
+        # Counted before it is made: the pack is the copy's once it is the bucket's.
+        await asyncio.to_thread(_room, self.clone, size, self.bounds, TOO_LARGE)
+        outgoing = scratch / "outgoing"
+        outgoing.mkdir()
+        name = await self._git(
+            _BRINGING, _seconds(size), "-c", "pack.writeReverseIndex=false", "pack-objects", "--revs", "--local", "-q",
+            str(outgoing / "pack"), input=f"{commit}\n^{expect}\n".encode(), new=new,
+        )
+        if not _ID.fullmatch(name):
+            raise HistoryError("git pack-objects named no pack")
+        pack = self.clone / "objects" / "pack"
+        for kind in ("pack", "idx"):  # the index last: a pod reads a pack only through it
+            await self.storage.upload(self.bucket, f"{self._durable}objects/pack/pack-{name}.{kind}", outgoing / f"pack-{name}.{kind}")
+        for kind in ("pack", "idx"):
+            os.replace(outgoing / f"pack-{name}.{kind}", pack / f"pack-{name}.{kind}")
+        (pack / f"pack-{name}.bucket").touch()
+        if await self._seen() != _noted(self.clone / _SEEN).get("seen"):
+            raise HistoryConflict("the project's history moved while it was pushed")
+        refs = scratch / "packed-refs"
+        await asyncio.to_thread(_moved, self.clone / "packed-refs", refs, commit)
+        await self.storage.upload(self.bucket, f"{self._durable}packed-refs", refs)
+
     async def _git(
         self, turns: ThreadPoolExecutor, seconds: float, *args: str,
         input: bytes | None = None, objects: Path | None = None, into: int | None = None,
+        new: Path | None = None, index: Path | None = None,
     ) -> str:
         """Run git in the copy, over its objects or those in *objects*, in one of *turns* and within *seconds*.
 
-        Its output; none where it is written to the open file *into*.
+        Its output; none where it is written to the open file *into*.  With
+        *new*, it reads the copy's objects and writes its own to that
+        folder, apart; with *index*, that file is its index.
         """
         env = {"GIT_DIR": str(self.clone), **({"GIT_OBJECT_DIRECTORY": str(objects)} if objects else {})}
+        if new is not None:
+            env.update(GIT_OBJECT_DIRECTORY=str(new), GIT_ALTERNATE_OBJECT_DIRECTORIES=str(self.clone / "objects"))
+        if index is not None:
+            env["GIT_INDEX_FILE"] = str(index)
         out = await _child(
             turns, seconds, ["git", *_BOUNDED, *args], input=input, env=_environ(env), cwd=self.clone,
             stdout=subprocess.PIPE if into is None else into,
@@ -590,6 +1094,55 @@ async def _child(turns: ThreadPoolExecutor, seconds: float, command: list[str], 
     return result.stdout or b""
 
 
+def _saga_of(trailers: list[list[str]]) -> str:
+    """The saga a commit with *trailers* says it is of; refused when it names none."""
+    saga = dict(map(tuple, trailers)).get("Surogate-Saga")
+    if not saga:
+        raise HistoryError("a landing's commit names its saga")
+    return str(saga)
+
+
+def _blob_id(source: Path) -> str:
+    """The git blob id of the file *source*, read a piece at a time: history keeps a file's bytes as they are."""
+    with open(source, "rb") as file:
+        digest = hashlib.sha1(b"blob %d\0" % os.fstat(file.fileno()).st_size)
+        while piece := file.read(_PIECE):
+            digest.update(piece)
+    return digest.hexdigest()
+
+
+def _packs(clone: Path) -> int:
+    """The bytes of the copy *clone*'s packs: what a pruning's bound is sized from."""
+    total = 0
+    with contextlib.suppress(OSError), os.scandir(clone / "objects" / "pack") as found:
+        for entry in found:
+            if entry.name.endswith(".pack"):
+                with contextlib.suppress(OSError):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def _cut_at(shallow: Path, commit: str) -> bool:
+    """Whether the copy's *shallow* names *commit*: a pruning cut the history there."""
+    try:
+        with open(shallow, "rb") as cuts:
+            return any(line.strip() == commit.encode() for line in cuts)
+    except OSError:
+        return False
+
+
+def _moved(refs: Path, target: Path, main: str) -> None:
+    """Write to *target* the copy's ``packed-refs``, *refs*, with ``main`` at *main*: a line at a time, in the order it has."""
+    branch, moved = f" {MAIN}\n".encode(), False
+    with open(refs, "rb") as source, open(target, "wb") as out:
+        for raw in source:
+            if raw.endswith(branch) and len(raw) == 40 + len(branch):
+                raw, moved = main.encode() + branch, True
+            out.write(raw)
+    if not moved:
+        raise HistoryError("the project's history has no main to move")
+
+
 def _named(command: list[str]) -> str:
     """The git command *command* runs, past its settings."""
     words = iter(command[1:])
@@ -625,28 +1178,41 @@ def _unsent(written: asyncio.Future) -> None:
         asyncio.get_running_loop().run_in_executor(None, written.result().close)
 
 
-def _room_for(clone: Path, size: int, bounds: Bounds) -> tuple[Path, int]:
-    """A file of the copy *clone* for a version of *size* bytes to be written out to: its path, and its handle, locked.
+def _room(clone: Path, need: int, bounds: Bounds, too_large: str) -> None:
+    """Make sure the copy *clone* has room for *need* more bytes, with all else it holds.
 
-    Refused in words where the version is larger than one may be, or than
-    the copy has room for with all else it holds.  Told to try again where
-    the copy has room for it only once the versions on their way out of it
-    have gone.  Other copies make room for it as they do for a pack; and
-    where those left cannot go, in use or used just now, it waits for room
-    too: no version is written out past what the copies may hold together.
+    Refused in the words *too_large* where it has none.  Told to try
+    again where it has room for them only once the files on their way in
+    and out of it have gone.  Other copies make room for them as they do
+    for a pack; and where those left cannot go, in use or used just now,
+    it waits for room too: nothing is written past what the copies may
+    hold together.
     """
-    out = clone / _OUT
-    held, going = _size(clone), _size(out)
-    if size > bounds.file or held - going + size > min(bounds.packs, bounds.copies):
-        raise HistoryError(VERSION_TOO_LARGE)
-    if held + size > bounds.packs:
+    held, going = _size(clone), _size(clone / _OUT)
+    if held - going + need > min(bounds.packs, bounds.copies):
+        raise HistoryError(too_large)
+    if held + need > bounds.packs:
         raise Busy(BUSY)
     # With what the copies in use hold, which are removed for no one.
-    mine = held + size + sum(_size(other) for other in clone.parent.iterdir() if other != clone and _USING.get(other) and other.is_dir())
+    mine = held + need + sum(_size(other) for other in clone.parent.iterdir() if other != clone and _USING.get(other) and other.is_dir())
     others = _others(clone, bounds)
     _make_room(others, mine, bounds)
     if mine + sum(kept for _, _, kept in others) > bounds.copies:
         raise Busy(BUSY)
+
+
+def _room_for(clone: Path, size: int, bounds: Bounds, *, beside: int = 0, too_large: str = VERSION_TOO_LARGE) -> tuple[Path, int]:
+    """A file of the copy *clone* for *size* bytes on their way: its path, and its handle, locked.
+
+    A version of a file written out, or a real file read in.  Refused in
+    the words *too_large* where it is larger than a version may be, or
+    than the copy has room for with the *beside* bytes it brings with it
+    (:func:`_room`).
+    """
+    if size > bounds.file:
+        raise HistoryError(too_large)
+    _room(clone, size + beside, bounds, too_large)
+    out = clone / _OUT
     out.mkdir(exist_ok=True)
     path = out / os.urandom(8).hex()
     handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC, 0o600)
@@ -683,17 +1249,18 @@ def _lock_of(clone: Path) -> Path:
 
 
 @contextlib.asynccontextmanager
-async def _alone(clone: Path) -> AsyncIterator[None]:
+async def _alone(clone: Path, *, patient: bool = False) -> AsyncIterator[None]:
     """Hold the copy *clone* alone, among this process's requests and any other process's on this disk.
 
-    One that finds it held waits its patience, then is told to try again.
+    One that finds it held waits its patience, then is told to try again;
+    a *patient* one waits for as long as its caller does.
     """
     clone.parent.mkdir(parents=True, exist_ok=True)
     held = os.open(_lock_of(clone), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
     try:
-        until = time.monotonic() + _PATIENCE
+        until = None if patient else time.monotonic() + _PATIENCE
         while not _locked(held):
-            if time.monotonic() >= until:
+            if until is not None and time.monotonic() >= until:
                 raise Busy(BUSY)
             await asyncio.sleep(_LOCK_POLL)
         yield

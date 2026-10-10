@@ -38,7 +38,7 @@ LABEL org.opencontainers.image.title="surogates-api" \
 #   parsing.  ``libreoffice-core`` alone is not enough — without the
 #   format-specific filters (writer/calc/impress) the conversion fails.
 # git: a file's History asks the api's copy of a project's history which versions are still kept,
-#   and Open version has it write one out.
+#   Open version has it write one out, and Restore lands one, as a pod's git does.
 # imagemagick: liteparse uses ImageMagick to rasterise non-PDF image
 #   formats (tiff/webp/svg/etc.) before parsing.
 # tesseract-ocr + tesseract-ocr-eng: optional OCR backend for scanned
