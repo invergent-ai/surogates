@@ -5,7 +5,9 @@
 // operation. Behind SUROGATE_VM_TESTS=1: the image built by images/guest/build.sh, and npm run build and npm run
 // agent-disk first.
 
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +34,25 @@ const THREE = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
 // Enough files that a copy's making runs for some seconds: long enough to be cut part of the way.
 const FILES = 5_000;
 const data64 = (text: string) => Buffer.from(text).toString("base64");
+
+// A folder as it lies (as-it-lies.ts), and each name of it that came, went, or is not in every way as it was.
+type Lies = Record<string, unknown>;
+const differing = (before: Lies, after: Lies): string[] =>
+  [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((name) => JSON.stringify(before[name]) !== JSON.stringify(after[name])).sort();
+const up = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".");
+// The folders a file's coming or going shows in: the one it is in, and each above it down to one that was there.
+function above(path: string, before: Lies): string[] {
+  const folders: string[] = [];
+  for (let at = up(path); ; at = up(at)) {
+    folders.push(at);
+    if (before[at] !== undefined || at === ".") return folders;
+  }
+}
+interface Change {
+  path: string;
+  before: string | null;
+  after: string | null;
+}
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("threads on a folder, through the app's executor, each in its copy", { timeout: 300_000 }, () => {
   let dir: string;
@@ -213,6 +234,228 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("threads on a folder, thr
     expect(existsSync(`${copy}.making`)).toBe(false);
     expect(files(copy)).toEqual(files(large));
     expect(await command(THREE, "ls data | wc -l")).toMatchObject({ output: `${FILES}\n` });
+  });
+});
+
+// Two threads' turns on one folder, their steps and their landings as the server's worker asks them over the device link:
+// each under the invocation of its own the journal takes it under, through the app's executor, its hosts and its guest.
+// The folder is compared by every name, mode, time and byte around each step, with what the step may have changed.
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints and its landings, through the app's executor", { timeout: 300_000 }, () => {
+  const YOU = { name: "u1", email: "user:u1@surogate" };
+  const TITLES: Record<string, string> = { [ONE]: "Tidy the report", [TWO]: "Check the totals" };
+  const NOTHING_CUT = { restored: [], beside: [], lost: [], unread: [] };
+  let dir: string;
+  let data: string;
+  let folder: string;
+  let run: string;
+  let vm: VmClient;
+  let journal: OperationJournal;
+  let executor: VmExecutor;
+  let count = 0;
+  const starts: HostStart[] = [];
+  // How many landings' hosts were started, and how many of them have gone.
+  const landers = { started: 0, gone: 0 };
+
+  // One operation of *root*'s, as the device link delivers it under *invocation*; and around it, the folder: what is
+  // not as it was is what *may* names, by the folder as it was.
+  const operate = async (root: string, kind: string, args: Record<string, unknown>, invocation = "17", may: (before: Lies) => string[] = () => []) => {
+    count += 1;
+    const operation: Operation = { id: `${kind}-${count}`, sessionId: root, callingSessionId: root, invocationId: invocation, ordinal: count, kind, args, digest: "d" };
+    const before = asItLies(folder);
+    const outcome = await executor.run(operation, signal());
+    const changed = "ok" in outcome ? may(before).sort() : [];
+    expect(differing(before, asItLies(folder)), `what ${kind} ${String(args.action ?? "")} of ${root} changed in the folder`).toEqual(changed);
+    return outcome;
+  };
+  const did = async (root: string, kind: string, args: Record<string, unknown>, invocation?: string, may?: (before: Lies) => string[]) => {
+    const outcome = await operate(root, kind, args, invocation, may);
+    expect(outcome, `${kind} ${JSON.stringify(args).slice(0, 200)}`).toHaveProperty("ok");
+    return (outcome as { ok: Record<string, unknown> }).ok;
+  };
+  const key = (name: string) => join(folder, name);
+  const real = (name: string) => readFileSync(key(name), "utf8");
+  const copyOf = (root: string) => join(data, "history", keyOf(folder), "threads", root);
+  const kept = (...inside: string[]) => join(data, "landings", keyOf(folder), ...inside);
+  const command = (root: string, line: string) => did(root, "run", { command: line, workdir: null, timeout: 30 });
+  const write = (root: string, name: string, text: string, more: Record<string, unknown> = {}) => did(root, "write", { key: key(name), data: data64(text), ...more });
+
+  /**
+   * One landing of *root*'s turn *turn*, as the worker's saga asks it of this computer: the hold, the files the turn
+   * changed, the look at them in the folder, your edits picked up, the turn committed, each file applied at the revision
+   * the look saw, the landing recorded, and what it kept forgotten. An apply that is refused has each one before it put
+   * back, the newest first, and the landing forgotten without a record. A change with no version on either side is no
+   * apply's. The forgetting names every apply that was answered, by its step. *between* runs once the files to apply are
+   * fixed. Around each step, the folder changed where the step may change it, and nowhere else.
+   */
+  const landing = async (root: string, turn: string, between: () => void = () => {}) => {
+    const invocation = `land:${turn}`;
+    const saga = `saga-${root.slice(0, 8)}-${turn}`;
+    const trailers = [["Surogate-Saga", saga]];
+    const author = { name: TITLES[root] ?? root, email: `thread:${root}@surogate` };
+    const history = (action: string, args: Record<string, unknown> = {}) => did(root, "history", { action, ...args }, invocation);
+    const land = (action: string, args: Record<string, unknown>, may?: (before: Lies) => string[]) => operate(root, "land", { action, ...args }, invocation, may);
+    // A file's coming, going or replacing shows in it and in the folders above it, down to one that was there.
+    const where = (path: string) => (before: Lies) => [...above(path, before), path];
+    const recovered = (await land("recover", {}) as { ok: unknown }).ok;
+    const { paths } = await history("changed") as { paths: string[] };
+    const seen = Object.fromEntries(((await land("revisions", { paths }) as { ok: { revisions: Array<[string, string]> } }).ok.revisions));
+    const picked = await history("pickup", { author: YOU, trailers });
+    const committed = await history("commit", { author, trailers, pickup: picked.commit });
+    const changes = committed.changes as Change[];
+    between();
+    const applied: Array<Change & { step: number }> = [];
+    let failed: { type: string; message: string } | null = null;
+    for (const [step, change] of changes.entries()) {
+      if (change.before === null && change.after === null) continue;
+      const outcome = await land("apply", { saga, step, ...change, expected: seen[change.path] }, where(change.path));
+      if ("error" in outcome) {
+        failed = outcome.error;
+        break;
+      }
+      applied.push({ step, ...change });
+    }
+    const putBack: unknown[] = [];
+    for (const { step, path } of failed ? [...applied].reverse() : []) {
+      putBack.push((await land("unapply", { saga, step, path }, where(path)) as { ok: unknown }).ok);
+    }
+    const recorded = failed || committed.commit === null ? null : await history("record", {
+      turn: committed.commit, applied: changes, author, trailers, main: picked.main, pickup: picked.commit,
+    });
+    expect(await land("forget", { saga, applied })).toEqual({ ok: {} });
+    expect(existsSync(kept(saga))).toBe(false);
+    // Forgotten, the landing is over: its host lets the folder go at once, not once idle.
+    await until(() => landers.gone === landers.started, 15_000);
+    return { state: failed ? "compensated" as const : "completed" as const, failed, recovered, picked, committed, changes, putBack, recorded };
+  };
+
+  beforeAll(async () => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-threads-land-")));
+    data = join(dir, "data");
+    folder = join(dir, "Documents");
+    mkdirSync(join(folder, "notes"), { recursive: true });
+    writeFileSync(key("Report.md"), "# Report\n\nTotals: 40\n");
+    writeFileSync(key("Budget.csv"), "item,cost\nrent,40\n");
+    writeFileSync(key("notes/keep.txt"), "kept as it is\n");
+    // A mode of its user's own: a landing that replaces the file leaves it the mode it had.
+    chmodSync(key("Budget.csv"), 0o600);
+    run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
+    vm = new VmClient({
+      vm: {
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        run, console: join(dir, "console.log"), user: USER, kvm: KVM,
+      },
+    });
+    journal = new OperationJournal(join(dir, "journal.sqlite"));
+    for (const root of [ONE, TWO]) {
+      const { dev, ino } = statSync(folder);
+      journal.bindings.add({ root, nonce: `nonce-${root}`, folder, dev, ino, boot: BOOT_ID, mode: "free", boundAt: Date.now(), history: root });
+    }
+    executor = new VmExecutor({
+      bindingOf: (root) => journal.bindings.get(root), dataDir: data, cacheDir: join(dir, "cache", "surogate"),
+      env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 60_000, user: "u1",
+      spawnHost: () => {
+        const host = forkHost();
+        let lands = false;
+        host.onExit(() => {
+          if (lands) landers.gone += 1;
+        });
+        return {
+          ...host,
+          send: (message) => {
+            if (message.type === "start") {
+              starts.push(message);
+              lands = message.landing !== undefined;
+              if (lands) landers.started += 1;
+            }
+            host.send(message);
+          },
+        };
+      },
+      vm: {
+        perform: (operation, stop) => vm.perform(operation, stop), teardown: (root) => vm.teardown(root), onProcesses: (listener) => vm.onProcesses(listener),
+        onAsk: (listener) => vm.onAsk(listener), history: (request, stop) => vm.history(request, stop), unplace: (place) => vm.unplace(place),
+      },
+    });
+  });
+
+  afterAll(async () => {
+    await executor?.stop();
+    await vm?.stop();
+    journal?.close();
+    if (run) rmSync(run, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("take back a stopped step in the thread's copy alone, to the snapshot taken before it", async () => {
+    expect(await Promise.all([did(ONE, "history", { action: "open" }, "open:t1"), did(TWO, "history", { action: "open" }, "open:t1")])).toEqual([
+      { copy: "made" }, { copy: "made" },
+    ]);
+    // The first thread's step, its snapshot taken before it.
+    expect((await did(ONE, "checkpoint", { action: "take", reason: "before write_file" }, "checkpoint:t1:1:call-1")).hash).toMatch(/^[0-9a-f]{40}$/);
+    expect(await write(ONE, "Report.md", "# Report\n\nTotals: 40\n\nTidied by A.\n")).toBeNull();
+    await command(ONE, "echo 'notes of A' > A.md");
+    // A step stopped part-way: what it made and what it changed are taken back, by its snapshot, in the copy.
+    const { hash } = await did(ONE, "checkpoint", { action: "take", reason: "before terminal" }, "checkpoint:t1:2:call-2");
+    await command(ONE, "mkdir junk && echo x > junk/x; echo half > scratch.txt; sed -i 's/Tidied/Ruined/' Report.md");
+    expect(await did(ONE, "checkpoint", { action: "restore", hash }, `checkpoint:t1:restore:${String(hash)}`)).toEqual({});
+    expect(await command(ONE, "ls; cat Report.md")).toMatchObject({ output: "A.md\nBudget.csv\nReport.md\nnotes\n# Report\n\nTotals: 40\n\nTidied by A.\n" });
+    // A snapshot from before is no turn of the other thread's: its copy is its own.
+    await write(TWO, "Report.md", "# Report\n\nTotals: 42\n");
+    await command(TWO, "printf 'item,cost\\nrent,42\\n' > Budget.csv; echo 'notes of B' > B.md");
+    expect(readdirSync(folder).sort()).toEqual(["Budget.csv", "Report.md", "notes"]);
+  });
+
+  it("land one thread's turn in the folder, and leave the other's copy as it was until its next turn", async () => {
+    const first = await landing(ONE, "t1");
+    expect([first.state, first.recovered, first.changes.map((change) => change.path)]).toEqual(["completed", NOTHING_CUT, ["A.md", "Report.md"]]);
+    expect(first.recorded).toMatchObject({ commit: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    expect([real("Report.md"), real("A.md")]).toEqual(["# Report\n\nTotals: 40\n\nTidied by A.\n", "notes of A\n"]);
+    expect(await command(TWO, "cat Report.md")).toMatchObject({ output: "# Report\n\nTotals: 42\n" });
+    // The landing's host was on the folder itself, given the thread's copy to read.
+    expect(starts.filter((start) => start.landing).map((start) => [start.folder, start.landing?.copy])).toEqual([[folder, copyOf(ONE)]]);
+  });
+
+  it("never overwrite a file you save while a landing runs: the landing is put back whole, and it names the file the other thread changed", async () => {
+    const cut = await landing(TWO, "t1", () => writeFileSync(key("Budget.csv"), "item,cost\nrent,40\npower,5\n"));
+    expect(cut).toMatchObject({
+      state: "compensated", failed: { type: "conflict", message: "Budget.csv changed in the folder while this landing ran, so it was not replaced" },
+    });
+    expect([cut.changes.map((change) => change.path), cut.putBack]).toEqual([["B.md", "Budget.csv"], [{ path: "B.md", put_back: true }]]);
+    expect(cut.committed.overlapped).toEqual([
+      expect.objectContaining({ path: "Report.md", reason: "changed", by: { kind: "thread", id: ONE, title: "Tidy the report" } }),
+    ]);
+    expect([real("Budget.csv"), statSync(key("Budget.csv")).mode & 0o777]).toEqual(["item,cost\nrent,40\npower,5\n", 0o600]);
+    expect(readdirSync(folder).sort()).toEqual(["A.md", "Budget.csv", "Report.md", "notes"]);
+  });
+
+  it("land again as a new landing, which names your save and the other thread's change, and leaves both files as they are", async () => {
+    const again = await landing(TWO, "t1-again");
+    expect([again.state, again.changes.map((change) => change.path)]).toEqual(["completed", ["B.md"]]);
+    expect(again.picked.picked_up).toEqual([expect.objectContaining({ path: "Budget.csv" })]);
+    expect(again.committed.overlapped).toEqual([
+      expect.objectContaining({ path: "Budget.csv", reason: "changed", by: { kind: "you" } }),
+      expect.objectContaining({ path: "Report.md", reason: "changed", by: { kind: "thread", id: ONE, title: "Tidy the report" } }),
+    ]);
+    expect([real("B.md"), real("Budget.csv"), real("Report.md")]).toEqual(["notes of B\n", "item,cost\nrent,40\npower,5\n", "# Report\n\nTotals: 40\n\nTidied by A.\n"]);
+  });
+
+  it("redo the second thread's change on the newer files at its next turn, and both threads' changes reach the folder", async () => {
+    expect(await did(TWO, "history", { action: "open" }, "open:t2")).toEqual({ copy: "moved" });
+    expect(await command(TWO, "cat Report.md Budget.csv")).toMatchObject({ output: "# Report\n\nTotals: 40\n\nTidied by A.\nitem,cost\nrent,40\npower,5\n" });
+    // By its file tools, on the version it now reads; and by a command.
+    const { revision } = await did(TWO, "stat", { key: key("Report.md") });
+    expect(await write(TWO, "Report.md", "# Report\n\nTotals: 47\n\nTidied by A.\n", { expected_revision: revision })).toBeNull();
+    await command(TWO, "sed -i 's/rent,40/rent,42/' Budget.csv");
+    const redone = await landing(TWO, "t2");
+    expect([redone.state, redone.committed.overlapped, redone.changes.map((change) => change.path)]).toEqual(["completed", [], ["Budget.csv", "Report.md"]]);
+    expect([real("Report.md"), real("Budget.csv"), statSync(key("Budget.csv")).mode & 0o777]).toEqual([
+      "# Report\n\nTotals: 47\n\nTidied by A.\n", "item,cost\nrent,42\npower,5\n", 0o600,
+    ]);
+    // And the first thread's next turn starts from all of it.
+    expect(await did(ONE, "history", { action: "open" }, "open:t2")).toEqual({ copy: "moved" });
+    expect(await did(ONE, "read", { key: key("Report.md"), max_bytes: null })).toEqual(data64("# Report\n\nTotals: 47\n\nTidied by A.\n"));
+    expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Budget.csv", "Report.md", "notes"]);
+    expect(existsSync(kept()) ? readdirSync(kept()) : []).toEqual([]);
   });
 });
 
