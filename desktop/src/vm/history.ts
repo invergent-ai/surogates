@@ -55,6 +55,9 @@ export const NOT_A_REQUEST: Outcome = { error: { type: "value", message: "This r
 const REFUSED: Outcome = {
   error: { type: "history", code: "not_an_answer", message: "This computer's sandbox answered what is not a history's answer, so it was not used" },
 };
+const NOT_A_FORGETTING: Outcome = {
+  error: { type: "value", message: "This is no answer of a folder's history to forgetting a landing, so what the landing kept was not forgotten" },
+};
 
 // The longest path Linux takes, and the most files one answer names: a folder with more has no history.
 const PATH_UNITS = 4_096;
@@ -146,6 +149,9 @@ const turn: Parse<unknown> = (value) => {
   return { ...answer, changes: answer.changes.filter((change: Version) => landable(change.path)), overlapped: overlapped.sort((a, b) => (a.path < b.path ? -1 : 1)) };
 };
 
+// The landing where main holds it, recorded; null where each file it applied is in the folder as it was before.
+const forgetting = fields({ landing: idOrNull });
+
 // Each action's answer (local_history.py's _ACTIONS).
 const ANSWERS: Record<string, Parse<unknown>> = {
   // *set_asides*: the snapshots of what the copy held of its own when a record or a move made it other files,
@@ -168,8 +174,7 @@ const ANSWERS: Record<string, Parse<unknown>> = {
   record: fields({ commit: id, set_aside: idOrNull }),
   // A kept turn: its commit, and the helpers' files its copy left as it had them, as a turn's commit names them.
   keep: fields({ commit: id, not_taken: list(path) }),
-  // The landing where main holds it, recorded; null where each file it applied is in the folder as it was before.
-  forget: fields({ landing: idOrNull }),
+  forget: forgetting,
 };
 
 function taken(action: string, outcome: unknown): Outcome {
@@ -206,4 +211,23 @@ export function checked(action: string, outcome: unknown): Outcome {
     // Only what is no data at all can throw when it is read: no line of the control port parses to it.
     return REFUSED;
   }
+}
+
+/**
+ * Whether what a landing kept of the folder's files may be forgotten, by the history's answer to
+ * `forget` for the landing's saga and the files it applied, as checked() gave it. The file helper
+ * keeps each file a landing replaces for its put-back, and forgets them on its caller's word
+ * (files/land.ts): it cannot tell whether the landing was recorded. The history can. Null where
+ * they may go: the history holds the landing, so each replaced file is a version under it, or each
+ * file the landing applied is in the folder as it was before. Otherwise the refusal, and the land
+ * kind's `forget` is not asked: the history's own where it refused or did not answer, and this
+ * computer's for an answer that is no forgetting's. A look at the history (`fetch`) names a
+ * landing too, and null there is a landing that was not pushed.
+ */
+export function forgettable(answer: Outcome): Outcome | null {
+  if (typeof answer !== "object" || answer === null) return NOT_A_FORGETTING;
+  if ("error" in answer) return answer;
+  const ok: unknown = (answer as { ok?: unknown }).ok;
+  const own = typeof ok === "object" && ok !== null && Object.keys(ok).length === 1 && forgetting(ok) !== undefined;
+  return own ? null : NOT_A_FORGETTING;
 }

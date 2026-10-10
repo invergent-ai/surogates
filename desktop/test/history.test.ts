@@ -11,7 +11,7 @@ import { Control, type ControlPlaces } from "../src/guest/control.js";
 import { type Asked, askHistory, Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
 import type { Outcome } from "../src/link/protocol.js";
-import { checked, type HistoryRequest, named } from "../src/vm/history.js";
+import { checked, forgettable, type HistoryRequest, named } from "../src/vm/history.js";
 import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
 
 const KEY = "0123456789abcdef";
@@ -627,6 +627,43 @@ describe("what the guest answered, checked on this computer", () => {
     ["apply", { path: "a.txt" }],
   ])("refuses %s's answer %j", (action, answer) => {
     expect(checked(action, { ok: answer })).toEqual(NOT_AN_ANSWER);
+  });
+});
+
+describe("what a landing kept of a folder's files, forgotten only by the history's word", () => {
+  const UNSETTLED = {
+    error: { type: "history", code: "landing_unsettled", message: "refused the request: this landing was neither recorded nor put back whole" },
+  };
+  const NOT_A_FORGETTING = {
+    error: { type: "value", message: "This is no answer of a folder's history to forgetting a landing, so what the landing kept was not forgotten" },
+  };
+
+  it("may be forgotten once the history holds the landing, or says each file it applied is as it was before", () => {
+    expect(forgettable({ ok: { landing: ID } })).toBeNull();
+    expect(forgettable({ ok: { landing: null } })).toBeNull();
+    // As the check gives a guest's answer on: its own field alone.
+    expect(forgettable(checked("forget", { ok: { landing: ID, main: ID, planted: [1] } }))).toBeNull();
+  });
+
+  it("is not while the history refuses, or did not answer: the refusal is why", () => {
+    for (const refusal of [UNSETTLED, NO_ANSWER, NOT_AN_ANSWER, NOT_HERE, CANCELLED, SANDBOX_STOPPED, { error: { type: "history", code: "failed", message: "git failed" } }]) {
+      expect(forgettable(refusal)).toBe(refusal);
+    }
+    expect(forgettable(checked("forget", { ok: { landing: "main" } }))).toEqual(NOT_AN_ANSWER);
+  });
+
+  it("is not by an answer that is no forgetting's: a look at the history names a landing too, and null there is one that did not land", () => {
+    const others: unknown[] = [
+      { main: ID, landing: null, hidden: false, packs: 0, missing: [] }, { main: null, landing: ID, hidden: false, packs: 0, missing: [] },
+      { landing: null, main: ID }, { landing: ID, hidden: false }, { commit: ID, set_aside: null }, { commit: ID, not_taken: [] }, { copy: "made" },
+      {}, { landing: "main" }, { landing: undefined }, { landing: ID.toUpperCase() }, { landing: [ID] }, { Landing: ID }, null, undefined, [], [null], [ID],
+      "landing", 7, true,
+    ];
+    for (const ok of others) expect(forgettable({ ok }), JSON.stringify(ok)).toEqual(NOT_A_FORGETTING);
+    // And what is no outcome at all, or one that is both.
+    for (const outcome of [null, undefined, 7, "ok", [], {}]) expect(forgettable(outcome as unknown as Outcome)).toEqual(NOT_A_FORGETTING);
+    expect(forgettable({ ok: { landing: null }, error: null } as unknown as Outcome)).not.toBeNull();
+    expect(forgettable({ ok: { landing: ID }, error: UNSETTLED.error } as unknown as Outcome)).not.toBeNull();
   });
 });
 
