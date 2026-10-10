@@ -306,7 +306,7 @@ async def test_a_turn_whose_open_is_never_answered_asks_it_a_bounded_number_of_t
     assert worker.model_asked == 0 and [kind for kind, _ in await operations_of(api, thread)] == ["bind", *["history"] * OPEN_TRIES]
     failed = await failure(api, thread)
     assert (failed["reason"], failed["why"], failed["code"], failed["error_title"], failed["retryable"]) == (
-        "nowhere_to_work", "refused", "no_answer", NOWHERE["refused"], True,
+        "nowhere_to_work", "again", "no_answer", NOWHERE["again"], True,
     )
     assert await status_of(api, thread) == "failed"
 
@@ -550,9 +550,9 @@ async def test_a_folder_too_large_to_copy_in_time_has_its_threads_turn_fail_sayi
 @pytest.mark.parametrize(("case", "lie", "why", "code"), [
     ("a history that refuses the project's", {"error": {"type": "history", "code": "history_refused", "message": "no"}}, "refused", "history_refused"),
     ("what is no answer", {"ok": {"copy": "/etc", "session": "another"}}, "refused", "not_an_answer"),
-    ("a folder no longer there", {"error": {"type": "folder_unavailable", "message": "The folder is gone"}}, "refused", "folder_unavailable"),
+    ("a folder no longer there", {"error": {"type": "folder_unavailable", "message": "The folder is gone"}}, "gone", "folder_unavailable"),
 ])
-async def test_an_open_refused_in_a_way_asking_again_would_not_pass_fails_the_turn_before_its_prompt(
+async def test_an_open_refused_in_a_way_that_lasts_fails_the_turn_saying_what_to_do_and_offers_no_retry(
     api, computer, monkeypatch, case, lie, why, code,
 ):
     _, _, thread = await begun_with_copy(api, computer)
@@ -562,7 +562,16 @@ async def test_an_open_refused_in_a_way_asking_again_would_not_pass_fails_the_tu
     assert worker.model_asked == 0 and await steps_of(api, thread) == [], case
     assert picture(computer.folder) == folder and asked(computer) == [("open:0", "open")]
     failed = await failure(api, thread)
-    assert (failed["why"], failed["code"], failed["error_title"], failed["retryable"]) == (why, code, NOWHERE[why], True)
+    assert (failed["why"], failed["code"], failed["error_title"], failed["retryable"]) == (why, code, NOWHERE[why], False)
+
+
+async def test_a_computer_whose_access_was_revoked_has_its_threads_turn_fail_saying_to_sign_it_in_again(api, computer, monkeypatch):
+    _, _, thread = await begun_with_copy(api, computer)
+    assert (await api.client.delete(f"/v1/devices/{computer.device_id}", headers=api.auth())).status_code == 204
+    worker = await woken(api, monkeypatch, thread, [WRITES])
+    assert worker.model_asked == 0 and await steps_of(api, thread) == []
+    failed = await failure(api, thread)
+    assert (failed["why"], failed["code"], failed["error_title"], failed["retryable"]) == ("revoked", "revoked", NOWHERE["revoked"], False)
 
 
 # -- only a thread's own turn opens -------------------------------------------------------------------------------

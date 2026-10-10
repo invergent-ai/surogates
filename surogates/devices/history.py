@@ -112,17 +112,24 @@ _PASSING_KINDS = frozenset({"interrupted", "unavailable"})
 #: The refusal of an open its turn's Stop closed: no reason of the folder's, and nothing more of
 #: the turn is asked.
 _STOPPED = "cancelled"
-#: Why a thread has nowhere to work where its copy could not be opened: no reason of its folder's.
+#: A refusal a later turn's asking may pass where this turn's did not: those above, at the last
+#: asking; another chat working in the folder; and the history's own failure.
+_AGAIN = "again"
+_LATER = _PASSING_CODES | _PASSING_KINDS | {"busy", "failed"}
+#: Why a thread has nowhere to work where its copy could not be opened, and asking again gives the same.
 _REFUSED = "refused"
 #: The refusal of a computer whose app gives the thread no copy of a folder too large to copy in
 #: the time a copy may take, its making cut short by that bound twice: until the app starts again.
 _TOO_LARGE = "history_off"
 #: Why a thread has nowhere to work, by its open's refusal: its type, else its code.
-_NOWHERE_BY = {NO_COPY: NO_COPY, _TOO_LARGE: _TOO_LARGE, "name_not_utf8": "names"}
+_NOWHERE_BY = {
+    NO_COPY: NO_COPY, _TOO_LARGE: _TOO_LARGE, "name_not_utf8": "names", "folder_unavailable": "gone", "revoked": "revoked",
+}
 #: What a person reads where a thread has nowhere to work on its computer, by why: its folder has
 #: more files than its history keeps, or a name its history cannot keep, or is too large for its
-#: computer's app to copy; its app keeps no copy of the folder for it; or its copy could not be
-#: opened there.  Said as its turn's failure.  The owner's words, and these alone.
+#: computer's app to copy; its app keeps no copy of the folder for it; the folder is no longer
+#: where it was; the computer's access was revoked; its copy could not be opened just now; or it
+#: cannot be opened there.  Said as its turn's failure.  The owner's words, and these alone.
 NOWHERE: dict[str, str] = {
     "cap": "This folder has more files than its history can keep, so this thread cannot work there. Choose a folder inside it.",
     "names": "A file in this folder has a name its history cannot keep, so this thread cannot work there. Choose a folder inside it.",
@@ -134,9 +141,15 @@ NOWHERE: dict[str, str] = {
         "Surogate Desktop on this computer keeps no copy of the folder for this thread, so it cannot work there. "
         "Update Surogate Desktop."
     ),
+    "gone": (
+        "This thread's folder is no longer where it was on this computer, so it cannot work there. "
+        "Put the folder back, or choose it again."
+    ),
+    "revoked": "This computer's access to Surogate was revoked, so this thread cannot work on it. Sign this computer in again.",
+    _AGAIN: "Surogate Desktop could not open this thread's copy of the folder just now, so it cannot work there. Try again.",
     _REFUSED: (
-        "Surogate Desktop could not open this thread's copy of the folder, so it cannot work there now. "
-        "Try again, or update Surogate Desktop."
+        "Surogate Desktop could not open this thread's copy of the folder, so it cannot work there. "
+        "Update Surogate Desktop, or choose another folder."
     ),
 }
 
@@ -184,8 +197,8 @@ class NowhereToWork(Exception):
         super().__init__(NOWHERE[why])
         self.why = why
         self.code = code
-        #: Whether a later turn may find otherwise: only one whose copy could not be opened.
-        self.retryable = why == _REFUSED
+        #: Whether a later turn may find otherwise, its turn asked again: only one whose copy could not be opened just now.
+        self.retryable = why == _AGAIN
 
 
 def opens_its_copy(session: Any) -> bool:
@@ -594,8 +607,9 @@ class ThreadCopy:
 
         Raises :class:`NowhereToWork` where the thread has nowhere to work:
         its folder has no history, its computer's app keeps no copy for it
-        or gives it none of a folder too large to copy, or it refused at the
-        turn's last asking or in a way asking again would not pass.  Raises the
+        or gives it none of a folder too large to copy, the folder is gone,
+        the computer's access was revoked, or it refused at the turn's last
+        asking or in a way asking again would not pass.  Raises the
         :class:`ComputerRefused` of an open its turn's Stop closed: nothing
         more is asked.  Asked again, it raises the same, and the computer
         hears nothing.  The journal's own refusals pass through as they are.
@@ -610,7 +624,8 @@ class ThreadCopy:
                 if number + 1 < OPEN_TRIES and (refusal.code in _PASSING_CODES or refusal.kind in _PASSING_KINDS):
                     number += 1
                     continue
-                why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or _REFUSED
+                later = refusal.code in _LATER or refusal.kind in _LATER
+                why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or (_AGAIN if later else _REFUSED)
                 raise NowhereToWork(why, code=code_of(refusal)) from None
             except NotAnAnswer as refusal:
                 raise NowhereToWork(_REFUSED, code=code_of(refusal)) from None
