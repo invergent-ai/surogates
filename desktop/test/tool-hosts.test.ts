@@ -1518,8 +1518,40 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(await applying).toEqual(CANCELLED);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(fakes[0]?.count("stop")).toBe(0);
+    // Past its idle time it still holds the folder for the landing: its next step goes to it.
+    const next = landing("revisions", { paths: [] });
+    const looking = executor.land(next, signal());
+    await until(() => fakes[0]?.count("op") === 2);
+    expect(fakes).toHaveLength(1);
+    fakes[0]?.say({ type: "result", id: next.id, outcome: { ok: "looked" } });
+    expect(await looking).toEqual({ ok: "looked" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fakes[0]?.count("stop")).toBe(0);
+    // The cancelled step answered last: nothing of the landing runs, and the host idles out.
     fakes[0]?.say({ type: "result", id: step.id, outcome: { ok: "applied" } });
     await until(() => fakes[0]?.count("stop") === 1);
+  });
+
+  it("stops, when its thread is dismissed, the hosts its operations were starting while its copy was opened, once they are made", async () => {
+    const makes: Array<(opened: Opened) => void> = [];
+    answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
+    // Hosts that are still starting when they are told to go.
+    const executor = threads({ spawnHost: spawnHost(onStop) });
+    const waiting = [executor.run(op("resolve", { path: "" }), signal()), executor.land(landing("revisions", { paths: [] }), signal())];
+    await until(() => opens.length === 2);
+    let over = false;
+    const dismissed = executor.dismiss(ROOT_A).then(() => {
+      over = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(over).toBe(false);
+    for (const make of makes) make(handed(ROOT_A));
+    await dismissed;
+    // Each was told to go as it was made: neither ran what waited for it, and each let its hold go.
+    expect([fakes.length, fakes.map((host) => host.count("stop")), fakes.map((host) => host.count("op")), closed.length]).toEqual([2, [1, 1], [0, 0], 2]);
+    for (const outcome of await Promise.all(waiting)) {
+      expect(outcome).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: its tool host stopped while it was starting" } });
+    }
   });
 
   it.each([
