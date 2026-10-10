@@ -18,24 +18,29 @@ import { type Context, OWN_FILE, perform, revisionOf } from "../src/files/operat
 const SAGA = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f";
 const HELPER = fileURLToPath(new URL("../dist/files/helper.js", import.meta.url));
 // Loaded into a helper before its own code: it ends the process as a kill does, at the call of an fs function, by its
-// number among those whose argument matches. Nothing after that call runs, no handler and no cleanup.
+// number among those whose argument matches. Nothing after that call runs, no handler and no cleanup. Given something
+// to do there instead, it does that before the call: what another program did meanwhile, or what the filesystem answers.
 const CUT = `data:text/javascript,${encodeURIComponent(`
   import fs from "node:fs";
   import { syncBuiltinESMExports } from "node:module";
-  const [name, argument, pattern, nth] = JSON.parse(process.env.LAND_CUT);
+  const [name, argument, pattern, nth, instead] = JSON.parse(process.env.LAND_CUT);
   const real = fs[name];
   let seen = 0;
   fs[name] = (...args) => {
-    if (new RegExp(pattern).test(String(args[argument])) && ++seen === nth) {
-      process.kill(process.pid, "SIGKILL");
-      for (;;);
+    if (new RegExp(pattern).test(String(args[argument])) && (++seen === nth || nth === 0)) {
+      if (instead) new Function("fs", "refuse", instead)(fs, (code) => { throw Object.assign(new Error(code), { code, errno: -1, syscall: name }); });
+      else {
+        process.kill(process.pid, "SIGKILL");
+        for (;;);
+      }
     }
     return real(...args);
   };
   syncBuiltinESMExports();
 `)}`;
 // Where a helper is cut: before the call of this fs function, numbered from 1 among those whose argument at this place matches.
-type Cut = [name: string, argument: number, pattern: string, nth: number];
+// With *instead*, the helper lives, and runs that there: `refuse(code)` answers the call as the filesystem would. 0 is every such call.
+type Cut = [name: string, argument: number, pattern: string, nth: number, instead?: string];
 
 let base: string;
 let folder: string;
@@ -446,8 +451,9 @@ describe("a landing cut short by a kill", () => {
     ["while its own file is half written", ["writeSync", 0, ".", 2], false],
     ["with its own file staged", ["renameSync", 0, "\\.json\\.new$", 2], false],
     ["before the real file is moved aside", ["renameSync", 0, "/Report\\.docx$", 1], false],
+    ["with the real file under a second name, to see that it can be given one", ["unlinkSync", 0, "\\.surogate-", 1], false],
     ["between its two renames, the real file moved aside and its name empty", ["linkSync", 1, "/Report\\.docx$", 1], true],
-    ["with its own file at the name and still beside it", ["unlinkSync", 0, "\\.surogate-", 1], true],
+    ["with its own file at the name and still beside it", ["unlinkSync", 0, "\\.surogate-", 2], true],
     ["before the replaced file is kept in the app's data", ["renameSync", 0, "\\.surogate-", 1], true],
     ["before its record says it ended", ["renameSync", 0, "\\.json\\.new$", 3], true],
   ])("loses no file an apply was replacing when it is killed %s: the helper's next start puts the user's back at its name", { timeout: 60_000 }, async (_where, cut, moved) => {
@@ -462,8 +468,8 @@ describe("a landing cut short by a kill", () => {
     const killed = await helper([apply(1, "Report.docx", blob(V1), blob(data), seen["Report.docx"]!)], cut);
     expect(killed).toEqual({ answers: [], signal: "SIGKILL" });
     // The user's file is somewhere the helper finds it, with the user's bytes, whatever the cut.
-    expect(holders("Report.docx", V1)).toHaveLength(1);
-    expect(holders("Report.docx", V1)[0] === target).toBe(!moved);
+    expect(holders("Report.docx", V1).length).toBeGreaterThan(0);
+    expect(holders("Report.docx", V1).includes(target)).toBe(!moved);
     expect(await restart()).toEqual({ ok: { restored: moved ? ["Report.docx"] : [], beside: [], lost: [] } });
     // The very file, not a copy of it: its inode, its time and its mode.
     const now = lstatSync(target, { bigint: true });
@@ -597,13 +603,100 @@ describe("a landing cut short by a kill", () => {
     expect(await asked("walk", { key: folder, skip: [], skip_top: [], skip_hidden: false, since: null })).toMatchObject({ ok: { files: [["Report.docx", V1.length]] } });
   });
 
+  it("follows nothing to a file whose folder went, or was made a link, after the cut: it says the file was lost with it, and keeps no record of it", { timeout: 60_000 }, async () => {
+    mkdirSync(join(base, "elsewhere"));
+    writeFileSync(join(base, "elsewhere", "Report.docx"), "outside the folder");
+    await cutBetween("docs/Report.docx");
+    renameSync(join(folder, "docs"), join(base, "docs.taken"));
+    symlinkSync(join(base, "elsewhere"), join(folder, "docs"));
+    const [own] = readdirSync(join(base, "docs.taken"));
+    expect(await restart()).toEqual({ ok: { restored: [], beside: [], lost: [["docs/Report.docx", own]] } });
+    expect(readFileSync(join(base, "docs.taken", own!), "utf8")).toBe(V1);
+    expect(readdirSync(join(base, "elsewhere"))).toEqual(["Report.docx"]);
+    expect(readFileSync(join(base, "elsewhere", "Report.docx"), "utf8")).toBe("outside the folder");
+    expect(existsSync(join(kept, SAGA))).toBe(false);
+    // Said once: the next start has nothing left to say of it.
+    expect(await restart()).toEqual({ ok: { restored: [], beside: [], lost: [] } });
+  });
+
+  it("acts on no record but one of its own writing: a file of the user's that one names as the landing's is left where it is", { timeout: 60_000 }, async () => {
+    await cutBetween();
+    writeFileSync(join(folder, "Budget.xlsx"), "yours");
+    const record = join(kept, SAGA, "1.json");
+    const written = JSON.parse(readFileSync(record, "utf8")) as Record<string, unknown>;
+    const other = "1b2c3d4e-0000-4000-8000-000000000001";
+    mkdirSync(join(kept, other));
+    // As a damaged record could read: the user's own file named as the one moved aside, a path out of the folder, and no record at all.
+    writeFileSync(join(kept, other, "1.json"), JSON.stringify({ ...written, aside: "Budget.xlsx" }));
+    writeFileSync(join(kept, other, "2.json"), JSON.stringify({ ...written, path: "../Documents/Budget.xlsx" }));
+    writeFileSync(join(kept, other, "3.json"), "{ not a record");
+    writeFileSync(join(kept, other, "3"), "what a step kept");
+    // Nor on a folder that is no saga's, whatever is in it.
+    mkdirSync(join(kept, "not a saga"));
+    writeFileSync(join(kept, "not a saga", "1.json"), JSON.stringify(written));
+    expect(await restart()).toEqual({ ok: { restored: ["Report.docx"], beside: [], lost: [] } });
+    expect(readFileSync(join(folder, "Budget.xlsx"), "utf8")).toBe("yours");
+    expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe(V1);
+    expect(readdirSync(folder).sort()).toEqual(["Budget.xlsx", "Report.docx"]);
+    // What it cannot read it does not remove: the file beside such a record may be all that is left of a user's.
+    expect(readdirSync(join(kept, other)).sort()).toEqual(["1.json", "2.json", "3", "3.json"]);
+    expect(readdirSync(join(kept, "not a saga"))).toEqual(["1.json"]);
+  });
+
+  it("puts the file back before a landing's first look or apply, in a helper that was not started as one", { timeout: 60_000 }, async () => {
+    const target = join(folder, "Report.docx");
+    writeFileSync(target, V1);
+    const after = turn("Report.docx", "the report, by the thread");
+    // Not asked of this process: nothing here has looked at the folder yet.
+    const seen = revisionOf(statSync(target, { bigint: true }));
+    await helper([apply(1, "Report.docx", blob(V1), after, seen)], ["linkSync", 1, "/Report\\.docx$", 1]);
+    expect(existsSync(target)).toBe(false);
+    expect((await looked("Report.docx"))["Report.docx"]).toBe(revisionOf(statSync(target, { bigint: true })));
+    expect(await ok({ action: "recover" })).toEqual({ restored: ["Report.docx"], beside: [], lost: [] });
+  });
+
+  it("removes what a forgetting was killed in the middle of: nothing of a landing that ended is kept for good", { timeout: 60_000 }, async () => {
+    writeFileSync(join(folder, "Report.docx"), V1);
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    await helper([apply(1, "Report.docx", blob(V1), after, seen["Report.docx"]!)]);
+    expect(await helper([{ action: "forget", saga: SAGA }], ["rmSync", 0, "forgotten", 1])).toEqual({ answers: [], signal: "SIGKILL" });
+    expect(readdirSync(kept)).toHaveLength(1);
+    await restart();
+    expect(readdirSync(kept)).toEqual([]);
+    expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe("the report, by the thread");
+  });
+
+  it("leaves no copy of a kept file in the folder when a put-back from another filesystem is killed", { timeout: 60_000 }, async () => {
+    const here = kept;
+    kept = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    try {
+      if (statSync(kept).dev === statSync(folder).dev) return;
+      context = { ...context, landing: { copy, kept } };
+      const target = join(folder, "Report.docx");
+      writeFileSync(target, V1);
+      const after = turn("Report.docx", "the report, by the thread");
+      const seen = await looked("Report.docx");
+      await helper([apply(1, "Report.docx", blob(V1), after, seen["Report.docx"]!)]);
+      // Its second link to the name: the first, from the other filesystem, is refused there, and the copy is the one linked in.
+      expect(await helper([unapply(1, "Report.docx")], ["linkSync", 1, "/Report\\.docx$", 2])).toEqual({ answers: [], signal: "SIGKILL" });
+      expect(leftovers()).toHaveLength(2);
+      expect(await restart()).toEqual({ ok: { restored: ["Report.docx"], beside: [], lost: [] } });
+      expect([readdirSync(folder), readFileSync(target, "utf8")]).toEqual([["Report.docx"], V1]);
+      expect(readdirSync(kept)).toEqual([]);
+    } finally {
+      rmSync(kept, { recursive: true, force: true });
+      kept = here;
+    }
+  });
+
   it("leaves a file the user saved over the landing's before the helper started again, and puts the one it replaced beside it", { timeout: 60_000 }, async () => {
     const target = join(folder, "Report.docx");
     writeFileSync(target, V1);
     const after = turn("Report.docx", "the report, by the thread");
     const seen = await looked("Report.docx");
     // Killed with its own file at the name, and the user's still beside it.
-    await helper([apply(1, "Report.docx", blob(V1), after, seen["Report.docx"]!)], ["unlinkSync", 0, "\\.surogate-", 1]);
+    await helper([apply(1, "Report.docx", blob(V1), after, seen["Report.docx"]!)], ["unlinkSync", 0, "\\.surogate-", 2]);
     writeFileSync(target, "saved by you over the thread's");
     expect(await restart()).toEqual({ ok: { restored: [], beside: [["Report.docx", "Report (kept by Surogate).docx"]], lost: [] } });
     expect(readFileSync(target, "utf8")).toBe("saved by you over the thread's");
@@ -718,6 +811,59 @@ describe("a landing's step, when it fails or is asked again", () => {
     expect(readFileSync(join(target, "inside.txt"), "utf8")).toBe("yours, in the folder you made");
     expect(readdirSync(folder)).toEqual(["big.bin"]);
     expect(existsSync(join(kept, SAGA))).toBe(false);
+  });
+
+  it("replaces and deletes nothing in a folder that gives a file no second name, as a disk with no hard links does, and says why", { timeout: 60_000 }, async () => {
+    writeFileSync(join(folder, "Report.docx"), "the report, v1");
+    writeFileSync(join(folder, "old.txt"), "to be deleted");
+    const was = ["Report.docx", "old.txt"].map((name) => lstatSync(join(folder, name), { bigint: true }).ino);
+    const after = turn("Report.docx", "the report, by the thread");
+    const fresh = turn("new.md", "new\n");
+    const seen = await looked("Report.docx", "old.txt");
+    const { answers } = await helper([
+      apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!),
+      apply(2, "old.txt", blob("to be deleted"), null, seen["old.txt"]!),
+      apply(3, "new.md", null, fresh, "absent"),
+    ], ["linkSync", 0, ".", 0, 'refuse("EPERM")']);
+    const refusal = (path: string) => ({
+      error: { type: "os", code: "EPERM", message: `${path} was not written: this folder cannot give a file a second name, which a landing needs to put back what it replaces` },
+    });
+    expect(answers).toEqual([refusal("Report.docx"), refusal("old.txt"), refusal("new.md")]);
+    // Refused before either left its name: the very files, and nothing beside them.
+    expect(readdirSync(folder).sort()).toEqual(["Report.docx", "old.txt"]);
+    expect(["Report.docx", "old.txt"].map((name) => lstatSync(join(folder, name), { bigint: true }).ino)).toEqual(was);
+    expect(existsSync(join(kept, SAGA))).toBe(false);
+  });
+
+  it("gives the replaced file its name back when the step fails after it was kept: what it kept is never dropped with its record", { timeout: 60_000 }, async () => {
+    const target = join(folder, "Report.docx");
+    writeFileSync(target, "the report, v1");
+    const was = lstatSync(target, { bigint: true });
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    // The disk is full as the step writes down that it ended.
+    const { answers } = await helper([apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!)], ["renameSync", 0, "\\.json\\.new$", 3, 'refuse("ENOSPC")']);
+    expect(answers).toMatchObject([{ error: { type: "os", code: "ENOSPC" } }]);
+    const now = lstatSync(target, { bigint: true });
+    expect([readFileSync(target, "utf8"), now.ino, now.mode, now.nlink]).toEqual(["the report, v1", was.ino, was.mode, 1n]);
+    expect(readdirSync(folder)).toEqual(["Report.docx"]);
+  });
+
+  it("leaves a file saved over the landing's while its put-back moves it out, and keeps what the landing replaced", { timeout: 60_000 }, async () => {
+    const target = join(folder, "Report.docx");
+    writeFileSync(target, "the report, v1");
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    await helper([apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!)]);
+    // Saved in place between the put-back's look and its move.
+    const { answers } = await helper([unapply(1, "Report.docx")], ["renameSync", 0, "/Report\\.docx$", 1, `fs.writeFileSync(${JSON.stringify(target)}, "saved by you as it was put back")`]);
+    expect(answers).toEqual([{ error: { type: "conflict", message: "Report.docx changed after the landing wrote it, so it was not put back" } }]);
+    expect(readFileSync(target, "utf8")).toBe("saved by you as it was put back");
+    expect(readdirSync(folder)).toEqual(["Report.docx"]);
+    expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
+    // The step is as it was: nothing for the next start to end, and still there to settle.
+    expect(await restart()).toEqual({ ok: { restored: [], beside: [], lost: [] } });
+    expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
   });
 
   it("answers a recovery with nothing where no landing was cut short", async () => {
