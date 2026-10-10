@@ -6,6 +6,11 @@ copied to every session created under it.  Its binding is the root session's
 first device operation, ``bind``: the computer answers it once its user has
 confirmed the folder there.  Until then the session takes no messages and its
 device runs nothing for it.
+
+A project's thread may work in a copy of the folder of its own instead, which
+its computer keeps: the server says so in the same stamp
+(``execution.history``), its bind names the copy, and the computer's answer
+must say it keeps that copy, or the thread has nowhere to work.
 """
 
 from __future__ import annotations
@@ -77,13 +82,23 @@ class Binding:
     message: str | None = None
 
 
+# Why a thread bound with a copy of its own has nowhere to work: its computer
+# did not say it keeps the copy, as an app older than copies binds the folder
+# itself and says yes.  A thread never works in the folder itself.
+KEEPS_NO_COPY = "This computer keeps no copy of the folder for a thread: update Surogate Desktop"
+
+
 async def binding_of(db: AsyncSession, root_session_id: UUID) -> Binding:
-    """Whether the computer accepted the root session's folder."""
+    """Whether the computer accepted the root session's folder.
+
+    A bind that names the thread's copy is accepted only where the computer
+    answers that it keeps that copy, ``{"history": {"thread": <id>}}``.
+    """
     # Not filtered by device: a bind row is recorded only after the root was
     # confirmed to name that device, and the server never changes a session's
     # ``execution``, so the root's one bind row is always its device's.
     row = (await db.execute(
-        select(DeviceOperation.outcome).where(
+        select(DeviceOperation.args, DeviceOperation.outcome).where(
             DeviceOperation.calling_session_id == root_session_id,
             DeviceOperation.invocation_id == BIND,
             DeviceOperation.ordinal == 0,
@@ -99,6 +114,9 @@ async def binding_of(db: AsyncSession, root_session_id: UUID) -> Binding:
     if outcome is None:
         return Binding("pending")
     if "ok" in outcome:
+        copy = row.args.get("history")
+        if copy is not None and outcome["ok"] != {"history": copy}:
+            return Binding("failed", KEEPS_NO_COPY)
         return Binding("bound")
     error = outcome.get("error")
     message = error.get("message") if isinstance(error, dict) else None

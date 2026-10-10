@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 import pytest
 
 from surogates.devices.binding import Binding, copy_of
+from surogates.devices.operations import OperationRequest
+from surogates.devices.workspace import DeviceOperationError
 from surogates.session.provisioning import create_child_session
 from surogates.workstreams.threads import make_thread
 
@@ -96,6 +98,65 @@ async def test_a_root_is_bound_with_a_copy_only_as_the_server_marked_it(api):
     [bind] = await ops.pending(UUID(device["id"]), 1)
     assert (bind.root_session_id, bind.args) == (UUID(plain_id), {"folder": FOLDER, "nonce": NONCE})
     assert await binding(api, marked.id) == Binding("failed", "The computer was never asked to set it up")
+
+
+async def answered_bind(api, thread, outcome: dict) -> None:
+    """*thread*'s computer answers its bind with *outcome*."""
+    ops = journal(api)
+    device_id = UUID(thread.config["execution"]["device_id"])
+    [bind] = await ops.pending(device_id, 1)
+    assert await ops.complete(device_id, 1, bind.id, bind.digest, outcome) == "completed"
+
+
+KEEPS_NO_COPY = (
+    "This chat's folder could not be set up: This computer keeps no copy of the folder for a thread: "
+    "update Surogate Desktop. Start a new chat."
+)
+
+
+@pytest.mark.parametrize("case, outcome", [
+    # As an app older than copies answers: it bound the thread to the folder itself.
+    ("the folder itself", {"ok": None}),
+    ("another thread's copy", {"ok": {"history": {"thread": "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f"}}}),
+    ("something else", {"ok": {"history": {"thread": None}, "folder": FOLDER}}),
+])
+async def test_a_thread_whose_computer_does_not_say_it_keeps_the_copy_works_nowhere_and_says_so(api, case, outcome):
+    device = await register(api)
+    project, _, thread = await made_with_copy(api, device["id"])
+    await bind_with_copy(api, thread)
+    await answered_bind(api, thread, outcome)
+    assert await binding(api, thread.id) == Binding(
+        "failed", "This computer keeps no copy of the folder for a thread: update Surogate Desktop",
+    ), case
+    # Its user is told, and it never begins.
+    refused = await begin(api, project, str(thread.id))
+    assert (refused.status_code, refused.json()["detail"]) == (409, KEEPS_NO_COPY)
+    # Nothing of the thread's reaches its computer: no file operation, no command, and none of its own kinds.
+    ops = journal(api)
+    for kind, args in [("write", {"key": f"{FOLDER}/a.txt", "data": ""}), ("run", {"command": "ls"}), ("history", {"action": "open"})]:
+        with pytest.raises(DeviceOperationError, match="This session's folder is not set up on this computer yet"):
+            await ops.run(OperationRequest(
+                device_id=UUID(device["id"]), root_session_id=thread.id, calling_session_id=thread.id,
+                invocation_id="open:0" if kind == "history" else "1", ordinal=1, kind=kind, args=args,
+            ))
+    assert await ops.pending(UUID(device["id"]), 1) == []
+
+
+async def test_a_thread_whose_computer_says_it_keeps_the_copy_is_bound(api):
+    device = await register(api)
+    _, _, thread = await made_with_copy(api, device["id"])
+    await bind_with_copy(api, thread)
+    await answered_bind(api, thread, {"ok": {"history": {"thread": str(thread.id)}}})
+    assert await binding(api, thread.id) == Binding("bound")
+
+
+async def test_a_chat_on_the_folder_itself_is_bound_whatever_its_computer_says_beside_yes(api):
+    device = await register(api)
+    _, _, _, thread_id = await plain_thread(api, device["id"])
+    thread = await api.app.state.session_store.get_session(UUID(thread_id))
+    # As on master: a binding is its computer's yes, and nothing it says beside it is read.
+    await answered_bind(api, thread, {"ok": {"history": {"thread": thread_id}}})
+    assert await binding(api, thread.id) == Binding("bound")
 
 
 async def plain_thread(api, device_id: str) -> tuple[dict, object, str, str]:
