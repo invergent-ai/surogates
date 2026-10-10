@@ -181,15 +181,15 @@ class FolderGone extends Error {}
 
 const NO_HISTORY = "could not add this folder's history";
 // What a request of a place is answered that a letting-go of the place did not wait for any longer.
-const LET_GO = unavailable("let this folder's history go before this was answered");
+export const LET_GO = unavailable("let this folder's history go before this was answered");
 
 // Settles with "late" once *ms* pass, its timer not holding the process.
-const late = (ms: number) => new Promise<"late">((resolve) => {
+export const late = (ms: number) => new Promise<"late">((resolve) => {
   setTimeout(() => resolve("late"), Math.max(0, ms)).unref();
 });
 
 // Settles once *signal* aborts.
-const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve) => {
+export const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve) => {
   if (signal.aborted) resolve("aborted");
   else signal.addEventListener("abort", () => resolve("aborted"), { once: true });
 });

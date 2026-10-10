@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -195,5 +195,64 @@ describe("the file helper", () => {
     expect((await lines([look], 2, { SUROGATE_COPY: join(base, "copy") }))[1]).toEqual(unsupported);
     const landing = await lines([look], 2, { SUROGATE_COPY: join(base, "copy"), SUROGATE_KEPT: join(base, "kept") });
     expect(landing[1]).toMatchObject({ id: "1", outcome: { ok: { revisions: [["a.txt", expect.stringMatching(/^\d+:\d+:6:/)], ["b.txt", "absent"]] } } });
+  });
+});
+
+describe("the folders a file helper is given, as its host found them when it checked them", () => {
+  // A folder as its host names the one it checked: its device and its inode.
+  const is = (path: string) => {
+    const { dev, ino } = statSync(path);
+    return `${dev}:${ino}`;
+  };
+  const NOT_CHECKED = "is not the folder its host checked: another was at its path as its sandbox was made\n";
+  let copy = "";
+  let kept = "";
+  let other = "";
+  // What a landing's helper does to its kept folder before it is ready shows here: it clears what a forgetting cut short left.
+  const left = () => join(kept, ".forgotten-0f6d1c5e");
+  beforeEach(() => {
+    [copy, kept, other] = [join(base, "copy"), join(base, "kept"), join(base, "other")];
+    for (const dir of [copy, other, left()]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(left(), "1"), "what a forgetting cut short left\n");
+  });
+
+  it("starts in the folder its host checked, and, for a landing, with the copy and the kept folder its host checked", async () => {
+    expect(await started({ SUROGATE_FOLDER_IS: is(base) })).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
+    expect(await started({ SUROGATE_FOLDER_IS: is(base), SUROGATE_AT: join(dirname(base), "Reports") })).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
+    const landing = { SUROGATE_FOLDER_IS: is(base), SUROGATE_COPY: copy, SUROGATE_COPY_IS: is(copy), SUROGATE_KEPT: kept, SUROGATE_KEPT_IS: is(kept) };
+    expect(await started(landing)).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
+    expect(existsSync(left())).toBe(false);
+    // What it is told of them is its own to go by: no request, and nothing it starts, is given it.
+    const heard = await lines([JSON.stringify({ id: "1", kind: "ripgrep", args: { key: base, mode: "files", pattern: "*.txt", glob: null, context: 0 } })], 2, { SUROGATE_FOLDER_IS: is(base) });
+    expect(heard[1]).toEqual({ id: "1", outcome: { ok: `${base}/a.txt\n` } });
+  });
+
+  it("ends before it looks at anything where another folder is at its folder's path, or at the copy's or the kept folder's: by the folder's name, never by a copy's path", async () => {
+    const at = join(dirname(base), "Reports");
+    const landing = { SUROGATE_FOLDER_IS: is(base), SUROGATE_COPY: copy, SUROGATE_COPY_IS: is(copy), SUROGATE_KEPT: kept, SUROGATE_KEPT_IS: is(kept) };
+    symlinkSync(base, join(dirname(base), `${basename(base)}-link`));
+    const refusals: Array<[string, Record<string, string>, string]> = [
+      ["a chat's folder", { SUROGATE_FOLDER_IS: is(other) }, `the folder ${base} ${NOT_CHECKED}`],
+      ["a thread's copy", { SUROGATE_FOLDER_IS: is(other), SUROGATE_AT: at }, `the copy of ${at} this thread works in ${NOT_CHECKED}`],
+      ["a landing's folder", { ...landing, SUROGATE_FOLDER_IS: is(other) }, `the folder ${base} ${NOT_CHECKED}`],
+      ["the copy a landing lands from", { ...landing, SUROGATE_COPY_IS: is(other) }, `the thread's copy a landing in ${base} lands from ${NOT_CHECKED}`],
+      ["the folder a landing keeps in", { ...landing, SUROGATE_KEPT_IS: is(other) }, `the folder a landing in ${base} keeps replaced files in ${NOT_CHECKED}`],
+      ["a copy that is not there", { ...landing, SUROGATE_COPY: join(base, "gone") }, `the thread's copy a landing in ${base} lands from ${NOT_CHECKED}`],
+      ["a kept folder that is a file", { ...landing, SUROGATE_KEPT: join(base, "a.txt"), SUROGATE_KEPT_IS: is(join(base, "a.txt")) }, `the folder a landing in ${base} keeps replaced files in ${NOT_CHECKED}`],
+      ["a folder reached through a link", { SUROGATE_FOLDER: join(dirname(base), `${basename(base)}-link`), SUROGATE_FOLDER_IS: is(base) }, `the folder ${join(dirname(base), `${basename(base)}-link`)} ${NOT_CHECKED}`],
+      ["a folder its host named by no device and inode", { SUROGATE_FOLDER_IS: "" }, `the folder ${base} ${NOT_CHECKED}`],
+      ["the same inode on another device", { SUROGATE_FOLDER_IS: `${statSync(base).dev + 1}:${statSync(base).ino}` }, `the folder ${base} ${NOT_CHECKED}`],
+      ["a copy it is told of and not given", { SUROGATE_FOLDER_IS: is(base), SUROGATE_COPY_IS: is(copy) }, `the thread's copy a landing in ${base} lands from ${NOT_CHECKED}`],
+    ];
+    try {
+      for (const [what, told, why] of refusals) {
+        expect(await started(told), what).toEqual({ said: "", failed: why, code: 2 });
+        // Not even what a landing's helper puts right before it is ready.
+        expect(readdirSync(left()), what).toEqual(["1"]);
+      }
+      expect(refusals.map(([, , why]) => why).filter((why) => why.includes(copy) || why.includes(kept))).toEqual([]);
+    } finally {
+      rmSync(join(dirname(base), `${basename(base)}-link`));
+    }
   });
 });
