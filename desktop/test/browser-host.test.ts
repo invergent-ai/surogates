@@ -4324,7 +4324,9 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     // What the agent's next answers carry, once the download a test waits for has ended: the page's own hears it too.
     const hears = async (starts: () => Promise<unknown>) => {
       const [download] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), starts()]);
-      await download.failure();
+      // Ended. The host may have removed it already, which it does only once it has ended: Playwright then
+      // refuses any question of the download's, as of one closed, and a short download is removed at once.
+      await download.failure().catch(() => {});
       // Removed by the host once it had looked at it: by then it has said what it says.
       await expect.poll(() => download.path().then((path) => existsSync(path), () => false), { timeout: 5_000 }).toBe(false);
       return (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")) as { ok?: { notices: string[] }; error?: unknown };
