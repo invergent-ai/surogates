@@ -543,6 +543,10 @@ describe("what the guest answered, checked on this computer", () => {
     for (const thread of [undefined, "", OTHER, THREAD.toUpperCase(), `${THREAD} `, ".*"]) {
       expect(checked("open", { ok: { copy: "made", set_aside_folders: [aside(1, "copy")] } }, thread)).toEqual(NOT_AN_ANSWER);
     }
+    // Nor a name made for what it was told, where that is no thread's id.
+    for (const thread of ["", "x", ".*", "../..", THREAD.toUpperCase(), `${THREAD} `, `${THREAD}/x`]) {
+      expect(checked("open", { ok: { copy: "made", set_aside_folders: [aside(1, "copy", thread)] } }, thread), thread).toEqual(NOT_AN_ANSWER);
+    }
     // An open that names none is an open's answer whoever asked.
     expect(checked("open", { ok: { copy: "made" } })).toEqual({ ok: { copy: "made" } });
   });
