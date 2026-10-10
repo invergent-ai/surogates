@@ -1010,31 +1010,35 @@ class LocalHistory(History):
         would hold every deletion of every later turn as a move git could
         not see.  So what the copy held when its base was last set
         (:meth:`_remember`) is neither said nor counted: only a name that is
-        new since, or a file written again since.  What the harness writes
-        is never counted.
+        new since, or one written again since, a folder's by anything in it.
+        What the harness writes is never counted.  Each name is looked up
+        once, by the names git lists, however many files are in them.
         """
         excluded, repositories, _ = super()._excluded()
         seen, now = self._seen(), self._left_out()
         names = set(seen["names"])
         fresh = {name for name, token in now.items() if seen["files"].get(name) != token}
-
-        def new(name: str) -> bool:
-            return name not in names or name in fresh or (name.endswith("/") and any(f.startswith(name) for f in fresh))
-
         wrote = any(not name.startswith(self.harness) for name in fresh)
-        return [name for name in excluded if new(name)], [name for name in repositories if new(name)], wrote
+        return (
+            [name for name in excluded if name not in names or name in fresh],
+            [name for name in repositories if name not in names or name in fresh],
+            wrote,
+        )
 
     def _left_out(self) -> dict[str, str]:
-        """Every file in the copy that history leaves out, each with what tells it from a later write of it (:func:`_state`).
+        """Each name history leaves out in the copy, with what tells it from a later write of it.
 
-        Listed by git, by the excludes alone, and looked at without
-        following a link.  A folder git does not go into, another
-        repository's, is one name: told apart by all of that for everything
-        in it.
+        Listed by git as the cloud's :meth:`_excluded` lists them, by the
+        excludes alone: a file, by its :func:`_state`; or a folder all of
+        which is left out, a ``node_modules/`` or another repository's,
+        which git does not go into, as one name, told apart by the name
+        and the state of everything in it.  A folder's are read by this
+        computer, not git, and never decoded: a name in it that is not
+        UTF-8 counts with the folder, and refuses nothing.  Looked at
+        without following a link.
         """
         found: dict[str, str] = {}
-        listed = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard").split("\0")
-        # Each by its name from the copy's handle: a node_modules/ is tens of thousands of them.
+        listed = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory").split("\0")
         copy = os.open(self.copy, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             for name in listed:

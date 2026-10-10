@@ -530,6 +530,60 @@ def test_what_an_earlier_turn_left_out_and_a_later_one_writes_again_is_the_later
     assert (second["excluded"], second["repositories"]) == said and (folder / "notes.txt").is_file()
 
 
+def test_a_name_that_is_not_utf8_inside_a_folder_history_leaves_out_is_left_out_with_it_and_counted_by_it(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "node_modules" / "pkg").mkdir(parents=True)
+    # A package's test data, named in latin-1: history never records it, and never names it.
+    latin = os.fsencode(one.copy / "node_modules" / "pkg") + b"/caf\xe9.txt"
+    with open(latin, "wb") as file:
+        file.write(b"test data\n")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 report by one")
+    first = land(one, "saga:1")
+    assert ([c["path"] for c in first["changes"]], first["excluded"]) == (["Report.docx"], ["node_modules/"])
+    assert (folder / "Report.docx").read_bytes() == b"PK\x03\x04 report by one"
+    # Left as it is, it is no later turn's write: the next turn's deletion lands.
+    (one.copy / "notes.txt").unlink()
+    second = land(one, "saga:2")
+    assert ([(c["path"], c["after"]) for c in second["changes"]], second["excluded"]) == ([("notes.txt", None)], [])
+    # Written again, it is: the folder it is in is new since the copy's base, and the turn's deletion waits.
+    with open(latin, "wb") as file:
+        file.write(b"test data, written again\n")
+    (one.copy / "Report.docx").unlink()
+    third = land(one, "saga:3")
+    assert ([(o["path"], o["reason"]) for o in third["overlapped"]], third["excluded"]) == ([("Report.docx", "with")], ["node_modules/"])
+
+
+def test_what_history_leaves_out_is_told_from_what_its_copy_held_at_its_base_in_the_time_it_takes_to_look_at_it(tmp_path):
+    folder = tmp_path / "Documents"
+    for n in range(1000):
+        (folder / f"p-{n:04d}").mkdir(parents=True)
+        (folder / f"p-{n:04d}" / "mod.py").write_text(f"N = {n}\n")
+    (folder / "notes.txt").write_text("v1 notes\n")
+    one = a_copy(tmp_path, folder)
+    # A __pycache__/ in every package, noted at the landing: a thousand folders history leaves out.
+    for n in range(1000):
+        (one.copy / f"p-{n:04d}" / "__pycache__").mkdir()
+        for k in range(5):
+            (one.copy / f"p-{n:04d}" / "__pycache__" / f"m{k}.pyc").write_bytes(b"\0")
+    (one.copy / "notes.txt").write_text("v2 notes\n")
+    assert len(land(one, "saga:1")["excluded"]) == 1000
+    # Then one of them gets fifty thousand files written again, as a reinstall would.
+    for k in range(50_000):
+        (one.copy / "p-0000" / "__pycache__" / f"w{k}.pyc").write_bytes(b"\1")
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    looks, tells = [], []
+    for _ in range(2):
+        begun = time.monotonic()
+        again._left_out()
+        looks.append(time.monotonic() - begun)
+        begun = time.monotonic()
+        excluded, repositories, wrote = again._excluded()
+        tells.append(time.monotonic() - begun)
+    assert (excluded, repositories, wrote) == (["p-0000/__pycache__/"], [], True)
+    # Telling them apart costs about what looking at them does: it grows with them, not with folders times files.
+    assert min(tells) < 3 * min(looks) + 1.0, (looks, tells)
+
+
 #: What an earlier guest can leave where a thread's repository notes what its copy held at its base.
 NOTES = {
     "a link to a note": lambda note, real: note.symlink_to(real),
