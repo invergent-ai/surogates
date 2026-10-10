@@ -57,9 +57,9 @@ def scenario(place: Path) -> None:
 
     turn, step = applied(ONE, A, "saga:1")
     assert [c["path"] for c in turn["changes"]] == ["A-new.md", "Report.docx"], turn
-    assert ask(ONE, "forget", saga="saga:1")["error"]["code"] == "landing_unsettled"
+    assert ask(ONE, "forget", saga="saga:1", applied=step["applied"])["error"]["code"] == "landing_unsettled"
     landed = ask(ONE, "record", **step)
-    assert landed["set_aside"] is None and ask(ONE, "forget", saga="saga:1") == {"landing": landed["commit"]}, landed
+    assert landed["set_aside"] is None and ask(ONE, "forget", saga="saga:1", applied=step["applied"]) == {"landing": landed["commit"]}, landed
     print("the first thread's turn landed, and what it kept may be forgotten only then")
 
     turn, step = applied(TWO, B, "saga:2")
@@ -74,7 +74,7 @@ def scenario(place: Path) -> None:
 
     landing = History.record(LocalHistory.at(store, folder, thread=TWO, user="u1"), **step)["commit"]
     assert (two / "Report.docx").read_text() == "B's report\n"
-    assert ask(TWO, "open") == {"copy": "moved", "finished": {"landing": landing, "set_aside": None}}
+    assert ask(TWO, "open") == {"copy": "moved"}
     assert files(two) == files(folder) == {
         "A-new.md": "A's new file\n", "B.md": "B's own\n", "Report.docx": "A's report\n", "notes.txt": "v1 notes\n",
     }
@@ -84,7 +84,8 @@ def scenario(place: Path) -> None:
     assert ask(TWO, "record", **step) == {"commit": landing, "set_aside": None}
     print("a record cut after its push is finished at the thread's next open, and its next landing takes nothing of the other's")
 
-    # A command still running writes the copy after the turn is committed: set aside before the record takes it away.
+    # A command still running writes the copy after the turn is committed: set aside before the record takes it away,
+    # named by every open after, and no snapshot the copy is put back to.
     (one / "Report.docx").write_text("A's report, again\n")
     (two / "Report.docx").write_text("B's report, on A's first\n")
     assert ask(ONE, "open") == {"copy": "kept"}
@@ -94,9 +95,33 @@ def scenario(place: Path) -> None:
     (two / "late.md").write_text("written after the turn was committed\n")
     aside = ask(TWO, "record", **step)["set_aside"]
     assert not (two / "late.md").exists() and (two / "Report.docx").read_text() == "A's report, again\n"
-    ask(TWO, "restore", commit=aside)
-    assert (two / "late.md").read_text() == "written after the turn was committed\n"
-    print("what a copy held beyond its turn is set aside, and can be put back")
+    assert ask(TWO, "restore", commit=aside)["error"]["code"] == "not_on_base"
+    assert not (two / "late.md").exists() and (two / "Report.docx").read_text() == "A's report, again\n"
+    assert ask(TWO, "open") == {"copy": "moved", "set_asides": [aside]} == ask(TWO, "open")
+    print("what a copy held beyond its turn is set aside, named at every open, and the copy is not put back to it")
+
+    # A clean copy's move to main, cut after its files and before its base: the next act finishes it.
+    (two / "B2.md").write_text("more of B's\n")
+    _, step = applied(TWO, B, "saga:6")
+    ask(TWO, "record", **step)
+    (folder / "yours.txt").write_text("saved by you since\n")
+
+    class Cut(Exception):
+        pass
+
+    def cut(self: History, old: str, new: str, moved: object = History._switch) -> str:
+        moved(self, old, new)
+        raise Cut
+
+    History._switch = cut
+    try:
+        LocalHistory.at(store, folder, thread=ONE, user="u1").open()
+    except Cut:
+        pass
+    assert (one / "B2.md").exists() and (one / "yours.txt").exists()
+    assert ask(ONE, "changed") == {"paths": []}
+    assert ask(ONE, "open") == {"copy": "moved"} and files(one) == files(folder)
+    print("a clean copy's move to main cut before its base moved is finished by the next act")
 
 
 place = Path(tempfile.mkdtemp(prefix="history-tree-", dir="/run"))

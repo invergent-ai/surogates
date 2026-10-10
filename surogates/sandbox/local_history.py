@@ -24,21 +24,26 @@ bound, a stop, a lost guest.  The history is safe by itself after one.  No
 request writes a file of the folder; a copy cut short in its making is made
 again before anything is read from it; and a push that counted is caught up
 with, a landing's by making the copy the landing's files, before the copy is
-read as anything's base.
+read as anything's base.  So is a clean copy's move to ``main`` that was cut
+between its files and its base.
 """
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from itertools import takewhile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, NoReturn
 
 from surogates.sandbox.history import (
@@ -54,23 +59,29 @@ from surogates.sandbox.history import (
     History,
     HistoryError,
     _as,
-    _ID,
     _checked_id,
     _name,
     _replace,
 )
 
+#: What a request did that a person reading the guest's log later must be able to find.
+logger = logging.getLogger(__name__)
+
 #: Why a request was not answered, beside the cloud's two codes (history.py): a thread with no
 #: whole copy, which its next open makes; a file whose name history cannot record, which
 #: nothing lands past until it is renamed; a request that is none this history takes; and a
-#: landing the history holds whose copy could not be made its files, so that nothing is read
-#: from the copy; and a landing neither recorded nor put back, whose kept files are not to be
-#: forgotten.  Whoever asked goes by the code, never by the words.
+#: landing the history holds whose copy could not be made its files, or a move of the copy to
+#: ``main`` that could not be finished, so that nothing is read from the copy; a landing
+#: neither recorded nor put back whole, whose kept files are not to be forgotten; and a
+#: snapshot the copy is not put back to, taken on another base than the copy's is now.
+#: Whoever asked goes by the code, never by the words.
 NO_WHOLE_COPY = "no_whole_copy"
 NAME_NOT_UTF8 = "name_not_utf8"
 NOT_A_REQUEST = "not_a_request"
 RECORD_UNFINISHED = "record_unfinished"
+MOVE_UNFINISHED = "move_unfinished"
 LANDING_UNSETTLED = "landing_unsettled"
+NOT_ON_BASE = "not_on_base"
 
 #: On a folder of the user's these are the platform's: the whiteboard's
 #: canvas, the harness's own files, and where a coding tool checks a
@@ -102,10 +113,8 @@ _REDIRECTS = ("commondir", "hooks", "modules", "objects/info/alternates", "objec
 _MADE = "made"
 #: A thread's repository is packed again at its turn's start once it holds more packs than this.
 _PACKS = 20
-#: A file in a thread's repository from when a landing's record was finished until an answer says so.
-_FINISHED = "finished"
-#: What a thread's copy held beyond its turn when a record made it the landing's files is kept
-#: for its last sixteen such records: the oldest goes for one more.
+#: What a thread's copy held of its own when a record or a move made it other files is kept
+#: for the last sixteen times that happened: the oldest goes for one more.
 _ASIDE = 16
 _PINNED = {
     "GIT_CONFIG_COUNT": str(len(_OVERRIDES)), "GIT_ALLOW_PROTOCOL": "file",
@@ -132,7 +141,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
     "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup"})),
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
-    "forget": ("forget", frozenset({"saga"})),
+    "forget": ("forget", frozenset({"saga", "applied"})),
 }
 #: Why a folder's history takes no part in what the cloud's does besides.
 _NO_WRITER = "a folder's history writes no file of the folder: the desktop's file helper lands a turn's files"
@@ -171,8 +180,13 @@ class LocalHistory(History):
         return f"refs/landed/{self.thread}"
 
     @property
+    def moving(self) -> str:
+        """Where a clean copy is being moved to, from before the first of its files moves until its base has."""
+        return f"refs/moving/{self.thread}"
+
+    @property
     def aside(self) -> str:
-        """Under it, what the copy held beyond its turn when a record made it the landing's files: ``<nth>-<turn>``."""
+        """Under it, what the copy held of its own when a record or a move made it other files: ``<nth>-<what it was made>``."""
         return f"refs/set-aside/{self.thread}"
 
     @property
@@ -230,11 +244,13 @@ class LocalHistory(History):
         your edits picked up as at its first open (``moved``); one with
         unlanded work stays where it is, and so does its base (``kept``).
 
-        Before the copy is read as anything's base, a landing of the
-        thread's that the history holds and the copy was never made the
-        files of is finished, by the snapshot the move to ``main`` begins
-        with (:meth:`_catch_up`).  ``finished`` then names it, once, with
-        what was set aside: by this open, or by an act that came before it.
+        Before the copy is read as anything's base, what a request of the
+        thread's was cut in the middle of is finished, by the snapshot the
+        move to ``main`` begins with (:meth:`_catch_up`).  ``set_asides``
+        are the snapshots of what the copy held of its own when that, or a
+        record, made it other files, the oldest first: all the thread's
+        repository holds, read from its refs at every open, so that one
+        whose answer was lost is told again.
         """
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
@@ -265,10 +281,14 @@ class LocalHistory(History):
                 )
                 (self.copy / ".git").unlink()
             if len(list((self.repo / "objects" / "pack").glob("*.pack"))) > _PACKS:
-                self._git(["repack", "-a", "-d", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
+                try:
+                    self._git(["repack", "-a", "-d", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
+                except HistoryError as why:
+                    # Upkeep: a repository git cannot pack again still serves its thread's turn.
+                    logger.warning("A thread's repository could not be packed again, and is left as it is: %s", why)
             moved = self._to_main()
-            finished = self._said()
-            return {"copy": "moved" if moved else "kept", **({"finished": finished} if finished else {})}
+            asides = [commit for _, commit in sorted(self._asides().values())]
+            return {"copy": "moved" if moved else "kept", **({"set_asides": asides} if asides else {})}
         finally:
             _TIMEOUT.reset(budget)
 
@@ -289,6 +309,24 @@ class LocalHistory(History):
         self._catch_up()
         return super().snapshot(reason)
 
+    def restore(self, commit: str) -> None:
+        """Put the copy back to *commit*, a snapshot of the stretch it is on: one built on its base as it stands.
+
+        A copy here outlives its landing, and so do its snapshots.  One
+        taken before a record or a move is the copy as it was on another
+        base: put back to it whole, every file another thread landed since
+        and every edit of yours picked up since would be this thread's own
+        change back, and its next landing would delete and overwrite them.
+        So would what a record or a move set aside.  Each is refused.
+        """
+        self._catch_up()
+        if self._has(commit) and self._main("rev-list", "--count", "--end-of-options", f"{commit}..{self.base}") != "0":
+            raise HistoryError(
+                "refused the request: this snapshot is not built on the copy's base as it stands, and put back to it "
+                "the copy would undo what landed since", code=NOT_ON_BASE,
+            )
+        super().restore(commit)
+
     def commit_turn(self, **step: Any) -> dict:
         self._catch_up()
         return super().commit_turn(**step)
@@ -306,7 +344,9 @@ class LocalHistory(History):
         is the landing's second parent.  What history leaves out stays.
         ``set_aside`` is a snapshot of what the copy held beyond its turn,
         written after the turn was committed, where making the copy the
-        landing's took it away; None where it took nothing.
+        landing's took it away; None where it took nothing.  It is kept on
+        a ref of the thread's repository, and is not one the copy is put
+        back to (:meth:`restore`).
 
         Safe to repeat wherever ``main`` is by then: no lock is held across
         a computer's absence, so another thread may have landed since a try
@@ -322,10 +362,7 @@ class LocalHistory(History):
         else:
             commit = super().record(**step)["commit"]
             self._catch_up()
-        aside = self._asides().get(step["turn"], (None, None))[1]
-        # Told here, by this answer: the thread's next open has nothing left to say of it.
-        self._said()
-        return {"commit": commit, "set_aside": aside}
+        return {"commit": commit, "set_aside": self._asides().get(step["turn"], (None, None))[1]}
 
     def _landing(self, refs: dict[str, str]) -> tuple[str, str, list[str]] | None:
         """The thread's landing where *refs*, the history's, still have its branch: it, its turn, and its message.
@@ -354,26 +391,36 @@ class LocalHistory(History):
         return parents, said[said.index("") + 1:] if "" in said else []
 
     def _catch_up(self) -> None:
-        """Finish a record of this thread's that was cut after its push, before the copy is read as anything's base.
+        """Finish what a request of this thread's was cut in the middle of, before the copy is read as anything's base.
+
+        A copy outlives the request that changes it, and a request's bound,
+        a stop or a lost guest can fall between the copy's files and the
+        base they are read against.  No act reads the copy before this.
+        """
+        if not (self.repo / "HEAD").is_file():
+            return
+        self._finish_record()
+        self._finish_move()
+
+    def _finish_record(self) -> None:
+        """Finish a record of this thread's that was cut after its push.
 
         The push is the moment a landing counts; making the copy the
-        landing's files comes after it, and a request's bound, a stop or a
-        lost guest can fall between.  The copy then still holds the turn's
-        files, on a base that is the landing: read so, every file another
-        thread landed would be one this thread deleted, and the thread's old
-        version of a file the landing left out would be its change to the
-        newer one.  So no act reads the copy before this: the history holds
-        a landing of the thread's that :attr:`landed` does not name, and the
-        copy is made its files now.
+        landing's files comes after it.  Cut between, the copy still holds
+        the turn's files, on a base that is the landing: read so, every file
+        another thread landed would be one this thread deleted, and the
+        thread's old version of a file the landing left out would be its
+        change to the newer one.  The history holds a landing of the
+        thread's that :attr:`landed` does not name, and the copy is made its
+        files now.
 
-        What the copy holds beyond the turn and the landing is set aside
-        first, on a ref (:meth:`_set_aside`).  A copy whose index is the
-        landing's already was made so, git writing the index last, and is
-        left as it is, with whatever the thread has written since.  Safe to
-        cut anywhere: the ref that says it is done moves last.  Where it
-        cannot be done the request is refused, and nothing was read from
-        the copy.  A note is left for whoever is told of it: the record's
-        own answer, or the thread's next open.
+        What the copy holds that is neither the turn's file nor the
+        landing's is set aside first, on a ref (:meth:`_set_aside`).  A copy
+        whose index is the landing's already was made so, git writing the
+        index last, and is left as it is, with whatever the thread has
+        written since.  Safe to cut anywhere: the ref that says it is done
+        moves last.  Where it cannot be done the request is refused, and
+        nothing was read from the copy.
 
         A turn, or a kept one, that this repository pushed and a cut kept it
         from noting is noted here too.  The thread's next push expects the
@@ -382,8 +429,6 @@ class LocalHistory(History):
         thread's would be refused as one whose branch moved.  A branch this
         repository did not make is still that.
         """
-        if not (self.repo / "HEAD").is_file():
-            return
         refs = self._take()
         found = self._landing(refs)
         if found is None:
@@ -401,10 +446,10 @@ class LocalHistory(History):
             if index != self._tree(landing):
                 self._add_all(self._copy)
                 held = self._copy("write-tree")
-                if held not in {self._tree(commit) for commit in (landing, turn) if self._has(commit)}:
-                    self._set_aside(held, turn)
+                sides = [commit for commit in (landing, turn) if self._has(commit)]
+                if self._beyond(held, sides):
+                    self._set_aside(held, turn, onto=sides[-1])
                 self._copy("read-tree", "-u", "--reset", landing)
-            _replace(self.repo / _FINISHED, f"{landing} {turn}\n".encode())
             for ref in (self.branch, self.base, self.synced, self.landed):
                 self._main("update-ref", ref, landing)
         except HistoryError as why:
@@ -415,30 +460,86 @@ class LocalHistory(History):
                 f"could not be made the landing's files: {why}", code=RECORD_UNFINISHED,
             ) from None
 
-    def _set_aside(self, tree: str, turn: str) -> None:
-        """Keep *tree*, what the copy holds, on the ref of *turn*'s set-aside, before a record takes it away.
+    def _finish_move(self) -> None:
+        """Finish a move of the thread's clean copy to ``main`` that was cut after it began.
 
-        A snapshot the thread can be put back to (:meth:`restore`).  One
-        taken before for the same turn, by a try cut part way through the
-        copy's files, is its second parent: that one may hold a file this
-        one no longer does.  A thread keeps its last ``_ASIDE``, by the
-        order they were set aside in, which their names count.
+        A copy with nothing unlanded moves to ``main`` at its turn's start:
+        its files, then its branch, then its base (:meth:`_to_main`).  Cut
+        between, the copy holds ``main``'s files, or some of them, on the
+        base it had: read so, your edits and every other thread's landing
+        since would be this thread's own changes, and its next landing would
+        write them over whatever the folder holds by then.  :attr:`moving`
+        names where the copy was going, from before the first of its files
+        moved until its base has, and the copy had nothing unlanded when it
+        was written: so the move is finished here.
+
+        A copy whose index is already where it was going had every file
+        moved, git writing the index last, and is left as it is, with
+        whatever the thread has written since.  Otherwise what it holds that
+        is neither a file of where it was nor of where it was going is set
+        aside first (:meth:`_set_aside`).  Safe to cut anywhere: the base
+        moves last, and the ref goes after it.  Where it cannot be done the
+        request is refused, and nothing was read from the copy.
+        """
+        to = self._ref(self.moving)
+        if to is None:
+            return
+        try:
+            # First, and before anything is written: a copy that is not whole is its next open's to make.
+            if self._copy("write-tree") != self._tree(to):
+                was = self._main("rev-parse", self.base)
+                self._add_all(self._copy)
+                held = self._copy("write-tree")
+                if self._beyond(held, [was, to]):
+                    self._set_aside(held, to, onto=was)
+                self._copy("read-tree", "-u", "--reset", to)
+            for ref in (self.branch, self.base):
+                self._main("update-ref", ref, to)
+            self._main("update-ref", "-d", self.moving)
+        except HistoryError as why:
+            if why.code != FAILED:
+                raise
+            raise HistoryError(
+                f"refused the request: this thread's copy was being moved to main, and the move could not be finished: {why}",
+                code=MOVE_UNFINISHED,
+            ) from None
+
+    def _beyond(self, held: str, sides: list[str]) -> bool:
+        """Whether the tree *held* has, at some name, what none of *sides* has there: a file that is neither's."""
+        differing = [
+            {name for name in self._main("diff", "--name-only", "--no-renames", "-z", side, held).split("\0") if name}
+            for side in sides
+        ]
+        return bool(set.intersection(*differing))
+
+    def _set_aside(self, tree: str, of: str, *, onto: str) -> None:
+        """Keep *tree*, what the copy holds, on a ref of its own before the copy is made *of*'s files.
+
+        *of* is the turn whose landing the copy is made, or where its move
+        was going.  The snapshot is the copy as it was on *onto*, its first
+        parent: the turn, or the base the move began on.  What differs from
+        that is what was written since.  It is not one the copy is put back
+        to (:meth:`restore` refuses it): the copy's base has moved, and put
+        back whole it would undo what landed since.  One taken before for
+        the same *of*, by a try cut part way through the copy's files, is
+        its second parent: that one may hold a file this one no longer does.
+        A thread keeps its last ``_ASIDE``, by the order they were set aside
+        in, which their names count.
         """
         kept = self._asides()
-        ref, earlier = kept.get(turn, (None, None))
+        ref, earlier = kept.get(of, (None, None))
         if ref is None:
             last = max((int(name.rpartition("/")[2].partition("-")[0]) for name, _ in kept.values()), default=0)
-            ref = f"{self.aside}/{last + 1:08d}-{turn}"
-        before = [commit for commit in (self._copy("rev-parse", "HEAD"), earlier) if commit]
-        self._main("update-ref", ref, self._copy(
-            *_as(_CHECKPOINT), "commit-tree", tree, *(arg for parent in before for arg in ("-p", parent)),
-            "-m", "Set aside before a landing's record",
+            ref = f"{self.aside}/{last + 1:08d}-{of}"
+        self._main("update-ref", ref, self._main(
+            *_as(_CHECKPOINT), "commit-tree", tree, *(arg for parent in (onto, earlier) if parent for arg in ("-p", parent)),
+            "-m", "Set aside before the copy was made other files",
         ))
-        for old, _ in sorted({**kept, turn: (ref, None)}.values())[:-_ASIDE]:
+        for old, _ in sorted({**kept, of: (ref, None)}.values())[:-_ASIDE]:
             self._main("update-ref", "-d", old)
 
     def _asides(self) -> dict[str, tuple[str, str]]:
-        """What the thread's records set aside, by the turn: each its ref and its snapshot."""
+        """What was set aside of the thread's copy, by what the copy was then made: each its ref and its snapshot."""
         kept = {}
         for line in self._main("for-each-ref", "--format=%(objectname) %(refname)", f"{self.aside}/").splitlines():
             commit, _, ref = line.partition(" ")
@@ -446,71 +547,72 @@ class LocalHistory(History):
                 kept[ref[-40:]] = (ref, commit)
         return kept
 
-    def _said(self) -> dict | None:
-        """The record that was finished and not yet told of, with what it set aside; told once."""
-        note = self.repo / _FINISHED
-        try:
-            landing, turn = note.read_text().split()
-        except (FileNotFoundError, ValueError):
-            return None
-        if not (_ID.fullmatch(landing) and _ID.fullmatch(turn)):
-            return None
-        said = {"landing": landing, "set_aside": self._asides().get(turn, (None, None))[1]}
-        note.unlink()
-        return said
-
-    def forget(self, *, saga: str) -> dict:
+    def forget(self, *, saga: str, applied: list[dict] | None = None) -> dict:
         """Whether what the landing of *saga* kept of the folder's files may be forgotten; refused while it may not.
 
         The file helper keeps each file a landing replaces until the landing
-        is settled, for its put-back, and cannot tell when that is.  The
-        history can: ``landing`` is the landing where ``main`` holds it,
-        recorded, so that each replaced file is a version under it; or None
-        where the landing was put back whole, no file its turn wrote or
-        deleted being as the turn left it in the folder.  Asked before
-        either, or of a saga the history holds no turn of, it is refused,
-        and whoever asked forgets nothing.  It reads, and writes nothing.
+        is settled, for its put-back, and cannot tell when that is.
+        ``landing`` is the landing where ``main`` holds it: recorded, so
+        that each replaced file is a version under it.  It is None where the
+        landing was put back whole: each file of *applied*, what whoever
+        asks says the landing applied, is its ``before`` in the folder now.
+        Anything else there is not: the landing's own file, one changed
+        since it wrote it, a link, a folder.  Then, and for a landing not
+        recorded, it is refused, and whoever asked forgets nothing.
 
-        The turn is the thread's branch as the history has it, pushed before
-        the landing's first apply, or the thread's own commit of it, where a
-        turn kept since has moved the branch.  A file already as the turn
-        left it before the landing, which the landing never wrote, counts as
-        written: the kept files then stay until the landing is recorded.
+        It goes by the folder and the folder's history alone, follows no
+        link, and neither reads nor makes the thread's repository.
         """
         if not (isinstance(saga, str) and saga):
             _refuse("it names no saga")
-        said = f"Surogate-Saga: {saga}"
-        self._init()
-        refs = self._take()
-        if (main := refs.get(MAIN)) is not None:
-            # The newest first: a landing's own pickup, which carries its saga too, lies under it.
-            log = self._git(["log", "--first-parent", "-z", "--format=%H%n%B", main], env={"GIT_DIR": str(self._taken)}, cwd=self._taken)
-            for landing, message in _logged(log):
-                if said in message:
-                    return {"landing": landing}
-        pushed, base = refs.get(self.branch), None
-        if pushed is not None:
-            parents, message = self._stored(pushed)
-            pushed, base = (pushed, parents[0]) if parents and said in message else (None, None)
-        if pushed is None and self._ref(self.base) and self._ref(self.branch):
-            own = self._main("log", "--first-parent", "-z", "--format=%H%n%B", f"{self.base}..{self.branch}")
-            pushed, base = next(
-                ((turn, self._ref(self.base)) for turn, message in _logged(own) if said in message),
-                (None, None),
-            )
-        if pushed is None:
+        if not isinstance(applied, list):
+            _refuse("it names no files a landing applied")
+        files = []
+        for change in applied:
+            path = PurePosixPath(change["path"])
+            # Spelt as it is walked: from the folder's top, down, each part a name.
+            if path.is_absolute() or not path.parts or ".." in path.parts or str(path) != change["path"]:
+                _refuse("a file it applied has no path in the folder")
+            files.append((path.parts, change["before"]))
+        main = self._take().get(MAIN)
+        if main is not None and (landing := self._landing_of(saga, main, None)[0]) is not None:
+            return {"landing": landing}
+        if any(self._unfollowed(parts) != before for parts, before in files):
             raise HistoryError(
-                "refused the request: the history holds neither this landing nor its turn, and cannot tell what it wrote",
-                code=LANDING_UNSETTLED,
-            )
-        self._fetch(pushed, base)
-        versions, _ = self._diff(base, pushed)
-        if any(self._real(path) == after for path, (_, after) in versions.items()):
-            raise HistoryError(
-                "refused the request: this landing was neither recorded nor put back: a file is in the folder as "
-                "it left it, and what it replaced is kept for its put-back", code=LANDING_UNSETTLED,
+                "refused the request: this landing was neither recorded nor put back whole: a file it applied is not "
+                "what was there before it, and what it replaced is kept for its put-back", code=LANDING_UNSETTLED,
             )
         return {"landing": None}
+
+    def _unfollowed(self, parts: tuple[str, ...]) -> str | None:
+        """The blob id of the folder's file at *parts* now, None where there is none, following no link.
+
+        ``""``, which is no blob's id, where what is there is no file: a
+        link or a folder at its name, or a link or a file on the way to it.
+        """
+        opened: list[int] = []
+        try:
+            opened.append(os.open(self.project, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
+            for name in parts[:-1]:
+                opened.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=opened[-1]))
+            # Non-blocking, so a pipe answers at once and is no file.
+            opened.append(os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=opened[-1]))
+            info = os.fstat(opened[-1])
+            if not stat.S_ISREG(info.st_mode):
+                return ""
+            blob = hashlib.sha1(b"blob %d\0" % info.st_size)
+            while chunk := os.read(opened[-1], 1 << 20):
+                blob.update(chunk)
+            return blob.hexdigest()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                return ""
+            raise
+        finally:
+            for fd in opened:
+                os.close(fd)
 
     def pickup(self, *, author: dict[str, str], trailers: list[list[str]], push: bool = False) -> dict:
         if push:
@@ -548,7 +650,11 @@ class LocalHistory(History):
         _refuse(_NO_HELPER)
 
     def _to_main(self) -> bool:
-        """Move a copy with nothing unlanded, and its base, to ``main`` as the folder is now; whether it moved."""
+        """Move a copy with nothing unlanded, and its base, to ``main`` as the folder is now; whether it moved.
+
+        Its files, then its branch, then its base, with :attr:`moving` naming where it is going
+        from before the first to after the last: cut anywhere, the next act finishes it (:meth:`_finish_move`).
+        """
         tip = self.snapshot("before a turn")
         if self._tree(tip) != self._tree(self._main("rev-parse", self.base)):
             return False
@@ -566,8 +672,11 @@ class LocalHistory(History):
         # A file saved in the second the read began is read again by the next look, as at the first open.
         os.utime(self.repo / "index", (begun, begun))
         start = self._main("rev-parse", MAIN)
+        # Where the copy is going, before the first of its files moves: a move cut from here on is finished from it.
+        self._main("update-ref", self.moving, start)
         self._switch(tip, start)
         self._main("update-ref", self.base, start)
+        self._main("update-ref", "-d", self.moving)
         return True
 
     def _off(self) -> str | None:
@@ -653,11 +762,6 @@ class LocalHistory(History):
                 if os.path.lexists(self._admin / "config.worktree"):
                     _removed(self._admin / "config.worktree")
         self.pinned.append(True)
-
-
-def _logged(log: str) -> list[tuple[str, list[str]]]:
-    """``git log -z --format=%H%n%B``'s commits, each its id and its message line by line, by the line end alone."""
-    return [(lines[0], lines[1:]) for lines in (entry.split("\n") for entry in log.split("\0") if entry)]
 
 
 def _refuse(why: str) -> NoReturn:
@@ -750,6 +854,8 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         raise HistoryError("refused the request: it names no action this computer's history takes", code=NOT_A_REQUEST)
     for key in ("commit", "turn", "main", "pickup", "commits", "since"):
         _ids(args.get(key), f"its {key}")
+    if not isinstance(args.get("applied", []), list):
+        raise HistoryError("refused the request: it names no files a landing applied", code=NOT_A_REQUEST)
     for change in args.get("applied", []):
         if not isinstance(change, dict) or not isinstance(change.get("path"), str) or "\0" in change["path"]:
             raise HistoryError("refused the request: a file it applied has no path", code=NOT_A_REQUEST)

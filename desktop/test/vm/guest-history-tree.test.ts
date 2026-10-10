@@ -46,7 +46,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("lands two threads' turns from the tree on the agent disk, finishes a record cut after its push, and sets aside what a copy held beyond its turn", async () => {
+  it("lands two threads' turns from the tree on the agent disk, and finishes a record cut after its push and a copy's move cut before its base", async () => {
     const lines = () => readFileSync(options.console, "utf8").split("\n").flatMap((line) => /history-tree: (.*?)\r?$/.exec(line)?.[1] ?? []);
     await until(() => lines().some((line) => line === "passed" || line === "failed"), 100_000);
     const said = lines();
@@ -55,7 +55,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
       "each thread's copy is made",
       "the first thread's turn landed, and what it kept may be forgotten only then",
       "a record cut after its push is finished at the thread's next open, and its next landing takes nothing of the other's",
-      "what a copy held beyond its turn is set aside, and can be put back",
+      "what a copy held beyond its turn is set aside, named at every open, and the copy is not put back to it",
+      "a clean copy's move to main cut before its base moved is finished by the next act",
       "passed",
     ]);
     expect(said[0]).toMatch(/^python 3\.\d+\.\d+, git version \d+\.\d+/);

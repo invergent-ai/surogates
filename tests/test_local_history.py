@@ -839,8 +839,9 @@ def a_record_cut_after_its_push(tmp_path: Path, folder: Path) -> tuple[LocalHist
 def test_a_record_cut_after_its_push_and_never_asked_again_is_finished_at_the_threads_next_open(tmp_path, folder):
     again, cut = a_record_cut_after_its_push(tmp_path, folder)
     theirs = files_of(folder)
-    # The open finishes the record first, and says so: the copy is the landing's files, the newer report among them.
-    assert again.open() == {"copy": "moved", "finished": {"landing": cut["landing"], "set_aside": None}}
+    # The open finishes the record first: the copy is the landing's files, the newer report among them.
+    assert again.open() == {"copy": "moved"}
+    assert git(again.repo, "rev-parse", "refs/landed/t2") == cut["landing"]
     assert (again.copy / "Report.docx").read_bytes() == b"PK\x03\x04 A's report"
     assert (again.copy / "A-new.md").read_text() == "A's new file\n"
     assert again.changed() == {"paths": []}
@@ -848,8 +849,6 @@ def test_a_record_cut_after_its_push_and_never_asked_again_is_finished_at_the_th
     after = land(again, "saga:3", B)
     assert (after["commit"], after["changes"], after["overlapped"]) == (None, [], [])
     assert files_of(folder) == theirs
-    # Said once: the next open has nothing to finish.
-    assert again.open() == {"copy": "moved"}
     # A redo of the report, made on the newer one, lands.
     (again.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report, with B's change")
     assert [c["path"] for c in land(again, "saga:4", B)["changes"]] == ["Report.docx"]
@@ -877,10 +876,9 @@ def test_whichever_act_reads_the_copy_first_after_a_record_cut_after_its_push_fi
     if first == "commit":
         assert (answer["commit"], answer["changes"]) == (None, [])
     assert files_of(folder) == theirs
-    # The thread's next open says what was finished.
-    assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == {
-        "copy": "moved", "finished": {"landing": cut["landing"], "set_aside": None},
-    }
+    # Nothing of the turn's was set aside for it, and the thread's next open has nothing left to finish.
+    assert git(again.repo, "rev-parse", "refs/landed/t2") == cut["landing"]
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == {"copy": "moved"}
 
 
 def test_a_record_asked_again_after_other_threads_landed_answers_its_landing(tmp_path, folder):
@@ -929,8 +927,9 @@ def test_a_record_cut_part_way_through_making_the_copy_the_landings_is_finished_
     again, cut = a_record_cut_after_its_push(tmp_path, folder)
     # As a reset killed after its first file leaves the copy: one file the landing's, the rest and the index the turn's.
     (again.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report")
-    finished = again.open()["finished"]
-    assert finished["landing"] == cut["landing"]
+    # Each file it holds is the turn's or the landing's: nothing of the thread's is set aside.
+    assert again.open() == {"copy": "moved"}
+    assert git(again.repo, "rev-parse", "refs/landed/t2") == cut["landing"]
     assert files_of(again.copy) == files_of(folder)
     assert land(again, "saga:3", B)["commit"] is None
 
@@ -947,7 +946,7 @@ def test_what_a_copy_holds_beyond_its_turn_is_set_aside_before_a_record_makes_it
     (two.copy / "late.md").write_text("written after the turn was committed\n")
     (two.copy / "notes.txt").write_text("changed after the turn was committed\n")
     recorded = two.record(turn=turn["commit"], applied=turn["changes"], author=B, trailers=saga, main=picked["main"], pickup=picked["commit"])
-    # The copy is the landing's files, and what it held is a snapshot the thread can be put back to.
+    # The copy is the landing's files, and what it held is a snapshot the thread's repository keeps.
     aside = recorded["set_aside"]
     assert re.fullmatch(r"[0-9a-f]{40}", aside)
     assert sorted(p.name for p in two.copy.iterdir()) == ["Report.docx", "notes.txt"]
@@ -957,14 +956,23 @@ def test_what_a_copy_holds_beyond_its_turn_is_set_aside_before_a_record_makes_it
     )
     assert git(two.repo, "cat-file", "-p", f"{aside}:late.md") == "written after the turn was committed"
     assert git(two.repo, "cat-file", "-p", f"{aside}:notes.txt") == "changed after the turn was committed"
+    # It is the copy as it was on its turn: what differs from its first parent is what was written since.
+    assert git(two.repo, "rev-parse", f"{aside}^1") == turn["commit"]
+    assert git(two.repo, "diff", "--name-only", f"{aside}^1", aside).split() == ["late.md", "notes.txt"]
     # Packed again, the repository still holds it.
     git(two.repo, "repack", "-a", "-d", "-q")
     git(two.repo, "prune", "--expire=now")
-    two.restore(aside)
-    assert (two.copy / "late.md").read_text() == "written after the turn was committed\n"
-    # Asked again, the record says the same.
+    assert git(two.repo, "cat-file", "-t", aside) == "commit"
+    # The copy is not put back to it: its base has moved since, and the other thread's report would go with it.
+    held = files_of(two.copy)
+    with refused("not_on_base", "refused the request: this snapshot is not built on the copy's base as it stands"):
+        two.restore(aside)
+    assert files_of(two.copy) == held
+    # Asked again the record says the same, and each open of the thread's names what its repository holds set aside.
     again = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1")
     assert again.record(turn=turn["commit"], applied=turn["changes"], author=B, trailers=saga, main=picked["main"], pickup=picked["commit"]) == recorded
+    assert again.open() == {"copy": "moved", "set_asides": [aside]}
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == {"copy": "moved", "set_asides": [aside]}
 
 
 def test_what_was_set_aside_for_a_turn_stays_under_what_a_later_try_sets_aside_for_it(tmp_path, folder):
@@ -984,20 +992,12 @@ def test_what_was_set_aside_for_a_turn_stays_under_what_a_later_try_sets_aside_f
     git(two.repo / "worktrees" / "t2", "read-tree", turn["commit"])
     (two.copy / "later.md").write_text("written since\n")
     assert two.changed() == {"paths": []}
-    again = two.open()["finished"]["set_aside"]
+    [again] = two.open()["set_asides"]
     # One ref for the turn, and the first snapshot under the second: neither file is lost.
     assert git(two.repo, "for-each-ref", "--format=%(objectname)", "refs/set-aside/") == again != first
     assert git(two.repo, "rev-parse", f"{again}^2") == first
     assert git(two.repo, "cat-file", "-p", f"{again}:later.md") == "written since"
     assert git(two.repo, "cat-file", "-p", f"{again}^2:late.md") == "written after the turn was committed"
-
-
-def test_a_note_of_a_finished_record_that_names_no_commit_is_told_to_no_one(tmp_path, folder):
-    one = a_copy(tmp_path, folder)
-    # What an earlier guest can leave in the thread's repository: its words reach no answer.
-    for planted in ("--upload-pack=/planted x\n", "one\n", f"{'a' * 40} ../../etc\n", ""):
-        (one.repo / "finished").write_text(planted)
-        assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open() == {"copy": "moved"}
 
 
 def test_a_landing_that_left_nothing_out_leaves_the_copy_and_what_was_written_since_as_they_are(tmp_path, folder):
@@ -1062,7 +1062,8 @@ def test_a_copy_that_is_gone_after_a_record_cut_after_its_push_is_made_again_as_
     with refused("no_whole_copy"):
         again.changed()
     opened = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()
-    assert opened == {"copy": "moved", "finished": {"landing": cut["landing"], "set_aside": None}}
+    assert opened == {"copy": "moved"}
+    assert git(again.repo, "rev-parse", "refs/landed/t2") == cut["landing"]
     assert files_of(again.copy) == files_of(folder)
 
 
@@ -1083,57 +1084,79 @@ def a_landing_applied_and_not_recorded(tmp_path: Path, folder: Path) -> tuple[Lo
     return one, turn, replaced
 
 
-def test_what_a_landing_kept_is_forgotten_only_once_it_was_recorded(tmp_path, folder):
+def test_what_a_recorded_landing_kept_is_forgotten_wherever_main_is_by_then(tmp_path, folder):
     one, turn, _ = a_landing_applied_and_not_recorded(tmp_path, folder)
+    wrote = turn["step"]["applied"]
     # Not recorded, and its files are in the folder: what it replaced is all its put-back has.
-    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
-        one.forget(saga="saga:1")
-    # Told by the turn the history holds, pushed before the first apply: the thread's own repository may be gone.
-    aside = tmp_path / "set-aside"
-    aside.mkdir()
-    one.repo.rename(aside / "clones")
-    one.copy.rename(aside / "threads")
-    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
-        LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1")
-    shutil.rmtree(one.repo)
-    (aside / "clones").rename(one.repo)
-    (aside / "threads").rename(one.copy)
+    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back whole"):
+        one.forget(saga="saga:1", applied=wrote)
     recorded = one.record(**turn["step"])
-    assert one.forget(saga="saga:1") == {"landing": recorded["commit"]}
+    assert one.forget(saga="saga:1", applied=wrote) == {"landing": recorded["commit"]}
     # And for good: wherever main is by then, and whatever the thread has pushed since.
     two = a_copy(tmp_path, folder, "t2")
     (two.copy / "B.md").write_text("B's own\n")
     land(two, "saga:2", B)
     (one.copy / "Draft.md").write_text("a failed turn's, kept\n")
     one.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True)
-    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1") == {"landing": recorded["commit"]}
-    # A saga the history holds neither a landing nor a turn of: it cannot tell what that one wrote.
-    with refused("landing_unsettled", "refused the request: the history holds neither this landing nor its turn"):
-        one.forget(saga="saga:none")
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1", applied=wrote) == {"landing": recorded["commit"]}
     # Any thread's landing, by its saga.
-    assert one.forget(saga="saga:2") == {"landing": git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/threads/t2")}
+    assert one.forget(saga="saga:2", applied=[]) == {"landing": git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/threads/t2")}
+    # A landing that applied nothing kept nothing.
+    assert one.forget(saga="saga:none", applied=[]) == {"landing": None}
 
 
-@pytest.mark.parametrize("kept_since", [False, True])
-def test_what_a_landing_kept_is_forgotten_once_it_was_put_back_whole(tmp_path, folder, kept_since):
+def test_what_a_landing_kept_is_forgotten_once_each_file_it_applied_is_as_it_was_before(tmp_path, folder):
     one, turn, replaced = a_landing_applied_and_not_recorded(tmp_path, folder)
+    wrote = turn["step"]["applied"]
     # Put back in part: a file the landing wrote, and the one it deleted, are as it left them.
     (folder / "Summary.md").unlink()
     with refused("landing_unsettled"):
-        one.forget(saga="saga:1")
+        one.forget(saga="saga:1", applied=wrote)
     (folder / "notes.txt").write_bytes(replaced["notes.txt"])
     with refused("landing_unsettled"):
-        one.forget(saga="saga:1")
+        one.forget(saga="saga:1", applied=wrote)
     (folder / "Report.docx").write_bytes(replaced["Report.docx"])
-    if kept_since:
-        # The failed turn kept on its branch with what the thread wrote since: the branch is no longer the
-        # landing's turn in the history, and the thread's own repository still holds that turn.
-        (one.copy / "since.md").write_text("written since\n")
-        kept = one.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True)["commit"]
-        assert kept != turn["commit"] == turn["step"]["turn"]
+    # Whole.  It goes by the folder and by what it is told was applied: the thread's own repository is not read, nor made.
+    shutil.rmtree(one.repo)
     again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
-    assert again.forget(saga="saga:1") == {"landing": None}
+    assert again.forget(saga="saga:1", applied=wrote) == {"landing": None}
+    assert not one.repo.exists()
     assert sorted(p.name for p in folder.iterdir()) == ["Report.docx", "notes.txt"]
+
+
+@pytest.mark.parametrize("left", [
+    "a file you changed after the landing wrote it", "a link where the landing's file was",
+    "the first try's file, its commit step tried again after a late write",
+    "a link where the file's folder was", "a folder where the file the landing made was",
+])
+def test_a_put_back_that_is_not_whole_is_not_taken_for_one(tmp_path, folder, left):
+    one, turn, replaced = a_landing_applied_and_not_recorded(tmp_path, folder)
+    wrote = turn["step"]["applied"]
+    # The put-back takes away the file the landing made and gives back the one it deleted; the third it could not.
+    (folder / "Summary.md").unlink()
+    (folder / "Report.docx").write_bytes(replaced["Report.docx"])
+    if left.startswith("a link where the file's folder"):
+        # Every file is as it was, read through a link to a folder that holds them: the folder's own are not.
+        (folder / "notes.txt").write_bytes(replaced["notes.txt"])
+        wrote = [{**change, "path": f"sub/{change['path']}"} for change in wrote]
+        (folder / "sub").symlink_to(folder)
+    elif left.startswith("a folder"):
+        (folder / "notes.txt").write_bytes(replaced["notes.txt"])
+        (folder / "Summary.md").mkdir()
+    elif left.startswith("a file you changed"):
+        # Neither the landing's nor what was there before it: the put-back leaves it, and keeps what the landing replaced.
+        (folder / "notes.txt").write_text("the thread's notes\nand a line of yours, after the landing\n")
+    elif left.startswith("a link"):
+        # To a file that holds what was there before: no file of the folder's is.
+        (tmp_path / "elsewhere.txt").write_bytes(replaced["notes.txt"])
+        (folder / "notes.txt").unlink()
+        (folder / "notes.txt").symlink_to(tmp_path / "elsewhere.txt")
+    else:
+        (one.copy / "notes.txt").write_text("the thread's notes, written late\n")
+        again = one.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]], pickup=turn["step"]["pickup"])
+        assert again["commit"] != turn["commit"] and (folder / "notes.txt").read_text() == "the thread's notes\n"
+    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back whole"):
+        LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").forget(saga="saga:1", applied=wrote)
 
 
 def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_holds(tmp_path, folder):
@@ -1147,11 +1170,12 @@ def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_ho
     shutil.copyfile(two.copy / "B.md", folder / "B.md")
     two.record(turn=turn["commit"], applied=turn["changes"], author=B, trailers=said, main=picked["main"], pickup=picked["commit"])
     again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
-    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back"):
-        again.forget(saga="saga:1")
-    # Nor is that landing, where its own thread's branch has it, a turn of the first one's saga.
-    with refused("landing_unsettled", "refused the request: the history holds neither this landing nor its turn"):
-        two.forget(saga="saga:1")
+    with refused("landing_unsettled", "refused the request: this landing was neither recorded nor put back whole"):
+        again.forget(saga="saga:1", applied=mine["step"]["applied"])
+    assert again.forget(saga="saga:1", applied=[]) == {"landing": None}
+    # Nor is that landing, where its own thread's branch has it, the record of the first one's saga.
+    with refused("conflict", "main moved in the project's history since the landing began"):
+        two.record(turn=turn["commit"], applied=[], author=B, trailers=[["Surogate-Saga", "saga:1"]], main=None, pickup=None)
     # Nor is main's tip the first one's landing, to its record.
     with refused("conflict", "main moved in the project's history since the landing began"):
         again.record(**mine["step"])
@@ -1161,9 +1185,17 @@ def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, fo
     place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
     assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
     for saga in (None, 7, "", ["saga:1"]):
-        answer = ask(tree, {**place, "action": "forget", "args": {"saga": saga}})
+        answer = ask(tree, {**place, "action": "forget", "args": {"saga": saga, "applied": []}})
         assert answer == {"error": {"code": "not_a_request", "message": "refused the request: it names no saga"}}, saga
-    assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1"}})["error"]["code"] == "landing_unsettled"
+    for args in ({}, {"applied": None}, {"applied": "notes.txt"}, {"applied": {"path": "notes.txt"}}):
+        answer = ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", **args}})
+        assert answer == {"error": {"code": "not_a_request", "message": "refused the request: it names no files a landing applied"}}, args
+    for path in ("/etc/passwd", "../notes.txt", "sub//notes.txt", "sub/./notes.txt", ""):
+        answer = ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": [{"path": path, "before": None, "after": None}]}})
+        assert answer == {"error": {"code": "not_a_request", "message": "refused the request: a file it applied has no path in the folder"}}, path
+    wrote = [{"path": "notes.txt", "before": "0" * 40, "after": None}]
+    assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": wrote}})["error"]["code"] == "landing_unsettled"
+    assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": []}}) == {"landing": None}
 
 
 @pytest.mark.parametrize("act, why", [
@@ -1254,15 +1286,115 @@ def test_a_repository_made_again_owes_its_copy_no_record_of_a_landing_made_befor
     assert not list((again.repo / "refs").glob("set-aside/*/*"))
 
 
+@pytest.mark.parametrize("moved_by", ["a landing recorded whole", "a landing whose record was cut after its push", "an open's move to main"])
+def test_a_copy_is_not_put_back_to_a_snapshot_from_before_its_base_moved(tmp_path, folder, moved_by):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    # What a Stop puts the copy back to: the snapshot before the turn's first step.
+    before_the_turn = one.snapshot("before a step")
+    (two.copy / "Report.docx").write_bytes(b"PK\x03\x04 B's report")
+    (two.copy / "B.md").write_text("B's own\n")
+    land(two, "saga:2", B)
+    (folder / "yours.txt").write_text("saved by you since\n")
+    if moved_by == "an open's move to main":
+        assert one.open() == {"copy": "moved"}
+    else:
+        (one.copy / "notes.txt").write_text("the thread's notes\n")
+        saga = [["Surogate-Saga", "saga:1"]]
+        picked = one.pickup(author=YOURS, trailers=saga)
+        turn = one.commit_turn(author=A, trailers=saga, pickup=picked["commit"])
+        shutil.copyfile(one.copy / "notes.txt", folder / "notes.txt")
+        step = {"turn": turn["commit"], "applied": turn["changes"], "author": A, "trailers": saga, "main": picked["main"], "pickup": picked["commit"]}
+        (one.record if moved_by == "a landing recorded whole" else lambda **cut: History.record(one, **cut))(**step)
+    theirs = files_of(folder)
+    # The put-back arrives after all that.  The copy as it was then, on the base as it is now, would be the
+    # thread deleting the other's file and writing its own old versions over the other's and yours.
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    with refused("not_on_base", "refused the request: this snapshot is not built on the copy's base as it stands"):
+        again.restore(before_the_turn)
+    assert files_of(again.copy) == theirs
+    assert again.changed() == {"paths": []}
+    after = land(again, "saga:3")
+    assert (after["commit"], after["changes"], after["overlapped"]) == (None, [], [])
+    assert files_of(folder) == theirs
+    # A snapshot of the stretch the copy is on now is one it is put back to.
+    here = again.snapshot("before a step")
+    (again.copy / "made.txt").write_text("made by the turn\n")
+    again.restore(here)
+    assert files_of(again.copy) == theirs
+
+
+def test_what_a_cut_record_set_aside_is_named_by_every_open_whatever_the_thread_did_between(tmp_path, folder):
+    again, _ = a_record_cut_after_its_push(tmp_path, folder)
+    # A command still running wrote the copy after the turn was committed.
+    (again.copy / "late.md").write_text("written after the turn was committed\n")
+    # No open comes first: the snapshot before the next turn's first step finishes the record, and the turn lands.
+    again.snapshot("before a step")
+    assert not (again.copy / "late.md").exists()
+    (again.copy / "next.md").write_text("the next turn's\n")
+    assert [c["path"] for c in land(again, "saga:3", B)["changes"]] == ["next.md"]
+    # The file is out of the copy and on a ref, and no answer has named it yet: each open does, asked again or not.
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()
+    [aside] = opened["set_asides"]
+    assert opened == {"copy": "moved", "set_asides": [aside]}
+    assert git(again.repo, "cat-file", "-p", f"{aside}:late.md") == "written after the turn was committed"
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == opened
+
+
+def a_fetch_cut_before_its_cut_was_recorded(tmp_path: Path, folder: Path) -> tuple[LocalHistory, str]:
+    """A thread's repository as a fetch of ``main`` killed part way leaves it, and that ``main``: the commit is
+    there, its parents are not, and ``shallow`` does not say its history is cut there."""
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    (two.copy / "B.md").write_text("B's own\n")
+    main = land(two, "saga:2", B)["landing"]
+    subprocess.run(
+        ["git", f"--git-dir={one.repo}", "fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", str(tmp_path / "store" / "history.git"), main],
+        check=True, env=HERMETIC,
+    )
+    shallow = one.repo / "shallow"
+    shallow.write_text("".join(line for line in shallow.read_text().splitlines(keepends=True) if line.strip() != main))
+    with pytest.raises(subprocess.CalledProcessError):
+        git(one.repo, "rev-list", "-n", "1", main)
+    return one, main
+
+
+def test_a_commit_a_cut_fetch_left_with_no_parents_and_no_cut_is_fetched_again(tmp_path, folder):
+    one, main = a_fetch_cut_before_its_cut_was_recorded(tmp_path, folder)
+    # The next open takes main: the commit is in the repository, and is not taken for fetched.
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open() == {"copy": "moved"}
+    assert main in (one.repo / "shallow").read_text().split()
+    assert git(one.repo, "fsck", "--no-dangling") == ""
+    assert (one.copy / "B.md").read_text() == "B's own\n"
+
+
+def test_a_thread_whose_repository_cannot_be_packed_again_still_opens(tmp_path, folder, monkeypatch, caplog):
+    monkeypatch.setattr(local_history, "_PACKS", 1)
+    one, broken = a_fetch_cut_before_its_cut_was_recorded(tmp_path, folder)
+    # A ref of the repository's names the commit git cannot walk from, and no fetch of this open's brings it whole:
+    # main has moved on from it.
+    git(one.repo, "update-ref", "refs/heads/kept", broken)
+    two = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1")
+    (two.copy / "B2.md").write_text("more of B's\n")
+    land(two, "saga:3", B)
+    for n in range(3):
+        (one.copy / "notes.txt").write_text(f"edit {n}\n")
+        one.snapshot("before a step")
+    assert len(list((one.repo / "objects" / "pack").glob("*.pack"))) > 1
+    # Packing is upkeep: the thread's turn starts all the same, on its unlanded work, and lands.
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open() == {"copy": "kept"}
+    assert "could not be packed again" in caplog.text
+    assert [c["path"] for c in land(again, "saga:4")["changes"]] == ["notes.txt"]
+
+
 #: One request, as its runner takes it, run to its end or killed at one of its steps: each git it
 #: runs, and each file it writes or puts in its place.  Killed, every process of it goes at once.
 STEPPED = """
 import json, os, pathlib, signal, subprocess, sys
-at, count = int(sys.argv[2]), [0]
+at, before, count = int(sys.argv[2]), sys.argv[3], [0]
 def stepped(real):
     def step(*args, **kwargs):
         count[0] += 1
-        if count[0] == at:
+        if count[0] == at or before and args and isinstance(args[0], list) and before in " ".join(args[0]):
             os.killpg(0, signal.SIGKILL)
         return real(*args, **kwargs)
     return step
@@ -1279,14 +1411,15 @@ OURS, THEIRS, NEW = THREAD, THREAD.replace("0b6c", "1b6c"), THREAD.replace("0b6c
 SAGA = [["Surogate-Saga", "saga:ours"]]
 
 
-def stepped(root: Path, thread: str, action: str, args: dict, at: int = 0) -> dict | None:
-    """*thread*'s request on the folder under *root*, killed at its step *at*; its steps and answer when it ran to its end."""
+def stepped(root: Path, thread: str, action: str, args: dict, at: int = 0, before: str = "") -> dict | None:
+    """*thread*'s request on the folder under *root*, killed at its step *at*, or right before the git that is
+    *before*; its steps and answer when it ran to its end."""
     request = {"store": str(root / "store"), "folder": str(root / "Documents"), "thread": thread, "user": "u1", "action": action, "args": args}
     ran = subprocess.run(
-        [sys.executable, "-c", STEPPED, json.dumps(request), str(at)], capture_output=True, text=True,
+        [sys.executable, "-c", STEPPED, json.dumps(request), str(at), before], capture_output=True, text=True,
         cwd=Path(__file__).parents[1], start_new_session=True, timeout=300,
     )
-    if at:
+    if at or before:
         assert ran.returncode == -signal.SIGKILL, (at, ran.returncode, ran.stdout, ran.stderr)
         return None
     assert ran.returncode == 0, ran.stderr
@@ -1415,9 +1548,9 @@ def test_a_landing_stopped_after_any_of_its_applies_deletes_and_overwrites_nothi
         again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
         if done:
             with refused("landing_unsettled"):
-                again.forget(saga="saga:ours")
+                again.forget(saga="saga:ours", applied=turn["changes"][:done])
         else:
-            assert again.forget(saga="saga:ours") == {"landing": None}
+            assert again.forget(saga="saga:ours", applied=[]) == {"landing": None}
         the_next_turn_lands_whole(root, kept, landed=False)
 
 
@@ -1441,12 +1574,12 @@ def test_a_record_killed_at_any_step_is_finished_or_never_was_and_the_next_landi
             answer = again.record(**step)
             assert re.fullmatch(r"[0-9a-f]{40}", answer["set_aside"]), at
             assert git(again.repo, "cat-file", "-p", f"{answer['set_aside']}:late.md") == "written after the turn was committed"
-            assert again.forget(saga="saga:ours") == {"landing": answer["commit"]}
+            assert again.forget(saga="saga:ours", applied=turn["changes"]) == {"landing": answer["commit"]}
         elif recorded:
-            # The push counted: the thread's next open finishes it, and says what it set aside.
-            finished = again.open()["finished"]
-            assert finished["landing"] == landing, at
-            assert git(again.repo, "cat-file", "-p", f"{finished['set_aside']}:late.md") == "written after the turn was committed"
+            # The push counted: the thread's next open finishes it, and says what was set aside.
+            [aside] = again.open()["set_asides"]
+            assert git(again.repo, "rev-parse", f"refs/landed/{OURS}") == landing, at
+            assert git(again.repo, "cat-file", "-p", f"{aside}:late.md") == "written after the turn was committed"
         if asked_again or recorded:
             # The copy is the landing's files: the newer report, and no file the thread wrote since.
             assert dict(files_of(again.copy)) == {**dict(files_of(folder))}, at
@@ -1454,7 +1587,7 @@ def test_a_record_killed_at_any_step_is_finished_or_never_was_and_the_next_landi
         else:
             # It never counted: the landing is as it was before its record, and its kept files are not forgotten.
             with refused("landing_unsettled"):
-                again.forget(saga="saga:ours")
+                again.forget(saga="saga:ours", applied=turn["changes"])
             (root / "store" / "threads" / OURS / "late.md").unlink()
         the_next_turn_lands_whole(root, kept, landed=True)
     # The cuts fall on both sides of the push.
@@ -1464,7 +1597,136 @@ def test_a_record_killed_at_any_step_is_finished_or_never_was_and_the_next_landi
 def test_a_forget_killed_at_any_step_changes_nothing_and_answers_the_same_when_asked_again(tmp_path):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
     landed = land(ours, "saga:ours", B)
-    for at, root in each_cut(tmp_path, OURS, "forget", {"saga": "saga:ours"}):
+    for at, root in each_cut(tmp_path, OURS, "forget", {"saga": "saga:ours", "applied": landed["changes"]}):
         again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
-        assert again.forget(saga="saga:ours") == {"landing": landed["landing"]}, at
+        assert again.forget(saga="saga:ours", applied=landed["changes"]) == {"landing": landed["landing"]}, at
     the_next_turn_lands_whole(root, kept, landed=True)
+
+
+def a_clean_copy_whose_main_moved(root: Path, after_a_cut_record: bool) -> None:
+    """A folder under *root* whose history moved on while our thread's copy held nothing unlanded.
+
+    The other thread has landed a change and a new file, and you have changed a file, deleted one and made
+    one since: our thread's next open moves its copy to all of that.  With *after_a_cut_record*, our thread
+    landed a file first, and that landing's record was cut right after its push: the open finishes it first.
+    """
+    folder = root / "Documents"
+    folder.mkdir(parents=True)
+    for name in "abeg":
+        (folder / f"{name}.txt").write_text(f"{name} v1\n")
+        os.utime(folder / f"{name}.txt", (time.time() - 60, time.time() - 60))
+    ours, theirs = a_copy(root, folder, OURS), a_copy(root, folder, THEIRS)
+    if after_a_cut_record:
+        (ours.copy / "a.txt").write_text("a by us\n")
+        picked = ours.pickup(author=YOURS, trailers=SAGA)
+        turn = ours.commit_turn(author=B, trailers=SAGA, pickup=picked["commit"])
+        applied(folder, ours.copy, turn["changes"])
+        History.record(ours, turn=turn["commit"], applied=turn["changes"], author=B, trailers=SAGA, main=picked["main"], pickup=picked["commit"])
+    (theirs.copy / "g.txt").write_text("g by them\n")
+    (theirs.copy / "B.md").write_text("new by them\n")
+    land(theirs, "saga:theirs")
+    (folder / "b.txt").write_text("b v2 by you\n")
+    (folder / "e.txt").unlink()
+    (folder / "yours.txt").write_text("a new file of yours\n")
+
+
+def the_folder_goes_back_and_the_thread_lands_its_own_file_alone(root: Path, at: object) -> None:
+    """After our thread's copy moved to ``main``: you undo your edit, bring your deleted file back, and remove
+    your new file and the other thread's, whose change you undo too.  Our thread's turn writes one file, and its
+    landing names that file and no other: nothing of yours or the other's is taken for its work."""
+    folder = root / "Documents"
+    ours = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+    assert ours.changed() == {"paths": []}, at
+    assert files_of(ours.copy) == files_of(folder), at
+    (folder / "b.txt").write_text("b v1\n")
+    (folder / "e.txt").write_text("e v1\n")
+    (folder / "yours.txt").unlink()
+    (folder / "B.md").unlink()
+    (folder / "g.txt").write_text("g v1\n")
+    yours = files_of(folder)
+    (ours.copy / "A2.md").write_text("our own work this turn\n")
+    landed = land(ours, "saga:next", B)
+    assert ([c["path"] for c in landed["changes"]], landed["overlapped"]) == (["A2.md"], []), at
+    assert files_of(folder) == sorted([*yours, ("A2.md", b"our own work this turn\n")]), at
+
+
+@pytest.mark.parametrize("after", ["a landing", "a record cut after its push"])
+def test_an_open_that_moves_a_clean_copy_killed_at_any_step_leaves_the_copy_and_its_base_agreeing(tmp_path, after):
+    a_clean_copy_whose_main_moved(tmp_path / "whole", after == "a record cut after its push")
+    for at, root in each_cut(tmp_path, OURS, "open", {}):
+        ours = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+        # Whatever the cut left of the move, the next open finishes it: the copy is the folder, on a base that is.
+        assert ours.open() == {"copy": "moved"}, at
+        assert not git(ours.repo, "for-each-ref", "refs/moving/", "refs/set-aside/"), at
+        the_folder_goes_back_and_the_thread_lands_its_own_file_alone(root, at)
+
+
+@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "commit", "keep"])
+@pytest.mark.parametrize("written_since", [False, True])
+def test_a_move_of_a_clean_copy_cut_part_way_through_its_files_is_finished_by_whichever_act_comes_first(tmp_path, first, written_since):
+    root = tmp_path / "whole"
+    a_clean_copy_whose_main_moved(root, False)
+    stepped(root, OURS, "open", {}, before="read-tree -u -m")
+    ours = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+    # As a checkout killed after some of its files leaves the copy: one of main's files written and one of its
+    # deletions made, the rest and the index as they were.
+    (ours.copy / "g.txt").write_text("g by them\n")
+    (ours.copy / "e.txt").unlink()
+    if written_since:
+        # A command of the thread's still running wrote a file of its own, and one that main changed.
+        (ours.copy / "late.md").write_text("written by a command still running\n")
+        (ours.copy / "b.txt").write_text("b, written by a command still running\n")
+    answer = {
+        "open": ours.open, "changed": ours.changed, "snapshot": lambda: ours.snapshot("before a step"),
+        "commit": lambda: ours.commit_turn(author=B, trailers=SAGA, pickup=None),
+        "keep": lambda: ours.keep(author=B, trailers=SAGA, base=True),
+    }[first]()
+    if first == "changed":
+        assert answer == {"paths": []}
+    if first == "commit":
+        assert (answer["commit"], answer["changes"]) == (None, [])
+    # Finished, and no longer said to be under way: a later act would put the copy back to where it was going.
+    assert not git(ours.repo, "for-each-ref", "refs/moving/")
+    asides = git(ours.repo, "for-each-ref", "--format=%(objectname)", "refs/set-aside/").split()
+    if written_since:
+        # Neither what the copy held nor what main holds: set aside before the copy is made main's files, and named.
+        [aside] = asides
+        assert git(ours.repo, "cat-file", "-p", f"{aside}:late.md") == "written by a command still running"
+        assert git(ours.repo, "cat-file", "-p", f"{aside}:b.txt") == "b, written by a command still running"
+        assert LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1").open() == {"copy": "moved", "set_asides": [aside]}
+    else:
+        assert asides == []
+        assert LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1").open() == {"copy": "moved"}
+    the_folder_goes_back_and_the_thread_lands_its_own_file_alone(root, first)
+
+
+def test_a_move_cut_after_the_copys_files_were_moved_leaves_what_the_thread_wrote_since_as_its_work(tmp_path):
+    root = tmp_path / "whole"
+    a_clean_copy_whose_main_moved(root, False)
+    # Every file of the copy is main's, and its index: the branch and the base are where they were.
+    stepped(root, OURS, "open", {}, before="update-ref refs/heads/threads/")
+    ours = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+    assert (ours.copy / "B.md").exists() and git(ours.repo, "rev-parse", f"refs/moving/{OURS}") != git(ours.repo, "rev-parse", f"refs/bases/{OURS}")
+    (ours.copy / "late.md").write_text("written by a command still running\n")
+    # Nothing is put back, so nothing is set aside: the file is the turn's own, on a base that is main.
+    assert ours.changed() == {"paths": ["late.md"]}
+    assert not git(ours.repo, "for-each-ref", "refs/moving/", "refs/set-aside/")
+    assert ours.open() == {"copy": "kept"}
+    assert [c["path"] for c in land(ours, "saga:next", B)["changes"]] == ["late.md"]
+
+
+def test_a_move_that_cannot_be_finished_refuses_every_act_and_moves_nothing(tmp_path):
+    root = tmp_path / "whole"
+    a_clean_copy_whose_main_moved(root, False)
+    stepped(root, OURS, "open", {}, before="read-tree -u -m")
+    ours = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+    # What no request can put right: the copy's index is no index.
+    (ours.repo / "worktrees" / OURS / "index").write_bytes(b"not an index\n")
+    refs, held = git(ours.repo, "for-each-ref"), files_of(ours.copy)
+    for ask in (
+        lambda h: h.open(), lambda h: h.changed(), lambda h: h.snapshot("before a step"),
+        lambda h: h.commit_turn(author=B, trailers=SAGA, pickup=None), lambda h: h.keep(author=B, trailers=SAGA, base=True),
+    ):
+        with refused("move_unfinished", "refused the request: this thread's copy was being moved to main, and the move could not be finished: git write-tree failed"):
+            ask(LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1"))
+    assert (git(ours.repo, "for-each-ref"), files_of(ours.copy)) == (refs, held)
