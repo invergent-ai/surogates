@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
 import { workstreamRoutes } from "../web/src/api/workstream-routes.ts";
 import { threadRowOf } from "../web/src/lib/projects-wire.ts";
+import { savedName } from "../web/src/lib/save-file.ts";
 import {
   INBOX_REOPENING,
   projectReopening,
@@ -247,8 +248,10 @@ test("a row maps to the shell's ThreadRow field by field", () => {
 
 // The project routes over a fake fetch: *answer* gives each request's response, and every
 // request is kept, as [method, url, body], and a POST or a PATCH with the type its body was sent as.
+// Each file handed to the user to save is kept in saved, as [name, the type it is saved as, its text].
 function routesOver(answer) {
   const asked = [];
+  const saved = [];
   const fetchFn = async (input, init = {}) => {
     const method = init.method ?? "GET";
     const request = [method, String(input), init.body === undefined ? undefined : JSON.parse(init.body)];
@@ -256,7 +259,11 @@ function routesOver(answer) {
     asked.push(request);
     return answer(String(input), init);
   };
-  return { asked, routes: workstreamRoutes(fetchFn, (url, watched) => new FetchSseEventStream(url, { fetchFn: watched })) };
+  const save = (data, name) => saved.push(data.text().then((text) => [name, data.type, text]));
+  return {
+    asked, saved,
+    routes: workstreamRoutes(fetchFn, (url, watched) => new FetchSseEventStream(url, { fetchFn: watched }), save),
+  };
 }
 
 const PROJECT = {
@@ -553,5 +560,87 @@ test("a History the agent refuses says why in the agent's words, and one that is
   for (const body of [{ versions: [] }, [{ ...VERSION, id: 12 }], [{ ...VERSION, path: undefined }], [null]]) {
     const odd = routesOver(() => Response.json(body));
     await assert.rejects(odd.routes.history("p-1", "a.md", { kind: "cloud" }), { message: "Failed to fetch the file's History" });
+  }
+});
+
+test("a version is opened at its route and handed to the user to save, as data under the file's own name", async () => {
+  // A page among the project's files, as a server of any kind may answer it.
+  const { asked, saved, routes } = routesOver(() => new Response("<script>alert(1)</script>", { headers: { "Content-Type": "text/html" } }));
+  assert.equal(await routes.openVersion("p-1", { versionId: "12:f", path: "threads/Draft A/page.html" }), undefined);
+  // Saved as data, whatever the route called it: nothing a browser would show as a page of the agent's.
+  assert.deepEqual(await Promise.all(saved), [["page.html", "application/octet-stream", "<script>alert(1)</script>"]]);
+  // A version's id is one part of the address, whatever it holds.
+  await routes.openVersion("p-1", { versionId: "../../sessions?x=1#y", path: "a b/c&d.md" });
+  assert.deepEqual(asked, [
+    ["GET", "/api/v1/workstreams/p-1/history/12%3Af/file?path=threads%2FDraft+A%2Fpage.html", undefined],
+    ["GET", "/api/v1/workstreams/p-1/history/..%2F..%2Fsessions%3Fx%3D1%23y/file?path=a+b%2Fc%26d.md", undefined],
+  ]);
+  await assert.rejects(routes.openVersion("p-1", { versionId: "..", path: "a.md" }), { message: "No such version." });
+  assert.equal(asked.length, 2);
+});
+
+test("a version the agent cannot open says why in the agent's words, and nothing is handed to save", async () => {
+  for (const [status, detail] of [
+    [410, "This version is no longer kept in the project's history."],
+    [409, "This version is larger than Surogate can read here."],
+    [503, "This project's history is being read just now. Try again in a moment."],
+    // A server from before Open version has no such route.
+    [404, "Not Found"],
+  ]) {
+    const { saved, routes } = routesOver(() => Response.json({ detail }, { status }));
+    await assert.rejects(routes.openVersion("p-1", { versionId: "3:p", path: "a.md" }), { message: detail });
+    assert.deepEqual(saved, []);
+  }
+  const down = routesOver(() => new Response("<html>Bad gateway</html>", { status: 502 }));
+  await assert.rejects(down.routes.openVersion("p-1", { versionId: "3:p", path: "a.md" }), { message: "The version could not be opened." });
+  // A version cut short on its way is not saved as if it were whole.
+  const cut = routesOver(() => new Response(new ReadableStream({ start: (stream) => stream.error(new TypeError("network error")) })));
+  await assert.rejects(cut.routes.openVersion("p-1", { versionId: "3:p", path: "a.md" }), { message: "The version could not be opened." });
+  assert.deepEqual([down.saved, cut.saved], [[], []]);
+});
+
+test("a version is saved under its file's own name, which is a name and no more", () => {
+  for (const [path, name] of [
+    ["Report.docx", "Report.docx"],
+    ["reports/2026/Raport final – ș.docx", "Raport final – ș.docx"],
+    ["../../../etc/passwd", "passwd"],
+    ["/etc/shadow", "shadow"],
+    ["..\\..\\AppData\\run.bat", ".._.._AppData_run.bat"],
+    ["C:\\Windows\\system.ini", "C:_Windows_system.ini"],
+    ["line\r\nbreak\u0000\u001b[2J\u007f\u0085.txt", "linebreak[2J.txt"],
+    ["é".repeat(200) + ".docx", "é".repeat(125) + ".docx"],
+    ["a".repeat(300), "a".repeat(255)],
+    ["x." + "y".repeat(300), ("x." + "y".repeat(300)).slice(0, 255)],
+    // A name is never cut inside a character.
+    ["😀".repeat(100) + ".md", "😀".repeat(63) + ".md"],
+    ["folder/..", "file"], ["folder/.", "file"], ["folder/", "file"], ["...", "file"], [" ", "file"], ["", "file"], ["\u0001\u0002", "file"],
+  ]) {
+    assert.equal(savedName(path), name, JSON.stringify(path));
+    assert.ok(new TextEncoder().encode(savedName(path)).length <= 255);
+  }
+});
+
+test("the files a project deleted are asked at their route, and whether there are more than are listed", async () => {
+  const gone = { ...VERSION, id: "13:p", path: "old.md", by: { kind: "you" }, change: "deleted", landing_id: null };
+  const { asked, routes } = routesOver(() => Response.json({ files: [gone, { ...gone, id: "9:f", path: "older.md", by: VERSION.by, landing_id: "9" }], more: true }));
+  assert.deepEqual(await routes.deleted("p-1"), {
+    files: [
+      { id: "13:p", path: "old.md", by: { kind: "you" }, at: "2026-10-07T11:00:00Z", change: "deleted", merged: true, available: true, landingId: null },
+      { id: "9:f", path: "older.md", by: { kind: "thread", threadId: "t-1", title: "Draft A" }, at: "2026-10-07T11:00:00Z", change: "deleted", merged: true, available: true, landingId: "9" },
+    ],
+    more: true,
+  });
+  assert.deepEqual(asked, [["GET", "/api/v1/workstreams/p-1/history/deleted", undefined]]);
+  // Anything but a plain yes is no more; and what a later server adds is left out.
+  for (const more of [false, undefined, "yes", 1]) {
+    const plain = routesOver(() => Response.json({ files: [], more, cursor: "x" }));
+    assert.deepEqual(await plain.routes.deleted("p-1"), { files: [], more: false });
+  }
+  // A server from before the list has no such route; and an answer that is not the route's shape is its own failure.
+  const older = routesOver(() => Response.json({ detail: "Not Found" }, { status: 404 }));
+  await assert.rejects(older.routes.deleted("p-1"), { message: "Not Found" });
+  for (const body of [[gone], { files: "none" }, { more: true }, { files: [{ ...gone, id: 13 }] }, null]) {
+    const odd = routesOver(() => Response.json(body));
+    await assert.rejects(odd.routes.deleted("p-1"), { message: "Failed to fetch the project's deleted files" });
   }
 });

@@ -62,10 +62,16 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   // A source's methods, which must be its own: what the page hands over is a copy, and keeps no prototype.
   const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "subscribe"] as const;
   const answer = (id: number, outcome: { ok: unknown } | { error: string }) => ipcRenderer.send("desktop:projects-answer", id, outcome);
+  // What a page of an agent older than this app does not serve yet, in words.
+  const NOT_YET: Partial<Record<Extract<ToPage, { type: "call" }>["method"], string>> = {
+    history: "This agent cannot show a file's History yet",
+    openVersion: "This agent cannot open a version yet",
+    deleted: "This agent cannot list deleted files yet",
+  };
   const called = (source: ProjectsSource, message: Extract<ToPage, { type: "call" }>) => {
     const method = source[message.method] as ((...args: unknown[]) => Promise<unknown>) | undefined;
-    // A page of an agent older than this app serves no file's History: it is said, not run.
-    if (typeof method !== "function") return answer(message.id, { error: "This agent cannot show a file's History yet" });
+    // What its page does not serve is said, not run.
+    if (typeof method !== "function") return answer(message.id, { error: NOT_YET[message.method] ?? "This agent cannot do that yet" });
     Promise.resolve().then(() => method(...message.args)).then(
       (ok) => answer(message.id, { ok }),
       (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),

@@ -14,7 +14,9 @@ import {
 } from "electron";
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
-import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier } from "../../../web/src/lib/projects-contract.js";
+import type {
+  DeletedFiles, LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier,
+} from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
@@ -215,8 +217,9 @@ let choice = 0;
 let failure: string | null = null;
 // A thread's row, open or resolve, that left the pane between its drawing and the click.
 const NO_SUCH_THREAD = "No such thread in the open project";
-// The open project, for the Overview pane, and what stops following it.
-let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[] } | null = null;
+// The open project, for the Overview pane, and what stops following it. deleted: its files that are
+// gone, each the version that deleted it, which the Library lists under its files.
+let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[]; deleted: DeletedFiles } | null = null;
 let unfollow = (): void => {};
 // The project dialog's view, while it is open over the window.
 let projectDialog: WebContents | null = null;
@@ -595,22 +598,26 @@ async function refreshProjects(threadId: string | null = null): Promise<void> {
   }
 }
 
-// The open project's threads, library and routines.
+// A project's files that are gone. A page of an agent older than this app lists none, and a list that
+// could not be read is none for now: neither is a failure of the Overview's, whose threads still show.
+const deletedFiles = (id: string): Promise<DeletedFiles> => projects.deleted(id).catch(() => ({ files: [], more: false }));
+
+// The open project's threads, library, routines and deleted files.
 async function refreshOverview(): Promise<void> {
   const open = view.kind === "project" ? view : null;
   if (!open) return;
-  const [project, threads, library, routines] = await Promise.all([
-    projects.get(open.id), projects.threads(open.id), projects.library(open.id), projects.routines(open.id),
+  const [project, threads, library, routines, deleted] = await Promise.all([
+    projects.get(open.id), projects.threads(open.id), projects.library(open.id), projects.routines(open.id), deletedFiles(open.id),
   ]);
   remember(project);
   if (view !== open) return;
-  overview = { project, threads, library, routines };
+  overview = { project, threads, library, routines, deleted };
   leaveIfGone(open);
 }
 
 // One thread's row of the open project, read alone: it keeps its place, a new one comes first,
 // and one the project no longer has goes. A row new or gone, or whose files changed, changes the
-// Library too, which is read again with it.
+// Library too, which is read again with it, and with it the files that are gone.
 async function refreshThread(threadId: string): Promise<void> {
   const open = view.kind === "project" ? view : null;
   if (!open) return;
@@ -618,9 +625,9 @@ async function refreshThread(threadId: string): Promise<void> {
   if (view !== open || overview?.project.id !== open.id) return;
   const before = overview.threads.find((found) => found.id === threadId);
   if (!row || !before || JSON.stringify(row.files) !== JSON.stringify(before.files)) {
-    const library = await projects.library(open.id);
+    const [library, deleted] = await Promise.all([projects.library(open.id), deletedFiles(open.id)]);
     if (view !== open || overview?.project.id !== open.id) return;
-    overview = { ...overview, library };
+    overview = { ...overview, library, deleted };
   }
   overview = { ...overview, threads: merged(overview.threads, threadId, row) };
   leaveIfGone(open);
@@ -2386,17 +2393,21 @@ function wire(window: MainWindow, page: string): void {
   };
   handle("shell:resolve", settle("resolve"));
   handle("shell:reopen", settle("reopen"));
-  // A file's History: of a file the open project lists among its cloud files, or among a cloud thread's.
+  // A file's History: of a file the open project lists among its cloud files, among a cloud thread's,
+  // or among those deleted from them.
   handle("shell:history", (path) => {
     const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
     const listed = open && overview && (
       overview.library.some((entry) => entry.path === path && entry.place.kind === "cloud")
       || overview.threads.some((row) => row.place.kind === "cloud" && row.files.some((file) => file.kind === "file" && file.ref === path))
+      || overview.deleted.files.some((version) => version.path === path)
     );
     if (!open || typeof path !== "string" || !listed) throw new Error("No such file in the open project");
     return fileHistory.open(open.id, path);
   });
   handle("shell:history-close", () => fileHistory.close());
+  // A version of the file whose History is shown, handed by the agent's page to its user to save.
+  handle("shell:history-open", (id) => fileHistory.openVersion(id));
   // Back and Forward move the web client; on the Projects page they leave it, for what the centre
   // showed before it, as the client still is there. A failure the choice cleared is drawn away.
   const move = (step: () => void) => {

@@ -35,8 +35,9 @@ QUIET_RESOLVES_AFTER = timedelta(days=7)
 #: with anything past one of these, and every row in it.  Lengths are UTF-16
 #: units, as the shell counts them.  A row's other fields stay inside the
 #: shell's limits by construction: a title is at most 256 units, a status line
-#: 200 code points.  A Library entry's path is a ``ref``.  A file's History answers its newest versions.
-SHELL_LIMITS = {"rows": 500, "files": 200, "label": 500, "ref": 4096, "library": 2000, "versions": 500}
+#: 200 code points.  A Library entry's path is a ``ref``.  A file's History answers its newest versions,
+#: and the Library the files most lately deleted.
+SHELL_LIMITS = {"rows": 500, "files": 200, "label": 500, "ref": 4096, "library": 2000, "versions": 500, "deleted": 500}
 _STATUS_LINE_MAX = 200
 
 
