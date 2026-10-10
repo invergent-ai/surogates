@@ -4,11 +4,15 @@
 // folder: its lock, and, around a command, the hook guard's refusal and its look after.
 // A project thread's root works in its copy of the folder (spec, Section 13): the
 // executor's copies have the guest make it, its file host holds it, and the guest shares
-// it at the folder's path.
+// it at the folder's path. Its own kinds go where each is done (history/kinds.ts): a
+// checkpoint and a step of its history to git in the guest, for its copy; a landing's
+// steps to the landing's own host on the folder itself.
 
 import type { FolderGuards } from "../binding/folder.js";
 import { Copies, type Making } from "../history/copies.js";
-import { type Guard, ToolHosts, type ToolHostsOptions } from "../hosts/tool-hosts.js";
+import { checkpointOf, NOT_A_CHECKPOINT, refusedOf, THREAD_KINDS } from "../history/kinds.js";
+import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
+import { type BoundFolder, type Guard, ToolHosts, type ToolHostsOptions } from "../hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import type { VmClient } from "./client.js";
@@ -51,11 +55,56 @@ export class VmExecutor implements Executor {
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    if (THREAD_KINDS.has(operation.kind)) return this.thread(operation, signal);
     if (!PROCESS_KINDS.has(operation.kind)) return this.files.run(operation, signal);
     // What the root's host holds is what the guest shares for it: its folder, or a thread's copy at the folder's path.
     return this.files.guarded(operation, signal, GUARDS[operation.kind] ?? null, ({ folder, at }, aborted, ended) => this.options.vm.perform({
       id: operation.id, root: operation.sessionId, folder, ...(at === undefined ? {} : { at }), kind: operation.kind, args: operation.args, ended,
     }, aborted));
+  }
+
+  /** What is refused before its user is asked anything: one of a thread's own kinds that is not its turn's to ask. */
+  refusal(operation: Operation): Outcome | null {
+    if (!THREAD_KINDS.has(operation.kind)) return null;
+    const { binding, deleted } = this.bound(operation);
+    return refusedOf(operation, binding, deleted);
+  }
+
+  /**
+   * A deleted chat's root, told before its binding is forgotten (binding/binder.ts). A thread's hosts go, but for a
+   * landing that has written in its folder, and its copy and repository stay as it left them. Answered at once.
+   */
+  retired(root: string): void {
+    let binding: BoundFolder | undefined;
+    try {
+      binding = this.options.bindingOf(root);
+    } catch {
+      return; // a journal that cannot be read names no thread's hosts
+    }
+    if (binding?.history !== undefined) this.files.retired(root, binding);
+  }
+
+  // One of a thread's own kinds, where it is done. Refused again here: admit's answer is not this run's.
+  private thread(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    const { binding, deleted } = this.bound(operation);
+    const refused = refusedOf(operation, binding, deleted);
+    if (refused || !binding) return Promise.resolve(refused ?? FOLDER_UNAVAILABLE);
+    if (operation.kind === "land") return this.files.land(operation, signal);
+    const root = operation.sessionId;
+    const { action, ...args } = operation.args;
+    if (operation.kind === "history") return this.copies.ask(root, binding, String(action), args, signal);
+    // The cloud's checkpoint by the history's own names: a take is its snapshot, and a restore's hash its commit.
+    const asked = checkpointOf(operation.args);
+    return asked ? this.copies.ask(root, binding, asked.action, asked.args, signal) : Promise.resolve(NOT_A_CHECKPOINT);
+  }
+
+  // The binding of the root an operation of a thread's own is for: the journal's, or, for a step of its history or its
+  // landing, a deleted thread's whose landing's host was kept, which takes only what finishes that landing.
+  private bound({ sessionId, kind }: Operation): { binding: BoundFolder | undefined; deleted: boolean } {
+    const binding = this.options.bindingOf(sessionId);
+    if (binding || kind === "checkpoint") return { binding, deleted: false };
+    const left = this.files.deletedLanding(sessionId);
+    return { binding: left, deleted: left !== undefined };
   }
 
   guards(): FolderGuards {
