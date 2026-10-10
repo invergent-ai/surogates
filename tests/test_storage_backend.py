@@ -14,6 +14,7 @@ import pytest
 from aioboto3.s3 import inject
 
 from surogates.storage.backend import (
+    Changed,
     LocalBackend,
     S3Backend,
     TooLarge,
@@ -109,6 +110,41 @@ class TestLocalBackendObjects:
         await backend.upload("bucket", "new/folder/key.bin", source)
         assert await backend.read("bucket", "new/folder/key.bin") == source.read_bytes()
         assert [p.name for p in (tmp_path / "bucket" / "deep").iterdir()] == ["key.bin"]
+
+    async def test_an_object_is_told_by_a_tag_that_changes_with_each_write(self, backend: LocalBackend, tmp_path: Path):
+        await backend.write("bucket", "key.bin", b"one")
+        first = (await backend.stat("bucket", "key.bin"))["etag"]
+        assert (await backend.stat("bucket", "key.bin"))["etag"] == first
+        # Written anew, or written in place at the same size: another tag.
+        await backend.write("bucket", "key.bin", b"two")
+        second = (await backend.stat("bucket", "key.bin"))["etag"]
+        with open(tmp_path / "bucket" / "key.bin", "r+b") as file:
+            file.write(b"owt")
+        assert len({first, second, (await backend.stat("bucket", "key.bin"))["etag"]}) == 3
+
+    async def test_an_upload_is_made_only_where_the_object_is_the_one_its_writer_saw(self, backend: LocalBackend, tmp_path: Path):
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"the version")
+        await backend.write("bucket", "key.bin", b"what the writer saw")
+        seen = (await backend.stat("bucket", "key.bin"))["etag"]
+        # Saved meanwhile: nothing is written over the save, and nothing is left beside it.
+        await backend.write("bucket", "key.bin", b"saved meanwhile")
+        with pytest.raises(Changed):
+            await backend.upload("bucket", "key.bin", source, if_tag=seen)
+        assert await backend.read("bucket", "key.bin") == b"saved meanwhile"
+        with pytest.raises(Changed):
+            await backend.upload("bucket", "key.bin", source, if_absent=True)
+        # Gone meanwhile is a change too.
+        await backend.delete("bucket", "key.bin")
+        with pytest.raises(Changed):
+            await backend.upload("bucket", "key.bin", source, if_tag=seen)
+        assert not await backend.exists("bucket", "key.bin")
+        assert [p.name for p in (tmp_path / "bucket").iterdir()] == []
+        # As it was seen, it is written.
+        await backend.upload("bucket", "new.bin", source, if_absent=True)
+        now = (await backend.stat("bucket", "new.bin"))["etag"]
+        await backend.upload("bucket", "new.bin", source, if_tag=now)
+        assert await backend.read("bucket", "new.bin") == b"the version"
 
     async def test_an_upload_that_fails_leaves_the_object_as_it_was(self, backend: LocalBackend, tmp_path: Path):
         await backend.write("bucket", "deep/key.bin", b"what the object held")

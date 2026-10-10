@@ -90,7 +90,7 @@ from surogates.sandbox.history import (
     _replace,
     tracked,
 )
-from surogates.storage.backend import TooLarge
+from surogates.storage.backend import Changed, TooLarge
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams.history import REFS_BOUND
 
@@ -484,11 +484,15 @@ class BucketHistory:
 
         async def write() -> dict:
             kept = (await self._current([blob for blob in (before, after) if blob]))[1]
-            real = await self._real(path)
-            if real != after:
-                if real != before:
-                    raise HistoryConflict(f"{path} changed since the landing began")
-                await self._write(path, after, kept, there=real is not None)
+            async with self._ready(path, after, kept) as written:
+                real, tag = await self._checked(path)
+                if real != after:
+                    if real != before:
+                        raise HistoryConflict(f"{path} changed since the landing began")
+                    try:
+                        await written(real, tag)
+                    except Changed as exc:
+                        raise HistoryConflict(f"{path} changed as it was written") from exc
             return {"path": path, "before": before, "after": after, "made": []}
 
         return await self._held(write, patient=True)
@@ -509,12 +513,17 @@ class BucketHistory:
 
         async def write() -> dict:
             kept = (await self._current([blob for blob in (before, after) if blob]))[1]
-            real = await self._real(path)
-            if real != before:
-                if real == after:
-                    await self._write(path, before, kept, there=real is not None)
-                elif ran:
-                    raise HistoryConflict(f"{path} changed after the landing wrote it")
+            async with self._ready(path, before, kept) as written:
+                real, tag = await self._checked(path)
+                if real != before:
+                    if real == after:
+                        try:
+                            await written(real, tag)
+                        except Changed:
+                            if ran:
+                                raise HistoryConflict(f"{path} changed after the landing wrote it") from None
+                    elif ran:
+                        raise HistoryConflict(f"{path} changed after the landing wrote it")
             return {"path": path, "before": before, "after": after}
 
         return await self._held(write, patient=True)
@@ -918,57 +927,89 @@ class BucketHistory:
             await staged.gone()
 
     async def _real(self, path: str, new: Path | None = None) -> str | None:
-        """The blob id of the real file at *path*, None when there is none; kept among the objects in *new*, when given.
+        """The blob id of the real file at *path*, None when there is none; kept among the objects in *new*, when given."""
+        return (await self._checked(path, new))[0]
+
+    async def _checked(self, path: str, new: Path | None = None) -> tuple[str | None, str | None]:
+        """The blob id of the real file at *path*, and the store's tag for it as it was asked of; None for each when there is none.
 
         The file goes to a file of the copy's a piece at a time, within
         what a version may be and what the copy has room for, and is
-        hashed there: by the api, or by git as it keeps it.  History keeps
-        a file's bytes as they are.  One kept is counted twice on its way:
-        its object, then the pack that takes it to the bucket.
+        hashed there: by the api, or by git as it keeps it, among the
+        objects in *new*.  History keeps a file's bytes as they are.  One
+        kept is counted twice on its way: its object, then the pack that
+        takes it to the bucket.  The tag is what the store said before the
+        file was read: a write made only where the file is still of that
+        tag is never made over a save since.
         """
         key = self._key(path)
         try:
-            size = (await self.storage.stat(self.bucket, key))["size"]
+            of = await self.storage.stat(self.bucket, key)
         except KeyError:
-            return None
+            return None, None
+        size, tag = of["size"], of.get("etag")
         async with self._on_its_way(size, beside=size if new else 0, too_large=f"{path} is larger {_HERE}") as staged:
             try:
                 await self.storage.download(self.bucket, key, staged._path, limit=size)
             except KeyError:
-                return None  # gone since it was asked of
+                return None, None  # gone since it was asked of
             except TooLarge as exc:
                 raise HistoryConflict(f"{path} changed while it was read") from exc
             if new is None:
-                return await asyncio.to_thread(_blob_id, staged._path)
+                return await asyncio.to_thread(_blob_id, staged._path), tag
             try:
                 return await self._git(
                     _BRINGING, _kept_seconds(size), "hash-object", "-w", "--no-filters", "--", str(staged._path), new=new,
-                )
+                ), tag
             except Slow as exc:
                 # Past its seconds, it is a file larger than is kept here: said as the bounds are.
                 raise HistoryError(f"{path} is larger {_HERE}") from exc
 
-    async def _write(self, path: str, blob: str | None, kept: dict[str, int], *, there: bool) -> None:
-        """Make the real file at *path* the version *blob*, one of *kept*, the versions the copy holds; take it away for None.
+    @contextlib.asynccontextmanager
+    async def _ready(
+        self, path: str, blob: str | None, kept: dict[str, int],
+    ) -> AsyncIterator[Callable[[str | None, str | None], Awaitable[None]]]:
+        """The real file at *path* made ready to be the version *blob*, one of *kept*, before it is checked; None takes it away.
 
-        A version goes from the copy to the bucket through a file of the
-        copy's, a piece at a time.  A file is written where one is *there*
-        already, or where the real files can take one.
+        What it yields writes it, given what the check saw of the real
+        file: its blob, and the store's tag.  All a write needs but the
+        store is done first: the version written out to a file of the
+        copy's, and whether the real files can take a file there asked.  So
+        from the check to the write is the store's own time alone, and a
+        save in that time is refused where the store can tell it: the write
+        raises :class:`Changed`, for its caller to say what that is.  A
+        version the copy no longer holds is refused only when it is to be
+        written.  The file is gone with the block.
         """
         key = self._key(path)
         if blob is None:
-            await self.storage.delete(self.bucket, key)
-            # A store may swallow a delete's failure: the landing must not record what did not happen.
-            if await self.storage.exists(self.bucket, key):
-                raise HistoryError(f"{path} could not be deleted")
+
+            async def taken_away(real: str | None, tag: str | None) -> None:
+                await self.storage.delete(self.bucket, key)
+                # A store may swallow a delete's failure: the landing must not record what did not happen.
+                if await self.storage.exists(self.bucket, key):
+                    raise HistoryError(f"{path} could not be deleted")
+
+            yield taken_away
             return
         if blob not in kept:
-            raise NotKept(NOT_KEPT)
-        if not there and not await self._fits(key):
-            raise HistoryConflict(f"{path} cannot be written: a folder is there, or a file where its folder would be")
+
+            async def not_kept(real: str | None, tag: str | None) -> None:
+                raise NotKept(NOT_KEPT)
+
+            yield not_kept
+            return
+        fits = await self._fits(key)
         staged = await self._written_out(blob, kept[blob])
         try:
-            await self.storage.upload(self.bucket, key, staged._path)
+
+            async def written(real: str | None, tag: str | None) -> None:
+                # A file is written where one is there already, or where the real files can take one.
+                if real is None and not fits:
+                    raise HistoryConflict(f"{path} cannot be written: a folder is there, or a file where its folder would be")
+                await self.storage.upload(self.bucket, key, staged._path, if_tag=tag, if_absent=real is None)
+
+            yield written
         finally:
             await staged.gone()
 

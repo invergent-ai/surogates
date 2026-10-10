@@ -38,6 +38,7 @@ from uuid import UUID
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import SagaState, SagaStep
 from surogates.harness.landing import _call, _fence, _orchestrator, _Row, _row_files, _settle, settle_running
+from surogates.sandbox.history import YOU
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, said
 from surogates.workstreams.history import (
@@ -188,7 +189,9 @@ async def _landed(
         logger.warning("A %s by you in project %s did not start", kind, project.id, exc_info=True)
         raise Refused(f"Nothing was changed. {said(exc)}" if said(exc) else UNREAD) from exc
     if applies:
-        await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undoes)
+        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undoes)
+        if left:
+            return {"applied": [], "skipped": [*skipped, *left], "picked_up": list(picked)}
     return {"applied": [a["path"] for a in applies], "skipped": skipped, "picked_up": list(picked)}
 
 
@@ -242,8 +245,12 @@ async def _pick_up(
 async def _land(
     session_factory: Any, place: BucketHistory, project: Any, user_id: UUID, you: dict, audit: list, settings: Any,
     held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: list[WorkstreamHistory],
-) -> None:
+) -> list[dict]:
     """The saga of a landing by you: one apply a file, then the record; put back whole if a step fails.
+
+    The files it left as they are, each ``{path, by}``: none when it
+    landed.  Put back, a file saved since the pickup is one, by you, and
+    nothing of the landing is written.
 
     Its row is written running with its steps fixed, the record among
     them, before the first apply: all a put-back by another lock holder
@@ -293,8 +300,23 @@ async def _land(
             raise Refused(CUT_SHORT) from cut
         if pushed is not None:
             # The push happened though its answer, or its row's last write, was lost: it landed.
-            return
+            return []
         if state == "escalated":
             raise Refused(HALF) from exc
+        # A file saved since your edit was picked up is left as it is, as a thread's landing leaves out one
+        # changed since: said to have been changed after this, by you.
+        left = await _changed_since(place, applies)
+        if left:
+            return [{"path": path, "by": YOU} for path in left]
         # A bound's refusal, as a version too large to write, is said as it is.
         raise Refused(f"Nothing was changed. {said(exc)}" if said(exc) else UNWRITTEN) from exc
+    return []
+
+
+async def _changed_since(place: BucketHistory, applies: list[dict]) -> list[str]:
+    """Those of *applies*' files that are no longer the version each was to replace; none where it cannot be told."""
+    try:
+        return [apply["path"] for apply in applies if await place.real(apply["path"]) != apply["before"]]
+    except Exception:
+        logger.warning("Could not tell whether the files of a landing by you changed since its pickup", exc_info=True)
+        return []

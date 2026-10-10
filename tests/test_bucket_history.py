@@ -1816,8 +1816,8 @@ async def test_a_push_that_finds_the_historys_refs_moved_while_its_pack_went_up_
     applied = await history.apply("Report.docx", await history.real("Report.docx"), v1)
     upload, went = storage.upload, []
 
-    async def another_lands_meanwhile(bucket_name, key, source):
-        await upload(bucket_name, key, source)
+    async def another_lands_meanwhile(bucket_name, key, source, **condition):
+        await upload(bucket_name, key, source, **condition)
         if key.endswith(".idx") and not went:
             # The project's lock was lost unseen: another thread's landing went up while this one's pack did.
             went.append(landed(tmp_path, project, "saga:2", {"notes.txt": b"by another thread\n"}))
@@ -2136,10 +2136,10 @@ async def test_a_step_whose_request_left_goes_on_to_its_end_with_the_copy_its_ow
     await history.sync()
     upload, reached, go = storage.upload, asyncio.Event(), asyncio.Event()
 
-    async def slow(bucket_name, key, source):
+    async def slow(bucket_name, key, source, **condition):
         reached.set()
         await go.wait()
-        await upload(bucket_name, key, source)
+        await upload(bucket_name, key, source, **condition)
 
     monkeypatch.setattr(storage, "upload", slow)
     applying = asyncio.ensure_future(history.apply("Report.docx", v2, v1))
@@ -2198,3 +2198,68 @@ async def test_an_edit_git_cannot_keep_within_its_seconds_is_refused_in_words_an
     # Stopped, it is a file larger than is kept here: said as the bounds are, never as a history that could not be read.
     assert said(refused.value) == "Report.docx is larger than Surogate can read here."
     assert git(project / "_history", "rev-parse", MAIN) == one and left_in(history) == []
+
+
+async def test_a_save_while_the_version_is_written_out_is_seen_by_the_check_and_never_written_over(
+    tmp_path, storage, project, monkeypatch,
+):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    written_out, saved = BucketHistory._written_out, b"saved by you while the version was written out"
+
+    async def then_you_save(self, blob, size):
+        staged = await written_out(self, blob, size)
+        (project / "Report.docx").write_bytes(saved)
+        return staged
+
+    monkeypatch.setattr(BucketHistory, "_written_out", then_you_save)
+    # The version is written out first, and the real file checked after: the save is seen, and kept.
+    with pytest.raises(HistoryConflict, match="changed since"):
+        await history.apply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    # So for a put-back: one that wrote the file is told someone changed it since; one that may not have leaves it.
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    with pytest.raises(HistoryConflict, match="changed after"):
+        await history.unapply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    assert (await history.unapply("Report.docx", v2, v1, ran=False))["path"] == "Report.docx"
+    assert (project / "Report.docx").read_bytes() == saved
+    assert left_in(history) == []
+
+
+async def test_a_save_between_the_check_and_the_write_is_refused_by_the_store_where_it_can_say(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    upload, saved = storage.upload, b"saved by you as the version went up"
+
+    async def you_save_first(bucket_name, key, source, **condition):
+        if key.endswith("/Report.docx"):
+            (project / "Report.docx").write_bytes(saved)  # your save, after the check and before the version is in place
+        return await upload(bucket_name, key, source, **condition)
+
+    monkeypatch.setattr(storage, "upload", you_save_first)
+    # The local store writes only over the file as the check saw it.
+    with pytest.raises(HistoryConflict, match="changed as it was written"):
+        await history.apply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    # And a file the check found missing is written only where none was made since.
+    (project / "Report.docx").unlink()
+    saved = b"made by you as the version went up"
+    with pytest.raises(HistoryConflict, match="changed as it was written"):
+        await history.apply("Report.docx", None, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    # A put-back over a save in that time: one that wrote the file is told someone changed it since; one that may not
+    # have written it leaves it as it is.
+    for ran in (True, False):
+        (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+        saved = b"saved by you as the put-back went up, " + str(ran).encode()
+        if ran:
+            with pytest.raises(HistoryConflict, match="changed after"):
+                await history.unapply("Report.docx", v2, v1, ran=ran)
+        else:
+            assert (await history.unapply("Report.docx", v2, v1, ran=ran))["path"] == "Report.docx"
+        assert (project / "Report.docx").read_bytes() == saved
+    assert left_in(history) == []

@@ -1496,10 +1496,10 @@ async def test_a_restore_whose_write_the_bucket_refuses_writes_nothing_and_says_
     monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
     storage, upload = api.app.state.storage, api.app.state.storage.upload
 
-    async def refused_for_the_report(bucket_name, key, source):
+    async def refused_for_the_report(bucket_name, key, source, **condition):
         if key.endswith("/Report.docx"):
             raise OSError("the bucket refused the object")
-        await upload(bucket_name, key, source)
+        await upload(bucket_name, key, source, **condition)
 
     monkeypatch.setattr(storage, "upload", refused_for_the_report)
     refused = await restored(api, project, by_a, status=409)
@@ -1521,15 +1521,40 @@ async def test_a_save_between_a_restores_pickup_and_its_write_is_kept(api, monke
 
     (pods.project / "Report.docx").write_bytes(YOURS)
     monkeypatch.setattr(BucketHistory, "pickup", then_you_save)
-    # The apply expects what the pickup recorded: the save fails its check, and nothing is written over it.
-    refused = await restored(api, project, by_a, status=409)
-    assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
+    # The apply expects what the pickup recorded: the save fails its check, and nothing is written over it.  It is
+    # left as it is, as a thread's landing leaves a file changed since: said to have been changed after this, by you.
+    assert await restored(api, project, by_a) == {
+        "applied": [], "skipped": [{"path": "Report.docx", "by": {"kind": "you"}}], "picked_up": ["Report.docx"],
+    }
     assert (pods.project / "Report.docx").read_bytes() == saved
     # Tried again, the save is picked up first, and is a version of the file; so is the edit before it.
     assert await restored(api, project, by_a) == {"applied": ["Report.docx"], "skipped": [], "picked_up": ["Report.docx"]}
     [_, again, first_edit, *_] = await history_of(api, project, "Report.docx")
     for version, held in ((again, saved), (first_edit, YOURS)):
         assert (version["by"], (await opened(api, project, version["id"], "Report.docx")).content) == ({"kind": "you"}, held)
+
+
+async def test_a_save_while_a_restore_writes_its_version_out_is_kept_and_said_to_have_been_changed_after_it(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    written_out, saved = BucketHistory._written_out, b"PK\x03\x04 saved by you while the version was written out"
+
+    async def then_you_save(self, blob, size):
+        staged = await written_out(self, blob, size)
+        (pods.project / "Report.docx").write_bytes(saved)
+        return staged
+
+    monkeypatch.setattr(BucketHistory, "_written_out", then_you_save)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    # The version is written out before the file is checked: the save is seen, and nothing is written over it.
+    assert await restored(api, project, by_a) == {
+        "applied": [], "skipped": [{"path": "Report.docx", "by": {"kind": "you"}}], "picked_up": ["Report.docx"],
+    }
+    assert (pods.project / "Report.docx").read_bytes() == saved and restores_on_main(pods) == 0
+    assert [(r.kind, r.saga_state) for r in await rows_of(api, project)][-2:] == [("pickup", "completed"), ("restore", "compensated")]
+    # Your edit before it is a version; the save is the file, and the next landing records it.
+    [yours, *_] = await history_of(api, project, "Report.docx")
+    assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
 
 
 async def test_a_save_between_a_restores_look_at_your_edit_and_its_pickup_is_never_written_over(api, monkeypatch, tmp_path):
@@ -1788,8 +1813,8 @@ def the_api_goes(monkeypatch, api, at: str) -> None:
         "the record's pack": ("pack", 2), "the record's push": ("packed-refs", 2),
     }
 
-    async def uploaded(bucket_name, key, source):
-        await upload(bucket_name, key, source)
+    async def uploaded(bucket_name, key, source, **condition):
+        await upload(bucket_name, key, source, **condition)
         kind = "packed-refs" if key.endswith("packed-refs") else "pack" if key.endswith(".idx") else None
         if kind is not None:
             pushes[kind] += 1
