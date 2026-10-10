@@ -311,6 +311,29 @@ class BucketHistory:
 
     def __init__(self, storage: Any, bucket: str, prefix: str, clone: Path, bounds: Bounds = Bounds()) -> None:
         self.storage, self.bucket, self.prefix, self.clone, self.bounds = storage, bucket, prefix, clone, bounds
+        # Within steady(): whether the copy was brought to the bucket's history since it began, and what the
+        # real files were found to take, by key.
+        self._steady = self._brought_in = False
+        self._taking: dict[str, bool] = {}
+
+    @contextlib.contextmanager
+    def steady(self) -> Iterator[None]:
+        """The copy as the holder of the project's lock uses it: the bucket's history asked of once, then the copy as it is.
+
+        Only the holder of the lock moves the history, and every pack it
+        pushes is the copy's too.  So within the block, once the copy has
+        been brought to the bucket's history, a step that writes the real
+        files or reads a version asks the bucket nothing more of it, and
+        whether the real files can take a file at a path, or have a file
+        where a folder of it would be, is asked once.  What moves ``main``,
+        a pickup and a record, and a settle's look still ask afresh.  For
+        an act of many files, whose every step would otherwise ask again.
+        """
+        self._steady, self._brought_in, self._taking = True, False, {}
+        try:
+            yield
+        finally:
+            self._steady, self._brought_in, self._taking = False, False, {}
 
     @classmethod
     def of(cls, storage: Any, master: Any, settings: Any = None) -> BucketHistory:
@@ -332,6 +355,8 @@ class BucketHistory:
         wanted = sorted({_checked_id(b, "a version") for b in blobs if b})
         if not wanted:
             return set()
+        if self._steady and self._brought_in:
+            return set(await self._held(functools.partial(self._asked, wanted)))
         return set((await self._brought(wanted))[1])
 
     @_using
@@ -483,8 +508,8 @@ class BucketHistory:
         self._changes([{"path": path, "before": before, "after": after}], "an apply")
 
         async def write() -> dict:
-            kept = (await self._current([blob for blob in (before, after) if blob]))[1]
-            async with self._ready(path, after, kept) as written:
+            kept = await self._known([blob for blob in (before, after) if blob])
+            async with self._ready(path, after, kept, absent=before is None) as written:
                 real, tag = await self._checked(path)
                 if real != after:
                     if real != before:
@@ -512,8 +537,8 @@ class BucketHistory:
         self._changes([{"path": path, "before": before, "after": after}], "a put-back")
 
         async def write() -> dict:
-            kept = (await self._current([blob for blob in (before, after) if blob]))[1]
-            async with self._ready(path, before, kept) as written:
+            kept = await self._known([blob for blob in (before, after) if blob])
+            async with self._ready(path, before, kept, absent=after is None) as written:
                 real, tag = await self._checked(path)
                 if real != before:
                     if real == after:
@@ -579,16 +604,22 @@ class BucketHistory:
         return await self._held(read)
 
     @_using
-    async def recorded(self, main: str | None, path: str) -> str | None:
-        """The blob of *path* in the files of *main*, a commit of the history's; None when it has none there."""
-        self._key(path)
-        if main is None:
-            return None
+    async def recorded(self, main: str | None, paths: Iterable[str]) -> dict[str, str | None]:
+        """The blob of each of *paths* in the files of *main*, a commit of the history's; None for one it has none of there.
+
+        Every file in one look of the copy, as many as an Undo writes.
+        """
+        wanted = list(dict.fromkeys(paths))
+        for path in wanted:
+            self._key(path)
+        if main is None or not wanted:
+            return dict.fromkeys(wanted)
         _checked_id(main, "a commit")
 
-        async def read() -> str | None:
-            await self._current([])
-            return (await self._entries(main, [path])).get(path, (None, None))[1]
+        async def read() -> dict[str, str | None]:
+            await self._known([])
+            found = await self._entries(main, wanted)
+            return {path: found.get(path, (None, None))[1] for path in wanted}
 
         return await self._held(read)
 
@@ -624,7 +655,14 @@ class BucketHistory:
         if room.stale:
             await asyncio.to_thread(_cleared, self.clone / "objects" / "pack", room.stale)
         # Asked while the copy is this request's: one project runs one git at a time.
+        self._brought_in = True
         return main, (await self._asked(wanted) if wanted else {})
+
+    async def _known(self, wanted: list[str]) -> dict[str, int]:
+        """Those of *wanted* the copy holds, each with its size: brought to the bucket's history first, unless steady and already."""
+        if self._steady and self._brought_in:
+            return await self._asked(wanted) if wanted else {}
+        return (await self._current(wanted))[1]
 
     async def _staged(self, blob: str) -> Staged:
         """The version *blob* written out by git, while the copy is this request's alone.
@@ -967,25 +1005,27 @@ class BucketHistory:
 
     @contextlib.asynccontextmanager
     async def _ready(
-        self, path: str, blob: str | None, kept: dict[str, int],
+        self, path: str, blob: str | None, kept: dict[str, int], *, absent: bool,
     ) -> AsyncIterator[Callable[[str | None, str | None], Awaitable[None]]]:
         """The real file at *path* made ready to be the version *blob*, one of *kept*, before it is checked; None takes it away.
 
-        What it yields writes it, given what the check saw of the real
-        file: its blob, and the store's tag.  All a write needs but the
-        store is done first: the version written out to a file of the
-        copy's, and whether the real files can take a file there asked.  So
-        from the check to the write is the store's own time alone, and a
-        save in that time is refused where the store can tell it: the write
-        raises :class:`Changed`, for its caller to say what that is.  A
-        version the copy no longer holds is refused only when it is to be
-        written.  The file is gone with the block.
+        What it yields writes it, or takes it away, given what the check saw
+        of the real file: its blob, and the store's tag.  All a write needs
+        but the store is done first: the version written out to a file of
+        the copy's, and, for a file expected *absent*, whether the real files
+        can take a file there asked.  So from the check to the write, or the
+        delete, is the store's own time alone, and a save in that time is
+        refused where the store can tell it: the write or the delete raises
+        :class:`Changed`, for its caller to say what that is.  A version the
+        copy no longer holds is refused only when it is to be written.  The
+        file is gone with the block.
         """
         key = self._key(path)
         if blob is None:
 
             async def taken_away(real: str | None, tag: str | None) -> None:
-                await self.storage.delete(self.bucket, key)
+                # Only the file the check saw: a save since is left, as a write leaves one.
+                await self.storage.delete(self.bucket, key, if_tag=tag)
                 # A store may swallow a delete's failure: the landing must not record what did not happen.
                 if await self.storage.exists(self.bucket, key):
                     raise HistoryError(f"{path} could not be deleted")
@@ -999,13 +1039,14 @@ class BucketHistory:
 
             yield not_kept
             return
-        fits = await self._fits(key)
+        # A file expected there is written over itself: whether a folder holds its name is no question.
+        fits = await self._fits(key) if absent else None
         staged = await self._written_out(blob, kept[blob])
         try:
 
             async def written(real: str | None, tag: str | None) -> None:
                 # A file is written where one is there already, or where the real files can take one.
-                if real is None and not fits:
+                if real is None and not (fits if fits is not None else await self._fits(key)):
                     raise HistoryConflict(f"{path} cannot be written: a folder is there, or a file where its folder would be")
                 await self.storage.upload(self.bucket, key, staged._path, if_tag=tag, if_absent=real is None)
 
@@ -1014,14 +1055,32 @@ class BucketHistory:
             await staged.gone()
 
     async def _fits(self, key: str) -> bool:
-        """Whether the real files can take a file at *key*, as a landing asks before it writes one."""
-        if await self.storage.list_entries(self.bucket, f"{key}/", limit=1):
+        """Whether the real files can take a file at *key*, as a landing asks before it writes one.
+
+        Steady, each key and each folder above it is asked of once.
+        """
+        if await self._asked_once(f"{key}/", self._has_files):
             return False
         folders = key[len(self.prefix):].split("/")[:-1]
         for depth in range(1, len(folders) + 1):
-            if await self.storage.exists(self.bucket, f"{self.prefix}{'/'.join(folders[:depth])}"):
+            if await self._asked_once(f"{self.prefix}{'/'.join(folders[:depth])}", self._has_file):
                 return False
         return True
+
+    async def _has_files(self, prefix: str) -> bool:
+        return bool(await self.storage.list_entries(self.bucket, prefix, limit=1))
+
+    async def _has_file(self, key: str) -> bool:
+        return await self.storage.exists(self.bucket, key)
+
+    async def _asked_once(self, key: str, ask: Callable[[str], Awaitable[bool]]) -> bool:
+        """*ask*'s answer for *key*; steady, the first answer it gave."""
+        if self._steady and key in self._taking:
+            return self._taking[key]
+        answer = await ask(key)
+        if self._steady:
+            self._taking[key] = answer
+        return answer
 
     async def _commit(
         self, parent: str, changes: list[dict], author: dict[str, str], title: str, trailers: list[list[str]],
