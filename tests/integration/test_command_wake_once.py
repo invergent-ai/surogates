@@ -40,6 +40,7 @@ from surogates.session import LeaseNotHeldError
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.interactive_input import pending_input_for_session
 from surogates.session.provisioning import create_child_session
+from surogates.session.store import SessionStore
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND
@@ -2306,6 +2307,34 @@ async def test_a_threads_turn_after_a_command_is_named_by_the_turn_end_before_it
     # A command lands nothing: the thread's next turn goes on from its last landing, as its stop does.
     await name_turn(workers.store, thread)
     assert (thread.config["turn_after"], (await last_turn_end(workers.store, thread.id)).id) == (landed.id, landed.id)
+
+
+async def test_a_threads_command_end_is_told_to_its_chats_viewers_and_to_its_projects_row(api, workers):
+    state = api.app.state
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await workers.says(thread.id, "/compress")
+    typed = await workers.typed(thread.id)
+    told = state.redis.pubsub()
+    await told.subscribe(f"surogates:session:{thread.id}", f"surogates:workstream:{project['id']}")
+
+    # A worker whose store tells its listeners, as every worker's does.
+    await workers.worker(store=SessionStore(state.session_factory, redis=state.redis)).wake(thread.id)
+
+    heard = []
+    # Each message published to either channel, its subscriptions' own replies aside.
+    while (message := await told.get_message(timeout=0.5)) is not None:
+        if message["type"] == "message":
+            said = message["data"]
+            heard.append(said.decode() if isinstance(said, bytes) else said)
+    await told.aclose()
+    [ended] = await workers.ends(thread.id, after=typed)
+    assert [said for said in heard if said.endswith(":session.complete")] == [
+        f"{ended.id}:session.complete", f"{thread.id}:session.complete",
+    ]
 
 
 async def test_a_threads_work_left_unsaved_before_a_command_still_lands_at_its_next_turn(api, workers):
