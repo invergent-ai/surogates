@@ -13,6 +13,7 @@ step only marks the row alive.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -30,7 +31,7 @@ from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
 from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, YOU, _who, tracked
 from surogates.storage.tenant import boundary_workspace_prefix
-from surogates.workstreams.derive import utc
+from surogates.workstreams.derive import undone_files, utc
 
 logger = logging.getLogger(__name__)
 
@@ -174,12 +175,19 @@ async def touch_landing(session_factory: Any, row: int) -> None:
 
 
 async def running_landings(session_factory: Any, workstream_id: UUID | str) -> list[tuple[WorkstreamHistory, float]]:
-    """The project's landings still ``running``, oldest first, each with the seconds since its row last changed."""
+    """The project's landings of its cloud files still ``running``, oldest first, each with the seconds since its row last changed.
+
+    A computer's landing of a folder of its own is its computer's to
+    settle, over that folder's history: no cloud's landing waits on it.
+    """
     quiet = func.extract("epoch", func.now() - WorkstreamHistory.updated_at)
     async with session_factory() as db:
         rows = await db.execute(
             select(WorkstreamHistory, quiet)
-            .where(WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.saga_state == "running")
+            .where(
+                WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None),
+                WorkstreamHistory.saga_state == "running",
+            )
             .order_by(WorkstreamHistory.id)
         )
         return [(row, float(seconds)) for row, seconds in rows.all()]
@@ -284,13 +292,15 @@ async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str
 
 #: What a project over the file cap answers wherever its history is asked for.
 HISTORY_OFF = "History is off: this project has more than 50,000 files."
-#: A row's id as a version names it: digits the column holds, never what a guess could overflow.
+#: The kinds of row whose files a person can undo: each a landing on ``main``.
+UNDOABLE = ("landing", "restore", "undo")
+#: A row's id as a version or a landing names it: digits the column holds, never what a guess could overflow.
 _ROW_ID = re.compile(r"[0-9]{1,18}")
 #: The step whose author a version is by: what a row picked up is its pickup's; a thread's landing's files are
 #: its commit's, and the files of a landing by you, which has no turn to commit, its record's.
 _PICKUP, _COMMIT, _RECORD = "history.pickup", "history.commit", "history.record"
 #: How a version came to be, for a landing by you: by its row's kind.
-_MADE = {"restore": "restored"}
+_MADE = {"restore": "restored", "undo": "undone"}
 #: The most of a project's latest records its deleted files are looked for among: what the list costs
 #: is bounded whatever the project's age.  A file deleted before them is listed no more.
 _GONE_AMONG = 10_000
@@ -326,6 +336,31 @@ _GONE = text("""
       LEFT JOIN workstream_history h ON h.id = gone.id
      ORDER BY gone.id DESC, gone.side, gone.path
 """)
+# Who last changed :path after the record :after and before the files of the record :until: the newest of the
+# project's cloud records that changed it, its files before its pickup, with who that record's step says it is by.
+# A landing that left the file out did not change it.
+_SINCE = text("""
+    SELECT h.id, changed.side, (
+               SELECT s->'arguments'->'author' FROM jsonb_array_elements(h.steps) s
+                WHERE s->>'tool_name' = CASE WHEN changed.side = 'p' THEN :pickup WHEN h.kind = 'landing' THEN :commit ELSE :record END
+                LIMIT 1
+           ) AS author
+      FROM workstream_history h
+     CROSS JOIN LATERAL (
+            SELECT 'f' AS side WHERE h.id < :until AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(h.files) f
+                 WHERE f->>'path' = :path AND f->'merged' IS DISTINCT FROM 'false'::jsonb
+            )
+            UNION ALL
+            SELECT 'p' WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(h.picked_up) p WHERE p->>'path' = :path)
+           ) changed
+     WHERE h.workstream_id = :project AND h.device_id IS NULL AND h.saga_state = 'completed'
+       AND h.id > :after AND h.id <= :until AND (h.files @> cast(:on AS jsonb) OR h.picked_up @> cast(:on AS jsonb))
+     ORDER BY h.id DESC, changed.side
+     LIMIT 1
+""")
+#: The newest a record's id can be: what :func:`changed_since` reads up to, unless told.
+_NEWEST = 2**62
 
 
 def row_id(value: str) -> int | None:
@@ -378,8 +413,9 @@ async def versions(
     Each is the wire's ``FileVersion`` in snake_case, with ``blob``, its git
     blob id (None for a deletion), for the caller to ask the history whether
     it is still kept.  A thread's version that did not land is listed, not
-    merged; a version that landed names its landing's row.  The records are
-    the cloud's, or those of a folder on the computer *device_id*.
+    merged; a version that landed names its landing's row, to undo, until
+    an Undo put that file back.  The records are the cloud's, or those of a
+    folder on the computer *device_id*.
 
     The last is the file's first version, when it had one before its oldest
     record: your upload, which ``main``'s first commit took as it was and
@@ -400,6 +436,8 @@ async def versions(
             .order_by(WorkstreamHistory.id.desc())
             .limit(limit)
         )).scalars().all()
+    # A change an Undo put back already is none to undo again from its History.
+    undone = await undone_of(session_factory, workstream_id, device_id=device_id) if rows else frozenset()
     found = []
     first: tuple[WorkstreamHistory, dict] | None = None
     for row in rows:
@@ -407,7 +445,10 @@ async def versions(
         for entries, picked in ((row.files, False), (row.picked_up, True)):
             for entry in entries:
                 if entry["path"] == path:
-                    found.append(_version(row, entry, picked=picked))
+                    version = _version(row, entry, picked=picked)
+                    if (row.id, path) in undone:
+                        version["landing_id"] = None
+                    found.append(version)
                     first = (row, entry)
     if first is not None and first[1]["before"] is not None:
         row, entry = first
@@ -475,3 +516,38 @@ async def deleted_files(session_factory: Any, workstream_id: UUID | str, *, limi
         }
         for _, row, side, path, at, author in found[:limit]
     ], len(found) > limit or answered[0].records >= _GONE_AMONG
+
+
+async def undone_of(session_factory: Any, workstream_id: UUID | str, *, device_id: UUID | None = None) -> frozenset[tuple[int, str]]:
+    """Each ``(row, path)`` of the project's records an Undo put back, and no later Undo brought back (:func:`undone_files`).
+
+    Read from the project's completed Undos of its cloud files, or of a
+    folder on the computer *device_id*.
+    """
+    async with session_factory() as db:
+        undos = (await db.execute(
+            select(WorkstreamHistory.id, WorkstreamHistory.undoes, WorkstreamHistory.files).where(
+                WorkstreamHistory.workstream_id == workstream_id,
+                WorkstreamHistory.device_id == device_id if device_id is not None else WorkstreamHistory.device_id.is_(None),
+                WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
+            )
+        )).all()
+    return undone_files({"id": found, "undoes": undoes, "files": files} for found, undoes, files in undos)
+
+
+async def changed_since(
+    session_factory: Any, workstream_id: UUID | str, path: str, after_row: int, *, until_row: int | None = None,
+) -> dict:
+    """Who last changed *path* after the record *after_row*, as the wire's ``ChangedBy`` has it; you, where no record says.
+
+    The newest of the project's cloud records that changed it: a landing
+    that left the file out did not.  With *until_row*, only those before
+    that record's own files: its pickup came before them.  An edit of
+    yours a pickup has not recorded yet is yours.
+    """
+    async with session_factory() as db:
+        found = (await db.execute(_SINCE, {
+            "project": workstream_id, "path": path, "on": json.dumps([{"path": path}]), "after": after_row,
+            "until": _NEWEST if until_row is None else until_row, "pickup": _PICKUP, "commit": _COMMIT, "record": _RECORD,
+        })).first()
+    return YOU if found is None else _by(found.author)

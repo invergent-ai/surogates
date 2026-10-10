@@ -1,6 +1,9 @@
-"""Restore: a project's file made one of its versions again by you, as a landing the api runs.
+"""Restore and Undo: a project's files made versions they were again by you, as landings the api runs.
 
-A Restore is a landing saga, as a thread's turn's is in its pod
+A Restore makes one file one of its versions again.  An Undo puts back
+what a landing replaced, or all of a thread's landings, file by file: the
+compensation of a landing saga, run as a new landing.  Each is a landing
+saga, as a thread's turn's is in its pod
 (:mod:`surogates.harness.landing`), here over the api's own copy of the
 project's history (:class:`~surogates.workstreams.bucket.BucketHistory`),
 and by a landing's own rules:
@@ -22,8 +25,12 @@ and by a landing's own rules:
   and is not written over.  Then the record, which pushes.  A step that
   still fails is put back whole.
 
-A Restore runs to its end, though who asked for it leaves: a landing is
-never left half made for a request's sake.
+A file an Undo would put back that is not as the landing left it, changed
+since by you, by another thread or by a routine, is left as it is and named,
+with who changed it: never written over.
+
+A Restore or an Undo runs to its end, though who asked for it leaves: a
+landing is never left half made for a request's sake.
 """
 
 from __future__ import annotations
@@ -31,23 +38,30 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
 from uuid import UUID
+
+from sqlalchemy import select
 
 from surogates.db.models import WorkstreamHistory
 from surogates.governance.saga import SagaState, SagaStep
 from surogates.harness.landing import _call, _fence, _orchestrator, _Row, _row_files, _settle, settle_running
 from surogates.sandbox.history import YOU
+from surogates.session.store import SessionNotFoundError
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, said
 from surogates.workstreams.history import (
     HISTORY_OFF,
+    UNDOABLE,
     ProjectBusy,
+    changed_since,
     over_history_cap,
     project_lock,
     running_landings,
     start_landing,
+    undone_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +74,25 @@ BUSY = "Your project's files are being saved right now. Try again in a moment."
 UNREAD = "Nothing was changed: the project's history could not be read just now. Try again in a moment."
 UNWRITTEN = "Nothing was changed: the project's files could not all be written. Try again."
 HALF = "Some files could not be put back as they were. Open a file's History to restore the version you want."
+WORKING = "Stop the thread to undo its changes."
+UNDONE = "This change was undone already."
+NO_CHANGE = "No such change."
+#: How long an Undo may hold the project's lock, in ms: a person waits on it, and the page gives a landing two
+#: minutes, the wait for the lock among them; what is left is room for the files' bytes.
+LOCK_BUDGET_MS = 60_000
+#: A call of the cloud's store at its slowest that an Undo is planned for, and what else each file costs it under
+#: the lock (its version written out by git, its row marked alive), as measured on node1; in ms.
+CALL_MS = 40
+FILE_MS = 30
+#: The calls of the store an Undo makes under the lock.  Once an act: the history's refs and packs asked of
+#: by its look, its pickup and its record, and each push's pack, index and refs.  Once a file: the look's ask
+#: and read, the check's ask and read, and the write, or the delete with its asks before and after.
+CALLS_AN_ACT = 30
+CALLS_A_FILE = 7
+#: The most files one Undo puts back: all it does under the lock, at that call, within its time.
+UNDO_MOST = (LOCK_BUDGET_MS - CALLS_AN_ACT * CALL_MS) // (CALLS_A_FILE * CALL_MS + FILE_MS)
+#: The most files a refusal names: the rest it counts.
+_NAMED_MOST = 3
 CUT_SHORT = "This was cut short: the files are put back as they were when the project's files are next saved. Try again in a moment."
 UNLANDED = "This file cannot be restored: the project's history keeps no file of its name."
 UNTAKEN = "This file cannot be restored here: a folder of its name is there, or a file where its folder would be."
@@ -67,8 +100,9 @@ UNTAKEN = "This file cannot be restored here: a folder of its name is there, or 
 _ACTS: set[asyncio.Future] = set()
 
 #: What a landing by you lands, once your edits are picked up: given the copy and ``main`` as the pickup
-#: left it, the applies, each ``{path, before, after}``, and the files it leaves as they are, each ``{path, by}``.
-Decide = Callable[[BucketHistory, str | None], Awaitable[tuple[list[dict], list[dict]]]]
+#: left it, the applies, each ``{path, before, after}``; the files it leaves as they are, each ``{path, by}``;
+#: and, by an apply's path, the landings it undoes, each with its ``id`` and ``commit``.
+Decide = Callable[[BucketHistory, str | None], Awaitable[tuple[list[dict], list[dict], dict[str, list[Any]]]]]
 
 
 class Refused(Exception):
@@ -90,23 +124,187 @@ async def restore(state: Any, project: Any, user_id: UUID, *, path: str, blob: s
     storage, and the route says so first (:data:`UNLANDED`).
     """
 
-    async def decide(place: BucketHistory, main: str | None) -> tuple[list[dict], list[dict]]:
+    async def decide(place: BucketHistory, main: str | None) -> tuple[list[dict], list[dict], dict[str, list[Any]]]:
         # What the pickup left on main, never a fresh read: a save made since then fails the apply's check.
-        recorded = await place.recorded(main, path)
+        recorded = (await place.recorded(main, [path]))[path]
         if recorded == blob:
-            return [], []
+            return [], [], {}
         if not await place.held([blob]):
             raise Refused(NOT_KEPT, status=410)
         if recorded is None and not await place.takes(path):
             raise Refused(UNTAKEN)
-        return [{"path": path, "before": recorded, "after": blob}], []
+        return [{"path": path, "before": recorded, "after": blob}], [], {}
 
     return await _by_you(state, project, user_id, kind="restore", paths=[path], decide=decide, announce=project.master_session_id)
 
 
+@dataclass(frozen=True)
+class _Landed:
+    """A landing an Undo may put back, as its record has it: its files that landed, each ``{path, before, after}``."""
+
+    id: int
+    commit: str
+    thread_id: UUID | None
+    files: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class Back:
+    """A file an Undo puts back to *to*, where it is still *expected*, the version the newest of *rows* left it.
+
+    *rows* are the landings whose changes to it go back, newest first.  A
+    change of another's *between* two of them, ``(older, newer)``, is one
+    the file is left under, as it is.
+    """
+
+    path: str
+    to: str | None
+    expected: str | None
+    rows: tuple[int, ...]
+    between: tuple[int, int] | None = None
+
+
+def _plan(landed: list[_Landed], undone: frozenset[tuple[int, str]]) -> dict[str, Back]:
+    """What an Undo of *landed* puts back, file by file, each landing's changes the newest first.
+
+    A file goes back to its version from before the oldest of them that
+    changed it, as long as each found it as the one before it left it.
+    Where another changed it between two of them, it is left as it is: put
+    back further than that, it would lose that change, and put back less,
+    it would be a version no one made.  A change an Undo put back already,
+    and no later Undo brought back, is none to undo again.
+    """
+    plan: dict[str, Back] = {}
+    for row in sorted(landed, key=lambda found: found.id, reverse=True):
+        for f in row.files:
+            path = f["path"]
+            if (row.id, path) in undone:
+                continue
+            back = plan.get(path)
+            if back is None:
+                plan[path] = Back(path, to=f["before"], expected=f["after"], rows=(row.id,))
+            elif back.between is None:
+                plan[path] = (
+                    replace(back, to=f["before"], rows=(*back.rows, row.id)) if f["after"] == back.to
+                    else replace(back, between=(row.id, back.rows[-1]))
+                )
+    return dict(sorted(plan.items()))
+
+
+async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None = None, thread: UUID | None = None) -> dict:
+    """Undo the landing *landing*, a Restore or an Undo among them, or every landing of *thread*, as a landing by you.
+
+    ``{applied, skipped, picked_up}``.  Each file goes back to its version
+    from before the landing, or from before the thread first changed it,
+    where it is still as the landing, or the thread's last landing of it,
+    left it.  A file changed since is left as it is and named, with who
+    changed it; one whose version from before is no longer kept is named,
+    ``pruned``.  Raises :class:`LookupError` for no such change among the
+    project's cloud records; and :class:`Refused` for one undone already,
+    for more files than one Undo puts back, and while a thread whose
+    changes these are is working: its next landing would land on top.
+    """
+    landed = await _undoable(state.session_factory, project, landing=landing, thread=thread)
+    threads = {row.thread_id for row in landed if row.thread_id is not None} | ({thread} if thread is not None else set())
+    for each in threads:
+        try:
+            working = (await state.session_store.get_session(each)).status == "active"
+        except SessionNotFoundError:
+            working = False
+        if working:
+            raise Refused(WORKING)
+    plan = _plan(landed, await undone_of(state.session_factory, project.id))
+    if not plan:
+        # Nothing of it is left to put back: no landing is made, and the project's files are not waited for.
+        if landing is not None:
+            raise Refused(UNDONE)
+        return {"applied": [], "skipped": [], "picked_up": []}
+    if len(plan) > UNDO_MOST:
+        raise Refused(
+            f"This change has more than {UNDO_MOST:,} files to put back, more than one Undo puts back. Restore each file from its History."
+            if landing is not None else
+            f"This thread changed more than {UNDO_MOST:,} files, more than one Undo puts back. Undo its landings one at a time from its card."
+        )
+
+    async def decide(place: BucketHistory, main: str | None) -> tuple[list[dict], list[dict], dict[str, list[Any]]]:
+        # Under the project's lock: what an Undo since put back is not undone twice.
+        fresh = _plan(landed, await undone_of(state.session_factory, project.id))
+        backs = [fresh[path] for path in plan if path in fresh]
+        if landing is not None and not backs:
+            # Another lock holder's settle, or another Undo, put it back while this one waited.
+            raise Refused(UNDONE)
+        # Each file as the pickup recorded it, never a fresh read: your edit to it is a version by now.
+        now = await place.recorded(main, [back.path for back in backs])
+        kept = await place.held(back.to for back in backs)
+        by_id = {row.id: row for row in landed}
+        applies, skipped, undoes = [], [], {}
+        for back in backs:
+            real = now[back.path]
+            if back.between is None and real == back.to:
+                continue
+            if real != back.expected:
+                skipped.append({"path": back.path, "by": await changed_since(state.session_factory, project.id, back.path, back.rows[0])})
+            elif back.between is not None:
+                older, newer = back.between
+                skipped.append({"path": back.path, "by": await changed_since(state.session_factory, project.id, back.path, older, until_row=newer)})
+            elif back.to is not None and back.to not in kept:
+                skipped.append({"path": back.path, "by": None, "pruned": True})
+            elif real is None and not await place.takes(back.path):
+                # A folder of its name is there, or a file where its folder would be.
+                skipped.append({"path": back.path, "by": await changed_since(state.session_factory, project.id, back.path, back.rows[0])})
+            else:
+                applies.append({"path": back.path, "before": back.expected, "after": back.to})
+                undoes[back.path] = [by_id[row] for row in back.rows]
+        return applies, skipped, undoes
+
+    # One thread's changes are that thread's to tell of; any other Undo, of a landing by you, is the master's.
+    announce = next(iter(threads)) if len(threads) == 1 else project.master_session_id
+    return await _by_you(state, project, user_id, kind="undo", paths=list(plan), decide=decide, announce=announce)
+
+
+async def _undoable(session_factory: Any, project: Any, *, landing: int | None, thread: UUID | None) -> list[_Landed]:
+    """The landings an Undo of *landing*, or of *thread*'s changes, puts back: the project's own, of its cloud files.
+
+    A landing is one that completed on ``main``: a thread's, a Restore or
+    an Undo.  LookupError for any other record, whatever its id.
+    """
+    here = (
+        WorkstreamHistory.workstream_id == project.id, WorkstreamHistory.device_id.is_(None),
+        WorkstreamHistory.saga_state == "completed",
+    )
+    asked = (
+        (WorkstreamHistory.id == landing, WorkstreamHistory.kind.in_(UNDOABLE)) if landing is not None
+        else (WorkstreamHistory.thread_id == thread, WorkstreamHistory.kind == "landing")
+    )
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(WorkstreamHistory.id, WorkstreamHistory.commit, WorkstreamHistory.thread_id, WorkstreamHistory.files)
+            .where(*here, *asked, WorkstreamHistory.commit.is_not(None))
+            .order_by(WorkstreamHistory.id)
+        )).all()
+    landed = [
+        _Landed(found.id, found.commit, found.thread_id, tuple(
+            {"path": f["path"], "before": f["before"], "after": f["after"]} for f in found.files if f.get("merged", True)
+        ))
+        for found in rows
+    ]
+    if landing is not None and not any(row.files for row in landed):
+        raise LookupError(NO_CHANGE)
+    return landed
+
+
+def _half(paths: list[str]) -> str:
+    """What a landing by you put back only in part says: the files named, the rest counted."""
+    if not paths:
+        return HALF
+    if len(paths) == 1:
+        return f"{paths[0]} could not be put back as it was. Open its History to restore the version you want."
+    named = paths[:_NAMED_MOST] if len(paths) <= _NAMED_MOST else [*paths[:_NAMED_MOST], f"{len(paths) - _NAMED_MOST} more files"]
+    return f"{', '.join(named[:-1])} and {named[-1]} could not be put back as they were. Open each file's History to restore the version you want."
+
+
 async def _by_you(
-    state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide,
-    announce: UUID, undoes: list[WorkstreamHistory] = (),
+    state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide, announce: UUID,
 ) -> dict:
     """A landing by you of *kind* in *project*: your edits to *paths* picked up, then what *decide* says; ``{applied, skipped, picked_up}``.
 
@@ -114,11 +312,11 @@ async def _by_you(
     *decide* is given the copy and ``main`` as the pickup left it: each
     apply's ``before`` is a version ``main`` holds.  The project's stream
     tells of it as *announce*'s change: a change with no session event.
-    An Undo names the rows it *undoes*.  It runs to its end, though who
+    An Undo names the landings it undoes.  It runs to its end, though who
     asked for it leaves.
     """
     acting = asyncio.ensure_future(_act(
-        state, project, user_id, kind=kind, paths=paths, decide=decide, announce=announce, undoes=undoes,
+        state, project, user_id, kind=kind, paths=paths, decide=decide, announce=announce,
     ))
     _ACTS.add(acting)
     acting.add_done_callback(_ACTS.discard)
@@ -128,8 +326,7 @@ async def _by_you(
 
 
 async def _act(
-    state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide,
-    announce: UUID, undoes: list[WorkstreamHistory],
+    state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide, announce: UUID,
 ) -> dict:
     session_factory = state.session_factory
     master = await state.session_store.get_session(project.master_session_id)
@@ -143,13 +340,14 @@ async def _act(
     refused: Refused | None = None
     try:
         async with project_lock(session_factory, project.id, patience=LOCK_PATIENCE) as held:
-            try:
-                answer = await _landed(
-                    state, place, project, user_id, you, audit, held,
-                    kind=kind, paths=paths, decide=decide, undoes=undoes, picked=picked,
-                )
-            except Refused as exc:
-                refused = exc
+            # The lock's holder alone moves the history: the copy is brought to it once, not once a file.
+            with place.steady():
+                try:
+                    answer = await _landed(
+                        state, place, project, user_id, you, audit, held, kind=kind, paths=paths, decide=decide, picked=picked,
+                    )
+                except Refused as exc:
+                    refused = exc
     except ProjectBusy as exc:
         raise Refused(BUSY) from exc
     except Exception as exc:
@@ -168,7 +366,7 @@ async def _act(
 
 async def _landed(
     state: Any, place: BucketHistory, project: Any, user_id: UUID, you: dict, audit: list, held: Any,
-    *, kind: str, paths: list[str], decide: Decide, undoes: list[WorkstreamHistory], picked: list[str],
+    *, kind: str, paths: list[str], decide: Decide, picked: list[str],
 ) -> dict:
     """The landing by you under the project's lock, *held*: settled, picked up, decided, landed."""
     session_factory, settings = state.session_factory, state.settings.saga
@@ -181,17 +379,26 @@ async def _landed(
             session_factory, place, API, project.id, settings, held, redis=state.redis, master=project.master_session_id,
         )
         main = await _pick_up(session_factory, place, project, user_id, you, audit, paths, settings, held, picked)
-        applies, skipped = await decide(place, main)
+        applies, skipped, undoes = await decide(place, main)
     except Refused:
         raise
     except Exception as exc:
         # Before the landing's own steps, which write the files: said in words, never the server's error.
         logger.warning("A %s by you in project %s did not start", kind, project.id, exc_info=True)
         raise Refused(f"Nothing was changed. {said(exc)}" if said(exc) else UNREAD) from exc
-    if applies:
-        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undoes)
-        if left:
-            return {"applied": [], "skipped": [*skipped, *left], "picked_up": list(picked)}
+    for tried in range(2):
+        if not applies:
+            break
+        undid = sorted({row.id: row for a in applies for row in undoes.get(a["path"], ())}.values(), key=lambda row: row.id)
+        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undid)
+        if not left:
+            break
+        if tried:
+            # Saved over again as it was tried once more: put back whole, and nothing of it written.
+            raise Refused(UNWRITTEN)
+        # As a thread's landing leaves out a file changed since, the rest is tried once more at once, as a landing of its own.
+        saved = {each["path"] for each in left}
+        skipped, applies = [*skipped, *left], [a for a in applies if a["path"] not in saved]
     return {"applied": [a["path"] for a in applies], "skipped": skipped, "picked_up": list(picked)}
 
 
@@ -244,7 +451,7 @@ async def _pick_up(
 
 async def _land(
     session_factory: Any, place: BucketHistory, project: Any, user_id: UUID, you: dict, audit: list, settings: Any,
-    held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: list[WorkstreamHistory],
+    held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: list[Any],
 ) -> list[dict]:
     """The saga of a landing by you: one apply a file, then the record; put back whole if a step fails.
 
@@ -292,8 +499,10 @@ async def _land(
         await row.write(state="completed", commit=record.execute_result["commit"], files=_row_files(saga, "completed"))
     except Exception as exc:
         logger.warning("A %s by you in project %s did not finish", kind, project.id, exc_info=True)
+        # The files a put-back left as the landing wrote them, to name.
+        at_issue: list[str] = []
         try:
-            state, pushed = await _settle(saga, orchestrator, place, API, row, held=held)
+            state, pushed = await _settle(saga, orchestrator, place, API, row, held=held, at_issue=at_issue)
         except Exception as cut:
             # Its row says where it stopped: the next lock holder puts back what it wrote.
             logger.warning("A %s by you in project %s was left for the next lock holder", kind, project.id, exc_info=True)
@@ -302,7 +511,7 @@ async def _land(
             # The push happened though its answer, or its row's last write, was lost: it landed.
             return []
         if state == "escalated":
-            raise Refused(HALF) from exc
+            raise Refused(_half(at_issue)) from exc
         # A file saved since your edit was picked up is left as it is, as a thread's landing leaves out one
         # changed since: said to have been changed after this, by you.
         left = await _changed_since(place, applies)

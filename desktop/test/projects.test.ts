@@ -178,23 +178,38 @@ describe("the projects the page serves", () => {
     ]);
   });
 
-  it("take the rows of an agent older than the app, whose files carry no mark, with none", async () => {
+  it("take the rows of an agent older than the app, whose files carry no mark and whose rows name no landing, with neither", async () => {
     const { source } = page();
     const asked = source.threads(REPORT);
-    // As a page built before file history maps a row: no landing on a file.
-    const older = threads[REPORT]!.map(({ files, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
+    // As a page built before file history maps a row: no landing on a file, and none for its card's Undo.
+    const older = threads[REPORT]!.map(({ files, landingId: _none, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
     source.answered(1, { ok: older });
     const rows = await asked;
     expect(rows.map((row) => row.id)).toEqual(threads[REPORT]!.map((row) => row.id));
     expect(rows.flatMap((row) => row.files).length).toBeGreaterThan(0);
-    expect(rows.every((row) => row.files.every((file) => file.landing === null))).toBe(true);
+    expect(rows.every((row) => row.landingId === null && row.files.every((file) => file.landing === null))).toBe(true);
+  });
+
+  it("take the landing a row's card undoes, and refuse one that is no id", async () => {
+    const { source } = page();
+    const asked = source.threads(REPORT);
+    source.answered(1, { ok: threads[REPORT] });
+    const rows = await asked;
+    expect(rows.find((found) => found.id === FIXTURE_IDS.idle)!.landingId).toBe("41");
+    expect(rows.find((found) => found.id === FIXTURE_IDS.approval)!.landingId).toBeNull();
+    const row = threads[REPORT]![0]!;
+    for (const [at, landingId] of [41, "", "4".repeat(41), { id: "41" }].entries()) {
+      const odd = source.threads(REPORT);
+      source.answered(at + 2, { ok: [{ ...row, landingId }] });
+      await expect(odd, JSON.stringify(landingId)).rejects.toThrow("The agent's page answered threads with something Surogate cannot use");
+    }
   });
 
   it("take a row of an agent newer than the app, leaving out what it does not know of", async () => {
     const { source } = page();
     const asked = source.threads(REPORT);
     const row = threads[REPORT]![0]!;
-    source.answered(1, { ok: [{ ...row, landingId: "41", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
+    source.answered(1, { ok: [{ ...row, waitingSince: "2026-10-06T11:00:00Z", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
     expect(await asked).toEqual([row]);
   });
 
@@ -316,11 +331,13 @@ describe("the projects the page serves", () => {
       vi.advanceTimersByTime(ANSWER_TIMEOUT_MS + 15_000);
       const by = { kind: "thread", threadId: "t-1", title: "Draft A" };
       source.answered(1, { ok: { applied: [REVENUE], skipped: [{ path: "b.md", by, why: "x" }, { path: "c.md", by: null }], pickedUp: [REVENUE], secret: "x" } });
-      expect(await restored).toEqual({ applied: [REVENUE], skipped: [{ path: "b.md", by }, { path: "c.md", by: null }], pickedUp: [REVENUE] });
+      expect(await restored).toEqual({
+        applied: [REVENUE], skipped: [{ path: "b.md", by, pruned: false }, { path: "c.md", by: null, pruned: false }], pickedUp: [REVENUE],
+      });
       // Someone the app has no name for is no one it names: the answer is still taken.
       const later = source.restore(REPORT, asked);
       source.answered(2, { ok: { applied: [], skipped: [{ path: "b.md", by: { kind: "agent", name: "Reviewer" } }], pickedUp: [] } });
-      expect(await later).toEqual({ applied: [], skipped: [{ path: "b.md", by: null }], pickedUp: [] });
+      expect(await later).toEqual({ applied: [], skipped: [{ path: "b.md", by: null, pruned: false }], pickedUp: [] });
       const refusals: unknown[] = [
         null, [], undefined, { applied: [REVENUE], skipped: [] }, { applied: REVENUE, skipped: [], pickedUp: [] },
         { applied: [7], skipped: [], pickedUp: [] }, { applied: ["a".repeat(4097)], skipped: [], pickedUp: [] },
@@ -338,6 +355,41 @@ describe("the projects the page serves", () => {
       await expect(busy).rejects.toThrow("Your project's files are being saved right now. Try again in a moment.");
       // Two minutes, and no longer.
       const slow = source.restore(REPORT, asked);
+      let settled = false;
+      void slow.catch(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(slow).rejects.toBeInstanceOf(TimedOut);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ask the page to undo a landing or a thread's changes, with the time a landing takes, and take what it did field by field", async () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const { source, last } = page();
+      const undone = source.undo(REPORT, { landingId: "9" });
+      expect(last()).toEqual({ type: "call", id: 1, method: "undo", args: [REPORT, { landingId: "9" }], deadline: 1_000 + LONG_ANSWER_TIMEOUT_MS });
+      // The agent waits for the project's lock, then puts back each file a step at a time: past a plain call's bound.
+      vi.advanceTimersByTime(ANSWER_TIMEOUT_MS + 15_000);
+      const by = { kind: "thread", threadId: "t-1", title: "Draft B" };
+      source.answered(1, {
+        ok: { applied: [REVENUE], skipped: [{ path: "b.md", by }, { path: "c.md", by: null, pruned: true }, { path: "d.md", by: null, pruned: 1 }], pickedUp: [] },
+      });
+      expect(await undone).toEqual({
+        applied: [REVENUE], pickedUp: [],
+        skipped: [{ path: "b.md", by, pruned: false }, { path: "c.md", by: null, pruned: true }, { path: "d.md", by: null, pruned: false }],
+      });
+      const all = source.undo(REPORT, { threadId: FIXTURE_IDS.question });
+      expect(last()).toMatchObject({ method: "undo", args: [REPORT, { threadId: FIXTURE_IDS.question }] });
+      source.answered(2, { error: "Stop the thread to undo its changes." });
+      await expect(all).rejects.toThrow("Stop the thread to undo its changes.");
+      const odd = source.undo(REPORT, { landingId: "9" });
+      source.answered(3, { ok: { applied: "everything", skipped: [], pickedUp: [] } });
+      await expect(odd).rejects.toThrow("The agent's page answered undo with something Surogate cannot use");
+      const slow = source.undo(REPORT, { landingId: "9" });
       let settled = false;
       void slow.catch(() => { settled = true; });
       await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);

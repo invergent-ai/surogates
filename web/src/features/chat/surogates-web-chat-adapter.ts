@@ -209,6 +209,10 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return workstreams.start(input.projectId, input.proposalId, input.key);
   },
 
+  async undoProjectChanges(input) {
+    return workstreams.undo(input.projectId, input.target);
+  },
+
   // Only Surogate Desktop has folders of this computer for a thread to work in.
   ...localThreads(getDesktop(), {
     ...workstreams,

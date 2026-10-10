@@ -7,6 +7,7 @@ from the event log.  The row is the shell's ``ThreadRow``
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -62,6 +63,8 @@ class ThreadFacts:
     landings: tuple[dict[str, Any], ...] = ()
     #: The files its next turn is told to redo (``landing.redo_files``).
     redoing: frozenset[str] = frozenset()
+    #: Each ``(row, path)`` of the project an Undo put back and no later Undo brought back (:func:`undone_files`).
+    undone: frozenset[tuple[int, str]] = frozenset()
 
 
 def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
@@ -76,6 +79,7 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "status_line": status_line,
         "progress": _progress(todos.data if todos else {}),
         "files": _files(facts, group),
+        "landing_id": _landing_id(facts),
         "place": facts.place,
         "created_at": utc(facts.created_at),
         "updated_at": utc(facts.updated_at),
@@ -199,11 +203,12 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
     of it left it: those left out first, then those that landed, each
     newest first.
 
-    ``landed``; or ``not_merged`` when the landing left it out, ``redoing``
-    while the thread's next turn is to redo it.  A resolved thread takes
-    no next turn, so none of its files is being redone.  A file a landing
-    deleted is no file to open: it is left out.  So is one whose path the
-    shell would refuse as a label.
+    ``landed``, or ``undone`` once an Undo put it back and no later Undo
+    brought it back; or ``not_merged`` when the landing left it out,
+    ``redoing`` while the thread's next turn is to redo it.  A resolved
+    thread takes no next turn, so none of its files is being redone.  A
+    file a landing deleted is no file to open: it is left out.  So is one
+    whose path the shell would refuse as a label.
     """
     redoing = facts.redoing if group != "resolved" else frozenset()
     left_out: list[dict[str, Any]] = []
@@ -217,11 +222,44 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
             seen.add(path)
             if (f["merged"] and f["after"] is None) or units(path) > SHELL_LIMITS["label"]:
                 continue
-            mark = "landed" if f["merged"] else ("redoing" if path in redoing else "not_merged")
+            mark = (
+                ("undone" if (landing["id"], path) in facts.undone else "landed") if f["merged"]
+                else ("redoing" if path in redoing else "not_merged")
+            )
             (landed if f["merged"] else left_out).append(
                 {"kind": "file", "label": path, "ref": path, "thread_id": str(facts.id), "landing": mark}
             )
     return [*left_out, *landed]
+
+
+def _landing_id(facts: ThreadFacts) -> str | None:
+    """The thread's newest landing with a file still as it landed: what its card's Undo undoes; None when it has none.
+
+    A file it left out is no change of its, and one an Undo put back is
+    one it has no more to undo.
+    """
+    for landing in sorted(facts.landings, key=lambda row: row["id"], reverse=True):
+        if any(f["merged"] and (landing["id"], f["path"]) not in facts.undone for f in landing["files"]):
+            return str(landing["id"])
+    return None
+
+
+def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:
+    """Each ``(row, path)`` of the project an Undo put back, and no later Undo brought back.
+
+    *undos* are the project's Undo rows, each ``{id, undoes, files}``: an
+    Undo puts each of its files back as it was before the rows it
+    *undoes*, a landing, a Restore or another Undo.  An Undo of an Undo
+    brings back what that one put back, file by file: a row's file is
+    undone while an Undo that put it back is not undone itself, at that
+    file.  So the newest are read first.
+    """
+    undone: set[tuple[int, str]] = set()
+    for undo in sorted(undos, key=lambda found: found["id"], reverse=True):
+        for f in undo["files"]:
+            if f.get("merged", True) and (undo["id"], f["path"]) not in undone:
+                undone.update((row, f["path"]) for row in undo["undoes"] or ())
+    return frozenset(undone)
 
 
 def _summarized(facts: ThreadFacts, kinds: tuple[str, ...]) -> list[dict[str, Any]]:

@@ -121,8 +121,16 @@ class StorageBackend(Protocol):
         """Return True if the object exists."""
         ...
 
-    async def delete(self, bucket: str, key: str) -> None:
-        """Delete an object.  No-op if it doesn't exist."""
+    async def delete(self, bucket: str, key: str, *, if_tag: str | None = None) -> None:
+        """Delete an object.  No-op if it doesn't exist.
+
+        With *if_tag*, the ``etag`` :meth:`stat` gave the object, only that
+        object is taken away: one changed since, or gone, raises
+        :class:`Changed` and is left as it is, where the store can tell.
+        ``LocalBackend`` tells up to the moment it removes the file;
+        ``S3Backend`` asks for the object right before the delete, so one
+        changed in the delete's own call is taken away all the same.
+        """
         ...
 
     async def delete_prefix(self, bucket: str, prefix: str) -> int:
@@ -300,16 +308,21 @@ class LocalBackend:
     async def exists(self, bucket: str, key: str) -> bool:
         return self._resolve(bucket, key).is_file()
 
-    async def delete(self, bucket: str, key: str) -> None:
+    async def delete(self, bucket: str, key: str, *, if_tag: str | None = None) -> None:
         path = self._resolve(bucket, key)
-        if path.is_file():
+        if if_tag is not None:
+            # Looked at right before it is removed: a save since is not taken away.
+            await asyncio.to_thread(_unlink_if, path, if_tag)
+        elif path.is_file():
             path.unlink()
-            # Clean up empty parent directories up to the bucket root.
-            bucket_root = self._bucket_path(bucket)
-            parent = path.parent
-            while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
-                parent = parent.parent
+        else:
+            return
+        # Clean up empty parent directories up to the bucket root.
+        bucket_root = self._bucket_path(bucket)
+        parent = path.parent
+        while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
 
     async def delete_prefix(self, bucket: str, prefix: str) -> int:
         if not prefix:
@@ -536,8 +549,18 @@ class S3Backend:
             except Exception:
                 return False
 
-    async def delete(self, bucket: str, key: str) -> None:
+    async def delete(self, bucket: str, key: str, *, if_tag: str | None = None) -> None:
         async with self._client() as s3:
+            if if_tag is not None:
+                # Asked for right before the delete, which is then the whole window left: the client takes a
+                # condition on a delete (If-Match), but whether a store honours one, Garage among them, is not
+                # known here, and one that refused it would refuse every delete.
+                try:
+                    now = (await s3.head_object(Bucket=bucket, Key=key)).get("ETag")
+                except Exception as exc:
+                    raise Changed(f"{bucket}/{key}") from exc
+                if now != if_tag:
+                    raise Changed(f"{bucket}/{key}")
             try:
                 await s3.delete_object(Bucket=bucket, Key=key)
             except Exception:
@@ -698,6 +721,17 @@ def _copy(source: Path, target: Path, limit: int | None, name: str) -> int:
 def _tag(st: os.stat_result) -> str:
     """What tells one write of a file from another: a file written anew has another inode, and one written in place another time."""
     return f"{st.st_ino}-{st.st_size}-{st.st_mtime_ns}"
+
+
+def _unlink_if(path: Path, tag: str) -> None:
+    """Remove the file *path* where it is still the file of *tag*, as it is looked at right before: :class:`Changed` otherwise."""
+    try:
+        now = _tag(os.stat(path))
+    except FileNotFoundError:
+        raise Changed(str(path)) from None
+    if now != tag:
+        raise Changed(str(path))
+    path.unlink()
 
 
 def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent: bool = False) -> None:

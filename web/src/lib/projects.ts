@@ -35,7 +35,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
   const ids = FIXTURE_IDS;
   const cloud = { kind: "cloud" } as const;
   const thread = (id: string, title: string, minutes: number, rest: Partial<ThreadRow>): ThreadRow => ({
-    id, title, group: "idle", reason: null, statusLine: null, progress: null, files: [], place: cloud,
+    id, title, group: "idle", reason: null, statusLine: null, progress: null, files: [], landingId: null, place: cloud,
     createdAt: ago(minutes + 60), updatedAt: ago(minutes), resolvedAt: null, ...rest,
   });
   // A file of each mark among them; an artifact has none.
@@ -44,7 +44,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
   const report = [
     thread(ids.question, "Check the revenue figures", 17, {
       group: "waiting", reason: "question", statusLine: "Which quarter's exchange rate should I use?", progress: { done: 2, total: 5 },
-      files: [file(ids.question, "revenue.xlsx", "threads/revenue/revenue.xlsx", "file", "not_merged")],
+      files: [file(ids.question, "revenue.xlsx", "threads/revenue/revenue.xlsx", "file", "not_merged")], landingId: "9",
     }),
     thread(ids.approval, "Send the draft to finance", 25, {
       group: "waiting", reason: "approval", statusLine: "Send an email to finance@example.com?",
@@ -63,6 +63,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
     thread(ids.idle, "Collect the sales data", 540, {
       group: "idle", statusLine: "Done: 4 regions",
       files: ["north", "south", "east"].map((region) => file(ids.idle, `${region}.csv`, `threads/sales/${region}.csv`, "file", region === "east" ? "undone" : "landed")),
+      landingId: "41",
     }),
     thread(ids.resolved, "Book the review meeting", 9_000, {
       group: "resolved", statusLine: "Booked for Monday", resolvedAt: ago(8_900),

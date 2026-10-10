@@ -1,15 +1,16 @@
 /**
  * A project thread's card marks each file as the project's files have it: being redone,
- * or not merged, after its name.
+ * or not merged, after its name. And it undoes the thread's newest landing, or all its
+ * changes from its menu, saying what was put back and what was left as it was.
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentChatAdapterProvider, NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { ThreadCards } from "../src/components/chat/thread-cards";
 import { applyAgentChatEvent, createInitialAgentChatState } from "../src/runtime/reducer";
-import type { AgentChatAdapter, AgentChatThreadRow, ChatMessage } from "../src/types";
+import type { AgentChatAdapter, AgentChatThreadRow, AgentChatUndoResult, ChatMessage } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,11 +37,10 @@ afterEach(() => {
   container = null;
 });
 
-function drawn(row: AgentChatThreadRow | null = ROW) {
+function drawn(row: AgentChatThreadRow | null = ROW, adapter = NO_BROWSER_ADAPTER as unknown as AgentChatAdapter) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  const adapter = NO_BROWSER_ADAPTER as unknown as AgentChatAdapter;
   act(() => root?.render(
     <AgentChatAdapterProvider value={{ adapter, sessionId: "master", projectId: "project-1", threadRows: row ? { [THREAD]: row } : {} }}>
       <ThreadCards message={card} />
@@ -94,5 +94,110 @@ describe("a project thread's card", () => {
 
   it("marks nothing on a card with no row, which shows what its reports said", () => {
     expect(drawn(null).querySelector("[data-mark]")).toBeNull();
+  });
+
+});
+
+describe("a project thread's card's Undo", () => {
+  const undoing = (undoProjectChanges?: AgentChatAdapter["undoProjectChanges"]) =>
+    ({ ...NO_BROWSER_ADAPTER, undoProjectChanges }) as unknown as AgentChatAdapter;
+  const button = (name: string) => [...document.querySelectorAll("button")].find((found) => found.textContent === name);
+  const said = (within: Element) => [...within.querySelectorAll('[role="status"] p')].map((line) => line.textContent);
+  const opened = () => act(() => button("…")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+  const chosen = (item: string) => act(() => [...document.querySelectorAll('[role="menuitem"]')].find((found) => found.textContent === item)!
+    .dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+  async function settle(): Promise<void> {
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+  }
+
+  it("undoes its newest landing still as it landed, and says what it put back, what it recorded first and what it left as it was", async () => {
+    const result: AgentChatUndoResult = {
+      applied: ["A.docx", "B.docx"], pickedUp: ["Notes.md"],
+      skipped: [
+        { path: "Notes.md", by: { kind: "you" }, pruned: false },
+        // A thread titled "you" is still said to be a thread.
+        { path: "Plan.md", by: { kind: "thread", threadId: "t-9", title: "you" }, pruned: false },
+        { path: "Old.md", by: null, pruned: true },
+        { path: "Odd.md", by: null },
+      ],
+    };
+    const undo = vi.fn(async () => result);
+    const drawnCard = drawn({ ...ROW, landingId: "41" }, undoing(undo));
+    expect(button("Undo")!.getAttribute("aria-label")).toBe("Undo Draft A's latest changes");
+    act(() => button("Undo")!.click());
+    await settle();
+    expect(undo).toHaveBeenCalledWith({ projectId: "project-1", target: { landingId: "41" } });
+    expect(said(drawnCard)).toEqual([
+      "Put back A.docx and B.docx.",
+      "Your changes to Notes.md were recorded first: each is a version in its History.",
+      "Notes.md was changed after this, by you. It was left as it is. Restore an earlier version from its History.",
+      "Plan.md was changed after this, by the thread you. It was left as it is. Restore an earlier version from its History.",
+      "Old.md could not be put back: its version from before is no longer kept.",
+      "1 more file was left as it is: its History says who changed it.",
+    ]);
+    expect(drawnCard.querySelectorAll('[role="status"] p bdi')).toHaveLength(6);
+  });
+
+  it("names three files it put back and counts the rest, and says when there was nothing to put back", async () => {
+    let result: AgentChatUndoResult = { applied: ["a.md", "b.md", "c.md", "d.md", "e.md"], skipped: [] };
+    const drawnCard = drawn({ ...ROW, landingId: "41" }, undoing(vi.fn(async () => result)));
+    act(() => button("Undo")!.click());
+    await settle();
+    expect(said(drawnCard)).toEqual(["Put back a.md, b.md, c.md and 2 more files."]);
+    result = { applied: [], skipped: [], pickedUp: [] };
+    act(() => button("Undo")!.click());
+    await settle();
+    expect(said(drawnCard)).toEqual(["Nothing to put back: the files are as they were."]);
+  });
+
+  it("undoes one change at a time, and keeps what it did when the card is drawn anew", async () => {
+    const answers: Array<(result: AgentChatUndoResult) => void> = [];
+    const undo = vi.fn(() => new Promise<AgentChatUndoResult>((resolve) => answers.push(resolve)));
+    const adapter = undoing(undo);
+    drawn({ ...ROW, landingId: "41" }, adapter);
+    act(() => button("Undo")!.click());
+    await settle();
+    // Neither its Undo nor its menu's undoes anything more while the first lands.
+    expect(button("Undo")!.disabled).toBe(true);
+    opened();
+    expect(document.querySelector('[role="menuitem"]')!.getAttribute("aria-disabled")).toBe("true");
+    chosen("Undo this thread's changes");
+    act(() => button("Undo")!.click());
+    await settle();
+    expect(undo).toHaveBeenCalledTimes(1);
+    answers[0]!({ applied: ["A.docx"], skipped: [] });
+    await settle();
+    act(() => root?.unmount());
+    container?.remove();
+    // A change of view mode draws the card anew, for the same adapter.
+    const again = drawn({ ...ROW, landingId: null }, adapter);
+    expect(said(again)).toEqual(["Put back A.docx."]);
+    expect(button("Undo")).toBeUndefined();
+  });
+
+  it("undoes all its thread's changes from its menu, and says why it could not, in the agent's words", async () => {
+    const undo = vi.fn(async () => Promise.reject(new Error("Stop the thread to undo its changes.")));
+    const drawnCard = drawn({ ...ROW, landingId: null }, undoing(undo));
+    // Every landing undone: no Undo of its newest, but the menu still undoes them all.
+    expect(button("Undo")).toBeUndefined();
+    expect(button("…")!.getAttribute("aria-label")).toBe("More for Draft A");
+    opened();
+    chosen("Undo this thread's changes");
+    await settle();
+    expect(undo).toHaveBeenCalledWith({ projectId: "project-1", target: { threadId: THREAD } });
+    expect(drawnCard.querySelector('[role="alert"]')!.textContent).toBe("Stop the thread to undo its changes.");
+    expect(said(drawnCard)).toEqual([]);
+  });
+
+  it("offers no Undo where the adapter cannot undo, or the card has no row of a project's", () => {
+    drawn({ ...ROW, landingId: "41" });
+    expect([button("Undo"), button("…")]).toEqual([undefined, undefined]);
+    act(() => root?.unmount());
+    container?.remove();
+    drawn(null, undoing(vi.fn()));
+    expect([button("Undo"), button("…")]).toEqual([undefined, undefined]);
   });
 });

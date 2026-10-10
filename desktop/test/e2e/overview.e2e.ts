@@ -140,7 +140,8 @@ interface Served {
   asked: string[][];
   unopened: string | null;
   unrestored: string | null;
-  put: { applied: string[]; skipped: Array<{ path: string; by: unknown }>; pickedUp: string[] } | null;
+  notUndone: string | null;
+  put: { applied: string[]; skipped: Array<{ path: string; by: unknown; pruned?: boolean }>; pickedUp: string[] } | null;
   changed(id: string, threadId: string | null): void;
   register(lacks?: string[]): void;
 }
@@ -1341,11 +1342,13 @@ describe("a file's History in the Library", () => {
     const { page, client } = await opened();
     await history(page);
     await page.waitForSelector("#versions .version");
-    // Nothing on a deletion, which left nothing to open, nor on a version no longer kept.
+    // Nothing to open on a deletion, which left nothing, nor anything on a version no longer kept. One that
+    // came with a landing undoes that landing, a deletion among them.
     expect(await page.$$eval("#versions .version", (found) => found.map((version) => [
       (version as HTMLElement).dataset.version, [...version.querySelectorAll(".act")].map((act) => act.textContent),
     ]))).toEqual([
-      ["20:f", []], ["12:f", ["Open version", "Restore"]], ["12:p", ["Open version", "Restore"]], ["9:f", ["Open version", "Restore"]], ["3:p", []],
+      ["20:f", ["Undo this change"]], ["12:f", ["Open version", "Restore"]], ["12:p", ["Open version", "Restore"]],
+      ["9:f", ["Open version", "Restore", "Undo this change"]], ["3:p", []],
     ]);
     await page.click('[data-version="12:p"] .act');
     await expect.poll(() => asked(client)).toEqual([["openVersion", "12:p", REVENUE]]);
@@ -1564,6 +1567,84 @@ describe("a file's History in the Library", () => {
     expect(await texts(page, "#versions .what")).toHaveLength(4);
     expect(await asked(client)).toEqual([]);
     expect(await page.isVisible("#failure")).toBe(false);
+  });
+
+  it("undoes the change a version came with, one at a time with a Restore and the keyboard still on the one pressed, and says what it did", async () => {
+    const { shell, page, client } = await opened();
+    await (await served(client)).evaluate((fake, path) => {
+      fake.lag = 1_500;
+      fake.put = {
+        applied: [path, "brief.docx"], pickedUp: ["notes.md"],
+        skipped: [{ path: "notes.md", by: { kind: "thread", threadId: "t-2", title: "Draft B" } }, { path: "old.csv", by: null, pruned: true }],
+      };
+    }, REVENUE);
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.focus('[data-version="9:f"] [data-act="undo"]');
+    expect(await focused(page)).toBe("version:9:f:undo");
+    await page.keyboard.press("Enter");
+    // Neither an Undo nor a Restore while it lands; a version still opens.
+    await expect.poll(() => waiting(page, "undo")).toEqual(["true"]);
+    expect(await waiting(page, "restore")).toEqual(["true", "true", "true"]);
+    expect(await waiting(page)).toEqual([null, null, null]);
+    await page.keyboard.press("Enter");
+    await page.click('[data-version="12:p"] [data-act="restore"]', { force: true });
+    await page.focus('[data-version="9:f"] [data-act="undo"]');
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    // Landed: its newest version is the Undo, by you, which can be undone in its turn; and the pane says what it did.
+    await expect.poll(() => texts(page, "#versions .what")).toEqual([
+      "Undone by you", "Changed by the thread Check the revenue figures", "Changed by you", "Changed by the thread Check the revenue figures",
+      "Added by the routine Nightly import",
+    ]);
+    await expect.poll(() => texts(page, "#history-told p")).toEqual([
+      `Put back ${REVENUE} and brief.docx.`,
+      "Your changes to notes.md were recorded first: each is a version in its History.",
+      "notes.md was changed after this, by the thread Draft B. It was left as it is. Restore an earlier version from its History.",
+      "old.csv could not be put back: its version from before is no longer kept.",
+    ]);
+    expect(await waiting(page, "undo")).toEqual([null, null]);
+    expect(await focused(page)).toBe("version:9:f:undo");
+    expect(await asked(client)).toEqual([["undo", "9"]]);
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    // Nothing left to put back is said so.
+    await (await served(client)).evaluate((fake) => {
+      fake.lag = 0;
+      fake.put = { applied: [], skipped: [], pickedUp: [] };
+    });
+    await page.keyboard.press("Enter");
+    await expect.poll(() => texts(page, "#history-told p")).toEqual(["Nothing to put back: the files are as they were."]);
+  });
+
+  it("says in the agent's words why a change was not undone, a name in them as the app shows one, and that an older agent cannot undo yet", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake) => { fake.notUndone = "Stop the thread to undo its changes."; });
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.click('[data-version="9:f"] [data-act="undo"]');
+    await expect.poll(() => page.textContent("#history-failure")).toBe("Stop the thread to undo its changes.");
+    expect(await texts(page, "#history-told p")).toEqual([]);
+    // A put-back that failed names its files: a name's controls are shown, never obeyed.
+    await (await served(client)).evaluate((fake) => {
+      fake.notUndone = "plan\u202Excod.md could not be put back as it was. Open its History to restore the version you want.";
+    });
+    await page.click('[data-version="9:f"] [data-act="undo"]');
+    await expect.poll(() => page.textContent("#history-failure"))
+      .toBe("planU+202Excod.md could not be put back as it was. Open its History to restore the version you want.");
+    await (await served(client)).evaluate((fake, project) => {
+      fake.notUndone = null;
+      fake.register(["undo"]);
+      fake.changed(project, null);
+    }, REPORT);
+    await page.click('[data-version="9:f"] [data-act="undo"]');
+    await expect.poll(() => page.textContent("#history-failure")).toBe("This agent cannot undo a change yet");
+    expect(await texts(page, "#versions .what")).toHaveLength(4);
+    expect(await asked(client)).toEqual([["undo", "9"], ["undo", "9"]]);
+    // Asked past the page's own buttons, as a page gone wrong might: a change no version shown came with is none.
+    for (const id of ["12", "3", "99", "9:f"]) {
+      const refused = await page.evaluate((landing) => (window as unknown as { surogateShell: { undoChange(id: string): Promise<void> } })
+        .surogateShell.undoChange(landing).then(() => null, (error: Error) => error.message), id);
+      expect(refused).toContain("No such change in the History shown");
+    }
   });
 
   it("brings a deleted file back from its History: it is among the files again, and the Deleted list holds it no more", async () => {

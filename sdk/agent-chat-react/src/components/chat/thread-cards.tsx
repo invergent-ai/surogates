@@ -9,8 +9,12 @@
 
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useAgentChatAdapterContext } from "../../adapter-context";
-import type { AgentChatAdapter, AgentChatThreadProposal, AgentChatThreadRow, AgentChatWorker, ChatMessage } from "../../types";
+import type {
+  AgentChatAdapter, AgentChatChangedBy, AgentChatThreadProposal, AgentChatThreadRow, AgentChatUndoResult, AgentChatWorker,
+  ChatMessage,
+} from "../../types";
 import { Button } from "../ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 
 const GROUP_LABEL: Record<AgentChatThreadRow["group"], string> = {
   waiting: "Waiting on you",
@@ -34,6 +38,39 @@ const MARKS: Record<NonNullable<AgentChatThreadRow["files"][number]["landing"]>,
   undone: "undone",
 };
 
+// A thread is said to be one, so that a thread titled "you" never reads as the user.
+const changedBy = (by: AgentChatChangedBy): string =>
+  by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${by.title}` : `the routine ${by.name}`;
+
+// The first few names, the rest counted: "a, b and 4 more files".
+function named(paths: string[]): string {
+  const names = paths.slice(0, FILES_SHOWN);
+  if (paths.length > FILES_SHOWN) names.push(`${paths.length - FILES_SHOWN} more files`);
+  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * What an Undo did, as a file's History says it: what it put back, whose edit it recorded first, and
+ * each file it left as it was, with who changed it since or that its version from before is no
+ * longer kept; the first few of those, the rest counted.
+ */
+function undoLines(result: AgentChatUndoResult): string[] {
+  const lines = result.applied.length > 0 ? [`Put back ${named(result.applied)}.`] : [];
+  const picked = result.pickedUp ?? [];
+  if (picked.length > 0) lines.push(`Your changes to ${named(picked)} were recorded first: each is a version in its History.`);
+  for (const { path, by, pruned } of result.skipped.slice(0, FILES_SHOWN)) {
+    lines.push(pruned
+      ? `${path} could not be put back: its version from before is no longer kept.`
+      : by === null
+        ? `${path} was left as it is.`
+        : `${path} was changed after this, by ${changedBy(by)}. It was left as it is. Restore an earlier version from its History.`);
+  }
+  const more = result.skipped.length - FILES_SHOWN;
+  if (more === 1) lines.push("1 more file was left as it is: its History says who changed it.");
+  if (more > 1) lines.push(`${more} more files were left as they are: each one's History says who changed it.`);
+  return lines.length > 0 ? lines : ["Nothing to put back: the files are as they were."];
+}
+
 function firstLine(text: string | null): string | null {
   return text?.split("\n").find((line) => line.trim())?.trim() ?? null;
 }
@@ -48,14 +85,18 @@ function statusLineOf(report: string | null): string | null {
   return null;
 }
 
-// What each proposed card's Start did, by proposal and key, kept for the adapter outside the
-// card: a change of view mode draws the card anew, and "Starting…", the error and the focus
-// a start owes its View thread survive it. A start keeps the way it went, in the cloud or on
-// the device, so that only that way's button says "Starting…".
+// What each proposed card's Start did, by proposal and key, and each thread card's Undo, by
+// thread, kept for the adapter outside the card: a change of view mode draws the card anew, and
+// "Starting…", the error, the focus a start owes its View thread and what an Undo did survive it.
+// A start keeps the way it went, in the cloud or on the device, so that only that way's button
+// says "Starting…".
 type CardStart =
   | { state: "starting"; where: "device" | "cloud" }
   | { state: "failed"; error: string }
-  | { state: "started"; threadId: string; focus: boolean };
+  | { state: "started"; threadId: string; focus: boolean }
+  | { state: "undoing" }
+  | { state: "undone"; result: AgentChatUndoResult }
+  | { state: "not_undone"; error: string };
 const cardStarts = new WeakMap<AgentChatAdapter, Map<string, CardStart>>();
 const startListeners = new Set<() => void>();
 let startsChanged = 0;
@@ -91,7 +132,9 @@ export function ThreadCards({ message }: { message: ChatMessage }) {
 }
 
 function WorkerCard({ worker }: { worker: AgentChatWorker }) {
-  const { onFileSelect, onOpenSession, threadRows } = useAgentChatAdapterContext();
+  const { adapter, projectId, onFileSelect, onOpenSession, threadRows } = useAgentChatAdapterContext();
+  const undoKey = `undo:${worker.id}`;
+  const undone = useCardStarts(adapter).get(undoKey);
   // A project's thread shows its row, live; any other worker what its reports said.
   const live = threadRows?.[worker.id];
   const status = live
@@ -101,6 +144,19 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
   const files = live ? live.files : worker.files;
   const name = worker.title ?? firstLine(worker.goal);
   const view = worker.title !== null ? "View thread" : "View worker";
+  // A project's thread undoes its newest landing still as it landed, or all its changes, as a landing
+  // by the user: one at a time, since each lands over the project's files.
+  const canUndo = !!live && !!projectId && !!adapter.undoProjectChanges;
+  const undoingNow = undone?.state === "undoing";
+  const undo = async (target: { landingId: string } | { threadId: string }) => {
+    if (undoingNow) return;
+    setCardStart(adapter, undoKey, { state: "undoing" });
+    try {
+      setCardStart(adapter, undoKey, { state: "undone", result: await adapter.undoProjectChanges!({ projectId: projectId!, target }) });
+    } catch (error) {
+      setCardStart(adapter, undoKey, { state: "not_undone", error: error instanceof Error ? error.message : "The change could not be undone." });
+    }
+  };
   return (
     <div data-testid="worker-card" data-group={live?.group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
@@ -150,16 +206,49 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
           {files.length > FILES_SHOWN && <li>+{files.length - FILES_SHOWN} more</li>}
         </ul>
       )}
-      {onOpenSession && (
-        <Button
-          size="xs"
-          variant="ghost"
-          className="mt-1"
-          aria-label={name ? `${view} ${name}` : undefined}
-          onClick={() => onOpenSession(worker.id)}
-        >
-          {view}
-        </Button>
+      <div className="mt-1 flex items-center gap-1">
+        {onOpenSession && (
+          <Button size="xs" variant="ghost" aria-label={name ? `${view} ${name}` : undefined} onClick={() => onOpenSession(worker.id)}>
+            {view}
+          </Button>
+        )}
+        {canUndo && live.landingId && (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={undoingNow}
+            aria-label={name ? `Undo ${name}'s latest changes` : undefined}
+            onClick={() => void undo({ landingId: live.landingId! })}
+          >
+            Undo
+          </Button>
+        )}
+        {canUndo && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="xs" variant="ghost" aria-label={name ? `More for ${name}` : "More"}>
+                …
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem disabled={undoingNow} onSelect={() => void undo({ threadId: worker.id })}>
+                Undo this thread's changes
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </div>
+      {/* There before it says what an Undo did, so that a screen reader hears it. Each line holds a
+          file's name, and maybe a thread's title: isolated, as text. */}
+      {canUndo && (
+        <div role="status" className="text-xs text-foreground/70">
+          {undone?.state === "undone" && undoLines(undone.result).map((line, at) => <p key={at}><bdi>{line}</bdi></p>)}
+        </div>
+      )}
+      {canUndo && undone?.state === "not_undone" && (
+        <p role="alert" className="text-xs text-destructive">
+          <bdi>{undone.error}</bdi>
+        </p>
       )}
     </div>
   );
