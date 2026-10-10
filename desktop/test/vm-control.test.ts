@@ -126,6 +126,10 @@ describe("the host's side of the control port", () => {
     expect(await history("open", { error: { type: "history", code: "no_whole_copy", message: "its words", more: 1 } }))
       .toEqual({ error: { type: "history", code: "no_whole_copy", message: "its words" } });
     for (const said of [null, 7, "ok", { error: null }, CANCELLED]) expect(await history("open", said)).toEqual(NOT_AN_ANSWER);
+    // An open names what was set aside of the thread it was asked for, and of no other.
+    const aside = (thread: string) => `00000001-20261010T030000Z-${thread}.copy`;
+    expect(await history("open", { ok: { copy: "made", set_aside_folders: [aside(THREAD)] } })).toEqual({ ok: { copy: "made", set_aside_folders: [aside(THREAD)] } });
+    expect(await history("open", { ok: { copy: "made", set_aside_folders: [aside(THREAD.replace("0b", "1c"))] } })).toEqual(NOT_AN_ANSWER);
     // A cancel is this computer's to answer, at once; and a link that closed, as a sandbox that stopped.
     const cancel = new AbortController();
     const cancelled = link.history(KEY, THREAD, "u1", "open", { wait: true }, cancel.signal);

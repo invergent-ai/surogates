@@ -38,9 +38,11 @@ export function refusedForNul(kind: string, args: Record<string, unknown>): bool
 
 export type Refusal = { type: string; message: string; [detail: string]: unknown };
 
-// An operation that cannot be done, carrying the error it is answered with.
+// An operation that cannot be done, carrying the error it is answered with. *retold*: the same refusal, each path its
+// words name as it lies on this computer given by *name* instead. A helper on a thread's copy answers with it, by the
+// folder's path (edge.ts); a refusal whose words name no file where it lies has none.
 export class Failure extends Error {
-  constructor(readonly refusal: Refusal) {
+  constructor(readonly refusal: Refusal, readonly retold?: (name: (path: string) => string) => Refusal) {
     super(refusal.message);
   }
 }
@@ -128,7 +130,9 @@ export function pyJsonLength(text: string): number {
 
 // OSError(code, text, path): "<text>: <repr(path)>", without the "[Errno N] ".
 export function osError(code: string, path: string, text?: string): Failure {
-  return new Failure({ type: "os", code, message: `${text ?? STRERROR[code] ?? code}: ${pyRepr(path)}` });
+  // repr() picks its quote and its escapes by the path it words: by another name, the words are made again.
+  const about = (path: string): Refusal => ({ type: "os", code, message: `${text ?? STRERROR[code] ?? code}: ${pyRepr(path)}` });
+  return new Failure(about(path), (name) => about(name(path)));
 }
 
 export function valueError(message: string): Failure {

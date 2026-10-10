@@ -127,15 +127,15 @@ export class ControlLink {
    * One request to the history of the place *key*, for *thread*'s copy, cancelled as an operation is.
    * What the agent answered is the guest's: nobody has it before it is checked as the answer of
    * *action* (history.ts), and an answer that is no result at all is refused as one that is none.
-   * A cancel, and a link that closed, are this computer's own to say.
+   * A cancel, a link that closed and an agent that has not answered after *ms* are this computer's own to say.
    */
-  history(key: string, thread: string, user: string, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  history(key: string, thread: string, user: string, action: string, args: Record<string, unknown>, signal: AbortSignal, ms?: number): Promise<Outcome> {
     const asked: Request = { type: "history", key, thread, user, action, args };
-    return this.cancellable(asked, signal, (reply) => checked(action, reply.type === "result" ? reply.outcome : undefined));
+    return this.cancellable(asked, signal, (reply) => checked(action, reply.type === "result" ? reply.outcome : undefined, thread), ms);
   }
 
-  // *message*, cancelled by *signal*; its answer, as *read* takes it.
-  private async cancellable(message: Request, signal: AbortSignal, read: (reply: FromAgent) => Outcome): Promise<Outcome> {
+  // *message*, cancelled by *signal*; its answer, as *read* takes it. With none once the link has closed, or after *ms*, as stopped by the sandbox.
+  private async cancellable(message: Request, signal: AbortSignal, read: (reply: FromAgent) => Outcome, ms?: number): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     const id = this.next;
     let cancel = () => {};
@@ -146,7 +146,7 @@ export class ControlLink {
       };
     });
     signal.addEventListener("abort", cancel, { once: true });
-    const reply = await Promise.race([this.request(message), cancelled]);
+    const reply = await Promise.race([this.request(message, ms), cancelled]);
     signal.removeEventListener("abort", cancel);
     if (reply === "cancelled") return CANCELLED;
     return reply ? read(reply) : SANDBOX_STOPPED;

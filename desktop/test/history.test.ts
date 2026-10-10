@@ -10,9 +10,10 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlPlaces } from "../src/guest/control.js";
 import { type Asked, askHistory, Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
+import { boundsFor } from "../src/guest/root.js";
 import type { Outcome } from "../src/link/protocol.js";
 import { checked, forgettable, type HistoryRequest, named } from "../src/vm/history.js";
-import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, type Place, VmManager, type VmOptions, WAITS } from "../src/vm/manager.js";
 
 const KEY = "0123456789abcdef";
 const OTHER_KEY = "fedcba9876543210";
@@ -24,6 +25,8 @@ const BLOB = "b".repeat(40);
 const signal = () => new AbortController().signal;
 const NO_ANSWER = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
 const NOT_HERE = { error: { type: "unavailable", message: "This folder's history is not in the sandbox" } };
+const HELD = { error: { type: "unavailable", message: "This folder's history is held by a request before this one, which has not ended" } };
+const LET_GO = { error: { type: "unavailable", message: "This computer's sandbox let this folder's history go before this was answered" } };
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -197,6 +200,46 @@ describe("the agent, asked for a folder's history", () => {
     await again;
     expect(order).toEqual(["mount r1", "mount r2", "start 1", "ended 1", "umount real", "umount history", "mount r3", "mount r4"]);
     expect(await mounted.history(KEY, { ...request, args: { n: 3 } }, signal())).toEqual({ ok: {} });
+  });
+
+  it("bounds a request that waits its turn as one that runs: behind one whose processes cannot end it answers that the history is held, and never starts", async () => {
+    const order: string[] = [];
+    // A history that does not end, whatever it is told: its processes wait on a share that stalled.
+    const stuck = (waitMs?: number) => new Places({
+      folder: join(dir, "places"), mount: async () => {}, unmount: async () => {}, historyMs: 60, waitMs,
+      ask: ({ args }) => new Promise<string>(() => void order.push(`start ${String(args.n)}`)),
+    });
+    const mounted = stuck(120);
+    await mounted.mount(KEY, R1, R2);
+    await mounted.mount(OTHER_KEY, { kind: "virtiofs", tag: "r3" }, { kind: "virtiofs", tag: "r4" });
+    const began = performance.now();
+    const first = mounted.history(KEY, { ...request, args: { n: 1 } }, signal());
+    const second = mounted.history(KEY, { ...request, args: { n: 2 } }, signal());
+    expect(await first).toEqual(NO_ANSWER);
+    expect(await second).toEqual(HELD);
+    expect(performance.now() - began).toBeGreaterThanOrEqual(115);
+    // One asked later waits as long from when it is asked; a cancel is still answered at once.
+    const later = performance.now();
+    const cancel = new AbortController();
+    const fourth = mounted.history(KEY, { ...request, args: { n: 4 } }, cancel.signal);
+    cancel.abort();
+    expect(await fourth).toEqual(CANCELLED);
+    expect(await mounted.history(KEY, { ...request, args: { n: 3 } }, signal())).toEqual(HELD);
+    expect(performance.now() - later).toBeGreaterThanOrEqual(115);
+    expect(performance.now() - began).toBeLessThan(2_000);
+    // None of them started, then or after; and another place's requests are not held.
+    void mounted.history(OTHER_KEY, { ...request, args: { n: 5 } }, signal());
+    await until(() => order.length === 2);
+    expect(order).toEqual(["start 1", "start 5"]);
+    // Unless it is told otherwise a request waits as long as the one before it may run, and as long again as what that ran has to end.
+    order.length = 0;
+    const usual = stuck();
+    await usual.mount(KEY, R1, R2);
+    const from = performance.now();
+    void usual.history(KEY, { ...request, args: { n: 1 } }, signal());
+    expect(await usual.history(KEY, { ...request, args: { n: 2 } }, signal())).toEqual(HELD);
+    expect(performance.now() - from).toBeGreaterThanOrEqual(60 + boundsFor(1).killedMs - 5);
+    expect(order).toEqual(["start 1"]);
   });
 
   it("ends every request at the guest's stop, within its bound, and starts none after", async () => {
@@ -488,6 +531,69 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("restore", { ok: { commit: ID } })).toEqual({ ok: {} });
   });
 
+  // What of a thread's own the place keeps set aside whole, each by its folder's name there: the order it was set
+  // aside in, when, whose, and which of the two.
+  const aside = (n: number, kind: string, thread = THREAD) => `${String(n).padStart(8, "0")}-20261010T03${String(n % 60).padStart(2, "0")}00Z-${thread}.${kind}`;
+
+  it("takes from an open the names of what was set aside whole of the request's own thread, kept and gone, on either of its forms", () => {
+    const kept = [aside(3, "repository"), aside(3, "copy"), aside(7, "copy")];
+    const gone = [aside(1, "copy"), aside(2, "repository")];
+    for (const answer of [
+      { copy: "made", set_aside_folders: kept }, { copy: "made", set_aside_folders: kept, set_aside_gone: gone },
+      { copy: "kept", set_asides: [ID], set_aside_gone: gone }, { history: "off", reason: "cap", set_aside_folders: kept },
+      { history: "off", reason: "names", set_aside_folders: kept, set_aside_gone: gone },
+      // As many as a thread is told of, with room: it keeps four times, of two names each, and is told the last sixteen times one went.
+      { copy: "moved", set_aside_folders: Array.from({ length: 64 }, (_unused, n) => aside(n, "copy")), set_aside_gone: Array.from({ length: 64 }, (_unused, n) => aside(n, "repository")) },
+    ]) {
+      expect(checked("open", { ok: answer }, THREAD)).toEqual({ ok: answer });
+    }
+    // No other action's answer names any.
+    expect(checked("snapshot", { ok: { hash: ID, set_aside_folders: kept } }, THREAD)).toEqual({ ok: { hash: ID } });
+  });
+
+  const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+  it.each<[string, unknown]>([
+    // Another thread's, or no thread's the check was told of.
+    ["another thread's", [aside(1, "copy", OTHER)]],
+    ["one that ends in the thread's and starts with another's", [`${aside(1, "copy", OTHER).slice(0, -5)}-${THREAD}.copy`]],
+    ["a name that is the thread's alone", [`${THREAD}.copy`]],
+    // A name that is not as the history makes one.
+    ["a path out of the place", [`../../${aside(1, "copy")}`]],
+    ["a path into it", [`${aside(1, "copy")}/Report.docx`]],
+    ["a third kind", [aside(1, "gone")]],
+    ["one that went, by the name it has on disk", [`${aside(1, "copy")}.gone`]],
+    ["a count of fewer digits", [aside(1, "copy").slice(1)]],
+    ["a count that is none", [`x${aside(1, "copy").slice(1)}`]],
+    ["a time that is none", [aside(1, "copy").replace("T03", "T3x")]],
+    ["upper case", [aside(1, "copy").toUpperCase()]],
+    ["a line more", [`${aside(1, "copy")}\n`]],
+    ["no text", [7]],
+    ["none", [null]],
+    ["a list in a list", [[aside(1, "copy")]]],
+    // What is no list, or more than any thread is told.
+    ["text", aside(1, "copy")],
+    ["an object", { 0: aside(1, "copy"), length: 1 }],
+    ["sixty-five", Array.from({ length: 65 }, (_unused, n) => aside(n, "copy"))],
+    ["a million", Array<string>(1_000_000).fill(aside(1, "copy"))],
+  ])("refuses an open that names, among what was set aside, %s", (_what, names) => {
+    for (const key of ["set_aside_folders", "set_aside_gone"]) {
+      expect(checked("open", { ok: { copy: "made", [key]: names } }, THREAD)).toEqual(NOT_AN_ANSWER);
+      expect(checked("open", { ok: { history: "off", reason: "cap", [key]: names } }, THREAD)).toEqual(NOT_AN_ANSWER);
+    }
+  });
+
+  it("refuses every name of what was set aside where it is not told whose the request was", () => {
+    for (const thread of [undefined, "", OTHER, THREAD.toUpperCase(), `${THREAD} `, ".*"]) {
+      expect(checked("open", { ok: { copy: "made", set_aside_folders: [aside(1, "copy")] } }, thread)).toEqual(NOT_AN_ANSWER);
+    }
+    // Nor a name made for what it was told, where that is no thread's id.
+    for (const thread of ["", "x", ".*", "../..", THREAD.toUpperCase(), `${THREAD} `, `${THREAD}/x`]) {
+      expect(checked("open", { ok: { copy: "made", set_aside_folders: [aside(1, "copy", thread)] } }, thread), thread).toEqual(NOT_AN_ANSWER);
+    }
+    // An open that names none is an open's answer whoever asked.
+    expect(checked("open", { ok: { copy: "made" } })).toEqual({ ok: { copy: "made" } });
+  });
+
   it("knows every action a folder's history takes, and no other", () => {
     const actions = /^_ACTIONS[^]*?^\}/m.exec(source("local_history.py"))![0];
     expect([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort()).toEqual(Object.keys(answers).sort());
@@ -714,6 +820,61 @@ describe("what the guest sent in an outcome's place, checked on this computer", 
     expect(checked("open", { error: { type: "history", code: "failed", message: huge } })).toEqual({ error: { type: "history", code: "failed", message: "x".repeat(2_000) } });
     expect(performance.now() - began).toBeLessThan(2_000);
   });
+
+  // How long the check of *answer*, a turn's commit, takes, and what it gave.
+  const timed = (answer: unknown) => {
+    const began = performance.now();
+    const taken = checked("commit", { ok: answer });
+    return { took: performance.now() - began, taken: taken as { ok: { changes: unknown[]; overlapped: unknown[] } } };
+  };
+  const commit = { commit: ID, base: ID, overlapped: [], excluded: [], repositories: [], not_taken: [] };
+  // The most the check of one line of the control port may take, on a loaded computer: it took about a third of a
+  // second for the deepest paths a line can hold where this was written, and more than half a minute before each
+  // part of a path was looked at once.
+  const LINE_MS = 2_000;
+
+  it("checks a turn's commit in time that grows with its size, whatever its paths are made of: one of as many parts as a path may have, a line full of them", () => {
+    // 4,096 units hold 2,048 names of a letter each, and one line of the control port 2,009 changes of such a path.
+    const deep = Array<string>(2_048).fill("a").join("/");
+    const changes = Array<unknown>(2_009).fill({ path: deep, before: null, after: ID });
+    expect(JSON.stringify({ type: "result", id: 1, outcome: { ok: { ...commit, changes } } }).length).toBeGreaterThan(8 * 1024 ** 2 - 8_192);
+    const plain = timed({ ...commit, changes });
+    expect(plain.taken.ok.changes).toHaveLength(2_009);
+    expect(plain.took).toBeLessThan(LINE_MS);
+    // With one name that no landing writes, among as many files left out: the list they are sorted into is as long.
+    const left = Array<unknown>(1_000).fill({ path: deep, reason: "with", before: null, after: ID });
+    const one = timed({ ...commit, overlapped: left, changes: [...changes.slice(0, 1_000), { path: `${deep.slice(0, -18)}/.git/hooks/commit`, before: null, after: ID }] });
+    expect(one.taken.ok.changes).toHaveLength(1_000);
+    expect(one.taken.ok.overlapped).toHaveLength(1_001);
+    expect(one.took).toBeLessThan(LINE_MS);
+    // Paths made of git's own folders, each of which is looked into, are no slower.
+    for (const part of [".git", ".git/modules/a/b", "node_modules", ".claude", "modules/hooks"]) {
+      const names = `${part}/`.repeat(Math.floor(4_090 / (part.length + 1)));
+      const such = timed({ ...commit, changes: Array<unknown>(2_009).fill({ path: `${names}x`, before: null, after: ID }) });
+      expect(such.took, part).toBeLessThan(LINE_MS);
+    }
+  });
+
+  it("takes a landing as large as a folder's history can answer: the agent's 6 MiB of changes, or as many as a folder history tracks has files", () => {
+    // As many files as a folder with a history may hold, each made by the turn: 50,000 fit an answer where their names are short.
+    const every = Array.from({ length: 50_000 }, (_unused, n) => ({ path: `d${n % 100}/f${n}`, before: null, after: ID }));
+    expect(JSON.stringify({ ...commit, changes: every }).length).toBeLessThan(6 * 1024 ** 2);
+    const whole = timed({ ...commit, changes: every });
+    expect(whole.taken.ok.changes).toHaveLength(50_000);
+    expect(whole.took).toBeLessThan(LINE_MS);
+    // And an answer's full size of files named as a project names them.
+    const named = Array.from({ length: 29_000 }, (_unused, n) => ({
+      path: `packages/area-${n % 40}/src/components/feature-${n % 700}/a rather long file name, as a document has, ${n}.docx`, before: BLOB, after: ID,
+    }));
+    const size = JSON.stringify({ ...commit, changes: named }).length;
+    expect(size).toBeGreaterThan(5.5 * 1024 ** 2);
+    expect(size).toBeLessThan(6 * 1024 ** 2);
+    const full = timed({ ...commit, changes: named });
+    expect(full.taken.ok.changes).toHaveLength(29_000);
+    expect(full.took).toBeLessThan(LINE_MS);
+    // One file more than a folder with a history has is no answer.
+    expect(checked("commit", { ok: { ...commit, changes: [...every, { path: "one more", before: null, after: ID }] } })).toEqual(NOT_AN_ANSWER);
+  });
 });
 
 describe("the VM manager, asked for a folder's history", () => {
@@ -899,6 +1060,85 @@ describe("the VM manager, asked for a folder's history", () => {
     expect(await manager.history(ask("changed"), signal())).toEqual({ ok: { paths: ["Report.docx"] } });
     // Let go, it is added anew from the folder at its path, in whichever guest runs by then.
     expect(asked.slice(2).map((entry) => (entry as string[])[0]).filter((what) => what !== "gone")).toEqual(["unmount", "mount", "history"]);
+    await manager.stop();
+  });
+
+  it("gives the agent a time to answer a request in that is past the agent's own two, for a request's wait and for its run", () => {
+    for (const [waits, slower] of [[WAITS.kvm, 1], [WAITS.emulated, 6]] as const) {
+      const { historyMs, killedMs } = boundsFor(slower);
+      expect(waits.historyMs).toBeGreaterThan(2 * historyMs + killedMs);
+      expect(waits.historyMs - (2 * historyMs + killedMs)).toBeLessThanOrEqual(waits.setupMs);
+    }
+  });
+
+  it("gives up a guest that answers pings and no request to a history, at a bound of this computer's own, and answers that the sandbox stopped", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager({ ...options(), historyMs: 150 }, guest(asked, (_key, request) => new Promise<Outcome>(() => void asked.push(["history", request.action]))));
+    const began = performance.now();
+    expect(await manager.history(ask("open"), signal())).toEqual(SANDBOX_STOPPED);
+    expect(performance.now() - began).toBeGreaterThanOrEqual(145);
+    expect(performance.now() - began).toBeLessThan(3_000);
+    // The guest went with it, as one that answers no setup does, and the next request boots another.
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["history", "open"], ["gone"]]);
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.stop();
+  });
+
+  it("lets a place go within a bound of its own, whatever was asked of it before: a request not answered by then is answered as let go", async () => {
+    const asked: unknown[] = [];
+    // A guest that answers no request to a history, and heeds no cancel of one.
+    const manager = new VmManager({ ...options(), setupMs: 150, historyMs: 600 }, guest(asked, (_key, request) => new Promise<Outcome>(() => void asked.push(["history", request.action]))));
+    const first = manager.history(ask("open"), signal());
+    await until(() => asked.length === 2);
+    const began = performance.now();
+    const gone = manager.unplace(place());
+    // Asked after the letting go: each waits for it, and no longer.
+    const placed = manager.place(place(), signal());
+    const second = manager.history(ask("changed"), signal());
+    expect(await first).toEqual(LET_GO);
+    expect(performance.now() - began).toBeGreaterThanOrEqual(145);
+    expect(await gone).toBe(true);
+    expect(await placed).toBeNull();
+    expect(performance.now() - began).toBeLessThan(3_000);
+    // The one asked after it is this computer's to bound too: the guest that answers none goes.
+    expect(await second).toEqual(SANDBOX_STOPPED);
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([
+      ["mount", KEY, "r1", "r2"], ["history", "open"], ["unmount", KEY], ["mount", KEY, "r3", "r4"], ["history", "changed"], ["gone"],
+    ]);
+    await manager.stop();
+  });
+
+  it("gives up the guest, within the time a place has to be let go, where what a request ran cannot end: nothing waits behind it for good", async () => {
+    const asked: unknown[] = [];
+    // The agent's own places, their history one whose processes cannot end.
+    const real = new Places({
+      folder: join(dir, "places"), mount: async () => {}, unmount: async () => {}, historyMs: 100, waitMs: 160,
+      ask: ({ action }) => new Promise<string>(() => void asked.push(["started", action])),
+    });
+    const manager = new VmManager({ ...options(), setupMs: 700 }, guest(asked, (key, request, stop) => real.history(key, request, stop), {
+      mount: async (key, store, folder) => {
+        asked.push(["mount", key]);
+        await real.mount(key, store, folder);
+      },
+      unmount: async (key) => {
+        asked.push(["unmount", key]);
+        await real.unmount(key);
+      },
+    }));
+    const began = performance.now();
+    const first = manager.history(ask("open"), signal());
+    const second = manager.history(ask("changed"), signal());
+    const gone = manager.unplace(place());
+    // The first at its bound; the second, which waited behind it, at its own, never started; and the letting go
+    // asked after both reaches the agent, which cannot end what the first ran, so the guest goes.
+    expect(await first).toEqual(NO_ANSWER);
+    expect(await second).toEqual(HELD);
+    expect(await gone).toBe(true);
+    expect(performance.now() - began).toBeLessThan(3_000);
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([["mount", KEY], ["started", "open"], ["unmount", KEY], ["gone"]]);
     await manager.stop();
   });
 

@@ -32,6 +32,7 @@ const GONE_RETRY_MS = 10;
 // Why not, where the history ended without saying: the agent's own code, beside the history's (vm/history.ts).
 const NO_ANSWER: Outcome = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
 const NOT_HERE = "This folder's history is not in the sandbox";
+const HELD = "This folder's history is held by a request before this one, which has not ended";
 
 const execute = promisify(execFile);
 
@@ -142,6 +143,8 @@ export interface PlacesOptions {
   ask?(asked: Asked, signal: AbortSignal): Promise<string>;
   // How long one request has from when it starts.
   historyMs?: number;
+  // How long one request waits for its turn: as long as the one before it has, and as long again as what that ran is given to end.
+  waitMs?: number;
 }
 
 interface Mounted {
@@ -161,6 +164,7 @@ export class Places {
   private stopped = false;
   private readonly ask: (asked: Asked, signal: AbortSignal) => Promise<string>;
   private readonly historyMs: number;
+  private readonly waitMs: number;
   private readonly folder: string;
   private readonly run: { mount(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown> };
   private readonly mountMs: number;
@@ -174,6 +178,7 @@ export class Places {
     this.mountMs = options.mountMs ?? BOUNDS.mountMs;
     this.ask = options.ask ?? ((asked, signal) => askHistory(asked, signal));
     this.historyMs = options.historyMs ?? BOUNDS.historyMs;
+    this.waitMs = options.waitMs ?? this.historyMs + BOUNDS.killedMs;
   }
 
   /** Where the place of *key* is mounted: its history, and the folder. Throws for one that is not. */
@@ -244,7 +249,9 @@ export class Places {
    * namespaces. One at a time on a place: a push reads the history's refs and then writes them,
    * and only one writer may be between the two. A request is ended by the host's cancel, at its
    * bound, when its place is let go and at the guest's stop: each is answered at once, and what
-   * the request ran has all gone before the place's next one starts. Never rejects.
+   * the request ran has all gone before the place's next one starts. Its wait for its turn is
+   * bounded as its run is: where what a request before it ran cannot end, it is answered that
+   * the history is held, and never starts. Never rejects.
    */
   history(key: string, request: Pick<Asked, "thread" | "user" | "action" | "args">, signal: AbortSignal): Promise<Outcome> {
     if (this.stopped) return Promise.resolve(SANDBOX_STOPPED);
@@ -261,7 +268,13 @@ export class Places {
     const asked = this.asked.get(key) ?? new Set();
     this.asked.set(key, asked.add(end));
     let began = false;
+    let held = false;
+    const waiting = setTimeout(() => {
+      held = true;
+      end.abort();
+    }, this.waitMs);
     const answered = (this.turns.get(key) ?? Promise.resolve()).then(async () => {
+      clearTimeout(waiting);
       if (end.signal.aborted) return null;
       began = true;
       const bound = setTimeout(cancel, this.historyMs);
@@ -281,10 +294,12 @@ export class Places {
     const outcome = answered.then((said) => (said === null ? NO_ANSWER : read(said)), (): Outcome => NO_ANSWER);
     return new Promise((resolve) => {
       // Ended before it answered. The host's cancel is the session's, and the guest's stop is answered as the
-      // host answers a guest that went; one that never started found its place gone.
-      const ended = () => resolve(
-        signal.aborted ? CANCELLED : this.stopped ? SANDBOX_STOPPED : began ? NO_ANSWER : { error: { type: "unavailable", message: NOT_HERE } },
-      );
+      // host answers a guest that went; one that never started found its place held, or gone.
+      const ended = () => {
+        clearTimeout(waiting);
+        const unstarted: Outcome = { error: { type: "unavailable", message: held ? HELD : NOT_HERE } };
+        resolve(signal.aborted ? CANCELLED : this.stopped ? SANDBOX_STOPPED : began ? NO_ANSWER : unstarted);
+      };
       end.signal.addEventListener("abort", ended, { once: true });
       void outcome.then((settled) => {
         end.signal.removeEventListener("abort", ended);
