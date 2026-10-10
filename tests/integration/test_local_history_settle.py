@@ -326,6 +326,67 @@ async def test_a_settle_whose_own_worker_is_lost_in_its_put_back_goes_on_with_it
     assert (own.saga_state, [f["path"] for f in own.files]) == ("completed", ["Y.md"])
 
 
+async def test_a_landing_a_settle_began_on_is_settled_by_its_own_turn_taken_up_again_never_gone_on_with(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    before = seen(here.folder)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 2)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    unapplied = [0]
+
+    def restarted(frame, outcome):
+        if (frame["invocation_id"], frame["args"].get("action")) == (settles(lost), "unapply"):
+            unapplied[0] += 1
+            if unapplied[0] == 2:
+                # Its app restarted as it answered the second put-back: the file is back, and the answer says it was cut off.
+                return {"error": {"type": "interrupted", "message": "This computer's app stopped while it ran"}}
+        return outcome
+
+    here.app.lie = restarted
+    await lands_next(api, monkeypatch, here, next_)
+    here.app.lie = None
+    # The settle stopped there: the next thread landed nothing, and the lost landing is left running, put back.
+    [report] = await told(api, next_master)
+    assert (report.data["landing"], report.data["landing_reason"], report.data["landing_code"]) == ("compensated", "refused", "interrupted")
+    assert (await records(api, lost))[0].saga_state == "running" and but(seen(here.folder), "Y.md") == before
+    # Its own turn is taken up again, its model answering with no step: the landing a settle began is settled, never gone on with.
+    here.app.places.holder = None
+    await woken(api, monkeypatch, lost, [_final_response("Done.")], said="Is it done?")
+    assert asked_by(here, lost, "land:0") == ["changed", "revisions", "pickup", "commit", "apply", "apply"]
+    assert asked_by(here, lost, settles(lost)) == ["unapply", "unapply", "forget"]
+    first, again = await records(api, lost)
+    assert (first.saga_state, again.saga_state, again.saga_id) == ("compensated", "completed", saga_of_turn(lost, "land:0:2"))
+    # Then the turn landed again, as a new saga: its files are in the folder, as its report and its record say.
+    assert (here.folder / "Budget.xlsx").read_text() == "Total,42\n" and (here.folder / "Report.docx").read_bytes() == b"PK report v1 edited"
+    assert sorted((f["path"], f["merged"]) for f in again.files) == [("Budget.xlsx", True), ("Report.docx", True)]
+    [report] = await told(api, lost_master)
+    assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)] and kept(here) == {}
+
+
+async def test_an_earlier_turns_landing_of_the_settling_thread_is_settled_under_its_own_lease(api, here, monkeypatch):
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
+    monkeypatch.setattr(local_landing, "BUSY_PATIENCE", 3.0)
+    _, master, thread = await begun_with_copy(api, here)
+    before = seen(here.folder)
+    with monkeypatch.context() as away:
+        # Its record is never answered: the landing is left unsettled, and its turn ends.
+        away.setattr(local_landing, "STEP_WAIT", 2)
+        frames = holding(here, lambda frame: frame["kind"] == "history" and frame["args"].get("action") == "record")
+        await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    del here.app._handle
+    assert [frame["invocation_id"] for frame in frames] == ["land:0"]
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    # Its next turn holds its own lease: it settles that landing first, from its record, then lands.
+    await woken(api, monkeypatch, thread, NEXT, said="Go on.")
+    assert asked_by(here, thread, f"land:{end.id}:settle:{saga_of_turn(thread)}") == ["fetch", "unapply", "unapply", "forget"]
+    first, second = await records(api, thread)
+    assert (first.saga_state, second.saga_state) == ("compensated", "completed")
+    assert sorted(f["path"] for f in second.files) == ["Budget.xlsx", "Report.docx", "Y.md"]
+    assert but(seen(here.folder), "Budget.xlsx", "Report.docx", "Y.md") == but(before, "Report.docx")
+    assert (here.folder / "Report.docx").read_bytes() == b"PK report v1 edited" and kept(here) == {}
+
+
 async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_worker_still_holds(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     before = seen(here.folder)
@@ -357,6 +418,52 @@ async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_work
     # The lease it took is given back: the lost thread's next turn is nobody's but its own.
     async with api.app.state.session_factory() as db:
         assert (await db.execute(text("SELECT count(*) FROM session_leases WHERE session_id = :id"), {"id": lost.id})).scalar() == 0
+
+
+def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") -> None:
+    """*thread*'s worker is lost just before it would ask *action* under *invocation*."""
+    ask = Steps.ask
+
+    async def asking(self, kind, asked, **arguments):
+        runner = self._runner
+        if (asked, runner._invocation_id, runner._calling_session_id) == (action, invocation, thread.id):
+            raise Lost
+        return await ask(self, kind, asked, **arguments)
+
+    monkeypatch.setattr(Steps, "ask", asking)
+
+
+@pytest.mark.parametrize("ended", ["recorded", "put back whole"])
+async def test_a_landing_whose_own_forgetting_never_ran_is_forgotten_by_the_next_landing_in_its_folder(api, here, monkeypatch, ended):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    if ended == "put back whole":
+        # You save the report after its turn was committed: its apply is refused, and the landing goes back whole.
+        lie_at(here, "commit", lambda frame, outcome: (here.folder / "Report.docx").write_bytes(b"PK report v2, by you") and None)
+    with monkeypatch.context() as first_run:
+        lost_before(first_run, lost, "forget")
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    here.app.lie = None
+    [row] = await records(api, lost)
+    assert row.saga_state == ("completed" if ended == "recorded" else "compensated") and row.steps[-1]["tool_name"] != "history.forget"
+    saga = saga_of_turn(lost)
+    assert kept(here) == ({f"{saga}/1": (0o600, b"PK report v1")} if ended == "recorded" else {})
+    landed = seen(here.folder)
+    await lands_next(api, monkeypatch, here, next_)
+    # The next landing in the folder asks it again, once it holds the folder, under a settle's name: what was kept goes.
+    assert asked_by(here, next_, f"{settles(lost)}:forget") == ["forget"] and kept(here) == {}
+    [row] = await records(api, lost)
+    assert (row.steps[-1]["tool_name"], row.steps[-1]["state"]) == ("history.forget", "committed")
+    applied = row.steps[-1]["arguments"]["applied"]
+    # Recorded, it names every apply; put back whole, it keeps nothing, and names none.
+    assert [a["path"] for a in applied] == (["Budget.xlsx", "Report.docx"] if ended == "recorded" else [])
+    assert but(seen(here.folder), "Y.md") == landed
+    [own] = await records(api, next_)
+    assert own.saga_state == "completed"
+    # Asked once: the landing after finds nothing owed.
+    asked = len(here.app.places.asked)
+    await woken(api, monkeypatch, next_, [calling(("write_file", {"path": "Z.md", "content": "z\n"})), _final_response("Done.")], said="More.")
+    assert "forget" not in [action for under, _, _, action in here.app.places.asked[asked:] if ":settle:" in under]
 
 
 # -- what a settle cannot finish -------------------------------------------------------------------------------------
