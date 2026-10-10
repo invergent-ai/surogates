@@ -420,16 +420,18 @@ async def test_a_thread_or_a_chat_bound_to_its_folder_itself_asks_no_open_and_wo
 # -- a stopped thread's open --------------------------------------------------------------------------------------
 
 
-async def test_a_paused_threads_open_reaches_its_computer_and_its_files_and_commands_do_not(api, computer):
+async def test_a_paused_threads_open_and_its_files_and_commands_reach_its_computer_none_of_them(api, computer):
     _, _, thread = await begun_with_copy(api, computer)
     await api.app.state.session_store.update_session_status(thread.id, "paused")
     copy = thread_copy(thread, session_factory=api.app.state.session_factory, redis=api.app.state.redis, lease_token=None)
-    assert await asyncio.wait_for(copy.opened(0), 30) == {"copy": "made"}
-    assert asked(computer) == [("open:0", "open")]
+    # An open is a turn's new work: none is recorded for a thread its Stop paused, so none waits on after it.
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await asyncio.wait_for(copy.opened(0), 30)
     for kind, args in [("write", {"key": f"{computer.folder}/a.txt", "data": ""}), ("run", {"command": "ls"})]:
         with pytest.raises(DeviceOperationError, match="This session was stopped"):
             await journal(api).run(OperationRequest(
                 device_id=UUID(computer.device_id), root_session_id=thread.id, calling_session_id=thread.id,
                 invocation_id="17:call_1", ordinal=1, kind=kind, args=args,
             ))
-    assert sorted(path.name for path in computer.app.places.copy(str(thread.id)).iterdir()) == ["Plans", "Report.docx"]
+    assert asked(computer) == [] and await operations_of(api, thread) == [("bind", "bind")]
+    assert not computer.app.places.copy(str(thread.id)).exists()

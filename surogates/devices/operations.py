@@ -83,8 +83,8 @@ CANCELLED_OUTCOME: dict[str, Any] = {
 
 # A calling session in one of these records none of the agent's operations.  A
 # cancellation of it then cannot miss one recorded beside it.  The user's own
-# requests, and a thread's own kinds, are refused only for a deleted chat (see
-# _check_session).
+# requests, and a thread's snapshots and landing, are refused only for a
+# deleted chat (see _check_session).
 _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
@@ -96,6 +96,10 @@ _CANCEL_RETRY_S = 0.05
 # own request on a chat's files.  A tool call's invocation starts with its
 # event id, a number, and a binding's is "bind".
 REQUEST_PREFIX = "request:"
+
+# A thread's turn's open of its copy (surogates.devices.history), asked under
+# ``open:<turn>``, or ``open:<turn>:<n>`` after a refusal.
+OPEN_PREFIX = "open:"
 
 # How many of the user's changes one session may have open on its computer at
 # once: a change waiting for its user holds its data in Postgres.  A read never
@@ -183,8 +187,8 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
 
     Returns whether the session is stopped for this request: for the agent's
     operations, paused, deleted or failed, or under a deleted root; for the
-    user's own request and for a thread's own kinds, deleted, or under a
-    deleted root.  The rows stay locked FOR SHARE until the operation commits,
+    user's own request and for a thread's snapshots and landing, deleted, or
+    under a deleted root.  The rows stay locked FOR SHARE until the operation commits,
     so a pause or a delete waits for the operation it must cancel.
     """
     rows = (await db.execute(
@@ -236,13 +240,16 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
             raise ValueError("Only a deleted root session's folder is retired")
         # Recorded once its chat is deleted, for its computer to forget the folder.
         return False
-    if request.invocation_id.startswith(REQUEST_PREFIX) or request.kind in THREAD_KINDS:
+    if request.invocation_id.startswith(REQUEST_PREFIX) or (
+        request.kind in THREAD_KINDS and not request.invocation_id.startswith(OPEN_PREFIX)
+    ):
         # The user's own look at the folder: a paused or failed chat's files
         # are still theirs to open.  A deleted chat's are not.  Nor are a
-        # thread's own kinds stopped with its turn, which no tool asks: a
-        # Stop pauses the thread before its turn hears of it, and what the
-        # turn must still do on its computer comes after, a snapshot put
-        # back or a landing finished, as does the open of a turn resumed.
+        # thread's own snapshots and landing stopped with its turn, which no
+        # tool asks: a Stop pauses the thread before its turn hears of it,
+        # and what the turn must still do on its computer comes after, a
+        # snapshot put back or a landing finished.  A turn's open is new work,
+        # refused once the thread is stopped, so none outlives the Stop.
         return "archived" in (calling.status, root.status)
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
 
@@ -261,7 +268,7 @@ def _its_own_turn(request: OperationRequest, root: dict[str, Any] | None) -> boo
         return False
     if request.kind == "checkpoint":
         return request.invocation_id.startswith("checkpoint:")
-    opening = request.kind == "history" and action == "open" and request.invocation_id.startswith("open:")
+    opening = request.kind == "history" and action == "open" and request.invocation_id.startswith(OPEN_PREFIX)
     return request.calling_session_id == request.root_session_id and (opening or request.invocation_id.startswith("land:"))
 
 
@@ -477,9 +484,9 @@ class DeviceOperations:
         it, or at once if it already has.
 
         A new operation of the agent's from a stopped session (paused, deleted
-        or failed), or a new request of the user's or one of a thread's own
-        kinds from a deleted one, raises "This session was stopped" and
-        records nothing.  A caller that is
+        or failed), a turn's open among them, or a new request of the user's
+        or a thread's snapshot or landing from a deleted one, raises "This
+        session was stopped" and records nothing.  A caller that is
         stopped while it waits, or while its request is being recorded, closes
         its own operation unless its turn is detached, handed to another
         worker that carries the wait on, or it is *keep_open*: a request whose
@@ -976,7 +983,7 @@ class DeviceOperations:
         refusal under ``open:<turn>:<n>``, n counted from 1: so the count
         names the turn's last asking, and its next (surogates.devices.history).
         """
-        first = f"open:{turn}"
+        first = f"{OPEN_PREFIX}{turn}"
         async with self._sf() as db:
             return (await db.execute(
                 select(func.count()).select_from(DeviceOperation).where(

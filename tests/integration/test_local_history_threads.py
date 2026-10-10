@@ -387,6 +387,20 @@ async def test_a_paused_or_failed_threads_own_kind_is_still_asked_and_a_deleted_
     assert len(await ops.pending(UUID(device["id"]), 1)) == 2
 
 
+@pytest.mark.parametrize("status", ["paused", "failed"])
+async def test_a_stopped_threads_open_is_refused_as_new_work_so_no_open_outlives_the_stop(api, status):
+    device, _, thread = await bound_with_copy(api)
+    store, ops = api.app.state.session_store, journal(api)
+    await store.update_session_status(thread.id, status)
+    # A turn opens its copy only while its thread is at work: a stopped turn's undo and landing are its kinds that pass.
+    for invocation in ("open:0", "open:0:1"):
+        with pytest.raises(DeviceOperationError, match="This session was stopped"):
+            await ops._record(asked(device, thread, "history", "open", invocation=invocation))
+    assert await ops.pending(UUID(device["id"]), 1) == []
+    await recorded(api, asked(device, thread, "checkpoint", "restore"))
+    await recorded(api, asked(device, thread, "land", "apply"))
+
+
 async def test_a_turns_opens_are_counted_by_the_turns_own_names_and_from_the_thread_itself_alone(api):
     device, _, thread = await bound_with_copy(api)
     ops = journal(api)
