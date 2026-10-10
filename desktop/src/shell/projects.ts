@@ -4,13 +4,13 @@
 // types and copied field by field before the shell uses it.
 
 import type {
-  LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
+  ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
 } from "../../../web/src/lib/projects-contract.js";
 
 // How long the page has to answer a call.
 export const ANSWER_TIMEOUT_MS = 10_000;
 
-const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines"] as const;
+const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "history"] as const;
 type Method = (typeof METHODS)[number];
 
 // What the main process sends the page's preload. A call's deadline is when its time runs out
@@ -100,6 +100,27 @@ function routineOf(value: unknown): Routine {
   return { id, name, scheduleDisplay, nextRunAt, status } as Routine;
 }
 
+// Who changed a file, when it is someone the app has a name for. A page of a later agent may name
+// another kind: that is no one the app can name, never a History refused.
+function changedByOf(value: unknown): ChangedBy | null {
+  const { kind, threadId, title, name } = fields(value);
+  if (kind === "you") return { kind };
+  if (kind === "thread" && named(threadId) && text(title, 500)) return { kind, threadId, title };
+  if (kind === "routine" && text(name, 500)) return { kind, name };
+  return null;
+}
+
+const CHANGES = ["added", "changed", "deleted", "restored", "undone"] as const;
+
+// A version's own facts are checked, as a row's are. How it came to be is taken when it is a way
+// the app knows, and as a plain change otherwise.
+function versionOf(value: unknown): FileVersion {
+  const { id, path, by, at, change, merged, available, landingId } = fields(value);
+  need(named(id) && text(path, 4096) && time(at) && typeof merged === "boolean" && typeof available === "boolean"
+    && (landingId === null || named(landingId)));
+  return { id, path, by: changedByOf(by), at, change: one(change, CHANGES) ? change : "changed", merged, available, landingId } as FileVersion;
+}
+
 // The row a thread's call answers must be that thread's: the shell cannot tell a project's rows apart otherwise.
 function theThread(row: ThreadRow, threadId: unknown): ThreadRow {
   need(row.id === threadId);
@@ -123,6 +144,8 @@ const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   reopen: (value, [, threadId]) => theThread(threadOf(value), threadId),
   library: (value) => listOf(value, 2_000, entryOf),
   routines: (value) => listOf(value, 200, routineOf),
+  // A version of another file is no version of this one.
+  history: (value, [, path]) => listOf(value, 500, versionOf).map((version) => (need(version.path === path), version)),
 };
 
 interface Call {
@@ -151,6 +174,7 @@ export class PageProjects implements ProjectsSource {
   reopen = (projectId: string, threadId: string) => this.call<ThreadRow>("reopen", projectId, threadId);
   library = (projectId: string) => this.call<LibraryEntry[]>("library", projectId);
   routines = (projectId: string) => this.call<Routine[]>("routines", projectId);
+  history = (projectId: string, path: string, place: ThreadPlace) => this.call<FileVersion[]>("history", projectId, path, place);
 
   subscribe(projectId: string, onChange: (threadId: string | null) => void): () => void {
     const id = this.next++;

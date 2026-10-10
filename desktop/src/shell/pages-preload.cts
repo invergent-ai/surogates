@@ -26,6 +26,8 @@ if (location.protocol === "file:") {
     focusPane: () => ipcRenderer.invoke("shell:focus-pane"),
     resolve: (id: string) => ipcRenderer.invoke("shell:resolve", id),
     reopen: (id: string) => ipcRenderer.invoke("shell:reopen", id),
+    history: (path: string) => ipcRenderer.invoke("shell:history", path),
+    closeHistory: () => ipcRenderer.invoke("shell:history-close"),
     back: () => ipcRenderer.invoke("shell:back"),
     forward: () => ipcRenderer.invoke("shell:forward"),
     reload: () => ipcRenderer.invoke("shell:reload"),

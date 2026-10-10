@@ -494,3 +494,64 @@ test("a stream closed while it waits to open again stops listening for the netwo
   stream.close();
   assert.equal(listening.size, 0);
 });
+
+const VERSION = {
+  id: "12:f", path: "threads/Draft A/A.docx", by: { kind: "thread", thread_id: "t-1", title: "Draft A" },
+  at: "2026-10-07T11:00:00Z", change: "changed", merged: true, available: true, landing_id: "12",
+};
+
+test("a file's History is asked at its route, the cloud's or a computer's, and answers the shell's types", async () => {
+  const { asked, routes } = routesOver(() => Response.json([
+    VERSION,
+    { ...VERSION, id: "11:p", by: { kind: "you" }, landing_id: null },
+    { ...VERSION, id: "3:p", by: { kind: "routine", name: "Nightly import" }, change: "added", available: false, landing_id: null },
+  ]));
+  const listed = await routes.history("p-1", "threads/Draft A/A.docx", { kind: "cloud" });
+  assert.deepEqual(listed, [
+    {
+      id: "12:f", path: "threads/Draft A/A.docx", by: { kind: "thread", threadId: "t-1", title: "Draft A" },
+      at: "2026-10-07T11:00:00Z", change: "changed", merged: true, available: true, landingId: "12",
+    },
+    { ...listed[0], id: "11:p", by: { kind: "you" }, landingId: null },
+    { ...listed[0], id: "3:p", by: { kind: "routine", name: "Nightly import" }, change: "added", available: false, landingId: null },
+  ]);
+  await routes.history("p-1", "notes & more.md", { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: true });
+  assert.deepEqual(asked, [
+    ["GET", "/api/v1/workstreams/p-1/history?path=threads%2FDraft+A%2FA.docx", undefined],
+    ["GET", "/api/v1/workstreams/p-1/history?path=notes+%26+more.md&device_id=d-1", undefined],
+  ]);
+});
+
+test("a version by someone, or changed in a way, this page does not know is a plain version: the list is never refused", async () => {
+  // As a server newer than this page may answer: a kind of author, a kind of change and a field it has no name for.
+  const { routes } = routesOver(() => Response.json([
+    { ...VERSION, id: "14:f", by: { kind: "agent", name: "Reviewer" }, change: "merged_by_hand", checked_by: "someone" },
+    { ...VERSION, id: "13:f", by: "the system", change: "restored" },
+    { ...VERSION, id: "12:f", by: { kind: "thread", thread_id: 7 }, merged: "yes", available: null, landing_id: 12 },
+    VERSION,
+  ]));
+  const listed = await routes.history("p-1", VERSION.path, { kind: "cloud" });
+  assert.deepEqual(listed.map(({ id, by, change }) => [id, by, change]), [
+    ["14:f", null, "changed"],
+    ["13:f", null, "restored"],
+    ["12:f", null, "changed"],
+    ["12:f", { kind: "thread", threadId: "t-1", title: "Draft A" }, "changed"],
+  ]);
+  assert.deepEqual(Object.keys(listed[0]).sort(), ["at", "available", "by", "change", "id", "landingId", "merged", "path"]);
+  // What only says more of a version is read as the plain case: landed, kept, with no landing named.
+  assert.deepEqual([listed[2].merged, listed[2].available, listed[2].landingId], [true, true, null]);
+});
+
+test("a History the agent refuses says why in the agent's words, and one that is no list is the route's own failure", async () => {
+  const off = routesOver(() => Response.json({ detail: "History is off: this project has more than 50,000 files." }, { status: 409 }));
+  await assert.rejects(off.routes.history("p-1", "a.md", { kind: "cloud" }), { message: "History is off: this project has more than 50,000 files." });
+  const busy = routesOver(() => Response.json({ detail: "This project's history is being read just now. Try again in a moment." }, { status: 503 }));
+  await assert.rejects(busy.routes.history("p-1", "a.md", { kind: "cloud" }), { message: "This project's history is being read just now. Try again in a moment." });
+  // A server from before a file's History has no such route.
+  const older = routesOver(() => Response.json({ detail: "Not Found" }, { status: 404 }));
+  await assert.rejects(older.routes.history("p-1", "a.md", { kind: "cloud" }), { message: "Not Found" });
+  for (const body of [{ versions: [] }, [{ ...VERSION, id: 12 }], [{ ...VERSION, path: undefined }], [null]]) {
+    const odd = routesOver(() => Response.json(body));
+    await assert.rejects(odd.routes.history("p-1", "a.md", { kind: "cloud" }), { message: "Failed to fetch the file's History" });
+  }
+});

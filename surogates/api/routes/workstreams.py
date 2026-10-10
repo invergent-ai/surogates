@@ -29,6 +29,7 @@ from surogates.devices.presence import DevicePresence
 from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
 from surogates.harness.turn_summarizer import is_platform_path
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
+from surogates.sandbox.history import HistoryError
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError
@@ -37,7 +38,9 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
+from surogates.workstreams.bucket import BucketHistory, Busy, said
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
+from surogates.workstreams.history import HISTORY_OFF, over_history_cap, versions
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
 
@@ -63,6 +66,17 @@ def _text(max_length: int, min_length: int = 1):
 
     # Postgres text and jsonb refuse NUL, which would fail the write with a 500.
     return Annotated[str, StringConstraints(pattern=r"^[^\x00]*$"), AfterValidator(fits)]
+
+
+def _whole(value: str) -> str:
+    if units(value) > SHELL_LIMITS["ref"]:
+        raise ValueError(f"must be at most {SHELL_LIMITS['ref']} characters")
+    return value
+
+
+#: A file's path as History takes it: as it is, never trimmed, with no NUL
+#: (jsonb refuses one), and no longer than the shell takes a file's ref.
+FilePath = Annotated[str, StringConstraints(pattern=r"^[^\x00]+$"), AfterValidator(_whole)]
 
 
 def _blank_is_none(max_length: int):
@@ -348,6 +362,48 @@ async def project_library(
     shown = [entry for _, entry in entries[: SHELL_LIMITS["library"]]]
     await _say_online(request, [entry["place"] for entry in shown])
     return shown
+
+
+def _unread(exc: HistoryError) -> HTTPException:
+    """A history the api could not read, in words: past a bound it keeps, said as it is; another request's
+    just now; or out of reach, with git's own words left to the log."""
+    if (words := said(exc)) is not None:
+        return HTTPException(status.HTTP_409_CONFLICT, words)
+    if isinstance(exc, Busy):
+        return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), headers={"Retry-After": "5"})
+    logger.warning("Could not read a project's history", exc_info=exc)
+    return HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "The project's history could not be read just now. Try again in a moment.",
+    )
+
+
+@router.get("/{workstream_id}/history")
+async def file_history(
+    workstream_id: UUID, path: FilePath, request: Request, ctx: AgentRuntime, tenant: Tenant, device_id: UUID | None = None,
+) -> list[dict[str, Any]]:
+    """A file's History, its newest versions first: who changed it, when and
+    how, read from the project's records.  *path* is a name among those
+    records and nothing more: it reaches no storage.  Whether each version
+    is still kept is asked of the api's copy of the project's history: a
+    pruned one is listed, as no longer kept.  A folder on a computer
+    (*device_id*) has records of its own, and its computer holds its
+    versions."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    master = await state.session_store.get_session(project.master_session_id)
+    if device_id is None and await over_history_cap(state.storage, master):
+        raise HTTPException(status.HTTP_409_CONFLICT, HISTORY_OFF)
+    found = await versions(state.session_factory, project.id, path, device_id=device_id, limit=SHELL_LIMITS["versions"])
+    kept = None
+    if device_id is None:
+        try:
+            kept = await BucketHistory.of(state.storage, master, state.settings.history).held(v["blob"] for v in found)
+        except HistoryError as exc:
+            raise _unread(exc) from exc
+    for version in found:
+        blob = version.pop("blob")
+        version["available"] = blob is None or kept is None or blob in kept
+    return found
 
 
 @router.get("/{workstream_id}/stream")

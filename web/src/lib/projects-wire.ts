@@ -6,7 +6,7 @@
 // desktop's ProjectsSource maps the same way, and a test can run it.
 
 import type {
-  LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
+  ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
 } from "./projects-contract";
 
 /** A thread's row as GET /v1/workstreams/{id}/threads answers it. */
@@ -153,5 +153,45 @@ export function routineOf(routine: RoutineResponse): Routine {
     scheduleDisplay: routine.schedule_display,
     nextRunAt: routine.next_run_at,
     status: routine.status,
+  };
+}
+
+/** A version of a file, as GET /v1/workstreams/{id}/history lists it. */
+export interface FileVersionResponse {
+  id: string;
+  path: string;
+  // you, a thread ({kind, thread_id, title}) or a routine ({kind, name}); a later server may name another kind.
+  by: unknown;
+  at: string;
+  change: string;
+  merged: boolean;
+  available: boolean;
+  landing_id: string | null;
+}
+
+const CHANGES: readonly FileVersion["change"][] = ["added", "changed", "deleted", "restored", "undone"];
+
+// Who the route says changed a file. Someone this page has no name for is no one it can name:
+// the version is still listed.
+export function changedByOf(by: unknown): ChangedBy | null {
+  const { kind, thread_id, title, name } = (typeof by === "object" && by !== null ? by : {}) as Record<string, unknown>;
+  if (kind === "you") return { kind };
+  if (kind === "thread" && typeof thread_id === "string" && typeof title === "string") return { kind, threadId: thread_id, title };
+  if (kind === "routine" && typeof name === "string") return { kind, name };
+  return null;
+}
+
+// A way of changing a file this page does not know is a change all the same; and what a version
+// says beside who, when and how is taken as the plain case unless it says otherwise.
+export function fileVersionOf(version: FileVersionResponse): FileVersion {
+  return {
+    id: version.id,
+    path: version.path,
+    by: changedByOf(version.by),
+    at: version.at,
+    change: CHANGES.find((known) => known === version.change) ?? "changed",
+    merged: version.merged !== false,
+    available: version.available !== false,
+    landingId: typeof version.landing_id === "string" ? version.landing_id : null,
   };
 }

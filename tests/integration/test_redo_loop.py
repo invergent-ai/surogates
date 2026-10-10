@@ -965,6 +965,15 @@ async def test_a_wait_on_you_names_its_first_file_and_counts_the_others():
     assert title_and_target(escalated=True) == ("Couldn't finish landing my changes", "session")
     many = landing_module.waiting_on_you([f"{n}.md" for n in range(23)], escalated=False)["instructions"]
     assert "19.md and 3 more changed again" in many and "20.md" not in many
+    # What it says of History is what History lists: a landing that did not finish has no version there.
+    assert landing_module.waiting_on_you(["A.md", "B.md"], escalated=True)["instructions"] == (
+        "A landing of this thread's changes could not be put back whole: A.md, B.md. "
+        "Each file's History lists its versions that landed; this landing's own are not listed there."
+    )
+    assert landing_module.waiting_on_you(["A.md"], escalated=False)["instructions"] == (
+        "A.md changed again while this thread redid its change. "
+        "The newer file was kept; this thread's version is in the file's History."
+    )
 
 
 REQUEST, COMPLETE = EventType.LLM_REQUEST, EventType.SESSION_COMPLETE

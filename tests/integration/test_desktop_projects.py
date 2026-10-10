@@ -10,12 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from surogates.sandbox.pool import SandboxPool
 from surogates.scheduled.schedule import parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
 
 from .test_desktop_link_client import built_client  # noqa: F401  (a fixture)
 from .test_devices import api, link_url  # noqa: F401  (fixtures)
+from .test_durable_landings import edited, ends, stored
+from .test_file_history import copies  # noqa: F401  (a fixture: the api's copies in the test's own folder)
 from .test_local_threads import answered_by_the_journal
+from .test_thread_copies import a_thread
 from .test_workstream_threads import threads_in_every_state, turn_ends
 from .test_workstreams import create, master_of
 
@@ -23,6 +27,18 @@ pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "scripts" / "desktop-projects-check.mjs"
+
+
+async def checked(api, link_url: str, project: dict, *more: str) -> dict:
+    """What the shell took of each answer the page's source gave it for *project*, through its own checks."""
+    origin = link_url.split("/api/")[0].replace("ws://", "http://", 1)
+    check = await asyncio.create_subprocess_exec(
+        "node", "--experimental-strip-types", str(CHECK), "--origin", origin, "--token", api.token, "--project", project["id"],
+        *more, cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await asyncio.wait_for(check.communicate(), 60)
+    assert check.returncode == 0, err.decode()
+    return json.loads(out)
 
 
 async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, api, link_url, session_factory):
@@ -42,14 +58,7 @@ async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, ap
         org_id=master.org_id, user_id=master.user_id, agent_id=master.agent_id, name="Weekly cash report",
         prompt="Report the cash.", schedule=parse_schedule("0 8 * * 1"), source="cron", created_from_session_id=master.id,
     )
-    origin = link_url.split("/api/")[0].replace("ws://", "http://", 1)
-    check = await asyncio.create_subprocess_exec(
-        "node", "--experimental-strip-types", str(CHECK), "--origin", origin, "--token", api.token, "--project", project["id"],
-        cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    out, err = await asyncio.wait_for(check.communicate(), 60)
-    assert check.returncode == 0, err.decode()
-    seen = json.loads(out)
+    seen = await checked(api, link_url, project)
 
     assert [(listed["id"], listed["waiting"], listed["working"]) for listed in seen["listed"]] == [(project["id"], 4, 2)]
     computer = {"kind": "device", "deviceId": local.config["execution"]["device_id"], "deviceName": "Flavius's ThinkPad", "online": False}
@@ -79,3 +88,22 @@ async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, ap
     assert [(routine["name"], routine["scheduleDisplay"]) for routine in seen["routines"]] == [("Weekly cash report", "0 8 * * 1")]
     # The stream says it is ready: the shell reads the project whole.
     assert seen["heard"] == [None]
+
+
+async def test_the_desktop_takes_every_answer_of_a_files_history(built_client, api, link_url, tmp_path):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    for command in ("echo one >> Report.docx", "echo two >> Report.docx"):
+        await edited(pool, thread, command)
+        await ends(api, pool, thread)
+    seen = (await checked(api, link_url, project, "--path", "Report.docx"))["history"]
+    # Newest first, and last the file as you uploaded it; each as the shell's checks left it.
+    assert [(v["path"], v["by"], v["change"], v["merged"], v["available"]) for v in seen["versions"]] == [
+        ("Report.docx", {"kind": "thread", "threadId": str(thread.id), "title": "Draft A"}, "changed", True, True),
+        ("Report.docx", {"kind": "thread", "threadId": str(thread.id), "title": "Draft A"}, "changed", True, True),
+        ("Report.docx", {"kind": "you"}, "added", True, True),
+    ]
+    assert [v["landingId"] is not None for v in seen["versions"]] == [True, True, False]
+    assert seen["none"] == []

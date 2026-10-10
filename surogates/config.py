@@ -735,6 +735,23 @@ class SagaSettings(BaseSettings):
     retry_delay: float = 1.0
 
 
+class HistorySettings(BaseSettings):
+    """What the api spends on its copies of projects' file histories.
+
+    The api reads a project's history from its bucket into a copy on its own
+    disk to answer a file's History.  It is one process for every tenant, so
+    each bound is refused in words, never met with memory or disk it does
+    not have.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_HISTORY_"}
+
+    copies_path: str = ""  # where the copies are kept; empty: surogates-history in the temp folder
+    packs_bound: int = 4 * 2**30  # the largest copy of one history: its packs, and the indexes the api makes of them
+    copies_bound: int = 8 * 2**30  # the copies on the api's disk, every project's together
+    copy_idle: int = 600  # seconds a copy stays unused before it is removed
+
+
 class OutcomeSettings(BaseSettings):
     """Outcome-oriented /goal loop configuration."""
 
@@ -810,6 +827,7 @@ class Settings(BaseSettings):
     browser: BrowserSettings = Field(default_factory=BrowserSettings)
     governance: GovernanceSettings = Field(default_factory=GovernanceSettings)
     saga: SagaSettings = Field(default_factory=SagaSettings)
+    history: HistorySettings = Field(default_factory=HistorySettings)
     outcomes: OutcomeSettings = Field(default_factory=OutcomeSettings)
     scheduled_sessions: ScheduledSessionSettings = Field(
         default_factory=ScheduledSessionSettings,

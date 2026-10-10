@@ -10,6 +10,7 @@ import pytest
 
 from surogates.storage.backend import (
     LocalBackend,
+    TooLarge,
 )
 
 
@@ -74,6 +75,23 @@ class TestLocalBackendObjects:
     async def test_delete_prefix_rejects_empty(self, backend: LocalBackend):
         with pytest.raises(ValueError):
             await backend.delete_prefix("bucket", "")
+
+    async def test_download_goes_through_a_file(self, backend: LocalBackend, tmp_path: Path):
+        data = b"\x00\x01" * 3 * 2**20  # more than one piece
+        await backend.write("bucket", "deep/key.bin", data)
+        target = tmp_path / "target.bin"
+        assert await backend.download("bucket", "deep/key.bin", target) == 6 * 2**20
+        assert target.read_bytes() == data
+        with pytest.raises(KeyError):
+            await backend.download("bucket", "nope.bin", target)
+
+    async def test_download_past_its_limit_is_refused_and_leaves_no_file(self, backend: LocalBackend, tmp_path: Path):
+        await backend.write("bucket", "key.bin", b"x" * 1025)
+        target = tmp_path / "target.bin"
+        with pytest.raises(TooLarge):
+            await backend.download("bucket", "key.bin", target, limit=1024)
+        assert not target.exists()
+        assert await backend.download("bucket", "key.bin", target, limit=1025) == 1025
 
     async def test_list_keys(self, backend: LocalBackend):
         await backend.write_text("bucket", "a.txt", "1")
