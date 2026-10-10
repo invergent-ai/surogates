@@ -456,7 +456,7 @@ def test_a_later_turns_deletion_lands_though_the_copy_holds_what_an_earlier_turn
 @pytest.mark.parametrize(("left_out", "again", "said"), [
     ("echo SECRET=1 > .env", "echo SECRET=2 > .env", ([".env"], [])),
     ("mkdir -p node_modules/pkg && echo x > node_modules/pkg/index.js", "echo y > node_modules/pkg/other.js", (["node_modules/"], [])),
-    ("git init -q vendor && echo x > vendor/a.txt", "echo xx > vendor/a.txt", ([], ["vendor/"])),
+    ("git init -q vendor && mkdir vendor/lib && echo x > vendor/lib/a.txt", "echo xx > vendor/lib/a.txt", ([], ["vendor/"])),
 ])
 def test_what_an_earlier_turn_left_out_and_a_later_one_writes_again_is_the_later_ones_write(tmp_path, folder, left_out, again, said):
     one = a_copy(tmp_path, folder)

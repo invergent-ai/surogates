@@ -1004,29 +1004,36 @@ class LocalHistory(History):
         in it.
         """
         found: dict[str, str] = {}
-        for name in self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard").split("\0"):
-            if not name:
-                continue
-            if not name.endswith("/"):
-                try:
-                    found[name] = _state(os.lstat(self.copy / name))
-                except OSError:
-                    pass  # gone since it was listed: no file of the copy's now
-                continue
-            inside = hashlib.sha1()
-            folders = [self.copy / name]
-            while folders:
-                try:
-                    with os.scandir(folders.pop()) as entries:
-                        for entry in sorted(entries, key=lambda e: e.name):
-                            if entry.is_dir(follow_symlinks=False):
-                                folders.append(Path(entry.path))
-                            else:
-                                said = f"{os.path.relpath(entry.path, self.copy)}\0{_state(entry.stat(follow_symlinks=False))}\0"
-                                inside.update(said.encode("utf-8", "surrogateescape"))
-                except OSError:
-                    inside.update(b"\0unread\0")
-            found[name] = inside.hexdigest()
+        listed = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard").split("\0")
+        # Each by its name from the copy's handle: a node_modules/ is tens of thousands of them.
+        copy = os.open(self.copy, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for name in listed:
+                if not name:
+                    continue
+                if not name.endswith("/"):
+                    try:
+                        found[name] = _state(os.stat(name, dir_fd=copy, follow_symlinks=False))
+                    except OSError:
+                        pass  # gone since it was listed: no file of the copy's now
+                    continue
+                inside = hashlib.sha1()
+                folders = [name.rstrip("/")]
+                while folders:
+                    at = folders.pop()
+                    try:
+                        with os.scandir(os.path.join(self.copy, at)) as entries:
+                            for entry in sorted(entries, key=lambda e: e.name):
+                                if entry.is_dir(follow_symlinks=False):
+                                    folders.append(f"{at}/{entry.name}")
+                                else:
+                                    said = f"{at}/{entry.name}\0{_state(entry.stat(follow_symlinks=False))}\0"
+                                    inside.update(said.encode("utf-8", "surrogateescape"))
+                    except OSError:
+                        inside.update(b"\0unread\0")
+                found[name] = inside.hexdigest()
+        finally:
+            os.close(copy)
         return found
 
     def _seen(self) -> dict[str, Any]:
