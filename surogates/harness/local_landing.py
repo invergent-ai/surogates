@@ -50,7 +50,7 @@ from surogates.devices.operations import OperationConflict
 from surogates.devices.workspace import MAX_MESSAGE_CHARS, DeviceOperationError
 from surogates.governance.saga import Saga, SagaState, SagaStep, StepState
 from surogates.governance.saga.orchestrator import SagaTimeoutError
-from surogates.harness.landing import TURN_ENDS, _orchestrator, _Row, _row_picked_up, _tell, _written, redo_files
+from surogates.harness.landing import _orchestrator, _Row, _row_picked_up, _tell, _written, last_turn_end, redo_files
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.session.events import EventType
 from surogates.workstreams.history import landing_row, saga_of, start_landing
@@ -144,7 +144,7 @@ async def lands(store: Any, session: Any, turn: int, calls: list) -> bool:
     """
     if any((call.data or {}).get("name") not in SAGA_EXCLUDED_TOOLS for call in calls):
         return True
-    ended = await store.last_event(session.id, *TURN_ENDS)
+    ended = await last_turn_end(store, session.id)
     if ended is not None and not (ended.type == EventType.SESSION_COMPLETE.value and ended.data.get("saved", True)):
         return True
     for report in (EventType.WORKER_COMPLETE, EventType.WORKER_FAILED):

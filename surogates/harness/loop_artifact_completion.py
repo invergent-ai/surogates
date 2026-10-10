@@ -42,7 +42,7 @@ from surogates.harness.landing import (
     _fence,
     keep_copy,
     land_turn,
-    TURN_ENDS,
+    last_turn_end,
     left_alone,
     pick_up_routine,
     prune_later,
@@ -1479,7 +1479,7 @@ class ArtifactCompletionMixin:
         try:
             if yours or self._routine_turn is None:
                 # Read as the turn begins: a stop's route writes its own end before the turn is torn down.
-                ended = await self._store.last_event(session.id, *TURN_ENDS)
+                ended = await last_turn_end(self._store, session.id)
                 self._routine_turn = ended.id if ended else 0
             if yours == await self._store.has_event(session.id, EventType.TOOL_CALL, after=self._routine_turn):
                 return

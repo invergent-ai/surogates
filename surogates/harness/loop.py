@@ -1275,12 +1275,12 @@ class AgentHarness(
         first, so the turn starting now comes after it; unless the thread
         has had a turn end since, when it is only let go.
         """
-        from surogates.harness.landing import TURN_ENDS, name_turn
+        from surogates.harness.landing import last_turn_end, name_turn
 
         kept = _STOPS_NOT_WRITTEN.get(session.id)
         if kept is not None:
             stopped, said = kept
-            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            ended = await last_turn_end(self._store, session.id)
             if (ended.id if ended else 0) == stopped:
                 await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
             # With a later turn end, written elsewhere since, the stopped turn is over already.
@@ -1353,11 +1353,11 @@ class AgentHarness(
         another worker first takes this turn's hand-off for its own, if
         the stop could not take it back either.
         """
-        from surogates.harness.landing import TURN_ENDS
+        from surogates.harness.landing import last_turn_end
 
         said = {"reason": "interrupted", "message": reason, "worker_id": self._worker_id}
         try:
-            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            ended = await last_turn_end(self._store, session.id)
             if (ended.id if ended else 0) != session.config.get("turn_after"):
                 return False
             await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
@@ -5361,10 +5361,14 @@ class AgentHarness(
         a later wake that goes on to the model leaves the cursor to that turn.
 
         A model's last answer ends its turn: the cursor moves past it and the
-        session comes to rest, so a later wake finds nothing to do.  A
-        command's answer ends its turn the same way, in one write.  A worker
-        that dies before that write leaves a turn the next wake ends: the
-        answer in the log says the command was run.
+        session comes to rest, so a later wake finds nothing to do, and its
+        ``session.complete`` tells whoever waits for the turn.  A command's
+        answer ends its turn the same way, in one write, with a
+        ``session.complete`` read as a turn's end is, that names the
+        command's message.  A worker that dies before that write leaves a
+        turn the next wake ends: the answer in the log says the command was
+        run.  One that dies after it leaves a session at rest, which no wake
+        ends again.
 
         Not when more was said since that still waits: a message no request
         has read, the user's own or the command's to start its work (a
@@ -5403,11 +5407,17 @@ class AgentHarness(
         if not at_rest and (cut_off or not ends_here):
             # The turn that goes on moves the cursor itself.
             return False
+        ending = {
+            "reason": "completed", "worker_id": self._worker_id,
+            # Most commands ask the model nothing, and what /compress asks is not counted against a turn.
+            "cost_summary": SessionCostTracker().summary(),
+            "answers": typed_at,
+        }
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=events[-1].id if unread is None else unread - 1,
             lease_token=lease.lease_token,
-            at_rest=at_rest,
+            rests_with=ending if at_rest else None,
         )
         if at_rest:
             await self._release_command_turn(session)
