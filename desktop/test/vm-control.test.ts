@@ -125,7 +125,7 @@ describe("the host's side of the control port", () => {
     expect(await history("open", { ok: { hash: ID } })).toEqual(NOT_AN_ANSWER);
     expect(await history("open", { error: { type: "history", code: "no_whole_copy", message: "its words", more: 1 } }))
       .toEqual({ error: { type: "history", code: "no_whole_copy", message: "its words" } });
-    for (const said of [null, 7, "ok", { error: null }, CANCELLED, SANDBOX_STOPPED]) expect(await history("open", said)).toEqual(NOT_AN_ANSWER);
+    for (const said of [null, 7, "ok", { error: null }, CANCELLED]) expect(await history("open", said)).toEqual(NOT_AN_ANSWER);
     // A cancel is this computer's to answer, at once; and a link that closed, as a sandbox that stopped.
     const cancel = new AbortController();
     const cancelled = link.history(KEY, THREAD, "u1", "open", { wait: true }, cancel.signal);

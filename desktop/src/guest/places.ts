@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { Outcome } from "../link/protocol.js";
-import { CANCELLED } from "./command.js";
+import { CANCELLED, SANDBOX_STOPPED } from "./command.js";
 import { PLACE_KEY, type Share } from "./protocol.js";
 import { BOUNDS, TAG } from "./root.js";
 
@@ -244,7 +244,7 @@ export class Places {
    * the request ran has all gone before the place's next one starts. Never rejects.
    */
   history(key: string, request: Pick<Asked, "thread" | "user" | "action" | "args">, signal: AbortSignal): Promise<Outcome> {
-    if (this.stopped) return Promise.resolve(NO_ANSWER);
+    if (this.stopped) return Promise.resolve(SANDBOX_STOPPED);
     let paths: { store: string; folder: string };
     try {
       paths = this.paths(key);
@@ -277,8 +277,11 @@ export class Places {
     this.turns.set(key, turn);
     const outcome = answered.then((said) => (said === null ? NO_ANSWER : read(said)), (): Outcome => NO_ANSWER);
     return new Promise((resolve) => {
-      // Ended before it answered. The host's cancel is the session's; one that never started found its place gone.
-      const ended = () => resolve(signal.aborted ? CANCELLED : began ? NO_ANSWER : { error: { type: "unavailable", message: NOT_HERE } });
+      // Ended before it answered. The host's cancel is the session's, and the guest's stop is answered as the
+      // host answers a guest that went; one that never started found its place gone.
+      const ended = () => resolve(
+        signal.aborted ? CANCELLED : this.stopped ? SANDBOX_STOPPED : began ? NO_ANSWER : { error: { type: "unavailable", message: NOT_HERE } },
+      );
       end.signal.addEventListener("abort", ended, { once: true });
       void outcome.then((settled) => {
         end.signal.removeEventListener("abort", ended);

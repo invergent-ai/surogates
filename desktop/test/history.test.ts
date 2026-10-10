@@ -211,8 +211,9 @@ describe("the agent, asked for a folder's history", () => {
     await until(() => order.length === 2);
     await mounted.stop();
     expect(order).toEqual(["start 1", "start 1", "ended 1", "ended 1"]);
-    expect(await Promise.all(all)).toEqual([NO_ANSWER, NOT_HERE, NO_ANSWER]);
-    expect(await mounted.history(KEY, { ...request, args: { n: 3 } }, signal())).toEqual(NO_ANSWER);
+    // Each as the host answers a guest that went, whichever of the two answers reaches whoever asked.
+    expect(await Promise.all(all)).toEqual([SANDBOX_STOPPED, SANDBOX_STOPPED, SANDBOX_STOPPED]);
+    expect(await mounted.history(KEY, { ...request, args: { n: 3 } }, signal())).toEqual(SANDBOX_STOPPED);
     expect(order).toHaveLength(4);
     // A request that cannot end keeps the stop no longer than its bound.
     const stuck = places(() => new Promise<string>(() => {}));
@@ -323,7 +324,7 @@ describe("a request to a folder's history, as the agent runs it", () => {
     const pid = await writer();
     await mounted.stop();
     expect(alive(pid)).toBe(false);
-    expect(await first).toEqual(NO_ANSWER);
+    expect(await first).toEqual(SANDBOX_STOPPED);
     // And a place's mounts go only once nothing of its requests is left to write through them.
     let living: boolean | undefined;
     mounted = new Places({
@@ -526,8 +527,10 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("open", { error: { type: "value", message: "The agent cannot take this history request", detail: [1] } }))
       .toEqual({ error: { type: "value", message: "The agent cannot take this history request" } });
     expect(checked("open", { error: { type: "other", message: "y".repeat(2_500) } })).toEqual({ error: { type: "other", message: "y".repeat(2_000) } });
-    // What only this computer says, a cancel or a sandbox that stopped, or a type nobody has, is none of the guest's to say.
-    for (const type of ["cancelled", "interrupted", "ok", "History", "", "x".repeat(100_000)]) {
+    // The guest's own stop, as this computer says a guest went.
+    expect(checked("open", { ...SANDBOX_STOPPED, more: 1 })).toEqual(SANDBOX_STOPPED);
+    // A cancel is this computer's alone to say, and a type nobody has is nobody's.
+    for (const type of ["cancelled", "ok", "History", "", "x".repeat(100_000)]) {
       expect(checked("open", { error: { type, message: "The session stopped this command" } })).toEqual(NOT_AN_ANSWER);
     }
   });

@@ -39,17 +39,17 @@ export const USER = /^[A-Za-z0-9_.@-]{1,128}$/;
 //   landing_unsettled  the landing was neither recorded nor put back whole: what it kept is not to be forgotten
 //   not_on_base        the snapshot was taken on another base than the copy's is now: the copy is not put back to it
 // and the agent's (guest/places.ts):
-//   no_answer          the history ended without an answer: its bound passed, it was stopped, or it wrote none
+//   no_answer          the history ended without an answer: its bound passed, its place was let go, or it wrote none
 const SAID = [
   "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "not_a_request", "record_unfinished", "move_unfinished",
   "landing_unsettled", "not_on_base", "no_answer",
 ] as const;
 // And this computer's own, for what the guest sent in an answer's place and it would not take.
 export type HistoryCode = (typeof SAID)[number] | "not_an_answer";
-// What the agent itself answers a request it did not run with: a place that is not in the guest, a
-// request it cannot take, an id still running. A cancel and a sandbox that stopped are this computer's
-// to say (control.ts), never the guest's.
-const AGENTS = ["unavailable", "value", "other"] as const;
+// What the agent itself answers a request it did not run to its end: a place that is not in the guest, a
+// request it cannot take, an id still running, and the guest's own stop, in the words this computer has
+// for a guest that went. A cancel is this computer's to say (control.ts), never the guest's.
+const AGENTS = ["unavailable", "value", "other", "interrupted"] as const;
 
 export const NOT_A_REQUEST: Outcome = { error: { type: "value", message: "This request names no thread, user or action of a history's" } };
 const REFUSED: Outcome = {
