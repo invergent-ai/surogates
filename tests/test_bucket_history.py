@@ -2177,3 +2177,24 @@ async def test_a_step_still_waiting_for_the_copy_when_its_request_left_never_run
     await asyncio.sleep(0.3)
     # It had begun nothing, and begins nothing once the copy is free.
     assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2" and no_ones(history)
+
+
+def test_a_real_file_kept_has_seconds_by_what_compressing_it_costs_git():
+    # Keeping a file compresses it, which a file that does not compress makes slower than reading a pack:
+    # twenty seconds at least, and a gibibyte in about a minute.
+    assert [module._kept_seconds(size) for size in (0, 2**20, 300 * 2**20, 2**30, 4 * 2**30)] == [20.0, 20.0, 20.0, 64.0, 120.0]
+    assert module._kept_seconds(2**30) > module._seconds(2**30)
+
+
+async def test_an_edit_git_cannot_keep_within_its_seconds_is_refused_in_words_and_nothing_is_pushed(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    (project / "Report.docx").write_bytes(os.urandom(4 * 2**20))
+    history = bucket(tmp_path, storage)
+    looked = await history.edits(["Report.docx"])
+    monkeypatch.setattr(module, "_TAKE_LEAST", 0.001)
+    monkeypatch.setattr(module, "_KEEP_RATE", 2**40)
+    with pytest.raises(HistoryError) as refused:
+        await history.pickup(main=looked["main"], picked_up=looked["picked_up"], author=YOU, trailers=by_saga("saga:p", "pickup"))
+    # Stopped, it is a file larger than is kept here: said as the bounds are, never as a history that could not be read.
+    assert said(refused.value) == "Report.docx is larger than Surogate can read here."
+    assert git(project / "_history", "rev-parse", MAIN) == one and left_in(history) == []

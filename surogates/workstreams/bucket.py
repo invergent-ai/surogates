@@ -127,6 +127,9 @@ _NO_MEMORY = re.compile(r"out of memory|cannot allocate memory|mmap failed", re.
 _TAKE_LEAST = 20.0
 _TAKE_RATE = 32 * 2**20
 _TAKE_MOST = 120.0
+#: And to keep a real file, your edit as it is picked up: git compresses it, which a file that does not
+#: compress makes slower than reading a pack.  A gibibyte took 48 s here; it is given 64.
+_KEEP_RATE = 16 * 2**20
 #: And to answer a question of a copy that is in, or to make a copy's repository: what a request waits.
 _READ_SECONDS = 8.0
 #: A pack stopped for its time is tried again after this long: the api may only have been busy.
@@ -937,7 +940,13 @@ class BucketHistory:
                 raise HistoryConflict(f"{path} changed while it was read") from exc
             if new is None:
                 return await asyncio.to_thread(_blob_id, staged._path)
-            return await self._git(_BRINGING, _seconds(size), "hash-object", "-w", "--no-filters", "--", str(staged._path), new=new)
+            try:
+                return await self._git(
+                    _BRINGING, _kept_seconds(size), "hash-object", "-w", "--no-filters", "--", str(staged._path), new=new,
+                )
+            except Slow as exc:
+                # Past its seconds, it is a file larger than is kept here: said as the bounds are.
+                raise HistoryError(f"{path} is larger {_HERE}") from exc
 
     async def _write(self, path: str, blob: str | None, kept: dict[str, int], *, there: bool) -> None:
         """Make the real file at *path* the version *blob*, one of *kept*, the versions the copy holds; take it away for None.
@@ -1162,6 +1171,11 @@ def _named(command: list[str]) -> str:
 def _seconds(size: int) -> float:
     """The seconds git has to bring in a pack of *size* bytes, or to write out a version of as many."""
     return min(_TAKE_MOST, max(_TAKE_LEAST, size / _TAKE_RATE))
+
+
+def _kept_seconds(size: int) -> float:
+    """The seconds git has to keep a real file of *size* bytes: to hash it, compress it and write it."""
+    return min(_TAKE_MOST, max(_TAKE_LEAST, size / _KEEP_RATE))
 
 
 def _send_seconds(size: int) -> float:
