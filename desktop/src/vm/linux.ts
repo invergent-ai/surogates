@@ -131,13 +131,31 @@ export async function missingTools(paths: { virtiofsd?: string; zstd?: string } 
 }
 
 /** Whether a virtiofsd whose --help says *help* refuses a guest's writes itself (--readonly: 1.11 and later). */
-export const readonlyFlag = (help: string) => /^\s*--readonly\s*$/m.test(help);
+export const readonlyFlag = (help: string) => /^\s*--readonly(\s|$)/m.test(help);
 
-// Whether this computer's virtiofsd has --readonly, asked once.
-let refusesWrites: Promise<boolean> | undefined;
-const hasReadonly = () => (refusesWrites ??= new Promise<boolean>((resolve) => {
-  execFile(...cleanly(VIRTIOFSD, ["--help"]), { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => resolve(!error && readonlyFlag(stdout)));
-}));
+// What each virtiofsd's --help said of --readonly, once it was read.
+const helps = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether *program*, a virtiofsd, refuses a guest's writes itself, by its --help, read within *ms*.
+ * Only a help that was read is an answer, and is kept: one that could not be read rejects, so the
+ * folder is not shared without the option on a computer whose virtiofsd has it, and the next share asks again.
+ */
+export function refusesWrites(program = VIRTIOFSD, ms = 5_000): Promise<boolean> {
+  const known = helps.get(program);
+  if (known) return known;
+  const asked = new Promise<boolean>((resolve, reject) => {
+    execFile(...cleanly(program, ["--help"]), { timeout: ms, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => {
+      if (error) reject(new Error("the folder could not be shared read-only: virtiofsd did not say whether it refuses a guest's writes"));
+      else resolve(readonlyFlag(stdout));
+    });
+  });
+  helps.set(program, asked);
+  asked.catch(() => {
+    if (helps.get(program) === asked) helps.delete(program);
+  });
+  return asked;
+}
 
 const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
 
@@ -280,10 +298,11 @@ class LinuxVm implements VmBackend {
    * *folder* on a free root port, by *deadline*: its virtiofsd, which maps the host user
    * to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
    * A share not added gives its port back. *readonly*: its virtiofsd refuses every write, where it
-   * has the option; the guest mounts it read-only either way (guest/places.ts).
+   * has the option; the guest mounts it read-only either way (guest/places.ts). Where it cannot be
+   * told whether it has, the folder is not shared.
    */
   async share(folder: string, uid: number, deadline: number, readonly = false): Promise<Share> {
-    const refusing = readonly && (await hasReadonly());
+    const refusing = readonly && (await refusesWrites());
     if (this.killed) throw new Error("the VM has gone");
     const port = Math.min(...this.free);
     if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);

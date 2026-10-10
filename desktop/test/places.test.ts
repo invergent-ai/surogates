@@ -11,7 +11,7 @@ import { Control, type ControlPlaces, type ControlRoots } from "../src/guest/con
 import { Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
-import { readonlyFlag } from "../src/vm/linux.js";
+import { readonlyFlag, refusesWrites } from "../src/vm/linux.js";
 import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { virtiofsdArgs } from "../src/vm/qemu.js";
 
@@ -91,6 +91,42 @@ describe("a folder's virtiofsd for the agent's own git", () => {
     expect(readonlyFlag("      --sandbox <SANDBOX>\n      --seccomp <SECCOMP>\n      --no-readonly-thing\n")).toBe(false);
     // Named in another option's words, or as the start of another's name, it is not the option.
     expect(readonlyFlag("      --sandbox <SANDBOX>\n          Unlike --readonly, this\n      --readonly-cache <MODE>\n")).toBe(false);
+    // A build that says what the option does on the option's own line has it.
+    expect(readonlyFlag("      --sandbox <SANDBOX>\n      --readonly  Prevent the guest from making modifications\n")).toBe(true);
+    expect(readonlyFlag("--readonly\tPrevent the guest from making modifications")).toBe(true);
+  });
+
+  // A virtiofsd whose --help is *script*'s to answer; each run of it is a line in its log.
+  const daemon = (name: string, script: string) => {
+    const program = join(dir, name);
+    writeFileSync(program, `#!/bin/sh\necho run >> ${program}.log\n${script}\n`, { mode: 0o755 });
+    return { program, runs: () => (existsSync(`${program}.log`) ? readFileSync(`${program}.log`, "utf8").split("\n").length - 1 : 0) };
+  };
+  const UNREAD = "the folder could not be shared read-only: virtiofsd did not say whether it refuses a guest's writes";
+
+  it("shares no folder read-only with a virtiofsd whose --help could not be read, and asks it again the next time", async () => {
+    const slow = daemon("slow", "exec sleep 30");
+    const begun = performance.now();
+    await expect(refusesWrites(slow.program, 200)).rejects.toThrow(UNREAD);
+    expect(performance.now() - begun).toBeLessThan(5_000);
+    const failing = daemon("failing", "echo '      --readonly'; exit 1");
+    await expect(refusesWrites(failing.program)).rejects.toThrow(UNREAD);
+    await expect(refusesWrites(join(dir, "none"))).rejects.toThrow(UNREAD);
+    // Not kept: one that answers the next time is taken at its word.
+    await expect(refusesWrites(failing.program)).rejects.toThrow(UNREAD);
+    expect(failing.runs()).toBe(2);
+    writeFileSync(failing.program, `#!/bin/sh\necho run >> ${failing.program}.log\necho '      --readonly'\n`, { mode: 0o755 });
+    expect(await refusesWrites(failing.program)).toBe(true);
+    expect(failing.runs()).toBe(3);
+  });
+
+  it("takes a --help that was read at its word, once: the option listed, or truly not there", async () => {
+    const having = daemon("having", "echo '      --sandbox <SANDBOX>'; echo '      --readonly  Prevent the guest from making modifications'");
+    const lacking = daemon("lacking", "echo '      --sandbox <SANDBOX>'; echo '      --seccomp <SECCOMP>'");
+    expect(await refusesWrites(having.program)).toBe(true);
+    expect(await refusesWrites(lacking.program)).toBe(false);
+    expect(await Promise.all([refusesWrites(having.program), refusesWrites(lacking.program)])).toEqual([true, false]);
+    expect([having.runs(), lacking.runs()]).toEqual([1, 1]);
   });
 });
 
