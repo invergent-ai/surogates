@@ -631,7 +631,8 @@ describe("a landing cut short by a kill", () => {
     expect(await asked("list_dir", { key: folder })).toEqual({ ok: [] });
     // The pickup is git's, in the guest, by the history's excludes: "*.tmp" there is what keeps both names out of
     // it, so neither is recorded as a file the user made. That the user's file is not recorded as deleted is the
-    // order's: a landing's helper is started, and so has put the file back, before the landing's pickup is asked.
+    // order's: a landing's first step, its hold, puts the file back before its pickup is asked; and where no landing's
+    // host is on the folder, the app puts it back before a pickup or a turn's open (hosts/tool-hosts.ts, recoverBefore).
     const history = readFileSync(new URL("../../surogates/sandbox/history.py", import.meta.url), "utf8");
     expect(/^HISTORY_EXCLUDES = [^]*?^\] \+ /m.exec(history)?.[0]).toContain('"*.tmp"');
     expect(await restart()).toEqual({ ok: { restored: ["Report.docx"], beside: [], lost: [], unread: [] } });

@@ -822,7 +822,10 @@ export class ToolHosts implements Executor {
       this.waiting.set(name, path);
       return ended({ folder: path, state: "left", why: heldElsewhere(path) }, notPutBackYet(path));
     }
-    return ended({ folder: path, state: "left", why: message }, unavailable(`what a landing cut short in ${path} could not be put back, so it was not read: ${message}`));
+    return ended(
+      { folder: path, state: "left", why: message },
+      { error: { type: "unavailable", message: `What a landing cut short in ${path} could not be put back, so the folder was not read: ${message}` } },
+    );
   }
 
   // A recovery's host on *folder*, given what its landings keep in *kept*, with a working folder of its own by *name*. It

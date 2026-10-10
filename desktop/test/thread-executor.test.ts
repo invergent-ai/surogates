@@ -793,6 +793,18 @@ describe("what a landing cut short in a thread's folder, put back through the ap
     expect([actions(), recoveries().length]).toEqual([["open"], 2]);
   });
 
+  it("answer a pickup unavailable, and ask the guest nothing, where what was cut short could not be put back: its host did not start", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    recoveryStarts = { type: "failed", message: "the file helper did not start: no bubblewrap here" };
+    const why = "This computer could not open the folder's sandbox: the file helper did not start: no bubblewrap here";
+    expect(await executor.run(history("pickup"), signal())).toEqual({
+      error: { type: "unavailable", message: `What a landing cut short in ${folder} could not be put back, so the folder was not read: ${why}` },
+    });
+    expect(actions()).toEqual(["open"]);
+    expect(executor.recoveries()).toEqual([{ folder, state: "left", why }]);
+  });
+
   it("read the folder all the same where the folder its place's record names is not there or is another: what its landings keep is left, and said", async () => {
     await executor.run(op("resolve", { path: "" }), signal());
     left();
