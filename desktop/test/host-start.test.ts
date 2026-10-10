@@ -8,6 +8,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
+import { copyOf, keptOf, placeOf } from "../src/history/place.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { sandboxPolicy } from "../src/hosts/policy.js";
 import { LANDING_READY_MS, READY_MS, type Start, startOn } from "../src/hosts/start.js";
@@ -120,6 +122,20 @@ describe("the folder a tool host holds", () => {
     // And a copy stands for no folder in the app's data, however that is spelled.
     for (const at of [linked, join(linked, "history"), dataDir, base]) {
       refused({ folder: copy, at, dataDir: linked }, /is no path a thread's copy can stand for$/, at);
+    }
+  });
+
+  it("is a thread's copy, and a landing's kept folder, where the folder's place names them, the app's data reached through a link or not", async () => {
+    const linked = join(base, "linked");
+    symlinkSync(dataDir, linked);
+    const { dev, ino } = statSync(folder);
+    for (const data of [dataDir, linked]) {
+      // As the app's copies take the place, by the journal's binding.
+      const { place } = await placeOf(data, { folder, dev, ino, boot: BOOT_ID, history: THREAD }, { letGo: async () => true });
+      const named = copyOf(place, THREAD);
+      mkdirSync(named, { recursive: true });
+      expect(held({ folder: named, at: folder, dataDir: data }), data).toEqual({ ok: true, path: named, dev: statSync(named).dev, ino: statSync(named).ino });
+      expect(started({ dataDir: data, landing: { copy: named, kept: keptOf(data, place) } }), data).toMatchObject({ path: folder, reads: [named], writes: [keptOf(data, place)] });
     }
   });
 

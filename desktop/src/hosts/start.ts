@@ -19,6 +19,8 @@ import { checkFolder, type FolderCheck, type FolderGuards } from "../binding/fol
 import { edgeRefused, said } from "../files/edge.js";
 import { inside, realpath } from "../files/paths.js";
 import { PLACE_KEY } from "../guest/protocol.js";
+// A thread's id, as the app names its copy by: the one spelling the folder's place has too (history/place.ts).
+import { THREAD } from "../vm/history.js";
 import type { HostStart } from "./messages.js";
 import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
@@ -33,8 +35,6 @@ const KEPT_BYTES = 4 * 1024 * 1024 * 1024; // files/land.ts, MAX_KEPT_BYTES
 const SLOW_DISK_BYTES_A_SECOND = 2 * 1024 * 1024; // a slow stick, or a share over a poor link
 export const LANDING_READY_MS = READY_MS + (KEPT_BYTES / SLOW_DISK_BYTES_A_SECOND) * 1000;
 
-// A thread's id, as the app names its copy by.
-const THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // The most bytes of a path this system takes, and of a name in one.
 const PATH_BYTES = 4095;
 const NAME_BYTES = 255;
