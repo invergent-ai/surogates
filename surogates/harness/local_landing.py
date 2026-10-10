@@ -142,8 +142,12 @@ CARRIES = MAX_MESSAGE_CHARS
 _PER_FILE = 256
 #: What a look's answer says of one file beside its name: a revision at its longest.
 _PER_LOOK = 128
-#: The most of your edits in a folder one landing records: as many files as the folder's history keeps.
-YOURS_MOST = HISTORY_CAP
+#: The most of your edits in a folder one landing records: as many as two folders the history keeps can differ by,
+#: each file of one gone and each of the other new, as a rename of the whole folder is.
+YOURS_MOST = 2 * HISTORY_CAP
+#: The most answers one landing hears your edits in, the pickup's own among them: an answer but the last is at least
+#: a part's worth of names, so your edits in all are at most this many parts of them, however long the names.
+PARTS_MOST = 16
 #: Why a landing put back is not tried again at once: the next try would meet the same, or its thread was stopped or
 #: deleted, or its computer did not answer a step for as long as a step waits.
 _ONCE = frozenset({"stale", "too_large", "yours_too_large", "stopped", "deleted", "unanswered"})
@@ -762,6 +766,9 @@ async def _land(
         # anything is committed: a save of yours after the look is either
         # picked up, or found by its apply.
         paths = (await _within(_asked(ending, partial(steps.history, "changed"), wrote=False)))["paths"]
+        # Its files until its commit says otherwise: a landing that ends before that names these, the turn's own, and
+        # none of yours that its turn's open brought into the copy.
+        changes = [{"path": path} for path in paths]
         if paths and not carries(paths):
             raise _TooLarge(f"the turn changed {len(paths)} files")
         revisions: dict[str, str] = {}
@@ -844,6 +851,7 @@ async def _land(
         logger.warning("The landing of thread %s on its computer cannot record your edits there in one go", session.id, exc_info=True)
         # Nothing of it was done: no ref moved, no file was written, and no row is left of it.
         outcome.update(state="compensated", reason="yours_too_large", saved=False)
+        outcome["files"] = _told(changes, [], [])
         await _written(row.drop)
         outcome["forgot"] = await _forgotten(saga, orchestrator, steps, None, nothing, "compensated", wait=RELEASE_WAIT)
         return outcome
@@ -912,17 +920,21 @@ async def _your_edits(execute: Any, step: Callable[..., SagaStep], pickup: SagaS
     part that does not go on from the one before it is no answer, and the
     landing goes no further.
 
-    More of them than the folder's history keeps files are more than one
-    landing records: no part is asked, and the landing goes no further
-    (:class:`_YoursTooLarge`); nor where its computer answered the pickup
-    or a part ``too_large``, which it does once it ran.  Your edits stay as
-    they are in the folder, and are asked for again by the next landing
-    there.
+    More of them than two of the folder's histories can differ by are
+    more than one landing records: no part is asked, and the landing goes
+    no further (:class:`_YoursTooLarge`); nor where they take more than
+    :data:`PARTS_MOST` answers in all, before the next would be asked; nor
+    where its computer answered the pickup or a part ``too_large``, which
+    it does once it ran.  Your edits stay as they are in the folder, and
+    are asked for again by the next landing there.
     """
     try:
         picked = await execute(pickup, partial(_picked_up, steps, **pickup.arguments))
-        yours, left = list(picked["picked_up"]), picked["more"]
+        yours, left, answers = list(picked["picked_up"]), picked["more"], 1
         while left:
+            if answers == PARTS_MOST:
+                raise _YoursTooLarge(f"your edits in the folder take more than {PARTS_MOST} answers of its computer's")
+            answers += 1
             part = step("picked", pickup=picked["commit"], after=yours[-1]["path"])
             named = await execute(part, partial(_part, steps, left, **part.arguments))
             yours += named["picked_up"]

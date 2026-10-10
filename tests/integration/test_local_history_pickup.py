@@ -12,6 +12,7 @@ computer, with real git; the folder is read back by name, mode, time and bytes.
 
 from __future__ import annotations
 
+import shutil
 from collections import Counter
 from uuid import UUID
 
@@ -20,6 +21,7 @@ from sqlalchemy import select
 
 from surogates.db.models import WorkstreamHistory
 from surogates.harness import landing as landing_module
+from surogates.harness import local_landing as local_landing_module
 from surogates.sandbox import local_history
 from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
@@ -47,28 +49,42 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 #: The thread's own turn: one file; and a step while which you add your photos to the folder, after its open.
 BUDGET = calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"}))
 ADD = calling(("memory", {"action": "add", "content": "Done."}))
+#: A later turn's own file.
+NOTES = calling(("write_file", {"path": "Notes.md", "content": "n\n"}))
 #: What a part of a pickup's files holds, made small: twenty photos are three answers, nine, nine and two.
 SMALL_PART = 1_000
+#: Why a landing records none of your changes, and what you can do, as its report says it.
+TOO_MANY = "the user added, changed, moved or deleted more files in its folder since the folder's last landing than one landing can record"
+WHAT_TO_DO = "for now the user can move some of the files they added out of it, or start a thread on a folder inside it"
+TWO_TURNS = "A folder they renamed or moved lands in two turns: moved out of the folder, then back in once a turn has ended"
 
 
-def photos(many: int) -> list[str]:
-    return [f"Photos/2026/IMG_{n:06d}.jpg" for n in range(many)]
+def photos(many: int, under: str = "Photos/2026") -> list[str]:
+    return [f"{under}/IMG_{n:06d}.jpg" for n in range(many)]
 
 
-def you_add(folder, many: int) -> dict:
+def you_add(folder, many: int, under: str = "Photos/2026") -> dict:
     """*many* photos you add to *folder*, named as a camera names them; the folder as you left it."""
-    (folder / "Photos" / "2026").mkdir(parents=True, exist_ok=True)
-    for n, path in enumerate(photos(many)):
+    (folder / under).mkdir(parents=True, exist_ok=True)
+    for n, path in enumerate(photos(many, under)):
         (folder / path).write_bytes(b"\xff\xd8 photo %d" % n)
     return seen(folder)
 
 
-def adding(folder, many: int, yours: dict):
+def adding(folder, many: int, yours: dict, under: str = "Photos/2026"):
     """While the thread works, you add *many* photos to *folder*: *yours* is the folder as you left it."""
     async def you_add_them(harness) -> None:
-        yours.update(you_add(folder, many))
+        yours.update(you_add(folder, many, under))
 
     return you_add_them
+
+
+def too_many(report) -> None:
+    """*report* says its landing recorded none of your changes, why, and what you can do."""
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "yours_too_large")
+    words = said(report)
+    assert TOO_MANY in words and WHAT_TO_DO in words and TWO_TURNS in words
+    assert "of its files" not in words and "lands with its next turn" not in words
 
 
 async def recorded_as_yours(api, workstream_id) -> Counter:
@@ -129,19 +145,99 @@ async def test_more_of_your_changes_than_the_folders_history_keeps_are_refused_i
 ):
     _, master, thread = await begun_with_copy(api, computer)
     yours: dict = {}
-    await woken(api, monkeypatch, thread, [BUDGET, ADD, _final_response("Done.")], during=adding(computer.folder, HISTORY_CAP + 1, yours))
+    # More than two of the history's whole folders differ by: no folder within its cap moves so much at once.
+    many = 2 * HISTORY_CAP + 1
+    await woken(api, monkeypatch, thread, [BUDGET, ADD, _final_response("Done.")], during=adding(computer.folder, many, yours))
     # The pickup's first answer says how many: more than one landing records, so nothing more is asked but the
     # forgetting that lets the folder go, and no row is left of it.
     assert ran(computer, "land:0") == ["changed", "revisions", "pickup", "forget"] and ran(computer, "land:0:2") == []
     assert await records(api, thread) == [] and kept(computer) == {} and computer.app.places.holder is None
     assert seen(computer.folder) == yours and (computer.app.places.copy(str(thread.id)) / "Budget.xlsx").read_text() == "Total,42\n"
     [report] = await told(api, master)
-    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "yours_too_large")
-    words = said(report)
-    assert "the user changed more files in its folder since the folder's last landing than one landing can record" in words
-    assert "move some of the files they added to it out of it, or start a thread on a folder inside it" in words
+    too_many(report)
+    # The thread's own file, not yours: the landing names what it changed before it picked anything up.
+    assert files_of(report) == [("Budget.xlsx", "not_merged", None)]
     [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
     assert end.data["saved"] is False
+
+
+async def test_a_folder_of_more_files_than_half_the_cap_that_you_renamed_lands_and_its_history_lists_the_move_as_yours(api, computer, monkeypatch):
+    project, master, thread = await begun_with_copy(api, computer)
+    many = HISTORY_CAP // 2 + 1
+    await woken(api, monkeypatch, thread, [BUDGET, ADD, _final_response("Done.")], during=adding(computer.folder, many, {}))
+    [first] = await records(api, thread)
+    assert first.saga_state == "completed" and len(first.picked_up) == many
+    # You rename the folder of photos: the folder is within the cap, and the rename is two of your changes a photo.
+    (computer.folder / "Photos" / "2026").rename(computer.folder / "Photos" / "2026 trip")
+    yours = seen(computer.folder)
+    await woken(api, monkeypatch, thread, [NOTES, _final_response("Done.")], said="Notes, please.")
+    assert (computer.folder / "Notes.md").read_text() == "n\n"
+    assert {path: entry for path, entry in seen(computer.folder).items() if path != "Notes.md"} == yours
+    _, second = await records(api, thread)
+    assert second.saga_state == "completed" and [f["path"] for f in second.files] == ["Notes.md"]
+    assert sorted((p["path"], p["before"] is None, p["after"] is None) for p in second.picked_up) == sorted([
+        *((path, False, True) for path in photos(many)), *((path, True, False) for path in photos(many, "Photos/2026 trip")),
+    ])
+    assert await history_of(api, project, computer, "Photos/2026 trip/IMG_000007.jpg") == [("added", {"kind": "you"})]
+    assert await history_of(api, project, computer, "Photos/2026/IMG_000007.jpg") == [("deleted", {"kind": "you"}), ("added", {"kind": "you"})]
+    _, report = await told(api, master)
+    assert files_of(report) == [("Notes.md", "landed", None)] and "landing" not in report.data
+
+
+async def test_a_folder_of_thirty_thousand_files_you_deleted_and_another_you_added_land_as_yours(api, computer, monkeypatch):
+    project, master, thread = await begun_with_copy(api, computer)
+    await woken(api, monkeypatch, thread, [BUDGET, ADD, _final_response("Done.")], during=adding(computer.folder, 30_000, {}))
+    # You delete the folder of thirty thousand photos, and add another of twenty-five thousand scans.
+    shutil.rmtree(computer.folder / "Photos")
+    yours = you_add(computer.folder, 25_000, "Scans")
+    await woken(api, monkeypatch, thread, [NOTES, _final_response("Done.")], said="Notes, please.")
+    assert {path: entry for path, entry in seen(computer.folder).items() if path != "Notes.md"} == yours
+    assert not (computer.folder / "Photos").exists() and (computer.folder / "Notes.md").read_text() == "n\n"
+    _, second = await records(api, thread)
+    assert second.saga_state == "completed"
+    assert [(p["path"], p["after"] is None) for p in second.picked_up] == [
+        *((path, True) for path in photos(30_000)), *((path, False) for path in photos(25_000, "Scans")),
+    ]
+    assert await history_of(api, project, computer, "Photos/2026/IMG_029999.jpg") == [("deleted", {"kind": "you"}), ("added", {"kind": "you"})]
+    assert await history_of(api, project, computer, "Scans/IMG_000000.jpg") == [("added", {"kind": "you"})]
+
+
+async def test_your_edits_in_more_parts_than_one_landing_asks_are_refused_in_their_own_words_and_nothing_of_them_is_recorded(api, computer, monkeypatch):
+    # One file a part: names longer than a part holds.
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", 10)
+    _, master, thread = await begun_with_copy(api, computer)
+    await woken(api, monkeypatch, thread, [BUDGET, _final_response("Done.")])
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    # Between two turns, you save files whose names are long, more of them than one landing asks parts for.
+    (computer.folder / "Long").mkdir()
+    for n in range(local_landing_module.PARTS_MOST + 4):
+        (computer.folder / "Long" / f"{'n' * 200}-{n:02d}.md").write_text(f"long {n}\n")
+    yours = seen(computer.folder)
+    await woken(api, monkeypatch, thread, [NOTES, _final_response("Done.")], said="Notes, please.")
+    # As many answers as one landing asks, the pickup's own among them; then nothing but the forgetting.
+    assert ran(computer, f"land:{end.id}") == ["changed", "revisions", "pickup", *["picked"] * (local_landing_module.PARTS_MOST - 1), "forget"]
+    assert ran(computer, f"land:{end.id}:2") == []
+    assert [row.saga_state for row in await records(api, thread)] == ["completed"]
+    assert seen(computer.folder) == yours and kept(computer) == {} and computer.app.places.holder is None
+    _, report = await told(api, master)
+    too_many(report)
+    # Its own file alone: not yours, which its turn's open brought into its copy.
+    assert files_of(report) == [("Notes.md", "not_merged", None)]
+
+
+async def test_a_part_its_computer_answers_too_large_is_told_as_yours_and_leaves_nothing_of_the_landing(api, computer, monkeypatch):
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", SMALL_PART)
+    _, master, thread = await begun_with_copy(api, computer)
+    yours: dict = {}
+    lie_at(computer, "picked", lambda frame, outcome: {"error": {
+        "type": "too_large", "message": "The operation ran, but its result is too large to send. Check what it did before repeating it.",
+    }})
+    await woken(api, monkeypatch, thread, [BUDGET, ADD, _final_response("Done.")], during=adding(computer.folder, 20, yours))
+    assert ran(computer, "land:0") == ["changed", "revisions", "pickup", "picked", "forget"] and ran(computer, "land:0:2") == []
+    assert await records(api, thread) == [] and kept(computer) == {} and seen(computer.folder) == yours
+    [report] = await told(api, master)
+    too_many(report)
+    assert files_of(report) == [("Budget.xlsx", "not_merged", None)]
 
 
 # -- a landing cut at any part of its pickup --------------------------------------------------------------------------
