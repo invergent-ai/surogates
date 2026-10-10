@@ -18,7 +18,7 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from surogates.devices.binding import THREAD_ACTIONS, THREAD_KINDS, Binding, copy_of
-from surogates.devices.history import ComputerRefused, thread_copy
+from surogates.devices.history import ComputerRefused, NotAnAnswer, answered, thread_copy
 from surogates.devices.operations import CANCELLED_OUTCOME, OperationConflict, OperationRequest
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.workspace import DeviceOperationError
@@ -536,3 +536,55 @@ async def test_an_app_that_keeps_no_copies_binds_a_thread_that_works_nowhere(api
     refused = await begin(api, project, str(thread.id))
     assert (refused.status_code, refused.json()["detail"]) == (409, KEEPS_NO_COPY)
     assert sorted(path.name for path in laptop.folder.iterdir()) == []
+
+
+async def test_a_computer_that_lies_is_answered_by_the_servers_own_refusal_and_nothing_of_the_lie_is_kept(api, computer, caplog):
+    _, thread = await connected_thread(api, computer)
+    copy = thread_copy(thread, session_factory=api.app.state.session_factory, redis=api.app.state.redis, lease_token=None)
+    megabyte = "words a person would read " * 40_000
+    a = "a" * 40
+    lies = {
+        ("history", "open"): {"ok": {"copy": "/etc", "session": "another"}},
+        ("history", "changed"): {"ok": {"paths": ["../../etc/passwd"]}},
+        ("history", "pickup"): {"ok": {"main": "--upload-pack=touch /tmp/x", "commit": None, "picked_up": [], "packs": 0}},
+        ("history", "commit"): {"error": {"type": "history", "code": "<script>alert(1)</script>", "message": megabyte}},
+        ("history", "record"): {"ok": {"commit": "refs/heads/main'; DROP TABLE sessions; --", "set_aside": None}},
+        # A look's answer where a forgetting's was asked, and a look of more files than one look takes.
+        ("history", "forget"): {"ok": {"main": a, "landing": a, "hidden": False, "packs": 0, "missing": []}},
+        ("land", "revisions"): {"ok": {"revisions": [["a.txt", "absent"]] * 60_000}},
+        ("land", "apply"): {"ok": {"path": "/home/other/.ssh/authorized_keys", "before": None, "after": a, "made": []}},
+        ("checkpoint", "take"): {"error": {"type": ["busy"], "code": {"history": 1}, "message": 7}},
+    }
+    computer.app.lie = lambda frame, outcome: lies.get((frame["kind"], frame["args"]["action"]), outcome)
+    landing = copy.steps("land:0")
+    asked = [
+        (copy.open, (0,), {}),
+        (landing.history, ("changed",), {}),
+        (landing.history, ("pickup",), {"author": {"name": "you", "email": "user:you@surogate"}, "trailers": []}),
+        (landing.history, ("commit",), {"author": {"name": "t", "email": "thread:t@surogate"}, "trailers": []}),
+        (landing.history, ("record",), {"turn": a}),
+        (landing.history, ("forget",), {"saga": "saga:x", "applied": []}),
+        (landing.land, ("revisions",), {"paths": ["a.txt"]}),
+        (landing.land, ("apply",), {"saga": "saga:x", "step": 0, "path": "a.txt", "before": None, "after": a, "expected": "absent"}),
+        (copy.take, (0, 0, "call_1", "before a step"), {}),
+    ]
+    with caplog.at_level("DEBUG"):
+        for ask, args, kwargs in asked:
+            with pytest.raises((NotAnAnswer, ComputerRefused)) as refused:
+                await ask(*args, **kwargs)
+            said = str(refused.value)
+            # Its own refusal, in words of a bounded length that carry none of the lie's.
+            assert len(said) <= 2_000 and "DROP TABLE" not in said and "/etc" not in said and "upload-pack" not in said, said
+            if isinstance(refused.value, ComputerRefused):
+                assert (refused.value.kind, refused.value.code) in {("other", None)}, refused.value.__dict__
+    assert all(len(record.getMessage()) < 10_000 and "DROP TABLE" not in record.getMessage() for record in caplog.records)
+    # The journal holds what the computer said, as it said it: read from there, it is no answer either.
+    async with api.app.state.session_factory() as db:
+        rows = (await db.execute(text(
+            "SELECT kind, args->>'action', outcome FROM device_operations WHERE calling_session_id = :id AND kind <> 'bind'"
+        ), {"id": thread.id})).all()
+    assert len(rows) == len(asked)
+    for kind, action, outcome in rows:
+        assert answered(kind, action, outcome, thread=thread.id) is None, (kind, action)
+    # And the user's folder is as it was.
+    assert sorted(str(path.relative_to(computer.folder)) for path in computer.folder.rglob("*")) == ["Plans", "Plans/Q3.md", "Report.docx"]
