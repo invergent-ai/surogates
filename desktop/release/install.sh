@@ -1236,12 +1236,28 @@ xdg() {
   if [[ "${1:-}" == /* ]]; then echo "$1"; else echo "$2"; fi
 }
 
+# What the program that follows writes, as root reads what a user's own program says: through a
+# reader of root's own, for SMALL_WAIT at most and no further than $1 bytes and one, whatever that
+# program does. A user's login runs their own profile, and certutil the modules their own database
+# names: one may write without end, or leave a program behind that keeps its output open, which is
+# not waited for and is that user's own to end. The reader is a line of perl, which hands on each
+# piece as it reads it: head keeps what it has read until it ends, and loses it when its time is
+# up. Then, in a last line, how the two ended, the program and the reader.
+heard() {
+  "${@:2}" 2>/dev/null </dev/null | timeout --foreground -s KILL "$SMALL_WAIT" /usr/bin/perl -e \
+    '$left = shift; while ($left > 0 && ($got = sysread(STDIN, $piece, $left < 65536 ? $left : 65536))) { syswrite(STDOUT, $piece); $left -= $got }' "$(( $1 + 1 ))" 2>/dev/null
+  printf '\n%s' "${PIPESTATUS[*]}"
+}
+
 # The invoking user's XDG config, data and cache folders, one a line, from their login's own
-# environment: sudo reset this one's.
+# environment: sudo reset this one's. A login that does not say them in its time, or says more
+# than a login's few lines, leaves XDG's own.
 login_folders() {
   local home lines config data cache
   home="$(getent passwd "$1" | cut -d: -f6)"
-  lines="$(runuser -l "$1" -c 'printf "\n%s\n%s\n%s\n" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CACHE_HOME:-}"' 2>/dev/null | tail -n 3)" || lines=
+  lines="$(heard 65536 timeout --foreground -s KILL "$SMALL_WAIT" runuser -l "$1" -c 'printf "\n%s\n%s\n%s\n" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CACHE_HOME:-}"')"
+  lines="${lines%$'\n'*}"
+  if [ "${#lines}" -le 65536 ]; then lines="$(printf %s "$lines" | tail -n 3)"; else lines=; fi
   { read -r config; read -r data; read -r cache; } <<<"$lines" || true
   xdg "${config:-}" "$home/.config"
   xdg "${data:-}" "$home/.local/share"
@@ -1263,7 +1279,7 @@ login_folders() {
 # database's password, and one that would ask for it fails. A database that is not there is not
 # made. One that certutil cannot read or change is left as it is, and said.
 forget_company_ca() {
-  local user="$1" uid="$2" gid="$3" db number groups listed line name ended
+  local user="$1" uid="$2" gid="$3" db number groups listed line name ended ends
   local ours='^(Surogate company CA [0-9a-f]{16}) +[^ ,]*,[^ ,]*,[^ ,]* *$'
   local still="an entry of Surogate's for the company's certificate authority may still be trusted there"
   number="$(listing id -u -- "$user")" && groups="$(listing id -G -- "$user")" && ended=0 || ended="$?"
@@ -1287,7 +1303,16 @@ forget_company_ca() {
       say "left the NSS database in $(named "$db") as it is, as it is not $(named "$user")'s own: $still"
       continue
     fi
-    if ! listed="$(as_reader "$SMALL_WAIT" setsid certutil -L -d "sql:$db" 2>/dev/null)"; then
+    # Its list, a megabyte of it at most, and then how certutil and root's reader of it ended.
+    listed="$(heard 1048576 as_reader "$SMALL_WAIT" setsid certutil -L -d "sql:$db")"
+    ends="${listed##*$'\n'}"
+    listed="${listed%$'\n'*}"
+    [[ "$ends" =~ ^[0-9]+\ [0-9]+$ ]] || ends="1 1"
+    if outlasted "${ends% *}" || outlasted "${ends#* }"; then
+      say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still"
+      return 0
+    fi
+    if [ "$ends" != "0 0" ] || [ "${#listed}" -gt 1048576 ]; then
       say "left $(named "$user")'s NSS database in $(named "$db") as it is, as certutil could not read it: $still"
       continue
     fi
