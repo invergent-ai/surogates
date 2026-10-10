@@ -76,11 +76,14 @@ type Parse<T> = (value: unknown) => T | undefined;
 const ID = /^[0-9a-f]{40}$/;
 const id: Parse<string> = (value) => (typeof value === "string" && value.length === 40 && ID.test(value) ? value : undefined);
 const idOrNull: Parse<string | null> = (value) => (value === null ? null : id(value));
+// A part of a path that is no name: an empty one, "." or "..".
+const NO_NAME = /(?:^|\/)\.{0,2}(?:\/|$)/;
 // A file as git names it, in text that is UTF-8's to carry: a path from the folder's top, each part a name. One
-// that starts at the root has an empty part first, and none leads out of the folder.
+// that starts at the root has an empty part first, and none leads out of the folder. At most PATH_UNITS long,
+// so of at most half as many parts; it is read through a fixed number of times, however many those are.
 const path: Parse<string> = (value) => {
   if (typeof value !== "string" || value.length > PATH_UNITS || value.includes("\0") || !value.isWellFormed()) return undefined;
-  return value.split("/").some((part) => part === "" || part === "." || part === "..") ? undefined : value;
+  return NO_NAME.test(value) ? undefined : value;
 };
 // A file or a folder history leaves out, as git lists it: a folder's name ends in a slash.
 const name: Parse<string> = (value) => (typeof value === "string" ? path(value.endsWith("/") ? value.slice(0, -1) : value) && value : undefined);
@@ -143,10 +146,15 @@ const turn: Parse<unknown> = (value) => {
     commit: idOrNull, base: id, changes: list(version), overlapped: list(held), excluded: list(name), repositories: list(name), not_taken: list(path),
   })(value);
   if (answer === undefined) return undefined;
-  const refused = answer.changes.filter((change: Version) => !landable(change.path));
+  // Each change is judged once: a path is as deep as a path may be, and an answer holds many.
+  const changes: Version[] = [];
+  const refused: Held[] = [];
+  for (const change of answer.changes) {
+    if (landable(change.path)) changes.push(change);
+    else refused.push({ ...change, reason: "protected" });
+  }
   if (refused.length === 0) return answer;
-  const overlapped: Held[] = [...answer.overlapped, ...refused.map((change: Version) => ({ ...change, reason: "protected" as const }))];
-  return { ...answer, changes: answer.changes.filter((change: Version) => landable(change.path)), overlapped: overlapped.sort((a, b) => (a.path < b.path ? -1 : 1)) };
+  return { ...answer, changes, overlapped: [...answer.overlapped, ...refused].sort((a, b) => (a.path < b.path ? -1 : 1)) };
 };
 
 // The landing where main holds it, recorded; null where each file it applied is in the folder as it was before.

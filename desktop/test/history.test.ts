@@ -714,6 +714,61 @@ describe("what the guest sent in an outcome's place, checked on this computer", 
     expect(checked("open", { error: { type: "history", code: "failed", message: huge } })).toEqual({ error: { type: "history", code: "failed", message: "x".repeat(2_000) } });
     expect(performance.now() - began).toBeLessThan(2_000);
   });
+
+  // How long the check of *answer*, a turn's commit, takes, and what it gave.
+  const timed = (answer: unknown) => {
+    const began = performance.now();
+    const taken = checked("commit", { ok: answer });
+    return { took: performance.now() - began, taken: taken as { ok: { changes: unknown[]; overlapped: unknown[] } } };
+  };
+  const commit = { commit: ID, base: ID, overlapped: [], excluded: [], repositories: [], not_taken: [] };
+  // The most the check of one line of the control port may take, on a loaded computer: it took about a third of a
+  // second for the deepest paths a line can hold where this was written, and more than half a minute before each
+  // part of a path was looked at once.
+  const LINE_MS = 2_000;
+
+  it("checks a turn's commit in time that grows with its size, whatever its paths are made of: one of as many parts as a path may have, a line full of them", () => {
+    // 4,096 units hold 2,048 names of a letter each, and one line of the control port 2,009 changes of such a path.
+    const deep = Array<string>(2_048).fill("a").join("/");
+    const changes = Array<unknown>(2_009).fill({ path: deep, before: null, after: ID });
+    expect(JSON.stringify({ type: "result", id: 1, outcome: { ok: { ...commit, changes } } }).length).toBeGreaterThan(8 * 1024 ** 2 - 8_192);
+    const plain = timed({ ...commit, changes });
+    expect(plain.taken.ok.changes).toHaveLength(2_009);
+    expect(plain.took).toBeLessThan(LINE_MS);
+    // With one name that no landing writes, among as many files left out: the list they are sorted into is as long.
+    const left = Array<unknown>(1_000).fill({ path: deep, reason: "with", before: null, after: ID });
+    const one = timed({ ...commit, overlapped: left, changes: [...changes.slice(0, 1_000), { path: `${deep.slice(0, -18)}/.git/hooks/commit`, before: null, after: ID }] });
+    expect(one.taken.ok.changes).toHaveLength(1_000);
+    expect(one.taken.ok.overlapped).toHaveLength(1_001);
+    expect(one.took).toBeLessThan(LINE_MS);
+    // Paths made of git's own folders, each of which is looked into, are no slower.
+    for (const part of [".git", ".git/modules/a/b", "node_modules", ".claude", "modules/hooks"]) {
+      const names = `${part}/`.repeat(Math.floor(4_090 / (part.length + 1)));
+      const such = timed({ ...commit, changes: Array<unknown>(2_009).fill({ path: `${names}x`, before: null, after: ID }) });
+      expect(such.took, part).toBeLessThan(LINE_MS);
+    }
+  });
+
+  it("takes a landing as large as a folder's history can answer: the agent's 6 MiB of changes, or as many as a folder history tracks has files", () => {
+    // As many files as a folder with a history may hold, each made by the turn: 50,000 fit an answer where their names are short.
+    const every = Array.from({ length: 50_000 }, (_unused, n) => ({ path: `d${n % 100}/f${n}`, before: null, after: ID }));
+    expect(JSON.stringify({ ...commit, changes: every }).length).toBeLessThan(6 * 1024 ** 2);
+    const whole = timed({ ...commit, changes: every });
+    expect(whole.taken.ok.changes).toHaveLength(50_000);
+    expect(whole.took).toBeLessThan(LINE_MS);
+    // And an answer's full size of files named as a project names them.
+    const named = Array.from({ length: 29_000 }, (_unused, n) => ({
+      path: `packages/area-${n % 40}/src/components/feature-${n % 700}/a rather long file name, as a document has, ${n}.docx`, before: BLOB, after: ID,
+    }));
+    const size = JSON.stringify({ ...commit, changes: named }).length;
+    expect(size).toBeGreaterThan(5.5 * 1024 ** 2);
+    expect(size).toBeLessThan(6 * 1024 ** 2);
+    const full = timed({ ...commit, changes: named });
+    expect(full.taken.ok.changes).toHaveLength(29_000);
+    expect(full.took).toBeLessThan(LINE_MS);
+    // One file more than a folder with a history has is no answer.
+    expect(checked("commit", { ok: { ...commit, changes: [...every, { path: "one more", before: null, after: ID }] } })).toEqual(NOT_AN_ANSWER);
+  });
 });
 
 describe("the VM manager, asked for a folder's history", () => {
