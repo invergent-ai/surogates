@@ -21,7 +21,18 @@ from uuid import uuid4
 import pytest
 
 from surogates.devices.binding import THREAD_ACTIONS
-from tests.fake_places import ACTIONS, BUSY, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, RECORDS_UNREAD, LandHelper, Places, landable
+from tests.fake_places import (
+    ACTIONS,
+    BUSY,
+    DELETED_THREAD,
+    NOT_A_FORGETTING_ASKED,
+    NOT_A_THREAD,
+    NOT_ITS_TURN,
+    RECORDS_UNREAD,
+    LandHelper,
+    Places,
+    landable,
+)
 
 DESKTOP = Path(__file__).resolve().parents[1] / "desktop"
 HELPER = DESKTOP / "dist" / "files" / "helper.js"
@@ -139,6 +150,36 @@ def test_the_tests_computer_forgets_what_a_landing_kept_only_where_the_forgettin
     assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": before, "after": after}]) == {"ok": {}}
     assert not kept.exists()
     assert (folder / "notes.txt").read_text() == "v1 notes\n"
+
+
+def test_the_tests_computer_keeps_a_deleted_threads_landing_that_wrote_for_the_steps_that_finish_it_alone(tmp_path):
+    # As the app's ToolHosts.retired and refusedOf do: a landing's host that was sent a write or a put-back outlives its
+    # thread's deletion, with the binding, until it is forgotten; and it takes only what puts back, records or forgets.
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    places = Places(tmp_path / "data", folder, "you")
+    places.threads[THREAD] = THREAD
+
+    def land(action: str, **args: Any) -> dict[str, Any]:
+        return places.run({**frame("land", action, "land:41"), "args": {"action": action, **args}})
+
+    # A landing that has only looked is not kept.
+    assert "ok" in land("revisions", paths=[])
+    places.retired(THREAD)
+    assert not places.deleted_landing(THREAD)
+    # One sent a put-back is, while its host holds the folder.
+    assert land("unapply", saga="saga:1", step=0, path="notes.txt") == {"ok": {"path": "notes.txt", "put_back": False}}
+    places.retired(THREAD)
+    assert places.deleted_landing(THREAD)
+    assert land("apply", saga="saga:1", step=1, path="new.txt", before=None, after="a" * 40, expected="absent") == DELETED_THREAD
+    assert land("revisions", paths=[]) == DELETED_THREAD
+    for kind, action in (("history", "pickup"), ("history", "commit"), ("checkpoint", "take")):
+        invocation = "checkpoint:41:0:call_1" if kind == "checkpoint" else "land:41"
+        assert places.run(frame(kind, action, invocation)) == DELETED_THREAD
+    assert land("unapply", saga="saga:1", step=0, path="notes.txt")["ok"]["put_back"] is False
+    # Its own forgetting lets the folder go, and the binding with it; the host it kept idles out alike.
+    assert land("forget", saga="saga:1", applied=[]) == {"ok": {}}
+    assert places.holder is None and not places.deleted_landing(THREAD)
 
 
 # -- the land kind's rules, beside the app's own file helper ------------------------------------------------------
