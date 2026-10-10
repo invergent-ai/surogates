@@ -66,6 +66,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   const NOT_YET: Partial<Record<Extract<ToPage, { type: "call" }>["method"], string>> = {
     history: "This agent cannot show a file's History yet",
     openVersion: "This agent cannot open a version yet",
+    restore: "This agent cannot restore a version yet",
     deleted: "This agent cannot list deleted files yet",
   };
   const called = (source: ProjectsSource, message: Extract<ToPage, { type: "call" }>) => {

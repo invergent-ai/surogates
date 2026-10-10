@@ -116,3 +116,9 @@ async def test_the_desktop_takes_every_answer_of_a_files_history(built_client, a
         ("notes.txt", "thread", "deleted", True),
     ]
     assert seen["deleted"]["more"] is False
+    # The oldest restored, with no edit of yours to record first; its History's newest version is then the restore, by you.
+    assert seen["restored"] == {"applied": ["Report.docx"], "skipped": [], "pickedUp": []}
+    assert [(v["by"], v["change"]) for v in seen["after"]][:2] == [
+        ({"kind": "you"}, "restored"), ({"kind": "thread", "threadId": str(thread.id), "title": "Draft A"}, "changed"),
+    ]
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"

@@ -305,6 +305,50 @@ describe("the projects the page serves", () => {
     }
   });
 
+  it("ask the page to restore a version, with the time a landing takes, and take what it did field by field", async () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const { source, last } = page();
+      const asked = { versionId: "9:f", path: REVENUE };
+      const restored = source.restore(REPORT, asked);
+      expect(last()).toEqual({ type: "call", id: 1, method: "restore", args: [REPORT, asked], deadline: 1_000 + LONG_ANSWER_TIMEOUT_MS });
+      // The agent waits up to twenty seconds for the project's lock, then lands: past a plain call's bound.
+      vi.advanceTimersByTime(ANSWER_TIMEOUT_MS + 15_000);
+      const by = { kind: "thread", threadId: "t-1", title: "Draft A" };
+      source.answered(1, { ok: { applied: [REVENUE], skipped: [{ path: "b.md", by, why: "x" }, { path: "c.md", by: null }], pickedUp: [REVENUE], secret: "x" } });
+      expect(await restored).toEqual({ applied: [REVENUE], skipped: [{ path: "b.md", by }, { path: "c.md", by: null }], pickedUp: [REVENUE] });
+      // Someone the app has no name for is no one it names: the answer is still taken.
+      const later = source.restore(REPORT, asked);
+      source.answered(2, { ok: { applied: [], skipped: [{ path: "b.md", by: { kind: "agent", name: "Reviewer" } }], pickedUp: [] } });
+      expect(await later).toEqual({ applied: [], skipped: [{ path: "b.md", by: null }], pickedUp: [] });
+      const refusals: unknown[] = [
+        null, [], undefined, { applied: [REVENUE], skipped: [] }, { applied: REVENUE, skipped: [], pickedUp: [] },
+        { applied: [7], skipped: [], pickedUp: [] }, { applied: ["a".repeat(4097)], skipped: [], pickedUp: [] },
+        { applied: [], skipped: [{ by: null }], pickedUp: [] }, { applied: [], skipped: [null], pickedUp: [] },
+        { applied: [], skipped: [], pickedUp: [null] },
+        { applied: Array.from({ length: 2_001 }, (_, n) => `${n}.md`), skipped: [], pickedUp: [] },
+      ];
+      for (const [at, answer] of refusals.entries()) {
+        const odd = source.restore(REPORT, asked);
+        source.answered(at + 3, { ok: answer });
+        await expect(odd, JSON.stringify(answer)?.slice(0, 80)).rejects.toThrow("The agent's page answered restore with something Surogate cannot use");
+      }
+      const busy = source.restore(REPORT, asked);
+      source.answered(refusals.length + 3, { error: "Your project's files are being saved right now. Try again in a moment." });
+      await expect(busy).rejects.toThrow("Your project's files are being saved right now. Try again in a moment.");
+      // Two minutes, and no longer.
+      const slow = source.restore(REPORT, asked);
+      let settled = false;
+      void slow.catch(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(slow).rejects.toBeInstanceOf(TimedOut);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("take the project's deleted files and whether there are more, and refuse one that is no deletion or is listed twice", async () => {
     const { source, last } = page();
     const gone = source.deleted(REPORT);

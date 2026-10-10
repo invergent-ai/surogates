@@ -26,12 +26,17 @@ from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
-#: How much of an object a streamed read holds at once.
+#: How much of an object a streamed read holds at once, and the size of each part of a streamed write.
 _CHUNK = 1 << 20
+_PART = 8 << 20
 
 
 class TooLarge(ValueError):
     """An object holds more than its reader said it would take."""
+
+
+class Changed(Exception):
+    """The object is no longer the one its writer saw: nothing was written."""
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +98,22 @@ class StorageBackend(Protocol):
         For an object that may be large: none of it is held whole.  Raises
         ``KeyError`` if not found, and :class:`TooLarge`, with *target*
         removed, once it holds more than *limit* bytes.
+        """
+        ...
+
+    async def upload(
+        self, bucket: str, key: str, source: Path, *, if_tag: str | None = None, if_absent: bool = False,
+    ) -> None:
+        """Write (or overwrite) an object from the file *source*, a piece at a time.
+
+        For an object that may be large: none of it is held whole.  The
+        object is the old one or the new one whole, never part of each.
+        With *if_tag*, the ``etag`` :meth:`stat` gave the object, or with
+        *if_absent*, the write is for the object its writer saw: one
+        changed since, made or gone, raises :class:`Changed` and is left as
+        it is, where the store can tell.  ``LocalBackend`` tells, up to the
+        moment it puts the new file in place; ``S3Backend`` writes as asked
+        whatever the object is now.
         """
         ...
 
@@ -271,6 +292,11 @@ class LocalBackend:
             raise KeyError(f"{bucket}/{key}")
         return await asyncio.to_thread(_copy, path, target, limit, f"{bucket}/{key}")
 
+    async def upload(
+        self, bucket: str, key: str, source: Path, *, if_tag: str | None = None, if_absent: bool = False,
+    ) -> None:
+        await asyncio.to_thread(_atomic_copy, source, self._resolve(bucket, key), if_tag, if_absent)
+
     async def exists(self, bucket: str, key: str) -> bool:
         return self._resolve(bucket, key).is_file()
 
@@ -334,7 +360,7 @@ class LocalBackend:
         if not path.is_file():
             raise KeyError(f"{bucket}/{key}")
         st = path.stat()
-        return {"size": st.st_size, "modified": st.st_mtime}
+        return {"size": st.st_size, "modified": st.st_mtime, "etag": _tag(st)}
 
     async def list_buckets(self, prefix: str = "") -> list[str]:
         if not self._base.is_dir():
@@ -489,6 +515,18 @@ class S3Backend:
                 # Let go whatever ended the read: an object past its limit is not read to its end.
                 body.close()
             return written
+
+    async def upload(
+        self, bucket: str, key: str, source: Path, *, if_tag: str | None = None, if_absent: bool = False,
+    ) -> None:
+        # Unconditional: the client's upload of parts passes no condition on, and whether a store honours
+        # one on a write, Garage among them, is not known here.
+        from boto3.s3.transfer import TransferConfig
+
+        async with self._client() as s3:
+            # In parts, each read from the file as the last are sent: two on their way and two waiting, at most.
+            parts = TransferConfig(multipart_chunksize=_PART, max_concurrency=2, max_io_queue=2)
+            await s3.upload_file(str(source), bucket, key, Config=parts)
 
     async def exists(self, bucket: str, key: str) -> bool:
         async with self._client() as s3:
@@ -655,6 +693,42 @@ def _copy(source: Path, target: Path, limit: int | None, name: str) -> int:
         Path(target).unlink(missing_ok=True)
         raise
     return written
+
+
+def _tag(st: os.stat_result) -> str:
+    """What tells one write of a file from another: a file written anew has another inode, and one written in place another time."""
+    return f"{st.st_ino}-{st.st_size}-{st.st_mtime_ns}"
+
+
+def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent: bool = False) -> None:
+    """Atomically make *path* a copy of *source*, a piece at a time, using temp file + os.replace.
+
+    With *if_tag* or *if_absent*, only where *path* is still the file of
+    that tag, or still no file, as it is looked at right before the
+    rename: :class:`Changed` otherwise, and nothing written.
+    """
+    with open(source, "rb") as src:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                shutil.copyfileobj(src, out, _CHUNK)
+                out.flush()
+                os.fsync(out.fileno())
+            if if_tag is not None or if_absent:
+                try:
+                    now: str | None = _tag(os.stat(path))
+                except FileNotFoundError:
+                    now = None
+                if now != if_tag:
+                    raise Changed(str(path))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
