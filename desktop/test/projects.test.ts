@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../web/src/lib/projects.js";
-import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut, type ToPage } from "../src/shell/projects.js";
+import { ANSWER_TIMEOUT_MS, LONG_ANSWER_TIMEOUT_MS, PageProjects, TimedOut, type ToPage } from "../src/shell/projects.js";
 
-const { projects, threads, history } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
+const { projects, threads, history, deleted } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
 const REPORT = FIXTURE_IDS.report;
 const REVENUE = "threads/revenue/revenue.xlsx";
 
@@ -267,5 +267,73 @@ describe("the projects the page serves", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("ask the page to open a version, with the time a whole file takes, and take nothing back of where it went", async () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const { source, last } = page();
+      const asked = { versionId: "9:f", path: REVENUE };
+      const opened = source.openVersion(REPORT, asked);
+      expect(last()).toEqual({ type: "call", id: 1, method: "openVersion", args: [REPORT, asked], deadline: 1_000 + LONG_ANSWER_TIMEOUT_MS });
+      // The agent writes the version out and sends it whole, and the page reads it whole: past a plain call's bound.
+      vi.advanceTimersByTime(ANSWER_TIMEOUT_MS + 5_000);
+      source.answered(1, { ok: undefined });
+      expect(await opened).toBeUndefined();
+      // The page says only that it is done: a path on this computer, or anything else, is no answer of its.
+      for (const [at, answer] of ["/home/flavius/Downloads/revenue.xlsx", { path: "revenue.xlsx" }, 0, false, ""].entries()) {
+        const odd = source.openVersion(REPORT, asked);
+        source.answered(at + 2, { ok: answer });
+        await expect(odd).rejects.toThrow("The agent's page answered openVersion with something Surogate cannot use");
+      }
+      const gone = source.openVersion(REPORT, asked);
+      source.answered(7, { error: "This version is no longer kept in the project's history." });
+      await expect(gone).rejects.toThrow("This version is no longer kept in the project's history.");
+      // Two minutes, and no longer.
+      const slow = source.openVersion(REPORT, asked);
+      let settled = false;
+      void slow.catch(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(slow).rejects.toBeInstanceOf(TimedOut);
+      // A read keeps the plain bound, the deleted files' among them.
+      void source.deleted(REPORT).catch(() => {});
+      expect(last()).toMatchObject({ method: "deleted", deadline: Date.now() + ANSWER_TIMEOUT_MS });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("take the project's deleted files and whether there are more, and refuse one that is no deletion or is listed twice", async () => {
+    const { source, last } = page();
+    const gone = source.deleted(REPORT);
+    expect(last()).toEqual({ type: "call", id: 1, method: "deleted", args: [REPORT], deadline: expect.any(Number) });
+    const listed = deleted[REPORT]!;
+    source.answered(1, { ok: { files: listed.files.map((version) => ({ ...version, secret: "x" })), more: false, cursor: "x" } });
+    expect(await gone).toEqual({ files: listed.files, more: false });
+    const [version] = listed.files;
+    const refusals: unknown[] = [
+      listed.files,
+      // A version that took no file away, of one file or of several, is no deleted file.
+      { files: [history[REPORT]![REVENUE]![0]], more: false },
+      { files: [version, { ...version, path: "kept.md", change: "added" }], more: false },
+      { files: [version, version], more: false },
+      { files: [{ ...version, at: "2026-10-06T11:15:00" }], more: false },
+      { files: Array.from({ length: 501 }, (_, n) => ({ ...version, path: `${n}.md` })), more: true },
+      { files: listed.files, more: "yes" },
+      { files: listed.files },
+      { more: false },
+      null,
+    ];
+    for (const [at, answer] of refusals.entries()) {
+      const asked = source.deleted(REPORT);
+      source.answered(at + 2, { ok: answer });
+      await expect(asked, JSON.stringify(answer)?.slice(0, 80)).rejects.toThrow("The agent's page answered deleted with something Surogate cannot use");
+    }
+    // As many as the agent lists at most are taken, and that there are more of them.
+    const full = source.deleted(REPORT);
+    source.answered(refusals.length + 2, { ok: { files: Array.from({ length: 500 }, (_, n) => ({ ...version, path: `${n}.md` })), more: true } });
+    expect(await full).toMatchObject({ more: true, files: { length: 500 } });
   });
 });

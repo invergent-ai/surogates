@@ -1,6 +1,6 @@
 # What guest-history-tree.test.ts runs in the guest as its root, before the agent starts: two threads'
-# landings on one folder through the tree the agent disk carries, one request a run as the agent will
-# run them, on the guest's own python and git.  Each check says a line; the last says how it ended.
+# landings on one folder through the tree the agent disk carries, one request a run as the agent
+# runs them, on the guest's own python and git.  Each check says a line; the last says how it ended.
 import json
 import shutil
 import subprocess

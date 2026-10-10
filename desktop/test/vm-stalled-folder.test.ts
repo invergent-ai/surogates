@@ -46,7 +46,7 @@ const fakeVm = (roots: ControlRoots, shared: string[] = []): BootVm => async () 
     inbound.destroy();
     gone("");
   };
-  const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill }, { mount: async () => {}, unmount: async () => {} });
+  const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill }, { mount: async () => {}, unmount: async () => {}, history: async () => ({ ok: {} }) });
   createInterface({ input: guest }).on("line", (line) => control.receive(line));
   control.hello();
   const share = async (folder: string) => {
