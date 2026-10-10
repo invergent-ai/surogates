@@ -452,6 +452,10 @@ async function vmReady(signal: AbortSignal): Promise<void> {
   }
 }
 
+// The company's CA certificates the app's own connections trust from its start: every boot of its VM
+// is told them, so its commands trust them too, and only them. The app reads its CA once a start,
+// and its VM stops with it, so no guest runs on with a CA the app no longer trusts.
+let companyCertificates: string[] = [];
 // The app's one VM, shared by every device, for this computer's user, and the background processes
 // alive in it, which Settings shows with Stop as they change.
 let vm: VmClient | null = null;
@@ -461,7 +465,7 @@ const copying = new Copying(changed);
 const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = new VmClient({
-    vm: vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+    vm: { ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }), ca: companyCertificates },
     ready: vmReady,
     spawn: utilityManager,
   });
@@ -2563,7 +2567,8 @@ if (!app.requestSingleInstanceLock()) {
   const companyCa = companyCaFile(app.isPackaged, process.env);
   // An installed app's is root's alone to write, as the install script leaves it. In the database Chromium
   // reads for this user, by its own rule: the session's XDG_DATA_HOME as it is written.
-  const untrusted = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : null;
+  const { certificates, untrusted } = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : { certificates: [], untrusted: null };
+  companyCertificates = certificates;
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
