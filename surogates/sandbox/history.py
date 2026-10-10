@@ -1218,7 +1218,10 @@ class History:
         if shallow:
             _replace(work / "shallow", "".join(f"{c}\n" for c in shallow).encode())
         git("reflog", "expire", "--expire=now", "--all")
-        git("gc", "-q", "--prune=now")
+        # A file over 1 MiB goes in whole, never as a change of another: the api's git reads a
+        # version within a bound of memory, and one stored as a change it holds whole with what it
+        # changes.  Small files' versions are still kept as changes of each other.
+        git("-c", "core.bigFileThreshold=1m", "gc", "-q", "--prune=now")
         return sum(p.stat().st_size for p in (work / "objects" / "pack").glob("pack-*.pack"))
 
     @staticmethod
@@ -1576,8 +1579,10 @@ class History:
         # history's own has moved on.
         held = {*have, *(first for first in map(self._first_held, tips) if first)}
         try:
+            # A file over 1 MiB goes in whole, as at a pruning, which keeps a change it finds in a pack.
             name = self._git(
-                ["pack-objects", "--revs", "-q", str(outgoing / "pack")], env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
+                ["-c", "core.bigFileThreshold=1m", "pack-objects", "--revs", "-q", str(outgoing / "pack")],
+                env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
                 input="".join(f"{c}\n" for c in tips) + "".join(f"^{c}\n" for c in sorted(held)),
             )
             if _objects(outgoing / f"pack-{name}.idx"):
