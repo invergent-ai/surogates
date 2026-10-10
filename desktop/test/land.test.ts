@@ -111,6 +111,37 @@ async function helper(requests: Array<Record<string, unknown>>, cut?: Cut): Prom
   clearTimeout(bound);
   return { answers, signal };
 }
+// A landing's helper that stays, asked one thing at a time, so that the folder can change between two answers.
+function session(cut?: Cut) {
+  const child = spawn(process.execPath, [...(cut ? ["--import", CUT] : []), HELPER], {
+    env: { SUROGATE_FOLDER: folder, HOME: base, PATH: "/usr/bin:/bin", SUROGATE_COPY: copy, SUROGATE_KEPT: kept, ...(cut ? { LAND_CUT: JSON.stringify(cut) } : {}) },
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  child.stdin.on("error", () => {});
+  const waiting: Array<(outcome: unknown) => void> = [];
+  const ready = new Promise<void>((resolve) => {
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      const said = JSON.parse(line) as { ready?: boolean; outcome?: unknown };
+      if (said.ready) resolve();
+      else waiting.shift()?.(said.outcome);
+    });
+  });
+  const bound = setTimeout(() => child.kill("SIGKILL"), 30_000);
+  return {
+    async ask(args: Record<string, unknown>): Promise<unknown> {
+      await ready;
+      const answered = new Promise<unknown>((resolve) => waiting.push(resolve));
+      child.stdin.write(`${JSON.stringify({ id: "1", kind: "land", args })}\n`);
+      return answered;
+    },
+    async end(): Promise<void> {
+      clearTimeout(bound);
+      const ended = new Promise((resolve) => child.once("exit", resolve));
+      child.stdin.end();
+      await ended;
+    },
+  };
+}
 // The helper's next start, asked what it put back.
 const restart = async () => (await helper([{ action: "recover" }])).answers[0];
 
@@ -451,7 +482,7 @@ describe("a landing cut short by a kill", () => {
     ["while its own file is half written", ["writeSync", 0, ".", 2], false],
     ["with its own file staged", ["renameSync", 0, "\\.json\\.new$", 2], false],
     ["before the real file is moved aside", ["renameSync", 0, "/Report\\.docx$", 1], false],
-    ["with the real file under a second name, to see that it can be given one", ["unlinkSync", 0, "\\.surogate-", 1], false],
+    ["with its own file under a second name, to see that the folder gives one", ["unlinkSync", 0, "\\.surogate-", 1], false],
     ["between its two renames, the real file moved aside and its name empty", ["linkSync", 1, "/Report\\.docx$", 1], true],
     ["with its own file at the name and still beside it", ["unlinkSync", 0, "\\.surogate-", 2], true],
     ["before the replaced file is kept in the app's data", ["renameSync", 0, "\\.surogate-", 1], true],
@@ -1180,6 +1211,45 @@ describe("a landing's helper in the file helper's sandbox", () => {
     ]);
     expect(readdirSync(folder)).toEqual(["Report.docx"]);
     expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe("the report, v1");
+    expect(existsSync(join(kept, SAGA))).toBe(false);
+  });
+});
+
+describe("a step whose own clean-up fails", () => {
+  // A replacement in a folder that another program makes read-only just as the landing's file is to take the name:
+  // the real file is beside its name by then, and nothing in the folder can be moved or removed.
+  const stuck = async () => {
+    mkdirSync(join(folder, "sub"));
+    writeFileSync(join(folder, "sub", "R.txt"), "the report, v1");
+    const after = turn("sub/R.txt", "the report, by the thread");
+    const seen = await looked("sub/R.txt");
+    const helping = session(["linkSync", 1, "/R\\.txt$", 1, `fs.chmodSync(${JSON.stringify(join(folder, "sub"))}, 0o555)`]);
+    expect(await helping.ask(apply(1, "sub/R.txt", blob("the report, v1"), after, seen["sub/R.txt"]!))).toMatchObject({ error: { type: "os", code: "EACCES" } });
+    expect(existsSync(join(folder, "sub", "R.txt"))).toBe(false);
+    return helping;
+  };
+  afterEach(() => {
+    if (existsSync(join(folder, "sub"))) chmodSync(join(folder, "sub"), 0o755);
+  });
+
+  it("drops no record while a file of its own is still in the folder: what it could not remove is removed at the next start", { timeout: 60_000 }, async () => {
+    mkdirSync(join(folder, "sub"));
+    writeFileSync(join(folder, "sub", "R.txt"), "the report, v1");
+    const was = lstatSync(join(folder, "sub", "R.txt"), { bigint: true });
+    const after = turn("sub/R.txt", "the report, by the thread");
+    const seen = await looked("sub/R.txt");
+    // Read-only from the moment its file is staged: the step is refused there, and cannot remove what it staged.
+    const { answers } = await helper(
+      [apply(1, "sub/R.txt", blob("the report, v1"), after, seen["sub/R.txt"]!)],
+      ["linkSync", 1, "\\.surogate-", 1, `fs.chmodSync(${JSON.stringify(join(folder, "sub"))}, 0o555)`],
+    );
+    expect(answers).toMatchObject([{ error: { type: "os", code: "EACCES" } }]);
+    expect(readdirSync(join(folder, "sub")).filter((name) => OWN_FILE.test(name))).toHaveLength(1);
+    expect(readdirSync(join(kept, SAGA))).toEqual(["1.json"]);
+    chmodSync(join(folder, "sub"), 0o755);
+    expect(await restart()).toMatchObject({ ok: { restored: [], beside: [], lost: [] } });
+    const now = lstatSync(join(folder, "sub", "R.txt"), { bigint: true });
+    expect([readdirSync(join(folder, "sub")), now.ino, now.nlink]).toEqual([["R.txt"], was.ino, 1n]);
     expect(existsSync(join(kept, SAGA))).toBe(false);
   });
 });

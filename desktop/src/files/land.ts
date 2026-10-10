@@ -26,7 +26,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  type BigIntStats, chmodSync, closeSync, constants, copyFileSync, fchmodSync, fstatSync, fsyncSync, futimesSync, linkSync, lstatSync, mkdirSync,
+  accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, fchmodSync, fstatSync, fsyncSync, futimesSync, linkSync, lstatSync, mkdirSync,
   openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync, writeSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -224,12 +224,27 @@ function syncDir(dir: string): void {
   }
 }
 
+// Gone, or never there. Any other failure is raised: a file that could not be removed is still in the folder, and
+// whoever asked must not go on as if it were not.
 function remove(path: string | null): void {
   if (path === null) return;
   try {
     unlinkSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw fromNode(error, path);
+  }
+}
+
+// Whether this user may give *found*, the file at *at*, a second name: any file of their own, and another's only
+// as the kernel allows it (fs.protected_hardlinks): one they may read and write that runs as nobody else.
+function relinkable(found: BigIntStats, at: string): boolean {
+  if (Number(found.uid) === process.getuid?.()) return true;
+  if ((found.mode & 0o4000n) !== 0n || (found.mode & 0o2010n) === 0o2010n) return false;
+  try {
+    accessSync(at, constants.R_OK | constants.W_OK);
+    return true;
   } catch {
-    // Not there.
+    return false;
   }
 }
 
@@ -532,6 +547,8 @@ class Landing {
         throw new Failure({ type: "stale", message: `${path} is still in the thread's copy, so it was not deleted from the folder` });
       }
       if (after !== null) source = sourceOf(theirs, name, path);
+      // A file this user could move aside and then not give its name back is not moved.
+      if (found !== null && !relinkable(found, way.dir!.at(name))) throw unlinkable(path, Object.assign(new Error("EPERM"), { code: "EPERM" }));
       if (found !== null && keptBytes(this.store) + Number(found.size) > MAX_KEPT_BYTES) {
         throw new Failure({
           type: "os", code: "EDQUOT",
@@ -545,7 +562,9 @@ class Landing {
         made: folders.slice(way.depth).map((_, index) => pathTo(way.depth + index + 1)).reverse(),
         // A deletion takes the folders it empties with it: each one's mode, for its put-back to make it again as it was.
         above: after === null ? way.modes.map((one, index) => [pathTo(index + 1), one]) : [],
-        temp: after === null ? null : ownFile(), aside: found === null ? null : ownFile(), out: found === null ? null : ownFile(), back: null,
+        temp: after === null ? null : ownFile(), aside: found === null ? null : ownFile(),
+        // The two names its look for a second name uses: a deletion stages no file of its own to give one to.
+        out: found === null ? null : ownFile(), back: found === null || after !== null ? null : ownFile(),
       };
       this.write(step, did, source === null);
       let dir = way.dir;
@@ -561,16 +580,17 @@ class Landing {
         this.still(dir, folders, path);
         if (did.aside !== null) {
           const [real, aside] = [dir.at(name), dir.at(did.aside)];
-          // Before the real file leaves its name: it can be given a second one, which is how it takes its own back.
-          // A filesystem with no hard links cannot, nor can this user for a file of another's it may not write.
+          // Before the real file leaves its name: the folder gives a file a second name, which is how the real one
+          // takes its own back. Seen with a file of the landing's own, so the user's never has two names.
+          const [first, second] = [dir.at(did.temp ?? did.back!), dir.at(did.out!)];
           try {
-            linkSync(real, dir.at(did.out!));
+            if (did.temp === null) closeSync(openSync(first, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600));
+            linkSync(first, second);
           } catch (error) {
-            // What is there now is no file at all, or not the one the look saw: that is the user's change, not the folder's limit.
-            const there = look(real);
-            throw there !== null && plain(there) && same(there, expectedIdentity(expected)) ? unlinkable(path, error) : conflict(path);
+            throw unlinkable(path, error);
           }
-          remove(dir.at(did.out!));
+          remove(second);
+          if (did.temp === null) remove(first);
           io(path, () => renameSync(real, aside));
           // Moved aside, no save by its name reaches it: it is the file the look saw, or it goes back.
           const moved = look(aside);
@@ -586,7 +606,7 @@ class Landing {
           remove(dir.at(did.temp));
         }
         if (did.aside !== null) this.keep(dir.at(did.aside), step);
-        this.write(step, { ...did, temp: null, aside: null, out: null });
+        this.write(step, { ...did, temp: null, aside: null, out: null, back: null });
         if (after === null) this.empty(folders.map((_, index) => pathTo(folders.length - index)));
         syncDir(dir.at("."));
         return { ...done, made: did.made };
