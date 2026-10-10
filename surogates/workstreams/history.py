@@ -27,8 +27,9 @@ from sqlalchemy.dialects.postgresql import Range
 
 from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
-from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, tracked
+from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, YOU, _who, tracked
 from surogates.storage.tenant import boundary_workspace_prefix
+from surogates.workstreams.derive import utc
 
 logger = logging.getLogger(__name__)
 
@@ -260,3 +261,84 @@ async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str
                 f"refs/handoff/{thread}", f"refs/handoff-from/{thread}", f"refs/helpers/{thread}/",
             )
         ]
+
+
+#: What a project over the file cap answers wherever its history is asked for.
+HISTORY_OFF = "History is off: this project has more than 50,000 files."
+
+
+def changed_by(row: WorkstreamHistory, *, picked: bool) -> dict:
+    """Who a version a row records is by, as the wire's ``ChangedBy`` has it.
+
+    A landing's files are its thread's, and what was picked up is by
+    whoever its pickup step names: you, or a routine.  Each is read from the
+    author its step was given.
+    """
+    step = "history.pickup" if picked else "history.commit"
+    author = next((s["arguments"].get("author") for s in row.steps if s["tool_name"] == step), None)
+    who = _who(author["name"], author["email"]) if author else YOU
+    return {"kind": "thread", "thread_id": who["id"], "title": who["title"]} if who["kind"] == "thread" else who
+
+
+def _version(row: WorkstreamHistory, entry: dict, *, picked: bool) -> dict:
+    """The wire's ``FileVersion`` in snake_case of a row's *entry*, with ``blob``, its git blob id: None for a deletion."""
+    merged = entry.get("merged", True)
+    return {
+        "id": f"{row.id}:{'p' if picked else 'f'}",
+        "path": entry["path"],
+        "by": changed_by(row, picked=picked),
+        "at": utc(row.updated_at),
+        # One that took the file away is a deletion: there is nothing of it to keep.
+        "change": "deleted" if entry["after"] is None else "added" if entry["before"] is None else "changed",
+        "merged": merged,
+        "landing_id": str(row.id) if merged and not picked and row.kind == "landing" else None,
+        "blob": entry["after"],
+    }
+
+
+async def versions(
+    session_factory: Any, workstream_id: UUID | str, path: str, *, device_id: UUID | None = None, limit: int,
+) -> list[dict]:
+    """*path*'s newest versions, *limit* at most and newest first, from the project's records alone: who made each, when and how.
+
+    Each is the wire's ``FileVersion`` in snake_case, with ``blob``, its git
+    blob id (None for a deletion), for the caller to ask the history whether
+    it is still kept.  A thread's version that did not land is listed, not
+    merged; a version that landed names its landing's row.  The records are
+    the cloud's, or those of a folder on the computer *device_id*.
+
+    The last is the file's first version, when it had one before its oldest
+    record: your upload, which ``main``'s first commit took as it was and
+    no row records.  It is that record's ``before``, by you, and its time
+    is that record's: the latest it can be.
+    """
+    on = [{"path": path}]
+    async with session_factory() as db:
+        # Each row holds a version at least, so no more rows than versions are read.
+        rows = (await db.execute(
+            select(WorkstreamHistory)
+            .where(
+                WorkstreamHistory.workstream_id == workstream_id,
+                WorkstreamHistory.device_id == device_id if device_id is not None else WorkstreamHistory.device_id.is_(None),
+                WorkstreamHistory.saga_state == "completed",
+                or_(WorkstreamHistory.files.contains(on), WorkstreamHistory.picked_up.contains(on)),
+            )
+            .order_by(WorkstreamHistory.id.desc())
+            .limit(limit)
+        )).scalars().all()
+    found = []
+    first: tuple[WorkstreamHistory, dict] | None = None
+    for row in rows:
+        # A row's files after its pickup: the pickup came first.
+        for entries, picked in ((row.files, False), (row.picked_up, True)):
+            for entry in entries:
+                if entry["path"] == path:
+                    found.append(_version(row, entry, picked=picked))
+                    first = (row, entry)
+    if first is not None and first[1]["before"] is not None:
+        row, entry = first
+        found.append({
+            "id": f"{row.id}:b", "path": path, "by": YOU, "at": utc(row.created_at), "change": "added",
+            "merged": True, "landing_id": None, "blob": entry["before"],
+        })
+    return found[:limit]
