@@ -69,20 +69,37 @@ export function checkWrite(folder: string, home: string, path: string): string |
 // linked worktree keeps a config of its own and a commondir that redirects git.
 // The rest of a .git folder (HEAD, info, objects, refs, ...) is not. Below a
 // DEPENDENCY_FOLDERS folder, only git's names count.
+// Each part is looked at once, and what the parts before and after it hold is kept as the look goes on: a key
+// is judged in time that grows with its length, however many parts it has. A guest's answer names keys too
+// (vm/history.ts), as deep as a path may be, and many in one answer.
 export function protectedInFolder(folder: string, key: string): boolean {
   if (key === folder || !inside(key, folder)) return false;
   const parts = key.slice(folder.length + 1).toLowerCase().split("/");
-  return parts.at(-1) === ".git" || parts.some((part, i) => {
-    const counts = part === ".git" || GIT_NAMES.has(part) || !parts.slice(0, i).some((above) => DEPENDENCY_FOLDERS.has(above));
-    return (counts && (PROTECTED_NAMES.has(part) || PROTECTED_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second))) ||
-      (part === ".git" && runsCode(parts.slice(i + 1)));
-  });
+  if (parts.at(-1) === ".git") return true;
+  // Whether a dependency folder lies above the part looked at.
+  let unpacked = false;
+  // The last part that is a hooks folder or one of git's states, looked for once a .git part is met.
+  let state: number | undefined;
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!;
+    const counts = !unpacked || part === ".git" || GIT_NAMES.has(part);
+    const paired = KEY_FOLDERS.has(part) && PROTECTED_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second);
+    if (counts && (PROTECTED_NAMES.has(part) || paired)) return true;
+    if (part === ".git") {
+      state ??= parts.findLastIndex((below) => below === "hooks" || GIT_STATE.has(below));
+      if (runsCode(parts, i + 1, state)) return true;
+    }
+    unpacked ||= DEPENDENCY_FOLDERS.has(part);
+  }
+  return false;
 }
 
 // What lies after a .git component. A paused rebase or cherry-pick keeps a todo
 // whose exec lines git runs on --continue. Git makes and removes each as it works.
 export const GIT_STATE: ReadonlySet<string> = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
 
+// Whether what lies after a .git component runs code: *parts* from *at* on, *state* being the last
+// part of them all that is a hooks folder or one of git's states.
 // In the git folder itself, hooks and configs count only directly under it:
 // elsewhere (refs, logs) the names are a branch's or a tag's. A submodule's git
 // folder lies under modules/<name>, and its name can hold slashes, so there the
@@ -92,13 +109,11 @@ export const GIT_STATE: ReadonlySet<string> = new Set(["worktrees", "rebase-merg
 // state name, and the whole git folder of a submodule whose name, after its first
 // part, holds hooks or a state name or ends in a config name (tools/hooks,
 // libs/config). Telling them apart needs .gitmodules.
-function runsCode(rest: string[]): boolean {
-  const [first, ...after] = rest;
-  if (first === "modules" && after.length > 1) {
-    const below = after.slice(1);
-    return below.some((part) => part === "hooks" || GIT_STATE.has(part)) || GIT_CONFIGS.has(below.at(-1) ?? "");
-  }
-  return first !== undefined && (GIT_STATE.has(first) || first === "hooks" || (rest.length === 1 && GIT_CONFIGS.has(first)));
+function runsCode(parts: string[], at: number, state: number): boolean {
+  const first = parts[at];
+  // Below a submodule's name's first part: from there on.
+  if (first === "modules" && parts.length > at + 2) return state >= at + 2 || GIT_CONFIGS.has(parts.at(-1) ?? "");
+  return first !== undefined && (GIT_STATE.has(first) || first === "hooks" || (parts.length === at + 1 && GIT_CONFIGS.has(first)));
 }
 
 // A directory moved out of a DEPENDENCY_FOLDERS folder, the folder itself too, carries what was
