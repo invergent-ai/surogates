@@ -118,7 +118,10 @@ class Places:
         self.holder: str | None = None
         self.idle_s = IDLE_S
         self._held_at = 0.0
-        self._helper: LandHelper | None = None
+        # How a landing's host starts its helper on the folder, given the thread's copy and where replaced files are kept:
+        # these rules, or the app's own helper in their place (tests.test_fake_places.Real).
+        self.land_helper: Any = LandHelper
+        self._helper: Any = None
         # The threads whose copy the app opened, in this run of it.
         self._opened: set[str] = set()
 
@@ -234,7 +237,8 @@ class Places:
             return BUSY
         if self.holder != root or self._helper is None or now - self._held_at > self.idle_s:
             # A landing's host, its helper started anew on the folder, with the thread's copy.
-            self._helper = LandHelper(self.real, self.copy(thread), self.kept)
+            self.let_go()
+            self._helper = self.land_helper(self.real, self.copy(thread), self.kept)
         self.holder, self._held_at = root, now
         if action != "forget":
             return self._helper.land({"action": action, **args})
@@ -247,8 +251,15 @@ class Places:
             return NOT_A_FORGETTING
         outcome = self._helper.land({"action": "forget", "saga": args.get("saga")})
         if "ok" in outcome:
-            self.holder, self._helper = None, None
+            self.let_go()
+            self.holder = None
         return outcome
+
+    def let_go(self) -> None:
+        """A landing's host stops: its helper with it, one the app started included."""
+        helper, self._helper = self._helper, None
+        if helper is not None and hasattr(helper, "end"):
+            helper.end()
 
 
 def _protected_held(answer: dict[str, Any]) -> dict[str, Any]:

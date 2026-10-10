@@ -148,7 +148,9 @@ async def notify_parent_on_completion(
     files instead, each landed or not merged, the excluded files it made,
     the folders inside a git repository it wrote into, the helpers' files
     its copy did not take up, and the landing's state when it did not
-    complete.
+    complete.  A landing on the user's computer also says why it did not
+    land, with its computer's word for a refusal, and what its folder's
+    helper found there, left by a landing cut short.
 
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
@@ -208,6 +210,13 @@ async def notify_parent_on_completion(
                 if landing.get("saved"):
                     # Not landed, and not lost: the turn is on the thread's branch.
                     payload["saved"] = True
+                for key in ("reason", "code"):
+                    if landing.get(key):
+                        # Why a landing on the user's computer did not land, and its computer's word for a refusal.
+                        payload[f"landing_{key}"] = landing[key]
+            if landing is not None and landing.get("recovery"):
+                # What its folder's helper found, left there by a landing cut short: told whatever came of this one.
+                payload["recovery"] = {key: found[:_MAX_LEFT_OUT_NAMED] for key, found in landing["recovery"].items()}
 
         await session_store.emit_event(
             parent_session_id,
