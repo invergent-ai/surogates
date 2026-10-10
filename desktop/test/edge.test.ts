@@ -201,6 +201,15 @@ describe("a file helper on a thread's copy", () => {
     // The copy's own path, in a link, is the folder's: it leads into the copy, and is answered by the folder's name.
     expect(await ask("resolve", { path: "to-itself/b.txt" })).toEqual({ ok: join(at, "sub", "b.txt") });
     expect(await ask("resolve", { path: `to-threads/${THREAD}/sub/b.txt` })).toEqual({ ok: join(at, "sub", "b.txt") });
+    // From there on it is the folder's path that is followed: a link past it is one of the copy's, and a loop is a loop.
+    symlinkSync(copy, join(copy, "to-root"));
+    symlinkSync(join(at, "sub"), join(copy, "linked"));
+    symlinkSync(join(copy, "pong"), join(copy, "ping"));
+    symlinkSync(join(copy, "ping"), join(copy, "pong"));
+    expect(await ask("resolve", { path: "to-root/linked/b.txt" })).toEqual({ ok: join(at, "sub", "b.txt") });
+    expect(await ask("resolve", { path: "ping/x" })).toEqual({
+      error: { type: "os", code: "ELOOP", message: `Too many levels of symbolic links: '${join(at, "ping", "x")}'` },
+    });
     for (const name of ["to-other", "beside", "to-place", "above", "to-itself"]) {
       const key = join(at, name, name.includes("place") ? "history.git/config" : name === "above" ? "config" : "b.txt");
       expect(await ask("read", { key, max_bytes: null }), name).toEqual(noPath(key));
@@ -429,6 +438,12 @@ describe("a search in a thread's copy", () => {
     const found = (await search("files", "*.md")) as { ok: string };
     expect(found.ok.split("\n").filter(Boolean).length).toBe(3000);
     expect(found.ok).not.toContain(join(base, "data"));
+    // And rg's events, each of which names its file: 250 files with a line each.
+    mkdirSync(join(copy, "some"));
+    for (let i = 0; i < 250; i += 1) writeFileSync(join(copy, "some", `f${i}.md`), "needle\n");
+    const events = (await search("json", "needle", join(at, "some"))) as { ok: string };
+    expect(events.ok.split("\n").filter((line) => line.startsWith('{"type":"match"')).length).toBe(250);
+    expect(events.ok).not.toContain(join(base, "data"));
     // And the other way: 1,500 files under the cap by the copy's path, over it by the folder's.
     lay(join("home", "r".repeat(200), "Reports"), "d");
     mkdirSync(join(copy, "many"));
