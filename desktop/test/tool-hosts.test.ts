@@ -20,7 +20,7 @@ import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, 
 import { LANDING_READY_MS } from "../src/hosts/start.js";
 import {
   APP_DIRS, CANCELLED, folderBusy, forkHost, type Guard, HOST_STOPPED, type HostProcess, LAND_WAIT_MS, NODE, NOT_BOUND, nothingToLand, QUIT_STEP_MS,
-  START_TIMEOUT_MS, ToolHosts, type ToolHostsOptions,
+  START_TIMEOUT_MS, type ThreadCopies, ToolHosts, type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 import { asItLies } from "./as-it-lies.js";
 
@@ -1554,6 +1554,99 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     }
   });
 
+  // A root's operation as it reaches each of a thread's hosts: its host on the copy, or its landing's.
+  const KINDS_OF_HOST: Array<[string, (executor: ToolHosts, aborted: AbortSignal) => Promise<Outcome>]> = [
+    ["host on the copy", (executor, aborted) => executor.run(op("resolve", { path: "" }), aborted)],
+    ["landing's host", (executor, aborted) => executor.land(landing("revisions", { paths: [] }), aborted)],
+  ];
+  const STOPPED_STARTING = { error: { type: "unavailable", message: "This computer could not open the folder's sandbox: its tool host stopped while it was starting" } };
+
+  it.each(KINDS_OF_HOST)("starts no thread's %s for an operation cancelled while its copy was opened, and lets that copy's hold go", async (_, ask) => {
+    const makes: Array<(opened: Opened) => void> = [];
+    answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
+    const executor = threads({ idleMs: 30 });
+    const cancel = new AbortController();
+    const asked = ask(executor, cancel.signal);
+    await until(() => opens.length === 1);
+    cancel.abort();
+    expect(await asked).toEqual(CANCELLED);
+    makes[0]?.(handed(ROOT_A));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Nothing holds the copy, nor the folder: no host was started, and the hold the copy was opened with goes.
+    expect([fakes.length, closed]).toEqual([0, [{ handle: { root: ROOT_A }, gone: 0, released: [] }]]);
+    // The root's next operation has its host, as ever.
+    answer = handed;
+    expect(await ask(executor, signal())).toMatchObject({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(1);
+  });
+
+  it.each(KINDS_OF_HOST)("answers an operation that comes to a thread's %s already cancelled at once, and opens it no copy and starts it no host", async (_, ask) => {
+    const makes: Array<(opened: Opened) => void> = [];
+    answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
+    const executor = threads();
+    const cancel = new AbortController();
+    cancel.abort();
+    expect(await ask(executor, cancel.signal)).toEqual(CANCELLED);
+    for (const make of makes) make(handed(ROOT_A));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect([opens.length, fakes.length, closed.length]).toEqual([0, 0, 0]);
+  });
+
+  it.each(KINDS_OF_HOST)("starts no thread's %s once this computer's access ended while its copy was opened, and an operation after has one of its own", async (_, ask) => {
+    const makes: Array<(opened: Opened) => void> = [];
+    answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
+    const executor = threads();
+    const first = ask(executor, signal());
+    await until(() => opens.length === 1);
+    const ended = executor.end();
+    // Asked after the end, it waits for no start the end stopped: the copy is opened for it again.
+    const second = ask(executor, signal());
+    await until(() => opens.length === 2);
+    for (const make of makes) make(handed(ROOT_A));
+    expect(await first).toEqual(STOPPED_STARTING);
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    await ended;
+    // The first start gave its hold back, and made no host; the one host is the second's, which holds its own.
+    expect([fakes.length, closed.length]).toEqual([1, 1]);
+  });
+
+  it.each(KINDS_OF_HOST)("idles a thread's %s out only once it is ready, never while it starts, where the operation it was started for was cancelled meanwhile", async (_, ask) => {
+    // Hosts slow to be ready, as a landing's is while its helper puts back what a step cut short.
+    const executor = threads({
+      idleMs: 30,
+      spawnHost: spawnHost((host, message) => {
+        if (message.type === "start") setTimeout(() => host.say({ type: "ready", processes: [] }), 200);
+        else guarding(host, message);
+      }),
+    });
+    const cancel = new AbortController();
+    const asked = ask(executor, cancel.signal);
+    await until(() => fakes.length === 1);
+    cancel.abort();
+    expect(await asked).toEqual(CANCELLED);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(fakes[0]?.count("stop")).toBe(0);
+    // Ready, with nothing to do, it goes after its idle time.
+    await until(() => fakes[0]?.count("stop") === 1);
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("gives a hold given back while its landing's host is being started to that host, which then lets the folder go", async () => {
+    const makes: Array<(opened: Opened) => void> = [];
+    answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
+    const executor = threads();
+    const look = landing("revisions", { paths: [] }, ROOT_A, "land:41:hold");
+    const looking = executor.land(look, signal());
+    await until(() => opens.length === 1);
+    // The turn gives its hold back while its copy is still opened for the host that will hold the folder.
+    const release = landing("forget", { saga: "hold:41", applied: [] }, ROOT_A, "land:41:release:9");
+    const releasing = executor.land(release, signal());
+    makes[0]?.(handed(ROOT_A));
+    expect(await Promise.all([looking, releasing])).toEqual([{ ok: look.id }, { ok: release.id }]);
+    await until(() => fakes[0]?.count("stop") === 1);
+    expect([fakes.length, opens.length]).toEqual([1, 1]);
+  });
+
   it.each([
     ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
     ["the app quitting", (executor: ToolHosts) => executor.stop()],
@@ -1581,22 +1674,27 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
   let copies: Record<string, string>;
   // A chat on the threads' folder itself.
   const CHAT = "33333333-3333-4333-8333-333333333333";
-  const threads = (overrides: Partial<ToolHostsOptions> = {}) => {
+  // The threads' copies, as the copies give them once the guest has made them.
+  const copiesOf = (): ThreadCopies => {
     const folder = folders[ROOT_A] ?? "";
     const place = { key: keyOf(folder), history: join(base, "data", "history", keyOf(folder)), real: { path: folder, ...identities.get(folder)! } };
+    return {
+      open: async (root) => {
+        const path = copies[root] ?? "";
+        const { dev, ino } = statSync(path);
+        return { copy: { place, folder: { path, dev, ino, boot: BOOT_ID }, at: folder }, handle: Object.freeze({ root }) };
+      },
+      close: () => {},
+    };
+  };
+  const threads = (overrides: Partial<ToolHostsOptions> = {}) => {
+    const folder = folders[ROOT_A] ?? "";
     return toolHosts({
       bindingOf: (root) => {
         if (root === CHAT) return { folder, ...identities.get(folder)! };
         return root === ROOT_A || root === ROOT_B ? { folder, ...identities.get(folder)!, history: root } : undefined;
       },
-      copies: {
-        open: async (root) => {
-          const path = copies[root] ?? "";
-          const { dev, ino } = statSync(path);
-          return { copy: { place, folder: { path, dev, ino, boot: BOOT_ID }, at: folder }, handle: Object.freeze({ root }) };
-        },
-        close: () => {},
-      },
+      copies: copiesOf(),
       ...overrides,
     });
   };
@@ -1612,9 +1710,10 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
   // What a landing's helper is left to do once it is told: for a test that stops it inside a step, the folder it
   // looks for the word in, which only that helper's sandbox and this test can both reach.
   const told = (root = ROOT_A) => join(base, "data", "tmp", `${root}.land`);
-  // Loaded into a landing's file helper before its own code: at the link that gives the file a step writes its name,
-  // the second of an apply's two renames, with the user's file moved aside and its name empty, it is held there until
-  // the test says go, or ends there as a kill does. Once a helper, and for at most 20 s.
+  // Loaded into a landing's file helper before its own code: at the first link that gives a.txt its name, it is held
+  // there until the test says go, or ends there as a kill does. In an apply, that is the second of its two renames,
+  // the user's file moved aside and its name empty; in a helper's start, it is its put-back of what a step cut short
+  // left, before it says it is ready. Once a helper, and for at most 20 s.
   const BETWEEN = `data:text/javascript,${encodeURIComponent(`
     import fs from "node:fs";
     import { syncBuiltinESMExports } from "node:module";
@@ -1636,12 +1735,14 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     };
     syncBuiltinESMExports();
   `)}`;
-  // A host whose next landing's helper, once *armed* is there, is so held or killed between an apply's two renames
-  // over a.txt: loaded into the host before its own code, it gives that helper the code above as it starts it.
-  const between = (does: "hold" | "kill") => {
+  // The next landing's helper a host started by upset() starts is held at that link, or killed there.
+  const arm = (does: "hold" | "kill") => writeFileSync(join(base, "armed"), does);
+  // Hosts loaded, before their own code, with what gives the next landing's helper that one is armed for the code
+  // above as they start it.
+  const upset = () => {
     const armed = join(base, "armed");
-    const helper = { NODE_OPTIONS: `--import=${BETWEEN}`, LAND_AT: "/a\\.txt$", LAND_DOES: does, LAND_TOLD: told() };
-    const upset = `data:text/javascript,${encodeURIComponent(`
+    const helper = { NODE_OPTIONS: `--import=${BETWEEN}`, LAND_AT: "/a\\.txt$", LAND_TOLD: told() };
+    const hook = `data:text/javascript,${encodeURIComponent(`
       import cp from "node:child_process";
       import fs from "node:fs";
       import { syncBuiltinESMExports } from "node:module";
@@ -1649,16 +1750,16 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
       cp.spawn = (...args) => {
         const landing = Array.isArray(args[1]) && String(args[1].at(-1)).includes("/files/helper.js") && args[2]?.env?.SUROGATE_KEPT;
         if (landing && fs.existsSync(${JSON.stringify(armed)})) {
+          const does = fs.readFileSync(${JSON.stringify(armed)}, "utf8");
           fs.unlinkSync(${JSON.stringify(armed)});
-          Object.assign(args[2].env, ${JSON.stringify(helper)});
+          Object.assign(args[2].env, ${JSON.stringify(helper)}, { LAND_DOES: does });
         }
         return spawn(...args);
       };
       syncBuiltinESMExports();
     `).replaceAll("'", "%27")}`;
     const node = join(base, "upset-node");
-    writeFileSync(node, `#!/bin/sh\nexec '${process.execPath}' --import '${upset}' "$@"\n`, { mode: 0o755 });
-    writeFileSync(armed, "");
+    writeFileSync(node, `#!/bin/sh\nexec '${process.execPath}' --import '${hook}' "$@"\n`, { mode: 0o755 });
     return () => {
       const host = forkHost({ execPath: node });
       host.onExit(() => {
@@ -1777,7 +1878,8 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     ["the app quitting", (executor: ToolHosts) => executor.stop()],
   ])("leaves the file whole where a landing's host is told to go, %s, inside an apply: the step ends first, and then the host", async (_, going) => {
     const folder = changed();
-    const executor = threads({ spawnHost: between("hold") });
+    const executor = threads({ spawnHost: upset() });
+    arm("hold");
     const before = lies(folder);
     const apply = await looked(executor);
     const applying = executor.land(apply, signal());
@@ -1799,7 +1901,8 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
 
   it("puts back the user's file at its name, when the next landing's host starts, after a helper killed between an apply's two renames", async () => {
     const folder = changed();
-    const executor = threads({ spawnHost: between("kill") });
+    const executor = threads({ spawnHost: upset() });
+    arm("kill");
     const before = lies(folder);
     const was = lstatSync(join(folder, "a.txt")).ino;
     expect(await executor.land(await looked(executor), signal())).toEqual(HOST_STOPPED);
@@ -1811,5 +1914,57 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(await executor.land(step("recover"), signal())).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
     expect(lies(folder)).toEqual(before);
     expect(lstatSync(join(folder, "a.txt")).ino).toBe(was);
+  });
+
+  it("puts back what a killed landing left, in the next landing's host, however long past its idle time that takes with no step waiting, and only then idles it out", async () => {
+    const folder = changed();
+    const executor = threads({ idleMs: 500, spawnHost: upset() });
+    arm("kill");
+    const before = lies(folder);
+    expect(await executor.land(await looked(executor), signal())).toEqual(HOST_STOPPED);
+    await until(() => exits === 1);
+    // The next landing's helper is held inside its put-back, before it says it is ready; and the step its host was
+    // started for is cancelled meanwhile.
+    arm("hold");
+    const cancel = new AbortController();
+    const recovering = executor.land(step("recover"), cancel.signal);
+    await until(() => existsSync(join(told(), "held")), 20_000);
+    cancel.abort();
+    expect(await recovering).toEqual(CANCELLED);
+    // Three idle times later it is still putting the file back: nothing stops it in there.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect([exits, existsSync(join(folder, "a.txt"))]).toEqual([1, false]);
+    writeFileSync(join(told(), "go"), "");
+    // Ready, with no step waiting, it idles out; the user's file is back at its name, and a chat on the folder is served.
+    await until(() => exits === 2, 15_000);
+    expect(lies(folder)).toEqual(before);
+    expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
+  });
+
+  it("starts no landing's host for a first step cancelled while its thread's copy was opened: a chat on the folder is served past the idle time", { timeout: 90_000 }, async () => {
+    const folder = folders[ROOT_A] ?? "";
+    const made = copiesOf();
+    // Copies whose open answers when the test says.
+    const opening: Array<() => void> = [];
+    const executor = threads({
+      idleMs: 1_000,
+      copies: {
+        open: async (root, bound, aborted) => {
+          await new Promise<void>((go) => void opening.push(go));
+          return made.open(root, bound, aborted);
+        },
+        close: (handle) => made.close(handle),
+      },
+    });
+    const cancel = new AbortController();
+    const stepping = executor.land(step("revisions", { paths: [] }), cancel.signal);
+    await until(() => opening.length === 1);
+    cancel.abort();
+    expect(await stepping).toEqual(CANCELLED);
+    opening[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
+    // The chat's is the one host started.
+    expect(spawned).toHaveLength(1);
   });
 });

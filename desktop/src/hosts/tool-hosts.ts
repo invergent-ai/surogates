@@ -81,6 +81,8 @@ const madeAgain = (at: string): Outcome => unavailable(`the copy of ${at} this t
 
 // A step of a landing that came to its host as the host was told to go: nothing of it was done.
 const NOT_BEGUN = unavailable("the host of this landing was stopping, so this step of it was not begun. Ask again");
+// What waited for a host that stopped, or was never made, before it was ready.
+const STOPPED_STARTING = unavailable("its tool host stopped while it was starting");
 
 /** Another held *folder* for as long as a landing waits for it: nothing of the landing began, and it can be asked again. */
 export const folderBusy = (folder: string): Outcome => ({
@@ -230,9 +232,9 @@ export class ToolHosts implements Executor {
   // Every host until it exits: one stopping because it had nothing to do is no longer in hosts.
   private readonly live = new Set<Host>();
   // A thread's host while its copy is opened for it: the root's operations that come meanwhile wait for that one.
-  private readonly starting = new Map<string, Promise<Host | Outcome>>();
+  private readonly starting = new Map<string, Starting>();
   // A landing's host while the thread's copy is opened for it: the landing's steps that come meanwhile wait for that one.
-  private readonly landing = new Map<string, Promise<Host | Outcome>>();
+  private readonly landing = new Map<string, Starting>();
   // The root of each host on a thread's copy, until it exits.
   private readonly onCopies = new Map<Host, string>();
   // How often each thread's root was told its copy is not vouched for: told while its copy was being opened, the copy
@@ -285,7 +287,7 @@ export class ToolHosts implements Executor {
     // nothing to let go, and no host is started to say so, which would wait for the folder first.
     const holds = this.landers.has(root) || this.landing.has(root);
     if (action === "forget" && typeof saga === "string" && saga.startsWith("hold:") && !holds) return { ok: {} };
-    const host = this.landers.get(root) ?? await this.once(this.landing, root, signal, () => this.onLanding(root, binding, copies));
+    const host = this.landers.get(root) ?? await this.once(this.landing, root, signal, (wanted) => this.onLanding(root, binding, copies, wanted));
     if (!(host instanceof Host)) return host;
     const outcome = await host.run(operation, signal);
     // Forgotten, the landing is over: the folder is let go at once, for the next landing or a chat. Not at the forgetting
@@ -320,7 +322,7 @@ export class ToolHosts implements Executor {
       going.add(host);
     };
     for (const host of [this.hosts.get(root), this.landers.get(root), ...[...this.onCopies].filter(([, of]) => of === root).map(([host]) => host)]) go(host);
-    for (const made of await Promise.all([this.starting.get(root), this.landing.get(root)])) go(made);
+    for (const made of await Promise.all([this.starting.get(root)?.host, this.landing.get(root)?.host])) go(made);
     await Promise.all([...going].map((host) => host.exited));
   }
 
@@ -376,6 +378,12 @@ export class ToolHosts implements Executor {
     const hosts = [...this.live];
     this.hosts.clear();
     this.landers.clear();
+    // A host still being started is started no more: its copy's hold is given back as it is opened, and an operation
+    // that comes after has a start of its own.
+    for (const starts of [this.starting, this.landing]) {
+      for (const start of starts.values()) start.stopped = true;
+      starts.clear();
+    }
     await Promise.all(hosts.map(async (host) => {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([host.letGo(), new Promise((resolve) => {
@@ -397,27 +405,43 @@ export class ToolHosts implements Executor {
     if (binding.history === undefined) return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } });
     const { copies } = this.options;
     if (!copies) return NO_COPIES;
-    return this.once(this.starting, root, signal, () => this.onCopy(root, binding, copies));
+    return this.once(this.starting, root, signal, (wanted) => this.onCopy(root, binding, copies, wanted));
   }
 
-  // The host *begin* makes for *root*, made once for every caller that comes while it is made, through *starts*. A
-  // cancel is answered at once; the copy is opened, and the host started, for the root's next operation.
-  private once(starts: Map<string, Promise<Host | Outcome>>, root: string, signal: AbortSignal, begin: () => Promise<Host | Outcome>): Promise<Host | Outcome> {
+  // The host *begin* makes for *root*, made once for every caller that comes while its copy is opened, through *starts*.
+  // A cancel is answered at once, and the copy's opening goes on: a host is made of it only while a caller still
+  // waits for one (*begin*'s wanted), and the hosts were not stopped meanwhile. A host no step reaches is never made.
+  private once(starts: Map<string, Starting>, root: string, signal: AbortSignal, begin: (wanted: () => boolean) => Promise<Host | Outcome>): Promise<Host | Outcome> {
+    if (signal.aborted) return Promise.resolve(CANCELLED);
     let start = starts.get(root);
     if (!start) {
-      const begun = begin().catch((error: unknown) => unavailable(error instanceof Error ? error.message : String(error)));
-      start = begun;
+      // Wanted is asked once the copy is opened, never before: by then this is the start's record.
+      const begun: Starting = {
+        host: begin(() => begun.waiting > 0 && !begun.stopped).catch((error: unknown) => unavailable(error instanceof Error ? error.message : String(error))),
+        waiting: 0,
+        stopped: false,
+      };
       starts.set(root, begun);
-      void begun.then(() => {
+      void begun.host.then(() => {
         if (starts.get(root) === begun) starts.delete(root);
       });
+      start = begun;
     }
-    return until(signal, start);
+    const waited = start;
+    waited.waiting += 1;
+    return new Promise((resolve) => {
+      const cancel = () => {
+        waited.waiting -= 1;
+        resolve(CANCELLED);
+      };
+      signal.addEventListener("abort", cancel, { once: true });
+      void waited.host.then(resolve).finally(() => signal.removeEventListener("abort", cancel));
+    });
   }
 
   // *root*'s host on its copy, once the copies have it opened, holding the copy from then until it has gone. A copy
   // the root was told is not vouched for while it was opened is let go, and opened again.
-  private async onCopy(root: string, binding: BoundFolder, copies: ThreadCopies): Promise<Host | Outcome> {
+  private async onCopy(root: string, binding: BoundFolder, copies: ThreadCopies, wanted: () => boolean): Promise<Host | Outcome> {
     for (let turn = 0; turn < OPENINGS; turn += 1) {
       const told = this.told.get(root) ?? 0;
       const opened = await copies.open(root, binding, this.halt.signal);
@@ -427,6 +451,11 @@ export class ToolHosts implements Executor {
       }
       if ("failed" in opened) return opened.failed;
       const { copy, handle } = opened;
+      // Nothing waits for a host any more, or the hosts were stopped meanwhile: none is made to hold the copy.
+      if (!wanted()) {
+        copies.close(handle);
+        return STOPPED_STARTING;
+      }
       if ((this.told.get(root) ?? 0) !== told) {
         copies.close(handle);
         continue;
@@ -454,7 +483,7 @@ export class ToolHosts implements Executor {
 
   // *root*'s landing's host, once the copies have its thread's copy opened for it: it holds that copy by a hold of its
   // own, let go once it has stopped. It is none of the hosts on the copy, whose commands share it in the guest.
-  private async onLanding(root: string, binding: BoundFolder, copies: ThreadCopies): Promise<Host | Outcome> {
+  private async onLanding(root: string, binding: BoundFolder, copies: ThreadCopies, wanted: () => boolean): Promise<Host | Outcome> {
     const opened = await copies.open(root, binding, this.halt.signal);
     if (this.stopping) {
       if ("handle" in opened) copies.close(opened.handle);
@@ -462,7 +491,12 @@ export class ToolHosts implements Executor {
     }
     if ("failed" in opened) return opened.failed;
     const { copy, handle } = opened;
-    // No host holds it where none is made: its hold goes now.
+    // No host holds it where none is made: its hold goes now. None is made where no step waits for it any more, or the
+    // hosts were stopped meanwhile, to hold the folder.
+    if (!wanted()) {
+      copies.close(handle);
+      return STOPPED_STARTING;
+    }
     let kept: string;
     try {
       kept = keptOf(this.options.dataDir, copy.place);
@@ -550,14 +584,12 @@ export class ToolHosts implements Executor {
   }
 }
 
-// *work*'s answer, or CANCELLED at once when *signal* aborts first.
-function until<T>(signal: AbortSignal, work: Promise<T>): Promise<T | Outcome> {
-  if (signal.aborted) return Promise.resolve(CANCELLED);
-  return new Promise((resolve) => {
-    const cancel = () => resolve(CANCELLED);
-    signal.addEventListener("abort", cancel, { once: true });
-    void work.then(resolve).finally(() => signal.removeEventListener("abort", cancel));
-  });
+// A host being made for a root while its copy is opened: the host, or why there is none; how many of the root's
+// operations still wait for it; and whether the hosts were stopped meanwhile.
+interface Starting {
+  host: Promise<Host | Outcome>;
+  waiting: number;
+  stopped: boolean;
 }
 
 class Host {
@@ -714,9 +746,11 @@ class Host {
 
   // With no operation running and no background process alive, the host keeps its
   // folder for idleMs. Out of the list first: the next operation for this root starts a new host.
+  // Never while it starts: a landing's helper puts back what a step cut short before it says it is
+  // ready, and one stopped there begins that again from nothing. Its start is bounded by its own time.
   private idle(): void {
     clearTimeout(this.idleTimer);
-    if (this.running > 0 || this.live > 0 || this.gone || this.finished || this.unanswered.size > 0) return;
+    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished || this.unanswered.size > 0) return;
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
@@ -821,6 +855,8 @@ class Host {
       this.handles = message.processes;
       this.readied = true;
       this.settleStart(null);
+      // Ready, with nothing waiting for it, as when what it was started for was cancelled meanwhile: it idles.
+      this.idle();
     } else if (message.type === "failed") {
       // A host that failed to start is exiting: the next operation starts a new one. One on a thread's copy says
       // in its own words, which name the folder, that the copy is not the one opened: its folder is not gone. A
@@ -852,7 +888,7 @@ class Host {
     this.gone = true;
     this.onGone();
     void this.letGo();
-    this.settleStart(unavailable("its tool host stopped while it was starting"));
+    this.settleStart(STOPPED_STARTING);
     for (const answer of this.pending.values()) answer(HOST_STOPPED);
     this.pending.clear();
     // Nothing it was sent is run any more.
