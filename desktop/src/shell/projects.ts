@@ -10,6 +10,9 @@ import type {
 
 // How long the page has to answer a call.
 export const ANSWER_TIMEOUT_MS = 10_000;
+// A file's History gets longer: the agent's first read of a large history it has not pruned yet takes
+// more than a plain read's bound (13.6 s, measured).
+export const HISTORY_ANSWER_TIMEOUT_MS = 30_000;
 // A version opened, a Restore and an Undo get longer: the agent has a version written out and sends it
 // whole, and the page reads it whole before it hands any of it over to save; or the agent waits up to
 // twenty seconds for the project's lock, then lands.
@@ -203,6 +206,7 @@ export class PageProjects implements ProjectsSource {
     private readonly send: (message: ToPage) => void,
     private readonly timeoutMs = ANSWER_TIMEOUT_MS,
     private readonly longMs = LONG_ANSWER_TIMEOUT_MS,
+    private readonly historyMs = HISTORY_ANSWER_TIMEOUT_MS,
   ) {}
 
   list = () => this.call<ProjectSummary[]>("list");
@@ -268,7 +272,7 @@ export class PageProjects implements ProjectsSource {
   private call<T>(method: Method, ...args: unknown[]): Promise<T> {
     const id = this.next++;
     const { promise, resolve, reject } = Promise.withResolvers<T>();
-    const bound = LONG.includes(method) ? this.longMs : this.timeoutMs;
+    const bound = LONG.includes(method) ? this.longMs : method === "history" ? this.historyMs : this.timeoutMs;
     const timer = setTimeout(() => {
       this.calls.delete(id);
       reject(new TimedOut(`The agent's page did not answer ${method} in time`));

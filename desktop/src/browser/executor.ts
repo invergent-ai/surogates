@@ -77,6 +77,8 @@ export interface BrowsingOptions {
   staging: string;
   // The ports of chats' own servers their users let the browser open, each with its chat's root, as the journal holds them now.
   ports(): Array<{ port: number; root: string }>;
+  // Every port that has turned, given to a chat, moved or taken back, with the mark of its last turn, as the journal holds them now.
+  turns(): Array<{ port: number; turn: string }>;
   // The sandbox's side of them: told each port's root, asked whether a root listens on one, and where the browser's proxy knocks.
   vm: Pick<VmClient, "forwards" | "listening" | "door">;
 }
@@ -269,25 +271,28 @@ export class Browsing implements ToolLayer {
    * What the browser may open of its chats' own servers (spec, Section 5), told to the two that enforce it:
    * the sandbox, each port with its chat's root, and the browser's proxy, the ports alone. Called at the
    * start and at each change of the bindings: a port allowed, taken back, moved to another chat, or gone
-   * with a deleted chat. A journal that cannot be read forwards nothing; nor does a run that has stopped.
+   * with a deleted chat. The browser hears each port's last turn too, by which it clears what a page of a
+   * port's origins stored before the port turned. A journal that cannot be read forwards nothing; nor does
+   * a run that has stopped.
    */
   forwarded(): void {
     if (this.over) return;
     let ports: Array<{ port: number; root: string }> = [];
+    let turns: Array<{ port: number; turn: string }> = [];
     try {
-      ports = this.options.ports();
+      [ports, turns] = [this.options.ports(), this.options.turns()];
     } catch {
       // Nothing is forwarded.
     }
-    this.forward(ports);
+    this.forward(ports, turns);
   }
 
-  private forward(ports: Array<{ port: number; root: string }>): void {
-    const telling = JSON.stringify(ports.map(({ port, root }) => [port, root]));
+  private forward(ports: Array<{ port: number; root: string }>, turns: Array<{ port: number; turn: string }>): void {
+    const telling = JSON.stringify([ports.map(({ port, root }) => [port, root]), turns.map(({ port, turn }) => [port, turn])]);
     if (telling === this.toldPorts) return;
     this.toldPorts = telling;
     this.options.vm.forwards(this.key, ports.map(({ port, root }) => [port, root]));
-    this.options.browser.forwards(ports.map(({ port }) => port), this.options.vm.door, this.key);
+    this.options.browser.forwards(ports.map(({ port }) => port), this.options.vm.door, this.key, turns.map(({ port, turn }) => [port, turn]));
   }
 
   /** Whether something in *root*'s sandbox listens on *port* of its own loopback now, or "busy" where it could not be asked: no sandbox is started to ask. */
@@ -397,14 +402,14 @@ export class Browsing implements ToolLayer {
   // journal keeps the ports, as it keeps the bindings: the next start forwards them under another key.
   async stop(): Promise<void> {
     this.over = true;
-    this.forward([]);
+    this.forward([], []);
     await Promise.all([this.options.browser.stop(), this.options.tools.stop()]);
   }
 
   // The computer's access ended: nothing is forwarded any more, the browser closes with every tab, and what runs in the tools ends.
   async end(): Promise<void> {
     this.over = true;
-    this.forward([]);
+    this.forward([], []);
     await Promise.all([this.options.browser.end(), this.options.tools.end?.()]);
   }
 }

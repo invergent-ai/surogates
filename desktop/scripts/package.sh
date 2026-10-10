@@ -6,14 +6,15 @@
 #     surogate                      Electron, renamed, with the app's fuses (no inspector)
 #     resources/app/                the app as a folder, never an asar: dist/ (no testing/),
 #                                   assets/, package.json at <version>, the production
-#                                   node_modules and bin/node
+#                                   node_modules, bin/node and the spelling dictionary,
+#                                   dictionaries/
 #     resources/vm/                 agent.img and the guest image's manifest
 #     resources/surogate.svg        the desktop entry's icon
 #     bin/surogate-apply-update     the install script, which applies a verified release as root
 #
 # The install script adds bin/bwrap, the system's copy, to each version it installs.
 #
-# Usage, after npm run build (which fetches and checks bin/node), from any folder, with its
+# Usage, after npm run build (which fetches and checks bin/node and the dictionary), from any folder, with its
 # paths as that folder names them:
 #   scripts/package.sh <version> <vm manifest.json> <out> [<install script>]
 # It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz. The install script it packs as the
@@ -62,7 +63,7 @@ rm "$top/resources/default_app.asar"
 node scripts/fuses.mjs "$top/surogate"
 
 mkdir -p "$app" "$top/resources/vm" "$top/bin"
-cp -a dist assets bin "$app/"
+cp -a dist assets bin dictionaries "$app/"
 # The echo client and the sign-in helper are the tests' own; the agent disk ships in resources/vm.
 rm -rf "$app/dist/testing" "$app/dist/agent.img"
 find "$app/dist" -name '*.map' -delete

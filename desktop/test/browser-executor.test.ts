@@ -55,7 +55,9 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
   let staged: (download: StagedDownload) => void = () => {};
   // The ports the chats' users allowed, as the journal holds them, and what the sandbox and the browser's proxy were told of them.
   const allowed: Array<{ port: number; root: string }> = [];
-  const forwards = { vm: [] as Array<[string, Array<[number, string]>]>, proxy: [] as Array<[number[], string, string]> };
+  // And the mark of each port's last turn, as the journal holds it.
+  const turned: Array<{ port: number; turn: string }> = [];
+  const forwards = { vm: [] as Array<[string, Array<[number, string]>]>, proxy: [] as Array<[number[], string, string, Array<[number, string]>]> };
   const journal = { fails: false };
   // The chats this computer bound, until one is deleted.
   const chats = new Set(bound ? [ROOT, OTHER] : []);
@@ -104,7 +106,7 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
       onDownload: (listener) => {
         staged = listener;
       },
-      forwards: (ports, door, key) => void forwards.proxy.push([ports, door, key]),
+      forwards: (ports, door, key, turns) => void forwards.proxy.push([ports, door, key, turns]),
     },
     bindingOf: (root) => (chats.has(root) ? {} : undefined),
     launch: () => launch,
@@ -113,13 +115,17 @@ function rig(launch: Launch | null = LAUNCH, bound = true, reads?: (operation: O
       if (journal.fails) throw new Error("disk I/O error");
       return allowed.map((entry) => ({ ...entry }));
     },
+    turns: () => {
+      if (journal.fails) throw new Error("disk I/O error");
+      return turned.map((entry) => ({ ...entry }));
+    },
     vm: {
       door: "/run/user/1000/surogate/vm-1/browser.sock",
       forwards: (key, ports) => void forwards.vm.push([key, ports]),
       listening: (root, port) => (probed.push([root, port]), Promise.resolve(port === 7000 ? "busy" : port === 3000)),
     },
   });
-  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, unasked, probed, allowed, forwards, journal, stage: (download: StagedDownload) => staged(download) };
+  return { browsing, ran, browsed, stopped, forgotten, paused, shown, chats, answers, reading, files, unasked, probed, allowed, turned, forwards, journal, stage: (download: StagedDownload) => staged(download) };
 }
 
 describe("the browser's kinds beside the tools", () => {
@@ -686,27 +692,36 @@ describe("the browser's kinds beside the tools", () => {
   });
 
   it("tells the browser's proxy and the sandbox the ports the chats' users allowed, under one key of this run's own, at each change and not between", () => {
-    const { browsing, allowed, forwards } = rig();
+    const { browsing, allowed, turned, forwards } = rig();
     const DOOR = "/run/user/1000/surogate/vm-1/browser.sock";
     browsing.forwarded();
     const key = forwards.vm[0]![0];
     // 256 bits nothing else is given: what its proxy knocks with at the sandbox's door.
     expect(key).toMatch(/^[0-9a-f]{64}$/);
-    expect(forwards).toEqual({ vm: [[key, []]], proxy: [[[], DOOR, key]] });
+    expect(forwards).toEqual({ vm: [[key, []]], proxy: [[[], DOOR, key, []]] });
     allowed.push({ port: 3000, root: ROOT }, { port: 8000, root: OTHER });
+    turned.push({ port: 3000, turn: "a1" }, { port: 8000, turn: "b1" });
     browsing.forwarded();
     // The same again: nobody is told twice.
     browsing.forwarded();
     expect(forwards.vm).toEqual([[key, []], [key, [[3000, ROOT], [8000, OTHER]]]]);
-    // The proxy hears the ports alone: which chat each leads to is the sandbox's to know.
-    expect(forwards.proxy).toEqual([[[], DOOR, key], [[3000, 8000], DOOR, key]]);
+    // The proxy hears the ports alone: which chat each leads to is the sandbox's to know. The browser hears each
+    // port's last turn, its own and those of ports no chat has now: what it clears the origins of a port by.
+    expect(forwards.proxy).toEqual([[[], DOOR, key, []], [[3000, 8000], DOOR, key, [[3000, "a1"], [8000, "b1"]]]]);
     // A port that moved to another chat is told, though the proxy's ports are the same.
     allowed[0] = { port: 3000, root: OTHER };
+    turned[0] = { port: 3000, turn: "a2" };
     browsing.forwarded();
-    expect([forwards.vm.at(-1), forwards.proxy.at(-1)]).toEqual([[key, [[3000, OTHER], [8000, OTHER]]], [[3000, 8000], DOOR, key]]);
+    expect([forwards.vm.at(-1), forwards.proxy.at(-1)]).toEqual([[key, [[3000, OTHER], [8000, OTHER]]], [[3000, 8000], DOOR, key, [[3000, "a2"], [8000, "b1"]]]]);
     allowed.pop();
+    turned[1] = { port: 8000, turn: "b2" };
     browsing.forwarded();
-    expect([forwards.vm.at(-1), forwards.proxy.at(-1)]).toEqual([[key, [[3000, OTHER]]], [[3000], DOOR, key]]);
+    expect([forwards.vm.at(-1), forwards.proxy.at(-1)]).toEqual([[key, [[3000, OTHER]]], [[3000], DOOR, key, [[3000, "a2"], [8000, "b2"]]]]);
+    // A port taken back and given again to the same chat between two looks is a turn the browser hears, though no chat's ports changed.
+    const told = forwards.proxy.length;
+    turned[0] = { port: 3000, turn: "a3" };
+    browsing.forwarded();
+    expect([forwards.proxy.length, forwards.proxy.at(-1)]).toEqual([told + 1, [[3000], DOOR, key, [[3000, "a3"], [8000, "b2"]]]]);
     // Another run of the app knocks with another key.
     const again = rig();
     again.browsing.forwarded();
@@ -715,8 +730,9 @@ describe("the browser's kinds beside the tools", () => {
 
   it("forwards nothing once the journal cannot be read, the app stops, or the computer's access ends, and nothing again after a stop or an end", async () => {
     for (const ending of ["journal", "stop", "end"] as const) {
-      const { browsing, allowed, forwards, journal, stopped } = rig();
+      const { browsing, allowed, turned, forwards, journal, stopped } = rig();
       allowed.push({ port: 3000, root: ROOT });
+      turned.push({ port: 3000, turn: "a1" });
       browsing.forwarded();
       const key = forwards.vm[0]![0];
       expect(forwards.vm).toEqual([[key, [[3000, ROOT]]]]);
@@ -728,7 +744,7 @@ describe("the browser's kinds beside the tools", () => {
         // Told before the browser and the tools are closed.
         expect(stopped.length, ending).toBeGreaterThan(0);
       }
-      expect([forwards.vm.at(-1), forwards.proxy.at(-1)?.[0]], ending).toEqual([[key, []], []]);
+      expect([forwards.vm.at(-1), forwards.proxy.at(-1)?.[0], forwards.proxy.at(-1)?.[3]], ending).toEqual([[key, []], [], []]);
       const told = [forwards.vm.length, forwards.proxy.length];
       // A change of the bindings after: a journal read again forwards again, a stopped or an ended run nothing.
       journal.fails = false;
