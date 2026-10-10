@@ -26,8 +26,9 @@ from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
-#: How much of an object a streamed read holds at once.
+#: How much of an object a streamed read holds at once, and the size of each part of a streamed write.
 _CHUNK = 1 << 20
+_PART = 8 << 20
 
 
 class TooLarge(ValueError):
@@ -93,6 +94,14 @@ class StorageBackend(Protocol):
         For an object that may be large: none of it is held whole.  Raises
         ``KeyError`` if not found, and :class:`TooLarge`, with *target*
         removed, once it holds more than *limit* bytes.
+        """
+        ...
+
+    async def upload(self, bucket: str, key: str, source: Path) -> None:
+        """Write (or overwrite) an object from the file *source*, a piece at a time.
+
+        For an object that may be large: none of it is held whole.  The
+        object is the old one or the new one whole, never part of each.
         """
         ...
 
@@ -270,6 +279,9 @@ class LocalBackend:
         if not path.is_file():
             raise KeyError(f"{bucket}/{key}")
         return await asyncio.to_thread(_copy, path, target, limit, f"{bucket}/{key}")
+
+    async def upload(self, bucket: str, key: str, source: Path) -> None:
+        await asyncio.to_thread(_atomic_copy, source, self._resolve(bucket, key))
 
     async def exists(self, bucket: str, key: str) -> bool:
         return self._resolve(bucket, key).is_file()
@@ -490,6 +502,14 @@ class S3Backend:
                 body.close()
             return written
 
+    async def upload(self, bucket: str, key: str, source: Path) -> None:
+        from boto3.s3.transfer import TransferConfig
+
+        async with self._client() as s3:
+            # In parts, each read from the file as the last are sent: two on their way and two waiting, at most.
+            parts = TransferConfig(multipart_chunksize=_PART, max_concurrency=2, max_io_queue=2)
+            await s3.upload_file(str(source), bucket, key, Config=parts)
+
     async def exists(self, bucket: str, key: str) -> bool:
         async with self._client() as s3:
             try:
@@ -655,6 +675,25 @@ def _copy(source: Path, target: Path, limit: int | None, name: str) -> int:
         Path(target).unlink(missing_ok=True)
         raise
     return written
+
+
+def _atomic_copy(source: Path, path: Path) -> None:
+    """Atomically make *path* a copy of *source*, a piece at a time, using temp file + os.replace."""
+    with open(source, "rb") as src:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                shutil.copyfileobj(src, out, _CHUNK)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:

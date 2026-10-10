@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import functools
 import os
 import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
+from aioboto3.s3 import inject
 
 from surogates.storage.backend import (
     LocalBackend,
+    S3Backend,
     TooLarge,
 )
 
@@ -92,6 +98,24 @@ class TestLocalBackendObjects:
             await backend.download("bucket", "key.bin", target, limit=1024)
         assert not target.exists()
         assert await backend.download("bucket", "key.bin", target, limit=1025) == 1025
+
+    async def test_upload_goes_through_a_file_and_replaces_the_object_whole(self, backend: LocalBackend, tmp_path: Path):
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"\x00\x01" * 3 * 2**20)  # more than one piece
+        await backend.write("bucket", "deep/key.bin", b"what the object held, and no part of the new file")
+        await backend.upload("bucket", "deep/key.bin", source)
+        assert await backend.read("bucket", "deep/key.bin") == source.read_bytes()
+        # Under a folder the bucket did not have, too; and nothing of the upload is left beside the object.
+        await backend.upload("bucket", "new/folder/key.bin", source)
+        assert await backend.read("bucket", "new/folder/key.bin") == source.read_bytes()
+        assert [p.name for p in (tmp_path / "bucket" / "deep").iterdir()] == ["key.bin"]
+
+    async def test_an_upload_that_fails_leaves_the_object_as_it_was(self, backend: LocalBackend, tmp_path: Path):
+        await backend.write("bucket", "deep/key.bin", b"what the object held")
+        with pytest.raises(OSError):
+            await backend.upload("bucket", "deep/key.bin", tmp_path / "no-such-file.bin")
+        assert await backend.read("bucket", "deep/key.bin") == b"what the object held"
+        assert [p.name for p in (tmp_path / "bucket" / "deep").iterdir()] == ["key.bin"]
 
     async def test_list_keys(self, backend: LocalBackend):
         await backend.write_text("bucket", "a.txt", "1")
@@ -208,3 +232,67 @@ class TestLocalBackendSecurity:
     async def test_a_mark_outside_the_bucket_or_at_no_name_is_refused(self, backend: LocalBackend, key: str):
         with pytest.raises(ValueError):
             await backend.mark("bucket", key)
+
+
+class _Bucket:
+    """An S3 client as the upload sees one, which keeps no part: it counts what is on its way to it at once."""
+
+    def __init__(self) -> None:
+        self.parts: list[int] = []
+        self.whole: int | None = None
+        self.done = False
+
+    async def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> dict:
+        self.whole = len(Body)
+        return {}
+
+    async def create_multipart_upload(self, *, Bucket: str, Key: str) -> dict:
+        return {"UploadId": "u1"}
+
+    async def upload_part(self, *, Body: bytes, **part) -> dict:
+        await asyncio.sleep(0.005)  # slower than a file is read: whatever may wait for it does
+        self.parts.append(len(Body))
+        return {"ETag": f"part-{part['PartNumber']}"}
+
+    async def complete_multipart_upload(self, **whole) -> dict:
+        self.done = True
+        return {}
+
+    async def abort_multipart_upload(self, **whole) -> dict:
+        return {}
+
+
+class TestS3BackendUpload:
+    """An object written from a file through the S3 client's own upload, with a client that stores nothing."""
+
+    @pytest.fixture()
+    def bucket(self, monkeypatch) -> tuple[S3Backend, _Bucket]:
+        backend, client = S3Backend("http://s3.invalid"), _Bucket()
+        client.upload_file = functools.partial(inject.upload_file, client)
+
+        @contextlib.asynccontextmanager
+        async def the_client():
+            yield client
+
+        monkeypatch.setattr(backend, "_client", the_client)
+        return backend, client
+
+    async def test_a_large_file_goes_up_in_parts_a_few_held_at_once_whatever_its_size(self, bucket, tmp_path: Path):
+        backend, client = bucket
+        source = tmp_path / "source.bin"
+        with open(source, "wb") as out:
+            out.truncate(256 * 2**20)
+        tracemalloc.start()
+        await backend.upload("bucket", "deep/key.bin", source)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        # Every byte went up, in parts of 8 MiB; and of the 256 MiB the upload held a few parts at once, never the file.
+        assert (client.done, sum(client.parts), max(client.parts)) == (True, 256 * 2**20, 8 * 2**20)
+        assert peak < 64 * 2**20, peak
+
+    async def test_a_small_file_goes_up_whole(self, bucket, tmp_path: Path):
+        backend, client = bucket
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"a small file")
+        await backend.upload("bucket", "key.bin", source)
+        assert (client.whole, client.parts) == (12, [])
