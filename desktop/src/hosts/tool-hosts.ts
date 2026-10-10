@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
 import { spawnClean } from "../clean-child.js";
-import { keepingOf, type Recovered, recordsOf } from "../files/land.js";
+import { keepingOf, type Recovered, recordsOf, UNTOLD, untoldIn } from "../files/land.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Copy, Handle, Opened } from "../history/copies.js";
 import { forgettingOf, NOT_A_FORGETTING_ASKED, notPutBack, RECORDS_UNREAD, unrecorded } from "../history/kinds.js";
@@ -97,6 +97,8 @@ const madeAgain = (at: string): Outcome => unavailable(`the copy of ${at} this t
 const NOT_BEGUN = unavailable("the host of this landing was stopping, so this step of it was not begun. Ask again");
 // What waited for a host that stopped, or was never made, before it was ready.
 const STOPPED_STARTING = unavailable("its tool host stopped while it was starting");
+// A landing's host asked for itself while its landing's last step runs alone: asked again once it has ended.
+const BUSY_ALONE: Outcome = { error: { type: "busy", message: "the landing in this folder is ending a step it runs alone" } };
 
 /** Another held *folder* for as long as a landing waits for it: nothing of the landing began, and it can be asked again. */
 export const folderBusy = (folder: string): Outcome => ({
@@ -115,6 +117,10 @@ export const stillCutShort = (folder: string): Outcome => ({
 // What is said of what a landing cut short in *folder* where another held the folder for as long as the put-back waited.
 const heldElsewhere = (folder: string): string =>
   `Another chat on this computer is working in ${folder}, so what a landing cut short there is not put back yet. It is put back once that one is done`;
+// A read of *folder* for a thread, refused: what a landing cut short there could not be put back, for *why*.
+const notRead = (folder: string, why: string): Outcome => ({
+  error: { type: "unavailable", message: `What a landing cut short in ${folder} could not be put back, so the folder was not read: ${why}` },
+});
 // What is said of what a folder's landings keep where the app's record of which folder that is cannot be read.
 const UNRECORDED = "The app's record of which folder a landing on this computer was cut short in cannot be read, so what that landing kept is left as it is";
 
@@ -444,28 +450,55 @@ export class ToolHosts implements Executor {
     } catch {
       // Nothing was ever kept here.
     }
-    for (const name of names) if (KEPT_NAME.test(name) && holdsAnything(join(landings!, name))) void this.recovery(name).done;
+    for (const name of names.filter((one) => KEPT_NAME.test(one))) {
+      const kept = join(landings!, name);
+      if (holdsAnything(kept)) {
+        void this.recovery(name).done;
+        continue;
+      }
+      // Nothing left to put back, and what an earlier put-back found not told yet: for whoever shows it.
+      const { restored, beside } = untoldIn(kept);
+      if (restored.length + beside.length > 0) {
+        this.tell(name, { folder: recordedFolder(this.options.dataDir, name)?.path ?? null, state: "found", found: { restored, beside, lost: [], unread: [] } });
+      }
+    }
   }
 
   /**
-   * Before *bound*'s folder is read for its thread, as a turn's open and a pickup read it: what a landing cut short there
-   * is put back first, where the folder's landings keep anything and no landing's host is on the folder, whose helper puts
-   * it back in its own first step. Once a folder, until a landing's host there next goes. Null where the folder may be
-   * read; otherwise what that read is answered instead: another held the folder for as long as the put-back waited, or the
-   * put-back could not run. A folder that is not the one its place recorded is read all the same: what is kept is another's.
+   * Before the folder at *folder* is read for a thread, as a request of its history may read it (history/copies.ts): what a
+   * landing cut short there is put back first, where the folder's landings keep anything. Where a landing's host is on
+   * the folder, by its helper, whose every step of the land kind puts that back first: read only once its last answered
+   * so, or once it answers so when asked; one still waiting for the folder has put back nothing. Elsewhere, by a recovery's
+   * host, once a folder until a landing's host there next goes. Null where the folder may be read; otherwise what that read
+   * is answered instead: another holds the folder, or what was cut short could not be put back, and it is asked again. A
+   * folder that is not the one its place recorded is read all the same: what is kept is another's.
    */
-  async recoverBefore(bound: BoundFolder, signal: AbortSignal): Promise<Outcome | null> {
+  async recoverBefore(folder: string, signal: AbortSignal): Promise<Outcome | null> {
     const landings = this.landings();
     if (landings === null) return null;
-    const name = keyOf(bound.folder);
+    const name = keyOf(folder);
     const kept = join(landings, name);
+    // A landing's host on the folder holds it, and is asked before a put-back of the app's, which would wait for it.
+    const lander = [...this.landers.values()].find((host) => host.kept === kept);
+    if (lander && holdsAnything(kept)) return lander.putBack ? null : this.putBackBy(lander, folder, signal);
     let under = this.recovering.get(name);
     if (!under) {
-      if (this.mended.has(name) || !holdsAnything(kept) || [...this.landers.values()].some((host) => host.kept === kept)) return null;
+      if (!holdsAnything(kept) || this.mended.has(name)) return null;
       under = this.recovery(name);
     }
     if (await aborts(under.done, signal)) return CANCELLED;
     return (await under.done).refusal;
+  }
+
+  // What a read of *folder* is answered where the landing's host *lander* on it is asked to put back what was cut short.
+  private async putBackBy(lander: Host, folder: string, signal: AbortSignal): Promise<Outcome | null> {
+    const outcome = await lander.putBackNow(signal);
+    if ("ok" in outcome) return null;
+    const { type, message } = outcome.error;
+    if (type === "cancelled") return CANCELLED;
+    // Its host still waits for the folder, has gone, or is going, or ends a step alone: nothing is known put back.
+    if (type === "busy" || type === "unavailable" || type === "interrupted") return stillCutShort(folder);
+    return notRead(folder, message);
   }
 
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
@@ -822,10 +855,7 @@ export class ToolHosts implements Executor {
       this.waiting.set(name, path);
       return ended({ folder: path, state: "left", why: heldElsewhere(path) }, stillCutShort(path));
     }
-    return ended(
-      { folder: path, state: "left", why: message },
-      { error: { type: "unavailable", message: `What a landing cut short in ${path} could not be put back, so the folder was not read: ${message}` } },
-    );
+    return ended({ folder: path, state: "left", why: message }, notRead(path, message));
   }
 
   // A recovery's host on *folder*, given what its landings keep in *kept*, with a working folder of its own by *name*. It
@@ -869,10 +899,11 @@ interface Mended {
   refusal: Outcome | null;
 }
 
-// Whether the folder at *path* holds anything: one that is not there, or cannot be read, holds nothing to put back.
+// Whether the folder at *path* holds anything to put back: anything but what earlier put-backs found untold. One that
+// is not there, or cannot be read, holds nothing.
 function holdsAnything(path: string): boolean {
   try {
-    return readdirSync(path).length > 0;
+    return readdirSync(path).some((name) => !name.startsWith(UNTOLD));
   } catch {
     return false;
   }
@@ -920,8 +951,14 @@ class Host {
   private quiet: Array<() => void> = [];
   // A landing's host was sent a step that writes the folder: an apply, or a put-back.
   private written = false;
-  // Settled once the last step sent alone (alone) is answered: a landing's next step is sent only after.
+  // Settled once the last step sent alone (alone) is answered: a landing's next step is sent only after. And whether one is.
   private lone: Promise<void> = Promise.resolve();
+  private aloneNow = false;
+  // A landing's or a recovery's host, whose helper puts back what a landing cut short in the folder before any step of
+  // the land kind: the land steps it was sent and has not answered, and whether the last it answered was answered ok, so
+  // that nothing of the folder is left aside.
+  private readonly landSteps = new Set<string>();
+  private putBackOk = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -996,6 +1033,7 @@ class Host {
       this.lone = new Promise((resolve) => {
         over = resolve;
       });
+      this.aloneNow = true;
       try {
         if (await aborts(before, signal)) return CANCELLED;
         while (this.unanswered.size > 0 && !this.gone) {
@@ -1009,6 +1047,7 @@ class Host {
         if (ends(outcome)) this.finish();
         return outcome;
       } finally {
+        this.aloneNow = false;
         over();
       }
     });
@@ -1017,6 +1056,26 @@ class Host {
   // Whether a landing's host was sent a step that writes the folder.
   get wrote(): boolean {
     return this.written;
+  }
+
+  // Whether this host's helper put back what a landing cut short in its folder, as the last step of the land kind it
+  // answered says: each puts that back before anything else, and answers ok only where it did.
+  get putBack(): boolean {
+    return this.putBackOk;
+  }
+
+  /**
+   * Its helper asked to put back what a landing cut short in its folder, for the app itself: nothing is told by its
+   * answer. Never waits for a step sent alone: one under way is answered BUSY_ALONE, and the asker asks again.
+   */
+  putBackNow(signal: AbortSignal): Promise<Outcome> {
+    return this.busy(async () => {
+      const failure = await this.ready(signal);
+      if (failure) return failure;
+      if (this.aloneNow) return BUSY_ALONE;
+      if (this.finished || this.closing) return NOT_BEGUN;
+      return this.request({ type: "op", id: randomUUID(), kind: "land", args: { action: "recover", tell: false } }, signal);
+    });
   }
 
   // Its work is over before it has been idle: out of the list first, so the next operation starts a new host, then
@@ -1149,6 +1208,7 @@ class Host {
       this.pending.set(message.id, answer);
       signal?.addEventListener("abort", cancel, { once: true });
       if (this.lands) this.unanswered.set(message.id, (this.unanswered.get(message.id) ?? 0) + 1);
+      if (this.lands && message.type === "op" && message.kind === "land") this.landSteps.add(message.id);
       this.send(message);
     });
   }
@@ -1217,6 +1277,7 @@ class Host {
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);
+      if (this.landSteps.delete(message.id)) this.putBackOk = "ok" in message.outcome;
       answer?.(message.outcome);
       if (this.unanswered.has(message.id)) this.answeredStep(message.id);
     }

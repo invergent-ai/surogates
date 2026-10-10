@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
+import { untoldIn } from "../src/files/land.js";
 import { kinds } from "../src/files/operations.js";
 import { FINISHED_TTL_SECONDS } from "../src/guest/processes.js";
 import { keyOf } from "../src/history/place.js";
@@ -1457,7 +1458,9 @@ describe("a tool host that puts back what a landing cut short, on the folder wit
     expect(existsSync(join(reports, "a.txt"))).toBe(false);
     expect(await harness.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
     const now = lstatSync(join(reports, "a.txt"), { bigint: true });
-    expect([readFileSync(join(reports, "a.txt"), "utf8"), now.ino, now.nlink, readdirSync(reports).sort(), readdirSync(keeps())]).toEqual(["the user's own\n", ino, 1n, ["a.txt", "sub"], []]);
+    expect([readFileSync(join(reports, "a.txt"), "utf8"), now.ino, now.nlink, readdirSync(reports).sort()]).toEqual(["the user's own\n", ino, 1n, ["a.txt", "sub"]]);
+    // What it put back is kept, untold, for the folder's next landing to tell: a recovery's answer tells nobody.
+    expect([readdirSync(keeps()), untoldIn(keeps())]).toEqual([[".untold.json"], { restored: ["a.txt"], beside: [] }]);
     harness.send({ type: "stop" });
     expect(await harness.exited).toBe(0);
     // Nothing else of the user's, or of the app's, changed; and no record of a folder's is kept for it.

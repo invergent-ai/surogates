@@ -339,6 +339,19 @@ function ownAt(path: string): number | null {
 }
 const sameFile = (a: Stats, b: Stats): boolean => a.dev === b.dev && a.ino === b.ino;
 
+// Whether the first *bytes* bytes of the files open at *a* and *b* are the same, each read where it is: one shorter
+// than that is not.
+function sameBytes(a: number, b: number, bytes: number): boolean {
+  const [one, other] = [Buffer.allocUnsafe(PIECE_BYTES), Buffer.allocUnsafe(PIECE_BYTES)];
+  for (let at = 0; at < bytes;) {
+    const want = Math.min(PIECE_BYTES, bytes - at);
+    const [got, also] = [readSync(a, one, 0, want, at), readSync(b, other, 0, want, at)];
+    if (got !== want || also !== want || one.compare(other, 0, want, 0, want) !== 0) return false;
+    at += want;
+  }
+  return true;
+}
+
 // The copy's file *name* in its folder *theirs*, opened to read: only a plain file of the copy's, and no link at its name.
 function sourceOf(theirs: Held | null, name: string, path: string): number {
   if (theirs === null) throw osError("ENOENT", path);
@@ -450,7 +463,8 @@ class Landing {
   private readonly kept: string;
   private readonly key: string;
 
-  constructor(context: Context, private readonly saga: string) {
+  // *passes*: it puts back what an earlier helper cut short, as a recovery does, and keeps what it finds until it is told.
+  constructor(context: Context, private readonly saga: string, private readonly passes = false) {
     this.key = keyOf(context);
     this.folder = context.folder;
     this.copy = context.landing!.copy;
@@ -504,6 +518,14 @@ class Landing {
     if (did !== null && !protectedInFolder(this.folder, join(this.folder, ...did.path.split("/")))) return did;
     const named = (value as { path?: unknown } | null)?.path;
     throw new Unreadable(this.saga, step, typeof named === "string" && landable(named) ? named : null);
+  }
+
+  // What a step put back, or put beside its name, said in *report*; and, for a recovery, kept in the app's data until it
+  // is told, before the step's record goes.
+  private tell(report: Recovered, found: Partial<Untold>): void {
+    report.restored.push(...(found.restored ?? []));
+    report.beside.push(...(found.beside ?? []));
+    if (this.passes) untell(this.store, found);
   }
 
   // What a step kept goes: its record, and the file it replaced; and the saga's folder with its last step's.
@@ -790,9 +812,12 @@ class Landing {
   }
 
   // The kept file *held*, copied whole under the step's own name beside its name in *dir*, with the mode and the time
-  // of the file it is: where a copy cut short is there, as far as its record says that copy is on disk, it goes on
-  // from there. The step as its record says now.
-  private copiedBack(step: number, did: Step, dir: Held, held: string): Step {
+  // of the file it is. That name is in the user's folder, where any program may write: what is there is gone on with
+  // only where it is a file of the step's own holding the kept file's very bytes as far as the record says the copy
+  // got, and is begun again from nothing otherwise. *whole*: compared whole with the kept file before it is answered,
+  // as it is about to take the name; a copy changed meanwhile is begun again once, and refused after. The step as its
+  // record says now.
+  private copiedBack(step: number, did: Step, dir: Held, held: string, whole = true): Step {
     let at = did;
     if (at.back === null) {
       at = { ...at, back: ownFile(), copied: 0 };
@@ -804,41 +829,50 @@ class Landing {
       const from = io(did.path, () => openSync(held, constants.O_RDONLY | constants.O_NOFOLLOW));
       open.push(from);
       const size = fstatSync(from).size;
-      // What an earlier put-back left there: gone on with only where it is a file of the step's own.
-      const left = ownAt(staged);
-      if (left !== null) open.push(left);
-      const length = left === null ? 0 : fstatSync(left).size;
-      let to = left;
-      // Whole already, as its record says: it is only given its mode and its time again, which may be no writer's.
-      if (left === null || at.copied !== size || length !== size) {
-        // Written on as it was made, this user's to write; and only the very file looked at, or one made new.
-        if (left !== null) fchmodSync(left, 0o600);
-        const flags = constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | (left === null ? constants.O_CREAT | constants.O_EXCL : 0);
-        const fd = io(did.path, () => openSync(staged, flags, 0o600));
-        open.push(fd);
-        if (left !== null && !sameFile(fstatSync(fd), fstatSync(left))) throw conflict(did.path);
-        to = fd;
-        let done = left !== null && length >= at.copied && at.copied <= size ? at.copied : 0;
-        ftruncateSync(fd, done);
-        const piece = Buffer.allocUnsafe(PIECE_BYTES);
-        for (let synced = done; done < size;) {
-          const count = io(did.path, () => readSync(from, piece, 0, Math.min(piece.length, size - done), done));
-          if (count === 0) throw osError("EIO", did.path, "The file a landing kept is shorter than it was when it was kept");
-          for (let written = 0; written < count;) written += io(did.path, () => writeSync(fd, piece, written, count - written, done + written));
-          done += count;
-          // On disk before its record says so.
-          if (done - synced >= COPIED_BYTES || done === size) {
-            fsyncSync(fd);
-            at = { ...at, copied: done };
-            this.write(step, at);
-            synced = done;
+      for (let tries = 0; ; tries += 1) {
+        const left = ownAt(staged);
+        if (left !== null) open.push(left);
+        // As far as the record says, byte for byte; a copy whole by it is compared whole.
+        const kept = left !== null && at.copied <= size && sameBytes(left, from, at.copied);
+        if (left !== null && !kept) remove(staged);
+        // Found whole, and so compared whole already.
+        const compared = kept && at.copied === size;
+        let to = kept ? left! : null;
+        if (to === null || at.copied < size) {
+          // Written on as it was made, this user's to write; and only the very file compared, or one made new.
+          if (to !== null) fchmodSync(to, 0o600);
+          const flags = constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK | (to === null ? constants.O_CREAT | constants.O_EXCL : 0);
+          const fd = io(did.path, () => openSync(staged, flags, 0o600));
+          open.push(fd);
+          if (to !== null && !sameFile(fstatSync(fd), fstatSync(to))) throw conflict(did.path);
+          let done = to === null ? 0 : at.copied;
+          to = fd;
+          ftruncateSync(fd, done);
+          const piece = Buffer.allocUnsafe(PIECE_BYTES);
+          for (let synced = done; done < size;) {
+            const count = io(did.path, () => readSync(from, piece, 0, Math.min(piece.length, size - done), done));
+            if (count === 0) throw osError("EIO", did.path, "The file a landing kept is shorter than it was when it was kept");
+            for (let written = 0; written < count;) written += io(did.path, () => writeSync(fd, piece, written, count - written, done + written));
+            done += count;
+            // On disk before its record says so.
+            if (done - synced >= COPIED_BYTES || done === size) {
+              fsyncSync(fd);
+              at = { ...at, copied: done };
+              this.write(step, at);
+              synced = done;
+            }
           }
         }
+        if (did.mode !== null) fchmodSync(to, did.mode);
+        dated(to, held);
+        fsyncSync(to);
+        // What takes the name is the kept file's bytes, every one: compared already where it was found whole.
+        if (!whole || compared || sameBytes(to, from, size)) return at;
+        remove(staged);
+        at = { ...at, copied: 0 };
+        this.write(step, at);
+        if (tries > 0) throw new Failure({ type: "conflict", message: `${did.path} was not put back: another program changed the copy beside it as it was made` });
       }
-      if (did.mode !== null) fchmodSync(to!, did.mode);
-      dated(to!, held);
-      fsyncSync(to!);
-      return at;
     } finally {
       for (const fd of open) closeSync(fd);
     }
@@ -848,7 +882,8 @@ class Landing {
   // step left. "restored" where the real file had left its name and took it again, "back" where it never had.
   // "changed" where the name holds a file that is neither the step's nor the one it found: that file stays, and so
   // does what the step kept.
-  private putBack(step: number, record: Step, held: Held | null = null): "back" | "restored" | "changed" {
+  // *restored* is told before the step lets go of its record, once the real file has its name again.
+  private putBack(step: number, record: Step, held: Held | null = null, restored?: () => void): "back" | "restored" | "changed" {
     let did = record;
     const parts = did.path.split("/");
     const name = parts.at(-1)!;
@@ -871,7 +906,8 @@ class Landing {
         if (did.was !== null && replaced === null) return "changed";
         // What it replaced, where it is copied back from another mount, is copied beside the name first: the
         // landing's file holds the name meanwhile, and leaves it only once the file it replaced can take it at once.
-        if (did.was !== null && replaced === this.bytes(step) && !this.linkable(did, dir, replaced)) did = this.copiedBack(step, did, dir, replaced);
+        // It is compared whole as it takes the name.
+        if (did.was !== null && replaced === this.bytes(step) && !this.linkable(did, dir, replaced)) did = this.copiedBack(step, did, dir, replaced, false);
         // Its own file is there: moved out as the real one was, and looked at again before anything takes its place.
         const [real, out] = [dir.at(name), dir.at(did.out!)];
         io(did.path, () => renameSync(real, out));
@@ -907,6 +943,7 @@ class Landing {
         // Neither the step's file nor the one it found: someone else's change.
         return "changed";
       }
+      if (outcome === "restored") restored?.();
       this.release(step, did, dir, false);
       if (did.was === null) this.empty(did.made);
       if (dir !== null) syncDir(dir.at("."));
@@ -935,12 +972,11 @@ class Landing {
   private revert(step: number, did: Step, report: Recovered, held: Held | null = null): void {
     let outcome: "back" | "restored" | "changed" = "changed";
     try {
-      outcome = this.putBack(step, did, held);
+      outcome = this.putBack(step, did, held, () => this.tell(report, { restored: [did.path] }));
     } catch (error) {
       // A link on its way now: nothing is followed to find what was moved aside there.
       if (!(error instanceof Failure && error.refusal.type === "sandbox")) throw error;
     }
-    if (outcome === "restored") report.restored.push(did.path);
     if (outcome === "changed") this.end(step, report, held);
   }
 
@@ -961,8 +997,7 @@ class Landing {
       const kept = look(this.bytes(step)) !== null;
       if (dir !== null && did.aside !== null && look(dir.at(did.aside)) !== null) {
         const beside = restore(dir, did.aside, parts.at(-1)!);
-        if (beside === null) report.restored.push(did.path);
-        else report.beside.push([did.path, [...parts.slice(0, -1), beside].join("/")]);
+        this.tell(report, beside === null ? { restored: [did.path] } : { beside: [[did.path, [...parts.slice(0, -1), beside].join("/")]] });
       } else if (did.moved && !kept && !(dir !== null && alike(look(dir.at(parts.at(-1)!)), did.was))) {
         // The file left its name, and is neither where the step moved it nor kept whole: it went with its folder,
         // wherever that is now. The record is all that names it, so it stays, and says so at every start.
@@ -1084,6 +1119,58 @@ function sagaNames(kept: string, saga: string): string[] {
   return readdirSync(folder);
 }
 
+// What recoveries in a folder put back, or beside its name, that no landing has told yet, kept beside the records of
+// the folder's landings: each written there before the record of the step it tells of goes.
+export const UNTOLD = ".untold.json";
+interface Untold {
+  restored: string[];
+  beside: Array<[string, string]>;
+}
+
+/** What recoveries in the folder whose landings keep what they replace in *kept* put back or beside its name, untold yet. */
+export function untoldIn(kept: string): Untold {
+  let value: unknown = null;
+  try {
+    value = JSON.parse(readFileSync(join(kept, UNTOLD), "utf8"));
+  } catch {
+    // Nothing untold, or nothing that can be read.
+  }
+  const { restored, beside } = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  const path = (one: unknown): one is string => typeof one === "string" && landable(one);
+  return {
+    restored: Array.isArray(restored) ? restored.filter(path) : [],
+    beside: Array.isArray(beside) ? beside.filter((one): one is [string, string] => Array.isArray(one) && one.length === 2 && path(one[0]) && path(one[1])) : [],
+  };
+}
+
+// *found* added to what is untold in *kept*: whole or not at all, and on disk before anything after it.
+function untell(kept: string, found: Partial<Untold>): void {
+  const now = untoldIn(kept);
+  const told: Untold = { restored: [...now.restored, ...(found.restored ?? [])], beside: [...now.beside, ...(found.beside ?? [])] };
+  const at = join(kept, UNTOLD);
+  io(at, () => {
+    const fd = openSync(`${at}.new`, "w", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(told));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(`${at}.new`, at);
+  });
+  syncDir(kept);
+}
+
+// What a put-back answers: what recoveries in the folder put back or beside its name that is untold yet, with what is
+// there that cannot be put back now (*report*). A landing's answer goes to the server, which tells the person: once it
+// answers, that is told. A recovery's answer, or one the app asks for itself (*tells* false), tells nobody.
+function answered(report: Recovered, context: Context, tells: boolean): Recovered {
+  const { kept, copy } = context.landing!;
+  const untold = untoldIn(kept);
+  if (tells && copy !== undefined) remove(join(kept, UNTOLD));
+  return { restored: untold.restored, beside: untold.beside, lost: report.lost, unread: report.unread };
+}
+
 /**
  * The steps of the landing *saga* that a landing's helper holds a record of in *kept*, where its folder's landings keep
  * what they replace, each with the file its record names: null for a record that cannot be read. The app reads them
@@ -1146,7 +1233,7 @@ export function recover(context: Context): Recovered {
     if (saga.startsWith(FORGOTTEN)) rmSync(join(kept, saga), { recursive: true, force: true });
     if (!SAGA.test(saga)) continue;
     try {
-      new Landing(context, saga).mend(report);
+      new Landing(context, saga, true).mend(report);
     } catch (error) {
       failures.push(error);
     }
@@ -1166,7 +1253,7 @@ export function land(args: Record<string, unknown>, context: Context): unknown {
   // A recovery's helper, given no copy, lands nothing: anything but its put-back is refused before the folder is touched.
   if (context.landing.copy === undefined && action !== "recover") throw new Failure({ type: "unsupported", message: ONLY_RECOVERS });
   const report = recover(context);
-  if (action === "recover") return report;
+  if (action === "recover") return answered(report, context, args.tell !== false);
   if (action === "revisions") {
     if (!Array.isArray(paths) || paths.length > MAX_LOOKED) throw valueError(BAD);
     const revisions = paths.map((one): [string, string] => [one as string, revision(context.folder, partsOf(one), one as string)]);

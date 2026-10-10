@@ -7,7 +7,7 @@
 // it at the folder's path. Its own kinds go where each is done (history/kinds.ts): a
 // checkpoint and a step of its history to git in the guest, for its copy; a landing's
 // steps to the landing's own host on the folder itself. What a landing cut short in a
-// folder is put back as the executor starts, and before a thread's step reads the folder.
+// folder is put back as the executor starts, and before any request of its history reads it.
 
 import type { FolderGuards } from "../binding/folder.js";
 import { Copies, type Making } from "../history/copies.js";
@@ -42,8 +42,10 @@ export class VmExecutor implements Executor {
 
   constructor(private readonly options: VmExecutorOptions) {
     // A copy that is its thread's no more: the hosts on it go before the thread's next operation.
+    // A request to a folder's history reads the folder only once what a landing cut short there is put back.
     this.copies = new Copies({
       dataDir: options.dataDir, user: options.user, vm: options.vm, replaced: (root) => this.files.replaced(root), making: (event) => options.making?.(event),
+      readable: (folder, signal) => this.files.recoverBefore(folder, signal),
     });
     // The guest's root goes before its file host lets the folder go: what its
     // commands left running must not outlive the folder's lock and its hook guard.
@@ -88,22 +90,17 @@ export class VmExecutor implements Executor {
   }
 
   // One of a thread's own kinds, where it is done. Refused again here: admit's answer is not this run's.
-  private async thread(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+  private thread(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     const { binding, deleted } = this.bound(operation);
     const refused = refusedOf(operation, binding, deleted);
-    if (refused || !binding) return refused ?? FOLDER_UNAVAILABLE;
+    if (refused || !binding) return Promise.resolve(refused ?? FOLDER_UNAVAILABLE);
     if (operation.kind === "land") return this.files.land(operation, signal);
     const root = operation.sessionId;
     const { action, ...args } = operation.args;
-    if (operation.kind === "history") {
-      // A turn's open and a pickup read the folder, and would take a file a landing cut short beside its name for one its
-      // user deleted: what was cut short is put back first, or neither is asked.
-      const left = action === "open" || action === "pickup" ? await this.files.recoverBefore(binding, signal) : null;
-      return left ?? this.copies.ask(root, binding, String(action), args, signal);
-    }
+    if (operation.kind === "history") return this.copies.ask(root, binding, String(action), args, signal);
     // The cloud's checkpoint by the history's own names: a take is its snapshot, and a restore's hash its commit.
     const asked = checkpointOf(operation.args);
-    return asked ? this.copies.ask(root, binding, asked.action, asked.args, signal) : NOT_A_CHECKPOINT;
+    return asked ? this.copies.ask(root, binding, asked.action, asked.args, signal) : Promise.resolve(NOT_A_CHECKPOINT);
   }
 
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { downloadSaver } from "../src/browser/downloads.js";
+import { untoldIn } from "../src/files/land.js";
 import { kinds, perform } from "../src/files/operations.js";
 import { type Copy, type Handle, historyOff, type Opened } from "../src/history/copies.js";
 import { keyOf } from "../src/history/place.js";
@@ -20,7 +21,7 @@ import { LOCK_WAIT_MS } from "../src/hosts/folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
   APP_DIRS, type BoundFolder, CANCELLED, folderBusy, forkHost, type Guard, HOST_STOPPED, type HostProcess, LAND_WAIT_MS, NODE, NOT_BOUND, nothingToLand, QUIT_STEP_MS,
-  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, type ThreadCopies, ToolHosts, type ToolHostsOptions,
+  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 import { asItLies } from "./as-it-lies.js";
 
@@ -2310,7 +2311,9 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(executor.recoveries()).toEqual([{ folder, state: "found", found: putBack }]);
     expect(lies(folder)).toEqual(before);
     expect(lstatSync(join(folder, "a.txt")).ino).toBe(was);
-    expect(readdirSync(join(base, "data", "landings", keyOf(folder)))).toEqual([]);
+    // What it put back is kept, untold, for the thread's next landing to tell.
+    expect(readdirSync(join(base, "data", "landings", keyOf(folder)))).toEqual([".untold.json"]);
+    expect(untoldIn(join(base, "data", "landings", keyOf(folder)))).toEqual({ restored: ["a.txt"], beside: [] });
   });
 
   it("says a folder that is gone and leaves what its landings keep as it was, and says a record of theirs it cannot read and does nothing for it", async () => {
@@ -2386,14 +2389,95 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
   it("puts back what a landing cut short before a thread's open or pickup reads the folder, where no landing's host is on it", async () => {
     const { folder, before } = await killed();
     const { executor, told } = startedAgain();
-    const bound = { folder, ...identities.get(folder)!, history: ROOT_A };
-    expect(await executor.recoverBefore(bound, signal())).toBeNull();
+    expect(await executor.recoverBefore(folder, signal())).toBeNull();
     expect(told).toEqual([{ folder, state: "begun" }, { folder, state: "found", found: putBack }]);
     expect(lies(folder)).toEqual(before);
     // Nothing is left to put back: the next read starts no host.
     const hosts = spawned.length;
-    expect(await executor.recoverBefore(bound, signal())).toBeNull();
+    expect(await executor.recoverBefore(folder, signal())).toBeNull();
     expect([told.length, spawned.length]).toEqual([2, hosts]);
+  });
+
+  it("reads the folder for a thread where a landing's host is on it only once that host holds it and its helper has put back what was cut short: one still waiting for the folder is no word that it has", { timeout: 90_000 }, async () => {
+    const { folder, before } = await killed();
+    const { executor, told } = startedAgain({ idleMs: 30_000, landWaitMs: 3_000 });
+    // A chat holds the folder: the start's put-back waits in vain, and so does the landing that comes after.
+    expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
+    executor.recoverLeft();
+    await until(() => told.length === 2, 15_000);
+    const hosts = spawned.length;
+    const landing = executor.land(step("recover"), signal());
+    await until(() => spawned.length === hosts + 1, 5_000);
+    expect(await executor.recoverBefore(folder, signal())).toEqual(stillCutShort(folder));
+    expect(await landing).toEqual(folderBusy(folder));
+    expect(existsSync(join(folder, "a.txt"))).toBe(false);
+    // Once the chat lets the folder go, the landing's host puts the file back, and the folder may be read.
+    await executor.dismiss(CHAT);
+    expect(await executor.land(step("recover"), signal())).toEqual({ ok: putBack });
+    expect(await executor.recoverBefore(folder, signal())).toBeNull();
+    expect(lies(folder)).toEqual(before);
+  });
+
+  it.each([
+    ["the folder made read-only", "a.txt", "."],
+    ["a folder in it made read-only", "docs/a.txt", "docs"],
+  ])("reads the folder for a thread where a landing's host is on it whose helper could not put back what was cut short there, %s, by no means: its failure is the answer, until it can", { timeout: 90_000 }, async (_, file, locked) => {
+    const folder = folders[ROOT_A] ?? "";
+    if (file !== "a.txt") {
+      for (const at of [folder, copies[ROOT_A] ?? ""]) mkdirSync(join(at, "docs"));
+      writeFileSync(join(folder, file), "the user's own\n");
+      writeFileSync(join(copies[ROOT_A] ?? "", file), "the thread's\n");
+      recorded(folder);
+      const cutting = threads({ spawnHost: upset() });
+      arm("kill");
+      const look = await cutting.land(step("revisions", { paths: [file] }), signal()) as { ok: { revisions: Array<[string, string]> } };
+      const apply = step("apply", { saga: "s1", step: 0, path: file, before: blob("the user's own\n"), after: blob("the thread's\n"), expected: look.ok.revisions[0]?.[1] });
+      expect(await cutting.land(apply, signal())).toEqual(HOST_STOPPED);
+      await until(() => exits === 1);
+      await cutting.stop();
+    } else {
+      await killed();
+    }
+    expect(existsSync(join(folder, file))).toBe(false);
+    chmodSync(join(folder, locked), 0o555);
+    try {
+      const { executor, told } = startedAgain({ idleMs: 30_000 });
+      executor.recoverLeft();
+      await until(() => told.length === 2, 15_000);
+      const denied = `Permission denied: '${file}'`;
+      expect(told[1]).toEqual({ folder, state: "left", why: denied });
+      // The landing's first step fails as the put-back does; its host stays on the folder.
+      expect(await executor.land(step("recover"), signal())).toEqual({ error: { type: "os", code: "EACCES", message: denied } });
+      const refused = { error: { type: "unavailable", message: `What a landing cut short in ${folder} could not be put back, so the folder was not read: ${denied}` } };
+      expect(await executor.recoverBefore(folder, signal())).toEqual(refused);
+      expect(existsSync(join(folder, file))).toBe(false);
+      // Writable again: the landing's host's helper is asked once more, puts the file back, and the folder may be read.
+      chmodSync(join(folder, locked), 0o755);
+      expect(await executor.recoverBefore(folder, signal())).toBeNull();
+      expect(readFileSync(join(folder, file), "utf8")).toBe("the user's own\n");
+    } finally {
+      chmodSync(join(folder, locked), 0o755);
+    }
+  });
+
+  it("keeps what the start's put-back found beside a file until the thread's next landing is asked what was put back, through a quit and a start, and tells it once", { timeout: 90_000 }, async () => {
+    const { folder } = await killed();
+    writeFileSync(join(folder, "a.txt"), "made by you since\n");
+    const beside = { restored: [], beside: [["a.txt", "a (kept by Surogate).txt"]], lost: [], unread: [] };
+    const first = startedAgain();
+    first.executor.recoverLeft();
+    await until(() => first.told.length === 2);
+    expect(first.told[1]).toEqual({ folder, state: "found", found: beside });
+    await first.executor.stop();
+    // A quit, and a start: nothing is left to put back, and what was found is there for whoever shows it.
+    const second = startedAgain();
+    second.executor.recoverLeft();
+    expect(second.executor.recoveries()).toEqual([{ folder, state: "found", found: beside }]);
+    // The thread's next landing is asked what was put back, as the server asks it: it is told, once.
+    expect(await second.executor.land(step("recover"), signal())).toEqual({ ok: beside });
+    expect(await second.executor.land(step("recover"), signal())).toEqual({ ok: { restored: [], beside: [], lost: [], unread: [] } });
+    expect(readdirSync(join(base, "data", "landings", keyOf(folder)))).toEqual([]);
+    expect(readFileSync(join(folder, "a (kept by Surogate).txt"), "utf8")).toBe("the user's own\n");
   });
 
   it("starts no landing's host for a first step cancelled while its thread's copy was opened: a chat on the folder is served past the idle time", { timeout: 90_000 }, async () => {

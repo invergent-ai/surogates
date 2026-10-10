@@ -62,6 +62,8 @@ let holding: Set<string>;
 let unanswered: Array<() => void>;
 // What a host started to put back what a landing cut short says at its start in place of ready, where a test says.
 let recoveryStarts: Extract<FromHost, { type: "failed" }> | null;
+// What a landing's or a recovery's helper answers a step of the land kind with in place of doing it, where a test says.
+let landRefuses: ((args: Record<string, unknown>) => Outcome | undefined) | undefined;
 
 // A step's record, as a landing's helper writes it before the step changes anything (files/land.ts).
 const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0 });
@@ -107,7 +109,8 @@ function host(): HostProcess {
         if (failing) exits.splice(0).forEach((listener) => listener());
       } else if (message.type === "op") {
         ops.push({ held, kind: message.kind, args: message.args });
-        const answer = () => say({ ok: message.kind === "land" && kept ? land(message.args) : (answers[message.kind] ?? (() => ({ did: message.kind })))(message.args) });
+        const refused = message.kind === "land" ? landRefuses?.(message.args) : undefined;
+        const answer = () => say(refused ?? { ok: message.kind === "land" && kept ? land(message.args) : (answers[message.kind] ?? (() => ({ did: message.kind })))(message.args) });
         if (holding.has(String(message.args.action))) unanswered.push(answer);
         else answer();
       } else if (message.type === "refusal") say({ ok: null });
@@ -152,6 +155,7 @@ beforeEach(() => {
   unanswered = [];
   bindings = new Map();
   recoveryStarts = null;
+  landRefuses = undefined;
   bind(THREAD, true);
   bind(CHAT, false);
   executor = executorOf();
@@ -769,16 +773,86 @@ describe("what a landing cut short in a thread's folder, put back through the ap
     expect(recoveries()).toHaveLength(2);
   });
 
-  it("put nothing back for them where a landing's host is on the folder: its helper's first step put back what was cut short", async () => {
+  it("read the folder where a landing's host is on it only once that host's helper has put back what was cut short there, as its last step's answer says, or as it says when asked", async () => {
     await executor.run(op("resolve", { path: "" }), signal());
     left();
-    expect(await executor.run({ ...op("land", { action: "recover" }), invocationId: "land:turn-1:hold" }, signal())).toEqual({ ok: nothing });
+    const landing = (args: Record<string, unknown>): Operation => ({ ...op("land", args), invocationId: "land:turn-1" });
+    const asks = () => ops.filter((done) => done.kind === "land" && done.args.action === "recover" && done.args.tell === false);
+    // Its first step answered: every land step puts back first, so nothing is left aside, and its helper is asked nothing more.
+    expect(await executor.run(landing({ action: "recover" }), signal())).toEqual({ ok: nothing });
     expect(await executor.run(history("pickup"), signal())).toEqual({ ok: {} });
-    expect(recoveries()).toEqual([]);
-    // Nor where the folder's landings keep nothing.
+    expect([recoveries(), asks()]).toEqual([[], []]);
+    // A step it failed may have been its put-back failing: its helper is asked again before the folder is read, and its
+    // failure answers the read.
+    const denied = { error: { type: "os", code: "EACCES", message: "Permission denied: 'a.txt'" } };
+    landRefuses = () => denied;
+    expect(await executor.run(landing({ action: "revisions", paths: ["a.txt"] }), signal())).toEqual(denied);
+    expect(await executor.run(history("pickup"), signal())).toEqual({
+      error: { type: "unavailable", message: `What a landing cut short in ${folder} could not be put back, so the folder was not read: Permission denied: 'a.txt'` },
+    });
+    expect([actions(), asks().length, recoveries()]).toEqual([["open", "pickup"], 1, []]);
+    // Once its helper puts it back, the folder is read.
+    landRefuses = undefined;
+    expect(await executor.run(history("pickup"), signal())).toEqual({ ok: {} });
+    expect([actions(), asks().length]).toEqual([["open", "pickup", "pickup"], 2]);
+    // Nor is anything asked where the folder's landings keep nothing.
     rmSync(join(realpathSync(dataDir), "landings"), { recursive: true });
     expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual({ ok: { copy: "made" } });
     expect(recoveries()).toEqual([]);
+  });
+
+  it("ask a landing's host nothing while its landing ends a step alone: the read is answered busy, and asked again once that step has ended", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    const landing = (args: Record<string, unknown>): Operation => ({ ...op("land", args), invocationId: "land:turn-1" });
+    const asks = () => ops.filter((done) => done.kind === "land" && done.args.tell === false);
+    // A step it failed: what was cut short may not be back.
+    landRefuses = (args) => (args.action === "revisions" ? { error: { type: "os", code: "EIO", message: "I/O error: 'a.txt'" } } : undefined);
+    await executor.run(landing({ action: "revisions", paths: ["a.txt"] }), signal());
+    // Its forgetting runs alone, its helper's part of it held.
+    holding.add("forget");
+    const forgetting = executor.run(landing({ action: "forget", saga: "saga-1", applied: [{ step: 0, path: "a.txt", before: null, after: "c".repeat(40) }] }), signal());
+    await until(() => ops.some((done) => done.kind === "land" && done.args.action === "forget"));
+    expect(await executor.run(history("pickup"), signal())).toEqual({
+      error: { type: "busy", message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+    });
+    expect([asks(), actions()]).toEqual([[], ["open", "forget"]]);
+    holding.delete("forget");
+    for (const answer of unanswered.splice(0)) answer();
+    expect(await forgetting).toEqual({ ok: {} });
+  });
+
+  it("read the folder by no request of its history, whoever asks it, before what was cut short there is put back: only a checkpoint, in the copy alone, and a landing's forgetting, which reads the folder only to refuse, are asked", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    recoveryStarts = { type: "failed", message: "another chat on this computer is working in this folder; this one can use it once that one is done", busy: true };
+    const busy = {
+      error: { type: "busy", message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+    };
+    for (const action of ["changed", "fetch", "pickup", "commit", "record", "keep"]) expect(await executor.run(history(action), signal()), action).toEqual(busy);
+    expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual(busy);
+    expect(actions()).toEqual(["open"]);
+    expect(await executor.run({ ...op("checkpoint", { action: "take", reason: "before write_file" }), invocationId: "checkpoint:turn-1:1:call-1" }, signal())).toMatchObject({ ok: {} });
+    expect(await executor.run({ ...op("land", { action: "forget", saga: "saga-1", applied: [{ step: 0, path: "a.txt", before: null, after: "c".repeat(40) }] }), invocationId: "land:turn-1" }, signal())).toEqual({ ok: {} });
+    expect(actions()).toEqual(["open", "snapshot", "forget"]);
+  });
+
+  it("make no first copy of the folder for a thread, after the app started again, before what was cut short there is put back", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    await executor.stop();
+    [asked, starts, ops] = [[], [], []];
+    holding.add("recover");
+    executor = executorOf();
+    // The thread's first operation since: its copy is opened by the app, which reads the folder where the copy was cut.
+    const first = executor.run(op("resolve", { path: "" }), signal());
+    await until(() => ops.some((done) => done.args.action === "recover"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(actions()).toEqual([]);
+    holding.delete("recover");
+    for (const answer of unanswered.splice(0)) answer();
+    expect(await first).toEqual({ ok: "" });
+    expect(actions()).toEqual(["open"]);
   });
 
   it("answer a pickup and a turn's open busy, and ask the guest nothing, where another holds the folder for as long as the recovery waits for it", async () => {
