@@ -130,11 +130,10 @@ describe("the file helper on a thread's copy", () => {
       mkdirSync(left, { recursive: true });
       writeFileSync(join(left, "1"), "what a forgetting cut short left\n");
     };
-    // What a landing's helper does before it is ready shows here: it clears what a forgetting cut short left.
+    // Nor does a landing's helper put anything back before it is asked: it says it is ready at once.
     leave();
     expect(await started({ SUROGATE_COPY: copy, SUROGATE_KEPT: kept })).toMatchObject({ said: '{"ready":true}\n', code: 0 });
-    expect(existsSync(left)).toBe(false);
-    leave();
+    expect(readdirSync(left)).toEqual(["1"]);
     const both = "the file helper's SUROGATE_AT is for a thread's copy: a landing's helper works in the folder itself, and is given none\n";
     const landings: Array<Record<string, string>> = [{ SUROGATE_COPY: copy, SUROGATE_KEPT: kept }, { SUROGATE_COPY: copy }, { SUROGATE_KEPT: kept }];
     for (const landing of landings) {
@@ -196,6 +195,32 @@ describe("the file helper", () => {
     const landing = await lines([look], 2, { SUROGATE_COPY: join(base, "copy"), SUROGATE_KEPT: join(base, "kept") });
     expect(landing[1]).toMatchObject({ id: "1", outcome: { ok: { revisions: [["a.txt", expect.stringMatching(/^\d+:\d+:6:/)], ["b.txt", "absent"]] } } });
   });
+
+  it("only puts back what a landing cut short, as a recovery's helper, given where the folder's landings keep and no copy: when it is asked, and nothing else", async () => {
+    const kept = join(base, "kept");
+    const left = join(kept, ".forgotten-0f6d1c5e");
+    mkdirSync(left, { recursive: true });
+    writeFileSync(join(left, "1"), "what a forgetting cut short left\n");
+    const only = { error: { type: "unsupported", message: "This computer only puts back here what a landing cut short in the folder" } };
+    const asks = [
+      { kind: "read", args: { key: `${base}/a.txt`, max_bytes: null } },
+      { kind: "write", args: { key: `${base}/b.txt`, data: Buffer.from("over the user's\n").toString("base64") } },
+      { kind: "delete", args: { key: `${base}/a.txt` } },
+      { kind: "land", args: { action: "revisions", paths: ["a.txt"] } },
+      { kind: "land", args: { action: "apply", saga: "s1", step: 1, path: "b.txt", before: null, after: "0".repeat(40), expected: "absent" } },
+      { kind: "land", args: { action: "unapply", saga: "s1", step: 1, path: "a.txt" } },
+      { kind: "land", args: { action: "forget", saga: "s1" } },
+      { kind: "no-such-kind", args: {} },
+    ];
+    const heard = await lines(asks.map((ask, id) => JSON.stringify({ id: String(id), ...ask })), asks.length + 1, { SUROGATE_KEPT: kept });
+    expect(heard[0]).toEqual({ ready: true });
+    expect(answered(heard)).toEqual(asks.map((_, id) => ({ id: String(id), outcome: only })));
+    // Nothing was touched: not the folder, and not what its landings keep.
+    expect([readdirSync(base).sort(), readdirSync(left)]).toEqual([["a.txt", "kept"], ["1"]]);
+    const recovered = await lines([JSON.stringify({ id: "r", kind: "land", args: { action: "recover" } })], 2, { SUROGATE_KEPT: kept });
+    expect(recovered[1]).toEqual({ id: "r", outcome: { ok: { restored: [], beside: [], lost: [], unread: [] } } });
+    expect(existsSync(left)).toBe(false);
+  });
 });
 
 describe("the folders a file helper is given, as its host found them when it checked them", () => {
@@ -208,7 +233,7 @@ describe("the folders a file helper is given, as its host found them when it che
   let copy = "";
   let kept = "";
   let other = "";
-  // What a landing's helper does to its kept folder before it is ready shows here: it clears what a forgetting cut short left.
+  // What a landing's helper puts right in its kept folder once it is asked shows here: it clears what a forgetting cut short left.
   const left = () => join(kept, ".forgotten-0f6d1c5e");
   beforeEach(() => {
     [copy, kept, other] = [join(base, "copy"), join(base, "kept"), join(base, "other")];
@@ -221,6 +246,15 @@ describe("the folders a file helper is given, as its host found them when it che
     expect(await started({ SUROGATE_FOLDER_IS: is(base), SUROGATE_AT: join(dirname(base), "Reports") })).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
     const landing = { SUROGATE_FOLDER_IS: is(base), SUROGATE_COPY: copy, SUROGATE_COPY_IS: is(copy), SUROGATE_KEPT: kept, SUROGATE_KEPT_IS: is(kept) };
     expect(await started(landing)).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
+    expect(readdirSync(left())).toEqual(["1"]);
+    const recovered = await lines([JSON.stringify({ id: "1", kind: "land", args: { action: "recover" } })], 2, landing);
+    expect([recovered[1], existsSync(left())]).toEqual([{ id: "1", outcome: { ok: { restored: [], beside: [], lost: [], unread: [] } } }, false]);
+    // And a recovery's, with the kept folder its host checked and no copy.
+    mkdirSync(left(), { recursive: true });
+    writeFileSync(join(left(), "1"), "what a forgetting cut short left\n");
+    const recovery = { SUROGATE_FOLDER_IS: is(base), SUROGATE_KEPT: kept, SUROGATE_KEPT_IS: is(kept) };
+    expect(await started(recovery)).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
+    expect((await lines([JSON.stringify({ id: "1", kind: "land", args: { action: "recover" } })], 2, recovery))[1]).toMatchObject({ outcome: { ok: { restored: [] } } });
     expect(existsSync(left())).toBe(false);
     // What it is told of them is its own to go by: no request, and nothing it starts, is given it.
     const heard = await lines([JSON.stringify({ id: "1", kind: "ripgrep", args: { key: base, mode: "files", pattern: "*.txt", glob: null, context: 0 } })], 2, { SUROGATE_FOLDER_IS: is(base) });
@@ -247,7 +281,7 @@ describe("the folders a file helper is given, as its host found them when it che
     try {
       for (const [what, told, why] of refusals) {
         expect(await started(told), what).toEqual({ said: "", failed: why, code: 2 });
-        // Not even what a landing's helper puts right before it is ready.
+        // Nothing of what a landing's helper would put right once asked.
         expect(readdirSync(left()), what).toEqual(["1"]);
       }
       expect(refusals.map(([, , why]) => why).filter((why) => why.includes(copy) || why.includes(kept))).toEqual([]);

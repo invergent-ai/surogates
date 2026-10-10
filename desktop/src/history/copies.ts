@@ -69,6 +69,10 @@ export interface CopiesOptions {
   making?(event: Making): void;
   // How long an open runs before an answer that is no copy is taken as the history's bound cutting it.
   cutMs?: number;
+  // Asked before any request to a folder's history that may read the folder itself, *folder*: null where it may be read
+  // now, or what the request is answered instead, and nothing is asked. A landing cut short there may have left a file of
+  // the user's beside its name, which a read would take for one the user deleted (hosts/tool-hosts.ts, recoverBefore).
+  readable?(folder: string, signal: AbortSignal): Promise<Outcome | null>;
 }
 
 export const PLACE_IDLE_MS = 120_000;
@@ -115,6 +119,11 @@ const AS_IT_WAS: ReadonlySet<unknown> = new Set<HistoryCode>(["not_a_request", "
 // The agent's own "value" is a request it would not take, and ran nothing of.
 const asItWas = (outcome: Outcome): boolean =>
   "error" in outcome && (outcome.error.type === "value" || (outcome.error.type === "history" && AS_IT_WAS.has(outcome.error.code)));
+
+// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, in the copy and the history
+// alone; and a landing's forgetting, which refuses where a file is not what was there before, as one moved aside is
+// not, and which is asked from inside its landing's last step, where waiting for that landing would wait for itself.
+const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "forget"]);
 
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not make this thread's copy of its folder: ${why}` },
@@ -361,6 +370,9 @@ export class Copies {
   // path is the whole copy, another one where the guest made it again, and anything else there is none.
   // STALE where the place was let go before the open could be asked.
   private async opened(known: Known, place: Place, root: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome | typeof STALE> {
+    // Refused before it reads the folder: the copy is as it was.
+    const refused = await this.readable(place, signal);
+    if (refused) return refused;
     // Not known as whole: the guest may make it, which takes as long as the folder is large.
     const making = !known.copies.has(root);
     known.copies.delete(root);
@@ -389,11 +401,20 @@ export class Copies {
     return outcome;
   }
 
+  // Null where *place*'s folder may be read now; otherwise what a request that reads it is answered instead.
+  private async readable(place: Place, signal: AbortSignal): Promise<Outcome | null> {
+    return (await this.options.readable?.(place.real.path, signal)) ?? null;
+  }
+
   // One request to *place*'s history for *root*'s copy, the place held in the guest while it runs: once
   // every letting go of the place asked before it has ended, or STALE where one let it go for another.
   private async request(
     known: Known, place: Place, root: string, action: string, args: Record<string, unknown>, signal: AbortSignal, sent?: () => void,
   ): Promise<Outcome | typeof STALE> {
+    // Every request but those reads the folder only once what a landing cut short there is back at its name; an open
+    // was asked so already, before anything of the copy was let go for it (opened).
+    const refused = NOT_READING.has(action) || action === "open" ? null : await this.readable(place, signal);
+    if (refused) return refused;
     await this.settled(place.key);
     if (this.known.get(place.key) !== known) return STALE;
     const held = this.hold(place);

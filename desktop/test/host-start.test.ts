@@ -9,10 +9,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
-import { copyOf, keptOf, placeOf } from "../src/history/place.js";
+import { copyOf, keptOf, keyOf, placeOf } from "../src/history/place.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { sandboxPolicy } from "../src/hosts/policy.js";
-import { LANDING_READY_MS, noCopyAt, READY_MS, type Start, startOn } from "../src/hosts/start.js";
+import { noCopyAt, READY_MS, type Start, startOn } from "../src/hosts/start.js";
 
 const KEY = "0123456789abcdef";
 const THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
@@ -407,6 +407,77 @@ describe("what a landing's host is given beside the folder", () => {
   });
 });
 
+describe("what a recovery's host is started on", () => {
+  // What the folder's landings keep, where the app keeps it for that folder: under the folder's key.
+  const keeps = () => join(dataDir, "landings", keyOf(folder));
+  beforeEach(() => mkdirSync(keeps(), { recursive: true }));
+
+  it("is the folder itself, as a chat's, with what its landings keep to write, and no copy: its helper is asked the land kind alone, and runs no command", () => {
+    const { dev, ino } = statSync(folder);
+    const checked = started({ recovery: { kept: keeps() } });
+    expect(checked).toMatchObject({
+      ok: true, path: folder, dev, ino, reads: [], writes: [keeps()], env: { SUROGATE_KEPT: keeps() }, commands: false, only: "land", readyMs: READY_MS,
+    });
+    // Its helper is told which folder the kept folder is, once its host holds the folder; nothing is made for it.
+    expect(checked.make()).toEqual({ made: [], env: { SUROGATE_KEPT_IS: is(keeps()) } });
+    expect(checked.replaced).toBe(`the folder at ${folder} is not the one a landing was cut short in`);
+    expect(checked.named(`bwrap: ${keeps()}`)).toBe(`bwrap: ${keeps()}`);
+    // Its sandbox writes the folder and the kept folder, and reads nothing else of the app's data.
+    const policy = sandboxPolicy({ folder: checked.path, tmp: "/t", appDirs: ["/app"], reads: checked.reads, writes: checked.writes });
+    expect(policy.filesystem.allowWrite).toEqual([folder, "/t", keeps()]);
+    for (const other of [copy, join(dataDir, "history", KEY), join(dataDir, "history"), dataDir]) {
+      expect((policy.filesystem.allowRead ?? []).some((path) => path === other || other.startsWith(`${path}/`)), other).toBe(false);
+    }
+  });
+
+  it("is given what a place set aside since kept, under the folder's own key", () => {
+    const aside = `${keeps()}.was-1700000000000`;
+    mkdirSync(aside);
+    expect(started({ recovery: { kept: aside } })).toMatchObject({ ok: true, path: folder, writes: [aside] });
+  });
+
+  it("is refused for what is kept of another folder, a name that is no place's, a link at it or on its way, or nothing there", () => {
+    const no = (kept: unknown, why: RegExp) => refused({ recovery: { kept: kept as string } }, why, JSON.stringify(kept));
+    const notWhere = new RegExp(`^what this recovery is given is not where the app keeps what ${folder}'s landings replaced$`);
+    const notOwn = new RegExp(`^what the app keeps of ${folder}'s landings is not a folder of the app's own$`);
+    for (const other of ["fedcba9876543210", `${keyOf(folder)}.was-x`, `${keyOf(folder)}.old`, `${keyOf(folder)}.was-`, ".."]) {
+      mkdirSync(join(dataDir, "landings", other), { recursive: true });
+      no(join(dataDir, "landings", other), notWhere);
+    }
+    for (const other of [join(dataDir, "landings"), `${keeps()}/`, join(keeps(), "s1"), join(folder, "kept"), join(dataDir, "history", keyOf(folder)), 7, null]) no(other, notWhere);
+    expect(on({ recovery: "kept" as unknown as { kept: string } })).toMatchObject({ ok: false, missing: false });
+    // A link where it is, or where every folder's is: what it puts back would be read wherever that leads.
+    rmSync(keeps(), { recursive: true });
+    no(keeps(), notOwn);
+    symlinkSync(folder, keeps());
+    no(keeps(), notOwn);
+    rmSync(keeps());
+    writeFileSync(keeps(), "");
+    no(keeps(), notOwn);
+    rmSync(join(dataDir, "landings"), { recursive: true });
+    mkdirSync(join(base, "elsewhere", keyOf(folder)), { recursive: true });
+    symlinkSync(join(base, "elsewhere"), join(dataDir, "landings"));
+    no(keeps(), notOwn);
+  });
+
+  it("is never also a landing's or a copy's, and says the folder is not there as a chat's does", () => {
+    refused({ recovery: { kept: keeps() }, landing: { copy, kept } }, /names more than one/);
+    refused({ recovery: { kept: keeps() }, folder: copy, at: folder }, /names more than one/);
+    expect(held({ recovery: { kept: keeps() }, folder: join(home, "gone") })).toMatchObject({ ok: false, missing: true });
+  });
+
+  it("holds nothing of the app's data but what the folder's landings keep through its working folder or what every sandbox reads, and says why not by the folder", () => {
+    const place = join(dataDir, "history", KEY);
+    for (const tmp of [join(place, "tmp"), place, join(dataDir, "history"), join(dataDir, "landings", "fedcba9876543210")]) {
+      const checked = on({ recovery: { kept: keeps() }, tmp });
+      expect(checked, tmp).toMatchObject({ ok: false, missing: false, message: expect.stringMatching(/^this recovery's sandbox would be given /) });
+    }
+    const checked = startOn(start({ recovery: { kept: keeps() } }), home, [join(base, "app"), place]);
+    expect(checked).toMatchObject({ ok: false, missing: false });
+    expect(!checked.ok && checked.message).not.toContain(keeps());
+  });
+});
+
 describe("what a file helper is started with", () => {
   it("is nothing beside its folder for a chat, the folder's path for a copy, and the copy and the kept folder for a landing", () => {
     expect(started({}).env).toEqual({});
@@ -436,16 +507,9 @@ describe("what a file helper is started with", () => {
     expect(started({})).not.toHaveProperty("only");
     expect(started({ folder: copy, at: folder })).toMatchObject({ commands: true, readyMs: READY_MS });
     expect(started({ folder: copy, at: folder })).not.toHaveProperty("only");
-    expect(started({ landing: { copy, kept } })).toMatchObject({ commands: false, only: "land", readyMs: LANDING_READY_MS });
-  });
-
-  it("has as long to be ready, for a landing, as a put-back of the largest file a folder's landings keep takes on a slow disk", () => {
-    // What a chat's helper has is what it had: it does nothing before it is ready.
+    // A landing's helper has as long to be ready as a chat's: it puts back what a step cut short in the first step it is asked.
+    expect(started({ landing: { copy, kept } })).toMatchObject({ commands: false, only: "land", readyMs: READY_MS });
     expect(READY_MS).toBe(15_000);
-    // A landing's puts back what a step cut short left first: a copy of the file the step replaced, of up to the
-    // 4 GiB a folder's landings keep, where the app's data is on another filesystem than the folder. Measured on a
-    // server's own disk, at some 230 MiB a second, that took 17.9 s. At 2 MiB a second it takes 2,048 s.
-    expect(LANDING_READY_MS).toBe(15_000 + 2_048_000);
   });
 });
 
