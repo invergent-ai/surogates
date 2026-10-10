@@ -502,16 +502,21 @@ export class Guest {
     }
   }
 
-  /** The place of *key* leaves the guest: the agent lets both mounts go, then the two shares are removed. */
-  async unplace(key: string): Promise<void> {
-    const known = this.places.get(key);
-    if (!known) return;
+  /**
+   * *place* leaves the guest: the agent lets both mounts go, then the two shares are removed. Only
+   * the place it holds for that folder and history: false for any other, which is left as it is.
+   */
+  async unplace(place: Place): Promise<boolean> {
+    const known = this.places.get(place.key);
+    if (!known || !samePlace(known.place, place)) return false;
     const placed = await known.placed.catch(() => null);
-    if (this.places.get(key) === known) this.places.delete(key);
-    if (!placed || this.left) return;
+    if (this.places.get(place.key) !== known) return false;
+    this.places.delete(place.key);
+    if (!placed || this.left) return true;
     // Unanswered: the agent is stuck, and the guest goes.
-    if (!(await this.request({ type: "unplace", key }, this.setupMs))) return this.lose();
-    for (const share of [placed.real, placed.history]) await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+    if (!(await this.request({ type: "unplace", key: place.key }, this.setupMs))) this.lose();
+    else for (const share of [placed.real, placed.history]) await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+    return true;
   }
 
   /**
@@ -647,7 +652,7 @@ export class VmManager {
   // The chats told that their commands run emulated: once a chat, whichever boot it was in.
   private readonly noticed = new Set<string>();
   // Each place the guest is letting go, until it has: asked for again meanwhile, it is added once it has gone.
-  private readonly leaving = new Map<string, Promise<void>>();
+  private readonly leaving = new Map<string, Promise<unknown>>();
   // Each place being asked for, by its key, until it is answered: let go meanwhile, it goes once it is.
   private readonly placing = new Map<string, Set<Promise<unknown>>>();
   // What each device's browser may open of its chats' own servers, whichever guest runs.
@@ -703,13 +708,16 @@ export class VmManager {
   }
 
   /**
-   * The place of *key* leaves the guest, if one runs: no thread works on its folder any more. What
-   * is asked of a key is done in the order it was asked: a place asked for before this is answered
-   * first, and goes; one asked for meanwhile is another place, added once this one has gone. Never rejects.
+   * *place* leaves the guest, if one runs: no thread works on its folder any more. True once it
+   * has; false where the guest holds no place for that folder and history under its key, as for a
+   * folder that was refused the key: nothing of the one that holds it is let go. What is asked of
+   * a key is done in the order it was asked: a place asked for before this is answered first, and
+   * goes; one asked for meanwhile is another place, added once this one has gone. Never rejects.
    */
-  unplace(key: string): Promise<void> {
+  unplace(place: Place): Promise<boolean> {
+    const { key } = place;
     const before = [this.leaving.get(key), ...(this.placing.get(key) ?? [])];
-    const gone = Promise.all(before).then(() => this.letGo(key));
+    const gone = Promise.all(before).then(() => this.letGo(place));
     this.leaving.set(key, gone);
     void gone.then(() => {
       if (this.leaving.get(key) === gone) this.leaving.delete(key);
@@ -717,11 +725,11 @@ export class VmManager {
     return gone;
   }
 
-  private async letGo(key: string): Promise<void> {
+  private async letGo(place: Place): Promise<boolean> {
     this.working += 1;
     try {
       const guest = await this.guest?.catch(() => null);
-      await guest?.unplace(key);
+      return (await guest?.unplace(place)) ?? false;
     } finally {
       this.done();
     }

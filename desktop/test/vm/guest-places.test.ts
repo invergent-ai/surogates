@@ -123,7 +123,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
   });
 
   it("lets the place go, its two shares with it, and takes it again", async () => {
-    await manager.unplace(KEY);
+    await manager.unplace(place);
     expect(Object.keys(daemons()).sort()).toEqual([copyOf("one"), copyOf("two")]);
     // Nothing of the folder or of its history went with the place, and nothing was put in the folder.
     expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);

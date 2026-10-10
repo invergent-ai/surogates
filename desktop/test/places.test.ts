@@ -332,7 +332,7 @@ describe("the VM manager, asked for a folder's place", () => {
     expect(asked).toEqual([
       ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2],
     ]);
-    await manager.unplace(KEY);
+    await manager.unplace(place());
     expect(asked.slice(3)).toEqual([["unmount", KEY], ["unshare", R2], ["unshare", R1]]);
     // A guest that holds no root and no place stops: the next place boots another, and is shared anew.
     expect(await manager.place(place(), signal())).toBeNull();
@@ -419,7 +419,7 @@ describe("the VM manager, asked for a folder's place", () => {
     }));
     expect(await manager.place(place(), signal())).toBeNull();
     hold();
-    const gone = manager.unplace(KEY);
+    const gone = manager.unplace(place());
     // Asked for at once: not the place being let go, whose mounts and shares are on their way out.
     const again = manager.place(place(), signal());
     await vi.waitFor(() => expect(unmounts()).toHaveLength(1));
@@ -436,7 +436,7 @@ describe("the VM manager, asked for a folder's place", () => {
     ]);
     // A cancel is answered at once, while it waits for a place on its way out too.
     hold();
-    const leaving = manager.unplace(KEY);
+    const leaving = manager.unplace(place());
     const cancel = new AbortController();
     const waiting = manager.place(place(), cancel.signal);
     await vi.waitFor(() => expect(unmounts()).toHaveLength(2));
@@ -462,9 +462,9 @@ describe("the VM manager, asked for a folder's place", () => {
       letGo = resolve;
     });
     // Let go, asked for again, and let go again, before the first has gone.
-    const first = manager.unplace(KEY);
+    const first = manager.unplace(place());
     const again = manager.place(place(), signal());
-    const last = manager.unplace(KEY);
+    const last = manager.unplace(place());
     await vi.waitFor(() => expect(asked.slice(3)).toEqual([["unmount", KEY]]));
     going = undefined;
     letGo();
@@ -489,7 +489,7 @@ describe("the VM manager, asked for a folder's place", () => {
       return boot(...args);
     });
     const placed = manager.place(place(), signal());
-    const gone = manager.unplace(KEY);
+    const gone = manager.unplace(place());
     expect(await placed).toBeNull();
     await gone;
     expect(asked).toEqual([
@@ -513,8 +513,8 @@ describe("the VM manager, asked for a folder's place", () => {
     going = new Promise<void>((resolve) => {
       letGo = resolve;
     });
-    const first = manager.unplace(KEY);
-    const second = manager.unplace(KEY);
+    const first = manager.unplace(place());
+    const second = manager.unplace(place());
     const again = manager.place(place(), signal());
     await vi.waitFor(() => expect(asked.slice(3)).toEqual([["unmount", KEY]]));
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -570,7 +570,7 @@ describe("the VM manager, asked for a folder's place", () => {
     expect(asked).toHaveLength(3);
     // The place it holds is as it was, and once let go its key is the other's to take.
     expect(await manager.place(place(), signal())).toBeNull();
-    await manager.unplace(KEY);
+    await manager.unplace(place());
     expect(await manager.place({ ...place(), history: join(dir, "other") }, signal())).toBeNull();
     expect(asked.slice(6)).toEqual([["share", join(dir, "other"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2]]);
     await manager.stop();
@@ -627,7 +627,7 @@ describe("the VM manager, asked for a folder's place", () => {
     expect(boots).toBe(1);
     expect(asked.filter((call) => (call as unknown[])[0] === "mount")).toHaveLength(1);
     await manager.teardown("root-1");
-    await manager.unplace(KEY);
+    await manager.unplace(place());
     expect(await work()).toEqual({ ok: true });
     expect(boots).toBe(2);
     await manager.stop();
@@ -655,19 +655,43 @@ describe("the VM manager, asked for a folder's place", () => {
     writeFileSync(join(dir, "store", "HEAD"), "ref: refs/heads/main\n");
     const manager = new VmManager(options(), recording([]));
     expect(await manager.place(place(), signal())).toBeNull();
-    await manager.unplace(KEY);
+    await manager.unplace(place());
     await manager.stop();
     expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);
     expect(readFileSync(join(dir, "Documents", "Report.docx"), "utf8")).toBe("the real report\n");
     expect(readdirSync(join(dir, "store"))).toEqual(["HEAD"]);
   });
 
+  it("lets go only of the place it holds for that folder and history: a folder refused a key takes nothing of its holder's", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    const copy = { path: join(dir, "copy"), ...statSync(join(dir, "copy")) };
+    mkdirSync(join(dir, "other"));
+    expect(await manager.place(place(), signal())).toBeNull();
+    // Another folder asks for the key, is refused, and lets go of what it never held; so does another history.
+    const others: Place[] = [{ ...place(), real: copy }, { ...place(), history: join(dir, "other") }, { ...place(), real: { ...place().real, ino: copy.ino } }];
+    for (const other of others) {
+      expect(await manager.place(other, signal())).toMatchObject({ error: { type: "unavailable" } });
+      expect(await manager.unplace(other)).toBe(false);
+    }
+    expect(asked).toHaveLength(3);
+    // The holder's threads work on: its place is the one that was mounted, and a root's command runs.
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(await manager.perform({ id: "1", root: "root-1", folder: copy, at: join(dir, "Documents"), kind: "which", args: { name: "sh" } }, signal())).toEqual({ ok: true });
+    expect(asked.filter((call) => ["unmount", "unshare", "mount"].includes((call as string[])[0]!))).toEqual([["mount", KEY, R1, R2]]);
+    // Its own letting go takes it, once.
+    expect(await manager.unplace(place())).toBe(true);
+    expect(await manager.unplace(place())).toBe(false);
+    expect(asked.filter((call) => ["unmount", "unshare"].includes((call as string[])[0]!))).toEqual([["unmount", KEY], ["unshare", R2], ["unshare", R1]]);
+    await manager.stop();
+  });
+
   it("lets go of nothing for a place it does not hold, and answers a place asked of a manager that is stopping", async () => {
     const asked: unknown[] = [];
     const manager = new VmManager(options(), recording(asked));
-    await manager.unplace(KEY);
+    await manager.unplace(place());
     expect(await manager.place(place(), signal())).toBeNull();
-    await manager.unplace("fedcba9876543210");
+    await manager.unplace({ ...place(), key: "fedcba9876543210" });
     expect(asked).toHaveLength(3);
     await manager.stop();
     expect(await manager.place(place(), signal())).toEqual({ error: { type: "unavailable", message: "This computer's sandbox is stopping" } });
