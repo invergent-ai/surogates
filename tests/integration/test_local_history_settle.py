@@ -364,6 +364,29 @@ async def test_a_landing_a_settle_began_on_is_settled_by_its_own_turn_taken_up_a
     assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)] and kept(here) == {}
 
 
+async def test_an_earlier_turns_landing_of_the_settling_thread_is_settled_under_its_own_lease(api, here, monkeypatch):
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
+    monkeypatch.setattr(local_landing, "BUSY_PATIENCE", 3.0)
+    _, master, thread = await begun_with_copy(api, here)
+    before = seen(here.folder)
+    with monkeypatch.context() as away:
+        # Its record is never answered: the landing is left unsettled, and its turn ends.
+        away.setattr(local_landing, "STEP_WAIT", 2)
+        frames = holding(here, lambda frame: frame["kind"] == "history" and frame["args"].get("action") == "record")
+        await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    del here.app._handle
+    assert [frame["invocation_id"] for frame in frames] == ["land:0"]
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    # Its next turn holds its own lease: it settles that landing first, from its record, then lands.
+    await woken(api, monkeypatch, thread, NEXT, said="Go on.")
+    assert asked_by(here, thread, f"land:{end.id}:settle:{saga_of_turn(thread)}") == ["fetch", "unapply", "unapply", "forget"]
+    first, second = await records(api, thread)
+    assert (first.saga_state, second.saga_state) == ("compensated", "completed")
+    assert sorted(f["path"] for f in second.files) == ["Budget.xlsx", "Report.docx", "Y.md"]
+    assert but(seen(here.folder), "Budget.xlsx", "Report.docx", "Y.md") == but(before, "Report.docx")
+    assert (here.folder / "Report.docx").read_bytes() == b"PK report v1 edited" and kept(here) == {}
+
+
 async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_worker_still_holds(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     before = seen(here.folder)
