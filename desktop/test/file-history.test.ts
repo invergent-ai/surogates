@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../web/src/lib/projects.js";
 import { FileHistory } from "../src/shell/file-history.js";
-import { ANSWER_TIMEOUT_MS, LONG_ANSWER_TIMEOUT_MS, PageProjects } from "../src/shell/projects.js";
+import { HISTORY_ANSWER_TIMEOUT_MS, LONG_ANSWER_TIMEOUT_MS, PageProjects } from "../src/shell/projects.js";
 
 const { history } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
 const REPORT = FIXTURE_IDS.report;
@@ -78,7 +78,7 @@ describe("a file's History", () => {
       const source = new PageProjects((message) => sent.push(message as never));
       const files = new FileHistory(source, () => {});
       const reading = files.open(REPORT, REVENUE);
-      await vi.advanceTimersByTimeAsync(ANSWER_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(HISTORY_ANSWER_TIMEOUT_MS);
       await reading;
       expect(files.shown!.failure).toBe("The agent's page did not answer history in time");
       const again = files.read();
