@@ -21,6 +21,10 @@ export const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 // backend has as many places for them (Linux's, its PCIe root ports).
 export const MAX_SHARES = 8;
 
+// A folder's key, the app's own name for it, which its place in the guest is mounted under:
+// 16 hex digits, and so a folder's name that leads nowhere else.
+export const PLACE_KEY = /^[0-9a-f]{16}$/;
+
 // A teardown's failure when something of the root waits on its share, which stalled: the
 // share is still in use in the guest, so the host keeps it until the VM stops.
 export const HELD = "What this chat ran is waiting on its folder, which does not answer";
@@ -59,6 +63,11 @@ export type ToAgent =
   // Everything of a root ends, and its share's mount goes: the host is letting its folder
   // go, and removes the share from the guest next.
   | { type: "teardown"; id: number; root: string; share: Share }
+  // A folder's place, for the agent's own git and in no root's namespaces: its history from the
+  // app's data, mounted for writing, and the folder itself, read-only (guest/places.ts).
+  | { type: "place"; id: number; key: string; history: Share; real: Share }
+  // Both mounts of a place go: the host removes its two shares next.
+  | { type: "unplace"; id: number; key: string }
   // The computer woke: its clock now, in milliseconds since the epoch, and how long it slept.
   // Every run's backstop in the guest falls that much later, whatever the guest's clock did.
   | { type: "time"; id: number; now: number; slept: number }
