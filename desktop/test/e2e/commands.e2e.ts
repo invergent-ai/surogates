@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -22,6 +22,7 @@ import { NODE } from "../../src/hosts/tool-hosts.js";
 import { REPO_IMAGE, vmOptions } from "../../src/vm/client.js";
 import { readManifest } from "../../src/vm/image.js";
 import { EMULATED_NOTICE } from "../../src/vm/manager.js";
+import { certificate } from "../certificates.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, ELECTRON, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
@@ -135,6 +136,31 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("commands through the app
     await quit(app);
     app = undefined;
     expect(existsSync(vmRun())).toBe(false);
+  });
+
+  it("gives the VM the company's CA the app trusts from its start, so its commands trust it, and none at a start that refuses its file", { timeout: 120_000 }, async () => {
+    const certs = join(home, "certs");
+    mkdirSync(certs);
+    certificate(certs, "company");
+    certificate(certs, "site", "company");
+    // A development build's CA file, as SUROGATE_CA_CERT names it.
+    const file = join(home, "ca.pem");
+    copyFileSync(join(certs, "company.pem"), file);
+    const folder = join(home, "inspected");
+    mkdirSync(folder);
+    copyFileSync(join(certs, "site.pem"), join(folder, "site.pem"));
+    const asked = { command: "openssl verify site.pem 2>&1 | tail -1; printenv SSL_CERT_FILE; true", workdir: null, timeout: 30 };
+    await bind(await launched({ SUROGATE_CA_CERT: file }), folder);
+    expect(await operation("run", asked)).toEqual({ ok: { output: "site.pem: OK\n/etc/ssl/certs/ca-certificates.crt\n", returncode: 0, timed_out: false } });
+    await quit(app);
+    // Made text, the file is refused at the next start, whose message saying so is answered here, not shown.
+    writeFileSync(file, "the company's CA is on the intranet\n");
+    const quiet = join(home, "quiet-messages.cjs");
+    writeFileSync(quiet, 'require("electron").dialog.showMessageBox = () => Promise.resolve({ response: 0, checkboxChecked: false });\n');
+    const connected = agent.link.hellos.length;
+    app = await launch(home, { XDG_RUNTIME_DIR: runtime, SUROGATE_VM_IMAGE: IMAGE, SUROGATE_CA_CERT: file }, [], [quiet]);
+    await expect.poll(() => agent.link.hellos.length, { timeout: 30_000 }).toBe(connected + 1);
+    expect(await operation("run", asked)).toEqual({ ok: { output: "error site.pem: verification failed\n", returncode: 0, timed_out: false } });
   });
 
   it("runs its file host and file helper on the app's own node, never Electron as Node, and a command in the VM reads what they wrote", async () => {

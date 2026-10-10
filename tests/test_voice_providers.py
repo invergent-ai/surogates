@@ -3,13 +3,16 @@ import json
 from uuid import uuid4
 
 import httpx
-import numpy as np
 import pytest
 
-from surogates.voice.providers import PROVIDERS, SUROGATE, Conn, check, list_voices
-from surogates.voice.speech import ShapedTTS, Slot, build_stt, build_tts, turn_handling
-from surogates.voice.stt import RoSTT
-from surogates.voice.tts import PhraseCache, RoTTS
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+import numpy as np  # noqa: E402
+
+from surogates.voice.providers import PROVIDERS, SUROGATE, Conn, check, list_voices  # noqa: E402
+from surogates.voice.speech import ShapedTTS, Slot, build_stt, build_tts, turn_handling  # noqa: E402
+from surogates.voice.stt import RoSTT  # noqa: E402
+from surogates.voice.tts import PhraseCache, RoTTS  # noqa: E402
 
 
 def _slot(pid: str, **kw) -> Slot:

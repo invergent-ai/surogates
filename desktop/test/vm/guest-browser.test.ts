@@ -156,7 +156,7 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
 
   it("opens the page of the chat the port is forwarded to, its own requests too, and never this computer's own service on that port", async () => {
     manager.forwards(KEY, [[port, ROOT]]);
-    host.forwards([port], door(), KEY);
+    host.forwards([port], door(), KEY, []);
     expect(await browse("browser.navigate", { url: `http://localhost:${port}/` })).toMatchObject({ ok: { url: `http://localhost:${port}/`, opened: true } });
     await expect.poll(async () => (await browse("browser.evaluate", { code: "return document.title;" })).ok?.value, { timeout: 10_000 }).toBe("The first chat's page 200");
     // The other chat listens on the same port in its own sandbox: forwarded to it, the browser opens its page, by either of the loopback's addresses.
@@ -168,21 +168,21 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
 
   it("opens nothing once the port is taken back, in the browser's proxy or at the sandbox's door", async () => {
     manager.forwards(KEY, [[port, ROOT]]);
-    host.forwards([], door(), KEY);
+    host.forwards([], door(), KEY, []);
     // Each at an address the browser has not kept a copy of: a page it has in its cache it shows without asking anyone.
     expect(await browse("browser.navigate", { url: `http://localhost:${port}/?taken-back` })).toEqual({
       error: { type: "browser", message: `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${port})` },
     });
     // The proxy alone would let it through: the door does not.
     manager.forwards(KEY, []);
-    host.forwards([port], door(), KEY);
+    host.forwards([port], door(), KEY, []);
     expect(await browse("browser.navigate", { url: `http://localhost:${port}/?forgotten` })).toEqual({
       error: { type: "browser", message: `The sandbox has not been told that the agent's browser may open port ${port} yet. Open it again in a moment.` },
     });
     // Forwarded again, to a port of the chat's that nothing listens on.
     const quiet = port === 65_535 ? port - 1 : port + 1;
     manager.forwards(KEY, [[quiet, ROOT]]);
-    host.forwards([quiet], door(), KEY);
+    host.forwards([quiet], door(), KEY, []);
     expect(await browse("browser.navigate", { url: `http://localhost:${quiet}/` })).toEqual({
       error: { type: "browser", message: `Nothing answers on port ${quiet} of the chat's servers now: its server is not running in the chat's sandbox` },
     });
@@ -191,7 +191,7 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
 
   it("lets go, at the chat's server too, of what the browser lets go: a tab closed while it reads an answer, and a browser killed with answers under way", async () => {
     manager.forwards(KEY, [[port, ROOT], [ENDLESS, ROOT]]);
-    host.forwards([port, ENDLESS], door(), KEY);
+    host.forwards([port, ENDLESS], door(), KEY, []);
     expect(await open(0)).toBe(0);
     expect((await browse("browser.navigate", { url: `http://localhost:${port}/?reading` })).ok?.title).toMatch(/^The first chat's page/);
     expect((await browse("browser.evaluate", { code: READING })).ok?.value).toBe(1);
@@ -224,7 +224,7 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
 
   it("carries a page's live socket into the chat's sandbox, and lets go of it at the chat's server when the page closes it, its tab is closed, its port is taken back or the browser is killed", async () => {
     manager.forwards(KEY, [[port, ROOT], [live, ROOT]]);
-    host.forwards([port, live], door(), KEY);
+    host.forwards([port, live], door(), KEY, []);
     const count = (wanted: number) => open(wanted, LIVE_COUNT);
     expect(await count(0)).toBe(0);
     expect((await browse("browser.navigate", { url: `http://localhost:${port}/?live` })).ok?.title).toMatch(/^The first chat's page/);
@@ -242,10 +242,10 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
     expect((await browse("browser.navigate", { url: `http://localhost:${port}/?taken` })).ok?.title).toMatch(/^The first chat's page/);
     expect((await browse("browser.evaluate", { code: LIVE("ticking") })).ok?.value).toBe("reload");
     expect(await count(1)).toBe(1);
-    host.forwards([port], door(), KEY);
+    host.forwards([port], door(), KEY, []);
     expect((await browse("browser.evaluate", { code: "return window.ended;" })).ok?.value).toBe("closed 1006 false");
     const takenBack = await count(0);
-    host.forwards([port, live], door(), KEY);
+    host.forwards([port, live], door(), KEY, []);
     // Two tabs with a socket each, one of them carrying frames, and the browser's main process killed under them.
     for (const [session, path] of [["one", "quiet"], ["two", "ticking"]] as const) {
       expect((await browse("browser.navigate", { url: `http://localhost:${port}/?${session}` }, ROOT, session)).ok?.title).toMatch(/^The first chat's page/);
@@ -271,7 +271,7 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
 
   it("ends the socket idle longest at a chat's bound, as a connection the page hears closed, and never one that carries frames", { timeout: 180_000 }, async () => {
     manager.forwards(KEY, [[port, ROOT], [live, ROOT], [HELD, ROOT]]);
-    host.forwards([port, live], door(), KEY);
+    host.forwards([port, live], door(), KEY, []);
     const held: Socket[] = [];
     try {
       // A socket that says nothing more, opened first, and one that is sent a frame ten times a second.
@@ -306,7 +306,7 @@ require("node:net").createServer((socket) => socket.on("error", () => {}).resume
 
   it("closes a page's live socket when its chat's root is torn down, within a second, and opens it again once the chat's server runs again", async () => {
     manager.forwards(KEY, [[port, ROOT], [live, ROOT]]);
-    host.forwards([port, live], door(), KEY);
+    host.forwards([port, live], door(), KEY, []);
     expect((await browse("browser.navigate", { url: `http://localhost:${port}/?torn` })).ok?.title).toMatch(/^The first chat's page/);
     expect((await browse("browser.evaluate", { code: LIVE("ticking") })).ok?.value).toBe("reload");
     await browse("browser.evaluate", { code: "window.endedAt = window.ended.then((how) => [how, Date.now()]); return 1;" });

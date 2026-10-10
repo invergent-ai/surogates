@@ -15,6 +15,7 @@ import { Places } from "./places.js";
 import { findPort, openPort } from "./port.js";
 import { type FromAgent, INBOUND_PORT } from "./protocol.js";
 import { BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
+import { trust } from "./trust.js";
 
 // Anything the agent does not catch ends it at once, and with it tini and the guest
 // (vm/init). An exit would wait for each read of its ports in flight, which never returns,
@@ -63,6 +64,10 @@ new Inbound(await openPort(await findPort(INBOUND_PORT)), (root, to, first) => r
 const places = new Places();
 // The guest's stop ends what a folder's history runs with what the roots run: nothing of either writes on while it goes.
 const stop = () => powerOff(places.stop());
-const control = new Control(say, roots, { setClock, powerOff: stop, woke: (ms) => roots.woke(ms), heard: () => roots.heard() }, places);
+// A store that could not be made leaves each root the image's, with the public roots alone: the console says why.
+const trusted = (certificates: string[]) => trust(certificates).then(() => {}, (error: unknown) => {
+  console.error(`surogate: this computer's sandbox does not trust your company's certificate authority: ${error instanceof Error ? error.message : String(error)}`);
+});
+const control = new Control(say, roots, { setClock, powerOff: stop, woke: (ms) => roots.woke(ms), heard: () => roots.heard(), trust: trusted }, places);
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();
