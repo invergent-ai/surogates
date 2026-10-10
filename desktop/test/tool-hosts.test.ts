@@ -82,8 +82,8 @@ function toolHosts(overrides: Partial<ToolHostsOptions> = {}): ToolHosts {
 
 const signal = () => new AbortController().signal;
 // What the stand-ins for a folder's history answer the one thing the tool hosts ask of it, a landing's forgetting: the
-// landing may go, each file it applied in the folder as it was before.
-const forgets: ThreadCopies["ask"] = async () => ({ ok: { landing: null } });
+// landing may go, recorded, each file it replaced a version under it.
+const forgets: ThreadCopies["ask"] = async () => ({ ok: { landing: "e".repeat(40) } });
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "tool-hosts-")));
@@ -2170,6 +2170,39 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(readFileSync(join(keeps, "0"), "utf8")).toBe("the user's own\n");
     expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toEqual({ ok: {} });
     expect(existsSync(keeps)).toBe(false);
+  });
+
+  it("forgets nothing of a landing the folder's history does not hold while its helper keeps the file it replaced, whatever the forgetting says that file was", async () => {
+    const folder = changed();
+    // The folder's history as it answers a forgetting of a landing main does not hold: put back whole where each file
+    // named is in the folder as its named version before, and refused otherwise. It goes by what it is told.
+    const unrecorded: ThreadCopies["ask"] = async (_root, _bound, _action, args) => {
+      const asIs = (path: string) => (existsSync(join(folder, path)) ? blob(readFileSync(join(folder, path), "utf8")) : null);
+      const back = (args.applied as Array<{ path: string; before: string | null }>).every(({ path, before }) => asIs(path) === before);
+      return back ? { ok: { landing: null } } : { error: { type: "history", code: "landing_unsettled", message: "refused the request: this landing was neither recorded nor put back whole" } };
+    };
+    const executor = threads({ copies: { ...copiesOf(), ask: unrecorded } });
+    const apply = await looked(executor);
+    expect(await executor.land(apply, signal())).toEqual(applied);
+    const keeps = join(base, "data", "landings", keyOf(folder), "s1");
+    const { ok: { path, before: from, after: to } } = applied;
+    // Named as it was applied: the folder holds the landing's file, and the history says so.
+    expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toMatchObject({
+      error: { type: "history", code: "landing_unsettled" },
+    });
+    // Named as though what the landing wrote were what was there before: the history says it was put back, and this
+    // computer's own records say it was not.
+    expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: to, after: to }] }), signal())).toEqual({
+      error: {
+        type: "conflict",
+        message: "Step 0 of this landing, of a.txt, was neither recorded nor put back on this computer, and keeps the file it replaced, so nothing the landing kept was forgotten",
+      },
+    });
+    expect(readFileSync(join(keeps, "0"), "utf8")).toBe("the user's own\n");
+    // Put back, it keeps nothing: the landing goes, and the user's file is at its name.
+    expect(await executor.land(step("unapply", { saga: "s1", step: 0, path }), signal())).toEqual({ ok: { path, put_back: true } });
+    expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toEqual({ ok: {} });
+    expect([existsSync(keeps), readFileSync(join(folder, "a.txt"), "utf8")]).toEqual([false, "the user's own\n"]);
   });
 
   it.each([

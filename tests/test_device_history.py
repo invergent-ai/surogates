@@ -1064,19 +1064,20 @@ def test_every_refusal_the_app_has_of_its_own_for_a_threads_kinds_is_read_by_its
     from tests import fake_places
 
     said = the_app({
-        "history/kinds.js": ["NOT_A_CHECKPOINT", "NOT_A_FORGETTING_ASKED", "NOT_A_THREAD", "NOT_ITS_TURN", "unrecorded"],
+        "history/kinds.js": ["DELETED_THREAD", "NOT_A_CHECKPOINT", "NOT_A_FORGETTING_ASKED", "NOT_A_THREAD", "NOT_ITS_TURN", "RECORDS_UNREAD", "notPutBack", "unrecorded"],
         "hosts/tool-hosts.js": ["CANCELLED", "HOST_STOPPED", "folderBusy", "nothingToLand"],
         "hosts/messages.js": ["FOLDER_UNAVAILABLE"],
         "history/copies.js": ["historyOff"],
         "vm/history.js": ["NOT_A_REQUEST", "REFUSED"],
     }, """return {
         NOT_A_THREAD, NOT_ITS_TURN, NOT_A_CHECKPOINT, NOT_A_FORGETTING_ASKED, FOLDER_UNAVAILABLE, CANCELLED, HOST_STOPPED, NOT_A_REQUEST, REFUSED,
+        DELETED_THREAD, RECORDS_UNREAD, notPutBack: notPutBack([0], new Map([[0, "a.txt"]])),
         unrecorded: unrecorded(new Map([[0, "a.txt"]]), []), busy: folderBusy("/home/me/Documents"), nothingToLand: nothingToLand("/home/me/Documents"),
         off: historyOff("cap", "/home/me/Documents"),
       };""")
     for outcome in said.values():
         taken_whole("land", "forget", outcome)
     # The tests' computer stands in for the app with the app's own words.
-    for name in ("NOT_A_THREAD", "NOT_ITS_TURN", "NOT_A_FORGETTING_ASKED", "FOLDER_UNAVAILABLE"):
+    for name in ("NOT_A_THREAD", "NOT_ITS_TURN", "NOT_A_FORGETTING_ASKED", "RECORDS_UNREAD", "FOLDER_UNAVAILABLE"):
         assert getattr(fake_places, name) == said[name], name
 

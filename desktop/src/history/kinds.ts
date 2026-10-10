@@ -45,11 +45,22 @@ export const NOT_ITS_TURN: Outcome = {
   error: { type: "refused", message: "Only a thread's own turn may take its snapshots, move its history or land its work on this computer" },
 };
 
+// What a deleted thread still asks of the landing it had begun, while the host that landing kept is there (hosts/tool-hosts.ts,
+// retired): the steps that put the landing back, record it or forget it, and the looks they need. No new write, no new turn.
+const FINISHING: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["history", new Set(["fetch", "record", "forget"])],
+  ["land", new Set(["recover", "unapply", "forget"])],
+]);
+export const DELETED_THREAD: Outcome = {
+  error: { type: "refused", message: "This thread was deleted: on this computer only the steps that put back, record or forget the landing it had begun are taken" },
+};
+
 /**
  * Why *operation*, one of a thread's own kinds, is not run for the root bound as *bound*; null where it may run. Asked
- * before its user would be asked anything, and again where it runs. It reads no argument but the action.
+ * before its user would be asked anything, and again where it runs. It reads no argument but the action. *deleted*: the
+ * binding is a deleted thread's, kept for the landing it had begun.
  */
-export function refusedOf(operation: Operation, bound: BoundFolder | undefined): Outcome | null {
+export function refusedOf(operation: Operation, bound: BoundFolder | undefined, deleted = false): Outcome | null {
   const { kind, sessionId, callingSessionId, invocationId, args } = operation;
   if (!bound) return FOLDER_UNAVAILABLE;
   if (bound.history === undefined) return NOT_A_THREAD;
@@ -57,7 +68,8 @@ export function refusedOf(operation: Operation, bound: BoundFolder | undefined):
   const { action } = args;
   // A binding names its thread's copy, which is the root's own (binding/binder.ts).
   if (!asked || bound.history !== sessionId || typeof action !== "string" || asked.takes.get(kind)?.has(action) !== true) return NOT_ITS_TURN;
-  return asked.under || callingSessionId === sessionId ? null : NOT_ITS_TURN;
+  if (!asked.under && callingSessionId !== sessionId) return NOT_ITS_TURN;
+  return deleted && FINISHING.get(kind)?.has(action) !== true ? DELETED_THREAD : null;
 }
 
 // A snapshot's words, as its commit's title: at most as many characters as the server sends, counted as it counts them.
@@ -116,22 +128,46 @@ export function forgettingOf(args: Record<string, unknown>): { saga: string; app
   return { saga, applied: named };
 }
 
+// What a forgetting is answered where this computer's records of the landing cannot all be read: it forgets nothing.
+export const RECORDS_UNREAD: Outcome = {
+  error: { type: "os", code: "EIO", message: "This computer's records of this landing cannot all be read, so nothing the landing kept was forgotten" },
+};
+
 /**
  * Why what a landing kept is not to be forgotten by the steps its forgetting names, *applied*, where its helper holds
- * *records*, of each step by its number with the file it names (files/land.ts, recordsOf): a step that is not among
- * them, or is named for another file. Null where every one is named. The helper's records are the proof of what was
- * applied in the folder; the steps named are the server's word.
+ * *records*, of each step by its number with the file it names (files/land.ts, recordsOf): a record that cannot be
+ * read, or a step that is not among them, or is named for another file. Null where every one is named. The helper's
+ * records are the proof of what was applied in the folder; the steps named are the server's word.
  */
 export function unrecorded(records: ReadonlyMap<number, string | null>, applied: readonly Applied[]): Outcome | null {
   const named = new Map(applied.map(({ step, path }) => [step, path]));
   for (const [step, path] of [...records].sort(([a], [b]) => a - b)) {
-    if (named.has(step) && (path === null || named.get(step) === path)) continue;
+    if (path === null) return RECORDS_UNREAD;
+    if (named.get(step) === path) continue;
     return {
       error: {
         type: "conflict",
-        message: `Step ${step} of this landing${path === null ? "" : `, of ${path},`} was applied on this computer, and the steps named to forget the landing leave it out, so nothing the landing kept was forgotten`,
+        message: `Step ${step} of this landing, of ${path}, was applied on this computer, and the steps named to forget the landing leave it out, so nothing the landing kept was forgotten`,
       },
     };
   }
   return null;
+}
+
+/**
+ * Why what a landing the folder's history does not hold kept is not to be forgotten, where *keeping* names the steps that
+ * still keep the file they replaced (files/land.ts, keepingOf), with what *records* say of each: the history says such a
+ * landing was put back by the versions it is told the files had, which are the server's word, and only this computer's
+ * own records show it was. Null where no step keeps a file.
+ */
+export function notPutBack(keeping: readonly number[], records: ReadonlyMap<number, string | null>): Outcome | null {
+  const step = keeping[0];
+  if (step === undefined) return null;
+  const path = records.get(step);
+  return {
+    error: {
+      type: "conflict",
+      message: `Step ${step} of this landing${path ? `, of ${path},` : ""} was neither recorded nor put back on this computer, and keeps the file it replaced, so nothing the landing kept was forgotten`,
+    },
+  };
 }

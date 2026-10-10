@@ -3,7 +3,7 @@
 // shares the copy at the folder's path. The guest and the file hosts are stand-ins here: what they do with what
 // they are given is theirs to test.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,7 +15,7 @@ import { downloadSaver } from "../src/browser/downloads.js";
 import { Browsing } from "../src/browser/executor.js";
 import { kinds } from "../src/files/operations.js";
 import type { Making } from "../src/history/copies.js";
-import { NOT_A_CHECKPOINT, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, THREAD_KINDS } from "../src/history/kinds.js";
+import { DELETED_THREAD, NOT_A_CHECKPOINT, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, RECORDS_UNREAD, THREAD_KINDS } from "../src/history/kinds.js";
 import { keyOf } from "../src/history/place.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "../src/hosts/messages.js";
 import { type BoundFolder, CANCELLED, type HostProcess, type Recovery } from "../src/hosts/tool-hosts.js";
@@ -85,10 +85,11 @@ function host(): HostProcess {
     if (action === "apply") {
       mkdirSync(steps, { recursive: true });
       writeFileSync(join(steps, `${String(step)}.json`), record(String(path)));
+      if (before !== null) writeFileSync(join(steps, String(step)), "the user's own\n");
       return { path, before, after, made: [] };
     }
     if (action === "unapply") {
-      rmSync(join(steps, `${String(step)}.json`), { force: true });
+      for (const name of [`${String(step)}.json`, String(step)]) rmSync(join(steps, name), { force: true });
       return { path, put_back: true };
     }
     rmSync(steps, { recursive: true, force: true });
@@ -309,6 +310,8 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
   const HASH = "b".repeat(40);
   const [A, B] = ["c".repeat(40), "d".repeat(40)];
   const SNAPSHOT = { ok: { hash: "a".repeat(40) } };
+  // The folder's history's answer to a forgetting where main holds the landing: recorded, each file it replaced a version under it.
+  const RECORDED = { ok: { landing: "e".repeat(40) } };
   const own = (kind: string, invocationId: string) => (args: Record<string, unknown>, more: Partial<Operation> = {}): Operation => ({
     ...op(kind, args), invocationId, ...more,
   });
@@ -388,13 +391,17 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     expect(ops.map((done) => [done.held, done.kind])).toEqual([[copy, "resolve"], [folder, "land"]]);
   });
 
-  it("forget what a landing kept only once the folder's history says it may go: asked first, for every apply that was sent, then the helper", async () => {
+  it("forget what a landing kept once the folder's history holds it recorded: asked first, for every apply that was sent, then the helper", async () => {
     const applies = [{ step: 0, path: "a.txt", before: A, after: B }, { step: 2, path: "b/c.txt", before: null, after: B }];
     for (const { step, path, before, after } of applies) expect(await executor.run(apply(step, path, before, after), signal())).toMatchObject({ ok: { path } });
-    expect(readdirSync(kept("saga-1")).sort()).toEqual(["0.json", "2.json"]);
+    expect(readdirSync(kept("saga-1")).sort()).toEqual(["0", "0.json", "2.json"]);
     // When the history is asked, the helper has forgotten nothing yet.
     const keptWhenAsked: boolean[] = [];
-    refuses = (request) => void (request.action === "forget" && keptWhenAsked.push(existsSync(kept("saga-1"))));
+    refuses = (request) => {
+      if (request.action !== "forget") return undefined;
+      keptWhenAsked.push(existsSync(kept("saga-1")));
+      return RECORDED;
+    };
     // A change with no version on either side was no apply's, and may be named all the same.
     const applied = [...applies, { step: 1, path: "gone.md", before: null, after: null }];
     expect(await executor.run(land({ action: "forget", saga: "saga-1", applied }), signal())).toEqual({ ok: {} });
@@ -414,30 +421,76 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     await executor.run(apply(0, "a.txt", A, B), signal());
     refuses = (request) => (request.action === "forget" ? answer : undefined);
     expect(await executor.run(land({ action: "forget", saga: "saga-1", applied: [{ step: 0, path: "a.txt", before: A, after: B }] }), signal())).toEqual(said ?? answer);
-    expect([readdirSync(kept("saga-1")), forgets()]).toEqual([["0.json"], []]);
+    expect([readdirSync(kept("saga-1")).sort(), forgets()]).toEqual([["0", "0.json"], []]);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(stops).toEqual([]);
   });
 
+  it("forget nothing of a landing its folder's history does not hold while a step of it keeps the file it replaced, whatever the forgetting says of that file's versions", async () => {
+    await executor.run(apply(0, "a.txt", A, B), signal());
+    await executor.run(apply(1, "b.txt", null, B), signal());
+    // Named as though what the landing wrote were what was there before: the history, which goes by what it is told, holds no
+    // landing of the saga and finds each file as named. This computer's records say the first step was not put back.
+    const forged = [{ step: 0, path: "a.txt", before: B, after: B }, { step: 1, path: "b.txt", before: null, after: B }];
+    expect(await executor.run(land({ action: "forget", saga: "saga-1", applied: forged }), signal())).toEqual({
+      error: {
+        type: "conflict",
+        message: "Step 0 of this landing, of a.txt, was neither recorded nor put back on this computer, and keeps the file it replaced, so nothing the landing kept was forgotten",
+      },
+    });
+    expect([readdirSync(kept("saga-1")).sort(), forgets()]).toEqual([["0", "0.json", "1.json"], []]);
+    // Put back, the step keeps nothing; one that replaced no file kept none: the landing may go.
+    expect(await executor.run(land({ action: "unapply", saga: "saga-1", step: 0, path: "a.txt" }), signal())).toHaveProperty("ok");
+    expect(await executor.run(land({ action: "forget", saga: "saga-1", applied: [{ step: 0, path: "a.txt", before: A, after: B }, forged[1]] }), signal())).toEqual({ ok: {} });
+    expect([forgets().length, existsSync(kept("saga-1"))]).toEqual([1, false]);
+  });
+
   it.each([
-    ["leaves out a step its helper holds a record of", [{ step: 0, path: "a.txt", before: A, after: B }], 2, "b.txt"],
-    ["names a step for another file than the one its record names", [{ step: 0, path: "a.txt", before: A, after: B }, { step: 2, path: "c.txt", before: null, after: B }], 2, "b.txt"],
-    ["leaves out a step whose record cannot be read", [{ step: 0, path: "a.txt", before: A, after: B }, { step: 2, path: "b.txt", before: null, after: B }], 3, null],
-  ])("forget nothing where the forgetting %s, and say which step", async (_, applied, step: number, path: string | null) => {
+    ["leaves out a step its helper holds a record of", [{ step: 0, path: "a.txt", before: A, after: B }]],
+    ["names a step for another file than the one its record names", [{ step: 0, path: "a.txt", before: A, after: B }, { step: 2, path: "c.txt", before: null, after: B }]],
+  ])("forget nothing of a recorded landing where the forgetting %s, and say which step", async (_, applied) => {
     await executor.run(apply(0, "a.txt", A, B), signal());
     await executor.run(apply(2, "b.txt", null, B), signal());
-    writeFileSync(kept("saga-1", "3.json"), "not a record");
+    refuses = (request) => (request.action === "forget" ? RECORDED : undefined);
     expect(await executor.run(land({ action: "forget", saga: "saga-1", applied }), signal())).toEqual({
       error: {
         type: "conflict",
-        message: `Step ${step} of this landing${path === null ? "" : `, of ${path},`} was applied on this computer, and the steps named to forget the landing leave it out, so nothing the landing kept was forgotten`,
+        message: "Step 2 of this landing, of b.txt, was applied on this computer, and the steps named to forget the landing leave it out, so nothing the landing kept was forgotten",
       },
     });
-    expect([readdirSync(kept("saga-1")).sort(), forgets()]).toEqual([["0.json", "2.json", "3.json"], []]);
-    // Named, the record that cannot be read is the helper's to refuse.
-    const all = [...applied.filter((one) => one.step !== 2), { step: 2, path: "b.txt", before: null, after: B }, { step: 3, path: "d.txt", before: null, after: B }];
+    expect([readdirSync(kept("saga-1")).sort(), forgets()]).toEqual([["0", "0.json", "2.json"], []]);
+    const all = [{ step: 0, path: "a.txt", before: A, after: B }, { step: 2, path: "b.txt", before: null, after: B }];
     expect(await executor.run(land({ action: "forget", saga: "saga-1", applied: all }), signal())).toEqual({ ok: {} });
     expect(forgets()).toHaveLength(1);
+  });
+
+  it.each([
+    ["a record that is none", () => writeFileSync(kept("saga-1", "1.json"), "not a record")],
+    ["a record larger than any the helper writes", () => writeFileSync(kept("saga-1", "1.json"), `${record("b.txt").slice(0, -1)}, "pad": "${"x".repeat(33 * 1024 * 1024)}"}`)],
+    ["a link in a record's stead", () => {
+      writeFileSync(join(dir, "elsewhere.json"), record("b.txt"));
+      symlinkSync(join(dir, "elsewhere.json"), kept("saga-1", "1.json"));
+    }],
+    ["a link in the landing's folder's stead", () => {
+      renameSync(kept("saga-1"), join(dir, "moved"));
+      symlinkSync(join(dir, "moved"), kept("saga-1"));
+    }],
+    ["a landing's folder that cannot be read", () => chmodSync(kept("saga-1"), 0)],
+    ["a link in the stead of the folder its folder's landings keep in", () => {
+      renameSync(kept(), join(dir, "moved"));
+      symlinkSync(join(dir, "moved"), kept());
+    }],
+  ])("forget nothing where this computer's records of the landing cannot all be read, as with %s, and say so", async (_, spoil: () => void) => {
+    await executor.run(apply(0, "a.txt", A, B), signal());
+    refuses = (request) => (request.action === "forget" ? RECORDED : undefined);
+    spoil();
+    try {
+      const applied = [{ step: 0, path: "a.txt", before: A, after: B }, { step: 1, path: "b.txt", before: null, after: B }];
+      expect(await executor.run(land({ action: "forget", saga: "saga-1", applied }), signal())).toEqual(RECORDS_UNREAD);
+      expect(forgets()).toEqual([]);
+    } finally {
+      if (existsSync(kept("saga-1"))) chmodSync(kept("saga-1"), 0o700);
+    }
   });
 
   it.each([
@@ -483,7 +536,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     const looking = executor.run(land({ action: "revisions", paths: ["a.txt"] }), signal());
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(ops.filter((done) => done.kind === "land").map((done) => done.args.action)).toEqual(["apply"]);
-    answer(undefined);
+    answer(RECORDED);
     expect(await forgetting).toEqual({ ok: {} });
     expect(ops.filter((done) => done.kind === "land").map((done) => done.args.action)).toEqual(["apply", "forget"]);
     // Forgotten, the landing is over: its host begins no step after, and the next is a new landing's.
@@ -637,6 +690,17 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     for (const operation of [op("resolve", { path: "" }), op("which", { name: "git" }), checkpoint({ action: "take", reason: "x" })]) {
       expect(await executor.run(operation, signal()), operation.kind).toEqual(FOLDER_UNAVAILABLE);
     }
+    // Nor any step of its landing's but those that finish it or put it back: no new write in the folder, no new turn of its history's.
+    for (const operation of [
+      apply(1, "b.txt", null, B), land({ action: "revisions", paths: ["b.txt"] }), history({ action: "open" }), history({ action: "changed" }),
+      history({ action: "pickup", author: {}, trailers: [] }), history({ action: "commit", author: {}, trailers: [], pickup: null }),
+      history({ action: "keep", author: {}, trailers: [], base: true }),
+    ]) {
+      expect(executor.refusal(operation), String(operation.args.action)).toEqual(DELETED_THREAD);
+      expect(await executor.run(operation, signal()), String(operation.args.action)).toEqual(DELETED_THREAD);
+    }
+    expect(executor.refusal(history({ action: "record", turn: HASH, applied: [applied], author: {}, trailers: [], main: null, pickup: null }))).toBeNull();
+    expect(executor.refusal(land({ action: "recover" }))).toBeNull();
     // The landing put back as the worker puts a deleted thread's back: the history looked at, the apply put back, the landing forgotten.
     for (const operation of [
       history({ action: "fetch", commits: [], saga: "saga-1", since: null }), land({ action: "unapply", saga: "saga-1", step: 0, path: "a.txt" }),
