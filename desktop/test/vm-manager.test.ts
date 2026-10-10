@@ -1598,8 +1598,9 @@ describe("the emulated VM", () => {
 
   it("waits as Section 11's table says, with KVM and emulated", () => {
     expect(WAITS).toEqual({
-      kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000 },
-      emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000 },
+      // The agent's answer to a request to a folder's history: twenty minutes and a quarter, past the agent's own ten for its wait and ten for its run.
+      kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000, historyMs: 1_215_000 },
+      emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000, historyMs: 7_290_000 },
     });
   });
 

@@ -13,7 +13,7 @@ import type { FromAgent, Share } from "../src/guest/protocol.js";
 import { boundsFor } from "../src/guest/root.js";
 import type { Outcome } from "../src/link/protocol.js";
 import { checked, forgettable, type HistoryRequest, named } from "../src/vm/history.js";
-import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, type Place, VmManager, type VmOptions, WAITS } from "../src/vm/manager.js";
 
 const KEY = "0123456789abcdef";
 const OTHER_KEY = "fedcba9876543210";
@@ -26,6 +26,7 @@ const signal = () => new AbortController().signal;
 const NO_ANSWER = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
 const NOT_HERE = { error: { type: "unavailable", message: "This folder's history is not in the sandbox" } };
 const HELD = { error: { type: "unavailable", message: "This folder's history is held by a request before this one, which has not ended" } };
+const LET_GO = { error: { type: "unavailable", message: "This computer's sandbox let this folder's history go before this was answered" } };
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -1059,6 +1060,85 @@ describe("the VM manager, asked for a folder's history", () => {
     expect(await manager.history(ask("changed"), signal())).toEqual({ ok: { paths: ["Report.docx"] } });
     // Let go, it is added anew from the folder at its path, in whichever guest runs by then.
     expect(asked.slice(2).map((entry) => (entry as string[])[0]).filter((what) => what !== "gone")).toEqual(["unmount", "mount", "history"]);
+    await manager.stop();
+  });
+
+  it("gives the agent a time to answer a request in that is past the agent's own two, for a request's wait and for its run", () => {
+    for (const [waits, slower] of [[WAITS.kvm, 1], [WAITS.emulated, 6]] as const) {
+      const { historyMs, killedMs } = boundsFor(slower);
+      expect(waits.historyMs).toBeGreaterThan(2 * historyMs + killedMs);
+      expect(waits.historyMs - (2 * historyMs + killedMs)).toBeLessThanOrEqual(waits.setupMs);
+    }
+  });
+
+  it("gives up a guest that answers pings and no request to a history, at a bound of this computer's own, and answers that the sandbox stopped", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager({ ...options(), historyMs: 150 }, guest(asked, (_key, request) => new Promise<Outcome>(() => void asked.push(["history", request.action]))));
+    const began = performance.now();
+    expect(await manager.history(ask("open"), signal())).toEqual(SANDBOX_STOPPED);
+    expect(performance.now() - began).toBeGreaterThanOrEqual(145);
+    expect(performance.now() - began).toBeLessThan(3_000);
+    // The guest went with it, as one that answers no setup does, and the next request boots another.
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["history", "open"], ["gone"]]);
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.stop();
+  });
+
+  it("lets a place go within a bound of its own, whatever was asked of it before: a request not answered by then is answered as let go", async () => {
+    const asked: unknown[] = [];
+    // A guest that answers no request to a history, and heeds no cancel of one.
+    const manager = new VmManager({ ...options(), setupMs: 150, historyMs: 600 }, guest(asked, (_key, request) => new Promise<Outcome>(() => void asked.push(["history", request.action]))));
+    const first = manager.history(ask("open"), signal());
+    await until(() => asked.length === 2);
+    const began = performance.now();
+    const gone = manager.unplace(place());
+    // Asked after the letting go: each waits for it, and no longer.
+    const placed = manager.place(place(), signal());
+    const second = manager.history(ask("changed"), signal());
+    expect(await first).toEqual(LET_GO);
+    expect(performance.now() - began).toBeGreaterThanOrEqual(145);
+    expect(await gone).toBe(true);
+    expect(await placed).toBeNull();
+    expect(performance.now() - began).toBeLessThan(3_000);
+    // The one asked after it is this computer's to bound too: the guest that answers none goes.
+    expect(await second).toEqual(SANDBOX_STOPPED);
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([
+      ["mount", KEY, "r1", "r2"], ["history", "open"], ["unmount", KEY], ["mount", KEY, "r3", "r4"], ["history", "changed"], ["gone"],
+    ]);
+    await manager.stop();
+  });
+
+  it("gives up the guest, within the time a place has to be let go, where what a request ran cannot end: nothing waits behind it for good", async () => {
+    const asked: unknown[] = [];
+    // The agent's own places, their history one whose processes cannot end.
+    const real = new Places({
+      folder: join(dir, "places"), mount: async () => {}, unmount: async () => {}, historyMs: 100, waitMs: 160,
+      ask: ({ action }) => new Promise<string>(() => void asked.push(["started", action])),
+    });
+    const manager = new VmManager({ ...options(), setupMs: 700 }, guest(asked, (key, request, stop) => real.history(key, request, stop), {
+      mount: async (key, store, folder) => {
+        asked.push(["mount", key]);
+        await real.mount(key, store, folder);
+      },
+      unmount: async (key) => {
+        asked.push(["unmount", key]);
+        await real.unmount(key);
+      },
+    }));
+    const began = performance.now();
+    const first = manager.history(ask("open"), signal());
+    const second = manager.history(ask("changed"), signal());
+    const gone = manager.unplace(place());
+    // The first at its bound; the second, which waited behind it, at its own, never started; and the letting go
+    // asked after both reaches the agent, which cannot end what the first ran, so the guest goes.
+    expect(await first).toEqual(NO_ANSWER);
+    expect(await second).toEqual(HELD);
+    expect(await gone).toBe(true);
+    expect(performance.now() - began).toBeLessThan(3_000);
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([["mount", KEY], ["started", "open"], ["unmount", KEY], ["gone"]]);
     await manager.stop();
   });
 
