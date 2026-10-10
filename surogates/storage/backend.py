@@ -561,6 +561,8 @@ class S3Backend:
                 return {
                     "size": resp.get("ContentLength", 0),
                     "modified": resp.get("LastModified"),
+                    # What the store names the object's contents by: two writes in one second differ by it.
+                    "etag": resp.get("ETag"),
                 }
             except Exception as exc:
                 if "404" in str(exc) or "NoSuchKey" in str(exc):
