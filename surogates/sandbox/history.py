@@ -239,6 +239,9 @@ class History:
     #: never a file of the project's, never reported as unsaved.  A place's own.
     excludes: ClassVar[list[str]] = HISTORY_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = PLATFORM_EXCLUDES
+    #: Those of the platform's own that the harness itself writes into a copy
+    #: at every turn: no write of the turn's, so no move git could not see.
+    harness: ClassVar[tuple[str, ...]] = ()
 
     @property
     def branch(self) -> str:
@@ -1902,8 +1905,8 @@ class History:
                 level = [folder for deeper in lookers.map(one, level) for folder in deeper]
         return found
 
-    def _excluded(self) -> tuple[list[str], list[str]]:
-        """The excluded files and folders in the copy, its folders holding a git repository, and whether it wrote any file history leaves out, the platform's folders included.
+    def _excluded(self) -> tuple[list[str], list[str], bool]:
+        """The excluded files and folders in the copy, its folders holding a git repository, and whether it wrote any file history leaves out, the platform's folders included but the harness's own.
 
         A copy starts with none, so the turn made them.  The platform's own
         folders are left out.
@@ -1921,7 +1924,7 @@ class History:
             n for n in names
             if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
         }
-        return [n for n in names if n not in repositories], sorted(repositories), bool(ignored)
+        return [n for n in names if n not in repositories], sorted(repositories), any(not n.startswith(self.harness) for n in ignored)
 
     def _inside(self, path: str) -> Path:
         """*path* in the real files; refused if it would leave them."""

@@ -304,6 +304,222 @@ def test_a_file_under_the_coding_tools_folder_never_lands(tmp_path, folder):
     assert sorted(p.name for p in (folder / ".threads").iterdir()) == ["old.txt"]
 
 
+def test_a_deletion_lands_from_a_copy_that_holds_the_harnesss_own_folders(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    # As every turn of a thread on a computer leaves its copy: the harness's mark and what its tools kept, and the whiteboard.
+    (one.copy / ".surogates-results").mkdir()
+    (one.copy / ".surogates-results" / ".turn").write_text("mark")
+    (one.copy / "_whiteboard").mkdir()
+    (one.copy / "_whiteboard" / "canvas.json").write_text("{}")
+    (one.copy / "notes.txt").unlink()
+    landed = land(one, "saga:1")
+    assert [(c["path"], c["after"]) for c in landed["changes"]] == [("notes.txt", None)] and landed["overlapped"] == []
+    assert not (folder / "notes.txt").exists()
+    # A file the turn itself made where history leaves out still holds a deletion git cannot pair: it may be a move there.
+    (one.copy / "build").mkdir()
+    os.replace(one.copy / "Report.docx", one.copy / "build" / "Report.docx")
+    held = land(one, "saga:2")
+    assert (held["changes"], [(o["path"], o["reason"]) for o in held["overlapped"]]) == ([], [("Report.docx", "with")])
+    assert (folder / "Report.docx").is_file()
+
+
+@pytest.mark.parametrize(("left_out", "said"), [
+    ("mkdir __pycache__ && echo x > __pycache__/tool.cpython-312.pyc", (["__pycache__/"], [])),
+    ("echo SECRET=1 > .env", ([".env"], [])),
+    ("mkdir -p node_modules/pkg && echo x > node_modules/pkg/index.js", (["node_modules/"], [])),
+    ("git init -q vendor && echo x > vendor/a.txt", ([], ["vendor/"])),
+    ("mkdir -p .threads/checkout && echo x > .threads/checkout/a.txt", ([], [])),
+    ("mkdir empty", (["empty/"], [])),
+])
+def test_a_later_turns_deletion_lands_though_the_copy_holds_what_an_earlier_turn_left_out(tmp_path, folder, left_out, said):
+    one = a_copy(tmp_path, folder)
+    subprocess.run(left_out, shell=True, cwd=one.copy, check=True, env=HERMETIC, capture_output=True)
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
+    first = land(one, "saga:1")
+    assert (first["excluded"], first["repositories"]) == said and [c["path"] for c in first["changes"]] == ["Report.docx"]
+    # A copy here outlives its turn, with what the turn left out in it.  The next turn made none of that:
+    # its deletion is no move git could not see, and lands.
+    (one.copy / "notes.txt").unlink()
+    second = land(one, "saga:2")
+    assert [(c["path"], c["after"]) for c in second["changes"]] == [("notes.txt", None)] and second["overlapped"] == []
+    assert not (folder / "notes.txt").exists()
+    # Nor is it said again to be unsaved: it was the first turn's, and was said then.
+    assert (second["excluded"], second["repositories"]) == ([], [])
+
+
+@pytest.mark.parametrize(("left_out", "again", "said"), [
+    ("echo SECRET=1 > .env", "echo SECRET=2 > .env", ([".env"], [])),
+    ("mkdir -p node_modules/pkg && echo x > node_modules/pkg/index.js", "echo y > node_modules/pkg/other.js", (["node_modules/"], [])),
+    ("git init -q vendor && echo x > vendor/a.txt", "echo xx > vendor/a.txt", ([], ["vendor/"])),
+])
+def test_what_an_earlier_turn_left_out_and_a_later_one_writes_again_is_the_later_ones_write(tmp_path, folder, left_out, again, said):
+    one = a_copy(tmp_path, folder)
+    subprocess.run(left_out, shell=True, cwd=one.copy, check=True, env=HERMETIC, capture_output=True)
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
+    land(one, "saga:1")
+    # The next turn writes there again, and deletes a file: that may be a move, and the deletion waits.
+    subprocess.run(again, shell=True, cwd=one.copy, check=True, env=HERMETIC, capture_output=True)
+    (one.copy / "notes.txt").unlink()
+    second = land(one, "saga:2")
+    assert (second["changes"], [(o["path"], o["reason"]) for o in second["overlapped"]]) == ([], [("notes.txt", "with")])
+    assert (second["excluded"], second["repositories"]) == said and (folder / "notes.txt").is_file()
+
+
+#: What an earlier guest can leave where a thread's repository notes what its copy held at its base.
+NOTES = {
+    "a link to a note": lambda note, real: note.symlink_to(real),
+    "a pipe": lambda note, real: os.mkfifo(note),
+    "a folder": lambda note, real: note.mkdir(),
+    "no json": lambda note, real: note.write_text("{"),
+    "json nested past any bound": lambda note, real: note.write_text("[" * 100_000 + "]" * 100_000),
+    "a list": lambda note, real: note.write_text("[]"),
+    "names that are no list": lambda note, real: note.write_text(json.dumps({"names": "__pycache__/", "files": {}})),
+    "tokens that are no words": lambda note, real: note.write_text(json.dumps({"names": [], "files": {"__pycache__/tool.cpython-312.pyc": 1}})),
+    "more than a request reads": lambda note, real: note.write_bytes(b" " * ((64 << 20) + 1)),
+}
+
+
+@pytest.mark.parametrize("planted", list(NOTES))
+def test_what_an_earlier_guest_left_for_a_copys_note_is_no_note_and_counts_all_it_holds_as_written(tmp_path, folder, planted):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "__pycache__").mkdir()
+    (one.copy / "__pycache__" / "tool.cpython-312.pyc").write_bytes(b"\0tool")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
+    land(one, "saga:1")
+    note = one.repo / "left-out"
+    real = tmp_path / "elsewhere"
+    shutil.move(note, real)
+    NOTES[planted](note, real)
+    # Read as data, it is none: everything history leaves out in the copy is taken as written since, and the deletion waits.
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again._seen() == {"names": [], "files": {}}
+    if planted in ("a link to a note", "a pipe"):
+        # Anything but files and folders in the repository has it set aside whole at the next request, the note with it.
+        assert again.open() == {"copy": "made", "set_aside_folders": set_aside_whole(tmp_path / "store")}
+        return
+    (again.copy / "notes.txt").unlink()
+    held = land(again, "saga:2")
+    assert [(o["path"], o["reason"]) for o in held["overlapped"]] == [("notes.txt", "with")] and held["excluded"] == ["__pycache__/"]
+
+
+def test_a_deletion_waits_while_the_turn_itself_writes_where_history_leaves_out_however_old_that_place_is(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "build").mkdir()
+    (one.copy / "build" / "old.bin").write_text("built\n")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
+    land(one, "saga:1")
+    # A move into a folder history leaves out, which an earlier turn made: git sees a deletion, and no landing has the file.
+    os.replace(one.copy / "notes.txt", one.copy / "build" / "notes.txt")
+    moved = land(one, "saga:2")
+    assert (moved["changes"], [(o["path"], o["reason"]) for o in moved["overlapped"]]) == ([], [("notes.txt", "with")])
+    assert (folder / "notes.txt").is_file() and moved["excluded"] == ["build/"]
+    # A file there written again in place holds a deletion the same way: its name is not new, and it is newer.
+    (one.copy / "build" / "old.bin").write_text("built again, and longer\n")
+    (one.copy / "notes.txt").unlink()
+    again = land(one, "saga:3")
+    assert [(o["path"], o["reason"]) for o in again["overlapped"]] == [("notes.txt", "with")] and (folder / "notes.txt").is_file()
+    # A turn that writes nothing there deletes the file, and it lands.
+    (one.copy / "notes.txt").unlink()
+    assert [(c["path"], c["after"]) for c in land(one, "saga:4")["changes"]] == [("notes.txt", None)]
+    assert not (folder / "notes.txt").exists()
+
+
+def test_what_a_kept_turn_left_out_is_its_threads_to_land_still_so_its_deletion_waits(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "build").mkdir()
+    os.replace(one.copy / "notes.txt", one.copy / "build" / "notes.txt")
+    # The turn fails, and is kept on its branch.  Nothing of it has landed: what it wrote is still its thread's to land.
+    one.keep(author=A, trailers=[["Surogate-Saga", "saga:kept"], ["Surogate-Kind", "turn"]], base=True)
+    held = land(one, "saga:2")
+    assert [(o["path"], o["reason"]) for o in held["overlapped"]] == [("notes.txt", "with")]
+    assert (folder / "notes.txt").read_text() == "v1 notes\n"
+
+
+def up_to_its_record(history: LocalHistory, saga: str, author: dict = B, left: tuple[str, ...] = ()) -> dict:
+    """*history*'s turn landed up to its record, as a landing saga runs it, and the record's step: each change
+    applied by the host, a copy of each file, but those of *left*, which no landing writes."""
+    picked = history.pickup(author=YOURS, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "pickup"]])
+    turn = history.commit_turn(author=author, trailers=[["Surogate-Saga", saga], ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    changes = [change for change in turn["changes"] if change["path"] not in left]
+    applied(history.project, history.copy, changes)
+    step = {
+        "turn": turn["commit"], "applied": changes, "author": author, "trailers": [["Surogate-Saga", saga], ["Surogate-Kind", "landing"]],
+        "main": picked["main"], "pickup": picked["commit"],
+    }
+    return {**step, "left": list(left)} if left else step
+
+
+def late(ours: LocalHistory) -> None:
+    """A command of the landed turn's, still running after its record, writes where history leaves out."""
+    (ours.copy / "__pycache__" / "late.cpython-312.pyc").write_bytes(b"\0late")
+
+
+def a_landing_of_theirs(root: Path) -> None:
+    """Another thread lands a file: ``main`` moves, and our thread's clean copy moves to it at its next open."""
+    theirs = LocalHistory.at(root / "store", root / "Documents", thread=THEIRS, user="u1")
+    theirs.open()
+    (theirs.copy / "theirs.md").write_text("theirs\n")
+    land(theirs, "saga:theirs")
+
+
+#: Each way a thread's copy starts again from its base, holding what history leaves out; then the next turn's
+#: first act.  An open that moves the copy is that way itself; a turn whose open was not answered starts with
+#: the snapshot before its first step.
+STARTS = {
+    "a landing recorded whole": lambda root, ours: (land(ours, "saga:ours", B), "snapshot"),
+    "a landing whose record was cut after its push": lambda root, ours: (
+        stepped(root, OURS, "record", up_to_its_record(ours, "saga:ours"), before="update-ref refs/heads/main"), "snapshot",
+    ),
+    "an open's move to main": lambda root, ours: (land(ours, "saga:ours", B), late(ours), a_landing_of_theirs(root), "open"),
+    "an open's move to main cut before its base": lambda root, ours: (
+        land(ours, "saga:ours", B), late(ours), a_landing_of_theirs(root),
+        stepped(root, OURS, "open", {}, before="update-ref refs/bases/"), "snapshot",
+    ),
+}
+
+
+@pytest.mark.parametrize("start", list(STARTS))
+def test_what_the_copy_holds_where_history_leaves_out_when_it_starts_again_from_its_base_is_no_later_turns_write(tmp_path, start):
+    root = tmp_path / "whole"
+    folder = root / "Documents"
+    folder.mkdir(parents=True)
+    for name in ("Report.docx", "notes.txt"):
+        (folder / name).write_text(f"{name} v1\n")
+    ours = a_copy(root, folder, OURS)
+    # The turn runs a script, as any coding thread does: python leaves __pycache__ in the copy, which outlives the turn.
+    (ours.copy / "__pycache__").mkdir()
+    (ours.copy / "__pycache__" / "tool.cpython-312.pyc").write_bytes(b"\0tool")
+    (ours.copy / "Report.docx").write_text("our report\n")
+    *_, first = STARTS[start](root, ours)
+    # The next turn deletes a file and writes nothing where history leaves out: the deletion lands.
+    again = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+    if first == "open":
+        assert again.open() == {"copy": "moved"}
+    else:
+        again.snapshot("before a step")
+    (again.copy / "notes.txt").unlink()
+    after = land(again, "saga:next", B)
+    assert [(c["path"], c["after"]) for c in after["changes"]] == [("notes.txt", None)] and after["overlapped"] == [], start
+    assert (after["excluded"], after["repositories"]) == ([], []) and not (folder / "notes.txt").exists()
+
+
+def test_a_copy_made_again_starts_with_nothing_history_leaves_out_seen_in_it(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "__pycache__").mkdir()
+    (one.copy / "__pycache__" / "tool.cpython-312.pyc").write_bytes(b"\0tool")
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    land(one, "saga:1")
+    assert one._seen()["names"] == ["__pycache__/"]
+    # A failed turn is kept on the branch; then the copy is let go, and made again from its branch, which it does
+    # not move from: none of what the old one held is in the new one, and nothing of it is taken as seen there.
+    (one.copy / "Draft.md").write_text("a failed turn's, kept\n")
+    one.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True)
+    shutil.rmtree(one.copy)
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open() == {"copy": "kept"} and not (again.copy / "__pycache__").exists()
+    assert again._seen() == {"names": [], "files": {}}
+
+
 def test_a_folder_over_the_cap_has_no_history(tmp_path, folder, monkeypatch):
     monkeypatch.setattr("surogates.sandbox.local_history.HISTORY_CAP", 3)
     (folder / "node_modules").mkdir()
