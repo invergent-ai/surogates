@@ -543,7 +543,7 @@ async def test_a_threads_own_kinds_reach_its_folders_history_and_the_land_kind_a
     recorded = await landing.history(
         "record", turn=turn["commit"], applied=[change], author=author, trailers=trailers, main=picked["main"], pickup=picked["commit"],
     )
-    assert await landing.land("forget", saga=saga, applied=[change]) == {}
+    assert await landing.land("forget", saga=saga, applied=[{"step": 0, **change}]) == {}
     assert computer.app.places.holder is None
     # The history holds the landing, and nothing it kept is left.
     assert (await landing.history("fetch", saga=saga, since=picked["main"]))["landing"] == recorded["commit"]
@@ -564,14 +564,14 @@ async def test_a_landing_its_folders_history_will_not_let_go_of_keeps_what_it_re
     assert (computer.folder / "Plans" / "Q3.md").read_text() == "Q3 plan v2\n"
     # Neither recorded nor put back: the history refuses, and the app forgets nothing and keeps the folder.
     with pytest.raises(ComputerRefused) as refused:
-        await landing.land("forget", saga=saga, applied=[change])
+        await landing.land("forget", saga=saga, applied=[{"step": 0, **change}])
     assert (refused.value.kind, refused.value.code) == ("history", "landing_unsettled")
     assert (computer.app.places.kept / saga / "0").read_bytes() == b"Q3 plan\n"
     assert computer.app.places.holder == str(thread.id)
     # Put back whole, it may go.
     assert await landing.land("unapply", saga=saga, step=0, path="Plans/Q3.md") == {"path": "Plans/Q3.md", "put_back": True}
     assert (computer.folder / "Plans" / "Q3.md").read_text() == "Q3 plan\n"
-    assert await landing.land("forget", saga=saga, applied=[change]) == {}
+    assert await landing.land("forget", saga=saga, applied=[{"step": 0, **change}]) == {}
     assert computer.app.places.holder is None
 
 
