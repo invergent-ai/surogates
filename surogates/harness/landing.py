@@ -1267,7 +1267,7 @@ def waiting_on_you(paths: list[str], *, escalated: bool) -> dict:
         title = "Couldn't finish landing my changes"
         instructions = (
             f"A landing of this thread's changes could not be put back whole: {named or 'its files'}. "
-            "Each file's History shows every version."
+            "Each file's History lists its versions that landed; this landing's own are not listed there."
         )
     else:
         title = f"Couldn't merge my changes to {first}" + (f" and {others} other file{'s' if others > 1 else ''}" if others else "")

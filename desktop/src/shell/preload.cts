@@ -63,7 +63,9 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "subscribe"] as const;
   const answer = (id: number, outcome: { ok: unknown } | { error: string }) => ipcRenderer.send("desktop:projects-answer", id, outcome);
   const called = (source: ProjectsSource, message: Extract<ToPage, { type: "call" }>) => {
-    const method = source[message.method] as (...args: unknown[]) => Promise<unknown>;
+    const method = source[message.method] as ((...args: unknown[]) => Promise<unknown>) | undefined;
+    // A page of an agent older than this app serves no file's History: it is said, not run.
+    if (typeof method !== "function") return answer(message.id, { error: "This agent cannot show a file's History yet" });
     Promise.resolve().then(() => method(...message.args)).then(
       (ok) => answer(message.id, { ok }),
       (error: unknown) => answer(message.id, { error: error instanceof Error ? error.message : String(error) }),

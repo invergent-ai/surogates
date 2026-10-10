@@ -4,7 +4,7 @@
 // Projects and their threads (desktop design, Section 12): the wire types, and fixtures
 // with a thread in every group and with every reason, for fakes of a ProjectsSource.
 
-import type { LibraryEntry, ProducedFile, Project, Routine, ThreadRow } from "./projects-contract.js";
+import type { FileVersion, LibraryEntry, ProducedFile, Project, Routine, ThreadRow } from "./projects-contract.js";
 
 export type * from "./projects-contract.js";
 
@@ -13,6 +13,7 @@ export interface ProjectFixtures {
   threads: Record<string, ThreadRow[]>;
   library: Record<string, LibraryEntry[]>;
   routines: Record<string, Routine[]>;
+  history: Record<string, Record<string, FileVersion[]>>; // by project, then by file
 }
 
 export const FIXTURE_IDS = {
@@ -85,6 +86,21 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
         { path: "threads/revenue/revenue.xlsx", origin: "produced", threadId: ids.question, size: 9_870, updatedAt: ago(17), place: cloud },
       ],
       [ids.budget]: [],
+    },
+    // The revenue sheet: a routine made it (pruned since), a thread changed it, you saved it, and the
+    // thread's next version did not land.
+    history: {
+      [ids.report]: {
+        "threads/revenue/revenue.xlsx": [
+          { id: "12:f", path: "threads/revenue/revenue.xlsx", by: { kind: "thread", threadId: ids.question, title: "Check the revenue figures" },
+            at: ago(17), change: "changed", merged: false, available: true, landingId: null },
+          { id: "12:p", path: "threads/revenue/revenue.xlsx", by: { kind: "you" }, at: ago(17), change: "changed", merged: true, available: true, landingId: null },
+          { id: "9:f", path: "threads/revenue/revenue.xlsx", by: { kind: "thread", threadId: ids.question, title: "Check the revenue figures" },
+            at: ago(120), change: "changed", merged: true, available: true, landingId: "9" },
+          { id: "3:p", path: "threads/revenue/revenue.xlsx", by: { kind: "routine", name: "Nightly import" }, at: ago(140_000), change: "added", merged: true, available: false, landingId: null },
+        ],
+      },
+      [ids.budget]: {},
     },
     routines: {
       [ids.report]: [],

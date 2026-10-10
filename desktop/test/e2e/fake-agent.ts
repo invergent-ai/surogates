@@ -380,7 +380,7 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // thread answers, whose unreachable, when set, makes the list and every call on a project fail as
 // the web client's fetch does with the agent out of reach, whose lag is how many ms a change of a
 // project takes to answer once it is made, as a slow agent's, and whose register() registers the
-// source. What it changes of a project it keeps at the fake agent, so the next load serves it.
+// source, or with true the source of an agent older than the app, which serves no file's History. What it changes of a project it keeps at the fake agent, so the next load serves it.
 // The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
@@ -391,7 +391,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     refusal: null as string | null,
     unreachable: false,
     lag: 0,
-    register: () => {},
+    register: (_old?: boolean) => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
     },
@@ -426,6 +426,10 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     },
     async routines(id: string) {
       return this.served.routines[this.one(id).id] ?? [];
+    },
+    async history(id: string, path: string) {
+      if (fake.refusal) throw new Error(fake.refusal);
+      return this.served.history[this.one(id).id]?.[path] ?? [];
     },
     async create(input: { name: string; goal?: string; instructions?: string }) {
       if (fake.refusal) throw new Error(fake.refusal);
@@ -470,7 +474,8 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
       return () => void heard.delete(onChange);
     },
   } satisfies ProjectsSource & { served: ProjectFixtures; one(id: string): Project; moved(id: string, threadId: string, group: string): ThreadRow };
-  fake.register = () => void window.surogateDesktop?.registerProjects(source);
+  const older = () => Object.fromEntries(Object.entries(source).filter(([name]) => name !== "history"));
+  fake.register = (old = false) => void window.surogateDesktop?.registerProjects((old ? older() : source) as ProjectsSource);
   Object.assign(window, { fakeProjects: fake });
   if (delay >= 0) setTimeout(fake.register, delay);
 }

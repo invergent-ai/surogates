@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../web/src/lib/projects.js";
-import { PageProjects, type ToPage } from "../src/shell/projects.js";
+import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut, type ToPage } from "../src/shell/projects.js";
 
-const { projects, threads } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
+const { projects, threads, history } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
 const REPORT = FIXTURE_IDS.report;
+const REVENUE = "threads/revenue/revenue.xlsx";
 
 // The page, as the proxy meets it: what it was sent, and how to answer.
 function page(timeoutMs?: number) {
@@ -195,5 +196,76 @@ describe("the projects the page serves", () => {
     const row = threads[REPORT]![0]!;
     source.answered(1, { ok: [{ ...row, landingId: "41", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
     expect(await asked).toEqual([row]);
+  });
+
+  it("take a file's History, and refuse a version of another file, one with no zone or more than it lists", async () => {
+    const { source, last } = page();
+    const versions = history[REPORT]![REVENUE]!;
+    const read = source.history(REPORT, REVENUE, { kind: "cloud" });
+    expect(last()).toEqual({ type: "call", id: 1, method: "history", args: [REPORT, REVENUE, { kind: "cloud" }], deadline: expect.any(Number) });
+    source.answered(1, { ok: versions.map((version) => ({ ...version, secret: "x" })) });
+    expect(await read).toEqual(versions);
+    const refused = "The agent's page answered history with something Surogate cannot use";
+    const refusals: unknown[] = [
+      [{ ...versions[0], path: "brief.docx" }],
+      [{ ...versions[0], at: "2026-10-06T11:43:00" }],
+      [{ ...versions[0], id: "" }],
+      [{ ...versions[0], merged: "yes" }],
+      [{ ...versions[0], available: 1 }],
+      [{ ...versions[0], landingId: 9 }],
+      Array.from({ length: 501 }, () => versions[0]),
+      { versions },
+    ];
+    for (const [at, answer] of refusals.entries()) {
+      const asked = source.history(REPORT, REVENUE, { kind: "cloud" });
+      source.answered(at + 2, { ok: answer });
+      await expect(asked, JSON.stringify(answer).slice(0, 80)).rejects.toThrow(refused);
+    }
+    // As many as the agent lists at most are taken.
+    const full = source.history(REPORT, REVENUE, { kind: "cloud" });
+    source.answered(refusals.length + 2, { ok: Array.from({ length: 500 }, () => versions[0]) });
+    expect(await full).toHaveLength(500);
+  });
+
+  it("take a version by someone, or changed in a way, the app does not know as a plain version, never a refused list", async () => {
+    const { source } = page();
+    const [version] = history[REPORT]![REVENUE]!;
+    const read = source.history(REPORT, REVENUE, { kind: "cloud" });
+    // As the page of an agent newer than the app may serve it.
+    source.answered(1, {
+      ok: [
+        { ...version, id: "20:f", by: { kind: "agent", name: "Reviewer" }, change: "merged_by_hand" },
+        { ...version, id: "19:f", by: null, change: "restored" },
+        { ...version, id: "18:f", by: { kind: "thread", threadId: "t-1" }, change: null },
+        { ...version, id: "17:f", by: { kind: "routine", name: "n".repeat(501) }, change: "toString" },
+        { ...version, id: "16:f", by: "constructor" },
+        version,
+      ],
+    });
+    expect((await read).map(({ id, by, change }) => [id, by, change])).toEqual([
+      ["20:f", null, "changed"],
+      ["19:f", null, "restored"],
+      ["18:f", null, "changed"],
+      ["17:f", null, "changed"],
+      ["16:f", null, "changed"],
+      ["12:f", version!.by, "changed"],
+    ]);
+  });
+
+  it("give a History the plain bound of a read, and say the agent's own refusal of one", async () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const { source, last } = page();
+      const off = source.history(REPORT, REVENUE, { kind: "cloud" });
+      expect(last()).toMatchObject({ method: "history", deadline: 1_000 + ANSWER_TIMEOUT_MS });
+      source.answered(1, { error: "History is off: this project has more than 50,000 files." });
+      await expect(off).rejects.toThrow("History is off: this project has more than 50,000 files.");
+      const slow = source.history(REPORT, REVENUE, { kind: "cloud" });
+      vi.advanceTimersByTime(ANSWER_TIMEOUT_MS);
+      await expect(slow).rejects.toBeInstanceOf(TimedOut);
+      await expect(slow).rejects.toThrow("The agent's page did not answer history in time");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -24,9 +24,19 @@ interface ThreadRow {
   reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
-  files: Array<{ label: string; landing: "landed" | "redoing" | "not_merged" | "undone" | null }>;
+  files: Array<{ kind: "file" | "artifact"; label: string; ref: string; landing: "landed" | "redoing" | "not_merged" | "undone" | null }>;
   place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean };
   updatedAt: string;
+}
+
+// A version of a file, as Section 13's FileVersion has it; by null: someone the app has no name for.
+interface Version {
+  id: string;
+  by: { kind: "you" } | { kind: "thread"; title: string } | { kind: "routine"; name: string } | null;
+  at: string;
+  change: "added" | "changed" | "deleted" | "restored" | "undone";
+  merged: boolean;
+  available: boolean;
 }
 
 interface State {
@@ -44,6 +54,9 @@ interface State {
     routines: Array<{ name: string; scheduleDisplay: string }>;
   } | null;
   reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
+  // A file's History, shown in the Library in place of its files: its versions, null until they are
+  // read, and why they could not be.
+  history: { path: string; versions: Version[] | null; failure: string | null } | null;
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
@@ -70,6 +83,8 @@ interface Shell {
   read(id: string | null): Promise<void>;
   resolve(id: string): Promise<void>;
   reopen(id: string): Promise<void>;
+  history(path: string): Promise<void>;
+  closeHistory(): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
@@ -187,6 +202,24 @@ function chip(file: ThreadRow["files"][number]): HTMLElement {
   return made;
 }
 
+// How a version came to be, and who made it, in a line of the app's own words. A thread is said to
+// be one, so that a thread titled "you" never reads as the user. A name from the history is data:
+// shown as the app's prompts show text (asShown), so that none of its characters reorders or hides
+// the words around it. Someone the app has no name for is not named.
+const CHANGES = { added: "Added", changed: "Changed", deleted: "Deleted", restored: "Restored", undone: "Undone" } as const;
+function what(version: Version): string {
+  const by = version.by;
+  if (by === null) return CHANGES[version.change];
+  return `${CHANGES[version.change]} by ${by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${asShown(by.title)}` : `the routine ${asShown(by.name)}`}`;
+}
+
+// A file's History opens in the Library, in place of its files.
+function openHistory(path: string): void {
+  tab = "library";
+  showTab();
+  void shell.history(path);
+}
+
 // A thread's, or a file's, on the user's computer: a laptop, titled with the computer and whether it is online.
 function laptop(place: ThreadRow["place"]): HTMLElement[] {
   if (place.kind !== "device") return [];
@@ -196,9 +229,12 @@ function laptop(place: ThreadRow["place"]): HTMLElement[] {
   return [mark];
 }
 
-// A row reads its thread in the pane; the pane's Open shows it in the centre.
+// A row reads its thread in the pane; the pane's Open shows it in the centre. One that waits on
+// the user over a file that did not merge opens that file's History, the first such file's.
 function threadRow(thread: ThreadRow): HTMLElement {
-  const row = button("thread", "", () => void shell.read(thread.id));
+  const unmerged = thread.reason === "files" && thread.place.kind === "cloud"
+    ? thread.files.find((file) => file.kind === "file" && file.landing === "not_merged") : undefined;
+  const row = button("thread", "", () => void (unmerged ? openHistory(unmerged.ref) : shell.read(thread.id)));
   row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
   row.dataset.focus = `thread:${thread.id}`;
@@ -234,6 +270,53 @@ function listRow(first: string, second: string, third: string, place: ThreadRow[
   return item;
 }
 
+// A cloud file's row in the Library, which opens its History.
+function historyRow(path: string, item: HTMLElement): HTMLElement {
+  const open = button("file", "", () => openHistory(path));
+  open.dataset.file = path;
+  open.dataset.focus = `file:${path}`;
+  open.setAttribute("aria-label", `History of ${asShown(path)}`);
+  open.append(...item.childNodes);
+  const row = element("li", "");
+  row.append(open);
+  return row;
+}
+
+// A version of the file whose History is shown: how it came to be and by whom, when, and whether
+// it landed and is still kept.
+function versionRow(version: Version): HTMLElement {
+  const item = element("li", "version");
+  item.dataset.version = version.id;
+  const tags = [...(version.merged ? [] : ["Not merged"]), ...(version.available ? [] : ["No longer kept"])];
+  item.append(element("span", "what", what(version)), aged(element("span", "age"), version.at), element("span", "from", tags.join(" · ")));
+  return item;
+}
+
+// The file whose History the pane showed when it was last drawn.
+let historyShown: string | null = null;
+
+// A file's History, in place of the Library's files. As it opens, the row that had the keyboard is
+// hidden and the redraw gives it to the History's way back; as it closes, the keyboard goes back to
+// the file's row, while the pane has it.
+function renderHistory(state: State): void {
+  const history = state.history;
+  byId("file-history").hidden = history === null;
+  byId("files").hidden = history !== null;
+  if (history !== null) {
+    byId("no-files").hidden = true;
+    showText(byId("history-path"), history.path);
+    byId("history-failure").hidden = history.failure === null;
+    byId("history-failure").textContent = history.failure ?? "";
+    byId("versions").replaceChildren(...(history.versions ?? []).map(versionRow));
+    byId("no-versions").hidden = history.versions?.length !== 0;
+  }
+  const was = historyShown;
+  historyShown = history?.path ?? null;
+  const inPane = document.activeElement === document.body || byId("panel").contains(document.activeElement);
+  if (historyShown !== null || was === null || !inPane) return;
+  document.querySelector<HTMLElement>(`[data-file="${CSS.escape(was)}"]`)?.focus();
+}
+
 function renderOverview(state: State): void {
   const overview = state.overview;
   const threads = overview?.threads ?? [];
@@ -256,18 +339,23 @@ function renderOverview(state: State): void {
   }
   const titles = new Map(threads.map((found) => [found.id, found.title]));
   const library = [...(overview?.library ?? [])].sort((a, b) => Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
-  byId("files").replaceChildren(...library.map((entry) => listRow(
-    entry.path,
-    `${entry.origin === "added" ? "Added by you" : `From ${titles.get(entry.threadId ?? "") ?? "a thread"}`}${kilobytes(entry.size)}`,
-    entry.updatedAt ? ago(entry.updatedAt) : "",
-    entry.place,
-  )));
+  byId("files").replaceChildren(...library.map((entry) => {
+    const item = listRow(
+      entry.path,
+      `${entry.origin === "added" ? "Added by you" : `From ${titles.get(entry.threadId ?? "") ?? "a thread"}`}${kilobytes(entry.size)}`,
+      entry.updatedAt ? ago(entry.updatedAt) : "",
+      entry.place,
+    );
+    // A file on a computer has its History there.
+    return entry.place.kind === "cloud" ? historyRow(entry.path, item) : item;
+  }));
   byId("no-files").hidden = library.length > 0;
   const routines = overview?.routines ?? [];
   byId("routine-list").replaceChildren(...routines.map((routine) => listRow(routine.name, routine.scheduleDisplay, "")));
   document.querySelector<HTMLElement>('[data-tab="routines"]')!.hidden = routines.length === 0;
   if (tab === "routines" && routines.length === 0) tab = "threads";
   showTab();
+  renderHistory(state);
 }
 
 // The thread read in the pane when it was last drawn.
@@ -436,6 +524,7 @@ byId("new-project").addEventListener("click", () => void shell.newProject());
 byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
 byId("reading-back").addEventListener("click", () => void shell.read(null));
+byId("history-back").addEventListener("click", () => void shell.closeHistory());
 // Tab after the head's last control takes the keyboard into the transcript; it comes back from the transcript's
 // edges: Shift+Tab from its first control to Open, Escape to Back.
 byId("reading-open").addEventListener("keydown", (event) => {

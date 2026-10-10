@@ -1586,3 +1586,67 @@ body.quick-page {
   font-size: 15px;
   user-select: text;
 }
+
+/* A Library file opens its History. */
+.library button.file {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.library button.file:hover {
+  background: var(--hover);
+}
+
+.history .back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.history .path {
+  margin: 8px 12px;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  user-select: text;
+}
+
+.history .failure {
+  margin: 4px 12px;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.version {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.version .what {
+  overflow-wrap: anywhere;
+}
+
+.version .from,
+.version .age {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.version .from:empty {
+  display: none;
+}
