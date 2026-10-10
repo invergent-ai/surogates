@@ -61,8 +61,9 @@ export type ToBrowser =
   | { type: "pause"; root: string; paused: boolean }
   // The chat's newest page brought to the front: answered whether there was one.
   | { type: "show"; id: string; root: string }
-  // The ports of chats' own servers the browser may open, the VM manager's door, and the key this device knocks with there.
-  | { type: "forwards"; ports: number[]; door: string; key: string }
+  // The ports of chats' own servers the browser may open, the VM manager's door, the key this device knocks with there, and
+  // the mark of each port's last turn, by which the browser clears what the port's origins stored before it.
+  | { type: "forwards"; ports: number[]; door: string; key: string; turns: Array<[number, string]> }
   | { type: "stop" };
 
 export type FromBrowser =
@@ -184,10 +185,11 @@ export class BrowserClient {
 
   /**
    * The ports of chats' own servers the browser may open from now on, where its proxy knocks for each connection,
-   * and with which key. A running host is told; one started later hears it first; none is started to hear it.
+   * with which key, and each port's last turn. A running host is told; one started later hears it first; none is
+   * started to hear it.
    */
-  forwards(ports: number[], door: string, key: string): void {
-    this.forwarded = { type: "forwards", ports, door, key };
+  forwards(ports: number[], door: string, key: string, turns: Array<[number, string]>): void {
+    this.forwarded = { type: "forwards", ports, door, key, turns };
     this.host?.send(this.forwarded);
   }
 

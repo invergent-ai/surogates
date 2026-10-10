@@ -809,6 +809,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       // A chat's own servers its user let the browser open: the journal's ports, carried into the chat's sandbox
       // by the VM, which also says whether one listens on a port.
       ports: () => bindings.forwards(),
+      // And each port's last turn: the browser clears what a port's origins kept from before it.
+      turns: () => bindings.turns(),
       vm: vmFor(),
     }),
     prompts,

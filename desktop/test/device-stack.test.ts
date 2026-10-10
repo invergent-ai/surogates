@@ -516,6 +516,7 @@ describe("one agent's device", () => {
           launch: () => null,
           staging: join(base, "data", "browser-profiles", "tmp"),
           ports: () => bindings.forwards(),
+          turns: () => bindings.turns(),
           vm: { door: join(base, "browser.sock"), forwards: () => {}, listening: () => Promise.resolve(false) },
         });
       },

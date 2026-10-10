@@ -96,9 +96,14 @@ connection into that chat's sandbox and no other. A port is one chat's at a time
 prompt names the chat by its folder, and says which chat has the port when it is another's.
 Settings → Folders and permissions lists each port under its chat, with Take back. It goes
 then, when the chat's browser is taken back, or when the chat is deleted, and what the
-browser had open to it ends at once. A page's WebSocket to such a port is carried too, when it
-is a page of an allowed port that opens it, so a development server's page reloads by
-itself; https and `wss://` are not. A chat's sandbox takes 160 connections from the browser
+browser had open to it ends at once. Each time a port is given to a chat, moves to another or
+goes, the browser's pages at its three names close, and what they stored there goes too:
+local storage, IndexedDB, Cache Storage, service workers and the cookies the port's pages
+set, in the browser running then and in each of the agent's browser profiles at its next
+launch, before anything acts in it. A cookie is its host's and not its port's, so a page of
+one port still reads the cookies another port's pages set. A page's WebSocket to such a port
+is carried too, when it is a page of an allowed port that opens it, so a development server's
+page reloads by itself; https and `wss://` are not. A chat's sandbox takes 160 connections from the browser
 at once: past them the one that has carried nothing for longest ends, which a page hears as
 a connection lost. A tab that goes to a port not allowed is shown a short page of the
 proxy's own, which says that the chat's agent opens it and that the ports allowed are

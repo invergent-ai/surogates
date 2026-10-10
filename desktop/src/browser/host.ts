@@ -5,7 +5,7 @@
 // (main.ts); the browser dies with it, as its pipe closes.
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -18,7 +18,7 @@ import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
-import { chatPort, chatPortOf } from "./ports.js";
+import { CHAT_HOSTS, chatPort, chatPortOf } from "./ports.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
@@ -533,6 +533,29 @@ export function keepWebRtcProxied(profile: string): void {
   writeFileSync(path, JSON.stringify({ ...prefs, webrtc: { ...webrtc, ip_handling_policy: "disable_non_proxied_udp" } }));
 }
 
+// What a chat's server's pages keep at its origins, as Chromium names it, but for cookies: a cookie is its
+// host's and not its port's, read by every port's pages, so those a port's pages set are taken one by one.
+const STORAGES = "file_systems,indexeddb,local_storage,websql,service_workers,cache_storage,storage_buckets,shared_storage";
+// Each profile's record of what its browser has been cleared of: each chat port, by the mark of the turn it
+// was last cleared at (forwards). Only this host writes it, and only for the profile its browser runs on.
+const CLEARED = "surogate-ports.json";
+
+function clearedIn(profile: string): Record<string, string> {
+  try {
+    const read: unknown = JSON.parse(readFileSync(join(profile, CLEARED), "utf8"));
+    if (isRecord(read)) return Object.fromEntries(Object.entries(read).filter(([, turn]) => typeof turn === "string")) as Record<string, string>;
+  } catch {
+    // None yet, or none to trust: every port that turned is cleared again, which takes nothing of a port's since.
+  }
+  return {};
+}
+
+function keepCleared(profile: string, record: Record<string, string>): void {
+  const path = join(profile, CLEARED);
+  writeFileSync(`${path}.${process.pid}.tmp`, JSON.stringify(record));
+  renameSync(`${path}.${process.pid}.tmp`, path);
+}
+
 export interface BrowserHostOptions {
   proxy?: BrowserProxyOptions; // what the proxy judges and dials with; the system's by default
   args?: readonly string[]; // switches added to every launch: the tests' own
@@ -666,6 +689,12 @@ export class BrowserHost {
   private readonly open = new Map<Request, Begun>();
   // The ports of chats' own servers the browser may open, as the app told them: its proxy's, whenever one runs.
   private forwarded: { ports: number[]; door: string; key: string } | null = null;
+  // The mark of each chat port's last turn, as the app told them: given to a chat, moved to another or taken back.
+  // Each profile's browser is cleared of what a port's origins kept from before its turn, before anything acts in it.
+  private turns = new Map<number, string>();
+  // The running browser's clears of the ports that turned, one after another: an operation acts once those
+  // told before it are done.
+  private clearing: Promise<void> = Promise.resolve();
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -782,10 +811,60 @@ export class BrowserHost {
   /**
    * The ports of chats' own servers the browser may open from now on, the VM manager's *door* and the *key* this
    * device knocks with there (BrowserProxy.forwards): what it carries to a port no longer among them ends now.
+   * And the mark of each port's last *turns*: a running or launching browser is cleared of each port that turned
+   * since its profile was (clearTurned), before any operation told after this acts; another profile, at its launch.
    */
-  forwards(ports: readonly number[], door: string, key: string): void {
+  forwards(ports: readonly number[], door: string, key: string, turns: ReadonlyArray<readonly [number, string]>): void {
     this.forwarded = { ports: [...ports], door, key };
     this.proxy?.server.forwards(ports, door, key);
+    this.turns = new Map(turns);
+    const running = this.running;
+    if (running !== null) this.clearing = this.clearing.then(() => this.clearRunning(running)).catch(() => {});
+  }
+
+  // The browser *running* launches, cleared of each port that turned once it runs. One whose clear fails closes
+  // whole before anything acts in it: the next launch clears it.
+  private async clearRunning(running: Promise<BrowserContext>): Promise<void> {
+    const context = await running.catch(() => null);
+    if (context === null || this.live !== context || this.profile === null) return;
+    try {
+      await this.clearTurned(context, this.profile);
+    } catch {
+      await this.closePages(context.pages());
+    }
+  }
+
+  /**
+   * What *context*'s profile, *profile*, still keeps of each chat port that turned since it was last cleared of it
+   * there: every page whose address is at one of the port's origins closes (a frame of one in another page stays),
+   * then what each origin stores goes, its service workers with it, and so do the cookies the port's pages set; and
+   * the profile's record says so. Nothing else is touched: another port's origins, and the cookies another port set.
+   * A browser that quits with the last of those pages is cleared at its next launch.
+   */
+  private async clearTurned(context: BrowserContext, profile: string): Promise<void> {
+    const record = clearedIn(profile);
+    const due = [...this.turns].filter(([port, turn]) => record[String(port)] !== turn);
+    if (due.length === 0) return;
+    const ports = new Set(due.map(([port]) => port));
+    const turned = (page: Page) => ports.has(chatPortOf(page.url()) ?? 0);
+    await this.closePages(context.pages().filter(turned));
+    const keeper = context.pages().find((page) => !page.isClosed());
+    if (keeper === undefined) return;
+    const line = await context.newCDPSession(keeper);
+    try {
+      for (const port of ports) {
+        for (const host of CHAT_HOSTS) await line.send("Storage.clearDataForOrigin", { origin: `http://${host}:${port}`, storageTypes: STORAGES });
+      }
+      const { cookies } = await line.send("Storage.getCookies", {});
+      for (const { name, domain, path, sourcePort, partitionKey } of cookies) {
+        if (!ports.has(sourcePort) || !CHAT_HOSTS.has(domain.replace(/^\./, ""))) continue;
+        await line.send("Network.deleteCookies", { name, domain, path, ...(partitionKey === undefined ? {} : { partitionKey }) });
+      }
+    } finally {
+      await line.detach().catch(() => {});
+    }
+    for (const [port, turn] of due) record[String(port)] = turn;
+    keepCleared(profile, record);
   }
 
   /**
@@ -922,6 +1001,8 @@ export class BrowserHost {
   private async act(
     launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined,
   ): Promise<Outcome> {
+    // Nothing acts in a browser before it is cleared of the ports that turned before this came.
+    await this.clearing;
     if (signal.aborted) return CANCELLED;
     // The agent acts again: from here on a download nobody is known to have asked for may be its own (whose).
     if (this.handed !== null) this.handed.acted = true;
@@ -2054,6 +2135,8 @@ export class BrowserHost {
       await this.bypassWorkers(context);
       await this.saysDownloads(context, staging);
       this.spare = await this.proxied(context, this.proxy.server);
+      // Before anything acts in it: what its profile kept of the chat ports that turned since it last ran.
+      await this.clearTurned(context, launch.profile);
     } catch (error) {
       await context.close().catch(() => {});
       throw error;
