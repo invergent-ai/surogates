@@ -249,6 +249,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's commands, its
           return { copy: { place, folder: { path: copyOf(root), dev: at.dev, ino: at.ino, boot: BOOT_ID }, at: folder }, handle: Object.freeze({ root }) };
         },
         close: () => {},
+        ask: async () => ({ ok: { landing: null } }),
       },
       dataDir: data, cacheDir: join(dir, "cache", "surogate"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 60_000,
       release: (root) => vm.teardown(root),

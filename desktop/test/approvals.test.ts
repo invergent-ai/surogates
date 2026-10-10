@@ -190,6 +190,26 @@ describe("a chat that asks every time", () => {
     expect(user.asked).toEqual([]);
   });
 
+  it("never asks about a thread's snapshots, its history's steps or its landing, and asks of every other kind as before", async () => {
+    bind(ROOT, "ask");
+    // None is its user's to allow: each change a landing applies was asked about when the thread made it in its copy.
+    for (const operation of [
+      op("checkpoint", { action: "take", reason: "before write_file" }), op("checkpoint", { action: "restore", hash: "b".repeat(40) }),
+      op("history", { action: "commit", author: {}, trailers: [] }), op("land", { action: "apply", saga: "s", step: 0, path: "a.txt" }),
+      op("land", { action: "forget", saga: "s", applied: [] }), op("history", { action: "no such action" }),
+    ]) {
+      expect(await approvals.admit(operation, never()), operation.kind).toBeNull();
+    }
+    expect(user.asked).toEqual([]);
+    // A kind that only looks like one of them asks, and so does the thread's own write into its copy.
+    user.auto = "deny";
+    for (const kind of ["histories", "Land", "checkpoint.take", " land", "land "]) {
+      expect(await approvals.admit(op(kind, { action: "apply" }), never()), kind).toEqual(COMMAND_DENIED);
+    }
+    expect(await approvals.admit(op("write", { key: `${FOLDER}/a.txt`, data: "" }), never())).toEqual(CHANGE_DENIED);
+    expect(user.asked).toHaveLength(6);
+  });
+
   it("never asks about the harness's own spilled output, and asks about anything else there", async () => {
     bind(ROOT, "ask");
     user.auto = "deny";

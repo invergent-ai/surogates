@@ -39,8 +39,11 @@ import { inFolderRefusal, protectedInFolder } from "./protect.js";
 const MAX_LOOKED = 2_000;
 const PIECE_BYTES = 1024 * 1024;
 const ID = /^[0-9a-f]{40}$/;
-// A saga's id, as a folder's name in the app's data.
-const SAGA = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
+// A saga's id, as a folder's name in the app's data; and a step's record, by its number, in its saga's folder there.
+export const SAGA = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
+const RECORD = /^(0|[1-9][0-9]*)\.json$/;
+// A record is a step's few names and numbers: one larger is none.
+const RECORD_BYTES = 64 * 1024;
 // A file's revision, as the look answers it (operations.ts, revisionOf).
 const REVISION = /^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+$/;
 // A folder held, not read: O_PATH, which Node does not name. One this user may pass through but not list is entered all the same.
@@ -499,7 +502,7 @@ class Landing {
       // It has written nothing yet.
     }
     for (const name of found === null ? [] : names) {
-      const step = /^(0|[1-9][0-9]*)\.json$/.exec(name)?.[1];
+      const step = RECORD.exec(name)?.[1];
       let did: Step | null = null;
       try {
         did = step === undefined ? null : this.read(Number(step));
@@ -937,7 +940,7 @@ class Landing {
     } catch {
       // It has written nothing yet.
     }
-    return names.flatMap((name) => /^(0|[1-9][0-9]*)\.json$/.exec(name)?.[1] ?? []).map(Number);
+    return names.flatMap((name) => RECORD.exec(name)?.[1] ?? []).map(Number);
   }
 
   // Every step of the saga whose record does not say it ended is put back, and a record's own half-written file
@@ -962,6 +965,39 @@ class Landing {
     this.rmdir(this.kept);
     if (failures.length > 0) throw failures[0];
   }
+}
+
+/**
+ * The steps of the landing *saga* that a landing's helper holds a record of in *kept*, where its folder's landings keep
+ * what they replace, each with the file its record names: null for a record that cannot be read. The app reads them
+ * before it has a landing forgotten (hosts/tool-hosts.ts): a record is all that names a file a step moved aside, so no
+ * step its caller leaves out has what it kept forgotten. Throws where the saga's folder is there and cannot be read.
+ */
+export function recordsOf(kept: string, saga: string): Map<number, string | null> {
+  if (!SAGA.test(saga)) throw valueError(BAD);
+  const folder = join(kept, saga);
+  let names: string[] = [];
+  try {
+    names = readdirSync(folder);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const records = new Map<number, string | null>();
+  for (const name of names) {
+    const step = RECORD.exec(name)?.[1];
+    if (step === undefined) continue;
+    const at = join(folder, name);
+    let did: Step | null = null;
+    try {
+      const found = lstatSync(at);
+      if (found.isFile() && found.size <= RECORD_BYTES) did = stepOf(JSON.parse(readFileSync(at, "utf8")));
+    } catch (error) {
+      // One that went since names nothing; anything else there is a record that cannot be read.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+    }
+    records.set(Number(step), did?.path ?? null);
+  }
+  return records;
 }
 
 // What each landing's helper found at its start, by the folder it lands in and where it keeps: one helper holds a
