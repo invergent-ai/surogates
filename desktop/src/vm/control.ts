@@ -12,6 +12,7 @@ import { MAX_PROCESSES, type ProcessHandle } from "../guest/processes.js";
 import type { FromAgent, HostUser, ToAgent } from "../guest/protocol.js";
 import { isHandle } from "../hosts/folder-record.js";
 import type { Outcome } from "../link/protocol.js";
+import { checked } from "./history.js";
 
 // What the host asks: every message to the agent but hello's answer, its id added on sending.
 type Without<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -118,7 +119,23 @@ export class ControlLink {
   }
 
   /** One operation of *root*'s. A cancel is answered at once; the agent is told, and its own answer goes unread. */
-  async op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+    return this.cancellable({ type: "op", root, kind, args }, signal, (reply) => (reply.type === "result" ? reply.outcome : SANDBOX_STOPPED));
+  }
+
+  /**
+   * One request to the history of the place *key*, for *thread*'s copy, cancelled as an operation is.
+   * What the agent answered is the guest's: nobody has it before it is checked as the answer of
+   * *action* (history.ts), and an answer that is no result at all is refused as one that is none.
+   * A cancel, and a link that closed, are this computer's own to say.
+   */
+  history(key: string, thread: string, user: string, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+    const asked: Request = { type: "history", key, thread, user, action, args };
+    return this.cancellable(asked, signal, (reply) => checked(action, reply.type === "result" ? reply.outcome : undefined));
+  }
+
+  // *message*, cancelled by *signal*; its answer, as *read* takes it.
+  private async cancellable(message: Request, signal: AbortSignal, read: (reply: FromAgent) => Outcome): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     const id = this.next;
     let cancel = () => {};
@@ -129,10 +146,10 @@ export class ControlLink {
       };
     });
     signal.addEventListener("abort", cancel, { once: true });
-    const reply = await Promise.race([this.request({ type: "op", root, kind, args }), cancelled]);
+    const reply = await Promise.race([this.request(message), cancelled]);
     signal.removeEventListener("abort", cancel);
     if (reply === "cancelled") return CANCELLED;
-    return reply?.type === "result" ? reply.outcome : SANDBOX_STOPPED;
+    return reply ? read(reply) : SANDBOX_STOPPED;
   }
 
   // Told of each root whose runner the guest lost, and set up again by the next operation.

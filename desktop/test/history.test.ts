@@ -1,15 +1,18 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CANCELLED } from "../src/guest/command.js";
+import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlPlaces } from "../src/guest/control.js";
 import { type Asked, askHistory, Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
 import type { Outcome } from "../src/link/protocol.js";
 import { checked, type HistoryRequest, named } from "../src/vm/history.js";
+import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
 
 const KEY = "0123456789abcdef";
 const OTHER_KEY = "fedcba9876543210";
@@ -433,7 +436,7 @@ describe("a request to a folder's history", () => {
       { thread: 7 }, { thread: [request.thread] }, { thread: undefined },
       { user: "" }, { user: "u1\n" }, { user: "u 1" }, { user: "u1;id" }, { user: "u/../x" }, { user: "--upload-pack=/x" }, { user: "u".repeat(129) },
       { user: undefined }, { user: null }, { user: 7 }, { user: ["u1"] },
-      { action: undefined }, { action: 7 }, { args: null }, { args: [] }, { args: "{}" }, { args: undefined },
+      { action: undefined }, { action: 7 }, { args: null }, { args: [] }, { args: "{}" }, { args: undefined }, { place: undefined }, { place: null },
     ]) {
       expect(named({ ...request, ...change } as unknown as HistoryRequest), JSON.stringify(change)).toBe(false);
     }
@@ -670,5 +673,193 @@ describe("what the guest sent in an outcome's place, checked on this computer", 
     }
     expect(checked("open", { error: { type: "history", code: "failed", message: huge } })).toEqual({ error: { type: "history", code: "failed", message: "x".repeat(2_000) } });
     expect(performance.now() - began).toBeLessThan(2_000);
+  });
+});
+
+describe("the VM manager, asked for a folder's history", () => {
+  const options = (): VmOptions => ({
+    kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: join(dir, "data", "sessions.img"),
+    run: join(dir, "run"), console: join(dir, "logs", "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, kvm: join(dir, "kvm"),
+  });
+  const place = (): Place => ({ key: KEY, history: join(dir, "store"), real: { path: join(dir, "Documents"), ...statSync(join(dir, "Documents")) } });
+  const ask = (action: string, args: Record<string, unknown> = {}): HistoryRequest => ({ place: place(), thread: THREAD, user: "u1", action, args });
+  // A guest whose agent's Control is the real one, its places answering *history*: what the agent was asked, and when the guest went.
+  const guest = (asked: unknown[], history: ControlPlaces["history"], places: Partial<ControlPlaces> = {}): BootVm => async () => {
+    const [host, agent] = duplexPair();
+    const [net] = duplexPair();
+    const [inbound] = duplexPair();
+    let gone = (_said: string) => {};
+    const exited = new Promise<string>((resolve) => {
+      gone = resolve;
+    });
+    const kill = async () => {
+      host.destroy();
+      net.destroy();
+      inbound.destroy();
+      gone("");
+    };
+    void exited.then(() => asked.push(["gone"]));
+    const control = new Control(
+      (message) => void agent.write(`${JSON.stringify(message)}\n`),
+      { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) },
+      { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill },
+      {
+        mount: async (key, store, real) => void asked.push(["mount", key, store.tag, real.tag]),
+        unmount: async (key) => void asked.push(["unmount", key]),
+        history, ...places,
+      },
+    );
+    createInterface({ input: agent }).on("line", (line) => control.receive(line));
+    control.hello();
+    let made = 0;
+    return { control: host, net, inbound, exited, emulated: null, kill, share: async () => ({ kind: "virtiofs", tag: `r${(made += 1)}` }), unshare: async () => {} };
+  };
+
+  it("places the folder first, then asks the agent, and checks its answer", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), guest(asked, async (key, request) => {
+      asked.push(["history", key, request]);
+      return { ok: request.action === "snapshot" ? { hash: ID, planted: true } : { hash: "not an id" } };
+    }));
+    expect(await manager.history(ask("snapshot", { reason: "r" }), signal())).toEqual({ ok: { hash: ID } });
+    expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["history", KEY, { thread: THREAD, user: "u1", action: "snapshot", args: { reason: "r" } }]]);
+    // A second thread's request finds the place there.
+    expect(await manager.history(ask("snapshot"), signal())).toEqual({ ok: { hash: ID } });
+    expect(asked.filter((entry) => (entry as string[])[0] === "mount")).toHaveLength(1);
+    // What is not an answer's is refused here, whatever the guest says.
+    const lying = new VmManager(options(), guest([], async () => ({ ok: { hash: "not an id" } })));
+    expect(await lying.history(ask("snapshot"), signal())).toEqual(NOT_AN_ANSWER);
+    await manager.stop();
+    await lying.stop();
+  });
+
+  it("answers a refusal, never a rejection, when the guest's outcome is none at all, or its history could not even be asked", async () => {
+    for (const outcome of [null, 7, "ok", { error: null }, { error: { type: "cancelled", message: "The session stopped this command" } }]) {
+      const manager = new VmManager(options(), guest([], async () => outcome as unknown as Outcome));
+      expect(await manager.history(ask("open"), signal())).toEqual(NOT_AN_ANSWER);
+      await manager.stop();
+    }
+    const failing = new VmManager(options(), guest([], () => Promise.reject(new Error("spawn EAGAIN"))));
+    expect(await failing.history(ask("open"), signal())).toEqual({ error: { type: "other", message: "Error: spawn EAGAIN" } });
+    await failing.stop();
+  });
+
+  it("asks nothing for a thread or a user that is not one's id, and answers a cancel at once", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), guest(asked, (_key, _request, stop) => new Promise<Outcome>((resolve) => {
+      stop.addEventListener("abort", () => resolve(CANCELLED), { once: true });
+    })));
+    for (const change of [{ thread: "../x" }, { thread: THREAD.toUpperCase().replace("0B", "0G") }, { user: "" }, { user: "u1\n" }, { action: 7 }, { args: null }, { place: null }]) {
+      expect(await manager.history({ ...ask("open"), ...change } as unknown as HistoryRequest, signal())).toEqual({
+        error: { type: "value", message: "This request names no thread, user or action of a history's" },
+      });
+    }
+    // No guest was asked, and none was booted to refuse it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(asked).toEqual([]);
+    const cancel = new AbortController();
+    const waiting = manager.history(ask("open"), cancel.signal);
+    setTimeout(() => cancel.abort(), 50);
+    expect(await waiting).toEqual(CANCELLED);
+    await manager.stop();
+  });
+
+  // A history whose requests are answered when the test says: what was asked, and each one's answer let go.
+  const held = (asked: unknown[]) => {
+    const release: Array<() => void> = [];
+    const history: ControlPlaces["history"] = (_key, request) => new Promise<Outcome>((resolve) => {
+      asked.push(["history", request.action]);
+      release.push(() => {
+        asked.push(["answered", request.action]);
+        resolve({ ok: { paths: [] } });
+      });
+    });
+    return { release, history };
+  };
+
+  it("is done in the order it was asked of its place: after a letting go asked before it, and before one asked after it", async () => {
+    const asked: unknown[] = [];
+    const { release, history } = held(asked);
+    const manager = new VmManager(options(), guest(asked, history));
+    const first = manager.history(ask("changed"), signal());
+    await until(() => release.length === 1);
+    // Let go while its request runs: the place stays until the request is answered.
+    const gone = manager.unplace(place());
+    // Asked for again meanwhile: another place, added once the first has gone, with shares of its own.
+    const second = manager.history(ask("open"), signal());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["history", "changed"]]);
+    release[0]!();
+    expect(await first).toEqual({ ok: { paths: [] } });
+    expect(await gone).toBe(true);
+    await until(() => release.length === 2);
+    expect(asked).toEqual([
+      ["mount", KEY, "r1", "r2"], ["history", "changed"], ["answered", "changed"], ["unmount", KEY], ["mount", KEY, "r3", "r4"], ["history", "open"],
+    ]);
+    release[1]!();
+    // Its answer is not an open's: checked as the answer of the action it was asked with.
+    expect(await second).toEqual(NOT_AN_ANSWER);
+    await manager.stop();
+  });
+
+  it("leaves nothing running when it is cancelled while it waits for its place's letting go: no place, no request, and a guest that stops", async () => {
+    const asked: unknown[] = [];
+    let unmounted = () => {};
+    const manager = new VmManager(options(), guest(asked, async () => {
+      asked.push(["history"]);
+      return { ok: {} };
+    }, {
+      unmount: (key) => new Promise<void>((resolve) => {
+        asked.push(["unmount", key]);
+        unmounted = resolve;
+      }),
+    }));
+    expect(await manager.place(place(), signal())).toBeNull();
+    const gone = manager.unplace(place());
+    await until(() => asked.length === 2);
+    const cancel = new AbortController();
+    const waiting = manager.history(ask("open"), cancel.signal);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    cancel.abort();
+    expect(await waiting).toEqual(CANCELLED);
+    unmounted();
+    expect(await gone).toBe(true);
+    // Nothing was added for it, the agent was asked nothing, and the guest, holding nothing, goes.
+    await until(() => asked.some((entry) => (entry as string[])[0] === "gone"));
+    expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["unmount", KEY], ["gone"]]);
+    await manager.stop();
+  });
+
+  it("is never answered from another folder's history: a key the guest holds for one folder takes no request for another", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), guest(asked, async (key, request) => {
+      asked.push(["history", key, request.action]);
+      return { ok: { paths: ["Report.docx"] } };
+    }));
+    expect(await manager.history(ask("changed"), signal())).toEqual({ ok: { paths: ["Report.docx"] } });
+    for (const name of ["other store", "Other"]) mkdirSync(join(dir, name));
+    const others: Place[] = [
+      { ...place(), real: { path: join(dir, "Other"), ...statSync(join(dir, "Other")) } },
+      { ...place(), history: join(dir, "other store") },
+    ];
+    for (const other of others) {
+      expect(await manager.history({ ...ask("changed"), place: other }, signal())).toEqual({
+        error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: its key is another folder's place in the sandbox" },
+      });
+    }
+    expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["history", KEY, "changed"]]);
+    await manager.stop();
+  });
+
+  it("answers a request the guest stopped under as stopped by the sandbox, and one asked of a manager that is stopping", async () => {
+    const asked: unknown[] = [];
+    const { release, history } = held(asked);
+    const manager = new VmManager(options(), guest(asked, history));
+    const running = manager.history(ask("changed"), signal());
+    await until(() => release.length === 1);
+    const stopped = manager.stop();
+    expect(await running).toEqual(SANDBOX_STOPPED);
+    await stopped;
+    expect(await manager.history(ask("changed"), signal())).toEqual({ error: { type: "unavailable", message: "This computer's sandbox is stopping" } });
   });
 });

@@ -61,9 +61,9 @@ const PATH_UNITS = 4_096;
 const MAX_FILES = 50_000;
 const MESSAGE_UNITS = 2_000;
 
-/** Whether *request* names a thread, a user and an action as a history's request does: nothing else is ever sent to the guest. */
-export function named({ thread, user, action, args }: HistoryRequest): boolean {
-  if (typeof thread !== "string" || typeof user !== "string" || typeof action !== "string") return false;
+/** Whether *request* names a thread, a user and an action as a history's request does: no other is asked of a guest, and none is booted for it. */
+export function named({ place, thread, user, action, args }: HistoryRequest): boolean {
+  if (typeof place !== "object" || place === null || typeof thread !== "string" || typeof user !== "string" || typeof action !== "string") return false;
   return THREAD.test(thread) && USER.test(user) && typeof args === "object" && args !== null && !Array.isArray(args);
 }
 
@@ -73,10 +73,10 @@ type Parse<T> = (value: unknown) => T | undefined;
 const ID = /^[0-9a-f]{40}$/;
 const id: Parse<string> = (value) => (typeof value === "string" && value.length === 40 && ID.test(value) ? value : undefined);
 const idOrNull: Parse<string | null> = (value) => (value === null ? null : id(value));
-// A file as git names it: a path from the folder's top, with no part that leads out of it, in text that is UTF-8's to carry.
+// A file as git names it, in text that is UTF-8's to carry: a path from the folder's top, each part a name. One
+// that starts at the root has an empty part first, and none leads out of the folder.
 const path: Parse<string> = (value) => {
-  if (typeof value !== "string" || value === "" || value.length > PATH_UNITS || value.includes("\0") || value.startsWith("/")) return undefined;
-  if (!value.isWellFormed()) return undefined;
+  if (typeof value !== "string" || value.length > PATH_UNITS || value.includes("\0") || !value.isWellFormed()) return undefined;
   return value.split("/").some((part) => part === "" || part === "." || part === "..") ? undefined : value;
 };
 // A file or a folder history leaves out, as git lists it: a folder's name ends in a slash.

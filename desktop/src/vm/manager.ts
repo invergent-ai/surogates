@@ -20,6 +20,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
+import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
 import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
 import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
@@ -518,6 +519,21 @@ export class Guest {
   }
 
   /**
+   * One request to a folder's history, its place added first: git in the guest, as the agent's own
+   * user. The answer is the guest's, checked as it comes off the link (history.ts), or why there is
+   * none. A request is its place's alone: a key the guest holds for another folder, or another
+   * history, is refused, and the agent is asked nothing.
+   */
+  async history(request: HistoryRequest, signal: AbortSignal): Promise<Outcome> {
+    if (!named(request)) return NOT_A_REQUEST;
+    const { place, thread, user, action, args } = request;
+    const failure = await Promise.race([this.place(place), aborted(signal)]);
+    if (failure === "aborted") return CANCELLED;
+    if (failure) return failure;
+    return this.control.history(place.key, thread, user, action, args, signal);
+  }
+
+  /**
    * *place* leaves the guest: the agent lets both mounts go, then the two shares are removed. Only
    * the place it holds for that folder and history: false for any other, which is left as it is.
    */
@@ -668,7 +684,7 @@ export class VmManager {
   private readonly noticed = new Set<string>();
   // Each place the guest is letting go, until it has: asked for again meanwhile, it is added once it has gone.
   private readonly leaving = new Map<string, Promise<unknown>>();
-  // Each place being asked for, by its key, until it is answered: let go meanwhile, it goes once it is.
+  // Each place being asked for, and each request to its history, by its key, until it is answered: let go meanwhile, it goes once it is.
   private readonly placing = new Map<string, Set<Promise<unknown>>>();
   // What each device's browser may open of its chats' own servers, whichever guest runs.
   private readonly forwarded = new Forwarded();
@@ -706,20 +722,41 @@ export class VmManager {
    * folder itself, for the agent's own git. Otherwise the answer that says why not. Never rejects.
    */
   async place(place: Place, signal: AbortSignal): Promise<Outcome | null> {
-    // What was asked of its key before this: a place on its way out has gone before it is added anew.
-    const gone = this.leaving.get(place.key) ?? Promise.resolve();
-    const asked = this.inGuest(signal, async (guest) => {
-      if ((await Promise.race([gone, aborted(signal)])) === "aborted") return CANCELLED;
+    const failure = await this.ofPlace(place.key, signal, async (guest) => {
       const failed = await Promise.race([guest.place(place), aborted(signal)]);
       if (failed === "aborted") return CANCELLED;
       return failed ?? { ok: null };
     });
-    const placing = this.placing.get(place.key) ?? new Set();
-    this.placing.set(place.key, placing.add(asked));
-    const failure = await asked;
-    placing.delete(asked);
-    if (placing.size === 0 && this.placing.get(place.key) === placing) this.placing.delete(place.key);
     return "ok" in failure ? null : failure;
+  }
+
+  /**
+   * One request to a folder's history, in the guest, booted for it if none runs, its place added
+   * first: its answer, checked (history.ts), or why there is none. It is done in the order it was
+   * asked of its place: a letting-go asked before it has ended first, and the place is added anew;
+   * one asked after it waits until it is answered. A cancel is answered at once, and one that comes
+   * while it waits for its place to go adds nothing and asks nothing. Never rejects.
+   */
+  history(request: HistoryRequest, signal: AbortSignal): Promise<Outcome> {
+    if (!named(request)) return Promise.resolve(NOT_A_REQUEST);
+    return this.ofPlace(request.place.key, signal, (guest) => guest.history(request, signal));
+  }
+
+  // *work* on the place of *key*, in the guest, once what was asked of the key before has been done:
+  // a place on its way out has gone before it is added anew. Noted until it is answered, so that a
+  // letting-go asked meanwhile waits for it.
+  private async ofPlace(key: string, signal: AbortSignal, work: (guest: Guest) => Promise<Outcome>): Promise<Outcome> {
+    const gone = this.leaving.get(key) ?? Promise.resolve();
+    const asked = this.inGuest(signal, async (guest) => {
+      if ((await Promise.race([gone, aborted(signal)])) === "aborted") return CANCELLED;
+      return work(guest);
+    });
+    const placing = this.placing.get(key) ?? new Set();
+    this.placing.set(key, placing.add(asked));
+    const outcome = await asked;
+    placing.delete(asked);
+    if (placing.size === 0 && this.placing.get(key) === placing) this.placing.delete(key);
+    return outcome;
   }
 
   /**
