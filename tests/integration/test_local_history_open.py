@@ -291,6 +291,34 @@ async def test_an_app_that_keeps_no_copy_for_the_thread_runs_no_step_of_its_turn
     assert failed["retryable"] is False
 
 
+async def test_a_folder_too_large_to_copy_in_time_has_its_threads_turn_fail_saying_why_once_its_app_says_so(api, computer, monkeypatch):
+    _, _, thread = await begun_with_copy(api, computer)
+    copied = [0]
+    too_large = {"error": {
+        "type": "history_off",
+        "message": "This folder is too large for a thread of the project to have a copy of its own on this computer: its copy could "
+                   "not be made within the time a copy may take, twice. Choose a folder inside it that holds less",
+    }}
+
+    def cut_twice(frame, outcome):
+        # As the app answers a turn's open: two makings of the copy cut short by their bound, then no copy for the thread.
+        if frame["args"].get("action") != "open":
+            return outcome
+        copied[0] += 1
+        return {"error": {"type": "history", "code": "no_answer", "message": "Cut short"}} if copied[0] <= 2 else too_large
+
+    computer.app.lie = cut_twice
+    await a_thread_turn(api, monkeypatch, thread, [
+        calling(("read_file", {"path": "Report.docx"})), calling(("read_file", {"path": "Plans/Q3.md"})), WRITES, _final_response("Done."),
+    ])
+    assert await steps_of(api, thread) == ["read_file", "read_file"]
+    assert not (computer.app.places.copy(str(thread.id)) / "Budget.xlsx").exists() and not (computer.folder / "Budget.xlsx").exists()
+    failed = await failure(api, thread)
+    assert (failed["why"], failed["code"], failed["error_title"], failed["retryable"]) == (
+        "history_off", "history_off", NOWHERE["history_off"], False,
+    )
+
+
 @pytest.mark.parametrize(("case", "lie", "code"), [
     ("a history that refuses the project's", {"error": {"type": "history", "code": "history_refused", "message": "no"}}, "history_refused"),
     ("a folder no longer there", {"error": {"type": "folder_unavailable", "message": "The folder is gone"}}, "folder_unavailable"),

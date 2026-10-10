@@ -441,6 +441,9 @@ def test_a_report_names_a_refusal_by_a_word_of_the_servers_own():
     assert code_of(NotAnAnswer("This computer's answer to 'open' was not one")) == "not_an_answer"
     # The journal's own refusal: its computer was asked nothing.
     assert code_of(DeviceOperationError("This session was stopped")) == "not_asked"
+    # The app's word that it gives a thread no copy of a folder too large to copy: a type of its own, with no code.
+    too_large = refused({"error": {"type": "history_off", "message": "This folder is too large for a thread of the project"}})
+    assert (too_large.kind, too_large.code, code_of(too_large)) == ("history_off", None, "history_off")
 
 
 def test_none_of_a_threads_kinds_is_answered_with_a_transfer():
@@ -660,6 +663,8 @@ def test_a_turn_asks_its_open_a_bounded_number_of_times_and_a_refusal_at_the_las
     ({"error": {"type": "history", "code": "name_not_utf8", "message": "a file's name is not UTF-8"}}, "names"),
     # Its computer's app keeps no copy of the folder for the thread: it bound it to the folder itself.
     ({"error": {"type": "unsupported", "message": "This chat works in its folder itself"}}, NO_COPY),
+    # Its computer's app gives the thread no copy: the folder is too large to copy in the time a copy may take.
+    ({"error": {"type": "history_off", "message": "This folder is too large for a thread of the project to have a copy"}}, "history_off"),
 ])
 def test_a_thread_whose_folder_has_no_history_or_whose_app_keeps_no_copy_for_it_has_nowhere_to_work(outcome, why):
     journal = Opens(outcome)
@@ -674,7 +679,7 @@ def test_a_thread_whose_folder_has_no_history_or_whose_app_keeps_no_copy_for_it_
     *({"error": {"type": "history", "code": code, "message": "no"}} for code in sorted(
         HISTORY_CODES - {"no_whole_copy", "move_unfinished", "record_unfinished", "no_answer", "name_not_utf8"},
     )),
-    *({"error": {"type": kind, "message": "no"}} for kind in sorted(REFUSALS - {"history", NO_COPY, "cancelled", "interrupted", "unavailable"})),
+    *({"error": {"type": kind, "message": "no"}} for kind in sorted(REFUSALS - {"history", NO_COPY, "history_off", "cancelled", "interrupted", "unavailable"})),
     # What is no refusal a computer's app gives, and what is no answer.
     {"error": "no"}, {"error": {"type": "history", "code": "<b>", "message": "no"}},
     {"ok": {"copy": "/etc", "session": "another"}}, {"ok": {"history": "off"}}, {"ok": None}, {"okay": 1},
@@ -688,6 +693,19 @@ def test_a_refusal_asking_again_would_not_pass_leaves_the_thread_nowhere_to_work
     assert journal.heard == ["open:7"]
 
 
+def test_a_folder_whose_copy_was_cut_twice_by_its_bound_leaves_its_thread_nowhere_to_work_at_the_next_asking():
+    cut = {"error": {"type": "history", "code": "no_answer", "message": "This folder's history did not answer"}}
+    too_large = {"error": {"type": "history_off", "message": "This folder is too large for a thread of the project to have a copy"}}
+    journal = Opens(cut, cut, too_large)
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    # As the app answers: two makings of the copy cut short by their bound, then no copy for the thread.
+    assert asyncio.run(its.opened(7)) is None
+    assert asyncio.run(its.opened(7)) is None
+    stood = nowhere(its)
+    assert (stood.why, stood.code, str(stood), stood.retryable) == ("history_off", "history_off", NOWHERE["history_off"], False)
+    assert journal.heard == ["open:7", "open:7:1", "open:7:2"]
+
+
 def test_an_asking_a_worker_left_unanswered_is_waited_for_and_is_not_asked_again():
     journal = Opens(MOVED)
     # Recorded by a worker cut off while it waited, and answered once its computer is back.
@@ -698,10 +716,10 @@ def test_an_asking_a_worker_left_unanswered_is_waited_for_and_is_not_asked_again
 
 
 def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_what_to_do():
-    assert set(NOWHERE) == {"cap", "names", NO_COPY, "refused"}
+    assert set(NOWHERE) == {"cap", "names", "history_off", NO_COPY, "refused"}
     for why, words in NOWHERE.items():
         assert str(NowhereToWork(why)) == words and len(words) <= 200, why
-    assert "Choose a folder inside it." in NOWHERE["cap"] and "Choose a folder inside it." in NOWHERE["names"]
+    assert all("Choose a folder inside it" in NOWHERE[why] for why in ("cap", "names", "history_off"))
     assert NOWHERE[NO_COPY].endswith("Update Surogate Desktop.")
 
 

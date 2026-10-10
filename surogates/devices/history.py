@@ -43,8 +43,8 @@ kinds is answered with a transfer.  The bounds are the app's own
 
 A turn of the thread's opens its copy before its steps
 (:meth:`ThreadCopy.opened`).  A thread whose folder has no history, whose
-computer's app keeps no copy for it, or whose copy cannot be opened there,
-has nowhere to work: its turn runs no step, and says why in the words of
+computer's app keeps no copy for it or gives it none of a folder too large
+to copy, or whose copy cannot be opened there, has nowhere to work: its turn runs no step, and says why in the words of
 :data:`NOWHERE`.
 """
 
@@ -111,13 +111,22 @@ _PASSING_CODES = frozenset({"no_whole_copy", "move_unfinished", "record_unfinish
 _PASSING_KINDS = frozenset({"cancelled", "interrupted", "unavailable"})
 #: Why a thread has nowhere to work where its copy could not be opened: no reason of its folder's.
 _REFUSED = "refused"
+#: The refusal of a computer whose app gives the thread no copy of a folder too large to copy in
+#: the time a copy may take, its making cut short by that bound twice: until the app starts again.
+_TOO_LARGE = "history_off"
+#: Why a thread has nowhere to work, by its open's refusal: its type, else its code.
+_NOWHERE_BY = {NO_COPY: NO_COPY, _TOO_LARGE: _TOO_LARGE, "name_not_utf8": "names"}
 #: What a person reads where a thread has nowhere to work on its computer, by why: its folder has
-#: more files than its history keeps, or a name its history cannot keep; its computer's app keeps
-#: no copy of the folder for it; or its copy could not be opened there.  Said as its turn's
-#: failure.  The owner's words, and these alone.
+#: more files than its history keeps, or a name its history cannot keep, or is too large for its
+#: computer's app to copy; its app keeps no copy of the folder for it; or its copy could not be
+#: opened there.  Said as its turn's failure.  The owner's words, and these alone.
 NOWHERE: dict[str, str] = {
     "cap": "This folder has more files than its history can keep, so this thread cannot work there. Choose a folder inside it.",
     "names": "A file in this folder has a name its history cannot keep, so this thread cannot work there. Choose a folder inside it.",
+    _TOO_LARGE: (
+        "This folder is too large for this thread to have a copy of its own on this computer, so it cannot work there. "
+        "Choose a folder inside it that holds less."
+    ),
     NO_COPY: (
         "Surogate Desktop on this computer keeps no copy of the folder for this thread, so it cannot work there. "
         "Update Surogate Desktop."
@@ -583,9 +592,9 @@ class ThreadCopy:
         it, never in the folder.
 
         Raises :class:`NowhereToWork` where the thread has nowhere to work:
-        its folder has no history, its computer's app keeps no copy for it,
-        or it refused in a way asking again would not pass, or at the turn's
-        last asking.  Asked again, it raises the same, and the computer
+        its folder has no history, its computer's app keeps no copy for it
+        or gives it none of a folder too large to copy, or it refused in a
+        way asking again would not pass, or at the turn's last asking.  Asked again, it raises the same, and the computer
         hears nothing.  The journal's own refusals pass through as they are:
         the computer heard nothing of them.
         """
@@ -604,7 +613,7 @@ class ThreadCopy:
         except ComputerRefused as refusal:
             if number + 1 < OPEN_TRIES and (refusal.code in _PASSING_CODES or refusal.kind in _PASSING_KINDS):
                 return None
-            why = NO_COPY if refusal.kind == NO_COPY else "names" if refusal.code == "name_not_utf8" else _REFUSED
+            why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or _REFUSED
             raise NowhereToWork(why, code=code_of(refusal)) from None
         except NotAnAnswer as refusal:
             raise NowhereToWork(_REFUSED, code=code_of(refusal)) from None
