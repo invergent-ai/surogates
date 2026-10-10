@@ -61,6 +61,13 @@ settings() {
   # of a process's numbers, so that nothing of root's is kept to go back to; then the command in
   # the process's place. 126 where one could not be set, and 127 for a command that is not there.
   AS_READER='use POSIX (); ($u, $g, $l) = splice(@ARGV, 0, 3); $l =~ tr/,/ /; $) = join(q( ), $g, $l); POSIX::setgid($g) && POSIX::setuid($u) or exit 126; exec { $ARGV[0] } @ARGV; exit 127'
+  # How a program is started in a user's home that runs what that user chooses, as certutil runs
+  # the modules their own database names: perl's own line again, run as that user (as_reader) and
+  # handed their home, then the program. With nothing of root's shell: no descriptor but the three
+  # standard ones, the root folder to start in, a session of its own with no terminal, and an
+  # environment of three names, as the app starts certutil (src/shell/company-ca.ts). 126 where one
+  # could not be set, and 127 for a program that is not there.
+  AS_THEIRS='use POSIX (); $home = shift; opendir($dir, "/proc/self/fd") or exit 126; @open = grep { /^\d+$/ && $_ > 2 } readdir($dir); closedir($dir); POSIX::close($_) for @open; chdir("/") && POSIX::setsid() > 0 or exit 126; %ENV = (PATH => "/usr/bin:/bin", LC_ALL => "C", HOME => $home); exec { $ARGV[0] } @ARGV; exit 127'
   # What is said of a base with a user or a password in it. The base is written into the install
   # record, which every user of the computer reads and the app reads its base from: a password
   # there would be every user's, and the app takes no base that has one.
@@ -657,6 +664,12 @@ unlisted() {
 # own.
 as_reader() {
   timeout --foreground -s KILL "$1" /usr/bin/perl -e "$AS_READER" "${READER[0]}" "${READER[1]}" "${READER[3]}" "${@:2}" 8<&- 9<&- </dev/null
+}
+
+# Runs what follows $2 as the reader, for $1 seconds at most, as as_reader does, and with nothing
+# else of root's (AS_THEIRS, in settings): $2 is that user's home.
+as_theirs() {
+  as_reader "$1" /usr/bin/perl -e "$AS_THEIRS" "${@:2}"
 }
 
 # Refuses file $1, which the reader could not read as a file. Root never looks at a file it is
@@ -1265,7 +1278,7 @@ login_folders() {
 }
 
 # Takes the entries the app made for the company's CA out of the NSS databases of the user named
-# $1, whose number is $2 and whose group's is $3: the folders that follow. Nothing else takes them
+# $1, whose number is $2, whose group's is $3 and whose home is $4: the folders that follow. Nothing else takes them
 # back once the app is gone, and that user's Chrome, Edge and Brave would go on trusting the CA for
 # every site. An entry is the app's by its name, to the letter: "Surogate company CA", a space and
 # 16 digits of hex, as the app names one (NICKNAME in src/shell/company-ca.ts). No other entry is
@@ -1275,11 +1288,13 @@ login_folders() {
 # that number's, as asker makes sure of the one it names, and what is changed is a database of
 # that user's own, whatever a link in their home leads to. Each look and each change for SMALL_WAIT
 # at most: a home that another computer serves may never answer, and is then said and passed by.
-# With nothing to ask on, no terminal either (setsid): certutil lists and removes without a
-# database's password, and one that would ask for it fails. A database that is not there is not
+# With nothing to ask on, no terminal either: certutil lists and removes without a database's
+# password, and one that would ask for it fails. It runs the modules that user's database names,
+# so it is started with nothing of root's (as_theirs), and what it writes is read as a user's own
+# program's is (heard). A database that is not there is not
 # made. One that certutil cannot read or change is left as it is, and said.
 forget_company_ca() {
-  local user="$1" uid="$2" gid="$3" db number groups listed line name ended ends
+  local user="$1" uid="$2" gid="$3" home="$4" db number groups listed line name ended ends
   local ours='^(Surogate company CA [0-9a-f]{16}) +[^ ,]*,[^ ,]*,[^ ,]* *$'
   local still="an entry of Surogate's for the company's certificate authority may still be trusted there"
   number="$(listing id -u -- "$user")" && groups="$(listing id -G -- "$user")" && ended=0 || ended="$?"
@@ -1289,22 +1304,22 @@ forget_company_ca() {
   fi
   [ "$ended" -eq 0 ] && [ "$number" = "$uid" ] && [[ "$groups" =~ ^[0-9]+(\ [0-9]+)*$ ]] || return 0
   local READER=("$uid" "$gid" "$user" "${groups// /,}")
-  number="$(as_reader "$SMALL_WAIT" id -u 2>/dev/null)" || number=
-  number+=":$(as_reader "$SMALL_WAIT" id -g 2>/dev/null)" || number=
+  number="$(as_theirs "$SMALL_WAIT" "$home" id -u 2>/dev/null)" || number=
+  number+=":$(as_theirs "$SMALL_WAIT" "$home" id -g 2>/dev/null)" || number=
   [ "$number" = "$uid:$gid" ] || return 0
-  for db in "${@:4}"; do
-    as_reader "$SMALL_WAIT" test -f "$db/cert9.db" && ended=0 || ended="$?"
+  for db in "${@:5}"; do
+    as_theirs "$SMALL_WAIT" "$home" test -f "$db/cert9.db" && ended=0 || ended="$?"
     if outlasted "$ended"; then
       say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still"
       return 0
     fi
     [ "$ended" -eq 0 ] || continue
-    if ! as_reader "$SMALL_WAIT" test -O "$db/cert9.db"; then
+    if ! as_theirs "$SMALL_WAIT" "$home" test -O "$db/cert9.db"; then
       say "left the NSS database in $(named "$db") as it is, as it is not $(named "$user")'s own: $still"
       continue
     fi
     # Its list, a megabyte of it at most, and then how certutil and root's reader of it ended.
-    listed="$(heard 1048576 as_reader "$SMALL_WAIT" setsid certutil -L -d "sql:$db")"
+    listed="$(heard 1048576 as_theirs "$SMALL_WAIT" "$home" certutil -L -d "sql:$db")"
     ends="${listed##*$'\n'}"
     listed="${listed%$'\n'*}"
     [[ "$ends" =~ ^[0-9]+\ [0-9]+$ ]] || ends="1 1"
@@ -1320,11 +1335,11 @@ forget_company_ca() {
     while IFS= read -r line; do
       [[ "$line" =~ $ours ]] || continue
       name="${BASH_REMATCH[1]}"
-      as_reader "$SMALL_WAIT" setsid certutil -D -d "sql:$db" -n "$name" >/dev/null 2>&1 && ended=0 || ended="$?"
+      as_theirs "$SMALL_WAIT" "$home" certutil -D -d "sql:$db" -n "$name" >/dev/null 2>&1 && ended=0 || ended="$?"
       [ "$ended" -ne 0 ] || continue
       # A name of the user's that goes on in spaces is listed as the app's is, and is not found by
       # the app's: it is theirs, and stays with nothing said.
-      outlasted "$ended" || as_reader "$SMALL_WAIT" setsid certutil -L -d "sql:$db" -n "$name" >/dev/null 2>&1 || continue
+      outlasted "$ended" || as_theirs "$SMALL_WAIT" "$home" certutil -L -d "sql:$db" -n "$name" >/dev/null 2>&1 || continue
       say "could not take $name out of $(named "$user")'s NSS database in $(named "$db"): their browsers go on trusting it"
     done <<<"$listed"
   done
@@ -1357,7 +1372,7 @@ forget_company_cas() {
       seen=1
       [ "$data" = "$home/.local/share" ] || folders+=("$data/pki/nssdb")
     fi
-    forget_company_ca "$each" "$uid" "$gid" "${folders[@]}"
+    forget_company_ca "$each" "$uid" "$gid" "$home" "${folders[@]}"
   done <<<"$mine"$'\n'"$users"
 }
 

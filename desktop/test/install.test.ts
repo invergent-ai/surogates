@@ -3905,6 +3905,29 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
   });
 
+  it("hands what it starts in a user's home nothing of root's: an environment of three names with that user's home in it, the root folder to start in, and the three standard descriptors alone", () => {
+    authorities();
+    try {
+      expect(root("useradd -m keen").status).toBe(0);
+      database("keen", "/home/keen/.pki/nssdb", { [OURS]: "company" });
+      // What a module of keen's own choosing would find, as certutil loads one: written down by a
+      // stand-in in certutil's place, and in test's. Each line's own program writes it, so that the
+      // stand-in's shell opens nothing; its own text is its descriptor 10.
+      const seen = 'umask 0; tr "\\0" "\\n" </proc/$$/environ | sort >/tmp/$(id -un)-saw-${0##*/}; readlink /proc/$$/cwd >>/tmp/$(id -un)-saw-${0##*/}; ls /proc/$$/fd | sort -n | tr "\\n" " " >>/tmp/$(id -un)-saw-${0##*/}';
+      before("certutil", seen);
+      before("test", seen);
+      // Root's own shell, with a secret in its environment and a file open, in root's home.
+      expect(alone('export ROOT_SECRET=of-roots; exec 7</etc/hostname; cd /root; forget_company_cas "" "" ""')).toMatchObject({ status: 0, stdout: "", stderr: "" });
+      for (const tool of ["certutil", "test"]) {
+        expect(root(`stat -c %U /tmp/keen-saw-${tool}; cat /tmp/keen-saw-${tool}`).stdout, tool).toBe("keen\nHOME=/home/keen\nLC_ALL=C\nPATH=/usr/bin:/bin\n/\n0 1 2 10 ");
+      }
+      expect(entries("keen", "/home/keen/.pki/nssdb")).toBe("");
+    } finally {
+      putBack("certutil", "test");
+      root("rm -f /tmp/*-saw-certutil /tmp/*-saw-test; userdel -r keen");
+    }
+  });
+
   it("uninstalls the app's entries for the company's CA from every user's NSS databases, as each user and with nothing asked, removes the CA it kept, and leaves every other entry", () => {
     // Names of the user's own that begin as the app's do, go on after it, differ in a letter's case,
     // end in a space, or stand on a second line: none is the app's.
