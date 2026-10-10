@@ -11,9 +11,9 @@ helper's look at the real folder and its writes into it.
 None is a tool's.  Each is the worker's own, journaled under an invocation
 of its own, so a worker lost part-way gets each step's recorded outcome when
 its turn resumes: ``open:<turn>`` for a turn's open, ``checkpoint:<turn>:…``
-for a snapshot and for a put-back, ``land:<turn>…`` for a landing.  The app
-takes each kind under those names alone, and a step of the history or of a
-landing from the thread itself alone.
+for a snapshot and for a put-back, ``land:<turn>…`` for a landing.  The
+journal records each kind under those names alone, and a step of the history
+or of a landing from the thread itself alone, as the app takes them.
 
 The computer is its user's, and its answers are still data.  The app checks
 what its guest says (``desktop/src/vm/history.ts``), and what reaches the
