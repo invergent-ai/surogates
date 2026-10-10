@@ -39,6 +39,11 @@ const started = (more: Partial<HostStart>): Start => {
   if (!checked.ok) throw new Error(checked.message);
   return checked;
 };
+// A folder as a helper is told which one it was when its host checked it: its device and its inode.
+const is = (path: string) => {
+  const { dev, ino } = statSync(path);
+  return `${dev}:${ino}`;
+};
 const refused = (more: Partial<HostStart>, why: RegExp, named = JSON.stringify(more)) => {
   const checked = on(more);
   expect(checked, named).toMatchObject({ ok: false, missing: false });
@@ -304,14 +309,15 @@ describe("what a landing's host is given beside the folder", () => {
     expect(checked).toMatchObject({ reads: [copy], writes: [kept] });
     expect(existsSync(join(dataDir, "landings"))).toBe(false);
     // Once it is: the kept folder, this user's alone, and what was made for it, the last made first.
-    expect(checked.make()).toEqual([kept, join(dataDir, "landings")]);
+    // Its helper is told which folder that is, as it was made: it keeps nothing in another put at its path.
+    expect(checked.make()).toEqual({ made: [kept, join(dataDir, "landings")], env: { SUROGATE_KEPT_IS: is(kept) } });
     for (const made of [kept, join(dataDir, "landings")]) expect(lstatSync(made).mode & 0o7777).toBe(0o700);
     // One that is there is taken as it is, and nothing is made for it.
-    expect(started({ landing: { copy, kept } }).make()).toEqual([]);
+    expect(started({ landing: { copy, kept } }).make()).toEqual({ made: [], env: { SUROGATE_KEPT_IS: is(kept) } });
     rmSync(kept, { recursive: true });
-    expect(started({ landing: { copy, kept } }).make()).toEqual([kept]);
+    expect(started({ landing: { copy, kept } }).make().made).toEqual([kept]);
     // A chat's host, and a copy's, have nothing made for them.
-    expect([started({}).make(), started({ folder: copy, at: folder }).make()]).toEqual([[], []]);
+    expect([started({}).make(), started({ folder: copy, at: folder }).make()]).toEqual([{ made: [], env: {} }, { made: [], env: {} }]);
   });
 
   it("is refused for a copy that is no thread's, a kept folder that is not the folder's own, or a link at either", () => {
@@ -369,7 +375,11 @@ describe("what a file helper is started with", () => {
   it("is nothing beside its folder for a chat, the folder's path for a copy, and the copy and the kept folder for a landing", () => {
     expect(started({}).env).toEqual({});
     expect(started({ folder: copy, at: folder }).env).toEqual({ SUROGATE_AT: folder });
-    expect(started({ landing: { copy, kept } }).env).toEqual({ SUROGATE_COPY: copy, SUROGATE_KEPT: kept });
+    // A landing's is told, of the copy, which folder it was when it was checked; of the kept folder, once it is made.
+    expect(started({ landing: { copy, kept } }).env).toEqual({ SUROGATE_COPY: copy, SUROGATE_COPY_IS: is(copy), SUROGATE_KEPT: kept });
+    rmSync(copy, { recursive: true });
+    mkdirSync(copy);
+    expect(started({ landing: { copy, kept } }).env.SUROGATE_COPY_IS).toBe(is(copy));
   });
 
   it("says of a folder replaced since its chat was bound what it said, and of a copy made again that it is the copy", () => {

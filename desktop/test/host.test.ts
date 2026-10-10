@@ -813,6 +813,11 @@ function helperOf(harness: Harness): number {
   return helpers[0]!;
 }
 
+// A folder as a helper is told which one it was when its host checked it: its device and its inode.
+const is = (path: string) => {
+  const { dev, ino } = statSync(path);
+  return `${dev}:${ino}`;
+};
 // What the file helper of *harness*'s host was started with, as the kernel has it: what it was told of its folder,
 // and the folder it works in.
 function startedWith(harness: Harness): { told: Record<string, string>; cwd: string } {
@@ -826,30 +831,39 @@ function startedWith(harness: Harness): { told: Record<string, string>; cwd: str
 
 // Loaded into a host before its own code, to do to it what this computer could: hold back what its file helper says
 // (a helper slow to be ready), start that helper with another environment (a host that got it wrong), fail the
-// making of srt's folder in words of the system's own, or put a link where its folder is just as its sandbox is made
-// (and the folder back once the sandbox is up), as whoever can write the folder's parent might.
+// making of srt's folder in words of the system's own, or put something else where a folder of its start's is, just as
+// its sandbox is made: a link, by its words, or another folder renamed in (and what was there back once the sandbox
+// is up), as whoever can write that folder's parent might between the host's look and the bind.
 const UPSET = `data:text/javascript,${encodeURIComponent(`
   import cp from "node:child_process";
   import fs from "node:fs";
   import { syncBuiltinESMExports } from "node:module";
   import { PassThrough } from "node:stream";
-  const { HELPER_LATE_MS: late, HELPER_ENV: env, SRT_FAILS: fails, FOLDER_SWAPPED: swapped, FOLDER_PUT_BACK: back } = process.env;
+  const { HELPER_LATE_MS: late, HELPER_ENV: env, SRT_FAILS: fails, FOLDER_SWAPPED: swapped } = process.env;
   const [spawn, mkdir] = [cp.spawn, fs.mkdirSync];
   cp.spawn = (...args) => {
     const helper = Array.isArray(args[1]) && String(args[1].at(-1)).includes("/files/helper.js");
     if (helper && env) Object.assign(args[2].env, JSON.parse(env));
-    const [folder, to] = helper && swapped ? JSON.parse(swapped) : [];
-    if (folder) {
-      fs.renameSync(folder, folder + ".true");
-      fs.symlinkSync(to, folder);
+    const swap = helper && swapped ? JSON.parse(swapped) : null;
+    if (swap) {
+      fs.renameSync(swap.at, swap.at + ".true");
+      if (swap.link === undefined) fs.renameSync(swap.folder, swap.at);
+      else fs.symlinkSync(swap.link, swap.at);
     }
     const child = spawn(...args);
-    // Before the host reads the helper's first word: the sandbox is made by then.
-    if (folder && back) {
-      child.stdout.once("data", () => {
-        fs.unlinkSync(folder);
-        fs.renameSync(folder + ".true", folder);
-      });
+    // At the first word of the helper, to its host or of its own end, before the host reads it: the sandbox is made by then.
+    if (swap && swap.back) {
+      let undone = false;
+      const undo = () => {
+        if (undone) return;
+        undone = true;
+        if (swap.link === undefined) fs.renameSync(swap.at, swap.folder);
+        else fs.unlinkSync(swap.at);
+        fs.renameSync(swap.at + ".true", swap.at);
+      };
+      child.stdout.once("data", undo);
+      child.stderr.once("data", undo);
+      child.once("exit", undo);
     }
     if (helper && late) {
       const said = child.stdout;
@@ -866,7 +880,7 @@ const UPSET = `data:text/javascript,${encodeURIComponent(`
 `).replaceAll("'", "%27")}`;
 // A host so upset, and no other: its own node is the test's, started through a line of sh that loads the above first
 // (so the above is written with no apostrophe left in it, which would end the line's word).
-function upset(how: { HELPER_LATE_MS?: string; HELPER_ENV?: string; SRT_FAILS?: string; FOLDER_SWAPPED?: string; FOLDER_PUT_BACK?: string }): Harness {
+function upset(how: { HELPER_LATE_MS?: string; HELPER_ENV?: string; SRT_FAILS?: string; FOLDER_SWAPPED?: string }): Harness {
   const node = join(base, "upset-node");
   // Written once: a second writing would be of a program another host is just being started from.
   if (!existsSync(node)) writeFileSync(node, `#!/bin/sh\nexec '${process.execPath}' --import '${UPSET}' "$@"\n`, { mode: 0o755 });
@@ -935,6 +949,48 @@ async function free(path: string): Promise<boolean> {
   }
 }
 
+// Loaded into a file helper before its own code: it ends the process as a kill does, before the first link it makes at a path that matches.
+const CUT = `data:text/javascript,${encodeURIComponent(`
+  import fs from "node:fs";
+  import { syncBuiltinESMExports } from "node:module";
+  const real = fs.linkSync;
+  fs.linkSync = (...args) => {
+    if (new RegExp(process.env.LAND_CUT).test(String(args[1]))) {
+      process.kill(process.pid, "SIGKILL");
+      for (;;);
+    }
+    return real(...args);
+  };
+  syncBuiltinESMExports();
+`)}`;
+// A file's blob id, as git names its bytes.
+const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
+
+// A landing's helper, outside any sandbox, killed between the two renames of its apply over the folder's a.txt: the
+// name is empty, and the user's file lies beside it under a name of the landing's own. Its record is in *keeps*.
+async function cut(keeps = kept): Promise<bigint> {
+  const was = lstatSync(join(reports, "a.txt"), { bigint: true });
+  const child = spawn(process.execPath, ["--import", CUT, HELPER], {
+    env: { SUROGATE_FOLDER: reports, HOME: home, PATH: "/usr/bin:/bin", SUROGATE_COPY: copy, SUROGATE_KEPT: keeps, LAND_CUT: "/a\\.txt$" },
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  child.stdin.on("error", () => {});
+  const args = { action: "apply", saga: SAGA, step: 1, path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), expected: "" };
+  const ask = (id: string, more: Record<string, unknown>) => child.stdin.write(`${JSON.stringify({ id, kind: "land", args: more })}\n`);
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    const said = JSON.parse(line) as { ready?: boolean; id?: string; outcome?: { ok: { revisions: Array<[string, string]> } } };
+    if (said.ready) ask("look", { action: "revisions", paths: ["a.txt"] });
+    else if (said.id === "look") ask("apply", { ...args, expected: said.outcome!.ok.revisions[0]![1] });
+  });
+  const bound = setTimeout(() => child.kill("SIGKILL"), 20_000);
+  const signal = await new Promise<NodeJS.Signals | null>((resolve) => child.once("exit", (_code, how) => resolve(how)));
+  clearTimeout(bound);
+  // Beside the empty name: the user's file, moved aside, and the landing's own, not yet at the name.
+  const beside = readdirSync(reports).filter((name) => name.startsWith(".surogate-")).map((name) => lstatSync(join(reports, name), { bigint: true }).ino);
+  expect([signal, existsSync(join(reports, "a.txt")), beside.length, beside.includes(was.ino)]).toEqual(["SIGKILL", false, 2, true]);
+  return was.ino;
+}
+
 describe("a tool host on a thread's copy", { timeout: 60_000 }, () => {
   beforeEach(lay);
 
@@ -944,7 +1000,8 @@ describe("a tool host on a thread's copy", { timeout: 60_000 }, () => {
     await ready(harness);
     // Its helper is told the folder's path beside the copy, always: without it, it would be a chat's helper on the
     // copy, answering by the copy's own path. It works in the copy, and is told of no landing.
-    expect(startedWith(harness)).toEqual({ told: { SUROGATE_FOLDER: copy, SUROGATE_AT: reports }, cwd: copy });
+    // And which folder the copy was when the host checked it: it works in that one or does not start.
+    expect(startedWith(harness)).toEqual({ told: { SUROGATE_FOLDER: copy, SUROGATE_FOLDER_IS: is(copy), SUROGATE_AT: reports }, cwd: copy });
     expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${reports}/a.txt` });
     expect(await harness.op("2", "read", { key: `${reports}/a.txt`, max_bytes: null })).toEqual({ ok: b64("the thread's\n") });
     expect(await harness.op("3", "write", { key: `${reports}/made.txt`, data: b64("made by the thread\n") })).toEqual({ ok: null });
@@ -1028,33 +1085,6 @@ describe("a tool host on a thread's copy", { timeout: 60_000 }, () => {
         expect(await harness.op(`${id}-${name}`, kind, args), `${kind} ${name}`).toEqual({ error: { type: "sandbox", message: `Not a path in this folder: '${reports}/${name}/${file}'` } });
       }
       expect(seen(base, [copy, ...hostsOwn()]), name).toEqual(before);
-    }
-  });
-
-  it("works in the copy it checked or not at all: a link put at the copy's path just as its sandbox is made, left there or taken away once the sandbox is up, starts no helper", async () => {
-    // What whoever can write the folder's place might time: after the host's look at the copy, before its sandbox binds it.
-    for (const [what, target] of [
-      ["the folder itself", () => reports], ["another thread's copy", () => other], ["the folder's place", () => place], ["the helper's own working folder", () => join(data, "tmp", THREAD)],
-    ] as const) {
-      for (const back of [false, true]) {
-        rmSync(base, { recursive: true, force: true });
-        mkdirSync(base);
-        lay();
-        mkdirSync(join(data, "tmp", THREAD), { recursive: true });
-        // The user's own, the other copy, the folder's history and the rest of the app's data; and the copy's files, wherever the copy lies.
-        const outside = () => [home, other, join(place, "history.git"), join(place, "clones"), join(data, "devices")].map((dir) => seen(dir));
-        const inCopy = (at: string) => Object.entries(seen(at)).filter(([path]) => path !== at).map(([path, is]) => [path.slice(at.length), is]);
-        const before = [outside(), inCopy(copy)];
-        const harness = upset({ FOLDER_SWAPPED: JSON.stringify([copy, target()]), ...(back ? { FOLDER_PUT_BACK: "1" } : {}) });
-        harness.send({ ...start, folder: copy, at: reports, expect: bound(copy), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", THREAD) });
-        const said = await failed(harness);
-        // The sandbox is not made over a link: its helper never runs, so nothing is asked of it. Said by the folder's path.
-        expect(said, what).toEqual({ type: "failed", message: expect.stringMatching(/^the file helper exited: bwrap: Can't bind mount /) });
-        expect(JSON.stringify(said), what).not.toContain(copy);
-        expect(await harness.exited, what).toBe(1);
-        // Nothing on this computer was written: not the folder, the other copy, the place, nor the copy that was moved aside.
-        expect([outside(), inCopy(existsSync(`${copy}.true`) ? `${copy}.true` : copy)], what).toEqual(before);
-      }
     }
   });
 
@@ -1165,15 +1195,17 @@ describe("a tool host on a thread's copy", { timeout: 60_000 }, () => {
 
 describe("a tool host for a landing", { timeout: 60_000 }, () => {
   beforeEach(lay);
-  // A file's blob id, as git names its bytes.
-  const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
   const land = (harness: Harness, id: string, args: Record<string, unknown>) => harness.op(id, "land", args);
 
   it("lands the thread's file in the folder from its copy, keeps the file it replaced in the app's data, and puts it back", async () => {
     const harness = forLanding();
     await ready(harness);
     // Its helper works in the folder itself, and is told of no folder it stands for: it would not start beside one.
-    expect(startedWith(harness)).toEqual({ told: { SUROGATE_FOLDER: reports, SUROGATE_COPY: copy, SUROGATE_KEPT: kept }, cwd: reports });
+    // Of each of its three folders, which one it was when the host checked it.
+    expect(startedWith(harness)).toEqual({
+      told: { SUROGATE_FOLDER: reports, SUROGATE_FOLDER_IS: is(reports), SUROGATE_COPY: copy, SUROGATE_COPY_IS: is(copy), SUROGATE_KEPT: kept, SUROGATE_KEPT_IS: is(kept) },
+      cwd: reports,
+    });
     const looked = await land(harness, "1", { action: "revisions", paths: ["a.txt", "new/c.txt"] }) as { ok: { revisions: Array<[string, string]> } };
     expect(looked.ok.revisions.map(([path, token]) => [path, token === "absent" ? token : "there"])).toEqual([["a.txt", "there"], ["new/c.txt", "absent"]]);
     const [theirs, mine] = [blob("the thread's\n"), blob("the user's own\n")];
@@ -1340,46 +1372,6 @@ describe("a tool host for a landing", { timeout: 60_000 }, () => {
 
 describe("what a landing cut short left, when the next landing's host starts", { timeout: 90_000 }, () => {
   beforeEach(lay);
-  // Loaded into a file helper before its own code: it ends the process as a kill does, before the first link it makes at a path that matches.
-  const CUT = `data:text/javascript,${encodeURIComponent(`
-    import fs from "node:fs";
-    import { syncBuiltinESMExports } from "node:module";
-    const real = fs.linkSync;
-    fs.linkSync = (...args) => {
-      if (new RegExp(process.env.LAND_CUT).test(String(args[1]))) {
-        process.kill(process.pid, "SIGKILL");
-        for (;;);
-      }
-      return real(...args);
-    };
-    syncBuiltinESMExports();
-  `)}`;
-  const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
-
-  // A landing's helper, outside any sandbox, killed between the two renames of its apply over the folder's a.txt: the
-  // name is empty, and the user's file lies beside it under a name of the landing's own.
-  async function cut(): Promise<bigint> {
-    const was = lstatSync(join(reports, "a.txt"), { bigint: true });
-    const child = spawn(process.execPath, ["--import", CUT, HELPER], {
-      env: { SUROGATE_FOLDER: reports, HOME: home, PATH: "/usr/bin:/bin", SUROGATE_COPY: copy, SUROGATE_KEPT: kept, LAND_CUT: "/a\\.txt$" },
-      stdio: ["pipe", "pipe", "inherit"],
-    });
-    child.stdin.on("error", () => {});
-    const args = { action: "apply", saga: SAGA, step: 1, path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), expected: "" };
-    const ask = (id: string, more: Record<string, unknown>) => child.stdin.write(`${JSON.stringify({ id, kind: "land", args: more })}\n`);
-    createInterface({ input: child.stdout }).on("line", (line) => {
-      const said = JSON.parse(line) as { ready?: boolean; id?: string; outcome?: { ok: { revisions: Array<[string, string]> } } };
-      if (said.ready) ask("look", { action: "revisions", paths: ["a.txt"] });
-      else if (said.id === "look") ask("apply", { ...args, expected: said.outcome!.ok.revisions[0]![1] });
-    });
-    const bound = setTimeout(() => child.kill("SIGKILL"), 20_000);
-    const signal = await new Promise<NodeJS.Signals | null>((resolve) => child.once("exit", (_code, how) => resolve(how)));
-    clearTimeout(bound);
-    // Beside the empty name: the user's file, moved aside, and the landing's own, not yet at the name.
-    const beside = readdirSync(reports).filter((name) => name.startsWith(".surogate-")).map((name) => lstatSync(join(reports, name), { bigint: true }).ino);
-    expect([signal, existsSync(join(reports, "a.txt")), beside.length, beside.includes(was.ino)]).toEqual(["SIGKILL", false, 2, true]);
-    return was.ino;
-  }
   it("is put back before the host says it is ready: the user's very file is at its name again", async () => {
     const ino = await cut();
     const harness = forLanding();
@@ -1530,5 +1522,195 @@ describe("a tool host that does not start", { timeout: 60_000 }, () => {
       chmodSync(copy, 0o755);
     }
     expect(seen(home)).toEqual(before);
+  });
+});
+
+// What whoever can write a folder's parent might put at its path between a host's look at the folder and its sandbox's
+// bind of it: a link, by its words, or another folder renamed in. *back*: taken away once the sandbox is up, and the
+// folder that was there back at its path, where every later look of the host's finds it.
+interface Swap {
+  at: string;
+  link?: string;
+  folder?: string;
+  back?: boolean;
+}
+
+describe("a tool host whose folder is another's by the time its sandbox binds it", { timeout: 120_000 }, () => {
+  beforeEach(lay);
+  // What lies in *root*, by its names from there: modes, links, sizes, times of change and bytes. Not the folder's own
+  // line: a folder moved aside and back for a test is the same folder, with all it holds.
+  const within = (root: string) => Object.entries(seen(root)).filter(([path]) => path !== root).map(([path, is]) => [path.slice(root.length), is]);
+  // The swap undone by the test, where the host's own was not told to undo it: every folder lies where it lay.
+  const unswap = ({ at, link, folder }: Swap) => {
+    if (!existsSync(`${at}.true`)) return;
+    if (link === undefined) renameSync(at, folder!);
+    else rmSync(at);
+    renameSync(`${at}.true`, at);
+  };
+  // No byte of the user's, of another thread's or of the app's own, plain or as a read answers it.
+  const BYTES = ["the user's own", "outside the folder", "another thread's", "ref: refs/heads", "the device's own", "elsewhere"];
+  const heard = (harness: Harness) => {
+    const said = JSON.stringify(harness.messages);
+    const read = harness.messages.flatMap((message) => (message.type === "result" && "ok" in message.outcome && typeof message.outcome.ok === "string" ? [Buffer.from(message.outcome.ok, "base64").toString()] : []));
+    return [said, ...read].filter((text) => BYTES.some((bytes) => text.includes(bytes)));
+  };
+  const NOT_CHECKED = "is not the folder its host checked: another was at its path as its sandbox was made";
+
+  // One start with *swap* done to it as its helper is started. *watched*: the folders that must be as they were after
+  // it. What the host said; and, where it said it was ready, what it then answered a read and a write of the thread's.
+  async function swapped(message: HostStart, swap: Swap, watched: string[], asked: Array<[string, Record<string, unknown>]>): Promise<{ said: unknown; answers: unknown[]; harness: Harness }> {
+    const before = watched.map(within);
+    const harness = upset({ FOLDER_SWAPPED: JSON.stringify(swap) });
+    harness.send(message);
+    const said = await failed(harness);
+    const answers: unknown[] = [];
+    if (said.type === "ready") for (const [kind, args] of asked) answers.push(await harness.op(`${kind}-${answers.length}`, kind, args));
+    await harness.stop();
+    unswap(swap);
+    // Nothing of theirs was written, made, moved or removed, and none of it was answered.
+    expect(watched.map(within)).toEqual(before);
+    expect(heard(harness)).toEqual([]);
+    expect(answers).toEqual([]);
+    return { said, answers, harness };
+  }
+
+  // Every way the copy's path can come to lead to another folder. Each from where the link lies, so that the sandbox
+  // binds what it leads to; one by a whole path, which the sandbox refuses by itself.
+  const UP = "../../../../home";
+  const atCopy: Array<[string, () => Omit<Swap, "back">]> = [
+    ["a link to the folder itself", () => ({ at: copy, link: `${UP}/Reports` })],
+    ["a link to the folder itself by its whole path", () => ({ at: copy, link: reports })],
+    ["a link to another thread's copy", () => ({ at: copy, link: OTHER })],
+    ["a link to the folder's history", () => ({ at: copy, link: "../history.git" })],
+    ["a link to the user's home", () => ({ at: copy, link: UP })],
+    ["a link to the rest of the app's data", () => ({ at: copy, link: "../../../devices" })],
+    ["a chain of links to the folder", () => {
+      symlinkSync(`${UP}/Reports`, join(place, "threads", "hop"));
+      symlinkSync("hop", join(place, "threads", "hop-again"));
+      return { at: copy, link: "hop-again" };
+    }],
+    ["a link where the place keeps its copies", () => {
+      mkdirSync(join(place, "decoys"));
+      symlinkSync(`${UP}/Reports`, join(place, "decoys", THREAD));
+      return { at: join(place, "threads"), link: "decoys" };
+    }],
+    ["a link at the folder's place", () => {
+      mkdirSync(join(data, "history", "decoy", "threads"), { recursive: true });
+      symlinkSync(`${UP}/Reports`, join(data, "history", "decoy", "threads", THREAD));
+      return { at: place, link: "decoy" };
+    }],
+    ["another thread's copy renamed in", () => ({ at: copy, folder: other })],
+    ["the folder's history renamed in", () => ({ at: copy, folder: join(place, "history.git") })],
+  ];
+  it.each(atCopy.flatMap(([what, swap]) => [[what, "left there", swap, false], [what, "taken away once the sandbox is up", swap, true]] as const))(
+    "starts no helper in a copy's stead for %s, %s: nothing of the user's is read or written, and the start fails by the folder's name",
+    async (_what, _how, arrange, back) => {
+      const swap = { ...arrange(), back };
+      const { said } = await swapped(
+        { ...start, folder: copy, at: reports, expect: bound(copy), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", THREAD) }, swap,
+        [home, join(data, "devices"), other, join(place, "history.git"), join(place, "clones"), copy],
+        // What a thread asks next: a file it reads, and one it writes.
+        [["read", { key: `${reports}/a.txt`, max_bytes: null }], ["read", { key: `${reports}/secret.txt`, max_bytes: null }], ["read", { key: `${reports}/HEAD`, max_bytes: null }],
+          ["read", { key: `${reports}/credentials.json`, max_bytes: null }], ["write", { key: `${reports}/PLANTED.txt`, data: b64("planted by the thread\n") }]],
+      );
+      // The helper found another folder where its own should be, and said so before it looked at anything in it; or
+      // the sandbox would not bind a link by a whole path. Either way by the folder's name, never the copy's path. And
+      // where the copy's path still leads elsewhere, the copy is gone as an operation would find it: the app opens it again.
+      expect(said).toEqual({
+        type: "failed",
+        message: swap.link === reports
+          ? expect.stringMatching(/^the file helper exited: bwrap: Can't bind mount /)
+          : `the file helper exited: the copy of ${reports} this thread works in ${NOT_CHECKED}\n`,
+        ...(back ? {} : { folder: true }),
+      });
+      expect(JSON.stringify(said)).not.toContain(join(data, "history"));
+    },
+  );
+
+  // A landing's three folders: the folder it writes, the copy it reads, and where it keeps what it replaces.
+  const atLanding: Array<[string, string, () => Omit<Swap, "back">]> = [
+    ["the copy it lands from", "the thread's copy a landing in <folder> lands from", () => ({ at: copy, link: OTHER })],
+    ["the copy it lands from, a folder renamed in", "the thread's copy a landing in <folder> lands from", () => ({ at: copy, folder: other })],
+    ["the copy it lands from, by a link above it", "the thread's copy a landing in <folder> lands from", () => {
+      mkdirSync(join(place, "decoys"));
+      symlinkSync(`../threads.true/${OTHER}`, join(place, "decoys", THREAD));
+      return { at: join(place, "threads"), link: "decoys" };
+    }],
+    ["the folder it keeps replaced files in", "the folder a landing in <folder> keeps replaced files in", () => ({ at: kept, link: "decoy" })],
+    ["the folder it keeps replaced files in, a folder renamed in", "the folder a landing in <folder> keeps replaced files in", () => ({ at: kept, folder: join(data, "landings", "decoy") })],
+    ["the folder itself", "the folder <folder>", () => ({ at: reports, link: "Elsewhere" })],
+  ];
+  it.each(atLanding.flatMap(([what, named, swap]) => [[what, "left there", named, swap, false], [what, "taken away once the sandbox is up", named, swap, true]] as const))(
+    "starts no landing's helper with another folder in the stead of %s, %s: what a cut landing left is not put back by a record of another folder's, and nothing lands",
+    async (_what, _how, named, arrange, back) => {
+      // Another folder's kept files, with the record of a landing cut in this folder: put back by nobody but this folder's own landing.
+      const decoy = join(data, "landings", "decoy");
+      await cut(decoy);
+      mkdirSync(join(decoy, ".forgotten-0b6c1d3e"));
+      writeFileSync(join(decoy, ".forgotten-0b6c1d3e", "1"), "kept for another folder\n");
+      mkdirSync(join(home, "Elsewhere"));
+      writeFileSync(join(home, "Elsewhere", "a.txt"), "elsewhere\n");
+      const swap = { ...arrange(), back };
+      const theirs = blob("another thread's\n");
+      const { said } = await swapped(
+        { ...start, folder: reports, expect: bound(reports), landing: { copy, kept }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "landing") }, swap,
+        [reports, join(home, "Elsewhere"), decoy, other, copy, join(place, "history.git"), join(data, "devices")],
+        [["land", { action: "recover" }], ["land", { action: "apply", saga: SAGA, step: 2, path: "sub/b.txt", before: null, after: theirs, expected: "absent" }]],
+      );
+      expect(said).toEqual({
+        type: "failed", message: `the file helper exited: ${named.replace("<folder>", reports)} ${NOT_CHECKED}\n`,
+        // The folder itself is gone from its path, as a chat's would be; a copy or a kept folder put back is no reason to say so.
+        ...(swap.at === reports && !back ? { folder: true } : {}),
+      });
+      // The kept folder it made for itself is taken away with the start, where its path still leads to it; the other folder's is as it was.
+      const stays = swap.at === kept && !back;
+      expect(readdirSync(join(data, "landings"))).toEqual(stays ? [KEY, "decoy"] : ["decoy"]);
+      if (stays) expect(readdirSync(kept)).toEqual([]);
+    },
+  );
+
+  it.skipIf(!enters)("keeps the folder its sandbox bound for its helper's life: a link, or another folder, put at the copy's path once the sandbox is up changes nothing its helper reaches", async () => {
+    const harness = onCopy();
+    await ready(harness);
+    // Nor can anything in the sandbox move it, mount over it, or take its powers to: it has none.
+    expect(inSandbox(harness, [{ act: "capabilities" }, { act: "rename", path: copy, to: `${copy}.moved` }])).toEqual([{ ok: "0000000000000000" }, { code: "EBUSY" }]);
+    const before = [home, join(data, "devices"), other, join(place, "history.git")].map(within);
+    for (const swap of [{ at: copy, link: `${UP}/Reports` }, { at: copy, link: reports }, { at: copy, folder: other }] as Swap[]) {
+      // Out here the copy's path leads elsewhere now: to the folder itself, or to another thread's copy.
+      renameSync(swap.at, `${swap.at}.true`);
+      if (swap.link === undefined) renameSync(swap.folder!, swap.at);
+      else symlinkSync(swap.link, swap.at);
+      expect(readFileSync(join(copy, "a.txt"), "utf8")).not.toBe("the thread's\n");
+      try {
+        // In the sandbox it is the folder that was bound: the thread's own copy, read and written.
+        expect(inSandbox(harness, [{ act: "read", path: join(copy, "a.txt") }, { act: "write", path: join(copy, "kept.txt"), data: "into the copy that was bound\n" }])).toEqual([{ ok: "the thread's\n" }, { ok: null }]);
+        expect(readFileSync(join(`${copy}.true`, "kept.txt"), "utf8")).toBe("into the copy that was bound\n");
+        // And the host, which looks from out here, has its helper asked nothing while the path leads elsewhere.
+        expect(await harness.op(`w-${swap.link ?? swap.folder}`, "write", { key: `${reports}/late.txt`, data: b64("late\n") })).toEqual(FOLDER_UNAVAILABLE);
+      } finally {
+        unswap(swap);
+      }
+      expect([home, join(data, "devices"), other, join(place, "history.git")].map(within)).toEqual(before);
+    }
+    // The copy back at its path, the host goes on in it.
+    expect(await harness.op("r", "read", { key: `${reports}/kept.txt`, max_bytes: null })).toEqual({ ok: b64("into the copy that was bound\n") });
+  });
+
+  it("tells a chat's helper, too, which folder its own was when it was checked", async () => {
+    const harness = host({ folder: reports, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") });
+    await ready(harness);
+    expect(startedWith(harness)).toEqual({ told: { SUROGATE_FOLDER: reports, SUROGATE_FOLDER_IS: is(reports) }, cwd: reports });
+  });
+
+  it.each([["left there", false], ["taken away once the sandbox is up", true]])("starts no chat's helper in another folder put at its folder's path, %s", async (_how, back) => {
+    mkdirSync(join(home, "Elsewhere"));
+    writeFileSync(join(home, "Elsewhere", "a.txt"), "elsewhere\n");
+    const { said } = await swapped(
+      { ...start, folder: reports, expect: bound(reports), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") }, { at: reports, link: "Elsewhere", back },
+      [reports, join(home, "Elsewhere")],
+      [["read", { key: `${reports}/a.txt`, max_bytes: null }], ["write", { key: `${reports}/PLANTED.txt`, data: b64("planted\n") }]],
+    );
+    // Where the folder at its path is another still, the chat is answered as when its folder is replaced: folder_unavailable.
+    expect(said).toEqual({ type: "failed", message: `the file helper exited: the folder ${reports} ${NOT_CHECKED}\n`, ...(back ? {} : { folder: true }) });
   });
 });

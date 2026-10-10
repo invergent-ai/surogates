@@ -29,7 +29,7 @@ import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { closeHanded } from "./handed.js";
 import { fileToolsMissing, GLOB, hideSrtTmp, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
-import { startOn } from "./start.js";
+import { isOf, startOn } from "./start.js";
 
 // Before anything else: nothing this process starts, the helper in its sandbox least of all, holds
 // a descriptor of the app's.
@@ -232,7 +232,8 @@ async function start(message: HostStart): Promise<void> {
   }
   mkdirSync(tmp, { recursive: true });
   // What the app keeps for this start, made now that the folder is this host's.
-  made = checked.make();
+  const kept = checked.make();
+  made = kept.made;
   const beside = [...checked.reads, ...checked.writes];
   // srt and the shell it wraps the helper in run outside the sandbox, and look up which,
   // rg and the shell through this process's PATH; the helper finds its rg through it in
@@ -274,7 +275,12 @@ async function start(message: HostStart): Promise<void> {
   // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
   const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
     cwd: path,
-    env: { ...checked.env, HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path },
+    // With which folder each folder it is given was when it was checked: the sandbox binds paths, and the helper
+    // works only where it finds those very folders at them (files/helper.ts).
+    env: {
+      ...checked.env, ...kept.env, HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path,
+      SUROGATE_FOLDER_IS: isOf({ dev, ino }),
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   helper = child;
@@ -308,7 +314,8 @@ async function start(message: HostStart): Promise<void> {
     });
     child.once("exit", () => {
       clearTimeout(timer);
-      if (!up) reject(new Error(`the file helper exited: ${stderr}`));
+      // A folder that is another at its path by the time its helper has gone is gone, as an operation would find it.
+      if (!up) reject(new (sameFolder() ? Error : FolderUnavailable)(`the file helper exited: ${stderr}`));
       // A helper that dies takes its host with it, srt cleaned up and what it was
       // asked unanswered: the app answers that as interrupted and starts a new host
       // for the next operation.

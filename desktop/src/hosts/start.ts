@@ -43,6 +43,11 @@ const LINE_BREAK = /[\n\r]/;
 // A path in a line of words, no further than a line goes.
 const shown = (path: string): string => (path.length > 300 ? `${path.slice(0, 300)}…` : path);
 
+// A folder as it was found when it was checked: what a helper is told of each folder it is given, and holds what
+// it finds at that folder's path in its sandbox against (files/helper.ts). A path can come to lead to another
+// folder between the check and the sandbox's bind of it; the folder that was checked cannot become another.
+export const isOf = ({ dev, ino }: { dev: number; ino: number }): string => `${dev}:${ino}`;
+
 // Where the app keeps a thread's copy, and what a folder's landings keep, in its data by its real path *data*.
 const copyAt = (data: string, key: string, thread: string): string => join(data, "history", key, "threads", thread);
 const keptAt = (data: string, key: string): string => join(data, "landings", key);
@@ -57,7 +62,8 @@ export interface Start {
   // What its helper's sandbox admits beside that folder: to read and not write, and to write.
   reads: string[];
   writes: string[];
-  // What its helper is told beside its folder, by the names it reads them under.
+  // What its helper is told beside its folder, by the names it reads them under: each folder it is given beside
+  // its own, with which folder that was when it was checked.
   env: Record<string, string>;
   // Whether the root's commands write the folder: where they do, the host keeps the folder's record and guards its hooks.
   commands: boolean;
@@ -75,9 +81,10 @@ export interface Start {
   named(text: string): string;
   /**
    * Makes what the app keeps for it and is not there yet, this user's alone, once the host holds
-   * its folder. What it made, the last first: a start that then fails takes them away again.
+   * its folder. What it made, the last first: a start that then fails takes them away again. And
+   * what its helper is told of what was made or found there: which folder each was.
    */
-  make(): string[];
+  make(): { made: string[]; env: Record<string, string> };
 }
 
 export type StartCheck = Start | Extract<FolderCheck, { ok: false }>;
@@ -153,7 +160,7 @@ const keptApart = (dataDir: string): string[] => {
 // What a chat's start and a copy's have alike: their helper is given nothing beside the folder, and
 // is asked every kind; the root's commands write the folder.
 const plain = (): Pick<Start, "reads" | "writes" | "commands" | "readyMs" | "make"> => ({
-  reads: [], writes: [], commands: true, readyMs: READY_MS, make: () => [],
+  reads: [], writes: [], commands: true, readyMs: READY_MS, make: () => ({ made: [], env: {} }),
 });
 // What a host on the folder itself says of one replaced since its chat was bound.
 const replaced = (folder: string): string => `the folder ${folder} was replaced after it was confirmed for this chat`;
@@ -219,7 +226,7 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
     return lacks;
   };
   if (lacking() === null) return refused(notOwn);
-  const make = (): string[] => {
+  const make = (): ReturnType<Start["make"]> => {
     const made: string[] = [];
     try {
       // Looked at again: a link put at either since would keep what a landing replaced wherever it leads.
@@ -231,6 +238,7 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
       }
       const there = own(kept, uid);
       if (there === null || there === "missing") throw new Error(notOwn);
+      return { made, env: { SUROGATE_KEPT_IS: isOf(there) } };
     } catch (error) {
       for (const dir of made) {
         try {
@@ -241,10 +249,9 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
       }
       throw error;
     }
-    return made;
   };
   return {
-    ...held, reads: [from.path], writes: [kept], env: { SUROGATE_COPY: from.path, SUROGATE_KEPT: kept }, commands: false, only: "land",
+    ...held, reads: [from.path], writes: [kept], env: { SUROGATE_COPY: from.path, SUROGATE_COPY_IS: isOf(from), SUROGATE_KEPT: kept }, commands: false, only: "land",
     readyMs: LANDING_READY_MS, make, replaced: replaced(message.folder), named: asSaid,
   };
 }
