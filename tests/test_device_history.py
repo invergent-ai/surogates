@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
+import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -902,3 +905,178 @@ def test_a_folder_the_history_cannot_record_is_said_so_in_an_answer_this_module_
     os.close(os.open(os.fsencode(folder.real) + b"/caf\xe9.txt", os.O_CREAT | os.O_WRONLY, 0o644))
     thread = str(uuid4())
     assert folder.taken(thread, "history", "open") == {"history": "off", "reason": "names"}
+
+
+# -- the app's own answers, beside this module's check -------------------------------------------------------------
+#
+# What reaches the server for a thread's kinds is the app's: its gate and its refusals (desktop/src/history/kinds.ts,
+# hosts/tool-hosts.ts), its check of what its guest's history answers (desktop/src/vm/history.ts), and its file
+# helper's land kind (desktop/src/files/land.ts). Each is run here as the app builds it, on real answers, and taken
+# by this module's check whole: the two cannot drift apart unseen.
+
+DESKTOP = Path(__file__).resolve().parents[1] / "desktop"
+DIST = DESKTOP / "dist"
+
+
+@pytest.fixture(scope="module")
+def built_desktop() -> Path:
+    """The desktop app's code, built from this checkout."""
+    if shutil.which("npm") is None:
+        pytest.fail("the app's answers need npm to be built")
+    subprocess.run(["npm", "run", "build"], cwd=DESKTOP, check=True, capture_output=True)
+    return DIST
+
+
+def the_app(imports: dict[str, list[str]], body: str, given: Any = None) -> Any:
+    """What the built app's own code makes of *given*: *body* reads ``given`` and returns what it says, as JSON."""
+    lines = [f"import {{ {', '.join(names)} }} from {json.dumps(str(DIST / module))};" for module, names in imports.items()]
+    script = "\n".join([*lines, 'import { readFileSync } from "node:fs";', 'const given = JSON.parse(readFileSync(0, "utf8"));',
+                         f"const said = (() => {{ {body} }})();", "process.stdout.write(JSON.stringify(said));"])
+    done = subprocess.run([shutil.which("node"), "--input-type=module", "-e", script], input=json.dumps(given), capture_output=True, text=True, check=True)
+    return json.loads(done.stdout)
+
+
+def taken_whole(kind: str, action: str, outcome: dict[str, Any], thread: str | None = None) -> None:
+    """*outcome*, the app's to a thread's *action*, as this module takes it: an answer whole, or a refusal by its own type and code."""
+    if "ok" in outcome:
+        assert checked(kind, action, outcome["ok"], thread=thread) == outcome["ok"], (kind, action, outcome)
+        return
+    refusal = refused(outcome)
+    assert refusal is not None and (refusal.kind, refusal.code) == (outcome["error"]["type"], outcome["error"].get("code")), outcome
+
+
+@pytest.mark.desktop
+def test_the_app_takes_a_threads_kinds_with_the_actions_the_journal_asks_and_no_other(built_desktop):
+    said = the_app({"history/kinds.js": ["THREAD_ACTIONS"]}, "return Object.fromEntries([...THREAD_ACTIONS].map(([kind, actions]) => [kind, [...actions]]));")
+    assert {kind: frozenset(actions) for kind, actions in said.items()} == THREAD_ACTIONS == ACTIONS
+
+
+@pytest.mark.desktop
+def test_what_the_app_passes_on_of_the_folders_own_history_is_taken_whole_and_each_refusal_by_its_code(tmp_path, built_desktop):
+    folder = Folder(tmp_path, ("Report.docx", b"PK report v1"), ("notes.txt", b"v1 notes\n"))
+    one, two = str(uuid4()), str(uuid4())
+    a = {"name": "Draft A", "email": f"thread:{one}@surogate"}
+    yours = {"name": "u1", "email": "user:u1@surogate"}
+    # Each request as the app asks it of its guest, the history's own outcome, and the kind and action the server asked.
+    asked: list[tuple[str, str, str, dict[str, Any], str]] = []
+
+    def ask(thread: str, kind: str, action: str, **args: Any) -> dict[str, Any]:
+        named = {("checkpoint", "take"): "snapshot", ("checkpoint", "restore"): "restore"}.get((kind, action), action)
+        outcome = folder.run(thread, named, **({"commit": args.pop("hash")} if named == "restore" else args))
+        asked.append((kind, action, named, outcome, thread))
+        return outcome.get("ok", {})
+
+    ask(one, "history", "open")
+    ask(two, "history", "open")
+    first = ask(one, "checkpoint", "take", reason="before write_file")["hash"]
+    (folder.copy(one) / "Report.docx").write_bytes(b"PK report v2, by A")
+    (folder.copy(one) / "Reports").mkdir()
+    (folder.copy(one) / "Reports" / "Q3.md").write_text("Q3\n")
+    # A name whose change could run code on the computer: the app leaves it out of what lands, and says why.
+    (folder.copy(one) / ".vscode").mkdir()
+    (folder.copy(one) / ".vscode" / "tasks.json").write_text("{}\n")
+    (folder.copy(one) / "node_modules" / "x").mkdir(parents=True)
+    (folder.copy(one) / "node_modules" / "x" / "index.js").write_text("x\n")
+    (folder.copy(one) / "notes.txt").unlink()
+    ask(one, "history", "changed")
+    saga = f"saga:{uuid4()}"
+    trailers = [["Surogate-Saga", saga], ["Surogate-Thread", one]]
+    picked = ask(one, "history", "pickup", author=yours, trailers=trailers)
+    turn = ask(one, "history", "commit", author=a, trailers=trailers, pickup=picked["commit"])
+    ask(one, "history", "fetch", saga=saga, since=picked["main"])
+    landed(folder, one, turn)
+    ask(one, "history", "forget", saga=saga, applied=turn["changes"])
+    ask(one, "history", "record", turn=turn["commit"], applied=turn["changes"], author=a, trailers=trailers, main=picked["main"], pickup=picked["commit"])
+    ask(one, "history", "forget", saga=saga, applied=turn["changes"])
+    ask(one, "history", "fetch", saga=saga, since=picked["main"])
+    ask(one, "checkpoint", "restore", hash=first)
+    (folder.copy(two) / "Report.docx").write_bytes(b"PK report v2, by B")
+    ask(two, "history", "keep", author=a, trailers=trailers, base=False)
+    ask(two, "history", "open")
+    ask(one, "history", "open")
+    ask(two, "history", "prune")
+    shutil.rmtree(folder.copy(two))
+    ask(two, "history", "changed")
+    said = the_app({"vm/history.js": ["checked"]}, "return given.map(([action, outcome, thread]) => checked(action, outcome, thread));", [
+        [named, outcome, thread] for _, _, named, outcome, thread in asked
+    ])
+    codes = {outcome["error"]["code"] for _, _, _, outcome, _ in asked if "error" in outcome}
+    assert codes == {"landing_unsettled", "not_on_base", "not_a_request", "no_whole_copy"}
+    for (kind, action, _, outcome, thread), passed in zip(asked, said, strict=True):
+        # The app takes every answer its guest's history gives, and passes on every refusal by its code.
+        assert ("ok" in passed) == ("ok" in outcome), (action, outcome, passed)
+        taken_whole(kind, action, passed, thread)
+    commits = [passed["ok"] for (_, action, _, _, _), passed in zip(asked, said, strict=True) if action == "commit"]
+    assert [entry["path"] for entry in commits[0]["overlapped"] if entry["reason"] == "protected"] == [".vscode/tasks.json"]
+
+
+@pytest.mark.desktop
+def test_what_the_apps_file_helper_answers_a_landing_is_taken_whole_and_each_refusal_by_its_type(tmp_path, built_desktop):
+    folder, copy_of, kept = tmp_path / "Documents", tmp_path / "data" / "history" / "k" / "threads" / "t", tmp_path / "data" / "landings" / "k"
+    for where in (folder, copy_of):
+        (where / "Plans").mkdir(parents=True)
+        (where / "Plans" / "Q3.md").write_text("Q3 plan\n")
+    (folder / "Report.docx").write_bytes(b"PK report v1")
+    (copy_of / "Report.docx").write_bytes(b"PK report v2")
+    (copy_of / "Reports").mkdir()
+    (copy_of / "Reports" / "new.md").write_text("new\n")
+    (folder / "old").mkdir()
+    (folder / "old" / "gone.md").write_text("gone\n")
+    blob = lambda data: hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()  # noqa: E731
+    helper = subprocess.Popen(
+        [shutil.which("node"), str(DIST / "files" / "helper.js")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        env={"SUROGATE_FOLDER": str(folder), "HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "SUROGATE_COPY": str(copy_of), "SUROGATE_KEPT": str(kept)},
+    )
+    try:
+        assert json.loads(helper.stdout.readline()) == {"ready": True}
+        answers: list[tuple[str, dict[str, Any]]] = []
+
+        def land(**args: Any) -> dict[str, Any]:
+            helper.stdin.write(json.dumps({"id": str(len(answers)), "kind": "land", "args": args}) + "\n")
+            helper.stdin.flush()
+            outcome = json.loads(helper.stdout.readline())["outcome"]
+            answers.append((args["action"], outcome))
+            return outcome
+
+        land(action="recover")
+        looked = dict(land(action="revisions", paths=["Report.docx", "Reports/new.md", "old/gone.md", "Plans/Q3.md", "Plans", "nothing.md"])["ok"]["revisions"])
+        saga = "saga:1"
+        land(action="apply", saga=saga, step=0, path="Report.docx", before=blob(b"PK report v1"), after=blob(b"PK report v2"), expected=looked["Report.docx"])
+        land(action="apply", saga=saga, step=1, path="Reports/new.md", before=None, after=blob(b"new\n"), expected="absent")
+        land(action="apply", saga=saga, step=2, path="old/gone.md", before=blob(b"gone\n"), after=None, expected=looked["old/gone.md"])
+        land(action="apply", saga=saga, step=3, path="Plans/Q3.md", before=blob(b"Q3 plan\n"), after=blob(b"x"), expected="1:2:3:4:5")
+        # A deletion of a file the copy still holds.
+        land(action="apply", saga=saga, step=4, path="Plans/Q3.md", before=blob(b"Q3 plan\n"), after=None, expected=looked["Plans/Q3.md"])
+        land(action="apply", saga="../x", step=0, path="a")
+        land(action="unapply", saga=saga, step=1, path="Reports/new.md")
+        land(action="unapply", saga=saga, step=9, path="a.txt")
+        land(action="forget", saga=saga)
+    finally:
+        helper.stdin.close()
+        helper.wait(10)
+    assert [outcome["error"]["type"] for _, outcome in answers if "error" in outcome] == ["conflict", "stale", "value"]
+    for action, outcome in answers:
+        taken_whole("land", action, outcome)
+
+
+@pytest.mark.desktop
+def test_every_refusal_the_app_has_of_its_own_for_a_threads_kinds_is_read_by_its_type_and_code(built_desktop):
+    from tests import fake_places
+
+    said = the_app({
+        "history/kinds.js": ["NOT_A_CHECKPOINT", "NOT_A_FORGETTING_ASKED", "NOT_A_THREAD", "NOT_ITS_TURN", "unrecorded"],
+        "hosts/tool-hosts.js": ["CANCELLED", "HOST_STOPPED", "folderBusy", "nothingToLand"],
+        "hosts/messages.js": ["FOLDER_UNAVAILABLE"],
+        "history/copies.js": ["historyOff"],
+        "vm/history.js": ["NOT_A_REQUEST", "REFUSED"],
+    }, """return {
+        NOT_A_THREAD, NOT_ITS_TURN, NOT_A_CHECKPOINT, NOT_A_FORGETTING_ASKED, FOLDER_UNAVAILABLE, CANCELLED, HOST_STOPPED, NOT_A_REQUEST, REFUSED,
+        unrecorded: unrecorded(new Map([[0, "a.txt"]]), []), busy: folderBusy("/home/me/Documents"), nothingToLand: nothingToLand("/home/me/Documents"),
+        off: historyOff("cap", "/home/me/Documents"),
+      };""")
+    for outcome in said.values():
+        taken_whole("land", "forget", outcome)
+    # The tests' computer stands in for the app with the app's own words.
+    for name in ("NOT_A_THREAD", "NOT_ITS_TURN", "NOT_A_FORGETTING_ASKED", "FOLDER_UNAVAILABLE"):
+        assert getattr(fake_places, name) == said[name], name
+
