@@ -1213,15 +1213,16 @@ class LocalHistory(History):
         is asked from the last file the one before it named; ``more`` is
         how many are left after this one.  Each is in the order the pickup
         names its files, by their paths, so its parts name each file once.
-        It only reads: *pickup* is this thread's commit of your edits on
-        ``main``, and its files are what it changed of its one parent.  A
+        It only reads.  *pickup* is the commit a pickup answered with, your
+        edits on ``main``: any commit of this thread's repository with one
+        parent is answered so, its files what it changed of that parent.  A
         part asked again is the same part.
         """
         if not _walked(after):
             _refuse("it names no file to go on from")
         parents = self._parents(pickup) if self._has(pickup) else []
         if len(parents) != 1:
-            _refuse("it names no pickup of this thread's")
+            _refuse("it names no commit of this thread's with one parent")
         versions, _ = self._diff(parents[0], pickup)
         return _part([{"path": path, "before": was, "after": now} for path, (was, now) in sorted(versions.items()) if path > after])
 
