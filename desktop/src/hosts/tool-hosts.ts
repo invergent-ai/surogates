@@ -478,9 +478,12 @@ export class ToolHosts implements Executor {
     if (landings === null) return null;
     const name = keyOf(folder);
     const kept = join(landings, name);
-    // A landing's host on the folder holds it, and is asked before a put-back of the app's, which would wait for it.
+    // A landing's host on the folder holds it, and is asked before a put-back of the app's, which would wait for it. One
+    // whose helper has put back what was cut short there is the word, whatever is kept now: a put-back of the app's still
+    // under way waits in vain for the folder that host holds.
     const lander = [...this.landers.values()].find((host) => host.kept === kept);
-    if (lander && holdsAnything(kept)) return lander.putBack ? null : this.putBackBy(lander, folder, signal);
+    if (lander?.putBack) return null;
+    if (lander && holdsAnything(kept)) return this.putBackBy(lander, folder, signal);
     let under = this.recovering.get(name);
     if (!under) {
       if (!holdsAnything(kept) || this.mended.has(name)) return null;

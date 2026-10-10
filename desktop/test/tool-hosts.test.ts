@@ -2418,6 +2418,40 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(lies(folder)).toEqual(before);
   });
 
+  it("reads the folder for a thread once a landing's host on it has put back what was cut short, while a recovery that came first still waits for the folder that host holds", { timeout: 90_000 }, async () => {
+    const { folder, before } = await killed();
+    // A recovery's host started first, whose start reaches it only once the landing's host holds the folder and its
+    // helper has put back what was cut short there: one slow to start, as under load.
+    let late = () => {};
+    const going = new Promise<void>((resolve) => {
+      late = resolve;
+    });
+    const { executor, told } = startedAgain({
+      idleMs: 30_000, landWaitMs: 3_000,
+      spawnHost: () => {
+        const host = forkHost();
+        host.onExit(() => {
+          exits += 1;
+        });
+        spawned.push(host);
+        return {
+          ...host,
+          send: (message) => {
+            if (message.type === "start" && message.recovery) void going.then(() => host.send(message));
+            else host.send(message);
+          },
+        };
+      },
+    });
+    executor.recoverLeft();
+    expect(told).toEqual([{ folder, state: "begun" }]);
+    expect(await executor.land(step("recover"), signal())).toEqual({ ok: putBack });
+    late();
+    // The recovery waits in vain for the folder the landing's host holds: the folder may be read all the same.
+    expect(await executor.recoverBefore(folder, signal())).toBeNull();
+    expect(lies(folder)).toEqual(before);
+  });
+
   it.each([
     ["the folder made read-only", "a.txt", "."],
     ["a folder in it made read-only", "docs/a.txt", "docs"],
