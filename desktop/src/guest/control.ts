@@ -8,6 +8,7 @@ import type { ProcessHandle } from "./processes.js";
 import type { FromAgent, HostUser, Share, ToAgent } from "./protocol.js";
 
 export const NO_HELLO = "The host has not answered hello";
+const NO_PLACES = "The agent keeps no folder's history";
 
 // What the control asks of the roots (root.ts, Roots).
 export interface ControlRoots {
@@ -22,6 +23,8 @@ export interface ControlRoots {
 export interface ControlPlaces {
   mount(key: string, history: Share, real: Share): Promise<void>;
   unmount(key: string): Promise<void>;
+  // Never rejects: whatever goes wrong is an outcome.
+  history(key: string, request: { thread: string; user: string; action: string; args: Record<string, unknown> }, signal: AbortSignal): Promise<Outcome>;
 }
 
 // What the control asks of the guest itself (root.ts): its clock, its runs' backstops, and its power.
@@ -53,7 +56,7 @@ function isUser(value: unknown): value is HostUser {
 
 export class Control {
   private user: HostUser | null = null;
-  // The operations still running, by id.
+  // The operations and the history requests still running, by id.
   private readonly running = new Map<number, AbortController>();
 
   // Without *machine*, as in the tests, the guest's clock and power are left alone; without *places*, no folder's history is mounted.
@@ -64,6 +67,22 @@ export class Control {
 
   hello(): void {
     this.send({ type: "hello", id: 0 });
+  }
+
+  // *work*, answered as the result of request *id*, and stopped by a cancel of that id.
+  private answer(id: number, work: (signal: AbortSignal) => Promise<Outcome>): void {
+    // The host numbers its own requests: one still running keeps its id, and its cancel.
+    if (this.running.has(id)) {
+      return this.send({ type: "result", id, outcome: { error: { type: "other", message: "An operation with this id is already running" } } });
+    }
+    const controller = new AbortController();
+    this.running.set(id, controller);
+    void work(controller.signal)
+      .catch((error: unknown): Outcome => ({ error: { type: "other", message: String(error) } }))
+      .then((outcome) => {
+        this.running.delete(id);
+        this.send({ type: "result", id, outcome });
+      });
   }
 
   receive(line: string): void {
@@ -102,29 +121,28 @@ export class Control {
       if (!isText(message.root) || !isText(message.kind)) {
         return this.send({ type: "result", id, outcome: { error: { type: "value", message: malformed("op") } } });
       }
-      // The host numbers its own requests: one still running keeps its id, and its cancel.
-      if (this.running.has(id)) {
-        return this.send({ type: "result", id, outcome: { error: { type: "other", message: "An operation with this id is already running" } } });
-      }
-      const controller = new AbortController();
-      this.running.set(id, controller);
-      void this.roots.perform(message.root, message.kind, isRecord(message.args) ? message.args : {}, controller.signal, `op-${id}`)
-        .catch((error: unknown): Outcome => ({ error: { type: "other", message: String(error) } }))
-        .then((outcome) => {
-          this.running.delete(id);
-          this.send({ type: "result", id, outcome });
-        });
+      const { root, kind } = message;
+      const args = isRecord(message.args) ? message.args : {};
+      this.answer(id, (signal) => this.roots.perform(root, kind, args, signal, `op-${id}`));
     } else if (message.type === "teardown") {
       if (!isText(message.root) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("teardown") });
       this.roots.teardown(message.root, message.share).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
+    } else if (message.type === "history") {
+      const { key, thread, user, action, args } = message;
+      const { places } = this;
+      if (![key, thread, user, action].every(isText) || !isRecord(args)) {
+        return this.send({ type: "result", id, outcome: { error: { type: "value", message: malformed("history") } } });
+      }
+      if (!places) return this.send({ type: "result", id, outcome: { error: { type: "unavailable", message: NO_PLACES } } });
+      this.answer(id, (signal) => places.history(key, { thread, user, action, args }, signal));
     } else if (message.type === "place" || message.type === "unplace") {
       const { type } = message;
       const shared = type === "unplace" || (isShare(message.history) && isShare(message.real));
       if (!isText(message.key) || !shared) return this.send({ type: "failed", id, message: malformed(type) });
-      if (!this.places) return this.send({ type: "failed", id, message: "The agent keeps no folder's history" });
+      if (!this.places) return this.send({ type: "failed", id, message: NO_PLACES });
       (type === "place" ? this.places.mount(message.key, message.history, message.real) : this.places.unmount(message.key)).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),

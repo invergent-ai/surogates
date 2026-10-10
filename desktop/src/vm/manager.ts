@@ -20,6 +20,7 @@ import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
+import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
 import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
 import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
@@ -33,10 +34,14 @@ const PING_MS = 10_000;
 // - powerOffMs, from the shutdown asked to the VM's exit, past which it is ended;
 // - setupMs, a root's set-up, and the agent's answer to a teardown. The agent's own bounds
 //   fit inside it: its share's mount, what the root ran before to end, and its runner's start;
-// - shareMs, a share's hot-add, from the agent's uid to the folder in the guest, and its removal.
+// - shareMs, a share's hot-add, from the agent's uid to the folder in the guest, and its removal;
+// - historyMs, the agent's answer to a request to a folder's history. The agent answers every one
+//   inside two bounds of its own, the request's wait for its place's turn and its run
+//   (guest/places.ts): this is past both by a setup's time, so an agent that has not answered by
+//   then never will.
 export const WAITS = {
-  kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000 },
-  emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000 },
+  kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000, historyMs: 1_215_000 },
+  emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000, historyMs: 7_290_000 },
 } as const;
 // The agent gives its roots uids from here up.
 const FIRST_UID = 10_000;
@@ -61,6 +66,7 @@ export interface VmOptions extends Disks {
   pingMs?: number;
   shareMs?: number;
   setupMs?: number;
+  historyMs?: number;
   powerOffMs?: number;
   reachMs?: number; // how long the agent has to answer a connection into a root
 }
@@ -174,6 +180,8 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 class FolderGone extends Error {}
 
 const NO_HISTORY = "could not add this folder's history";
+// What a request of a place is answered that a letting-go of the place did not wait for any longer.
+const LET_GO = unavailable("let this folder's history go before this was answered");
 
 // Settles with "late" once *ms* pass, its timer not holding the process.
 const late = (ms: number) => new Promise<"late">((resolve) => {
@@ -264,6 +272,7 @@ export class Guest {
   private offset = Date.now() - performance.now();
   private readonly shareMs: number;
   private readonly setupMs: number;
+  private readonly historyMs: number;
   private readonly powerOffMs: number;
   private readonly proxy: NetProxy;
   // The way into its roots: the host's end of the inbound port, and the door the browser's proxy knocks at.
@@ -313,6 +322,7 @@ export class Guest {
     this.keepalive.unref();
     this.shareMs = options.shareMs ?? waits.shareMs;
     this.setupMs = options.setupMs ?? waits.setupMs;
+    this.historyMs = options.historyMs ?? waits.historyMs;
     this.powerOffMs = options.powerOffMs ?? waits.powerOffMs;
     // Each connection a root's command makes, judged with the root the agent named.
     this.proxy = new NetProxy(vm.net, { egress });
@@ -518,6 +528,25 @@ export class Guest {
   }
 
   /**
+   * One request to a folder's history, its place added first: git in the guest, as the agent's own
+   * user. The answer is the guest's, checked as it comes off the link (history.ts), or why there is
+   * none. A request is its place's alone: a key the guest holds for another folder, or another
+   * history, is refused, and the agent is asked nothing. An agent that has not answered within
+   * historyMs is stuck, or is not ours: the guest goes, as one that answers no setup does.
+   */
+  async history(request: HistoryRequest, signal: AbortSignal): Promise<Outcome> {
+    if (!named(request)) return NOT_A_REQUEST;
+    const { place, thread, user, action, args } = request;
+    const failure = await Promise.race([this.place(place), aborted(signal)]);
+    if (failure === "aborted") return CANCELLED;
+    if (failure) return failure;
+    const outcome = await this.control.history(place.key, thread, user, action, args, signal, this.historyMs);
+    // The link's own word for no answer: it closed, or the agent's time passed.
+    if (outcome === SANDBOX_STOPPED) this.lose();
+    return outcome;
+  }
+
+  /**
    * *place* leaves the guest: the agent lets both mounts go, then the two shares are removed. Only
    * the place it holds for that folder and history: false for any other, which is left as it is.
    */
@@ -668,8 +697,11 @@ export class VmManager {
   private readonly noticed = new Set<string>();
   // Each place the guest is letting go, until it has: asked for again meanwhile, it is added once it has gone.
   private readonly leaving = new Map<string, Promise<unknown>>();
-  // Each place being asked for, by its key, until it is answered: let go meanwhile, it goes once it is.
-  private readonly placing = new Map<string, Set<Promise<unknown>>>();
+  // Each place being asked for, and each request to its history, by its key, until it is answered: let go
+  // meanwhile, the place goes once it is, or once the letting-go has waited its time and ended it.
+  private readonly placing = new Map<string, Set<{ answered: Promise<unknown>; end(): void }>>();
+  // The waits of the guest that runs, or ran last.
+  private waits: (typeof WAITS)[keyof typeof WAITS] = WAITS.kvm;
   // What each device's browser may open of its chats' own servers, whichever guest runs.
   private readonly forwarded = new Forwarded();
 
@@ -706,20 +738,48 @@ export class VmManager {
    * folder itself, for the agent's own git. Otherwise the answer that says why not. Never rejects.
    */
   async place(place: Place, signal: AbortSignal): Promise<Outcome | null> {
-    // What was asked of its key before this: a place on its way out has gone before it is added anew.
-    const gone = this.leaving.get(place.key) ?? Promise.resolve();
-    const asked = this.inGuest(signal, async (guest) => {
-      if ((await Promise.race([gone, aborted(signal)])) === "aborted") return CANCELLED;
-      const failed = await Promise.race([guest.place(place), aborted(signal)]);
+    const failure = await this.ofPlace(place.key, signal, async (guest, ended) => {
+      const failed = await Promise.race([guest.place(place), aborted(ended)]);
       if (failed === "aborted") return CANCELLED;
       return failed ?? { ok: null };
     });
-    const placing = this.placing.get(place.key) ?? new Set();
-    this.placing.set(place.key, placing.add(asked));
-    const failure = await asked;
-    placing.delete(asked);
-    if (placing.size === 0 && this.placing.get(place.key) === placing) this.placing.delete(place.key);
     return "ok" in failure ? null : failure;
+  }
+
+  /**
+   * One request to a folder's history, in the guest, booted for it if none runs, its place added
+   * first: its answer, checked (history.ts), or why there is none. It is done in the order it was
+   * asked of its place: a letting-go asked before it has ended first, and the place is added anew;
+   * one asked after it waits until it is answered, for as long as a place has to be let go, and
+   * then ends it. A cancel is answered at once, and one that comes while it waits for its place to
+   * go adds nothing and asks nothing. Nothing of it waits on the guest without a bound this
+   * computer keeps: the place's adding and its letting go have theirs, and the agent's answer
+   * historyMs, past which the guest is given up. Never rejects.
+   */
+  history(request: HistoryRequest, signal: AbortSignal): Promise<Outcome> {
+    if (!named(request)) return Promise.resolve(NOT_A_REQUEST);
+    return this.ofPlace(request.place.key, signal, (guest, ended) => guest.history(request, ended));
+  }
+
+  // *work* on the place of *key*, in the guest, once what was asked of the key before has been done:
+  // a place on its way out has gone before it is added anew. Noted until it is answered, so that a
+  // letting-go asked meanwhile waits for it; *work* is given what ends it, its caller's signal or
+  // that letting-go once it has waited its time, and is then answered as let go.
+  private async ofPlace(key: string, signal: AbortSignal, work: (guest: Guest, ended: AbortSignal) => Promise<Outcome>): Promise<Outcome> {
+    const gone = this.leaving.get(key) ?? Promise.resolve();
+    const overtaken = new AbortController();
+    const ended = AbortSignal.any([signal, overtaken.signal]);
+    const answered = this.inGuest(ended, async (guest) => {
+      if ((await Promise.race([gone, aborted(ended)])) === "aborted") return CANCELLED;
+      return work(guest, ended);
+    });
+    const asked = { answered, end: () => overtaken.abort() };
+    const placing = this.placing.get(key) ?? new Set();
+    this.placing.set(key, placing.add(asked));
+    const outcome = await answered;
+    placing.delete(asked);
+    if (placing.size === 0 && this.placing.get(key) === placing) this.placing.delete(key);
+    return outcome === CANCELLED && !signal.aborted ? LET_GO : outcome;
   }
 
   /**
@@ -727,12 +787,24 @@ export class VmManager {
    * has; false where the guest holds no place for that folder and history under its key, as for a
    * folder that was refused the key: nothing of the one that holds it is let go. What is asked of
    * a key is done in the order it was asked: a place asked for before this is answered first, and
-   * goes; one asked for meanwhile is another place, added once this one has gone. Never rejects.
+   * goes; one asked for meanwhile is another place, added once this one has gone. It reaches the
+   * agent within a bound of its own, whatever was asked before it: what has not been answered once
+   * a place's time to be let go has passed is ended, and answered as let go. The agent then has as
+   * long to let the place go, and a guest that has not by then is given up. Never rejects.
    */
   unplace(place: Place): Promise<boolean> {
     const { key } = place;
-    const before = [this.leaving.get(key), ...(this.placing.get(key) ?? [])];
-    const gone = Promise.all(before).then(() => this.letGo(place));
+    const left = this.leaving.get(key);
+    const before = [...(this.placing.get(key) ?? [])];
+    const gone = (async () => {
+      await left;
+      const answered = Promise.all(before.map((asked) => asked.answered));
+      if ((await Promise.race([answered, late(this.options.setupMs ?? this.waits.setupMs)])) === "late") {
+        for (const asked of before) asked.end();
+        await answered;
+      }
+      return this.letGo(place);
+    })();
     this.leaving.set(key, gone);
     void gone.then(() => {
       if (this.leaving.get(key) === gone) this.leaving.delete(key);
@@ -856,6 +928,7 @@ export class VmManager {
     })();
     booting.then(async (guest) => {
       this.failed = null;
+      this.waits = WAITS[guest.emulated ? "emulated" : "kvm"];
       this.backoff.up();
       this.report({ emulated: guest.emulated });
       await guest.gone;
