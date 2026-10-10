@@ -670,18 +670,20 @@ describe("a landing cut short by a kill", () => {
     mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
     writeFileSync(join(folder, ".git", "hooks", written.aside as string), "#!/bin/sh\n");
     writeFileSync(join(kept, other, "4.json"), JSON.stringify({ ...written, path: ".git/hooks/pre-commit" }));
+    // Nor is one that cannot even be opened taken for none.
+    mkdirSync(join(kept, other, "5.json"));
     // Nor on a folder that is no saga's, whatever is in it.
     mkdirSync(join(kept, "not a saga"));
     writeFileSync(join(kept, "not a saga", "1.json"), JSON.stringify(written));
     expect(await restart()).toEqual({
-      ok: { restored: ["Report.docx"], beside: [], lost: [], unread: [[other, 1, "Report.docx"], [other, 2, null], [other, 3, null], [other, 4, null]] },
+      ok: { restored: ["Report.docx"], beside: [], lost: [], unread: [[other, 1, "Report.docx"], [other, 2, null], [other, 3, null], [other, 4, null], [other, 5, null]] },
     });
     expect(readFileSync(join(folder, "Budget.xlsx"), "utf8")).toBe("yours");
     expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe(V1);
     expect(readdirSync(folder).sort()).toEqual([".git", "Budget.xlsx", "Report.docx"]);
     expect(readdirSync(join(folder, ".git", "hooks"))).toEqual([written.aside]);
     // What it cannot read it does not remove: the file beside such a record may be all that is left of a user's.
-    expect(readdirSync(join(kept, other)).sort()).toEqual(["1.json", "2.json", "3", "3.json", "4.json"]);
+    expect(readdirSync(join(kept, other)).sort()).toEqual(["1.json", "2.json", "3", "3.json", "4.json", "5.json"]);
     expect(readdirSync(join(kept, "not a saga"))).toEqual(["1.json"]);
   });
 
