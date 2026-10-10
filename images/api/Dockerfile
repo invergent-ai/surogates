@@ -37,6 +37,7 @@ LABEL org.opencontainers.image.title="surogates-api" \
 #   to convert Office docs (docx/xlsx/pptx/odt/etc.) to PDF before
 #   parsing.  ``libreoffice-core`` alone is not enough — without the
 #   format-specific filters (writer/calc/impress) the conversion fails.
+# git: a file's History asks the api's copy of a project's history which versions are still kept.
 # imagemagick: liteparse uses ImageMagick to rasterise non-PDF image
 #   formats (tiff/webp/svg/etc.) before parsing.
 # tesseract-ocr + tesseract-ocr-eng: optional OCR backend for scanned
@@ -46,6 +47,7 @@ LABEL org.opencontainers.image.title="surogates-api" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
         curl \
+        git \
         libreoffice-core \
         libreoffice-writer \
         libreoffice-calc \
