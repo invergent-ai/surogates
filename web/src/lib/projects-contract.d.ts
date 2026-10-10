@@ -81,6 +81,12 @@ export interface FileVersion {
   landingId: string | null; // the landing it came with
 }
 
+// The project's files that are gone, the newest first: each the version that deleted it.
+export interface DeletedFiles {
+  files: FileVersion[];
+  more: boolean; // others may have been deleted before these, and are not listed
+}
+
 export interface Routine {
   id: string;
   name: string;
@@ -106,6 +112,10 @@ export interface ProjectsSource {
   routines(projectId: string): Promise<Routine[]>;
   // A file's History, newest first: the file is the cloud's, or a folder's on a computer.
   history(projectId: string, path: string, place: ThreadPlace): Promise<FileVersion[]>;
+  // Open version: the file as that version left it, handed to the user to save.
+  openVersion(projectId: string, input: { versionId: string; path: string }): Promise<void>;
+  // The Library lists the deleted files under its files, so that a deleted file's History is reached.
+  deleted(projectId: string): Promise<DeletedFiles>;
   // threadId null: something project-wide changed; refetch the list
   subscribe(projectId: string, onChange: (threadId: string | null) => void): () => void;
 }

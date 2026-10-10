@@ -95,7 +95,7 @@ async def test_the_desktop_takes_every_answer_of_a_files_history(built_client, a
     thread = await a_thread(api, "Draft A", await master_of(api, project))
     pods = stored(api, thread, tmp_path)
     pool = SandboxPool(pods)
-    for command in ("echo one >> Report.docx", "echo two >> Report.docx"):
+    for command in ("echo one >> Report.docx", "echo two >> Report.docx && rm notes.txt"):
         await edited(pool, thread, command)
         await ends(api, pool, thread)
     seen = (await checked(api, link_url, project, "--path", "Report.docx"))["history"]
@@ -107,3 +107,12 @@ async def test_the_desktop_takes_every_answer_of_a_files_history(built_client, a
     ]
     assert [v["landingId"] is not None for v in seen["versions"]] == [True, True, False]
     assert seen["none"] == []
+    # The oldest opened: your upload, handed over to save as data under the file's own name, with nothing said of where.
+    assert (seen["answered"], seen["opened"]) == (
+        None, [{"name": "Report.docx", "type": "application/octet-stream", "size": len(b"PK\x03\x04 report v1")}],
+    )
+    # And the file the second landing took away, as the version that deleted it.
+    assert [(v["path"], v["by"]["kind"], v["change"], v["available"]) for v in seen["deleted"]["files"]] == [
+        ("notes.txt", "thread", "deleted", True),
+    ]
+    assert seen["deleted"]["more"] is False

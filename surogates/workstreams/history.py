@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -22,7 +23,7 @@ from itertools import islice
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, insert, or_, select, update
+from sqlalchemy import delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import Range
 
 from surogates.db.models import WorkstreamHistory, WorkstreamThread
@@ -265,6 +266,54 @@ async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str
 
 #: What a project over the file cap answers wherever its history is asked for.
 HISTORY_OFF = "History is off: this project has more than 50,000 files."
+#: A row's id as a version names it: digits the column holds, never what a guess could overflow.
+_ROW_ID = re.compile(r"[0-9]{1,18}")
+#: The step whose author a version is by: a row's files are its commit's, and what it picked up its pickup's.
+_STEP = {False: "history.commit", True: "history.pickup"}
+#: The most of a project's latest records its deleted files are looked for among: what the list costs
+#: is bounded whatever the project's age.  A file deleted before them is listed no more.
+_GONE_AMONG = 10_000
+# The project's cloud files that are gone, looked for among its latest :among records: each one's newest landed
+# record, where that took the file away, the newest first and :most of them, with who that record's step says it
+# is by.  A row's files come after its pickup.  One row at least, with how many records were looked among.
+_GONE = text("""
+    WITH recent AS (
+        SELECT id, files, picked_up FROM workstream_history
+         WHERE workstream_id = :project AND device_id IS NULL AND saga_state = 'completed'
+         ORDER BY created_at DESC, id DESC LIMIT :among
+    ), changed AS (
+        SELECT r.id, 'f' AS side, f->>'path' AS path, f->'after' AS after
+          FROM recent r, jsonb_array_elements(r.files) f
+         WHERE jsonb_typeof(f->'path') = 'string' AND f->'merged' IS DISTINCT FROM 'false'::jsonb
+        UNION ALL
+        SELECT r.id, 'p', p->>'path', p->'after'
+          FROM recent r, jsonb_array_elements(r.picked_up) p
+         WHERE jsonb_typeof(p->'path') = 'string'
+    ), newest AS (
+        SELECT DISTINCT ON (path) id, side, path, after FROM changed ORDER BY path, id DESC, side
+    ), gone AS (
+        SELECT id, side, path FROM newest WHERE after = 'null'::jsonb ORDER BY id DESC, side, path LIMIT :most
+    )
+    SELECT among.records, gone.id, gone.side, gone.path, h.updated_at, (
+               SELECT s->'arguments'->'author' FROM jsonb_array_elements(h.steps) s
+                WHERE s->>'tool_name' = CASE gone.side WHEN 'p' THEN :pickup ELSE :commit END LIMIT 1
+           ) AS author
+      FROM (SELECT count(*) AS records FROM recent) among
+      LEFT JOIN gone ON true
+      LEFT JOIN workstream_history h ON h.id = gone.id
+     ORDER BY gone.id DESC, gone.side, gone.path
+""")
+
+
+def row_id(value: str) -> int | None:
+    """*value* as a row's id, None when it is none."""
+    return int(value) if _ROW_ID.fullmatch(value) else None
+
+
+def _by(author: dict | None) -> dict:
+    """Who the *author* a row's step was given is, as the wire's ``ChangedBy`` has it; you, where it was given none."""
+    who = _who(author["name"], author["email"]) if author else YOU
+    return {"kind": "thread", "thread_id": who["id"], "title": who["title"]} if who["kind"] == "thread" else who
 
 
 def changed_by(row: WorkstreamHistory, *, picked: bool) -> dict:
@@ -274,10 +323,7 @@ def changed_by(row: WorkstreamHistory, *, picked: bool) -> dict:
     whoever its pickup step names: you, or a routine.  Each is read from the
     author its step was given.
     """
-    step = "history.pickup" if picked else "history.commit"
-    author = next((s["arguments"].get("author") for s in row.steps if s["tool_name"] == step), None)
-    who = _who(author["name"], author["email"]) if author else YOU
-    return {"kind": "thread", "thread_id": who["id"], "title": who["title"]} if who["kind"] == "thread" else who
+    return _by(next((s["arguments"].get("author") for s in row.steps if s["tool_name"] == _STEP[picked]), None))
 
 
 def _version(row: WorkstreamHistory, entry: dict, *, picked: bool) -> dict:
@@ -342,3 +388,62 @@ async def versions(
             "merged": True, "landing_id": None, "blob": entry["before"],
         })
     return found[:limit]
+
+
+async def version_of(session_factory: Any, workstream_id: UUID | str, version: str, path: str) -> dict | None:
+    """The record of *path*'s version *version* among the project's cloud files, ``{path, after, ...}``; None when its records name none.
+
+    A version is ``<row>:f``, one of a row's files; ``<row>:p``, one of its
+    pickup; or ``<row>:b``, what the file was before that row.  The row is
+    asked for as one of this project's own completed records of its cloud
+    files: another project's, a computer's folder's, or one that did not
+    complete, is no record here, whatever its id.  And the version is that
+    row's of this very file: a row names no version of a file it did not
+    change.
+    """
+    number, _, side = version.partition(":")
+    found = row_id(number)
+    if found is None or side not in ("f", "p", "b"):
+        return None
+    async with session_factory() as db:
+        row = (await db.execute(
+            select(WorkstreamHistory.files, WorkstreamHistory.picked_up).where(
+                WorkstreamHistory.id == found, WorkstreamHistory.workstream_id == workstream_id,
+                WorkstreamHistory.device_id.is_(None), WorkstreamHistory.saga_state == "completed",
+            )
+        )).first()
+    if row is None:
+        return None
+    # Before the row: before its pickup, when it picked the file up.
+    entries = row.files if side == "f" else row.picked_up if side == "p" else [*row.picked_up, *row.files]
+    entry = next((e for e in entries if e["path"] == path), None)
+    if side != "b" or entry is None:
+        return entry
+    return None if entry["before"] is None else {"path": path, "after": entry["before"]}
+
+
+async def deleted_files(session_factory: Any, workstream_id: UUID | str, *, limit: int) -> tuple[list[dict], bool]:
+    """The project's cloud files that are gone, *limit* at most and the newest first, and whether there may be more.
+
+    Each is the version that deleted it, as :func:`versions` gives one.  A
+    file is gone when its newest landed record took it away: one made again
+    since is not.  The Library lists the real files, so without these a
+    deleted file would have no way to its History.  They are looked for
+    among the project's latest records, a bounded number of them, and only
+    that many are read out, of each only what a version says: none of the
+    rows that hold them is read whole.  There may be more where more were
+    found than are listed, and where the project has records older than
+    those looked among.
+    """
+    async with session_factory() as db:
+        answered = (await db.execute(_GONE, {
+            "project": workstream_id, "among": _GONE_AMONG, "most": limit + 1, "commit": _STEP[False], "pickup": _STEP[True],
+        })).all()
+    found = [found for found in answered if found.id is not None]
+    return [
+        {
+            "id": f"{row}:{side}", "path": path, "by": _by(author), "at": utc(at), "change": "deleted",
+            "merged": True, "landing_id": None if side == "p" else str(row), "blob": None,
+        }
+        for _, row, side, path, at, author in found[:limit]
+    ], len(found) > limit or answered[0].records >= _GONE_AMONG

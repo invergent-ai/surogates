@@ -5,16 +5,31 @@
 
 import { createInterface } from "node:readline";
 
+import { edgeRefused } from "./edge.js";
 import { recover } from "./land.js";
 import { type Context, perform } from "./operations.js";
 
-const { SUROGATE_FOLDER: folder, HOME: home, SUROGATE_COPY: copy, SUROGATE_KEPT: kept, ...rest } = process.env;
+const { SUROGATE_FOLDER: folder, HOME: home, SUROGATE_AT: at, SUROGATE_COPY: copy, SUROGATE_KEPT: kept, ...rest } = process.env;
 if (!folder || !home) {
   process.stderr.write("the file helper needs SUROGATE_FOLDER and HOME\n");
   process.exit(2);
 }
+// A helper whose folder is a thread's copy is given the path of the folder it is a copy of, here and nowhere else:
+// no request names it. One it cannot go by ends the helper, which never works as a chat's in a copy's stead. A
+// landing's helper works in the folder itself, and is given none.
+if (at !== undefined) {
+  const refused = copy !== undefined || kept !== undefined
+    ? "the file helper's SUROGATE_AT is for a thread's copy: a landing's helper works in the folder itself, and is given none"
+    : edgeRefused(folder, at);
+  if (refused !== null) {
+    process.stderr.write(`${refused}\n`);
+    process.exit(2);
+  }
+}
 // A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing.
-const context: Context = { folder, home, env: { ...rest, HOME: home }, ...(copy && kept ? { landing: { copy, kept } } : {}) };
+const context: Context = {
+  folder, home, env: { ...rest, HOME: home }, ...(at !== undefined ? { at } : {}), ...(copy && kept ? { landing: { copy, kept } } : {}),
+};
 // Before it says it is ready: what an earlier helper's landing left cut short is put back while nothing else looks at
 // the folder. A failure here is answered by the first `land` asked, which tries again.
 if (context.landing) {

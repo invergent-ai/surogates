@@ -188,6 +188,17 @@ describe("protectedInFolder", () => {
     expect(protectedInFolder(folder, folder)).toBe(false);
   });
 
+  it("judges a key in time that grows with its length, however many parts it has and whatever they are", () => {
+    // The longest path Linux takes, made of names of a letter each; of git folders, a submodule's, a dependency folder's.
+    for (const part of ["a", ".git", ".git/modules/a/b", "node_modules", ".claude", "modules/hooks"]) {
+      const deep = `${part}/`.repeat(Math.floor(4_090 / (part.length + 1)));
+      const began = performance.now();
+      for (let n = 0; n < 2_000; n += 1) protectedInFolder(folder, `${folder}/${deep}x`);
+      // Loosely, for a loaded computer: a fifth of a second where this was written, and half a minute with every part before each looked at again.
+      expect(performance.now() - began, part).toBeLessThan(2_000);
+    }
+  });
+
   // Package managers unpack what packages ship, .idea and .vscode folders among it (iconv-lite's).
   it.each([
     "node_modules/iconv-lite/.idea/codeStyles/Project.xml", "a/node_modules/b/.vscode/settings.json", "NODE_MODULES/b/.mcp.json",
