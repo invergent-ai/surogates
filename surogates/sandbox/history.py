@@ -1579,8 +1579,10 @@ class History:
         # history's own has moved on.
         held = {*have, *(first for first in map(self._first_held, tips) if first)}
         try:
+            # A file over 1 MiB goes in whole, as at a pruning, which keeps a change it finds in a pack.
             name = self._git(
-                ["pack-objects", "--revs", "-q", str(outgoing / "pack")], env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
+                ["-c", "core.bigFileThreshold=1m", "pack-objects", "--revs", "-q", str(outgoing / "pack")],
+                env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
                 input="".join(f"{c}\n" for c in tips) + "".join(f"^{c}\n" for c in sorted(held)),
             )
             if _objects(outgoing / f"pack-{name}.idx"):
