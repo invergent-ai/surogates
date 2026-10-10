@@ -1,10 +1,11 @@
-"""The api's copy of a project's history, read from its bucket through the storage backend."""
+"""The api's copy of a project's history, read from its bucket through the storage backend, and what it lands there as a pod does."""
 
 from __future__ import annotations
 
 import asyncio
 import fcntl
 import hashlib
+import json
 import os
 import signal
 import struct
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from surogates.sandbox.history import MAIN, HistoryError
+from surogates.sandbox.history import MAIN, HistoryConflict, HistoryError
 from surogates.storage.backend import LocalBackend
 from surogates.workstreams import bucket as module
 from surogates.workstreams.bucket import BUSY, TOO_LARGE, Bounds, BucketHistory, Busy, NotKept, Slow, said
@@ -1618,3 +1619,647 @@ async def test_a_version_is_sent_within_its_seconds_and_gone_however_its_sending
     assert staged_in(history) == []
     # Nothing of these keeps the copy in use, and no handle of them is left open.
     assert (history.clone in module._USING, handles_of_versions()) == (False, [])
+
+
+# ----------------------------------------------------------------------
+# The copy's write side: a landing's steps, run here as a pod runs them
+# ----------------------------------------------------------------------
+
+YOU = {"name": "u1", "email": "user:u1@surogate"}
+
+
+def by_saga(saga: str, kind: str) -> list[list[str]]:
+    return [["Surogate-Saga", saga], ["Surogate-Kind", kind]]
+
+
+def left_in(history: BucketHistory) -> list[str]:
+    """What the copy holds beside the bucket's own packs: an object of its own, or a file an act left on its way."""
+    objects = history.clone / "objects"
+    return sorted(str(p.relative_to(history.clone)) for p in (
+        *(p for p in objects.rglob("*") if p.is_file() and p.parent != objects / "pack"),
+        *(p for p in (objects / "pack").glob("*.pack") if not p.with_suffix(".bucket").exists()),
+        *history.clone.glob("scratch-*"), *staged_in(history),
+    ))
+
+
+async def picked_up(history: BucketHistory, paths: list[str], saga: str = "saga:p") -> dict:
+    """Your edits to *paths*, looked for and then pushed, as a Restore picks them up."""
+    looked = await history.edits(paths)
+    return await history.pickup(main=looked["main"], picked_up=looked["picked_up"], author=YOU, trailers=by_saga(saga, "pickup"))
+
+
+async def test_a_look_tells_your_edits_to_the_files_asked_about_and_keeps_none_of_them(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, edited by you")
+    (project / "notes.txt").write_text("v2 notes, saved by you\n")
+    (project / "new.md").write_text("made by you\n")
+    history = bucket(tmp_path, storage)
+    looked = await history.edits(["new.md", "Report.docx", "gone.md", "Report.docx"])
+    # Only the files asked about, each once and in order, and only where they changed: the rest are the next landing's to pick up.
+    assert looked == {"main": one, "picked_up": [
+        {"path": "Report.docx", "before": blob_of(b"PK\x03\x04 report v2"), "after": blob_of(b"PK\x03\x04 report v2, edited by you")},
+        {"path": "new.md", "before": None, "after": blob_of(b"made by you\n")},
+    ]}
+    # A file you deleted is an edit too.
+    (project / "notes.txt").unlink()
+    assert (await history.edits(["notes.txt"]))["picked_up"] == [{"path": "notes.txt", "before": blob_of(b"v1 notes\n"), "after": None}]
+    # Nothing of them is kept: the history is as the bucket has it, and the copy holds nothing of its own.
+    assert git(project / "_history", "rev-parse", MAIN) == one
+    assert left_in(history) == []
+    # Before a project's first landing there is no main to tell an edit from.
+    assert await copy_of(tmp_path, storage, "empty").edits(["a.md"]) == {"main": None, "picked_up": []}
+
+
+async def test_a_pickup_records_your_edits_on_main_before_a_file_of_them_is_written_over(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, edited by you")
+    (project / "notes.txt").unlink()
+    history = bucket(tmp_path, storage)
+    looked = await history.edits(["Report.docx", "notes.txt"])
+    asked = {"main": looked["main"], "picked_up": looked["picked_up"], "author": YOU, "trailers": by_saga("saga:p", "pickup")}
+    picked = await history.pickup(**asked)
+    durable = project / "_history"
+    # As a pod's pickup answers: main as it found it, its commit, and its files.
+    assert (picked["main"], picked["picked_up"]) == (one, looked["picked_up"])
+    assert git(durable, "rev-parse", MAIN) == picked["commit"]
+    assert git(durable, "log", "-1", "--format=%an <%ae>|%P|%s|%(trailers:key=Surogate-Kind,valueonly)", picked["commit"]) == (
+        f"u1 <user:u1@surogate>|{one}|Your changes|pickup"
+    )
+    assert git(durable, "show", f"{picked['commit']}:Report.docx") == "PK\x03\x04 report v2, edited by you"
+    assert git(durable, "ls-tree", "--name-only", picked["commit"]).splitlines() == ["Report.docx"]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # Safe to repeat after a lost answer: the pickup is found by its saga, and nothing more goes up.
+    pushed = sorted(p.name for p in (durable / "objects" / "pack").iterdir())
+    assert await history.pickup(**asked) == picked
+    assert sorted(p.name for p in (durable / "objects" / "pack").iterdir()) == pushed
+    # The copy keeps the pack it pushed as one of the bucket's, and nothing else of the pickup.
+    assert left_in(history) == []
+    # A thread's next pod opens on it.
+    copy = a_pod(tmp_path, project).copy
+    assert (copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v2, edited by you" and not (copy / "notes.txt").exists()
+
+
+async def test_a_pickup_pushes_nothing_where_a_file_was_saved_again_since_it_was_looked_at_or_main_moved(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, edited by you")
+    history = bucket(tmp_path, storage)
+    looked = await history.edits(["Report.docx", "notes.txt"])
+    asked = {"main": looked["main"], "picked_up": looked["picked_up"], "author": YOU, "trailers": by_saga("saga:p", "pickup")}
+    durable = project / "_history"
+    pushed = sorted(p.name for p in (durable / "objects" / "pack").iterdir())
+    # What the pickup pushes is what the look told of, which a row holds by then: a later save is the next look's.
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, saved again")
+    with pytest.raises(HistoryConflict, match="Report.docx changed while it was picked up"):
+        await history.pickup(**asked)
+    (project / "Report.docx").unlink()
+    with pytest.raises(HistoryConflict, match="Report.docx changed while it was picked up"):
+        await history.pickup(**asked)
+    assert git(durable, "rev-parse", MAIN) == one
+    assert sorted(p.name for p in (durable / "objects" / "pack").iterdir()) == pushed and left_in(history) == []
+    # And main as the look found it: another landing went first, with the lock lost unseen.
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, edited by you")
+    two = landed(tmp_path, project, "saga:2", {"notes.txt": b"by another thread\n"})
+    with pytest.raises(HistoryConflict, match="main moved"):
+        await history.pickup(**asked)
+    assert git(durable, "rev-parse", MAIN) == two
+
+
+async def test_an_apply_and_its_record_land_on_main_and_the_next_pod_has_them(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx")
+    history = bucket(tmp_path, storage)
+    main = (await history.fetch())["main"]
+    now = await history.real("Report.docx")
+    assert (now, await history.recorded(main, "Report.docx"), await history.recorded(main, "no-such.md")) == (
+        blob_of(b"PK\x03\x04 report v2"), now, None,
+    )
+    applied = await history.apply("Report.docx", now, v1)
+    assert applied == {"path": "Report.docx", "before": now, "after": v1, "made": []}
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    # Safe to repeat after a lost answer: a file that is already the version is left as it is.
+    assert await history.apply("Report.docx", now, v1) == applied
+    record = {"applied": [applied], "author": YOU, "trailers": by_saga("saga:r", "restore"), "main": main}
+    restored = (await history.record(**record))["commit"]
+    # And so is the record: the landing is found by its saga.
+    assert (await history.record(**record))["commit"] == restored
+    durable = project / "_history"
+    assert git(durable, "log", "-1", "--format=%ae|%s|%P|%(trailers:key=Surogate-Kind,valueonly)", restored) == (
+        f"user:u1@surogate|Restore|{main}|restore"
+    )
+    assert git(durable, "rev-parse", MAIN, f"{restored}:Report.docx").split() == [restored, v1]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    assert left_in(history) == []
+    # A thread's next pod opens on it.
+    assert (a_pod(tmp_path, project).copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+async def test_a_version_the_history_already_holds_is_not_sent_to_the_bucket_again(tmp_path, storage, project):
+    old = os.urandom(2**20)
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": old})
+    landed(tmp_path, project, "saga:2", {"Report.docx": b"PK\x03\x04 report v3"})
+    history = bucket(tmp_path, storage)
+    main = (await history.fetch())["main"]
+    packs = project / "_history" / "objects" / "pack"
+    before = {p.name for p in packs.glob("*.pack")}
+    applied = await history.apply("Report.docx", await history.real("Report.docx"), blob_of(old))
+    await history.record(applied=[applied], author=YOU, trailers=by_saga("saga:r", "restore"), main=main)
+    # The landing's pack holds its commit and its tree: the mebibyte it brought back is the history's already.
+    [pushed] = {p.name for p in packs.glob("*.pack")} - before
+    assert (packs / pushed).stat().st_size < 4096
+    assert git(project / "_history", "cat-file", "-s", f"{MAIN}:Report.docx") == str(2**20) and one != main
+
+
+async def test_an_apply_refuses_a_file_changed_since_and_a_put_back_leaves_a_newer_one(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx")
+    v2 = blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    (project / "Report.docx").write_bytes(b"saved by you meanwhile")
+    with pytest.raises(HistoryConflict, match="changed since"):
+        await history.apply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == b"saved by you meanwhile"
+    # A put-back writes only over the version the landing wrote; an apply that failed wrote nothing.
+    assert await history.unapply("Report.docx", v2, v1, ran=False) == {"path": "Report.docx", "before": v2, "after": v1}
+    with pytest.raises(HistoryConflict, match="changed after"):
+        await history.unapply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == b"saved by you meanwhile"
+    # Where the file is the version the landing wrote, it goes back; and a file the landing made goes.  Safe to repeat.
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    for _ in range(2):
+        await history.unapply("Report.docx", v2, v1, made=["a folder a pod made"])
+        assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2"
+    (project / "docs").mkdir()
+    (project / "docs" / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    for _ in range(2):
+        await history.unapply("docs/Report.docx", None, v1)
+        assert not (project / "docs" / "Report.docx").exists()
+    assert left_in(history) == []
+
+
+async def test_a_record_whose_main_moved_is_refused(tmp_path, storage, project):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    history = bucket(tmp_path, storage)
+    main = (await history.fetch())["main"]
+    two = landed(tmp_path, project, "saga:2", {"notes.txt": b"by another thread\n"})
+    with pytest.raises(HistoryConflict, match="main moved"):
+        await history.record(applied=[], author=YOU, trailers=by_saga("saga:r", "restore"), main=main)
+    assert git(project / "_history", "rev-parse", MAIN) == two and left_in(history) == []
+
+
+async def test_a_push_that_finds_the_historys_refs_moved_while_its_pack_went_up_writes_none_of_its_own(
+    tmp_path, storage, project, monkeypatch,
+):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx")
+    history = bucket(tmp_path, storage)
+    main = (await history.fetch())["main"]
+    applied = await history.apply("Report.docx", await history.real("Report.docx"), v1)
+    upload, went = storage.upload, []
+
+    async def another_lands_meanwhile(bucket_name, key, source, **condition):
+        await upload(bucket_name, key, source, **condition)
+        if key.endswith(".idx") and not went:
+            # The project's lock was lost unseen: another thread's landing went up while this one's pack did.
+            went.append(landed(tmp_path, project, "saga:2", {"notes.txt": b"by another thread\n"}))
+
+    monkeypatch.setattr(storage, "upload", another_lands_meanwhile)
+    with pytest.raises(HistoryConflict, match="moved while it was pushed"):
+        await history.record(applied=[applied], author=YOU, trailers=by_saga("saga:r", "restore"), main=main)
+    assert git(project / "_history", "rev-parse", MAIN) == went[0]
+    assert git(project / "_history", "fsck", "--no-dangling") == ""
+
+
+async def test_it_answers_as_a_pod_does(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    history = bucket(tmp_path, storage)
+
+    async def asked(**request) -> dict:
+        return json.loads(await history.execute("api", "_history", json.dumps(request)))
+
+    looked = await asked(action="fetch", saga="saga:1", commits=[one, "0" * 40])
+    assert looked == {"main": one, "landing": one, "hidden": False, "packs": looked["packs"], "missing": ["0" * 40]}
+    assert looked["packs"] == sum(pack.stat().st_size for pack in packs_of(history)) > 0
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    assert await asked(action="apply", path="Report.docx", before=v2, after=v1) == {"path": "Report.docx", "before": v2, "after": v1, "made": []}
+    assert await asked(action="unapply", path="Report.docx", before=v2, after=v1, ran=True, made=[]) == {
+        "path": "Report.docx", "before": v2, "after": v1,
+    }
+    # What it does not do, or is asked wrongly, is an error in words, as a pod's: a step's result it is not.
+    for request, words in (
+        ({"action": "prune", "keep": []}, "Unknown history action: prune"),
+        ({"action": "keep", "base": True}, "Unknown history action: keep"),
+        ({}, "Unknown history action: None"),
+        ({"action": "apply", "path": "Report.docx"}, "missing 2 required positional arguments"),
+        ({"action": "apply", "path": "_history/packed-refs", "before": None, "after": None}, "is not one of the project's files"),
+        ({"action": "fetch", "commits": ["--upload-pack=touch /tmp/ran"]}, "refused the project's history"),
+    ):
+        assert words in (await asked(**request))["error"]
+    assert "Unknown history action" in json.loads(await history.execute("api", "terminal", json.dumps({"action": "fetch"})))["error"]
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2"
+
+
+async def test_a_look_finds_a_landing_by_its_saga_back_to_where_it_began_and_says_when_a_cut_hides_it(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    two = landed(tmp_path, project, "saga:2", {"Report.docx": b"PK\x03\x04 report v3"})
+    three = landed(tmp_path, project, "saga:3", {"Report.docx": b"PK\x03\x04 report v4"})
+    history = bucket(tmp_path, storage)
+
+    async def found(saga: str, since: str | None) -> tuple[str | None, bool]:
+        looked = await history.fetch(saga=saga, since=since)
+        return looked["landing"], looked["hidden"]
+
+    # However many landings went over it since; and none that never pushed, once the look met where it began.
+    assert await found("saga:2", one) == (two, False)
+    assert await found("saga:1", None) == (one, False)
+    assert await found("saga:never", two) == (None, False)
+    assert await found("saga:never", None) == (None, False)
+    # A saga's name whole, as its trailer has it: one that begins another's is not it.
+    assert await found("saga:", None) == (None, False)
+    # Only among main's own commits: a turn a landing merged carries the saga too, and is no landing.
+    assert (await found("saga:3", two))[0] == three
+    # Nor is it known where the look ends before it met where the landing began: it reads no further back than a look may.
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_LOOKED_MOST", 1)
+        assert await found("saga:never", None) == (None, True)
+        assert await found("saga:never", three) == (None, False)
+        assert await found("saga:3", None) == (three, False)
+    # Behind a pruning's cut, whether it pushed is not known; where the landing began is above the cut, it is.
+    cut_history(tmp_path, project / "_history", kept=1)
+    assert await found("saga:1", None) == (None, True)
+    assert await found("saga:never", three) == (None, False)
+    assert await found("saga:3", two) == (three, False)
+
+
+async def test_a_file_and_a_version_never_pass_through_the_apis_memory_whole(tmp_path, storage, project, monkeypatch):
+    video = os.urandom(48 * 2**20)  # 48 MiB that does not compress
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": os.urandom(64 * 2**20)})
+    landed(tmp_path, project, "saga:2", {"Report.docx": video})
+    report, saved = git(project / "_history", "rev-parse", f"{one}:Report.docx"), blob_of(video)
+    del video
+    whole, wrote = [], []
+
+    async def read(bucket_name, key):
+        whole.append(key)  # the backend's read answers an object whole
+        return await LocalBackend.read(storage, bucket_name, key)
+
+    async def write(bucket_name, key, data):
+        wrote.append(key)  # and its write takes one whole
+        return await LocalBackend.write(storage, bucket_name, key, data)
+
+    monkeypatch.setattr(storage, "read", read)
+    monkeypatch.setattr(storage, "write", write)
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    where = let_go_on_the_loop(monkeypatch)
+    tracemalloc.start()
+    main = (await history.fetch())["main"]
+    assert await history.real("Report.docx") == saved
+    applied = await history.apply("Report.docx", saved, report)
+    await history.record(applied=[applied], author=YOU, trailers=by_saga("saga:r", "restore"), main=main)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # A 48 MiB file checked twice and a 64 MiB version written: none of it held whole, and nothing through a whole object.
+    assert peak < 8 * 2**20, peak
+    assert whole == wrote == []
+    assert await history.real("Report.docx") == report
+    assert left_in(history) == []
+    # Each file on its way was let go as soon as it was read or written, and off the loop: a large file's going would stall it.
+    assert where and not any(where)
+
+
+async def test_a_pickup_records_a_file_too_large_for_git_to_hold_whole(tmp_path, storage, project):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    video = os.urandom(40 * 2**20)  # past the 32 MiB git holds whole: it writes the file straight into a pack
+    (project / "video.mp4").write_bytes(video)
+    history = bucket(tmp_path, storage)
+    tracemalloc.start()
+    picked = await picked_up(history, ["video.mp4"])
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert picked["picked_up"] == [{"path": "video.mp4", "before": None, "after": blob_of(video)}]
+    assert peak < 8 * 2**20, peak
+    # The file is pushed whole, once, and a pod reads it.
+    durable = project / "_history"
+    assert git(durable, "cat-file", "-s", f"{picked['commit']}:video.mp4") == str(len(video))
+    assert git(durable, "fsck", "--no-dangling") == ""
+    assert sum(p.stat().st_size for p in (durable / "objects" / "pack").glob("*.pack")) < 44 * 2**20
+    # Once pushed, the copy keeps the pushed pack alone.
+    assert left_in(history) == []
+
+
+async def test_a_file_or_a_version_past_its_bound_is_refused_in_words_and_nothing_is_written(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2, the long one"})
+    v1, v2 = (git(project / "_history", "rev-parse", f"{one}{side}:Report.docx") for side in ("^1", ""))
+    history = bucket(tmp_path, storage, file=20)
+    with pytest.raises(HistoryError, match="Report.docx is larger than Surogate can read here") as refused:
+        await history.real("Report.docx")
+    # A bound's refusal is said to the user as it is; any other failure of the history is not.
+    assert said(refused.value) == "Report.docx is larger than Surogate can read here."
+    assert said(HistoryError("git cat-file failed: fatal: bad object")) is None
+    # Neither is it looked at as your edit, nor picked up, nor written over.
+    with pytest.raises(HistoryError, match="Report.docx is larger than Surogate can read here"):
+        await history.edits(["Report.docx"])
+    with pytest.raises(HistoryError, match="Report.docx is larger than Surogate can read here"):
+        await history.apply("Report.docx", v2, v1)
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    with pytest.raises(HistoryError, match="This version is larger than Surogate can read here"):
+        await history.apply("Report.docx", v1, v2)
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert left_in(history) == []
+
+
+async def test_a_file_on_its_way_in_or_out_is_counted_with_the_copy_and_refused_where_the_copy_has_no_room_for_it(
+    tmp_path, storage, project,
+):
+    old = os.urandom(300_000)
+    landed(tmp_path, project, "saga:1", {"Report.docx": old})
+    landed(tmp_path, project, "saga:2", {"Report.docx": b"PK\x03\x04 report v3"})
+    roomy = bucket(tmp_path, storage)
+    await roomy.sync()
+    held = on_disk(roomy.clone)
+    v3 = blob_of(b"PK\x03\x04 report v3")
+    # The copy has room for all it holds, and for less than the version on its way to the real files.
+    tight = bucket(tmp_path, storage, packs=held + 200_000)
+    with pytest.raises(HistoryError, match="This version is larger than Surogate can read here"):
+        await tight.apply("Report.docx", v3, blob_of(old))
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v3"
+    # Nor for a real file on its way in to be looked at: your edit, as large.
+    (project / "Report.docx").write_bytes(os.urandom(300_000))
+    with pytest.raises(HistoryError, match="Report.docx is larger than Surogate can read here"):
+        await tight.real("Report.docx")
+    # And a file that is picked up is kept, and pushed: twice its bytes on the way.
+    kept = bucket(tmp_path, storage, packs=held + 500_000)
+    assert await kept.real("Report.docx") is not None
+    with pytest.raises(HistoryError, match="Report.docx is larger than Surogate can read here"):
+        await picked_up(kept, ["Report.docx"])
+    assert git(project / "_history", "rev-parse", f"{MAIN}:Report.docx") == v3
+    assert left_in(roomy) == []
+
+
+async def test_what_an_act_that_died_left_on_its_way_goes_with_the_next_request(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    # As a killed api leaves them: a version half written out, and the objects of a commit it had not pushed.
+    (history.clone / "out").mkdir()
+    (history.clone / "out" / "dead").write_bytes(b"x" * 4096)
+    (history.clone / "scratch-dead" / "objects" / "ab").mkdir(parents=True)
+    (history.clone / "scratch-dead" / "objects" / "ab" / ("c" * 38)).write_bytes(b"y" * 4096)
+    assert len(left_in(history)) == 2
+    assert await history.real("Report.docx") == blob_of(b"PK\x03\x04 report v2")
+    assert left_in(history) == []
+    assert (await history.fetch())["main"] == one
+
+
+async def test_a_deletion_the_storage_did_not_make_fails_its_apply(tmp_path, storage, project, monkeypatch):
+    landed(tmp_path, project, "saga:1", {"a.md": b"a\n"})
+    history = bucket(tmp_path, storage)
+    # A deletion the storage makes is an apply as any other.
+    (project / "b.md").write_bytes(b"b\n")
+    assert (await history.apply("b.md", blob_of(b"b\n"), None))["after"] is None and not (project / "b.md").exists()
+
+    async def swallowed(bucket_name, key):
+        return None  # as S3Backend.delete does on any error
+
+    monkeypatch.setattr(storage, "delete", swallowed)
+    with pytest.raises(HistoryError, match="a.md could not be deleted"):
+        await history.apply("a.md", blob_of(b"a\n"), None)
+    assert (project / "a.md").exists()
+
+
+@pytest.mark.parametrize("path", [
+    "/etc/passwd", "../other/Report.docx", "docs/../../Report.docx", "", ".", "docs//Report.docx", "docs/./Report.docx", "docs/",
+    "_history/packed-refs", "_history/objects/pack/pack-1.pack", "_artifacts/a.html", ".threads/t1/notes.md",
+    "~$Report.docx", "docs/.~lock.Report.docx#", "Report.docx.tmp", ".git/config", "a\x00b",
+])
+async def test_a_path_that_is_none_of_the_projects_files_reaches_neither_the_storage_nor_git(tmp_path, storage, project, monkeypatch, path):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    reached = []
+    for name in ("download", "upload", "delete", "stat", "exists", "write", "read", "list_entries"):
+        monkeypatch.setattr(storage, name, lambda *args, _name=name, **more: reached.append((_name, args)))
+    monkeypatch.setattr(module, "_child", lambda *args, **more: reached.append(("git", args)))
+    v2 = blob_of(b"PK\x03\x04 report v2")
+    for act in (
+        lambda: history.real(path), lambda: history.edits(["Report.docx", path]), lambda: history.recorded(one, path),
+        lambda: history.apply(path, None, v2), lambda: history.unapply(path, None, v2),
+        lambda: history.pickup(main=one, picked_up=[{"path": path, "before": None, "after": v2}], author=YOU, trailers=by_saga("s", "pickup")),
+        lambda: history.record(applied=[{"path": path, "before": None, "after": v2}], author=YOU, trailers=by_saga("s", "restore"), main=one),
+    ):
+        with pytest.raises(HistoryError, match="is not one of the project's files"):
+            await act()
+    assert reached == []
+
+
+async def test_a_version_that_is_no_id_reaches_neither_the_storage_nor_git(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    reached = []
+    for name in ("download", "upload", "delete", "stat", "exists", "write", "read"):
+        monkeypatch.setattr(storage, name, lambda *args, _name=name, **more: reached.append((_name, args)))
+    monkeypatch.setattr(module, "_child", lambda *args, **more: reached.append(("git", args)))
+    v2 = blob_of(b"PK\x03\x04 report v2")
+    for crafted in ("--output=/tmp/ran", "HEAD", f"{one}:Report.docx", v2.upper(), v2[:39], f"{v2}\n", ""):
+        for act in (
+            lambda: history.apply("Report.docx", v2, crafted), lambda: history.apply("Report.docx", crafted, v2),
+            lambda: history.unapply("Report.docx", crafted, v2), lambda: history.recorded(crafted, "Report.docx"),
+            lambda: history.pickup(main=crafted, picked_up=[], author=YOU, trailers=by_saga("s", "pickup")),
+            lambda: history.pickup(main=one, picked_up=[{"path": "a.md", "before": None, "after": crafted}], author=YOU, trailers=by_saga("s", "pickup")),
+            lambda: history.record(applied=[{"path": "a.md", "before": None, "after": crafted}], author=YOU, trailers=by_saga("s", "restore"), main=one),
+            lambda: history.record(applied=[], author=YOU, trailers=by_saga("s", "restore"), main=crafted),
+            lambda: history.fetch(since=crafted),
+        ):
+            with pytest.raises(HistoryError, match="refused the project's history"):
+                await act()
+    assert reached == []
+
+
+async def test_a_file_is_not_written_where_a_folder_has_its_name_or_a_file_the_name_of_its_folder(tmp_path, storage, project):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v2 = blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    (project / "plans").mkdir()
+    (project / "plans" / "q3.md").write_text("q3\n")
+    # A folder is where the file would be, and a file where its folder would be: neither is written, as a landing leaves one out.
+    assert [await history.takes(path) for path in ("plans", "notes.txt/old.md", "plans/q4.md", "new/deep/file.md", "Report.docx")] == [
+        False, False, True, True, True,
+    ]
+    for path in ("plans", "notes.txt/old.md"):
+        with pytest.raises(HistoryConflict, match="cannot be written"):
+            await history.apply(path, None, v2)
+    assert (project / "plans" / "q3.md").read_text() == "q3\n" and (project / "notes.txt").read_text() == "v1 notes\n"
+    # Under a folder the files do not have yet, it is.
+    await history.apply("new/deep/file.md", None, v2)
+    assert (project / "new" / "deep" / "file.md").read_bytes() == b"PK\x03\x04 report v2"
+
+
+async def test_git_writes_only_in_the_apis_copy_under_its_own_config_within_its_memory_and_its_turns(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    durable, ran = project / "_history", tmp_path / "ran"
+    # A config and a hook a command wrote into the bucket's history.
+    (durable / "config").write_text(f"[core]\n\tfsmonitor = touch {ran}\n\thooksPath = hooks\n")
+    (durable / "hooks").mkdir(exist_ok=True)
+    for hook in ("reference-transaction", "post-index-change", "pre-commit", "post-commit"):
+        (durable / "hooks" / hook).write_text(f"#!/bin/sh\ntouch {ran}\n")
+        (durable / "hooks" / hook).chmod(0o755)
+    child, ran_as = module._child, []
+
+    async def watched(turns, seconds, command, **how):
+        # Each git is the api's child in one of the copy's turns, within its seconds, with the copy this request's alone.
+        ran_as.append((turns is module._BRINGING or turns is module._READING, 0 < seconds <= module._TAKE_MOST, no_ones(history)))
+        assert command[:2] == ["git", "init"] or tuple(command[:1 + len(module._BOUNDED)]) == ("git", *module._BOUNDED)
+        return await child(turns, seconds, command, **how)
+
+    monkeypatch.setattr(module, "_child", watched)
+    history = bucket(tmp_path, storage)
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v2, edited by you")
+    picked = await picked_up(history, ["Report.docx"])
+    v1 = git(durable, "rev-parse", f"{one}^1:Report.docx")
+    applied = await history.apply("Report.docx", picked["picked_up"][0]["after"], v1)
+    await history.record(applied=[applied], author=YOU, trailers=by_saga("saga:r", "restore"), main=picked["commit"])
+    # The landing went up, and nothing of the bucket's ran.
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert not ran.exists()
+    assert "fsmonitor" not in (history.clone / "config").read_text() and not (history.clone / "hooks").exists()
+    assert len(ran_as) > 8 and set(ran_as) == {(True, True, False)}
+
+
+async def test_a_step_whose_request_left_goes_on_to_its_end_with_the_copy_its_own_and_the_next_waits_for_it(
+    tmp_path, storage, project, monkeypatch,
+):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    upload, reached, go = storage.upload, asyncio.Event(), asyncio.Event()
+
+    async def slow(bucket_name, key, source, **condition):
+        reached.set()
+        await go.wait()
+        await upload(bucket_name, key, source, **condition)
+
+    monkeypatch.setattr(storage, "upload", slow)
+    applying = asyncio.ensure_future(history.apply("Report.docx", v2, v1))
+    await reached.wait()
+    # Its request leaves, as a step's does past its time: the write it began is not left half made, nor the copy let go under it.
+    applying.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await applying
+    assert not no_ones(history) and (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2"
+    # Its put-back waits for it, and then finds what it wrote.
+    putting_back = asyncio.ensure_future(history.unapply("Report.docx", v2, v1, ran=False))
+    await asyncio.sleep(0.2)
+    assert not putting_back.done()
+    go.set()
+    assert await putting_back == {"path": "Report.docx", "before": v2, "after": v1}
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2"
+    assert no_ones(history) and left_in(history) == []
+
+
+async def test_a_step_still_waiting_for_the_copy_when_its_request_left_never_runs(tmp_path, storage, project):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    held = os.open(module._lock_of(history.clone), os.O_RDWR)
+    fcntl.flock(held, fcntl.LOCK_EX)  # another request has the copy
+    try:
+        applying = asyncio.ensure_future(history.apply("Report.docx", v2, v1))
+        await asyncio.sleep(0.2)
+        applying.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await applying
+    finally:
+        os.close(held)
+    await asyncio.sleep(0.3)
+    # It had begun nothing, and begins nothing once the copy is free.
+    assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v2" and no_ones(history)
+
+
+def test_a_real_file_kept_has_seconds_by_what_compressing_it_costs_git():
+    # Keeping a file compresses it, which a file that does not compress makes slower than reading a pack:
+    # twenty seconds at least, and a gibibyte in about a minute.
+    assert [module._kept_seconds(size) for size in (0, 2**20, 300 * 2**20, 2**30, 4 * 2**30)] == [20.0, 20.0, 20.0, 64.0, 120.0]
+    assert module._kept_seconds(2**30) > module._seconds(2**30)
+
+
+async def test_an_edit_git_cannot_keep_within_its_seconds_is_refused_in_words_and_nothing_is_pushed(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    (project / "Report.docx").write_bytes(os.urandom(4 * 2**20))
+    history = bucket(tmp_path, storage)
+    looked = await history.edits(["Report.docx"])
+    monkeypatch.setattr(module, "_TAKE_LEAST", 0.001)
+    monkeypatch.setattr(module, "_KEEP_RATE", 2**40)
+    with pytest.raises(HistoryError) as refused:
+        await history.pickup(main=looked["main"], picked_up=looked["picked_up"], author=YOU, trailers=by_saga("saga:p", "pickup"))
+    # Stopped, it is a file larger than is kept here: said as the bounds are, never as a history that could not be read.
+    assert said(refused.value) == "Report.docx is larger than Surogate can read here."
+    assert git(project / "_history", "rev-parse", MAIN) == one and left_in(history) == []
+
+
+async def test_a_save_while_the_version_is_written_out_is_seen_by_the_check_and_never_written_over(
+    tmp_path, storage, project, monkeypatch,
+):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    written_out, saved = BucketHistory._written_out, b"saved by you while the version was written out"
+
+    async def then_you_save(self, blob, size):
+        staged = await written_out(self, blob, size)
+        (project / "Report.docx").write_bytes(saved)
+        return staged
+
+    monkeypatch.setattr(BucketHistory, "_written_out", then_you_save)
+    # The version is written out first, and the real file checked after: the save is seen, and kept.
+    with pytest.raises(HistoryConflict, match="changed since"):
+        await history.apply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    # So for a put-back: one that wrote the file is told someone changed it since; one that may not have leaves it.
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    with pytest.raises(HistoryConflict, match="changed after"):
+        await history.unapply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+    assert (await history.unapply("Report.docx", v2, v1, ran=False))["path"] == "Report.docx"
+    assert (project / "Report.docx").read_bytes() == saved
+    assert left_in(history) == []
+
+
+async def test_a_save_between_the_check_and_the_write_is_refused_by_the_store_where_it_can_say(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v1, v2 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx"), blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    upload, saved = storage.upload, b"saved by you as the version went up"
+
+    async def you_save_first(bucket_name, key, source, **condition):
+        if key.endswith("/Report.docx"):
+            (project / "Report.docx").write_bytes(saved)  # your save, after the check and before the version is in place
+        return await upload(bucket_name, key, source, **condition)
+
+    monkeypatch.setattr(storage, "upload", you_save_first)
+    # The local store writes only over the file as the check saw it.
+    with pytest.raises(HistoryConflict, match="changed as it was written"):
+        await history.apply("Report.docx", v2, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    # And a file the check found missing is written only where none was made since.
+    (project / "Report.docx").unlink()
+    saved = b"made by you as the version went up"
+    with pytest.raises(HistoryConflict, match="changed as it was written"):
+        await history.apply("Report.docx", None, v1)
+    assert (project / "Report.docx").read_bytes() == saved
+    # A put-back over a save in that time: one that wrote the file is told someone changed it since; one that may not
+    # have written it leaves it as it is.
+    for ran in (True, False):
+        (project / "Report.docx").write_bytes(b"PK\x03\x04 report v1")
+        saved = b"saved by you as the put-back went up, " + str(ran).encode()
+        if ran:
+            with pytest.raises(HistoryConflict, match="changed after"):
+                await history.unapply("Report.docx", v2, v1, ran=ran)
+        else:
+            assert (await history.unapply("Report.docx", v2, v1, ran=ran))["path"] == "Report.docx"
+        assert (project / "Report.docx").read_bytes() == saved
+    assert left_in(history) == []

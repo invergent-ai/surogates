@@ -58,8 +58,12 @@ interface State {
   } | null;
   reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
   // A file's History, shown in the Library in place of its files: its versions, null until they are
-  // read, why what was last asked of it did not happen, and the version on its way to be saved.
-  history: { path: string; versions: Version[] | null; failure: string | null; opening: string | null } | null;
+  // read, why what was last asked of it did not happen, the version on its way to be saved, the version
+  // on its way back as the file, and what the last Restore did.
+  history: {
+    path: string; versions: Version[] | null; failure: string | null; opening: string | null; restoring: string | null;
+    result: { applied: string[]; skipped: Array<{ path: string; by: Version["by"] }>; pickedUp: string[] } | null;
+  } | null;
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
@@ -89,6 +93,7 @@ interface Shell {
   history(path: string): Promise<void>;
   closeHistory(): Promise<void>;
   openVersion(id: string): Promise<void>;
+  restoreVersion(id: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
@@ -212,9 +217,11 @@ function chip(file: ThreadRow["files"][number]): HTMLElement {
 // the words around it. Someone the app has no name for is not named.
 const CHANGES = { added: "Added", changed: "Changed", deleted: "Deleted", restored: "Restored", undone: "Undone" } as const;
 function what(version: Version, change: keyof typeof CHANGES = version.change): string {
-  const by = version.by;
-  if (by === null) return CHANGES[change];
-  return `${CHANGES[change]} by ${by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${asShown(by.title)}` : `the routine ${asShown(by.name)}`}`;
+  return version.by === null ? CHANGES[change] : `${CHANGES[change]} by ${who(version.by)}`;
+}
+
+function who(by: NonNullable<Version["by"]>): string {
+  return by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${asShown(by.title)}` : `the routine ${asShown(by.name)}`;
 }
 
 // A file's History opens in the Library, in place of its files.
@@ -287,25 +294,46 @@ function historyRow(path: string, item: HTMLElement, list: "file" | "deleted" = 
 }
 
 // A version of the file whose History is shown: how it came to be and by whom, when, and whether
-// it landed and is still kept. One still kept that left a file is opened, to be saved: none that is
-// no longer kept, and no deletion, which left nothing to open. While one is on its way no other is
-// opened: its buttons wait, without their use, so that the keyboard stays where it is.
-function versionRow(version: Version, opening: boolean): HTMLElement {
+// it landed and is still kept. One still kept that left a file is opened, to be saved, and restored:
+// none that is no longer kept, and no deletion, which left nothing to open or to bring back. While one
+// is on its way no other is opened, and while one is restored no other is: their buttons wait,
+// without their use, so that the keyboard stays where it is.
+function versionRow(version: Version, opening: boolean, restoring: boolean): HTMLElement {
   const item = element("li", "version");
   item.dataset.version = version.id;
   const tags = [...(version.merged ? [] : ["Not merged"]), ...(version.available ? [] : ["No longer kept"])];
   const acts = element("span", "acts");
   if (version.available && version.change !== "deleted") {
-    const open = button("act", "Open version", () => {
-      // One the History no longer shows, or shows as no longer kept, is refused there: the pane is drawn again with it.
-      if (!opening) void shell.openVersion(version.id).catch(() => {});
-    });
-    open.dataset.focus = `version:${version.id}:open`;
-    if (opening) open.setAttribute("aria-disabled", "true");
-    acts.append(open);
+    // One the History no longer shows, or shows as no longer kept, is refused there: the pane is drawn again with it.
+    const act = (name: "open" | "restore", text: string, waiting: boolean, ask: (id: string) => Promise<void>) => {
+      const made = button("act", text, () => {
+        if (!waiting) void ask(version.id).catch(() => {});
+      });
+      made.dataset.act = name;
+      made.dataset.focus = `version:${version.id}:${name}`;
+      if (waiting) made.setAttribute("aria-disabled", "true");
+      return made;
+    };
+    acts.append(
+      act("open", "Open version", opening, (id) => shell.openVersion(id)), act("restore", "Restore", restoring, (id) => shell.restoreVersion(id)),
+    );
   }
   item.append(element("span", "what", what(version)), aged(element("span", "age"), version.at), element("span", "from", tags.join(" · ")), acts);
   return item;
+}
+
+// What the last Restore did, in a line a file: what it restored, whose edit it recorded first, and
+// each it left as it was, with who changed it since where the agent names them. Each name is data.
+function told(result: NonNullable<State["history"]>["result"]): string[] {
+  if (result === null) return [];
+  const lines = result.applied.map((path) => `Restored ${asShown(path)}.`);
+  lines.push(...result.pickedUp.map((path) => `Your changes to ${asShown(path)} were recorded first: they are a version in this History.`));
+  for (const { path, by } of result.skipped) {
+    lines.push(by === null
+      ? `${asShown(path)} was left as it is.`
+      : `${asShown(path)} was changed after this, by ${who(by)}. It was left as it is. Restore an earlier version from its History.`);
+  }
+  return lines.length === 0 ? ["The file is already this version."] : lines;
 }
 
 // The file whose History the pane showed when it was last drawn.
@@ -322,9 +350,12 @@ function renderHistory(state: State): void {
     byId("no-files").hidden = true;
     byId("deleted").hidden = true;
     showText(byId("history-path"), history.path);
+    byId("history-told").replaceChildren(...told(history.result).map((line) => element("p", "", line)));
     byId("history-failure").hidden = history.failure === null;
     byId("history-failure").textContent = history.failure ?? "";
-    byId("versions").replaceChildren(...(history.versions ?? []).map((version) => versionRow(version, history.opening !== null)));
+    byId("versions").replaceChildren(
+      ...(history.versions ?? []).map((version) => versionRow(version, history.opening !== null, history.restoring !== null)),
+    );
     byId("no-versions").hidden = history.versions?.length !== 0;
   }
   const was = historyShown;

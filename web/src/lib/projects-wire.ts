@@ -7,6 +7,7 @@
 
 import type {
   ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
+  UndoResult,
 } from "./projects-contract";
 
 /** A thread's row as GET /v1/workstreams/{id}/threads answers it. */
@@ -179,6 +180,33 @@ export function changedByOf(by: unknown): ChangedBy | null {
   if (kind === "thread" && typeof thread_id === "string" && typeof title === "string") return { kind, threadId: thread_id, title };
   if (kind === "routine" && typeof name === "string") return { kind, name };
   return null;
+}
+
+/** What POST /v1/workstreams/{id}/history/restore answers. */
+export interface UndoResultResponse {
+  applied: string[];
+  skipped: { path: string; by: unknown }[];
+  picked_up: string[];
+}
+
+const paths = (value: unknown): string[] => {
+  if (!Array.isArray(value) || value.some((path) => typeof path !== "string")) throw new TypeError("Not a list of paths");
+  return value.map((path: string) => path);
+};
+
+// What a Restore did, each list as this page knows it: one it cannot read refuses the answer, and
+// someone it has no name for is no one it names.
+export function undoResultOf(result: UndoResultResponse): UndoResult {
+  if (!Array.isArray(result.skipped)) throw new TypeError("Not a list of files left as they were");
+  return {
+    applied: paths(result.applied),
+    skipped: result.skipped.map((left) => {
+      const { path, by } = (typeof left === "object" && left !== null ? left : {}) as Record<string, unknown>;
+      if (typeof path !== "string") throw new TypeError("A file left as it was names no file");
+      return { path, by: by === null ? null : changedByOf(by) };
+    }),
+    pickedUp: paths(result.picked_up),
+  };
 }
 
 // A way of changing a file this page does not know is a change all the same; and what a version
