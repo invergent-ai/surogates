@@ -288,20 +288,15 @@ async def _ends_its_landing(db: AsyncSession, request: OperationRequest) -> bool
     """
     if request.args.get("action") not in FINISHING.get(request.kind, ()):
         return False
-    last = WorkstreamHistory.steps[-1]
+    # Forgotten: a step of its row that forgot it was answered (``workstreams.history.unforgotten_in`` reads it so).
+    forgot = [{"tool_name": "history.forget", "state": "committed"}]
     found = await db.scalar(select(WorkstreamHistory.id).where(
         WorkstreamHistory.saga_id == f"saga:{uuid5(request.calling_session_id, request.invocation_id)}",
         WorkstreamHistory.thread_id == request.calling_session_id,
         WorkstreamHistory.device_id == request.device_id,
         or_(
             WorkstreamHistory.saga_state == "running",
-            and_(
-                WorkstreamHistory.saga_state.in_(("completed", "compensated")),
-                or_(
-                    last["tool_name"].astext.is_distinct_from("history.forget"),
-                    last["state"].astext.is_distinct_from("committed"),
-                ),
-            ),
+            and_(WorkstreamHistory.saga_state.in_(("completed", "compensated")), ~WorkstreamHistory.steps.contains(forgot)),
         ),
     ).limit(1))
     return found is not None
