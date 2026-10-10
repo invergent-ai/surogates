@@ -31,7 +31,7 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
-from surogates.devices.history import ComputerRefused, NowhereToWork, opens_its_copy
+from surogates.devices.history import ComputerRefused, NowhereToWork, opens_its_copy, thread_copy
 from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.agent_resolver import (
@@ -78,7 +78,7 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
-from surogates.harness.tool_exec import _open_local_copy, execute_single_tool, execute_tool_calls
+from surogates.harness.tool_exec import _open_local_copy, _turn_now, execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
@@ -1148,21 +1148,27 @@ class AgentHarness(
         session: Session,
         saga: Any,
         cost_tracker: SessionCostTracker | None = None,
+        *,
+        lease: SessionLease | None = None,
     ) -> None:
         """Tear down sandbox + sagas and emit SESSION_PAUSE, then clear.
 
         Shared by the iteration-top interrupt check and the pre-emission
         staleness guard so both paths perform the same cleanup before
-        returning from the loop.
+        returning from the loop.  The sagas are put back as the worker
+        holding *lease*.
         """
+        from surogates.governance.saga.compensator import stop_left
+
         reason_msg = self._interrupt_message or "interrupted"
         # A project thread's turn that is stopped is over from here on, whatever becomes of this worker.
         # One taken at the wake, before its loop named a turn, has made no pod and handed nothing on:
         # there is no turn of this wake to write an end for.
         named = is_project_thread(session.config) and session.config.get("turn_after") is not None
         stop_written = named and await self._write_that_the_turn_was_stopped(session, reason_msg)
+        left: list[dict] = []
         if saga is not None and saga.active_sagas:
-            await self._compensate_sagas(saga, session, "interrupt")
+            left = await self._compensate_sagas(saga, session, "interrupt", lease=lease)
         # A project's stopped turn spent what it spent: settle its holds now,
         # or a resolved thread keeps them reserved.  Only a project's session
         # holds its next turn again at its wake; any other session's next
@@ -1191,7 +1197,11 @@ class AgentHarness(
         # and leave the client's terminal flag stuck on, suppressing
         # the running indicator for the new turn's deltas.
         current = await self._store.get_session(session.id)
-        if current.status == "paused" and not stop_written:
+        # A stop that left some of a thread's turn in its copy on its user's
+        # computer, or in the folder, says so on its pause, as a turn's
+        # failure is said, and to the thread's master.
+        said = stop_left(left) if left else {}
+        if current.status == "paused" and (not stop_written or said):
             await self._store.emit_event(
                 session.id,
                 EventType.SESSION_PAUSE,
@@ -1199,8 +1209,11 @@ class AgentHarness(
                     "reason": "interrupted",
                     "message": reason_msg,
                     "worker_id": self._worker_id,
+                    **said,
                 },
             )
+        if said:
+            await self._tell_what_the_stop_left(session, said)
         # A channel /stop aborts out-of-band and leaves the session 'active'
         # (so the SESSION_PAUSE above never fires). The inbound handler only
         # posted an optimistic "Stopping…" ack, so emit a deliverable
@@ -1213,6 +1226,29 @@ class AgentHarness(
                 {"reason": "channel_stop", "worker_id": self._worker_id},
             )
         self._clear_interrupt()
+
+    async def _tell_what_the_stop_left(self, session: Session, said: dict[str, Any]) -> None:
+        """Tell a thread's master what its user's stop did not take back, as a thread's news reaches it: a report.
+
+        The harness alone speaks in it: no turn of the thread ended.  The
+        master reads it at its next wake, and its card of the thread shows
+        it.  As best it can: the thread's own pause says it whatever comes
+        of this.
+        """
+        from surogates.workstreams.store import WorkstreamStore
+
+        try:
+            named = await WorkstreamStore(self._session_factory).get_thread(session.id)
+            if session.parent_id is None or named is None:
+                return
+            await self._store.emit_event(session.parent_id, EventType.WORKER_COMPLETE, {
+                "worker_id": str(session.id), "title": named.title, "stopped": True,
+                "result": f"{said['error_title']}\n{said['error_detail']}", "not_taken_back": said["not_taken_back"],
+            })
+        except Exception:
+            logger.warning(
+                "Could not tell the master of thread %s what its stop did not take back", session.id, exc_info=True,
+            )
 
     async def _take_back_what_the_turn_handed_on(self, session: Session) -> None:
         """Take a thread's stopped turn's own files off the hand-off it made for its helpers, before its pod goes.
@@ -2685,7 +2721,7 @@ class AgentHarness(
 
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga, cost_tracker)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                 return
 
             # --- Mid-turn steering ---
@@ -3081,7 +3117,7 @@ class AgentHarness(
             # user turn at the next iteration boundary by the steer
             # injector, so the buffered response is delivered, not discarded.
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga, cost_tracker)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                 return
 
             response_data["turn_id"] = turn_id
@@ -4114,12 +4150,19 @@ class AgentHarness(
                 saga_complete_event(stale.saga_id, status=status.value, steps_executed=len(stale.steps)),
             )
 
-    async def _compensate_sagas(self, saga: Any, session: Any, reason: str) -> None:
+    async def _compensate_sagas(
+        self, saga: Any, session: Any, reason: str, *, lease: SessionLease | None = None,
+    ) -> list[dict]:
         """Compensate all active sagas on interrupt/crash/failure.
 
         Runs compensation for committed steps in reverse order and emits
         SAGA_COMPENSATE events.  Checkpoint restores go through the
         sandbox pool (same path as ``_checkpoint`` take/restore).
+
+        A project's thread on its user's computer has its copy there put
+        back instead (:meth:`_undo_on_computer`), as the worker holding
+        *lease*.  Answers each step of its turn that was not taken back,
+        for the stop to say; none for any other session.
         """
         from functools import partial
 
@@ -4127,6 +4170,7 @@ class AgentHarness(
         from surogates.governance.saga.compensator import compensate_step
         from surogates.governance.saga.state_machine import SagaState
 
+        left: list[dict] = []
         for active in list(saga.active_sagas):
             # Guard against double-compensation: if a prior crash happened
             # mid-compensation, reconstruction leaves the saga in
@@ -4140,6 +4184,9 @@ class AgentHarness(
                 )
                 continue
 
+            if opens_its_copy(session):
+                left += await self._undo_on_computer(active, session, reason, lease=lease)
+                continue
             try:
                 # Capture count before compensate() transitions steps
                 # away from COMMITTED (after which committed_steps is empty).
@@ -4200,6 +4247,49 @@ class AgentHarness(
                 logger.exception(
                     "Saga compensation failed for %s", active.saga_id,
                 )
+        return left
+
+    async def _undo_on_computer(
+        self, active: Any, session: Any, reason: str, *, lease: SessionLease | None,
+    ) -> list[dict]:
+        """Put a stopped turn's copy of a thread on its user's computer back, and end its saga; what was not taken back.
+
+        Through the computer, as the worker holding *lease*, under the turn
+        as it was named at its start: the stop's own end came after.  No pod
+        is asked.  Each step that began is put back, one the stop cut short
+        or another worker resumed among them (``undo_on_computer``), and the
+        saga's events name each step that was not.
+        """
+        from surogates.governance.events import saga_compensate_event, saga_complete_event
+        from surogates.governance.saga.compensator import undo_on_computer
+        from surogates.governance.saga.state_machine import StepState
+        from surogates.harness.tool_exec import refused_before_it_runs
+
+        try:
+            copy = thread_copy(
+                session, session_factory=self._session_factory, redis=self._redis,
+                lease_token=str(lease.lease_token) if lease is not None else None,
+            )
+            left = await undo_on_computer(
+                active, copy=copy, turn=await _turn_now(self._store, session),
+                ran=lambda step: not refused_before_it_runs(step.tool_name, step.arguments, session.config),
+            )
+            compensated = saga_compensate_event(
+                active.saga_id, steps_rolled_back=sum(s.state is StepState.COMPENSATED for s in active.steps),
+                reason=reason, failed_steps=[entry["step_id"] for entry in left] or None,
+            )
+            if left:
+                compensated["not_taken_back"] = left
+            await self._store.emit_event(session.id, EventType.SAGA_COMPENSATE, compensated)
+            # The saga is over: a rebuilt one must not take later steps.
+            await self._store.emit_event(
+                session.id, EventType.SAGA_COMPLETE,
+                saga_complete_event(active.saga_id, status=active.state.value, steps_executed=len(active.steps)),
+            )
+        except Exception:
+            logger.exception("Saga compensation failed for %s", active.saga_id)
+            return []
+        return left
 
     # ------------------------------------------------------------------
     # Credential rotation and fallback (delegates to resilience module)

@@ -295,8 +295,14 @@ class Workers:
         return (await self.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
 
     async def looks_abandoned(self, chat: UUID) -> bool:
-        """Whether a sweeper would take the chat for one whose worker died."""
-        abandoned = await self.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID)
+        """Whether a sweeper would take the chat for one whose worker died.
+
+        Asked of every session there is: a sweep reads a page of them, the quietest first, and the
+        sessions other tests' chats leave behind with this agent's id fill that page before this one.
+        """
+        async with self.api.app.state.session_factory() as db:
+            every = (await db.execute(text("SELECT count(*) FROM sessions"))).scalar_one()
+        abandoned = await self.store.find_orphaned_sessions(stale_seconds=0, agent_id=AGENT_ID, limit=every)
         return chat in [session.id for session in abandoned]
 
     async def nothing_waits(self, chat: UUID) -> bool:

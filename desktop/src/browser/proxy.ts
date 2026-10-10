@@ -452,7 +452,9 @@ export class BrowserProxy {
           response.writeHead(502, { "content-type": "text/plain; charset=utf-8", "content-length": Buffer.byteLength(SITE_SIGN_IN) }).end(SITE_SIGN_IN);
           return void socket.destroy();
         }
-        response.writeHead(answer.statusCode ?? 502, passed(answer.headers));
+        // A chat's server's answer is never kept: a port's next chat would be shown the former's pages and scripts
+        // from the browser's cache, never asking its own server. A public site's keeps its own word.
+        response.writeHead(answer.statusCode ?? 502, addresses ? passed(answer.headers) : { ...passed(answer.headers), "cache-control": "no-store" });
         // A site that hangs up partway through its answer: the browser's is cut short too, not left open.
         answer.once("close", () => {
           if (!answer.complete) response.destroy();

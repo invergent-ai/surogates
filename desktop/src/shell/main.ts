@@ -55,6 +55,7 @@ import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
+import { ownSpelling } from "./spellcheck.js";
 import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
 import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
@@ -78,6 +79,7 @@ const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
 const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
+const DICTIONARIES = join(import.meta.dirname, "..", "..", "dictionaries");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
@@ -88,6 +90,8 @@ const root = join(dataHome, "surogate");
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
 app.setPath("userData", join(root, "electron"));
+// Before ready too: the default session is made then, and spell-checks with the app's own dictionary.
+ownSpelling(app, DICTIONARIES, console.error);
 
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
@@ -452,6 +456,10 @@ async function vmReady(signal: AbortSignal): Promise<void> {
   }
 }
 
+// The company's CA certificates the app's own connections trust from its start: every boot of its VM
+// is told them, so its commands trust them too, and only them. The app reads its CA once a start,
+// and its VM stops with it, so no guest runs on with a CA the app no longer trusts.
+let companyCertificates: string[] = [];
 // The app's one VM, shared by every device, for this computer's user, and the background processes
 // alive in it, which Settings shows with Stop as they change.
 let vm: VmClient | null = null;
@@ -461,7 +469,7 @@ const copying = new Copying(changed);
 const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = new VmClient({
-    vm: vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+    vm: { ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }), ca: companyCertificates },
     ready: vmReady,
     spawn: utilityManager,
   });
@@ -805,6 +813,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       // A chat's own servers its user let the browser open: the journal's ports, carried into the chat's sandbox
       // by the VM, which also says whether one listens on a port.
       ports: () => bindings.forwards(),
+      // And each port's last turn: the browser clears what a port's origins kept from before it.
+      turns: () => bindings.turns(),
       vm: vmFor(),
     }),
     prompts,
@@ -2563,7 +2573,8 @@ if (!app.requestSingleInstanceLock()) {
   const companyCa = companyCaFile(app.isPackaged, process.env);
   // An installed app's is root's alone to write, as the install script leaves it. In the database Chromium
   // reads for this user, by its own rule: the session's XDG_DATA_HOME as it is written.
-  const untrusted = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : null;
+  const { certificates, untrusted } = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : { certificates: [], untrusted: null };
+  companyCertificates = certificates;
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {

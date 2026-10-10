@@ -5,7 +5,7 @@
 // (main.ts); the browser dies with it, as its pipe closes.
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -18,7 +18,7 @@ import { destination, reach } from "../vm/egress.js";
 import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
-import { chatPort, chatPortOf } from "./ports.js";
+import { CHAT_HOSTS, chatPort, chatPortOf } from "./ports.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
@@ -415,33 +415,50 @@ function opened(context: BrowserContext): Promise<Page> {
   }).finally(settle);
 }
 
-// How long a look at this computer's processes may take.
+// How long a look at this computer's processes waits with none of its reads answering.
 const SCAN_MS = 1_000;
-// ponytail: the command lines that did not come within SCAN_MS, for the host's life: a process
-// blocked in the kernel (as on a dead mount) blocks its readers too, and each such read holds one of
-// libuv's four threads until it returns. They are not asked again.
+// ponytail: the command lines that did not come while no other did for SCAN_MS, for the host's life: a
+// process blocked in the kernel (as on a dead mount) blocks its readers too, and each such read holds one
+// of libuv's four threads until it returns. They are not asked again.
 const unread = new Set<string>();
 
 /**
  * The processes on *profile*, by pid: each names it on its command line. None where /proc is not.
- * Read off the event loop, and passed over where one does not come within SCAN_MS.
+ * Read off the event loop, and passed over where one does not come: once SCAN_MS has gone by with no
+ * read answering. Not once SCAN_MS has gone by since the look began: the reads queue on libuv's threads,
+ * and on a busy computer one late in that queue has not come only because it waits its turn.
  */
 export async function holding(profile: string, read = (path: string) => readFile(path, "utf8")): Promise<number[]> {
   const named = [`${profile}\0`, `${profile}/`, `${profile} `];
   const pids = (await readdir("/proc").catch(() => [] as string[])).filter((pid) => /^\d+$/.test(pid));
   const found: number[] = [];
   const waiting = new Set<string>();
-  const reads = pids.map((pid) => `/proc/${pid}/cmdline`).filter((path) => !unread.has(path)).map((path) => {
-    waiting.add(path);
-    return read(path).then((line) => {
-      if (named.some((name) => line.includes(name))) found.push(Number(path.split("/")[2]));
-    }, () => {}).finally(() => waiting.delete(path));
+  await new Promise<void>((resolve) => {
+    let timer: NodeJS.Timeout | undefined;
+    let over = false;
+    const end = () => {
+      over = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    // Each answer gives what is left SCAN_MS more; with nothing left, the look is over.
+    const answered = () => {
+      if (over) return;
+      clearTimeout(timer);
+      if (waiting.size === 0) return end();
+      timer = setTimeout(end, SCAN_MS);
+    };
+    for (const path of pids.map((pid) => `/proc/${pid}/cmdline`).filter((path) => !unread.has(path))) {
+      waiting.add(path);
+      void read(path).then((line) => {
+        if (!over && named.some((name) => line.includes(name))) found.push(Number(path.split("/")[2]));
+      }, () => {}).finally(() => {
+        waiting.delete(path);
+        answered();
+      });
+    }
+    answered();
   });
-  let timer: NodeJS.Timeout | undefined;
-  await Promise.race([Promise.all(reads), new Promise((resolve) => {
-    timer = setTimeout(resolve, SCAN_MS);
-  })]);
-  clearTimeout(timer);
   for (const path of waiting) unread.add(path);
   return found.sort((a, b) => a - b);
 }
@@ -531,6 +548,35 @@ export function keepWebRtcProxied(profile: string): void {
   }
   const webrtc = isRecord(prefs.webrtc) ? prefs.webrtc : {};
   writeFileSync(path, JSON.stringify({ ...prefs, webrtc: { ...webrtc, ip_handling_policy: "disable_non_proxied_udp" } }));
+}
+
+// What a chat's server's pages keep at its origins, as Chromium names it, but for cookies: a cookie is its
+// host's and not its port's, read by every port's pages, so those a port's pages set are taken one by one.
+const STORAGES = "file_systems,indexeddb,local_storage,websql,service_workers,cache_storage,storage_buckets,shared_storage";
+// Each profile's record of what its browser has been cleared of: each chat port, by the mark of the turn it
+// was last cleared at (forwards). Only this host writes it, and only for the profile its browser runs on.
+const CLEARED = "surogate-ports.json";
+
+function clearedIn(profile: string): Record<string, string> {
+  try {
+    const read: unknown = JSON.parse(readFileSync(join(profile, CLEARED), "utf8"));
+    if (isRecord(read)) return Object.fromEntries(Object.entries(read).filter(([, turn]) => typeof turn === "string")) as Record<string, string>;
+  } catch {
+    // None yet, or none to trust: every port that turned is cleared again, which takes nothing of a port's since.
+  }
+  return {};
+}
+
+// The chat port a document at *address* is of, by its origin: a blob's address is its origin's too.
+const portOfDocument = (address: string): number | null => {
+  const origin = URL.parse(address)?.origin;
+  return origin === undefined || origin === "null" ? null : chatPortOf(origin);
+};
+
+function keepCleared(profile: string, record: Record<string, string>): void {
+  const path = join(profile, CLEARED);
+  writeFileSync(`${path}.${process.pid}.tmp`, JSON.stringify(record));
+  renameSync(`${path}.${process.pid}.tmp`, path);
 }
 
 export interface BrowserHostOptions {
@@ -666,6 +712,12 @@ export class BrowserHost {
   private readonly open = new Map<Request, Begun>();
   // The ports of chats' own servers the browser may open, as the app told them: its proxy's, whenever one runs.
   private forwarded: { ports: number[]; door: string; key: string } | null = null;
+  // The mark of each chat port's last turn, as the app told them: given to a chat, moved to another or taken back.
+  // Each profile's browser is cleared of what a port's origins kept from before its turn, before anything acts in it.
+  private turns = new Map<number, string>();
+  // The running browser's clears of the ports that turned, one after another: an operation acts once those
+  // told before it are done.
+  private clearing: Promise<void> = Promise.resolve();
   private closing = false;
 
   constructor(private readonly options: BrowserHostOptions = {}) {}
@@ -782,10 +834,73 @@ export class BrowserHost {
   /**
    * The ports of chats' own servers the browser may open from now on, the VM manager's *door* and the *key* this
    * device knocks with there (BrowserProxy.forwards): what it carries to a port no longer among them ends now.
+   * And the mark of each port's last *turns*: a running or launching browser is cleared of each port that turned
+   * since its profile was (clearTurned), before any operation told after this acts; another profile, at its launch.
+   * Until it is, its proxy carries nothing to such a port: a page of the port's former chat still open there would
+   * reach the new chat's server, with the former's storage.
    */
-  forwards(ports: readonly number[], door: string, key: string): void {
+  forwards(ports: readonly number[], door: string, key: string, turns: ReadonlyArray<readonly [number, string]>): void {
     this.forwarded = { ports: [...ports], door, key };
-    this.proxy?.server.forwards(ports, door, key);
+    this.turns = new Map(turns);
+    const running = this.running;
+    this.carry(running === null ? null : this.profile);
+    if (running !== null) this.clearing = this.clearing.then(() => this.clearRunning(running)).catch(() => {});
+  }
+
+  // What the proxy carries: every port told, but one that turned since *profile*, the running browser's, was last
+  // cleared of it. With no browser, every port told: the next launch holds back what its own profile owes.
+  private carry(profile: string | null): void {
+    if (!this.forwarded) return;
+    const record = profile === null ? null : clearedIn(profile);
+    const owed = new Set(record === null ? [] : [...this.turns].filter(([port, turn]) => record[String(port)] !== turn).map(([port]) => port));
+    this.proxy?.server.forwards(this.forwarded.ports.filter((port) => !owed.has(port)), this.forwarded.door, this.forwarded.key);
+  }
+
+  // The browser *running* launches, cleared of each port that turned once it runs, and its proxy carries those
+  // ports again. One whose clear fails closes whole before anything acts in it: the next launch clears it, and
+  // its proxy carries them only then.
+  private async clearRunning(running: Promise<BrowserContext>): Promise<void> {
+    const context = await running.catch(() => null);
+    if (context === null || this.live !== context || this.profile === null) return;
+    try {
+      await this.clearTurned(context, this.profile);
+      this.carry(this.profile);
+    } catch {
+      await this.closePages(context.pages());
+    }
+  }
+
+  /**
+   * What *context*'s profile, *profile*, still keeps of each chat port that turned since it was last cleared of it
+   * there: every page that holds a document of one of the port's origins closes, at its own address or in a frame,
+   * a blob's by its origin; then what each origin stores goes, its service workers with it, and so do the cookies
+   * the port's pages set; and the profile's record says so. Nothing else is touched: another port's origins, and the
+   * cookies another port set. A browser that quits with the last of those pages is cleared at its next launch.
+   */
+  private async clearTurned(context: BrowserContext, profile: string): Promise<void> {
+    const record = clearedIn(profile);
+    const due = [...this.turns].filter(([port, turn]) => record[String(port)] !== turn);
+    if (due.length === 0) return;
+    const ports = new Set(due.map(([port]) => port));
+    const turned = (page: Page) => page.frames().some((frame) => ports.has(portOfDocument(frame.url()) ?? 0));
+    await this.closePages(context.pages().filter(turned));
+    const keeper = context.pages().find((page) => !page.isClosed());
+    if (keeper === undefined) return;
+    const line = await context.newCDPSession(keeper);
+    try {
+      for (const port of ports) {
+        for (const host of CHAT_HOSTS) await line.send("Storage.clearDataForOrigin", { origin: `http://${host}:${port}`, storageTypes: STORAGES });
+      }
+      const { cookies } = await line.send("Storage.getCookies", {});
+      for (const { name, domain, path, sourcePort, partitionKey } of cookies) {
+        if (!ports.has(sourcePort) || !CHAT_HOSTS.has(domain.replace(/^\./, ""))) continue;
+        await line.send("Network.deleteCookies", { name, domain, path, ...(partitionKey === undefined ? {} : { partitionKey }) });
+      }
+    } finally {
+      await line.detach().catch(() => {});
+    }
+    for (const [port, turn] of due) record[String(port)] = turn;
+    keepCleared(profile, record);
   }
 
   /**
@@ -922,6 +1037,8 @@ export class BrowserHost {
   private async act(
     launch: Launch, session: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, stop: AbortSignal, id: string | undefined,
   ): Promise<Outcome> {
+    // Nothing acts in a browser before it is cleared of the ports that turned before this came.
+    await this.clearing;
     if (signal.aborted) return CANCELLED;
     // The agent acts again: from here on a download nobody is known to have asked for may be its own (whose).
     if (this.handed !== null) this.handed.acted = true;
@@ -2026,8 +2143,8 @@ export class BrowserHost {
       const server = new BrowserProxy(this.options.proxy);
       return { server, port: await server.listen() };
     })();
-    // What was told before any proxy ran.
-    if (this.forwarded) this.proxy.server.forwards(this.forwarded.ports, this.forwarded.door, this.forwarded.key);
+    // What was told before any proxy ran, but a port the profile has not been cleared of since it turned.
+    this.carry(launch.profile);
     keepWebRtcProxied(launch.profile);
     // Its first launch: what a host that was killed left staged here goes, and this host's own folder is made.
     let staging = this.staging;
@@ -2054,6 +2171,10 @@ export class BrowserHost {
       await this.bypassWorkers(context);
       await this.saysDownloads(context, staging);
       this.spare = await this.proxied(context, this.proxy.server);
+      // Before anything acts in it: what its profile kept of the chat ports that turned since it last ran. Then its
+      // proxy carries them.
+      await this.clearTurned(context, launch.profile);
+      this.carry(launch.profile);
     } catch (error) {
       await context.close().catch(() => {});
       throw error;

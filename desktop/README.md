@@ -62,6 +62,12 @@ and connects to no host.
 The file hosts and their helpers run on the app's own node, `bin/node`: Node 22 for
 linux-x64, pinned by hash and stripped (`scripts/node.sh`, which the build runs).
 
+The app's pages and the agent's web client are spell-checked in en-US alone, with Chromium's
+en-US dictionary that the app ships, `dictionaries/en-US-10-1.bdic`, pinned by hash
+(`scripts/dictionary.sh`, which the build runs). The app puts it where Chromium looks before any
+of its sessions starts, and points Chromium's dictionary downloads at its own folder
+(`src/shell/spellcheck.ts`): no dictionary is downloaded from Google's servers.
+
 Electron never runs as Node: its RunAsNode fuse is off (`scripts/fuses.mjs`; this
 package's own Electron keeps the inspector, which the end-to-end tests drive).
 
@@ -90,9 +96,18 @@ connection into that chat's sandbox and no other. A port is one chat's at a time
 prompt names the chat by its folder, and says which chat has the port when it is another's.
 Settings → Folders and permissions lists each port under its chat, with Take back. It goes
 then, when the chat's browser is taken back, or when the chat is deleted, and what the
-browser had open to it ends at once. A page's WebSocket to such a port is carried too, when it
-is a page of an allowed port that opens it, so a development server's page reloads by
-itself; https and `wss://` are not. A chat's sandbox takes 160 connections from the browser
+browser had open to it ends at once. Each time a port is given to a chat, moves to another or
+goes, every page of the browser that holds a document of its three names closes, at its own
+address, in a frame or as a blob of one, and what they stored there goes too: local storage,
+IndexedDB, Cache Storage, service workers and the cookies the port's pages set, in the browser
+running then and in each of the agent's browser profiles at its next launch, before anything
+acts in it. Until then the proxy carries nothing to that port. The browser keeps no answer of a
+chat's server (the proxy marks each `no-store`), so a port's next chat is always answered by its
+own. A cookie is its host's and not its port's, so a page of one port still reads the cookies
+another port's pages set; and an `about:blank` window a page of the port opened, which shares
+its origin, is not seen as one of its pages. A page's WebSocket to such a port
+is carried too, when it is a page of an allowed port that opens it, so a development server's
+page reloads by itself; https and `wss://` are not. A chat's sandbox takes 160 connections from the browser
 at once: past them the one that has carried nothing for longest ends, which a page hears as
 a connection lost. A tab that goes to a port not allowed is shown a short page of the
 proxy's own, which says that the chat's agent opens it and that the ports allowed are
@@ -294,8 +309,10 @@ release into `/opt/surogate`, and is each version's root helper for updates (`--
 
 A company whose network inspects TLS, or whose server has a certificate authority of its own, gives
 the script that CA as a PEM file. Every user's app then trusts it beside the public roots, and so do
-the user's Chrome, Edge and Brave, in the NSS database Chromium reads. The person's own curl must
-reach the script first (here with `--cacert`); `sudo rm /etc/surogate/ca.pem` stops trusting it:
+the user's Chrome, Edge and Brave, in the NSS database Chromium reads, and the commands the agent
+runs in the app's sandbox: its system store holds it, and Node, pip, requests, OpenSSL, curl and git
+are pointed at that store. The person's own curl must reach the script first (here with
+`--cacert`); `sudo rm /etc/surogate/ca.pem` stops trusting it, from the app's next start:
 
     curl --cacert company-ca.pem -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --ca-cert company-ca.pem
 
