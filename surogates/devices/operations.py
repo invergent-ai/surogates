@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from asyncpg.exceptions import InternalClientError
 from redis.asyncio import Redis
@@ -173,6 +173,19 @@ def _completing(device_id: UUID, generation: int, operation_id: UUID, digest: st
 
 class OperationConflict(RuntimeError):
     """The same invocation and ordinal were recorded with a different request."""
+
+
+class LeaseLost(DeviceOperationError):
+    """Another worker holds the session's lease now: this one's operation, or its write, is refused.
+
+    No step failed.  Whoever is refused so stands its turn down where it
+    is, and writes nothing more: the worker that holds the lease goes on
+    from the journal.  *session_id* is the session whose lease it lost.
+    """
+
+    def __init__(self, session_id: UUID) -> None:
+        super().__init__("Another worker runs this session now")
+        self.session_id = session_id
 
 
 class TransferGone(DeviceOperationError):
@@ -333,7 +346,7 @@ async def _check_lease(db: AsyncSession, request: OperationRequest) -> None:
         {"id": request.calling_session_id},
     )).scalar_one_or_none()
     if current is None or str(current) != request.lease_token:
-        raise DeviceOperationError("Another worker runs this session now")
+        raise LeaseLost(request.calling_session_id)
 
 
 async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device: Any) -> None:
@@ -1179,6 +1192,33 @@ class DeviceOperations:
             DeviceOperation.calling_session_id == calling_session_id,
             DeviceOperation.invocation_id == invocation_id,
         )
+
+    async def close_landing(self, calling_session_id: UUID, saga_id: str) -> list[tuple[str, dict[str, Any], dict[str, Any] | None]]:
+        """Close what a landing of a thread's left open on its computer; each of its operations, as the journal holds it then.
+
+        A landing's operations are those of the invocation its saga is named
+        after (``saga:<uuid5(thread, invocation)>``), whatever each says: its
+        first steps name no saga.  Each still open is cancelled first, so
+        that none of it runs when its computer is back, whoever asked it
+        last.  Then each, asked or answered, as ``(kind, args, outcome)`` in
+        the order asked: an outcome is its computer's word, and whoever reads
+        one checks it as an answer given now.
+        """
+        mine = (DeviceOperation.calling_session_id == calling_session_id, DeviceOperation.kind.in_(THREAD_KINDS))
+        async with self._sf() as db:
+            names = (await db.execute(
+                select(DeviceOperation.invocation_id).where(*mine, DeviceOperation.invocation_id.startswith("land:")).distinct()
+            )).scalars().all()
+        its = [name for name in names if f"saga:{uuid5(calling_session_id, name)}" == saga_id]
+        if not its:
+            return []
+        mine = (*mine, DeviceOperation.invocation_id.in_(its))
+        await self._cancel_where(*mine)
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(DeviceOperation.kind, DeviceOperation.args, DeviceOperation.outcome).where(*mine).order_by(DeviceOperation.ordinal)
+            )).all()
+        return [(row.kind, row.args, row.outcome) for row in rows]
 
     async def closed_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
         """Which of these operations of the device the server has closed.
