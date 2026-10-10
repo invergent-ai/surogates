@@ -657,7 +657,7 @@ async def test_a_commands_end_does_not_rest_over_a_coordinators_follow_up_no_tur
     lease = SimpleNamespace(lease_token=uuid4())
     assert await harness._end_command_turn(session, lease, 2, events, ends_here=True) is False
     # The cursor stops before the follow-up, and the thread stays as it is for the turn that reads it.
-    store.advance_harness_cursor.assert_awaited_once_with(session.id, through_event_id=0, lease_token=lease.lease_token, at_rest=False)
+    store.advance_harness_cursor.assert_awaited_once_with(session.id, through_event_id=0, lease_token=lease.lease_token, rests_with=None)
     harness._release_command_turn.assert_not_awaited()
 
 

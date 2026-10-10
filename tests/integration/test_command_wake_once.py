@@ -8,6 +8,7 @@ Every wake is a new worker's: two wakes share nothing but the database.
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -16,12 +17,17 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 
+import surogates.api.routes.openai as openai_route
 import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
 from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import Mission as MissionRow
+from surogates.db.models import Session as SessionRow
 from surogates.devices.browser import BROWSER_HAND_BACK
 from surogates.harness.budget import IterationBudget
+from surogates.harness.cost_tracker import SessionCostTracker
+from surogates.harness.landing import last_turn_end, name_turn
+from surogates.harness.local_landing import lands
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
 from surogates.harness.loop_pending import _actionable_pending_events
@@ -32,8 +38,12 @@ from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.session.interactive_input import pending_input_for_session
 from surogates.session.provisioning import create_child_session
+from surogates.session.store import SessionStore
+from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
+from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
@@ -88,7 +98,7 @@ class Meanwhile:
 
     async def advance_harness_cursor(self, *args, **kwargs):
         # Only the write that ends a turn says whether the session comes to rest.
-        if self._answered and (self._dies == "answered" or (self._dies == "ending" and "at_rest" in kwargs)):
+        if self._answered and (self._dies == "answered" or (self._dies == "ending" and "rests_with" in kwargs)):
             raise asyncio.CancelledError
         return await self._store.advance_harness_cursor(*args, **kwargs)
 
@@ -275,6 +285,14 @@ class Workers:
         """What the chat's assistant said, in order: the model's words and the harness's answers alike."""
         events = await self.store.get_events(chat, types=[EventType.LLM_RESPONSE])
         return [event.data["message"]["content"] for event in events]
+
+    async def ends(self, chat: UUID, after: int = 0) -> list:
+        """The ends of the chat's turns written after event *after*: its ``session.complete`` events."""
+        return await self.store.get_events(chat, after=after, types=[EventType.SESSION_COMPLETE])
+
+    async def typed(self, chat: UUID) -> int:
+        """The id of the message its user sent last."""
+        return (await self.store.get_events(chat, types=[EventType.USER_MESSAGE]))[-1].id
 
     async def looks_abandoned(self, chat: UUID) -> bool:
         """Whether a sweeper would take the chat for one whose worker died.
@@ -564,11 +582,12 @@ DIED = ["/compress", "/clear", "/goal status", "/mission status", "/code status"
 async def test_a_command_whose_worker_died_once_it_had_answered_is_not_run_again(workers, command, later):
     chat = await workers.chat()
     await workers.says(chat, command)
+    typed = await workers.typed(chat)
     # Its answer is written; the worker stops before the cursor moves.  It is also how every chat
     # was left whose last message was /compress or /clear, before a command's answer ended its turn.
     await workers.wake_of_a_worker_that_dies(chat, "answered")
     answers = len(await workers.said(chat))
-    assert (workers.ran, await workers.status(chat)) == ([ANSWERED[command]], "active")
+    assert (workers.ran, await workers.status(chat), await workers.ends(chat, after=typed)) == ([ANSWERED[command]], "active", [])
 
     await LATER[later](workers, chat)
     await workers.wake(chat)
@@ -578,6 +597,7 @@ async def test_a_command_whose_worker_died_once_it_had_answered_is_not_run_again
     assert (len(await workers.said(chat)), workers.requests) == (answers, [])
     assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
     assert (await workers.status(chat), await workers.looks_abandoned(chat)) == ("completed", False)
+    assert len(await workers.ends(chat, after=typed)) == 1
 
 
 @pytest.mark.parametrize("later", list(LATER))
@@ -585,19 +605,39 @@ async def test_a_command_whose_worker_died_once_it_had_answered_is_not_run_again
 async def test_a_chat_left_active_behind_an_answered_command_is_brought_to_rest_by_the_next_wake(workers, command, later):
     chat = await workers.chat()
     await workers.says(chat, command)
+    typed = await workers.typed(chat)
     # These commands move the cursor past their answer themselves; the worker stops before the turn's
     # end is written.  It is also how every chat was left whose last message was such a command,
     # before a command's answer ended its turn.
     await workers.wake_of_a_worker_that_dies(chat, "ending")
     answer = (await workers.said(chat))[-1]
+    assert await workers.ends(chat, after=typed) == []
 
     await LATER[later](workers, chat)
     await workers.wake(chat)
 
     assert workers.ran == [ANSWERED[command]]
     assert (await workers.said(chat)).count(answer) == 1
-    # Nothing in it for the model either: the wake ends the turn that was left open.
+    # Nothing in it for the model either: the wake ends the turn that was left open, once.
     assert (workers.requests, await workers.status(chat), await workers.looks_abandoned(chat)) == ([], "completed", False)
+    assert len(await workers.ends(chat, after=typed)) == 1
+
+
+async def test_a_worker_that_dies_once_a_commands_turn_has_ended_leaves_it_ended_once(workers):
+    chat = await workers.chat()
+    await workers.says(chat, "/goal status")
+    typed = await workers.typed(chat)
+    dying = workers.worker()
+    dying._release_command_turn = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await dying.wake(chat)
+
+    # The sweeper finds a chat at rest, and no wake after ends its turn again.
+    assert not await workers.swept(chat)
+    for later in LATER.values():
+        await later(workers, chat)
+        await workers.wake(chat)
+    assert (workers.ran, workers.requests, len(await workers.ends(chat, after=typed))) == (["_handle_goal_command"], [], 1)
 
 
 async def test_a_chat_resumed_after_a_stop_that_landed_on_a_command_takes_no_turn(workers):
@@ -816,6 +856,27 @@ async def test_a_command_answered_leaves_its_chat_at_rest(workers, command):
     await workers.types(chat, command)
     assert await workers.status(chat) == "completed"
     assert await workers.nothing_waits(chat)
+
+
+@pytest.mark.parametrize("command", list(ANSWERED))
+async def test_a_commands_turn_ends_once_and_as_a_models_turn_ends(workers, command):
+    chat = await workers.chat()
+    await workers.says(chat, command)
+    typed = await workers.typed(chat)
+    await workers.wake(chat)
+    # The model's turn on what its user says next ends as every turn of the model's does.
+    await workers.says(chat, "And Q1?")
+    await workers.wake(chat)
+
+    [ended, turn] = await workers.ends(chat, after=typed)
+    [answer] = [event for event in await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE]) if event.data.get("answers") == typed]
+    [woken] = [event for event in await workers.store.get_events(chat, types=[EventType.HARNESS_WAKE]) if typed < event.id < ended.id]
+    # After its answer, read as a turn's end is read: why it ended, by whom and what it cost, nothing at all.
+    assert ended.id > answer.id
+    assert ended.data == {
+        "reason": "completed", "worker_id": woken.data["worker_id"], "cost_summary": SessionCostTracker().summary(), "answers": typed,
+    }
+    assert set(ended.data) - {"answers"} == set(turn.data)
 
 
 async def test_the_users_next_message_after_a_command_is_answered_by_the_model(workers):
@@ -1290,10 +1351,11 @@ async def test_a_chat_its_user_stopped_while_a_command_was_answered_stays_stoppe
         assert stopped.status_code == 200, stopped.text
 
     await workers.says(chat, "/compress")
+    typed = await workers.typed(chat)
     await workers.worker(store=Meanwhile(workers.store, then=the_user_stops_it)).wake(chat)
 
     # A stop is its user's: the command's answer does not turn it into a turn that ended by itself.
-    assert await workers.status(chat) == "paused"
+    assert (await workers.status(chat), await workers.ends(chat, after=typed)) == ("paused", [])
     await workers.its_browser_is_handed_back(chat)
     await workers.wake(chat)
     assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_compress_command"], [], "paused")
@@ -1993,7 +2055,7 @@ async def test_a_coding_run_that_finished_leaves_its_chat_at_rest(workers, monke
     chat = await workers.chat()
     await workers.says(chat, '/code claude "Fix the totals"')
     await workers.wake(chat)
-    assert (await workers.log(chat))[-1] == EventType.CODE_RUN_RESULT.value
+    assert (await workers.log(chat))[-2:] == [EventType.CODE_RUN_RESULT.value, EventType.SESSION_COMPLETE.value]
     at_rest = await workers.status(chat)
 
     # No pass of the sweeper takes the finished run for a worker's death, and no later wake looks at it again.
@@ -2192,6 +2254,181 @@ async def test_a_commands_end_releases_what_a_turns_end_releases(workers, monkey
     assert (released, len(settled)) == ([str(chat)], 1)
 
 
+# -- What waits for a turn's end --
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streamed"])
+async def test_the_openai_route_returns_a_commands_answer_once_its_turn_has_ended(workers, monkeypatch, stream):
+    # Waited out, a turn whose end never came answers in seconds here, not in the route's minutes.
+    monkeypatch.setattr(openai_route, "NON_STREAMING_BUDGET_SECONDS", 10.0)
+    monkeypatch.setattr(openai_route, "STREAMING_BUDGET_SECONDS", 10.0)
+    api = workers.api
+    key = await ServiceAccountStore(api.app.state.session_factory).create(
+        org_id=api.org_id, name="openai-commands", agent_id=AGENT_ID, kind=KIND_API_KEY,
+    )
+
+    async def the_worker_takes_the_message_up() -> None:
+        while True:
+            async with api.app.state.session_factory() as db:
+                chat = (await db.execute(
+                    select(SessionRow.id).where(SessionRow.service_account_id == key.id),
+                )).scalar_one_or_none()
+            if chat is not None and await workers.store.get_events(chat, types=[EventType.USER_MESSAGE]):
+                await workers.wake(chat)
+                return
+            await asyncio.sleep(0.02)
+
+    worker = asyncio.create_task(the_worker_takes_the_message_up())
+    sent = await api.client.post(
+        "/v1/api/chat/completions", headers={"Authorization": f"Bearer {key.token}"},
+        json={"messages": [{"role": "user", "content": "/goal status"}], "stream": stream},
+    )
+    await worker
+
+    answer = "No active outcome. Set one with /goal <text>."
+    assert sent.status_code == 200, sent.text
+    if stream:
+        chunks = [json.loads(line[len("data: "):]) for line in sent.text.splitlines() if line.startswith("data: {")]
+        said = "".join(chunk["choices"][0]["delta"].get("content") or "" for chunk in chunks)
+        assert (said, chunks[-1]["choices"][0]["finish_reason"]) == (answer, "stop")
+    else:
+        choice = sent.json()["choices"][0]
+        assert (choice["message"]["content"], choice["finish_reason"]) == (answer, "stop")
+
+
+# -- A project's thread --
+
+
+async def test_a_threads_turn_after_a_command_is_named_by_the_turn_end_before_it(api, workers):
+    thread = await start(api, await master_of(api, await create(api)))
+    # Its turn on its goal ends.
+    await workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    [landed] = await workers.ends(thread.id)
+
+    await workers.types(thread.id, "/compress")
+    assert len(await workers.ends(thread.id)) == 2
+
+    # A command lands nothing: the thread's next turn goes on from its last landing, as its stop does.
+    await name_turn(workers.store, thread)
+    assert (thread.config["turn_after"], (await last_turn_end(workers.store, thread.id)).id) == (landed.id, landed.id)
+
+
+async def test_a_threads_command_end_is_told_to_its_chats_viewers_and_to_its_projects_row(api, workers):
+    state = api.app.state
+    project = await create(api)
+    thread = await start(api, await master_of(api, project))
+    await workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await workers.says(thread.id, "/compress")
+    typed = await workers.typed(thread.id)
+    told = state.redis.pubsub()
+    await told.subscribe(f"surogates:session:{thread.id}", f"surogates:workstream:{project['id']}")
+
+    # A worker whose store tells its listeners, as every worker's does.
+    await workers.worker(store=SessionStore(state.session_factory, redis=state.redis)).wake(thread.id)
+
+    heard = []
+    # Each message published to either channel, its subscriptions' own replies aside.
+    while (message := await told.get_message(timeout=0.5)) is not None:
+        if message["type"] == "message":
+            said = message["data"]
+            heard.append(said.decode() if isinstance(said, bytes) else said)
+    await told.aclose()
+    [ended] = await workers.ends(thread.id, after=typed)
+    assert [said for said in heard if said.endswith(":session.complete")] == [
+        f"{ended.id}:session.complete", f"{thread.id}:session.complete",
+    ]
+
+
+async def test_a_threads_work_left_unsaved_before_a_command_still_lands_at_its_next_turn(api, workers):
+    thread = await start(api, await master_of(api, await create(api)))
+    # Its turn on its goal ended, and did not save its work: its copy still holds it.
+    await workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+    await answered(api, thread, "Drafted the memo.")
+    await workers.store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed", "saved": False})
+    await workers.types(thread.id, "/compress")
+    assert len(await workers.ends(thread.id)) == 2
+
+    # A turn on its user's computer that only talks has that work to land all the same.
+    assert await lands(workers.store, thread, 0, [])
+
+
+# -- A question that waits for its user --
+
+
+ASKS = (
+    {"role": "assistant", "content": "", "tool_calls": [{
+        "id": "call_ask", "type": "function",
+        "function": {"name": "ask_user_question", "arguments": json.dumps({"questions": [{"prompt": "Which quarter?"}]})},
+    }]},
+    {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1},
+)
+
+
+async def a_question_waits(workers: Workers, chat: UUID) -> asyncio.Task:
+    """The model's turn on "Draft the report." asks its user a question: the wake that waits for the answer."""
+    workers.replies.append(ASKS)
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    waiting = asyncio.create_task(asking.wake(chat))
+    async with asyncio.timeout(10):
+        while not await workers.store.get_events(chat, types=[EventType.INBOX_INPUT_REQUIRED]):
+            await asyncio.sleep(0.02)
+    return waiting
+
+
+async def what_the_question_got(workers: Workers, chat: UUID) -> dict:
+    """What the question's call gave the model."""
+    [result] = [
+        event for event in await workers.store.get_events(chat, types=[EventType.TOOL_RESULT])
+        if event.data["tool_call_id"] == "call_ask"
+    ]
+    return json.loads(result.data["content"])
+
+
+async def test_a_command_typed_while_a_question_waits_dismisses_the_question_and_is_run(workers):
+    chat = await workers.chat()
+    waiting = await a_question_waits(workers, chat)
+
+    await workers.says(chat, "/goal status")
+    await asyncio.wait_for(waiting, 10)
+
+    # The question is not answered, and its turn ends there: the model is not asked again in it.
+    got = await what_the_question_got(workers, chat)
+    assert (got["cancelled"], got["reason"], got["detail"]) == (True, "dismissed", DISMISSED_BY_A_COMMAND)
+    assert (len(workers.requests), await workers.status(chat)) == (1, "completed")
+    assert await pending_input_for_session(workers.store, session_id=chat) is None
+    # The command's own wake runs it.
+    await workers.wake(chat)
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command"], "No active outcome. Set one with /goal <text>.")
+    # The model reads at its next turn that its question went unanswered, and may ask it again.
+    await workers.says(chat, "Q3, then.")
+    await workers.wake(chat)
+    [told] = [message for message in workers.requests[-1] if message.get("tool_call_id") == "call_ask"]
+    assert json.loads(told["content"])["detail"] == DISMISSED_BY_A_COMMAND
+
+
+async def test_a_question_dismissed_while_its_user_said_more_goes_on_with_what_they_said(workers):
+    chat = await workers.chat()
+    waiting = await a_question_waits(workers, chat)
+
+    # What a channel that takes no typed words for an answer delivers: a message, for the turn to read.
+    await workers.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Use the Q3 figures."})
+    await workers.says(chat, "/goal status")
+    await asyncio.wait_for(waiting, 10)
+
+    # The question is dismissed, and the turn goes on with what its user said; the command waits for its end.
+    assert (await what_the_question_got(workers, chat))["reason"] == "dismissed"
+    assert (len(workers.requests), workers.requests[-1][-1]) == (2, {"role": "user", "content": "Use the Q3 figures."})
+    assert workers.ran == []
+    await workers.wake(chat)
+    assert workers.ran == ["_handle_goal_command"]
+
+
 # -- A routine's run --
 
 
@@ -2212,6 +2449,8 @@ async def test_a_routines_run_whose_prompt_is_a_command_ends_and_its_routine_goe
 
     assert (workers.ran, (await workers.said(run))[-1]) == (["_handle_goal_command"], "No active outcome. Set one with /goal <text>.")
     assert await workers.status(run) == "completed"
+    # The run's turn ends as a turn ends, once.
+    assert len(await workers.ends(run)) == 1
     # The run is not taken for one whose worker died, to be queued again at every sweep ...
     stalled = await routines.find_retryable_stalled_dynamic_loop_runs(agent_id=AGENT_ID, stale_seconds=0)
     assert routine.id not in [r.id for r in stalled]

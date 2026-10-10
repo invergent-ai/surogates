@@ -52,7 +52,11 @@ def _hand_backs_taken_over_again(events: list[Any]) -> set[int]:
 
 
 def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
-    """Return post-cursor events that should start harness work."""
+    """Return post-cursor events that should start harness work.
+
+    The end of a command's turn is none: it lies past the cursor, which
+    stops before what was said while the command was answered.
+    """
     taken_again = _hand_backs_taken_over_again(events)
     pending = []
     for event in events:
@@ -62,9 +66,15 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
             and _event_type(event) not in _HARNESS_CONTROL_PENDING_EVENT_TYPES
             and not for_the_pane_alone(event)
             and event.id not in taken_again
+            and not _ends_a_commands_turn(event)
         ):
             pending.append(event)
     return pending
+
+
+def _ends_a_commands_turn(event: Any) -> bool:
+    """Whether *event* is the ``session.complete`` that ended a command's turn: it names the command's message."""
+    return _event_type(event) == EventType.SESSION_COMPLETE.value and "answers" in (getattr(event, "data", None) or {})
 
 
 def _hand_back_unread(events: list[Any]) -> bool:

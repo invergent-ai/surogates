@@ -288,9 +288,9 @@ async def _turn_now(store: Any, session: Any) -> int:
     named = session.config.get("turn_after")
     if named is not None:
         return named
-    from surogates.harness.landing import TURN_ENDS
+    from surogates.harness.landing import last_turn_end
 
-    ended = await store.last_event(session.id, *TURN_ENDS)
+    ended = await last_turn_end(store, session.id)
     return ended.id if ended else 0
 
 

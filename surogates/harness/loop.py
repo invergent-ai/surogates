@@ -1136,6 +1136,13 @@ class AgentHarness(
             return None, new_cursor
         return coalesce_user_messages(rendered), new_cursor
 
+    async def _said_to_the_model(self, session: Session, after_event_id: int) -> bool:
+        """Whether a message the model is to read arrived past the steer cursor *after_event_id*: the turn's next request reads it."""
+        return any(
+            self._is_plain_message(session, event)
+            for event in await self._store.get_events(session.id, after=after_event_id, types=list(MESSAGE_TYPES))
+        )
+
     async def _abort_iteration_with_pause(
         self,
         session: Session,
@@ -1311,12 +1318,12 @@ class AgentHarness(
         first, so the turn starting now comes after it; unless the thread
         has had a turn end since, when it is only let go.
         """
-        from surogates.harness.landing import TURN_ENDS, name_turn
+        from surogates.harness.landing import last_turn_end, name_turn
 
         kept = _STOPS_NOT_WRITTEN.get(session.id)
         if kept is not None:
             stopped, said = kept
-            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            ended = await last_turn_end(self._store, session.id)
             if (ended.id if ended else 0) == stopped:
                 await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
             # With a later turn end, written elsewhere since, the stopped turn is over already.
@@ -1389,11 +1396,11 @@ class AgentHarness(
         another worker first takes this turn's hand-off for its own, if
         the stop could not take it back either.
         """
-        from surogates.harness.landing import TURN_ENDS
+        from surogates.harness.landing import last_turn_end
 
         said = {"reason": "interrupted", "message": reason, "worker_id": self._worker_id}
         try:
-            ended = await self._store.last_event(session.id, *TURN_ENDS)
+            ended = await last_turn_end(self._store, session.id)
             if (ended.id if ended else 0) != session.config.get("turn_after"):
                 return False
             await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
@@ -3780,6 +3787,7 @@ class AgentHarness(
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
             )
+            question_dismissed = _question_dismissed(tool_calls_raw, tool_results)
 
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
@@ -3882,6 +3890,23 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="whiteboard_sketch_drawn",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A question its user dismissed by typing a command ends the turn,
+            # as the model's answer would: the command's own wake runs it, and
+            # the model reads at its next turn that the question went
+            # unanswered.  Not while something else its user said waits for
+            # the model: the turn goes on with it.
+            if question_dismissed and not await self._said_to_the_model(session, steer_cursor):
+                logger.info(
+                    "Session %s: its user dismissed a question with a command; ending turn", session.id,
+                )
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="question_dismissed",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -5451,10 +5476,14 @@ class AgentHarness(
         a later wake that goes on to the model leaves the cursor to that turn.
 
         A model's last answer ends its turn: the cursor moves past it and the
-        session comes to rest, so a later wake finds nothing to do.  A
-        command's answer ends its turn the same way, in one write.  A worker
-        that dies before that write leaves a turn the next wake ends: the
-        answer in the log says the command was run.
+        session comes to rest, so a later wake finds nothing to do, and its
+        ``session.complete`` tells whoever waits for the turn.  A command's
+        answer ends its turn the same way, in one write, with a
+        ``session.complete`` read as a turn's end is, that names the
+        command's message.  A worker that dies before that write leaves a
+        turn the next wake ends: the answer in the log says the command was
+        run.  One that dies after it leaves a session at rest, which no wake
+        ends again.
 
         Not when more was said since that still waits: a message no request
         has read, the user's own or the command's to start its work (a
@@ -5493,11 +5522,17 @@ class AgentHarness(
         if not at_rest and (cut_off or not ends_here):
             # The turn that goes on moves the cursor itself.
             return False
+        ending = {
+            "reason": "completed", "worker_id": self._worker_id,
+            # Most commands ask the model nothing, and what /compress asks is not counted against a turn.
+            "cost_summary": SessionCostTracker().summary(),
+            "answers": typed_at,
+        }
         await self._store.advance_harness_cursor(
             session.id,
             through_event_id=events[-1].id if unread is None else unread - 1,
             lease_token=lease.lease_token,
-            at_rest=at_rest,
+            rests_with=ending if at_rest else None,
         )
         if at_rest:
             await self._release_command_turn(session)
@@ -6015,6 +6050,23 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
         data = getattr(event, "data", None)
         return data.get("metadata") if isinstance(data, dict) else None
     return None
+
+
+def _question_dismissed(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
+    """Whether a question of *tool_calls_raw*'s went unanswered because its user typed a command instead."""
+    from surogates.tools.builtin.ask_user_question import DISMISSED
+
+    asked = {call.get("id") for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
+    for result in tool_results:
+        if result.get("tool_call_id") not in asked:
+            continue
+        try:
+            got = json.loads(result.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(got, dict) and got.get("reason") == DISMISSED:
+            return True
+    return False
 
 
 def _whiteboard_sketch_turn_done(

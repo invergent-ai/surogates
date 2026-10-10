@@ -954,11 +954,19 @@ class ChannelInboundPipeline:
         - Telegram has no modal; a plain reply IS the answer — resolve the
           durable pending record with it and ack.
 
+        A built-in command is never the answer, on any of them: it goes on
+        as a message, whose command dismisses the question, and its wake
+        runs it.
+
         Returns the outcome when the message was consumed, or ``None`` to
-        continue normal processing (no question pending, or a Telegram
-        resolution lost the race against a button tap — the text is then a
-        real user message, not an answer, and must not vanish).
+        continue normal processing (no question pending, a command, or a
+        Telegram resolution lost the race against a button tap — the text is
+        then a real user message, not an answer, and must not vanish).
         """
+        from surogates.harness.slash_skill import names_builtin_command
+
+        if names_builtin_command(msg.text):
+            return None
         try:
             pending = await deps.pending_input(session_id)
         except Exception:
