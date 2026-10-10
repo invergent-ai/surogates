@@ -138,7 +138,10 @@ class Places:
         self.holder: str | None = None
         self.idle_s = IDLE_S
         self._held_at = 0.0
-        self._helper: LandHelper | None = None
+        # How a landing's host starts its helper on the folder, given the thread's copy and where replaced files are kept:
+        # these rules, or the app's own helper in their place (tests.test_fake_places.Real).
+        self.land_helper: Any = LandHelper
+        self._helper: Any = None
         # The threads whose copy the app opened, in this run of it.
         self._opened: set[str] = set()
 
@@ -260,7 +263,8 @@ class Places:
             return BUSY
         if not holds:
             # A landing's host, its helper started anew on the folder, with the thread's copy.
-            self._helper = LandHelper(self.real, self.copy(thread), self.kept)
+            self.let_go()
+            self._helper = self.land_helper(self.real, self.copy(thread), self.kept)
         self.holder, self._held_at = root, now
         if action != "forget":
             return self._helper.land({"action": action, **args})
@@ -274,10 +278,17 @@ class Places:
         if (unrecorded := _unrecorded(_Landing(self._helper, args["saga"]), args["applied"], recorded=ok["landing"] is not None)) is not None:
             return unrecorded
         outcome = self._helper.land({"action": "forget", "saga": args.get("saga")})
-        # The turn's own landing over, the folder is let go; not at the forgetting of one it only settled.
+        # The turn's own landing over, the folder is let go, its helper with it; not at the forgetting of one it only settled.
         if "ok" in outcome and not _SETTLES.match(invocation):
-            self.holder, self._helper = None, None
+            self.let_go()
+            self.holder = None
         return outcome
+
+    def let_go(self) -> None:
+        """A landing's host stops: its helper with it, one the app started included."""
+        helper, self._helper = self._helper, None
+        if helper is not None and hasattr(helper, "end"):
+            helper.end()
 
 
 def _forgetting(args: dict[str, Any]) -> bool:
@@ -315,7 +326,7 @@ def _unrecorded(landing: _Landing, applied: list[dict[str, Any]], *, recorded: b
         if (landing.kept / f"{step}.json").is_symlink():
             return RECORDS_UNREAD
         try:
-            record = landing.read(step)
+            record = landing.read(step, as_the_app=True)
         except _Unreadable:
             return RECORDS_UNREAD
         if record is None:
@@ -610,6 +621,11 @@ class _Unreadable(_Refused):
         self.path = path
 
 
+# A step's record as these rules write one; and as the app's helper writes one, which says more of where the step got.
+_RECORD = {"path", "was", "wrote", "mode", "made", "above"}
+_APPS_RECORD = _RECORD | {"temp", "aside", "moved", "out", "back"}
+
+
 class _Landing:
     """One saga's steps in the folder, and what they kept: ``<kept>/<saga>/<step>.json``, and the file a step replaced at ``<step>``."""
 
@@ -622,7 +638,8 @@ class _Landing:
         names = os.listdir(self.kept) if self.kept.is_dir() else []
         return [int(match.group(1)) for name in names if (match := _STEP.fullmatch(name))]
 
-    def read(self, step: int) -> dict[str, Any] | None:
+    def read(self, step: int, *, as_the_app: bool = False) -> dict[str, Any] | None:
+        """A step's record as these rules write one, or None where it has none; *as_the_app*, the app's helper's too, as the app reads either (files/land.ts, recordsOf)."""
         try:
             text = (self.kept / f"{step}.json").read_text()
         except FileNotFoundError:
@@ -633,7 +650,7 @@ class _Landing:
             record = json.loads(text)
         except ValueError:
             record = None
-        if isinstance(record, dict) and record.keys() == {"path", "was", "wrote", "mode", "made", "above"} and landable(record["path"]):
+        if isinstance(record, dict) and (record.keys() == _RECORD or as_the_app and record.keys() == _APPS_RECORD) and landable(record["path"]):
             return record
         named = record.get("path") if isinstance(record, dict) else None
         raise _Unreadable(self.saga, step, named if isinstance(named, str) and landable(named) else None)

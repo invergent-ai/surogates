@@ -53,6 +53,10 @@ from tests.fake_places import FOLDER_UNAVAILABLE, Places, cannot
 
 # What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
 ASKED = {"run", "start", "write", "delete", "write_stdin"}
+# What the app answers an operation that ran and whose outcome does not fit one frame of its link (desktop/src/operations/runner.ts).
+RAN_TOO_LARGE = {"error": {
+    "type": "too_large", "message": "The operation ran, but its result is too large to send. Check what it did before repeating it.",
+}}
 # What the app answers the user's own request still asked about, or waiting for its data, once its link
 # ends (desktop/src/operations/runner.ts): its caller was told "offline", so it never runs.
 DISMISSED = {"error": {
@@ -447,6 +451,8 @@ class FakeLaptop:
         self.places = Places(data, Path(folder.root), user) if data is not None else None
         # Asked of each thread kind's outcome before it is sent: a computer that lies. (frame, outcome) -> outcome.
         self.lie: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None
+        # The most a thread kind's outcome may hold, as one frame of the link carries it: a scene may make it smaller.
+        self.frame_chars = MAX_MESSAGE_CHARS
         self.ping_interval_s = ping_interval_s
         self.ran: list[str] = []
         self.received: list[str] = []
@@ -688,6 +694,9 @@ class FakeLaptop:
             outcome = FOLDER_UNAVAILABLE
         else:
             outcome = await asyncio.to_thread(self.places.run, frame)
+        if len(json.dumps(outcome)) > self.frame_chars:
+            # It ran, and its answer does not fit: the app says so in its place.
+            outcome = RAN_TOO_LARGE
         return outcome if self.lie is None else self.lie(frame, outcome)
 
     async def _in_copy(self, frame: dict[str, Any]) -> dict[str, Any]:
