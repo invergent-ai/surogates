@@ -32,7 +32,20 @@ from tests.test_fake_places import built_helper  # noqa: F401  (a fixture)
 from tests.test_steer_loop import _final_response
 
 from .test_devices import FOLDER, api, eventually, link_url  # noqa: F401  (api and link_url are fixtures)
-from .test_local_history_landing import EDITS, LANDED, files_of, here, holding, kept, ran, records, said, seen, told  # noqa: F401
+from .test_local_history_landing import (  # noqa: F401  (here is a fixture)
+    EDITS,
+    LANDED,
+    SMALL_FRAME,
+    files_of,
+    here,
+    holding,
+    kept,
+    ran,
+    records,
+    said,
+    seen,
+    told,
+)
 from .test_local_history_open import a_worker, begun_with_copy, lease_let_go, status_of, woken
 from .test_local_history_settle import Lost, lands_next, left_open, lost_after, two_threads
 from .test_local_history_threads import asked, bound_with_copy, computer, fields_of, recorded  # noqa: F401  (computer is a fixture)
@@ -65,11 +78,13 @@ async def back(here) -> None:
     await here.app.connect()
 
 
-async def landing_away(api, monkeypatch, here, thread, action: str, path: str | None = None, replies=None, *, invocation="land:0"):
+async def landing_away(
+    api, monkeypatch, here, thread, action: str, path: str | None = None, replies=None, *, invocation="land:0", during=None,
+):
     """*thread*'s turn, whose landing finds its computer gone at *action*: the turn, waiting, and its worker."""
     monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
     away_at(here, action, path, invocation=invocation)
-    worker = a_worker(api, monkeypatch, thread, replies or [EDITS, _final_response("Done.")])
+    worker = a_worker(api, monkeypatch, thread, replies or [EDITS, _final_response("Done.")], during=during)
     turn = asyncio.create_task(worker.wake(thread.id))
     await eventually(lambda: gone(here), timeout=20.0)
     return turn, worker
@@ -297,6 +312,69 @@ async def test_a_stop_while_a_step_is_in_flight_of_a_landing_that_has_written_a_
     assert await status_of(api, thread) == "paused" and await lease_let_go(api, thread)
 
 
+@pytest.mark.parametrize("at", ["a turn that changed nothing", "your edits too many for one landing"])
+async def test_a_stop_while_a_landing_that_wrote_nothing_waits_in_its_forgetting_ends_its_turn_within_a_bound(api, here, monkeypatch, at):
+    heard_soon(monkeypatch)
+    # Thirty seconds; here it is half a second.
+    monkeypatch.setattr(local_landing, "RELEASE_WAIT", 0.5)
+    _, master, thread = await begun_with_copy(api, here)
+    if at == "a turn that changed nothing":
+        replies, during = [calling(("terminal", {"command": "ls"})), _final_response("Done.")], None
+    else:
+        here.app.frame_chars = SMALL_FRAME
+        photos = here.folder / "Photos" / "2026"
+        replies = [
+            calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})),
+            calling(("memory", {"action": "add", "content": "Done."})), _final_response("Done."),
+        ]
+
+        async def during(harness) -> None:
+            # While the thread works, you add more photos to the folder than one landing's answer can carry.
+            photos.mkdir(parents=True)
+            for n in range(80):
+                (photos / f"IMG_{n:06d}.jpg").write_bytes(b"\xff\xd8 photo %d" % n)
+
+    turn, worker = await landing_away(api, monkeypatch, here, thread, "forget", replies=replies, during=during)
+    before = seen(here.folder)
+    await stop(api, thread, worker)
+    # Its turn ends though its computer is away, and lets its lease go: nothing was written, so nothing is lost.
+    await asyncio.wait_for(turn, 10.0)
+    assert ran(here, "land:0")[-1] == "forget" and await records(api, thread) == [] and await left_open(api, thread) == []
+    assert await status_of(api, thread) == "paused" and await lease_let_go(api, thread)
+    assert seen(here.folder) == before
+    # Nothing of it was under way, and its master is not told it was.
+    [report] = await told(api, master)
+    assert "landing_stopped" not in report.data
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    assert "stopped" not in end.data
+
+
+async def test_a_stop_heard_once_its_landing_wrote_is_told_as_such_however_the_landing_ends_and_it_is_not_tried_again(api, here, monkeypatch):
+    heard_soon(monkeypatch)
+    _, master, thread = await begun_with_copy(api, here)
+    report_file = here.folder / "Report.docx"
+    worker = a_worker(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    ask = Steps.ask
+
+    async def stopped_after_the_first_apply(self, kind, action, **arguments):
+        answer = await ask(self, kind, action, **arguments)
+        if action == "apply" and arguments["path"] == "Budget.xlsx":
+            # You press Stop, and you save the report the landing is about to write.
+            await stop(api, thread, worker)
+            report_file.write_bytes(b"PK report v2, by you")
+        return answer
+
+    monkeypatch.setattr(Steps, "ask", stopped_after_the_first_apply)
+    await asyncio.wait_for(worker.wake(thread.id), 30.0)
+    # Its apply of the report was refused, and the landing put back whole; a Stop heard, it is not tried again.
+    assert ran(here, "land:0") == [*LANDED[:6], "unapply", "unapply", "forget"] and ran(here, "land:0:2") == []
+    assert report_file.read_bytes() == b"PK report v2, by you" and not (here.folder / "Budget.xlsx").exists()
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"], report.data["landing_stopped"]) == ("compensated", "changed", True)
+    assert "Stopped while its landing was already under way, so the landing was not interrupted: it was put back whole" in said(report)
+    assert await status_of(api, thread) == "paused"
+
+
 async def test_a_stop_heard_while_a_resumed_turn_settles_its_first_landing_lands_nothing_more_of_what_it_did_since(api, here, monkeypatch):
     heard_soon(monkeypatch)
     _, master, thread = await begun_with_copy(api, here)
@@ -379,9 +457,136 @@ async def test_a_thread_deleted_while_its_landing_is_under_way_has_it_put_back_w
         assert ran(here, "land:0") == [*LANDED[:4], *written, *["unapply"] * len(written), "forget"]
         assert seen(here.folder) == before and row.saga_state == "compensated"
         assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "deleted")
-        assert "the thread was deleted while its landing was under way" in said(report)
+        assert "the thread was deleted before its landing finished" in said(report) and "lands with its next turn" not in said(report)
     # Its computer was told to forget the folder, as for any deleted thread.
     assert "retire" in here.app.ran
+
+
+@pytest.mark.parametrize("at", ["its hold of the folder", "its commit"])
+async def test_a_thread_deleted_before_its_landings_first_apply_has_that_landing_end_there_and_says_it_was_deleted(api, here, monkeypatch, at):
+    heard_soon(monkeypatch)
+    _, master, thread = await begun_with_copy(api, here)
+    before = seen(here.folder)
+    held = at == "its hold of the folder"
+    turn, worker = await landing_away(
+        api, monkeypatch, here, thread, "recover" if held else "commit", invocation="land:0:hold" if held else "land:0",
+    )
+    await delete(api, thread, worker)
+    await asyncio.wait_for(turn, 10.0)
+    # It ends where it stood, with nothing of it in the folder and nothing of it left to run: its computer, away, is
+    # still to be told to forget the folder, as for any deleted thread.
+    assert [row.saga_state for row in await records(api, thread)] == ([] if held else ["compensated"])
+    assert await left_open(api, thread) == [("retire", None)] and seen(here.folder) == before
+    # Its master hears that it was deleted, and nothing of a next turn it will not have.
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "deleted")
+    assert "the thread was deleted before its landing finished" in said(report) and "lands with its next turn" not in said(report)
+
+
+async def test_a_thread_deleted_between_two_applies_whose_interrupt_comes_after_the_next_apply_has_its_landing_put_back_whole(
+    api, here, monkeypatch,
+):
+    heard_soon(monkeypatch)
+    _, master, thread = await begun_with_copy(api, here)
+    before = seen(here.folder)
+    worker = a_worker(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    ask = Steps.ask
+
+    async def deleted_after_the_first_apply(self, kind, action, **arguments):
+        answer = await ask(self, kind, action, **arguments)
+        if action == "apply" and arguments["path"] == "Budget.xlsx":
+            # Its computer answers on; the route's interrupt reaches the worker only once its next step has been refused.
+            assert (await api.client.delete(f"/v1/sessions/{thread.id}", headers=api.auth())).status_code == 204
+            asyncio.get_running_loop().call_later(0.2, worker.interrupt, "session deleted")
+        return answer
+
+    monkeypatch.setattr(Steps, "ask", deleted_after_the_first_apply)
+    await asyncio.wait_for(worker.wake(thread.id), 30.0)
+    # Put back whole by its worker, though the journal refused its next apply before it heard: nothing is left in the folder.
+    assert seen(here.folder) == before and kept(here) == {} and here.app.places.holder is None
+    [row] = await records(api, thread)
+    assert row.saga_state == "compensated" and await left_open(api, thread) == []
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "deleted")
+
+
+async def test_a_thread_deleted_whose_interrupt_never_reaches_its_worker_has_its_landings_put_back_bounded_all_the_same(
+    api, here, monkeypatch,
+):
+    heard_soon(monkeypatch)
+    # Five minutes; here it is two seconds.
+    monkeypatch.setattr(local_landing, "_PUT_BACK_BOUND", 2.0)
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    lost_master, lost, _, next_ = await two_threads(api, monkeypatch, here)
+    ask = Steps.ask
+
+    async def deleted_after_the_first_apply(self, kind, action, **arguments):
+        answer = await ask(self, kind, action, **arguments)
+        if action == "apply" and arguments["path"] == "Budget.xlsx":
+            # Its interrupt is lost: the worker learns of it from the journal's refusal of its next apply alone.
+            assert (await api.client.delete(f"/v1/sessions/{lost.id}", headers=api.auth())).status_code == 204
+            away_at(here, "unapply")
+        return answer
+
+    monkeypatch.setattr(Steps, "ask", deleted_after_the_first_apply)
+    worker = a_worker(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    await asyncio.wait_for(worker.wake(lost.id), 10.0)
+    # Its put-back met its computer gone: within the bound its worker ends, the landing left for the next in its folder.
+    [row] = await records(api, lost)
+    assert row.saga_state == "running"
+    [report] = await told(api, lost_master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("unsettled", "deleted")
+    await back(here)
+    await lands_next(api, monkeypatch, here, next_)
+    [settled] = await records(api, lost)
+    assert settled.saga_state == "compensated" and not (here.folder / "Budget.xlsx").exists() and kept(here) == {}
+
+
+@pytest.mark.parametrize("at", ["its put-back", "its look at its record"])
+async def test_a_thread_deleted_while_its_landing_puts_itself_back_has_that_put_back_bounded_too(api, here, monkeypatch, at):
+    heard_soon(monkeypatch)
+    # Five minutes; here it is two seconds.
+    monkeypatch.setattr(local_landing, "_PUT_BACK_BOUND", 2.0)
+    lost_master, lost, _, next_ = await two_threads(api, monkeypatch, here)
+    report_file = here.folder / "Report.docx"
+    look = at == "its look at its record"
+
+    def you_save_then_away(frame, outcome):
+        action = frame["args"].get("action")
+        if frame["invocation_id"] != "land:0":
+            return outcome
+        if action == "commit" and not look:
+            # You save the report after the turn was committed: its apply is refused, and the landing puts itself back.
+            report_file.write_bytes(b"PK report v2, by you")
+        elif action == "record" and look:
+            # Its record ran, and was answered with a refusal: the landing asks the folder's history whether it pushed.
+            return {"error": {"type": "interrupted", "message": "This computer stopped while it ran"}}
+        elif action == ("fetch" if look else "unapply"):
+            here.app.reply = False
+        return outcome
+
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    here.app.lie = you_save_then_away
+    worker = a_worker(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    turn = asyncio.create_task(worker.wake(lost.id))
+    await eventually(lambda: gone(here), timeout=20.0)
+    await delete(api, lost, worker)
+    # Past the bound its worker ends there, the landing left for the next in its folder.
+    await asyncio.wait_for(turn, 20.0)
+    [row] = await records(api, lost)
+    assert row.saga_state == "running"
+    [report] = await told(api, lost_master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("unsettled", "deleted")
+    await back(here)
+    await lands_next(api, monkeypatch, here, next_)
+    [settled] = await records(api, lost)
+    assert await left_open(api, lost) == [] and kept(here) == {}
+    if look:
+        # It had pushed: the next landing finds it so, and completes it with nothing put back.
+        assert settled.saga_state == "completed" and (here.folder / "Budget.xlsx").read_text() == "Total,42\n"
+    else:
+        assert settled.saga_state == "compensated"
+        assert report_file.read_bytes() == b"PK report v2, by you" and not (here.folder / "Budget.xlsx").exists()
 
 
 @pytest.mark.parametrize("at", ["the step in flight", "its put-back", "its forgetting"])
