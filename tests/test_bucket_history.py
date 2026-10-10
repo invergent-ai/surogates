@@ -2043,7 +2043,7 @@ async def test_a_deletion_the_storage_did_not_make_fails_its_apply(tmp_path, sto
     (project / "b.md").write_bytes(b"b\n")
     assert (await history.apply("b.md", blob_of(b"b\n"), None))["after"] is None and not (project / "b.md").exists()
 
-    async def swallowed(bucket_name, key):
+    async def swallowed(bucket_name, key, **condition):
         return None  # as S3Backend.delete does on any error
 
     monkeypatch.setattr(storage, "delete", swallowed)

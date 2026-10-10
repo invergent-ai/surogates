@@ -24,6 +24,7 @@ from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
 from surogates.sandbox.history import HistoryError
 from surogates.session.store import SessionStore
+from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import bucket as bucket_module
 from surogates.workstreams import history as rows_module
@@ -2649,3 +2650,62 @@ async def test_a_landing_by_you_the_api_left_running_is_settled_by_a_routine_run
     assert [f["path"] for f in picked.picked_up] == ["tidied.md"]
     found = [v for v in await history_of(api, project, yours) if v["by"] == {"kind": "you"} and v["change"] == "changed"]
     assert len(found) == 1 and (await opened(api, project, found[0]["id"], yours)).content == YOURS
+
+
+def you_save_on_its_read(monkeypatch, pods, path: str, read: int, data: bytes) -> list[int]:
+    """You save *path* right after the store hands the api its *read*-th read of it: a check then holds its tag and bytes."""
+    download, seen = LocalBackend.download, []
+
+    async def then_you_save(self, bucket, key, target, *, limit=None):
+        got = await download(self, bucket, key, target, limit=limit)
+        if key.endswith("/" + path):
+            seen.append(1)
+            if len(seen) == read:
+                (pods.project / path).write_bytes(data)
+        return got
+
+    monkeypatch.setattr(LocalBackend, "download", then_you_save)
+    return seen
+
+
+SAVED = b"your save, made while the Undo checked the file\n"
+
+
+@pytest.mark.parametrize("path", ["a.md", "Report.docx"])
+async def test_a_save_while_an_undo_checks_a_file_it_deletes_or_writes_is_kept_and_said_to_have_been_changed_after_it(
+    api, monkeypatch, tmp_path, path,
+):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && echo a > a.md")
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    # The first read of each file is the look at your edits; the second, the apply's check.
+    seen = you_save_on_its_read(monkeypatch, pods, path, 2, SAVED)
+    # The landing made a.md: its Undo takes it away, and changed the report: its Undo writes it back. Either way
+    # the store is asked to change only the file the check saw: the save is left, and the other file is put back.
+    other = "Report.docx" if path == "a.md" else "a.md"
+    assert await undone(api, project, landing=str(row.id)) == {
+        "applied": [other], "skipped": [{"path": path, "by": {"kind": "you"}}], "picked_up": [],
+    }
+    assert len(seen) >= 2 and (pods.project / path).read_bytes() == SAVED
+    if path == "a.md":
+        assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    else:
+        assert not (pods.project / "a.md").exists()
+    assert undos_on_main(pods) == 1
+
+
+async def test_a_save_while_a_put_back_checks_a_file_the_undo_had_made_is_kept_and_named(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && rm notes.txt")
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+
+    async def the_push_fails(self, **arguments):
+        raise HistoryError("the bucket refused the pack")
+
+    monkeypatch.setattr(BucketHistory, "record", the_push_fails)
+    # The Undo brings the notes back; its record fails, and the put-back is to take them away again. The notes
+    # were not there to read before: the put-back's check is the first read of them.
+    seen = you_save_on_its_read(monkeypatch, pods, "notes.txt", 1, SAVED)
+    refused = await undone(api, project, status=409, landing=str(row.id))
+    assert refused["detail"] == "notes.txt could not be put back as it was. Open its History to restore the version you want."
+    assert seen == [1] and (pods.project / "notes.txt").read_bytes() == SAVED
+    assert (pods.project / "Report.docx").read_bytes() == REPORT_BY_A and undos_on_main(pods) == 0
+    assert [r.saga_state for r in await rows_of(api, project)][-1] == "escalated"

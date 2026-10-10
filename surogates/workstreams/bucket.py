@@ -977,21 +977,23 @@ class BucketHistory:
     ) -> AsyncIterator[Callable[[str | None, str | None], Awaitable[None]]]:
         """The real file at *path* made ready to be the version *blob*, one of *kept*, before it is checked; None takes it away.
 
-        What it yields writes it, given what the check saw of the real
-        file: its blob, and the store's tag.  All a write needs but the
-        store is done first: the version written out to a file of the
-        copy's, and whether the real files can take a file there asked.  So
-        from the check to the write is the store's own time alone, and a
-        save in that time is refused where the store can tell it: the write
-        raises :class:`Changed`, for its caller to say what that is.  A
-        version the copy no longer holds is refused only when it is to be
-        written.  The file is gone with the block.
+        What it yields writes it, or takes it away, given what the check saw
+        of the real file: its blob, and the store's tag.  All a write needs
+        but the store is done first: the version written out to a file of
+        the copy's, and whether the real files can take a file there asked.
+        So from the check to the write, or the delete, is the store's own
+        time alone, and a save in that time is refused where the store can
+        tell it: the write or the delete raises :class:`Changed`, for its
+        caller to say what that is.  A version the copy no longer holds is
+        refused only when it is to be written.  The file is gone with the
+        block.
         """
         key = self._key(path)
         if blob is None:
 
             async def taken_away(real: str | None, tag: str | None) -> None:
-                await self.storage.delete(self.bucket, key)
+                # Only the file the check saw: a save since is left, as a write leaves one.
+                await self.storage.delete(self.bucket, key, if_tag=tag)
                 # A store may swallow a delete's failure: the landing must not record what did not happen.
                 if await self.storage.exists(self.bucket, key):
                     raise HistoryError(f"{path} could not be deleted")
