@@ -509,9 +509,9 @@ async def _land(
     ``through``, the last tool call it was begun for.  Taken up again, it
     goes on as its first run began it, its audit among it, so each step it
     asks again is answered from the journal; but where the turn took
-    another path than that run, or worked on since that run began it, it
-    is settled as a landing left running is, from what its computer was
-    asked, and the turn lands again as a new saga.
+    another path than that run, or worked on since that run began it, or a
+    settle began on it, it is settled as a landing left running is, from
+    what its computer was asked, and the turn lands again as a new saga.
     """
     invocation = f"land:{turn}" if attempt == 1 else f"land:{turn}:{attempt}"
     # Named after its invocation: a turn taken up again finds its landing, and no other landing ever has its name.
@@ -539,6 +539,11 @@ async def _land(
             # Gone on with, it would record the copy as it is now over the
             # turn it committed, and set the work done since aside.
             logger.warning("Thread %s worked on since its landing %s began: it is settled, and the turn lands again", session.id, saga_id)
+            return await settled(found)
+        if await copy.operations.settling(copy.device_id, saga_id):
+            # Another landing began putting it back, and stopped: gone on
+            # with, it would record files the folder may no longer hold.
+            logger.warning("A settle began on the landing %s of thread %s: it is settled, and the turn lands again", saga_id, session.id)
             return await settled(found)
     try:
         row_id = found.id if found is not None else await start_landing(

@@ -1220,6 +1220,22 @@ class DeviceOperations:
             )).all()
         return [(row.kind, row.args, row.outcome) for row in rows]
 
+    async def settling(self, device_id: UUID, saga_id: str) -> bool:
+        """Whether a turn, any thread's, has asked the computer *device_id* a step of settling the landing *saga_id*.
+
+        A settle asks its steps under ``land:<turn>:settle:<saga>``: once it
+        asked one, the landing's own turn may not go on with it as its run
+        left it, since its own journal holds none of what the settle did.
+        """
+        async with self._sf() as db:
+            return (await db.execute(
+                select(DeviceOperation.id).where(
+                    DeviceOperation.device_id == device_id, DeviceOperation.kind.in_(THREAD_KINDS),
+                    DeviceOperation.invocation_id.startswith("land:"),
+                    DeviceOperation.invocation_id.endswith(f":settle:{saga_id}", autoescape=True),
+                ).limit(1)
+            )).first() is not None
+
     async def closed_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
         """Which of these operations of the device the server has closed.
 
