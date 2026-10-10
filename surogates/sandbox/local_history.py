@@ -163,7 +163,7 @@ _THREAD = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 _USER = re.compile(r"[A-Za-z0-9_.@-]{1,128}")
 #: Each action a request may name, the method it runs and the arguments it takes.
 _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
-    "open": ("open", frozenset()),
+    "open": ("open", frozenset({"moves"})),
     "changed": ("changed", frozenset()),
     "snapshot": ("snapshot", frozenset({"reason"})),
     "restore": ("restore", frozenset({"commit"})),
@@ -276,7 +276,7 @@ class LocalHistory(History):
                 "refused the request: a file's name is not UTF-8, which history cannot record", code=NAME_NOT_UTF8,
             ) from None
 
-    def open(self) -> dict:
+    def open(self, moves: bool = True) -> dict:
         """Make the thread's copy, or bring the one it has to its next turn.
 
         With none yet, the cloud's open: ``main`` is the folder as it is, by
@@ -287,10 +287,12 @@ class LocalHistory(History):
         set aside for a redirect in it, is made again as the first, and
         whatever is at its copy's path with it.  A copy whose folder was
         removed, whose own making was cut short, or whose index is gone, is
-        made again from its branch.  Then a copy with nothing unlanded moves
-        to ``main``'s tip, your edits picked up as at its first open
-        (``moved``); one with unlanded work stays where it is, and so does
-        its base (``kept``).
+        made again from its branch.  Then, where it *moves*, as at a turn's
+        start, a copy with nothing unlanded moves to ``main``'s tip, your
+        edits picked up as at its first open (``moved``); one with unlanded
+        work stays where it is, and so does its base (``kept``).  Inside a
+        turn, as the desktop opens a copy before a step works in it, it
+        does not move: it stays on the base its turn began on (``kept``).
 
         A copy is being made from before its first file is written until
         its making has ended, at a first open once the repository is marked
@@ -307,9 +309,10 @@ class LocalHistory(History):
         (:meth:`_asides_whole`): read there at every open, whatever else the
         open answers, a folder with no history as any other.
 
-        Before the copy is read as anything's base, what a request of the
-        thread's was cut in the middle of is finished, by the snapshot the
-        move to ``main`` begins with (:meth:`_catch_up`).  ``set_asides``
+        Before the copy is read as anything's base, and before a copy that
+        does not move is answered, what a request of the thread's was cut in
+        the middle of is finished (:meth:`_catch_up`): a host works in the
+        copy right after.  ``set_asides``
         are the snapshots of what the copy held of its own when that, or a
         record, made it other files, the oldest first: all the thread's
         repository holds, read from its refs at every open, so that one
@@ -357,7 +360,12 @@ class LocalHistory(History):
                 except HistoryError as why:
                     # Upkeep: a repository git cannot pack again still serves its thread's turn.
                     logger.warning("A thread's repository could not be packed again, and is left as it is: %s", why)
-            moved = self._to_main()
+            if moves:
+                # Its snapshot before the turn finishes first what a cut request left.
+                moved = self._to_main()
+            else:
+                self._catch_up()
+                moved = False
             asides = [commit for _, commit in sorted(self._asides().values())]
             return {"copy": "moved" if moved else "kept", **({"set_asides": asides} if asides else {}), **self._asides_whole()}
         finally:
@@ -1273,6 +1281,8 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         raise HistoryError("refused the request: it names no action this computer's history takes", code=NOT_A_REQUEST)
     for key in ("commit", "turn", "main", "pickup", "commits", "since"):
         _ids(args.get(key), f"its {key}")
+    if not isinstance(args.get("moves", True), bool):
+        raise HistoryError("refused the request: whether it moves the copy is neither true nor false", code=NOT_A_REQUEST)
     if not isinstance(args.get("applied", []), list):
         raise HistoryError("refused the request: it names no files a landing applied", code=NOT_A_REQUEST)
     for change in args.get("applied", []):
