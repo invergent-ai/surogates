@@ -32,7 +32,7 @@ from tests.test_fake_places import built_helper  # noqa: F401  (a fixture)
 from tests.test_steer_loop import _final_response
 
 from .test_devices import FOLDER, api, eventually, link_url  # noqa: F401  (api and link_url are fixtures)
-from .test_local_history_landing import EDITS, LANDED, files_of, here, kept, ran, records, said, seen, told  # noqa: F401
+from .test_local_history_landing import EDITS, LANDED, files_of, here, holding, kept, ran, records, said, seen, told  # noqa: F401
 from .test_local_history_open import a_worker, begun_with_copy, lease_let_go, status_of, woken
 from .test_local_history_settle import Lost, lands_next, left_open, lost_after, two_threads
 from .test_local_history_threads import asked, bound_with_copy, computer, fields_of, recorded  # noqa: F401  (computer is a fixture)
@@ -148,6 +148,30 @@ async def test_a_step_its_computer_does_not_answer_within_its_bound_ends_a_landi
     await asyncio.sleep(0.5)
     assert ran(here) == [("open:0", "open"), ("land:0:hold", "recover"), *(("land:0", action) for action in LANDED[:4])]
     assert seen(here.folder) == before
+
+
+async def test_a_landing_that_landed_whose_forgetting_its_computer_does_not_answer_ends_its_turn_and_is_forgotten_by_the_next(
+    api, here, monkeypatch,
+):
+    # Thirty seconds; here it is one.
+    monkeypatch.setattr(local_landing, "RELEASE_WAIT", 1.0)
+    master, thread, _, next_ = await two_threads(api, monkeypatch, here)
+    frames = holding(here, lambda frame: (frame["session_id"], frame["args"].get("action")) == (str(thread.id), "forget"))
+    await asyncio.wait_for(woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")]), 20.0)
+    # Its files are in the folder, and its turn ended though its computer answered neither the forgetting nor the
+    # giving back of its hold of the folder that followed.
+    assert [frame["invocation_id"].split(":release:")[0] for frame in frames] == ["land:0", "land:0"]
+    assert (here.folder / "Budget.xlsx").read_text() == "Total,42\n" and (here.folder / "Report.docx").read_bytes() == b"PK report v1 edited"
+    [row] = await records(api, thread)
+    assert row.saga_state == "completed" and [(s["tool_name"], s["state"]) for s in row.steps][-1] == ("history.forget", "failed")
+    [report] = await told(api, master)
+    assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)]
+    saga = f"saga:{uuid5(thread.id, 'land:0')}"
+    assert set(kept(here)) == {f"{saga}/1"}
+    # What it kept is let go by the next landing in its folder.
+    del here.app._handle
+    await lands_next(api, monkeypatch, here, next_)
+    assert kept(here) == {} and (here.folder / "Y.md").read_text() == "y\n"
 
 
 # -- a computer revoked --------------------------------------------------------------------------------------------

@@ -111,8 +111,9 @@ STEP_WAIT = 7 * 86_400
 #: asks for in all: a refusal of ``busy`` did nothing.
 BUSY_WAIT = 15.0
 BUSY_PATIENCE = 1_800.0
-#: How long a turn waits for its computer to give the folder back: its app lets the folder go by itself once the
-#: landing's helper has been idle.
+#: How long a turn waits for its computer to give the folder back, and to forget its own landing at the landing's end:
+#: its app lets the folder go by itself once the landing's helper has been idle, and a landing not forgotten is
+#: forgotten by the next landing in its folder.
 RELEASE_WAIT = 30.0
 #: How often a landing whose thread may be stopped looks whether it was: one that has written no file ends there.
 STOP_CHECK = 1.0
@@ -856,7 +857,7 @@ async def _land(
     if outcome["state"] != "escalated":
         left = ending.left()
         outcome["forgot"] = await _forgotten(
-            saga, orchestrator, steps, row, nothing, outcome["state"], wait=None if left is None else max(left, STOP_FORGET),
+            saga, orchestrator, steps, row, nothing, outcome["state"], wait=RELEASE_WAIT if left is None else max(left, STOP_FORGET),
         )
     outcome["files"] = _told(changes, outcome["landed"], outcome["overlapped"])
     return outcome
