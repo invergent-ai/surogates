@@ -5,6 +5,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
+import { savedName, saveFile } from "../../../web/src/lib/save-file.js";
 import { ACCOUNT, connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
@@ -135,6 +136,9 @@ interface Served {
   reads: Array<string | null>;
   refusal: string | null;
   unreachable: boolean;
+  lag: number;
+  asked: string[][];
+  unopened: string | null;
   changed(id: string, threadId: string | null): void;
   register(lacks?: string[]): void;
 }
@@ -1321,5 +1325,211 @@ describe("a file's History in the Library", () => {
     }
     expect(await page.isVisible("#file-history")).toBe(false);
   });
-});
 
+  // What the fake page was asked to open.
+  const asked = (client: Page) => client.evaluate(() => (window as unknown as { fakeProjects: Served }).fakeProjects.asked);
+  const focused = (page: Page) => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus ?? null);
+  const waiting = (page: Page) => page.$$eval("#versions .act", (found) => found.map((act) => act.getAttribute("aria-disabled")));
+
+  it("offers Open version on each version still kept that left a file, and hands the one chosen to the agent's page to save", async () => {
+    agent.projects!.history[REPORT]![REVENUE]!.unshift(
+      { id: "20:f", path: REVENUE, by: { kind: "you" }, at: new Date().toISOString(), change: "deleted", merged: true, available: true, landingId: "20" },
+    );
+    const { page, client } = await opened();
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    // Nothing on a deletion, which left nothing to open, nor on a version no longer kept.
+    expect(await page.$$eval("#versions .version", (found) => found.map((version) => [
+      (version as HTMLElement).dataset.version, [...version.querySelectorAll(".act")].map((act) => act.textContent),
+    ]))).toEqual([["20:f", []], ["12:f", ["Open version"]], ["12:p", ["Open version"]], ["9:f", ["Open version"]], ["3:p", []]]);
+    await page.click('[data-version="12:p"] .act');
+    await expect.poll(() => asked(client)).toEqual([["openVersion", "12:p", REVENUE]]);
+    await expect.poll(() => waiting(page)).toEqual([null, null, null]);
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    // Asked past the page's own buttons, as a page gone wrong might: none of these is opened.
+    for (const id of ["20:f", "3:p", "99:f", "../12:p"]) {
+      const refused = await page.evaluate((version) => (window as unknown as { surogateShell: { openVersion(id: string): Promise<void> } })
+        .surogateShell.openVersion(version).then(() => null, (error: Error) => error.message), id);
+      expect(refused).toContain("No such version in the History shown");
+    }
+    expect(await asked(client)).toHaveLength(1);
+  });
+
+  it("opens one version at a time, its buttons waiting with the keyboard still on the one pressed", async () => {
+    const { shell, page, client } = await opened();
+    await (await served(client)).evaluate((fake) => { fake.lag = 1_500; });
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.focus('[data-version="9:f"] .act');
+    await page.keyboard.press("Enter");
+    await expect.poll(() => waiting(page)).toEqual(["true", "true", "true"]);
+    expect(await focused(page)).toBe("version:9:f:open");
+    // Pressed again, on this version or another, it opens nothing more; nor when the pane is drawn again meanwhile.
+    await page.keyboard.press("Enter");
+    await page.click('[data-version="12:p"] .act', { force: true });
+    await page.focus('[data-version="9:f"] .act');
+    await shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("shell:changed"));
+    await expect.poll(() => waiting(page)).toEqual([null, null, null]);
+    expect(await focused(page)).toBe("version:9:f:open");
+    expect(await asked(client)).toEqual([["openVersion", "9:f", REVENUE]]);
+    // Handed over, the next is opened.
+    await page.keyboard.press("Enter");
+    await expect.poll(() => asked(client)).toHaveLength(2);
+  });
+
+  it("says in the agent's words why a version could not be opened, and lists it as no longer kept once it is", async () => {
+    const { page, client } = await opened();
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    const gone = "This version is no longer kept in the project's history.";
+    // Pruned since the History was read.
+    await (await served(client)).evaluate((fake, [project, path, why]) => {
+      fake.data.history[project!]![path!]!.find((version) => version.id === "9:f")!.available = false;
+      fake.unopened = why!;
+    }, [REPORT, REVENUE, gone]);
+    await page.focus('[data-version="9:f"] .act');
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.textContent("#history-failure")).toBe(gone);
+    // Read again, it offers no save that would fail; the keyboard goes to what took the button's place.
+    await expect.poll(() => texts(page, '[data-version="9:f"] .from')).toEqual(["No longer kept"]);
+    expect(await texts(page, '[data-version="9:f"] .act')).toEqual([]);
+    expect(await focused(page)).toBe("version:12:p:open");
+    // Why it did not open stays said through the project's next change, until another version is opened.
+    await (await served(client)).evaluate((fake, project) => {
+      fake.unopened = null;
+      fake.changed(project, null);
+    }, REPORT);
+    await page.waitForSelector("#versions .version");
+    expect(await page.textContent("#history-failure")).toBe(gone);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.isVisible("#history-failure")).toBe(false);
+    expect(await asked(client)).toEqual([["openVersion", "9:f", REVENUE], ["openVersion", "12:p", REVENUE]]);
+  });
+
+  it("says an agent that lists a file's History but opens no version cannot yet, and lists no deleted file of its", async () => {
+    const { page, client } = await opened();
+    await (await served(client)).evaluate((fake, project) => {
+      fake.register(["openVersion", "deleted"]);
+      fake.changed(project, null);
+    }, REPORT);
+    await page.click('[data-tab="library"]');
+    await expect.poll(() => page.isVisible("#deleted")).toBe(false);
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    await page.click('[data-version="9:f"] .act');
+    await expect.poll(() => page.textContent("#history-failure")).toBe("This agent cannot open a version yet");
+    expect(await texts(page, "#versions .what")).toHaveLength(4);
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
+  // Open version is a download the agent's page starts (web/src/lib/save-file.ts). The page's own
+  // saveFile, run in the agent's page, reaches the app as a download of its session, which asks the
+  // user where to save it: no handler of the app's gives it a place, and the page is told none.
+  // What the app has of it is read where the system's dialog would open, and the download stopped there.
+  const downloaded = async (shell: ElectronApplication, client: Page, name: string, type = "application/octet-stream") => {
+    await shell.evaluate(({ webContents }, agentOrigin) => {
+      const agents = webContents.getAllWebContents().find((found) => found.getURL().startsWith(agentOrigin))!;
+      Object.assign(globalThis, { downloaded: undefined, handlers: agents.session.listenerCount("will-download") });
+      agents.session.once("will-download", (event, item) => {
+        Object.assign(globalThis, { downloaded: { name: item.getFilename(), bytes: item.getTotalBytes(), path: item.getSavePath() } });
+        event.preventDefault();
+      });
+    }, origin);
+    const text = "<script>document.title = 'ran'</script>";
+    const answer = await client.evaluate(`(${saveFile.toString()})(new Blob([${JSON.stringify(text)}], { type: ${JSON.stringify(type)} }), ${JSON.stringify(name)})`);
+    // The page is told nothing of where it went.
+    expect(answer).toBeUndefined();
+    await expect.poll(() => shell.evaluate(() => (globalThis as { downloaded?: unknown }).downloaded)).toBeDefined();
+    return shell.evaluate(() => {
+      const { downloaded: got, handlers } = globalThis as unknown as { downloaded: { name: string; bytes: number; path: string }; handlers: number };
+      return { ...got, handlers };
+    });
+  };
+
+  it("a version the agent's page hands to save reaches the app as a download of the file's own name, never as a page", async () => {
+    const { shell, client } = await opened();
+    const [at, title] = [client.url(), await client.title()];
+    // The session's own download, with no place given it and no handler of the app's to give one: the system's dialog asks.
+    expect(await downloaded(shell, client, "Report.docx")).toEqual({ name: "Report.docx", bytes: 39, path: "", handlers: 0 });
+    // A page or a drawing among the project's files is a file to save too, whatever it is called: it is not shown, and runs nothing.
+    expect(await downloaded(shell, client, "page.html", "text/html")).toMatchObject({ name: "page.html", bytes: 39 });
+    expect(await downloaded(shell, client, "drawing.svg", "image/svg+xml")).toMatchObject({ name: "drawing.svg", bytes: 39 });
+    expect([client.url(), await client.title()]).toEqual([at, title]);
+  });
+
+  it("a version's name is one name wherever the user saves it, however the file was called", async () => {
+    const { shell, client } = await opened();
+    const long = `${"long name ".repeat(800)}.xlsx`;
+    for (const [path, name, saved] of [
+      ["../../../etc/passwd", "passwd"], ["reports/..", "file"], ["line\r\nbreak.txt", "linebreak.txt"], [long, savedName(long)],
+      // The app's own rule for a download takes the dots a name begins with.
+      ["..\\..\\AppData\\run.bat", ".._.._AppData_run.bat", "_.._AppData_run.bat"],
+    ] as const) {
+      // As the page names it: the file's own name, no path, no longer than a file's name may be.
+      expect(savedName(path)).toBe(name);
+      expect(Buffer.byteLength(name)).toBeLessThanOrEqual(255);
+      expect((await downloaded(shell, client, name)).name).toBe(saved ?? name);
+      // And as the app has it, were a page gone wrong to hand the path over as it is: one name still,
+      // with no part that leaves the folder the user chooses.
+      const raw = (await downloaded(shell, client, path)).name;
+      expect([raw, /[\\/\u0000-\u001f]/.test(raw), [".", "..", ""].includes(raw)], JSON.stringify(path).slice(0, 40)).toEqual([raw, false, false]);
+    }
+  });
+
+  it("lists a deleted file under the Library's files, and opens its History as any file's", async () => {
+    const { page, client } = await opened();
+    await page.click('[data-tab="library"]');
+    await expect.poll(() => texts(page, "#deleted-files .path")).toEqual(["old-forecast.xlsx"]);
+    expect(await page.textContent("#deleted-title")).toBe("Deleted");
+    expect(await texts(page, "#deleted-files .from")).toEqual(["Deleted by you"]);
+    expect(await texts(page, "#deleted-files .age")).toEqual(["45m"]);
+    expect(await page.isVisible("#more-deleted")).toBe(false);
+    expect(await page.getAttribute('#deleted-files [data-file="old-forecast.xlsx"]', "aria-label")).toBe("History of old-forecast.xlsx");
+    await page.focus('#deleted-files [data-file="old-forecast.xlsx"]');
+    expect(await focused(page)).toBe("deleted:old-forecast.xlsx");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#versions .version");
+    // In place of the files, those deleted among them.
+    expect([await page.isVisible("#files"), await page.isVisible("#deleted"), await page.textContent("#history-path")])
+      .toEqual([false, false, "old-forecast.xlsx"]);
+    expect(await texts(page, "#versions .what")).toEqual(["Deleted by you", "Added by the thread Collect the sales data"]);
+    // The deletion left nothing to open; the version it took away opens.
+    expect(await texts(page, '[data-version="14:p"] .act')).toEqual([]);
+    await page.click('[data-version="5:f"] .act');
+    await expect.poll(() => asked(client)).toEqual([["openVersion", "5:f", "old-forecast.xlsx"]]);
+    // The way back gives the keyboard to the deleted file's row.
+    await page.focus("#history-back");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => focused(page)).toBe("deleted:old-forecast.xlsx");
+    expect(await page.isVisible("#deleted")).toBe(true);
+  });
+
+  it("says when more files were deleted than it lists, shows a name among them as text, and lists none that is there again", async () => {
+    const markup = '<img src=x onerror="document.title=1">\u202Egpj.md';
+    const gone = agent.projects!.deleted[REPORT]!;
+    gone.files.push({ ...gone.files[0]!, id: "11:f", path: markup, by: { kind: "thread", threadId: "t-9", title: "you\u200B" }, landingId: "11" });
+    gone.more = true;
+    const { page, client } = await opened();
+    await page.click('[data-tab="library"]');
+    await expect.poll(() => texts(page, "#deleted-files .path")).toEqual(["old-forecast.xlsx", markup]);
+    expect(await texts(page, "#deleted-files .from")).toEqual(["Deleted by you", "Deleted by the thread youU+200B"]);
+    expect(await page.textContent("#more-deleted")).toBe("Files deleted before these are not listed.");
+    expect(await page.isVisible("#more-deleted")).toBe(true);
+    expect(await page.$$eval("#deleted img", (found) => found.length)).toBe(0);
+    // A file that is among the project's files again, as one its user uploaded anew, is not gone; one on a computer is another file.
+    await (await served(client)).evaluate((fake, [project, path]) => {
+      fake.data.library[project!]!.push(
+        { path: "old-forecast.xlsx", origin: "added", threadId: null, size: 9, updatedAt: null, place: { kind: "cloud" } },
+        { path: path!, origin: "produced", threadId: null, size: null, updatedAt: null, place: { kind: "device", deviceId: "d", deviceName: "thinkpad", online: true } },
+      );
+      fake.changed(project!, null);
+    }, [REPORT, markup]);
+    await expect.poll(() => texts(page, "#deleted-files .path")).toEqual([markup]);
+    await (await served(client)).evaluate((fake, project) => {
+      fake.data.deleted[project] = { files: [], more: false };
+      fake.changed(project, null);
+    }, REPORT);
+    await expect.poll(() => page.isVisible("#deleted")).toBe(false);
+    expect(await page.title()).not.toBe("1");
+  });
+});

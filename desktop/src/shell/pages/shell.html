@@ -149,11 +149,16 @@
       <div class="library" id="library" hidden>
         <ul id="files" data-focus-list="files"></ul>
         <p class="desc" id="no-files">The files you add to this project and the files its threads produce appear here.</p>
+        <section id="deleted" aria-labelledby="deleted-title" hidden>
+          <h2 class="desc" id="deleted-title">Deleted</h2>
+          <ul id="deleted-files" data-focus-list="deleted"></ul>
+          <p class="desc" id="more-deleted" hidden>Files deleted before these are not listed.</p>
+        </section>
         <section class="history" id="file-history" aria-labelledby="history-path" hidden>
           <button class="back" id="history-back" type="button" data-icon="arrow-left" data-focus="history-back">All files</button>
           <h2 class="path" id="history-path"></h2>
           <p class="failure" id="history-failure" role="alert" hidden></p>
-          <ul id="versions"></ul>
+          <ul id="versions" data-focus-list="versions"></ul>
           <p class="desc" id="no-versions" hidden>No change to this file is recorded yet.</p>
         </section>
       </div>
