@@ -57,6 +57,10 @@ from .test_workstream_threads import events_of
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+#: The snapshots ``EDITS``'s two steps start from, each asked before its tool call, as the computer runs them.
+EDITS_TAKEN = [("checkpoint:0:0:call_0_write_file", "take"), ("checkpoint:0:1:call_1_terminal", "take")]
+
+
 async def gone(here) -> bool:
     return not here.app.connected
 
@@ -161,7 +165,7 @@ async def test_a_step_its_computer_does_not_answer_within_its_bound_ends_a_landi
     # Not tried again at once, and its computer, back, is asked nothing more of it.
     await back(here)
     await asyncio.sleep(0.5)
-    assert ran(here) == [("open:0", "open"), ("land:0:hold", "recover"), *(("land:0", action) for action in LANDED[:4])]
+    assert ran(here) == [("open:0", "open"), *EDITS_TAKEN, ("land:0:hold", "recover"), *(("land:0", action) for action in LANDED[:4])]
     assert seen(here.folder) == before
 
 
@@ -246,7 +250,7 @@ async def test_a_stop_ends_a_landing_that_has_written_no_file_and_nothing_of_it_
     # Back, its computer is asked nothing more of it: a commit it had run moved the thread's branch, and no file of the folder.
     await back(here)
     await asyncio.sleep(0.5)
-    assert ran(here) == [("open:0", "open"), ("land:0:hold", "recover"), *(("land:0", step) for step in landed)]
+    assert ran(here) == [("open:0", "open"), *EDITS_TAKEN, ("land:0:hold", "recover"), *(("land:0", step) for step in landed)]
     assert seen(here.folder) == before
     # The thread stays as the Stop left it, its work in its copy; its master hears that none of it landed, and why.
     assert await status_of(api, thread) == "paused" and await lease_let_go(api, thread)
