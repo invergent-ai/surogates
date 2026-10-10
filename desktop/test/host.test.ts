@@ -1,20 +1,25 @@
-import { execFileSync, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync,
   symlinkSync, writeFileSync,
 } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
+import { kinds } from "../src/files/operations.js";
 import { FINISHED_TTL_SECONDS } from "../src/guest/processes.js";
-import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
+import { lockFolder, readRecord, writeRecord } from "../src/hosts/folder-record.js";
+import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
+import { READY_MS } from "../src/hosts/start.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 let base: string;
@@ -565,7 +570,7 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     symlinkSync(folder, join(base, "link"));
     const second = host({ folder: join(base, "link"), tmp: join(base, "data", "tmp", "other") });
     const said = await second.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 20_000);
-    expect(said).toEqual({ type: "failed", message: expect.stringMatching(/another chat on this computer is working in this folder/) });
+    expect(said).toEqual({ type: "failed", message: expect.stringMatching(/another chat on this computer is working in this folder/), busy: true });
     expect(await second.exited).toBe(1);
   });
 
@@ -718,5 +723,618 @@ describe("a tool host's record of its folder", { timeout: 30_000 }, () => {
     await ready(second);
     expect(await before(second, "second")).toEqual({ ok: null });
     expect(statSync(planted()).mode & 0o111).toBe(0);
+  });
+});
+
+// A folder of the user's with a project's thread on it, as the app lays it out: the folder itself in the user's home,
+// and in the app's data the folder's place, with its history, each thread's repository and copy, and what its landings keep.
+const KEY = "0123456789abcdef";
+const THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
+const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+const SAGA = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f";
+const HELPER = fileURLToPath(new URL("../dist/files/helper.js", import.meta.url));
+let home: string;
+let reports: string;
+let data: string;
+let place: string;
+let copy: string;
+let other: string;
+let kept: string;
+
+function lay(): void {
+  home = join(base, "home");
+  reports = join(home, "Reports");
+  data = start.dataDir;
+  place = join(data, "history", KEY);
+  copy = join(place, "threads", THREAD);
+  other = join(place, "threads", OTHER);
+  kept = join(data, "landings", KEY);
+  for (const [path, text] of [
+    [join(home, "secret.txt"), "the user's own, outside the folder\n"],
+    [join(reports, "a.txt"), "the user's own\n"],
+    [join(reports, "sub", "b.txt"), "the user's own, in a folder\n"],
+    [join(copy, "a.txt"), "the thread's\n"],
+    [join(copy, "sub", "b.txt"), "the thread's, in a folder\n"],
+    [join(other, "a.txt"), "another thread's\n"],
+    [join(place, "history.git", "HEAD"), "ref: refs/heads/main\n"],
+    [join(place, "clones", THREAD, "HEAD"), "ref: refs/heads/thread\n"],
+    [join(data, "devices", "credentials.json"), "the device's own\n"],
+  ] as const) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  }
+}
+// A host on the thread's copy, which stands for the folder; and one on the folder itself, for a landing from that copy.
+const onCopy = (more: Partial<HostStart> = {}) =>
+  host({ folder: copy, at: reports, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", THREAD), ...more });
+const forLanding = (more: Partial<HostStart> = {}) =>
+  host({ folder: reports, landing: { copy, kept }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", `${THREAD}.landing`), ...more });
+// What a host keeps for itself in the app's data: srt's sockets, its helper's working folder, its folder's record.
+const hostsOwn = () => ["srt", "tmp", "folders"].map((name) => join(data, name));
+const b64 = (text: string) => Buffer.from(text).toString("base64");
+const failed = (harness: Harness) => harness.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"));
+
+// Every name under *root* and what it is: its mode, its links, its size, when it last changed, and its bytes. *but*:
+// folders left out with all they hold. Two of these that are equal show nothing there was written, made, moved or removed.
+function seen(root: string, but: string[] = []): Record<string, string> {
+  const all: Record<string, string> = {};
+  const look = (path: string) => {
+    if (but.includes(path)) return;
+    const found = lstatSync(path, { bigint: true });
+    const holds = found.isSymbolicLink() ? `-> ${readlinkSync(path)}` : found.isFile() ? createHash("sha256").update(readFileSync(path)).digest("hex") : "";
+    all[path] = `${found.mode.toString(8)} ${found.nlink} ${found.size} ${found.mtimeNs} ${found.ctimeNs} ${holds}`;
+    if (found.isDirectory()) for (const name of readdirSync(path)) look(join(path, name));
+  };
+  look(root);
+  return all;
+}
+
+// The processes below *pid*, by the kernel's own list of each one's children.
+function below(pid: number): number[] {
+  let children: number[] = [];
+  try {
+    children = readdirSync(`/proc/${pid}/task`).flatMap((task) => readFileSync(`/proc/${pid}/task/${task}/children`, "utf8").split(" ").filter(Boolean).map(Number));
+  } catch {
+    // Gone since it was listed.
+  }
+  return children.flatMap((child) => [child, ...below(child)]);
+}
+// The file helper of *harness*'s host, in its sandbox: the node that runs it.
+function helperOf(harness: Harness): number {
+  const helpers = below(harness.child.pid ?? 0).filter((pid) => {
+    try {
+      const words = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+      return words[1] === "--disable-sigusr1" && words[2] === HELPER;
+    } catch {
+      return false;
+    }
+  });
+  expect(helpers).toHaveLength(1);
+  return helpers[0]!;
+}
+
+// Run where a file helper runs: what each of *asks* comes to there, its value or the system's refusal.
+const PROBE = `
+  import fs from "node:fs";
+  const ACTS = {
+    read: ({ path }) => fs.readFileSync(path, "utf8"),
+    list: ({ path }) => fs.readdirSync(path).sort(),
+    write: ({ path, data }) => fs.writeFileSync(path, data),
+    mkdir: ({ path }) => fs.mkdirSync(path),
+    rename: ({ path, to }) => fs.renameSync(path, to),
+    remove: ({ path }) => fs.rmSync(path, { recursive: true }),
+    chmod: ({ path }) => fs.chmodSync(path, 0o777),
+    capabilities: () => /^CapEff:\\s*(\\S+)$/m.exec(fs.readFileSync("/proc/self/status", "utf8"))[1],
+  };
+  const did = (act) => { try { return { ok: act() ?? null }; } catch (error) { return { code: error.code ?? String(error) }; } };
+  console.log(JSON.stringify(JSON.parse(process.argv[1]).map((ask) => did(() => ACTS[ask.act](ask)))));
+`;
+type Ask = { act: "read" | "list" | "mkdir" | "remove" | "chmod" | "capabilities"; path?: string } | { act: "write"; path: string; data: string } | { act: "rename"; path: string; to: string };
+type Answer = { ok: unknown } | { code: string };
+// A program of the test's in the sandbox of *harness*'s file helper: in that helper's own namespaces (its mounts, its
+// users, its processes), as this user and with no capability, as the helper is. So what it reaches is what the helper can.
+function inSandbox(harness: Harness, asks: Ask[]): Answer[] {
+  const ran = spawnSync(
+    "nsenter", ["-t", String(helperOf(harness)), "-U", "-m", "-p", "--preserve-credentials", process.execPath, "--input-type=module", "-e", PROBE, JSON.stringify(asks)],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  expect([ran.status, ran.stderr]).toEqual([0, ""]);
+  return JSON.parse(ran.stdout) as Answer[];
+}
+// Whether this computer lets a test into a sandbox of its own: where it does not, what a helper's sandbox reaches is not measured.
+const enters = spawnSync("nsenter", ["--version"]).status === 0 && spawnSync("unshare", ["-Urm", "true"]).status === 0;
+// Everything a program can try on *file* in *dir*, a name that is there: to read it and list beside it, then to write
+// over it, make a file and a folder beside it, change its mode, move it and remove it.
+const tries = (dir: string, file: string): Ask[] => [
+  { act: "read", path: join(dir, file) },
+  { act: "list", path: dir },
+  { act: "write", path: join(dir, file), data: "written from a sandbox\n" },
+  { act: "write", path: join(dir, "planted.txt"), data: "planted from a sandbox\n" },
+  { act: "mkdir", path: join(dir, "planted") },
+  { act: "chmod", path: join(dir, file) },
+  { act: "rename", path: join(dir, file), to: join(dir, "moved") },
+  { act: "remove", path: join(dir, file) },
+];
+// What each of those comes to on a name the sandbox holds nothing of: it is not there, to read or to write.
+const NOT_THERE: Answer[] = Array.from({ length: 8 }, () => ({ code: "ENOENT" }));
+// And in a folder on the way to one the sandbox holds: a folder of the sandbox's own, with *way* in it and nothing
+// else. A program writes there as it likes, and writes nothing on this computer.
+const ownFolder = (way: string): Answer[] => [{ code: "ENOENT" }, { ok: [way] }, { ok: null }, { ok: null }, { ok: null }, { ok: null }, { ok: null }, { code: "ENOENT" }];
+// The processes of a host's own group that are left, the host among them.
+const groupOf = (harness: Harness) => spawnSync("pgrep", ["-g", String(harness.child.pid)], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
+// Whether a host could take the lock of the folder at *path* now.
+async function free(path: string): Promise<boolean> {
+  const { dev, ino } = statSync(path);
+  try {
+    (await lockFolder(dev, ino, 0)).close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("a tool host on a thread's copy", { timeout: 60_000 }, () => {
+  beforeEach(lay);
+
+  it("answers the thread's file tools in its copy, by the folder's path, and leaves the folder itself as it was", async () => {
+    const before = seen(home);
+    const harness = onCopy();
+    await ready(harness);
+    expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${reports}/a.txt` });
+    expect(await harness.op("2", "read", { key: `${reports}/a.txt`, max_bytes: null })).toEqual({ ok: b64("the thread's\n") });
+    expect(await harness.op("3", "write", { key: `${reports}/made.txt`, data: b64("made by the thread\n") })).toEqual({ ok: null });
+    expect(await harness.op("4", "delete", { key: `${reports}/sub/b.txt` })).toEqual({ ok: null });
+    expect(await harness.op("5", "ripgrep", { key: reports, mode: "files", pattern: "made*", glob: null, context: 0 })).toEqual({ ok: `${reports}/made.txt\n` });
+    // The copy's own path names nothing: a key is one under the folder's path alone.
+    expect(await harness.op("6", "read", { key: `${copy}/a.txt`, max_bytes: null })).toEqual({
+      error: { type: "sandbox", message: `Not a path in this folder: '${copy}/a.txt'` },
+    });
+    // Nothing lands from a copy's host: its helper was given no copy to land from.
+    expect(await harness.op("7", "land", { action: "recover" })).toEqual({ error: { type: "unsupported", message: "This computer cannot do 'land' yet" } });
+    expect([readFileSync(join(copy, "made.txt"), "utf8"), existsSync(join(copy, "sub", "b.txt"))]).toEqual(["made by the thread\n", false]);
+    harness.send({ type: "stop" });
+    expect(await harness.exited).toBe(0);
+    expect(seen(home)).toEqual(before);
+  });
+
+  it.skipIf(!enters)("reaches its copy from its helper's sandbox and nothing else of the user's: not the folder it answers by, the folder's history, another thread's copy, what its landings keep, or the rest of the app's data", async () => {
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, "replaced"), "a file a landing replaced\n");
+    const harness = onCopy();
+    await ready(harness);
+    expect(inSandbox(harness, [{ act: "capabilities" }])).toEqual([{ ok: "0000000000000000" }]);
+    // Its copy: read, listed and written, on this computer.
+    expect(inSandbox(harness, [
+      { act: "read", path: join(copy, "a.txt") }, { act: "list", path: copy }, { act: "write", path: join(copy, "probe.txt"), data: "from the sandbox\n" },
+    ])).toEqual([{ ok: "the thread's\n" }, { ok: ["a.txt", "sub"] }, { ok: null }]);
+    expect(readFileSync(join(copy, "probe.txt"), "utf8")).toBe("from the sandbox\n");
+    const before = seen(base, [copy, ...hostsOwn()]);
+    for (const [what, dir, file, answers] of [
+      ["the folder it answers by", reports, "a.txt", NOT_THERE],
+      ["a folder in that folder", join(reports, "sub"), "b.txt", NOT_THERE],
+      ["the user's home", home, "secret.txt", NOT_THERE],
+      ["the folder's history", join(place, "history.git"), "HEAD", NOT_THERE],
+      ["the thread's own repository", join(place, "clones", THREAD), "HEAD", NOT_THERE],
+      ["another thread's copy", other, "a.txt", NOT_THERE],
+      ["what the folder's landings keep", kept, "replaced", NOT_THERE],
+      ["the rest of the app's data", join(data, "devices"), "credentials.json", NOT_THERE],
+      ["the folder's place", place, "history.git", ownFolder("threads")],
+      ["where the place keeps its copies", join(place, "threads"), OTHER, ownFolder(THREAD)],
+    ] as const) {
+      expect(inSandbox(harness, tries(dir, file)), what).toEqual(answers);
+      // Whatever each write was answered, nothing on this computer was written, made, moved or removed.
+      expect(seen(base, [copy, ...hostsOwn()]), what).toEqual(before);
+    }
+  });
+
+  it("holds the copy as a chat's host holds its folder: the record and the hooks it guards are the copy's, and the folder itself is another's to hold", async () => {
+    const hook = (folder: string) => join(folder, "sub", ".git", "hooks", "pre-commit");
+    const harness = onCopy();
+    await ready(harness);
+    const recordOn = (folder: string) => {
+      const { dev, ino } = statSync(folder);
+      return readRecord(join(data, "folders", `${dev}-${ino}.json`))?.state;
+    };
+    expect([recordOn(copy), recordOn(reports)]).toEqual(["running", undefined]);
+    // A command of the thread's, in the guest, writes the copy: a hook it leaves there is stopped, and one in the folder is the user's.
+    harness.send({ type: "refusal", id: "r", run: true });
+    expect(await result(harness, "r")).toEqual({ ok: null });
+    for (const folder of [copy, reports]) {
+      mkdirSync(dirname(hook(folder)), { recursive: true });
+      writeFileSync(hook(folder), "#!/bin/sh\n", { mode: 0o755 });
+    }
+    harness.send({ type: "after", id: "a", outcome: { ok: { output: "done", returncode: 0, timed_out: false } } });
+    expect(await result(harness, "a")).toEqual({ ok: { output: `done\n${HOOKS_NOTICE}sub/.git/hooks/pre-commit`, returncode: 0, timed_out: false } });
+    expect([statSync(hook(copy)).mode & 0o111, statSync(hook(reports)).mode & 0o111]).toEqual([0, 0o111]);
+    // The folder's own lock is not the copy's host's: a chat on the folder itself works beside the thread.
+    const chat = host({ folder: reports, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") });
+    await ready(chat);
+    expect(await chat.op("1", "read", { key: `${reports}/a.txt`, max_bytes: null })).toEqual({ ok: b64("the user's own\n") });
+    expect(await harness.op("2", "read", { key: `${reports}/a.txt`, max_bytes: null })).toEqual({ ok: b64("the thread's\n") });
+  });
+
+  it("starts only on the copy the app looked at: not one made again since, one that is gone, a link in its stead, or a copy named for a path it cannot stand for", async () => {
+    const before = seen(home);
+    const { dev, ino } = statSync(copy);
+    const again = onCopy({ expect: { dev, ino: ino + 1, boot: BOOT_ID } });
+    expect(await failed(again)).toMatchObject({ type: "failed", folder: true, message: expect.stringMatching(/replaced/) });
+    const named = onCopy({ at: join(data, "history") });
+    expect(await failed(named)).toEqual({ type: "failed", message: `${join(data, "history")} is no path a thread's copy can stand for` });
+    renameSync(copy, `${copy}.was`);
+    const gone = onCopy();
+    expect(await failed(gone)).toEqual({ type: "failed", folder: true, message: `the copy of ${reports} this thread works in is not there` });
+    // A link the guest left where the copy was, to the folder itself: a host there would write the user's own files.
+    symlinkSync(reports, copy);
+    const linked = onCopy();
+    expect(await failed(linked)).toEqual({ type: "failed", message: `the copy of ${reports} this thread works in is not a folder of the app's own` });
+    for (const harness of [again, named, gone, linked]) expect(await harness.exited).toBe(1);
+    expect(seen(home)).toEqual(before);
+    expect(hostsOwn().filter((dir) => existsSync(dir))).toEqual([]);
+  });
+});
+
+describe("a tool host for a landing", { timeout: 60_000 }, () => {
+  beforeEach(lay);
+  // A file's blob id, as git names its bytes.
+  const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
+  const land = (harness: Harness, id: string, args: Record<string, unknown>) => harness.op(id, "land", args);
+
+  it("lands the thread's file in the folder from its copy, keeps the file it replaced in the app's data, and puts it back", async () => {
+    const harness = forLanding();
+    await ready(harness);
+    const looked = await land(harness, "1", { action: "revisions", paths: ["a.txt", "new/c.txt"] }) as { ok: { revisions: Array<[string, string]> } };
+    expect(looked.ok.revisions.map(([path, token]) => [path, token === "absent" ? token : "there"])).toEqual([["a.txt", "there"], ["new/c.txt", "absent"]]);
+    const [theirs, mine] = [blob("the thread's\n"), blob("the user's own\n")];
+    const apply = { action: "apply", saga: SAGA, step: 1, path: "a.txt", before: mine, after: theirs, expected: looked.ok.revisions[0]![1] };
+    expect(await land(harness, "2", apply)).toEqual({ ok: { path: "a.txt", before: mine, after: theirs, made: [] } });
+    expect([readFileSync(join(reports, "a.txt"), "utf8"), readFileSync(join(kept, SAGA, "1"), "utf8")]).toEqual(["the thread's\n", "the user's own\n"]);
+    // What it keeps is this user's alone to open, in a folder the host made so.
+    expect([statSync(kept).mode & 0o7777, statSync(join(data, "landings")).mode & 0o7777, statSync(join(kept, SAGA, "1")).mode & 0o7777]).toEqual([0o700, 0o700, 0o600]);
+    expect(await land(harness, "3", { action: "unapply", saga: SAGA, step: 1, path: "a.txt" })).toEqual({ ok: { path: "a.txt", put_back: true } });
+    expect([readFileSync(join(reports, "a.txt"), "utf8"), readdirSync(kept)]).toEqual(["the user's own\n", []]);
+    harness.send({ type: "stop" });
+    expect(await harness.exited).toBe(0);
+  });
+
+  it("takes the land kind and no other, and guards no command: its folder is the user's own, and no record of it is the landing's to keep", async () => {
+    const before = seen(home);
+    const harness = forLanding();
+    await ready(harness);
+    const asked: Array<[string, Record<string, unknown>]> = [
+      ...kinds().filter((kind) => kind !== "land").map((kind): [string, Record<string, unknown>] => [kind, { key: `${reports}/a.txt`, path: "a.txt", data: b64("over the user's\n"), max_bytes: null }]),
+      ["run", { command: `touch '${reports}/ran'`, workdir: null, timeout: 10 }],
+      ["bind", {}],
+      ["Land", { action: "recover" }],
+    ];
+    expect(asked.map(([kind]) => kind)).toEqual(expect.arrayContaining(["write", "delete", "read", "ripgrep", "resolve"]));
+    for (const [kind, args] of asked) {
+      expect(await harness.op(kind, kind, args), kind).toEqual({ error: { type: "unsupported", message: `This computer cannot do '${kind}' here` } });
+    }
+    // The hook guard's two questions about a command are answered, never left waiting: no command runs here.
+    harness.send({ type: "refusal", id: "r", run: true });
+    expect(await result(harness, "r")).toEqual({ error: { type: "unsupported", message: "This computer cannot run a command here" } });
+    harness.send({ type: "after", id: "a", outcome: { ok: { output: "done", returncode: 0, timed_out: false } } });
+    expect(await result(harness, "a")).toEqual({ error: { type: "unsupported", message: "This computer cannot run a command here" } });
+    expect(await land(harness, "l", { action: "recover" })).toEqual({ ok: { restored: [], beside: [], lost: [], unread: [] } });
+    harness.send({ type: "stop" });
+    expect(await harness.exited).toBe(0);
+    expect(seen(home)).toEqual(before);
+    expect(existsSync(join(data, "folders"))).toBe(false);
+  });
+
+  it.skipIf(!enters)("reads the thread's copy and cannot write it, writes the folder and the kept folder, and reaches no other thread's copy, nor the history, nor the rest of the app's data", async () => {
+    const harness = forLanding();
+    await ready(harness);
+    expect(inSandbox(harness, [{ act: "capabilities" }])).toEqual([{ ok: "0000000000000000" }]);
+    // The folder and the kept folder: written, on this computer.
+    expect(inSandbox(harness, [
+      { act: "read", path: join(reports, "a.txt") }, { act: "write", path: join(reports, "probe.txt"), data: "into the folder\n" },
+      { act: "write", path: join(kept, "probe"), data: "into the kept folder\n" },
+    ])).toEqual([{ ok: "the user's own\n" }, { ok: null }, { ok: null }]);
+    expect([readFileSync(join(reports, "probe.txt"), "utf8"), readFileSync(join(kept, "probe"), "utf8")]).toEqual(["into the folder\n", "into the kept folder\n"]);
+    const before = seen(base, [reports, kept, ...hostsOwn()]);
+    // The copy: read, and nothing of it written, made, moved or removed.
+    const [read, listed, ...writes] = inSandbox(harness, tries(copy, "a.txt"));
+    expect([read, listed]).toEqual([{ ok: "the thread's\n" }, { ok: ["a.txt", "sub"] }]);
+    expect(writes).toEqual(writes.map(() => ({ code: "EROFS" })));
+    expect(seen(base, [reports, kept, ...hostsOwn()])).toEqual(before);
+    for (const [what, dir, file, answers] of [
+      ["another thread's copy", other, "a.txt", NOT_THERE],
+      ["the folder's history", join(place, "history.git"), "HEAD", NOT_THERE],
+      ["the thread's own repository", join(place, "clones", THREAD), "HEAD", NOT_THERE],
+      ["the rest of the app's data", join(data, "devices"), "credentials.json", NOT_THERE],
+      ["the user's home", home, "secret.txt", ownFolder("Reports")],
+      ["the folder's place", place, "history.git", ownFolder("threads")],
+      ["where the place keeps its copies", join(place, "threads"), OTHER, ownFolder(THREAD)],
+      ["where the app keeps every folder's replaced files", join(data, "landings"), "fedcba9876543210", ownFolder(KEY)],
+    ] as const) {
+      expect(inSandbox(harness, tries(dir, file)), what).toEqual(answers);
+      expect(seen(base, [reports, kept, ...hostsOwn()]), what).toEqual(before);
+    }
+  });
+
+  it("takes the copy and the kept folder only by their real paths, through no link: one at either, or above either, refuses the start in words", async () => {
+    const elsewhere = join(base, "elsewhere");
+    const refusals: Array<[string, () => Partial<HostStart>, RegExp]> = [
+      ["a link at the copy's path, to the folder itself", () => {
+        rmSync(copy, { recursive: true });
+        symlinkSync(reports, copy);
+        return {};
+      }, /^this landing's copy is not a thread's copy of the folder: the copy of .* is not a folder of the app's own$/],
+      ["a link where the place keeps its copies", () => {
+        renameSync(join(place, "threads"), join(elsewhere, "threads"));
+        symlinkSync(join(elsewhere, "threads"), join(place, "threads"));
+        return {};
+      }, /^this landing's copy is not a thread's copy of the folder: the copy of .* is not a folder of the app's own$/],
+      ["a link at the folder's place", () => {
+        renameSync(place, join(elsewhere, KEY));
+        symlinkSync(join(elsewhere, KEY), place);
+        return {};
+      }, /^this landing's copy is not a thread's copy of the folder: the copy of .* is not a folder of the app's own$/],
+      ["a link where the app keeps every place", () => {
+        renameSync(join(data, "history"), join(elsewhere, "history"));
+        symlinkSync(join(elsewhere, "history"), join(data, "history"));
+        return {};
+      }, /^this landing's copy is not a thread's copy of the folder: the copy of .* is not a folder of the app's own$/],
+      ["a link at the kept folder's path", () => {
+        mkdirSync(join(data, "landings"));
+        symlinkSync(reports, kept);
+        return {};
+      }, /^this landing's kept folder is not a folder of the app's own: /],
+      ["a link where the app keeps every folder's replaced files", () => {
+        symlinkSync(elsewhere, join(data, "landings"));
+        return {};
+      }, /^this landing's kept folder is not a folder of the app's own: /],
+      ["the copy named through a link to the app's data", () => {
+        symlinkSync(data, join(base, "linked"));
+        return { dataDir: join(base, "linked"), landing: { copy: join(base, "linked", "history", KEY, "threads", THREAD), kept } };
+      }, /^this landing's copy is not a thread's copy of the folder: /],
+      ["the kept folder named through a link to the app's data", () => {
+        symlinkSync(data, join(base, "linked"));
+        return { dataDir: join(base, "linked"), landing: { copy, kept: join(base, "linked", "landings", KEY) } };
+      }, /^this landing's kept folder is not the folder's own: /],
+      ["another thread's id that is none", () => ({ landing: { copy: join(place, "threads", "not-a-thread"), kept } }), /^this landing's copy is not a thread's copy of the folder: /],
+      ["a kept folder of another folder's key", () => ({ landing: { copy, kept: join(data, "landings", "fedcba9876543210") } }), /^this landing's kept folder is not the folder's own: /],
+    ];
+    for (const [what, arrange, why] of refusals) {
+      rmSync(base, { recursive: true, force: true });
+      mkdirSync(base);
+      lay();
+      mkdirSync(elsewhere);
+      const more = arrange();
+      const before = seen(base);
+      const harness = forLanding(more);
+      const said = await failed(harness);
+      expect(said.type === "failed" ? said.message : said.type, what).toMatch(why);
+      expect(said, what).not.toHaveProperty("folder");
+      expect(await harness.exited, what).toBe(1);
+      // Refused before it held anything: nothing was made for it, here or where a link leads.
+      expect(seen(base), what).toEqual(before);
+    }
+  });
+
+  it("is given the copy and the kept folder by the real path of the app's data, where the app reaches its data through a link", async () => {
+    symlinkSync(data, join(base, "linked"));
+    const harness = forLanding({ dataDir: join(base, "linked"), tmp: join(base, "linked", "tmp", "landing") });
+    await ready(harness);
+    expect(await land(harness, "1", { action: "revisions", paths: ["a.txt"] })).toMatchObject({ ok: { revisions: [["a.txt", expect.stringMatching(/^[0-9]+:/)]] } });
+    expect(statSync(kept).isDirectory()).toBe(true);
+  });
+});
+
+describe("what a landing cut short left, when the next landing's host starts", { timeout: 90_000 }, () => {
+  beforeEach(lay);
+  // Loaded into a file helper before its own code: it ends the process as a kill does, before the first link it makes at a path that matches.
+  const CUT = `data:text/javascript,${encodeURIComponent(`
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const real = fs.linkSync;
+    fs.linkSync = (...args) => {
+      if (new RegExp(process.env.LAND_CUT).test(String(args[1]))) {
+        process.kill(process.pid, "SIGKILL");
+        for (;;);
+      }
+      return real(...args);
+    };
+    syncBuiltinESMExports();
+  `)}`;
+  // Loaded into a host before its own code: what its file helper says reaches it late, as from a helper slow to be ready.
+  const LATE = `data:text/javascript,${encodeURIComponent(`
+    import cp from "node:child_process";
+    import { syncBuiltinESMExports } from "node:module";
+    import { PassThrough } from "node:stream";
+    const real = cp.spawn;
+    cp.spawn = (...args) => {
+      const child = real(...args);
+      if (Array.isArray(args[1]) && String(args[1].at(-1)).includes("/files/helper.js")) {
+        const said = child.stdout;
+        child.stdout = new PassThrough();
+        setTimeout(() => said.pipe(child.stdout), Number(process.env.HELPER_LATE_MS));
+      }
+      return child;
+    };
+    syncBuiltinESMExports();
+  `)}`;
+  const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
+
+  // A landing's helper, outside any sandbox, killed between the two renames of its apply over the folder's a.txt: the
+  // name is empty, and the user's file lies beside it under a name of the landing's own.
+  async function cut(): Promise<bigint> {
+    const was = lstatSync(join(reports, "a.txt"), { bigint: true });
+    const child = spawn(process.execPath, ["--import", CUT, HELPER], {
+      env: { SUROGATE_FOLDER: reports, HOME: home, PATH: "/usr/bin:/bin", SUROGATE_COPY: copy, SUROGATE_KEPT: kept, LAND_CUT: "/a\\.txt$" },
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+    child.stdin.on("error", () => {});
+    const args = { action: "apply", saga: SAGA, step: 1, path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), expected: "" };
+    const ask = (id: string, more: Record<string, unknown>) => child.stdin.write(`${JSON.stringify({ id, kind: "land", args: more })}\n`);
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      const said = JSON.parse(line) as { ready?: boolean; id?: string; outcome?: { ok: { revisions: Array<[string, string]> } } };
+      if (said.ready) ask("look", { action: "revisions", paths: ["a.txt"] });
+      else if (said.id === "look") ask("apply", { ...args, expected: said.outcome!.ok.revisions[0]![1] });
+    });
+    const bound = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    const signal = await new Promise<NodeJS.Signals | null>((resolve) => child.once("exit", (_code, how) => resolve(how)));
+    clearTimeout(bound);
+    // Beside the empty name: the user's file, moved aside, and the landing's own, not yet at the name.
+    const beside = readdirSync(reports).filter((name) => name.startsWith(".surogate-")).map((name) => lstatSync(join(reports, name), { bigint: true }).ino);
+    expect([signal, existsSync(join(reports, "a.txt")), beside.length, beside.includes(was.ino)]).toEqual(["SIGKILL", false, 2, true]);
+    return was.ino;
+  }
+  // A node that runs a host with what its helper says held back for *ms*.
+  function lateNode(ms: number): [string, NodeJS.ProcessEnv] {
+    const node = join(base, "late-node");
+    writeFileSync(node, `#!/bin/sh\nexec '${process.execPath}' --import '${LATE}' "$@"\n`, { mode: 0o755 });
+    return [node, { ...process.env, HELPER_LATE_MS: String(ms) }];
+  }
+
+  it("is put back before the host says it is ready: the user's very file is at its name again", async () => {
+    const ino = await cut();
+    const harness = forLanding();
+    await ready(harness);
+    const now = lstatSync(join(reports, "a.txt"), { bigint: true });
+    expect([readFileSync(join(reports, "a.txt"), "utf8"), now.ino, now.nlink, readdirSync(reports).sort()]).toEqual(["the user's own\n", ino, 1n, ["a.txt", "sub"]]);
+    expect(await harness.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
+  });
+
+  it("is put back however long that takes the folder's disk, within the bound a landing's helper has: one not ready after the time a chat's has is waited for, and a chat's is not", async () => {
+    const ino = await cut();
+    // Both timers start as the helper is started, in the host itself: the helper's first word comes after a chat's bound, whatever the load.
+    const [node, env] = lateNode(READY_MS + 2_500);
+    // A chat's host on another folder, its helper as late: it has what it had.
+    mkdirSync(join(home, "Notes"));
+    const chat = new Harness(undefined, env, node);
+    const landing = new Harness(undefined, env, node);
+    harnesses.push(chat, landing);
+    chat.send({ ...start, folder: join(home, "Notes"), expect: bound(join(home, "Notes")), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") });
+    landing.send({ ...start, folder: reports, expect: bound(reports), landing: { copy, kept }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "landing") });
+    const said = (harness: Harness) => harness.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 40_000);
+    expect(await said(chat)).toMatchObject({ type: "failed", message: expect.stringMatching(/^the file helper did not start/) });
+    expect(await said(landing)).toMatchObject({ type: "ready" });
+    expect([readFileSync(join(reports, "a.txt"), "utf8"), lstatSync(join(reports, "a.txt"), { bigint: true }).ino]).toEqual(["the user's own\n", ino]);
+  });
+});
+
+describe("the folder's lock, between a thread's hosts and a chat's", { timeout: 60_000 }, () => {
+  beforeEach(lay);
+  const chatOn = (folder: string, name: string) => host({ folder, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", name) });
+  const BUSY = "another chat on this computer is working in this folder; this one can use it once that one is done";
+
+  it("is the copy's for a thread's host and the folder's for a landing's, so neither waits for the other, whichever starts first", async () => {
+    // The thread works in its copy; its landing starts on the folder while it does, and reads that copy.
+    const thread = onCopy();
+    await ready(thread);
+    const landing = forLanding({ lockWaitMs: 0 });
+    await ready(landing);
+    expect([await free(copy), await free(reports), await free(other)]).toEqual([false, false, true]);
+    // Another thread on the same folder works in its own copy meanwhile.
+    const second = onCopy({ folder: other, tmp: join(data, "tmp", OTHER), lockWaitMs: 0 });
+    await ready(second);
+    expect(await thread.op("1", "write", { key: `${reports}/made.txt`, data: b64("while it lands\n") })).toEqual({ ok: null });
+    expect(await landing.op("2", "land", { action: "revisions", paths: ["made.txt"] })).toEqual({ ok: { revisions: [["made.txt", "absent"]] } });
+    expect(await second.op("3", "read", { key: `${reports}/a.txt`, max_bytes: null })).toEqual({ ok: b64("another thread's\n") });
+    // Each lets go of its own, and of nothing else.
+    await landing.stop();
+    expect([await free(copy), await free(reports)]).toEqual([false, true]);
+    await thread.stop();
+    expect(await free(copy)).toBe(true);
+    // The other way round: the landing's host holds the folder, and the thread's host starts on the copy.
+    const first = forLanding({ lockWaitMs: 0 });
+    await ready(first);
+    await ready(onCopy({ lockWaitMs: 0 }));
+  });
+
+  it("makes a landing wait for a chat that holds the folder, for as long as it is told, and then says the folder is busy: nothing began, and nothing is left", async () => {
+    const chat = chatOn(reports, "chat");
+    await ready(chat);
+    const before = seen(base, hostsOwn());
+    const began = Date.now();
+    const landing = forLanding({ lockWaitMs: 700 });
+    expect(await failed(landing)).toEqual({ type: "failed", message: BUSY, busy: true });
+    expect(Date.now() - began).toBeGreaterThanOrEqual(700);
+    expect(await landing.exited).toBe(1);
+    // Not the kept folder, which it makes only once the folder is its own.
+    expect([seen(base, hostsOwn()), existsSync(join(data, "landings"))]).toEqual([before, false]);
+    // A landing that waits long enough has the folder once the chat's host lets it go.
+    const patient = forLanding({ lockWaitMs: 20_000 });
+    setTimeout(() => void chat.stop(), 500);
+    await ready(patient);
+    // And while it lands, a chat's host and a second landing's wait for it in their turn.
+    expect(await failed(chatOn(reports, "next"))).toEqual({ type: "failed", message: BUSY, busy: true });
+    expect(await failed(forLanding({ lockWaitMs: 300, tmp: join(data, "tmp", "second") }))).toEqual({ type: "failed", message: BUSY, busy: true });
+    expect(await patient.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: [], beside: [], lost: [], unread: [] } });
+  });
+
+  it("gives a copy one host at a time, as a folder", async () => {
+    await ready(onCopy());
+    const second = onCopy({ tmp: join(data, "tmp", "again"), lockWaitMs: 300 });
+    expect(await failed(second)).toEqual({ type: "failed", message: BUSY, busy: true });
+    expect(await second.exited).toBe(1);
+  });
+});
+
+describe("a tool host that does not start", { timeout: 60_000 }, () => {
+  beforeEach(lay);
+
+  // Gone with all it started, its folder's lock free.
+  async function gone(harness: Harness, held: string): Promise<void> {
+    expect(await harness.exited).toBe(1);
+    await until(() => groupOf(harness).length === 0, 5_000);
+    expect(await free(held)).toBe(true);
+  }
+
+  const linkedCopy = () => {
+    rmSync(copy, { recursive: true });
+    symlinkSync(reports, copy);
+  };
+  it.each<[string, () => void, () => Harness, () => string]>([
+    ["on a copy that is a link", linkedCopy, () => onCopy(), () => reports],
+    ["on a copy made again since the app looked at it", () => {}, () => onCopy({ expect: { dev: 1, ino: 1, boot: BOOT_ID } }), () => copy],
+    ["on a copy named for a path in the app's data", () => {}, () => onCopy({ at: join(data, "devices") }), () => copy],
+    ["for a landing from a copy that is a link", linkedCopy, () => forLanding(), () => reports],
+    ["for a landing from a copy that is not there", () => {}, () => forLanding({ landing: { copy: join(place, "threads", "0b6c1d3e-0000-4c1e-9a52-6a1d2c3b4e5f"), kept } }), () => reports],
+    ["for a landing whose kept folder is another folder's", () => {}, () => forLanding({ landing: { copy, kept: join(data, "landings", "fedcba9876543210") } }), () => reports],
+    ["for a landing into a folder replaced since it was bound", () => {}, () => forLanding({ expect: { dev: 1, ino: 1, boot: BOOT_ID } }), () => reports],
+    ["as both a copy's host and a landing's", () => {}, () => onCopy({ landing: { copy, kept } }), () => copy],
+  ])("leaves nothing behind when it is refused %s: no process, no lock, and nothing made in the app's data or the folder", async (_what, arrange, begin, held) => {
+    arrange();
+    const before = seen(base);
+    const harness = begin();
+    expect(await failed(harness)).toMatchObject({ type: "failed" });
+    await gone(harness, held());
+    expect(seen(base)).toEqual(before);
+  });
+
+  it("takes away the kept folder it made for a landing whose sandbox then cannot start, and holds nothing", async () => {
+    const before = seen(base);
+    const harness = forLanding({ bwrapPath: "/nonexistent/bwrap" });
+    expect(await failed(harness)).toEqual({ type: "failed", message: "Surogate's sandbox tools are missing. Run the install script again. It lacks bubblewrap" });
+    await gone(harness, reports);
+    // What is left is what any host keeps for its folder: srt's folder and its helper's working folder, both empty.
+    expect(seen(base, hostsOwn())).toEqual({ ...before, [data]: seen(base, hostsOwn())[data] });
+    expect([existsSync(join(data, "landings")), existsSync(join(data, "folders")), readdirSync(join(data, "srt")).flatMap((key) => readdirSync(join(data, "srt", key)))]).toEqual([false, false, []]);
+    // A kept folder that was there, with what an earlier landing kept, stays as it was.
+    mkdirSync(join(kept, SAGA), { recursive: true });
+    writeFileSync(join(kept, SAGA, "1"), "a file a landing replaced\n");
+    const held = seen(join(data, "landings"));
+    const again = forLanding({ bwrapPath: "/nonexistent/bwrap" });
+    expect(await failed(again)).toMatchObject({ type: "failed" });
+    await gone(again, reports);
+    expect(seen(join(data, "landings"))).toEqual(held);
+  });
+
+  it("leaves no process and no lock when its helper cannot be started in the copy, once srt's own are running", async () => {
+    const before = seen(home);
+    // A copy the host cannot enter: srt is ready for the helper, which is never started.
+    chmodSync(copy, 0o000);
+    try {
+      const shut = onCopy();
+      expect(await failed(shut)).toMatchObject({ type: "failed" });
+      await gone(shut, copy);
+      expect(readdirSync(join(data, "srt")).flatMap((key) => readdirSync(join(data, "srt", key)))).toEqual([]);
+    } finally {
+      chmodSync(copy, 0o755);
+    }
+    expect(seen(home)).toEqual(before);
   });
 });

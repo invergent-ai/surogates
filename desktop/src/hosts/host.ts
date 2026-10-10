@@ -4,9 +4,15 @@
 // operations to it. Commands run in the VM (spec, Section 11): around each, the host is
 // the hook guard, and it keeps the folder's record, the user's hooks and the handles of
 // the root's processes in the guest. It runs on the app's own node, spawned with an IPC channel.
+//
+// A project thread's host holds the thread's copy of its folder in the folder's stead (spec,
+// Section 13): the copy's lock, so threads on one folder work at once, and the copy's hooks. A
+// landing's host holds the folder itself, for as long as the landing runs: its helper writes the
+// folder from the thread's copy. It runs no command, so it keeps no record and guards no hook.
+// What each is started on is checked in start.ts.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
 import type { Server } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -14,22 +20,22 @@ import { fileURLToPath } from "node:url";
 
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
-import { checkFolder, confirmedFolder } from "../binding/folder.js";
+import { confirmedFolder } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
-import { type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
+import { FolderBusy, type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { closeHanded } from "./handed.js";
 import { fileToolsMissing, GLOB, hideSrtTmp, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
+import { startOn } from "./start.js";
 
 // Before anything else: nothing this process starts, the helper in its sandbox least of all, holds
 // a descriptor of the app's.
 closeHanded();
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
-const READY_TIMEOUT_MS = 15_000;
 // Once a command of the root's may have run in the guest, the hook guard looks this often until
 // the host stops: what it left running there, or a cancelled one still ending, can write a hook at any time.
 const WATCH_MS = 5_000;
@@ -48,6 +54,12 @@ let stopping = false;
 // answers it as interrupted, with the warning to check what it did.
 let failing = false;
 let guard: HookGuard | null = null;
+// The one kind its helper is asked, for a host whose start takes no other; and whether the root's
+// commands write its folder: a host of none guards none.
+let only: string | null = null;
+let commands = true;
+// What a start made in the app's data for a helper that then never was ready: taken away as the host goes.
+let made: string[] = [];
 // Held for the host's life: the kernel lets go of it when the host goes.
 let lock: Server | null = null;
 let recordPath: string | null = null;
@@ -80,6 +92,7 @@ process.on("message", (raw) => {
             type: "failed",
             message: error instanceof Error ? error.message : String(error),
             ...(error instanceof FolderUnavailable ? { folder: true as const } : {}),
+            ...(error instanceof FolderBusy ? { busy: true as const } : {}),
           },
           () => void stop(1),
         ),
@@ -87,7 +100,9 @@ process.on("message", (raw) => {
       break;
     case "op":
       // Every kind goes to the helper, which does the file kinds and refuses the rest: nothing runs a command here.
+      // A host whose start takes one kind refuses the rest itself: its helper is asked nothing else.
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
+      else if (only !== null && message.kind !== only) send({ type: "result", id: message.id, outcome: unsupported(`do '${message.kind}'`) });
       else helper?.stdin?.write(`${JSON.stringify({ id: message.id, kind: message.kind, args: message.args })}\n`);
       break;
     case "cancel":
@@ -98,6 +113,7 @@ process.on("message", (raw) => {
     case "refusal":
       // A command for a folder replaced since the start would run on the replacement.
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
+      else if (!commands) send({ type: "result", id: message.id, outcome: unsupported("run a command") });
       else {
         if (message.run) runs.add(message.id);
         void guard?.refusal().then((refused) => {
@@ -107,6 +123,10 @@ process.on("message", (raw) => {
       }
       break;
     case "after":
+      if (!commands) {
+        send({ type: "result", id: message.id, outcome: unsupported("run a command") });
+        break;
+      }
       runs.delete(message.id);
       if (!("ok" in message.outcome) || (message.outcome.ok as { timed_out?: boolean } | null)?.timed_out) endingUntil = performance.now() + ENDING_MS;
       void guard?.after(message.outcome).then((outcome) => {
@@ -147,6 +167,9 @@ function sweep(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
+// What a host whose start takes one kind answers anything else with, and any question about a command.
+const unsupported = (what: string): Outcome => ({ error: { type: "unsupported", message: `This computer cannot ${what} here` } });
+
 // The bound folder is gone, is not a folder, or was replaced. The app has no folder to check
 // before it starts a host (a stat on a stuck mount would freeze it), so the host says.
 class FolderUnavailable extends Error {}
@@ -157,7 +180,8 @@ async function start(message: HostStart): Promise<void> {
   if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
   const tmp = resolve(message.tmp);
   const appDirs = message.appDirs.map((dir) => resolve(dir));
-  const checked = checkFolder(message.folder, { home, dataDir: message.dataDir, cacheDir: message.cacheDir, appDirs });
+  // A chat's folder, a thread's copy of one, or the folder a landing writes: each checked as what it is.
+  const checked = startOn(message, home, appDirs);
   if (!checked.ok) throw checked.missing ? new FolderUnavailable(checked.message) : new Error(checked.message);
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
@@ -166,6 +190,8 @@ async function start(message: HostStart): Promise<void> {
     throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
   }
   folder = { path, dev, ino };
+  only = checked.only ?? null;
+  commands = checked.commands;
   // One host per folder.
   const key = `${dev}-${ino}`;
   // srt's own temp files (its bridges' sockets, the empty folders it mounts) go
@@ -176,31 +202,37 @@ async function start(message: HostStart): Promise<void> {
   if (Buffer.byteLength(join(srtTmp, `claude-socks-${"0".repeat(16)}.sock`)) > 107) {
     throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
   }
-  lock = await lockFolder(dev, ino);
+  lock = await lockFolder(dev, ino, message.lockWaitMs);
   // Before anything in the folder is touched: the bridges (socat) a host killed with
   // the app left running, and anything else whose command line names srt's folder.
   sweep(srtTmp);
   mkdirSync(srtTmp, { recursive: true, mode: 0o700 });
   process.env.TMPDIR = srtTmp;
-  const record = join(message.dataDir, "folders", `${key}.json`);
-  const last = readRecord(record);
-  const killed = last?.state === "running" ? last : null;
-  const inherited = killed?.hooks ? new Map(Object.entries(killed.hooks)) : null;
-  // The root's processes in the guest the last host kept: each still running ended when the app quit,
-  // and one that ended by itself keeps how. The guest's registry answers for them until the cloud would forget them.
-  const now = Date.now() / 1000;
-  const ended = lostWith((last?.processes ?? []).filter((handle) => now - handle.started_at <= FINISHED_TTL_SECONDS), APP_QUIT);
-  // On disk before the helper starts, with a killed host's baseline kept: commands
-  // wait for the guard, which records its own once it knows it.
-  saved = { state: "running", hooks: killed?.hooks ?? null, processes: ended };
-  writeRecord(record, saved);
-  recordPath = record;
-  const running = (hooks: ReadonlyMap<string, string>) => save({ hooks: Object.fromEntries(hooks) });
-  // Its first look finds the user's own hooks, while srt starts. After a killed host,
-  // that host's are the user's, and the look catches what was left in the folder meanwhile.
-  // A command writes the folder alone: a hook linked into it is a command's.
-  guard = new HookGuard(path, { inherited, known: running, writable: [path], writing, running: () => runs.size > 0 });
+  // A host that runs no command leaves the folder's record, and its hooks, to the chats that do.
+  if (checked.commands) {
+    const record = join(message.dataDir, "folders", `${key}.json`);
+    const last = readRecord(record);
+    const killed = last?.state === "running" ? last : null;
+    const inherited = killed?.hooks ? new Map(Object.entries(killed.hooks)) : null;
+    // The root's processes in the guest the last host kept: each still running ended when the app quit,
+    // and one that ended by itself keeps how. The guest's registry answers for them until the cloud would forget them.
+    const now = Date.now() / 1000;
+    const ended = lostWith((last?.processes ?? []).filter((handle) => now - handle.started_at <= FINISHED_TTL_SECONDS), APP_QUIT);
+    // On disk before the helper starts, with a killed host's baseline kept: commands
+    // wait for the guard, which records its own once it knows it.
+    saved = { state: "running", hooks: killed?.hooks ?? null, processes: ended };
+    writeRecord(record, saved);
+    recordPath = record;
+    const running = (hooks: ReadonlyMap<string, string>) => save({ hooks: Object.fromEntries(hooks) });
+    // Its first look finds the user's own hooks, while srt starts. After a killed host,
+    // that host's are the user's, and the look catches what was left in the folder meanwhile.
+    // A command writes the folder alone: a hook linked into it is a command's.
+    guard = new HookGuard(path, { inherited, known: running, writable: [path], writing, running: () => runs.size > 0 });
+  }
   mkdirSync(tmp, { recursive: true });
+  // What the app keeps for this start, made now that the folder is this host's.
+  made = checked.make();
+  const beside = [...checked.reads, ...checked.writes];
   // srt and the shell it wraps the helper in run outside the sandbox, and look up which,
   // rg and the shell through this process's PATH; the helper finds its rg through it in
   // the sandbox. Each absolute entry is kept as the path it leads to now, so a link a command
@@ -208,15 +240,16 @@ async function start(message: HostStart): Promise<void> {
   // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
   // .. through a folder in it. srt's own tools go by absolute path. So no program a command
   // wrote runs, out here or in the helper. The rule is pathOutside's: the app looks for the
-  // helper's tools by it too.
-  const hostPath = pathOutside(process.env.PATH, [{ dev, ino }, statSync(tmp)]);
+  // helper's tools by it too. What a helper is given beside its folder is held as the folder is:
+  // a command wrote a landing's copy, and its helper writes what it keeps.
+  const hostPath = pathOutside(process.env.PATH, [{ dev, ino }, statSync(tmp), ...beside.map((dir) => statSync(dir))]);
   process.env.PATH = hostPath;
   // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
   const lacking = fileToolsMissing(message.bwrapPath, hostPath);
   if (lacking.length > 0) throw new Error(toolsMissing(lacking));
   const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
   const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
-  const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath });
+  const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath, reads: checked.reads, writes: checked.writes });
   // The helper makes no connection: one that came would be refused.
   await SandboxManager.initialize(policy, () => Promise.resolve(false));
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
@@ -240,7 +273,7 @@ async function start(message: HostStart): Promise<void> {
   // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
   const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
     cwd: path,
-    env: { HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path },
+    env: { ...checked.env, HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path },
     stdio: ["pipe", "pipe", "pipe"],
   });
   helper = child;
@@ -252,7 +285,7 @@ async function start(message: HostStart): Promise<void> {
   });
   await new Promise<void>((resolve, reject) => {
     let up = false;
-    const timer = setTimeout(() => reject(new Error(`the file helper did not start: ${stderr}`)), READY_TIMEOUT_MS);
+    const timer = setTimeout(() => reject(new Error(`the file helper did not start: ${stderr}`)), checked.readyMs);
     createInterface({ input: child.stdout }).on("line", (line) => {
       if (!up) {
         up = true;
@@ -283,6 +316,8 @@ async function start(message: HostStart): Promise<void> {
   });
   // The helper's is the one wrap: srt clears the placeholders it made for it in the temp folder.
   SandboxManager.cleanupAfterCommand();
+  // Its helper is ready: what was made for it is its own now.
+  made = [];
 }
 
 // After a command of the root's in the guest, a look every WATCH_MS until the host stops:
@@ -333,6 +368,13 @@ async function stop(code = 0): Promise<void> {
 // cleanly, if it did, so the next one has nothing to clear.
 async function leave(code: number, clean: boolean): Promise<void> {
   await SandboxManager.reset().catch(() => {});
+  for (const dir of made) {
+    try {
+      rmdirSync(dir);
+    } catch {
+      // Something is in it, or it has gone: left as it is.
+    }
+  }
   try {
     if (recordPath && clean) writeRecord(recordPath, { state: "stopped", hooks: null, processes: saved?.processes ?? [] });
   } finally {
