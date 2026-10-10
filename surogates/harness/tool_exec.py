@@ -21,8 +21,10 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
-from surogates.devices.history import ThreadCopy, thread_copy
+from surogates.devices.history import ComputerRefused, NowhereToWork, ThreadCopy, code_of, opens_its_copy, thread_copy
+from surogates.devices.operations import OperationConflict
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
+from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
@@ -307,6 +309,34 @@ async def _open_local_copy(
     copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=str(lease.lease_token))
     turn = await _turn_now(store, session)
     return copy, turn, await copy.opened(turn)
+
+
+async def _snapshot_local_copy(
+    session: Any, store: Any, lease: Any, saga: Any, tool_call_id: str, *, reason: str, session_factory: Any, redis: Any,
+) -> str | None:
+    """A snapshot of a thread's copy on its user's computer, before a step of its turn's saga; its commit.
+
+    Taken only once the turn's open answered the copy, which the journal
+    holds from the turn's start.  Outside the step's own tool call, so under
+    an invocation of its own: the turn, the step's number in its saga, since
+    a provider may give two calls one id, and the call.  A step run again
+    after its worker was lost asks under the same name, and is answered the
+    snapshot it took: the computer hears of it once.  None where none is
+    had: the step then runs without one, and a stop cannot take it back.
+    """
+    current = saga.current_saga
+    if current is None:
+        return None
+    try:
+        copy, turn, _ = await _open_local_copy(session, store, lease, session_factory=session_factory, redis=redis)
+        return await copy.take(turn, len(current.steps), tool_call_id, reason)
+    except (DeviceOperationError, OperationConflict, NowhereToWork) as failed:
+        logger.warning(
+            "Snapshot %s was not taken for thread %s on its computer, so a stop cannot take the step back: %s",
+            # A refusal of the computer's by its code: its words are its own.
+            reason, session.id, code_of(failed) if isinstance(failed, ComputerRefused) else failed,
+        )
+        return None
 
 
 async def _apply_ssh_access(
@@ -1451,15 +1481,24 @@ async def _run_single_tool(
     # copy, taken right before it runs: a stop puts the copy back however
     # the step changed it.  A call refused below for not being offered or
     # allowed, for arguments that are not JSON, or by the thread's own rule,
-    # never runs, so it takes none.
+    # never runs, so it takes none.  Nor does a resumed call: its first run
+    # took its snapshot.  On the user's computer only the thread's own turn
+    # takes one, of its copy there; every other session on a computer works
+    # in a folder no snapshot is taken of, or in its thread's copy.
     allowed = session.config.get("tool_allow_list")
-    if (
-        saga is not None and replay_of is None and not on_device and sandbox_pool is not None
+    snapshots = (
+        saga is not None and replay_of is None
         and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
         and (offered_tools is None or tool_name in offered_tools)
         and (not allowed or tool_name in allowed) and parse_error is None
         and thread_refuses(tool_name, tool_args, session.config) is None
-    ):
+    )
+    if snapshots and opens_its_copy(session):
+        checkpoint_hash = await _snapshot_local_copy(
+            session, store, lease, saga, tool_call_id, reason=f"before {tool_name}",
+            session_factory=session_factory, redis=redis,
+        )
+    elif snapshots and not on_device and sandbox_pool is not None:
         checkpoint_hash = await _snapshot_copy(
             session, tenant, sandbox_pool, credential_vault, reason=f"before {tool_name}",
         )
