@@ -638,6 +638,14 @@ describe("list_dir", () => {
     expect(answer.ok.sort()).toEqual([".hidden", "a.txt", "link-in", "sub"]);
   });
 
+  it("names no file of the helper's own, which a helper killed while it wrote or landed can leave beside a user's", async () => {
+    writeFileSync(join(folder, ".surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp"), "half a write");
+    // A file of the user's whose name only resembles one is theirs.
+    for (const name of [".surogate-notes.tmp", "x.surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp"]) writeFileSync(join(folder, name), "");
+    const answer = (await run("list_dir", { key: folder })) as { ok: string[] };
+    expect(answer.ok.sort()).toEqual([".surogate-notes.tmp", "a.txt", "link-in", "sub", "x.surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp"]);
+  });
+
   it("answers OS errors in Python's words", async () => {
     expect(await run("list_dir", { key: `${folder}/a.txt` })).toEqual({
       error: { type: "os", code: "ENOTDIR", message: `Not a directory: '${folder}/a.txt'` },
@@ -677,6 +685,13 @@ describe("walk", () => {
     expect(walked.ok.truncated).toBe(false);
     expect(walked.ok.cursor).toMatch(/^\d+$/);
     expect(listed(await walk({ key: join(folder, "sub") }))).toEqual([["b.md", 5]]);
+  });
+
+  it("lists no file of the helper's own, at any depth: one left by a kill is no new file of the folder's", async () => {
+    writeFileSync(join(folder, ".surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp"), "half a write");
+    writeFileSync(join(folder, "sub", ".surogate-1b2c3d4e-0000-4000-8000-000000000001.tmp"), "a file moved aside");
+    writeFileSync(join(folder, "sub", ".surogate-notes.tmp"), "yours");
+    expect(listed(await walk())).toEqual([["a.txt", 6], ["sub/.surogate-notes.tmp", 5]]);
   });
 
   it("since a cursor, lists only the files changed after it, by mtime or ctime", async () => {

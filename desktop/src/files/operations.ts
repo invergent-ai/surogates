@@ -22,6 +22,7 @@ import {
   MAX_WALK_DEPTH, MAX_WALK_LOOKS, MAX_WRITE_BYTES, NUL_REFUSED, OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE,
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
+import { land } from "./land.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
 
@@ -29,6 +30,9 @@ export interface Context {
   folder: string; // resolved
   home: string;
   env: Record<string, string | undefined>;
+  // A landing's helper alone (land.ts): the thread's copy its files come from, and where the files it
+  // replaces are kept until the landing is recorded. The app's own paths, never a request's.
+  landing?: { copy: string; kept: string };
 }
 
 type Kind = (args: Record<string, unknown>, context: Context, signal: AbortSignal) => unknown;
@@ -44,7 +48,13 @@ const KINDS: Record<string, Kind> = {
   list_dir: listDir,
   walk,
   ripgrep,
+  land,
 };
+
+// The helper's own files beside a user's: a write's temp file, and a landing's (land.ts). A helper killed at the wrong
+// moment leaves one, so no listing names it as a file of the folder's.
+export const OWN_FILE = /^\.surogate-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/;
+export const ownFile = (): string => `.surogate-${randomUUID()}.tmp`;
 
 const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_LARGE });
 const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
@@ -350,7 +360,7 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
     if (existing.nlink > 1) throw osError("EMLINK", key, "File has more than one hard link, so it is not changed");
     mode = existing.mode & 0o7777;
   }
-  const temporary = join(parent, `.surogate-${randomUUID()}.tmp`);
+  const temporary = join(parent, ownFile());
   const fd = io(key, () =>
     openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
   try {
@@ -437,13 +447,14 @@ function makeDirs(dir: string): void {
 
 function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"));
-  return io(key, () => readdirSync(key)).slice(0, MAX_NAMES);
+  return io(key, () => readdirSync(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
 }
 
 // walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
 // its size, depth first. No link is followed, and no folder the tree hides is entered: one named in skip, one directly
 // under the key named in skip_top, and with skip_hidden a dot-folder other than SHOWN_DOT_FOLDERS. A name that is not
 // UTF-8 is left out: read as bytes, it does not survive the round trip, and its decoded twin could be another file.
+// So is a file of the helper's own (OWN_FILE), as it is from list_dir's names.
 // Since a cursor, only the files whose mtime or ctime is at or after it. The cursor is this computer's clock as the
 // walk began, less WALK_MARGIN_NS. It stops after WALK_BUDGET_MS: every other operation on the folder waits for it.
 //
@@ -535,7 +546,7 @@ function walk(args: Record<string, unknown>, { folder }: Context): { files: Arra
         }
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || OWN_FILE.test(name)) continue;
       let st: BigIntStats;
       try {
         st = lstatSync(at, { bigint: true });
