@@ -12,6 +12,7 @@ from surogates.artifacts.store import FolderArtifacts
 from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
 from surogates.devices.binding import device_of
 from surogates.devices.history import opens_its_copy
+from surogates.devices.operations import LeaseLost
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
     _PROMOTABLE_FENCES,
@@ -52,6 +53,7 @@ from surogates.harness.landing import (
     waiting_on_you,
 )
 from surogates.harness.local_landing import land_local_turn, waiting_on_you_here
+from surogates.runtime.turn_slots import detach_turn
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1080,7 +1082,9 @@ class ArtifactCompletionMixin:
         A project's thread lands its turn first: before its pod goes, and
         before the turn summary and the report, so both see the landed files.
         A thread that works in a copy of its own on its user's computer lands
-        in its folder there, through its computer (``local_landing``).
+        in its folder there, through its computer (``local_landing``); a
+        worker that finds the thread's turn another's there stands down where
+        it is, and ends nothing.
         """
         landing: dict[str, Any] | None = None
         # The turn is over: what it handed on lands with it, and is no later Stop's to drop.
@@ -1094,6 +1098,10 @@ class ArtifactCompletionMixin:
                     lease_token=str(lease.lease_token), saga_settings=self._saga_settings,
                     tool_saga_id=tool_saga.saga_id if tool_saga is not None else None,
                 )
+            except LeaseLost:
+                # Another worker runs this thread now, and goes on with its landing from the journal.
+                detach_turn()
+                raise asyncio.CancelledError("another worker runs this session now") from None
             except Exception:
                 logger.exception("Landing failed for %s on its computer", session.id)
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}

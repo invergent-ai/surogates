@@ -36,8 +36,9 @@ export interface Context {
   home: string;
   env: Record<string, string | undefined>;
   // A landing's helper alone (land.ts): the thread's copy its files come from, and where the files it
-  // replaces are kept until the landing is recorded. The app's own paths, never a request's.
-  landing?: { copy: string; kept: string };
+  // replaces are kept until the landing is recorded. The app's own paths, never a request's. A recovery's
+  // helper is given where they are kept and no copy: it puts back what a landing cut short, and lands nothing.
+  landing?: { copy?: string; kept: string };
 }
 
 type Kind = (args: Record<string, unknown>, context: Context, signal: AbortSignal) => unknown;
