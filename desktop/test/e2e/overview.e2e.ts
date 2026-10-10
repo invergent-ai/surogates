@@ -136,7 +136,7 @@ interface Served {
   refusal: string | null;
   unreachable: boolean;
   changed(id: string, threadId: string | null): void;
-  register(old?: boolean): void;
+  register(lacks?: string[]): void;
 }
 
 describe("the Overview pane", () => {
@@ -1196,7 +1196,7 @@ describe("a file's History in the Library", () => {
 
   it("says why an agent older than the app shows none, and its projects still serve", async () => {
     const { page, client } = await opened();
-    await (await served(client)).evaluate((fake) => fake.register(true));
+    await (await served(client)).evaluate((fake) => fake.register(["history", "openVersion", "deleted"]));
     await expect.poll(() => texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["revenue.xlsx · not merged"]);
     await history(page);
     await expect.poll(() => page.textContent("#history-failure")).toBe("This agent cannot show a file's History yet");

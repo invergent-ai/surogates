@@ -4,14 +4,22 @@
 // types and copied field by field before the shell uses it.
 
 import type {
-  ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
+  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace,
+  ThreadRow,
 } from "../../../web/src/lib/projects-contract.js";
 
 // How long the page has to answer a call.
 export const ANSWER_TIMEOUT_MS = 10_000;
+// A version opened gets longer: the agent has it written out and sends it whole, and the page reads it
+// whole before it hands any of it over to save.
+export const LONG_ANSWER_TIMEOUT_MS = 120_000;
 
-const METHODS = ["list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "history"] as const;
+const METHODS = [
+  "list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "history", "openVersion",
+  "deleted",
+] as const;
 type Method = (typeof METHODS)[number];
+const LONG: readonly Method[] = ["openVersion"];
 
 // What the main process sends the page's preload. A call's deadline is when its time runs out
 // (Date.now()'s clock): a page that holds the call until it serves drops it after that.
@@ -121,6 +129,15 @@ function versionOf(value: unknown): FileVersion {
   return { id, path, by: changedByOf(by), at, change: one(change, CHANGES) ? change : "changed", merged, available, landingId } as FileVersion;
 }
 
+// The project's deleted files: each the version that took its file away, and each file once.
+function deletedOf(value: unknown): DeletedFiles {
+  const { files, more } = fields(value);
+  need(typeof more === "boolean");
+  const listed = listOf(files, 500, versionOf);
+  need(listed.every((version) => version.change === "deleted") && new Set(listed.map((version) => version.path)).size === listed.length);
+  return { files: listed, more: more as boolean };
+}
+
 // The row a thread's call answers must be that thread's: the shell cannot tell a project's rows apart otherwise.
 function theThread(row: ThreadRow, threadId: unknown): ThreadRow {
   need(row.id === threadId);
@@ -146,6 +163,9 @@ const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   routines: (value) => listOf(value, 200, routineOf),
   // A version of another file is no version of this one.
   history: (value, [, path]) => listOf(value, 500, versionOf).map((version) => (need(version.path === path), version)),
+  // The page says only that the version was handed over to save: nothing of where it went.
+  openVersion: (value) => need(value === undefined || value === null),
+  deleted: deletedOf,
 };
 
 interface Call {
@@ -161,7 +181,11 @@ export class PageProjects implements ProjectsSource {
   private readonly calls = new Map<number, Call>();
   private readonly subscriptions = new Map<number, (threadId: string | null) => void>();
 
-  constructor(private readonly send: (message: ToPage) => void, private readonly timeoutMs = ANSWER_TIMEOUT_MS) {}
+  constructor(
+    private readonly send: (message: ToPage) => void,
+    private readonly timeoutMs = ANSWER_TIMEOUT_MS,
+    private readonly longMs = LONG_ANSWER_TIMEOUT_MS,
+  ) {}
 
   list = () => this.call<ProjectSummary[]>("list");
   get = (projectId: string) => this.call<Project>("get", projectId);
@@ -175,6 +199,8 @@ export class PageProjects implements ProjectsSource {
   library = (projectId: string) => this.call<LibraryEntry[]>("library", projectId);
   routines = (projectId: string) => this.call<Routine[]>("routines", projectId);
   history = (projectId: string, path: string, place: ThreadPlace) => this.call<FileVersion[]>("history", projectId, path, place);
+  openVersion = (projectId: string, input: { versionId: string; path: string }) => this.call<void>("openVersion", projectId, input);
+  deleted = (projectId: string) => this.call<DeletedFiles>("deleted", projectId);
 
   subscribe(projectId: string, onChange: (threadId: string | null) => void): () => void {
     const id = this.next++;
@@ -222,12 +248,13 @@ export class PageProjects implements ProjectsSource {
   private call<T>(method: Method, ...args: unknown[]): Promise<T> {
     const id = this.next++;
     const { promise, resolve, reject } = Promise.withResolvers<T>();
+    const bound = LONG.includes(method) ? this.longMs : this.timeoutMs;
     const timer = setTimeout(() => {
       this.calls.delete(id);
       reject(new TimedOut(`The agent's page did not answer ${method} in time`));
-    }, this.timeoutMs);
+    }, bound);
     this.calls.set(id, { method, args, resolve: resolve as (value: unknown) => void, reject, timer });
-    this.send({ type: "call", id, method, args, deadline: Date.now() + this.timeoutMs });
+    this.send({ type: "call", id, method, args, deadline: Date.now() + bound });
     return promise;
   }
 }

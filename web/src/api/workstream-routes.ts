@@ -6,7 +6,7 @@
 // import here is a file of web/src named with its extension, so a node test runs these routes
 // over a fake fetch.
 
-import type { ProjectsSource, ThreadRow } from "../lib/projects-contract";
+import type { DeletedFiles, ProjectsSource, ThreadRow } from "../lib/projects-contract";
 import {
   fileVersionOf,
   libraryEntryOf,
@@ -17,12 +17,16 @@ import {
   threadRowOf,
 } from "../lib/projects-wire.ts";
 import { type EventStreamLike, projectStream } from "../lib/reopening-stream.ts";
+import { savedName } from "../lib/save-file.ts";
 import { parseError } from "./_errors.ts";
 
 export type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 /** One connection to the server-sent events at *url*, over *fetchFn*. */
 export type OpenEvents = (url: string, fetchFn: Fetch) => EventStreamLike<"ready" | "change">;
+
+/** Hand *data* to the user to save as *name*: a version of a file, opened. */
+export type SaveFile = (data: Blob, name: string) => void;
 
 export interface WorkstreamRoutes extends ProjectsSource {
   /** Start the thread a proposal's card *key* names, in the cloud. */
@@ -89,9 +93,11 @@ const MADE = one(["thread_id"], (body: { thread_id: string }) => body.thread_id)
 const ENTRY = one(["path", "origin"], libraryEntryOf);
 const ROUTINE = one(["id", "schedule_display", "status"], routineOf);
 const VERSION = one(["id", "path", "at"], fileVersionOf);
+// GET …/history/deleted answers {files, more}. Whether there are more is a plain yes, or it is no.
+const DELETED = one([], (body: { files?: unknown; more?: unknown }): DeletedFiles => ({ files: many(VERSION)(body.files), more: body.more === true }));
 const ROUTINES = (body: unknown) => many(ROUTINE)((body as { items?: unknown } | null)?.items);
 
-export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): WorkstreamRoutes {
+export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFile: SaveFile): WorkstreamRoutes {
   // A body that is no JSON, or not the route's shape, is the route's own failure: never an
   // engine's words, and never a success with nothing in it.
   async function read<T>(url: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T): Promise<T> {
@@ -132,6 +138,20 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): Workst
       const query = new URLSearchParams({ path, ...(place.kind === "device" ? { device_id: place.deviceId } : {}) });
       return asked(`${project(projectId)}/history?${query}`, undefined, "Failed to fetch the file's History", many(VERSION));
     },
+    // The version's bytes, read whole before any of them is saved, and saved as data under the file's
+    // own name: a page or a drawing among the project's files is never one this page's origin shows.
+    openVersion: async (projectId, { versionId, path }) => {
+      const failure = "The version could not be opened.";
+      const address = `${ROUTE}${project(projectId)}/history/${segment(versionId, "No such version.")}/file?${new URLSearchParams({ path })}`;
+      const response = await fetchFn(address);
+      if (!response.ok) return parseError(response, failure);
+      const held = await response.blob().catch(() => {
+        throw new Error(failure);
+      });
+      saveFile(new Blob([held], { type: "application/octet-stream" }), savedName(path));
+    },
+    deleted: async (projectId) =>
+      asked(`${project(projectId)}/history/deleted`, undefined, "Failed to fetch the project's deleted files", DELETED),
     start: async (projectId, proposalId, key) =>
       row(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
     makeOnComputer: async (projectId, proposalId, key, execution) =>
