@@ -52,10 +52,46 @@ async def here(request, computer):
             return Real(*where)
 
         computer.app.places.land_helper = helper
+    unnamed = forgettings_checked(computer)
     yield computer
     computer.app.places.let_go()
     # Each scene here holds its folder: the app's helper answered its land kind, and the rules did not.
     assert started or request.param != "the app's helper"
+    assert unnamed == []
+
+
+def forgettings_checked(computer) -> list[str]:
+    """Each landing's forgetting *computer*'s app is asked, checked as the app's kinds check one: what it names wrong.
+
+    It names its saga and every apply that was sent for it, each by its
+    step once, its file and that file's two versions; and among them every
+    step whose record the folder's landing helper holds, for the same file.
+    """
+    unnamed: list[str] = []
+    places = computer.app.places
+    run = places.run
+
+    def checking(frame):
+        args = frame["args"]
+        if (frame["kind"], args.get("action")) == ("land", "forget") and not str(args.get("saga")).startswith("hold:"):
+            applied = args.get("applied")
+            entries = applied if isinstance(applied, list) else []
+            steps = [entry.get("step") for entry in entries if isinstance(entry, dict)]
+            if len(steps) != len(entries) or len(set(steps)) != len(steps) or not all(
+                type(entry["step"]) is int and isinstance(entry.get("path"), str) and entry["path"] and {"before", "after"} <= entry.keys()
+                for entry in entries
+            ):
+                unnamed.append(f"{args.get('saga')}: {applied!r}")
+            named = {entry.get("step"): entry.get("path") for entry in entries if isinstance(entry, dict)}
+            kept = places.kept / str(args.get("saga"))
+            for record in sorted(kept.glob("*.json")) if kept.is_dir() else []:
+                step, path = int(record.stem), json.loads(record.read_text())["path"]
+                if named.get(step) != path:
+                    unnamed.append(f"{args['saga']}: step {step}, of {path}, is recorded and not named")
+        return run(frame)
+
+    places.run = checking
+    return unnamed
 
 
 def ran(here, invocation: str | None = None) -> list[tuple[str, str]]:
