@@ -204,6 +204,10 @@ _NOT_LANDED_HERE = {
     "refused": "its computer refused a step of it: {code}",
     "too_large": "more of its files changed than one landing on a computer carries",
     "yours_too_large": "the user changed more files in its folder since the folder's last landing than one landing can record",
+    "settling": (
+        "a landing left unfinished in its folder had recorded, and the server could not write that down, "
+        "so nothing lands there until it can"
+    ),
 }
 #: Where the work of a thread on a computer is when its landing was put back: in its copy there, as its turn left it.
 _IN_ITS_COPY = "The thread's work is in its copy on its computer, and lands with its next turn"

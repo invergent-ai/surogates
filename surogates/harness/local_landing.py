@@ -32,28 +32,61 @@ asked first, and a landing ``main`` holds is complete, with nothing put
 back.  A landing whose computer stops answering is left as its row says,
 nothing put back and nothing forgotten, for whoever settles it.  A landing
 put back whole is tried once more, at once, as a new saga.
+
+A landing left running in a folder, its worker lost and its turn never taken
+up again, is settled before anything else lands there: by the next landing
+in that folder, any thread's of any project's, which holds the folder and
+takes the lost landing's thread's lease first.  What the landing left open
+on its computer is closed, so none of it runs when its computer is back; it
+is complete where the folder's history holds its saga, and put back whole
+where it does not.  A turn taken up again on another path than its first
+run, or that worked on since its landing began, has its landing settled so
+too, and lands again.  The row of a landing on a computer is written only
+while its writer holds its thread's lease: a worker that finds its lease
+another's stands down where it is, and writes and asks nothing more
+(:class:`LeaseLost`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from functools import partial
 from typing import Any
-from uuid import uuid4, uuid5
+from uuid import UUID, uuid4, uuid5
 
-from surogates.devices.history import MAX_LOOKED, ComputerRefused, NotAnAnswer, Steps, ThreadCopy, code_of, thread_copy
-from surogates.devices.operations import OperationConflict
+from surogates.devices.history import (
+    MAX_LOOKED,
+    ComputerRefused,
+    NotAnAnswer,
+    Steps,
+    ThreadCopy,
+    answered,
+    code_of,
+    thread_copy,
+)
+from surogates.devices.operations import LeaseLost, OperationConflict
 from surogates.devices.workspace import MAX_MESSAGE_CHARS, DeviceOperationError
 from surogates.governance.saga import Saga, SagaState, SagaStep, StepState
 from surogates.governance.saga.orchestrator import SagaTimeoutError
-from surogates.harness.landing import TURN_ENDS, _orchestrator, _Row, _row_picked_up, _tell, _written, redo_files
+from surogates.harness.landing import (
+    TURN_ENDS,
+    LandingUnsettled,
+    _orchestrator,
+    _Row,
+    _row_picked_up,
+    _tell,
+    _tell_escalated,
+    _written,
+    redo_files,
+)
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.session.events import EventType
-from surogates.workstreams.history import landing_row, saga_of, start_landing
+from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +99,13 @@ BUSY_PATIENCE = 1_800.0
 #: How long a turn waits for its computer to give the folder back: its app lets the folder go by itself once the
 #: landing's helper has been idle.
 RELEASE_WAIT = 30.0
+#: How long the lease a settle takes on a lost landing's thread lasts, and how often it is renewed while the settle runs.
+SETTLE_LEASE = 60
+SETTLE_RENEW = 20.0
+#: How many landings ended in a folder whose forgetting never let go of what they kept a landing asks it again for.
+FORGET_AGAIN = 16
 #: A landing put back whole is tried once more, as a new saga: its look and its pickup see what the first ran into.
+#: What a turn taken up again did after its landing began lands after it, as a landing of its own (``land:<turn>:3``).
 TRIES = 2
 #: Why a landing leaves out a file that no landing will ever write: a name that runs code, and a link or a file with a
 #: second name.  The thread's version stays in its copy, and is no work a turn's end failed to save.
@@ -104,6 +143,10 @@ class _TooLarge(Exception):
 
 class _YoursTooLarge(Exception):
     """You changed more files in the folder since its last landing than one landing's pickup records."""
+
+
+class _Waited(Exception):
+    """A landing left running in the folder is its own worker's still, for longer than a landing waits for the folder."""
 
 
 def carries(paths: list[str]) -> bool:
@@ -171,13 +214,21 @@ async def land_local_turn(
     its computer's answer to the pickup), its row could not be written
     (``unwritten``), another chat held the folder (``busy``), its computer
     did not answer (``unanswered``), or refused it (``refused``, with its
-    word, ``code``).
+    word, ``code``), or a landing left in its folder had recorded, and its
+    row could not say so (``settling``).
     ``recovery`` is what the folder's helper found there, left by a landing
     cut short, where it found any.
 
-    The folder is held first, then landed in.  Where the turn's last
-    landing did not let the folder go by a forgetting of its own, the turn
-    gives it back by its hold's own name, which drops nothing a landing kept.
+    The folder is held first, and every landing left running in it is
+    settled (:func:`settle_folder`); then it is landed in.  Where the turn's
+    last landing did not let the folder go by a forgetting of its own, the
+    turn gives it back by its hold's own name, which drops nothing a landing
+    kept.  Taken up again after its worker was lost, a turn whose landing
+    began goes on with it from the journal; and lands what it did since, as
+    a landing of its own.
+
+    Raises :class:`LeaseLost` where another worker took the thread's turn:
+    this one stands down, and has written nothing more.
     """
     turn = await _turn_now(store, session)
     calls = await store.get_events(session.id, after=turn, types=[EventType.TOOL_CALL])
@@ -185,23 +236,35 @@ async def land_local_turn(
         return None
     copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=lease_token)
     redoing = await redo_files(store, session.id)
+    held = (session.id, lease_token) if lease_token is not None else None
+    hold = copy.steps(f"land:{turn}:hold")
     try:
-        recovery = await _held(copy, turn)
+        recovery = await _held(copy, hold)
+        # Before anything of this turn's is looked at there.
+        await settle_folder(store, session_factory, copy, session, turn, hold, held, redis=redis)
+    except LeaseLost:
+        raise
     except Exception as refused:
-        logger.warning("The folder of thread %s was not held for its landing, so its turn lands nothing", session.id, exc_info=True)
+        logger.warning("The folder of thread %s was not held and settled for its landing, so its turn lands nothing", session.id, exc_info=True)
         outcome = _not_begun(refused)
-        if outcome["reason"] == "refused":
+        if outcome["reason"] in ("refused", "settling"):
             await _release(copy, session, turn)
         return outcome
+    land = partial(
+        _land, copy, session, turn, session_factory=session_factory, saga_settings=saga_settings, tool_saga_id=tool_saga_id,
+        held=held,
+    )
     outcome: dict[str, Any] = {}
     for attempt in range(1, TRIES + 1):
-        outcome = await _land(
-            copy, session, turn, attempt, session_factory=session_factory, saga_settings=saga_settings,
-            tool_saga_id=tool_saga_id, calls=calls,
-        )
+        outcome = await land(attempt, calls=calls)
         # Not where a try at once would meet the same, nor after a cancel, which is what a Stop's pause sends.
         if outcome["state"] != "compensated" or outcome.get("reason") in _ONCE or outcome.get("code") == "cancelled":
             break
+    since = [call for call in calls if call.id > outcome["through"]]
+    if outcome["state"] == "completed" and since:
+        # Taken up again, the turn worked on after its landing began, which
+        # had recorded: what it did since lands now, as a landing of its own.
+        outcome = _both(outcome, await land(TRIES + 1, calls=since))
     if not outcome.pop("forgot") and outcome["state"] != "unsettled":
         await _release(copy, session, turn)
     if recovery:
@@ -250,14 +313,15 @@ def waiting_on_you_here(session: Any, paths: list[str], *, escalated: bool) -> d
     }
 
 
-async def _held(copy: ThreadCopy, turn: int) -> dict[str, list]:
+async def _held(copy: ThreadCopy, hold: Steps) -> dict[str, list]:
     """Hold the folder for the turn's landing, its helper first putting right what a landing cut short left there: what it found.
 
     Of that, what a person may have to look at: a file kept beside a newer
     one of its name, a file gone with its folder, a record that could not
-    be read.  A file that took its name again is as it was.
+    be read.  A file that took its name again is as it was.  Asked under
+    the turn's hold, ``land:<turn>:hold``.
     """
-    found = await _within(_land_asked(copy.steps(f"land:{turn}:hold"), "recover"))
+    found = await _within(_land_asked(hold, "recover"))
     told = {key: found[key] for key in ("beside", "lost", "unread") if found[key]}
     if told:
         logger.warning("The folder of a landing in %s held what a landing cut short left there: %s", copy.folder, sorted(told))
@@ -275,14 +339,22 @@ async def _release(copy: ThreadCopy, session: Any, turn: int) -> None:
     Its landing ended before, as one taken up again finds it, was left
     escalated, or its forgetting was refused.  By the turn's hold's own name,
     under an invocation of its own, so a turn's end taken up again asks it
-    anew; and as best it can, for a while at most: its app lets the folder
-    go by itself once the landing's helper has been idle.
+    anew.
     """
-    steps = copy.steps(f"land:{turn}:release:{uuid4()}")
+    await _given_back(copy.steps(f"land:{turn}:release:{uuid4()}"), session, turn)
+
+
+async def _given_back(steps: Steps, session: Any, turn: int) -> None:
+    """Forget the turn's hold of its folder, under *steps*: as best it can, for a while at most.
+
+    Its app lets the folder go by itself once the landing's helper has been idle.
+    """
     try:
         await asyncio.wait_for(steps.land("forget", saga=_hold_of(session, turn), applied=[]), RELEASE_WAIT)
+    except LeaseLost:
+        raise
     except Exception:
-        logger.warning("The folder of thread %s was not given back after its landing: its app lets it go once idle", session.id, exc_info=True)
+        logger.warning("The folder of thread %s was not given back: its app lets it go once idle", session.id, exc_info=True)
 
 
 async def _within(asked: Any) -> Any:
@@ -338,8 +410,15 @@ def _why(exc: BaseException) -> dict[str, str]:
 
 
 def _not_begun(refused: BaseException) -> dict:
-    """The outcome of a turn's end whose landing did not begin: nothing of the turn reached the folder, and it is in the copy."""
-    if isinstance(refused, ComputerRefused) and refused.kind == "busy":
+    """The outcome of a turn's end whose landing did not begin: nothing of the turn reached the folder, and it is in the copy.
+
+    A settle its computer did not finish says why by what ended it.
+    """
+    if isinstance(refused, _Unsettled) and refused.__cause__ is not None:
+        refused = refused.__cause__
+    if isinstance(refused, LandingUnsettled):
+        why = {"reason": "settling"}
+    elif isinstance(refused, _Waited) or (isinstance(refused, ComputerRefused) and refused.kind == "busy"):
         why = {"reason": "busy"}
     elif _away(refused):
         why = {"reason": "unanswered"}
@@ -372,7 +451,21 @@ def _of_row(row: Any) -> dict:
         "saga": row.saga_id, "state": row.saga_state, "commit": row.commit, "landed": landed, "overlapped": overlapped,
         "excluded": commit.get("excluded", []), "repositories": commit.get("repositories", []), "not_taken": commit.get("not_taken", []),
         "files": _told(changes, landed, overlapped), "picked_up": row.picked_up or [], "saved": False, "packs": 0, "forgot": False,
+        "through": _through(row),
     }
+
+
+def _events_of(row: Any) -> tuple[int, int] | None:
+    """The first and the last tool call the landing *row* was begun for, as its first run named them; None for none."""
+    if row.events is None:
+        return None
+    return row.events.lower, row.events.upper - (0 if row.events.upper_inc else 1)
+
+
+def _through(row: Any) -> int:
+    """The last tool call the landing *row* was begun for: 0 where its turn had made none."""
+    events = _events_of(row)
+    return events[1] if events is not None else 0
 
 
 def _told(changes: list[dict], landed: list[dict], overlapped: list[dict]) -> list[dict]:
@@ -410,32 +503,62 @@ def _row_files(saga: Saga) -> list[dict]:
 
 async def _land(
     copy: ThreadCopy, session: Any, turn: int, attempt: int, *,
-    session_factory: Any, saga_settings: Any, tool_saga_id: str | None, calls: list,
+    session_factory: Any, saga_settings: Any, tool_saga_id: str | None, calls: list, held: tuple[UUID, str] | None,
 ) -> dict:
-    """One try of a turn's landing, as one saga; its outcome, with ``forgot``: whether its own forgetting let the folder go."""
+    """One try of a turn's landing, as one saga, of the turn's tool calls *calls*; its outcome.
+
+    With ``forgot``, whether its own forgetting let the folder go, and
+    ``through``, the last tool call it was begun for.  Taken up again, it
+    goes on as its first run began it, its audit among it, so each step it
+    asks again is answered from the journal; but where the turn took
+    another path than that run, or worked on since that run began it, or a
+    settle began on it, it is settled as a landing left running is, from
+    what its computer was asked, and the turn lands again as a new saga.
+    """
     invocation = f"land:{turn}" if attempt == 1 else f"land:{turn}:{attempt}"
     # Named after its invocation: a turn taken up again finds its landing, and no other landing ever has its name.
     saga_id = f"saga:{uuid5(session.id, invocation)}"
     orchestrator = _orchestrator(saga_settings)
     saga = orchestrator.adopt(Saga(saga_id=saga_id, session_id=session.id, kind="landing"))
+    events = (calls[0].id, calls[-1].id) if calls else None
     outcome: dict[str, Any] = {
         "saga": saga_id, "state": "completed", "commit": None,
         "landed": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": [], "files": [], "picked_up": [],
-        "saved": False, "packs": 0, "forgot": False,
+        "saved": False, "packs": 0, "forgot": False, "through": events[1] if events is not None else 0,
     }
+    settled = partial(_settled, copy, session, turn, session_factory=session_factory, held=held)
     try:
         found = await landing_row(session_factory, saga_id)
-        if found is not None and found.saga_state != "running":
-            # Ended already, by a run of this turn's end that was lost before it was told: as its row says.
-            return _of_row(found)
-        row = _Row(session_factory, found.id if found is not None else await start_landing(
-            session_factory, saga, workstream_id=session.config["workstream_id"], thread_id=session.id,
-            agent_id=str(session.agent_id), user_id=session.user_id, tool_saga_id=tool_saga_id,
-            events=(calls[0].id, calls[-1].id) if calls else None, device_id=copy.device_id, folder=copy.folder,
-        ), saga)
     except Exception:
         logger.warning("The landing of thread %s on its computer has no row, so it did not begin", session.id, exc_info=True)
         return {**outcome, "state": "compensated", "reason": "unwritten"}
+    if found is not None and found.saga_state != "running":
+        # Ended already, by a run of this turn's end that was lost before it was told: as its row says.
+        return _of_row(found)
+    if found is not None:
+        tool_saga_id, events, outcome["through"] = found.tool_saga_id, _events_of(found), _through(found)
+        if calls and calls[-1].id > outcome["through"]:
+            # Gone on with, it would record the copy as it is now over the
+            # turn it committed, and set the work done since aside.
+            logger.warning("Thread %s worked on since its landing %s began: it is settled, and the turn lands again", session.id, saga_id)
+            return await settled(found)
+        if await copy.operations.settling(copy.device_id, saga_id):
+            # Another landing began putting it back, and stopped: gone on
+            # with, it would record files the folder may no longer hold.
+            logger.warning("A settle began on the landing %s of thread %s: it is settled, and the turn lands again", saga_id, session.id)
+            return await settled(found)
+    try:
+        row_id = found.id if found is not None else await start_landing(
+            session_factory, saga, workstream_id=session.config["workstream_id"], thread_id=session.id,
+            agent_id=str(session.agent_id), user_id=session.user_id, tool_saga_id=tool_saga_id,
+            events=events, device_id=copy.device_id, folder=copy.folder, held=held,
+        )
+    except Exception:
+        logger.warning("The landing of thread %s on its computer has no row, so it did not begin", session.id, exc_info=True)
+        return {**outcome, "state": "compensated", "reason": "unwritten"}
+    if row_id is None:
+        raise LeaseLost(session.id)
+    row = _Row(session_factory, row_id, saga, held=held)
     steps = copy.steps(invocation)
     thread = {"name": session.title or "Thread", "email": f"thread:{session.id}@surogate"}
     you = {"name": str(session.user_id), "email": f"user:{session.user_id}@surogate"}
@@ -446,7 +569,7 @@ async def _land(
         ["Surogate-User", str(session.user_id)],
         ["Surogate-Saga", saga_id],
         *([["Surogate-Tool-Saga", tool_saga_id]] if tool_saga_id else []),
-        *([["Surogate-Events", f"{calls[0].id}-{calls[-1].id}"]] if calls else []),
+        *([["Surogate-Events", f"{events[0]}-{events[1]}"]] if events is not None else []),
     ]
 
     def step(name: str, **arguments: Any) -> SagaStep:
@@ -465,6 +588,8 @@ async def _land(
         # At a turning point the row must hold: seen written, or the landing goes no further.
         try:
             await row.write()
+        except LeaseLost:
+            raise
         except Exception as unwritten:
             raise _Unwritten("the landing's row could not be written") from unwritten
 
@@ -526,6 +651,13 @@ async def _land(
         saga.transition(SagaState.COMPLETED)
         outcome.update(commit=recorded["commit"], landed=landed, picked_up=picked["picked_up"])
         await row.write(state="completed", commit=recorded["commit"], files=_row_files(saga), picked_up=_row_picked_up(saga))
+    except LeaseLost:
+        # Another worker runs the thread now, and goes on with this landing from the journal.
+        raise
+    except OperationConflict:
+        # Taken up again, the turn asked a step otherwise than the run it takes up.
+        logger.warning("The landing %s of thread %s was taken up again on another path: it is settled, and the turn lands again", saga_id, session.id)
+        return await settled(await landing_row(session_factory, saga_id))
     except _TooLarge as large:
         logger.warning("The landing of thread %s on its computer carries no turn so large: %s", session.id, large)
         outcome.update(state="compensated", reason="too_large", saved=False)
@@ -608,10 +740,7 @@ async def _ended(saga: Saga, orchestrator: Any, steps: Steps, row: _Row, nothing
     await _written(row.write)
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
     if record is not None:
-        try:
-            looked = await _within(steps.history("fetch", saga=saga.saga_id, since=record.arguments["main"]))
-        except Exception as unseen:
-            raise _Unsettled("the folder's history did not say whether the landing pushed") from unseen
+        looked = await _looked(steps, saga, record)
         if looked["landing"] is not None:
             if saga.state is SagaState.RUNNING:
                 saga.transition(SagaState.COMPLETED)
@@ -620,10 +749,7 @@ async def _ended(saga: Saga, orchestrator: Any, steps: Steps, row: _Row, nothing
             )
             return "completed", looked["landing"]
         if looked["hidden"]:
-            logger.error("Landing %s cannot be put back: the folder's history is cut above where it began", saga.saga_id)
-            for it in saga.steps:
-                if it.tool_name == "history.apply" and it.state is not StepState.PENDING:
-                    it.state, it.error = StepState.COMPENSATION_FAILED, "The folder's history no longer says whether this landing pushed"
+            _given_up(saga, every=False)
             await _written(row.write, tries=2, state="escalated")
             return "escalated", None
     failed = await _put_back(saga, steps, row, nothing)
@@ -632,7 +758,33 @@ async def _ended(saga: Saga, orchestrator: Any, steps: Steps, row: _Row, nothing
     return state, None
 
 
-async def _put_back(saga: Saga, steps: Steps, row: _Row, nothing: set[int]) -> list[SagaStep]:
+async def _looked(steps: Steps, saga: Saga, record: SagaStep) -> dict:
+    """Whether ``main`` in the folder's history holds the landing *saga*, back to the ``main`` its *record* names.
+
+    A look its computer does not answer leaves the landing unsettled.
+    """
+    try:
+        return await _within(steps.history("fetch", saga=saga.saga_id, since=record.arguments["main"]))
+    except LeaseLost:
+        raise
+    except Exception as unseen:
+        raise _Unsettled("the folder's history did not say whether the landing pushed") from unseen
+
+
+def _given_up(saga: Saga, *, every: bool) -> list[str]:
+    """A landing a pruning's cut hides the push of, given up: each apply that may have written its file, which stays as it is.
+
+    With *every*, a settle's, every apply it holds: its row may show one
+    pending that ran.  Their files, for whoever checks them.
+    """
+    logger.error("Landing %s cannot be put back: the folder's history is cut above where it began", saga.saga_id)
+    applies = [it for it in saga.steps if it.tool_name == "history.apply" and (every or it.state is not StepState.PENDING)]
+    for it in applies:
+        it.state, it.error = StepState.COMPENSATION_FAILED, "The folder's history no longer says whether this landing pushed"
+    return [it.arguments["path"] for it in applies]
+
+
+async def _put_back(saga: Saga, steps: Steps, row: _Row, nothing: set[int], *, every: bool = False) -> list[SagaStep]:
     """Put back what a landing applied, newest first; the steps that could not be put back.
 
     The app's helper wrote down what each apply was about to do before it
@@ -642,13 +794,18 @@ async def _put_back(saga: Saga, steps: Steps, row: _Row, nothing: set[int]) -> l
     landing wrote it is left as it is, and what the landing kept of it stays
     kept: the saga escalates.  A put-back its computer did not finish ends
     the put-back there: the landing is unsettled, and nothing more is asked.
+
+    With *every*, a settle's: every apply the landing holds is asked, in
+    the same order however often the settle begins again, whatever state
+    its row gives it, since the row may show one pending that ran; and
+    each ends ``compensated``, or ``compensation_failed`` where it could not
+    be put back.
     """
     if saga.state is SagaState.RUNNING:
         saga.transition(SagaState.COMPENSATING)
     failed: list[SagaStep] = []
-    for it in reversed(saga.steps):
-        if it.tool_name != "history.apply" or it.state is StepState.PENDING:
-            continue
+    applies = [it for it in saga.steps if it.tool_name == "history.apply" and (every or it.state is not StepState.PENDING)]
+    for it in sorted(applies, key=lambda it: it.arguments["step"], reverse=True):
         committed = it.state is StepState.COMMITTED
         if committed:
             it.transition(StepState.COMPENSATING)
@@ -657,11 +814,15 @@ async def _put_back(saga: Saga, steps: Steps, row: _Row, nothing: set[int]) -> l
             did = await _within(_land_asked(steps, "unapply", saga=saga.saga_id, step=it.arguments["step"], path=it.arguments["path"]))
             if did["path"] != it.arguments["path"]:
                 raise NotAnAnswer("This computer's answer to 'unapply' names another file than the one it was asked to put back")
+        except LeaseLost:
+            raise
         except Exception as exc:
             logger.warning("Could not put back %s", it.arguments["path"], exc_info=True)
             if committed:
                 it.error = f"Compensation failed: {exc}"
                 it.transition(StepState.COMPENSATION_FAILED)
+            elif every:
+                it.state, it.error = StepState.COMPENSATION_FAILED, f"Compensation failed: {exc}"
             failed.append(it)
             if _unfinished(exc):
                 raise _Unsettled("its computer did not finish putting the landing back") from exc
@@ -671,6 +832,8 @@ async def _put_back(saga: Saga, steps: Steps, row: _Row, nothing: set[int]) -> l
         if committed:
             it.compensation_result = did
             it.transition(StepState.COMPENSATED)
+        elif every:
+            it.state, it.compensation_result = StepState.COMPENSATED, did
     if saga.state is SagaState.COMPENSATING:
         saga.transition(SagaState.ESCALATED if failed else SagaState.COMPLETED)
     return failed
@@ -698,8 +861,308 @@ async def _forgotten(saga: Saga, orchestrator: Any, steps: Steps, row: _Row | No
     )
     try:
         await orchestrator.execute_step(saga.saga_id, it.step_id, partial(_land_asked, steps, "forget", **it.arguments))
+    except LeaseLost:
+        raise
     except Exception:
         logger.warning("The landing %s was not forgotten on its computer: the next landing in its folder asks again", saga.saga_id, exc_info=True)
     if row is not None:
         await _written(row.write, state=state)
     return it.state is StepState.COMMITTED
+
+
+def _both(first: dict, more: dict) -> dict:
+    """The outcome of a turn that landed twice, as one: what its first landing landed, and what the turn did since."""
+    files = {f["ref"]: f for f in (*first["files"], *more["files"])}
+    return {
+        **more, "commit": more["commit"] or first["commit"],
+        **{key: [*first[key], *more[key]] for key in ("landed", "overlapped", "not_taken", "picked_up")},
+        **{key: sorted({*first[key], *more[key]}) for key in ("excluded", "repositories")},
+        "files": [files[ref] for ref in sorted(files)],
+    }
+
+
+def _own(session: Any, turn: int) -> set[str]:
+    """The sagas of this turn's own landings: its own to go on with, never settled as another's."""
+    return {f"saga:{uuid5(session.id, f'land:{turn}' if n == 1 else f'land:{turn}:{n}')}" for n in range(1, TRIES + 2)}
+
+
+@contextlib.asynccontextmanager
+async def _lease_of(store: Any, thread_id: UUID, owner: str) -> AsyncIterator[str | None]:
+    """Take *thread_id*'s lease for as long as the block runs; its token, or None while a worker holds it.
+
+    Whoever settles a thread's landing holds that thread's turn meanwhile:
+    a worker of its own that still ran finds its lease taken at its next
+    step, and stands down.  Renewed while the settle runs, a renewal that
+    failed asked again at the next; and given back.  Taken by another all
+    the same, it is renewed no more: the settle stops at its next step,
+    whose write of the row finds the lease another's (:class:`LeaseLost`).
+    """
+    # Imported here: the session's store imports the harness.
+    from surogates.session.store import LeaseNotHeldError
+
+    lease = await store.try_acquire_lease(thread_id, owner, ttl_seconds=SETTLE_LEASE)
+    if lease is None:
+        yield None
+        return
+
+    async def renewing() -> None:
+        while True:
+            await asyncio.sleep(SETTLE_RENEW)
+            try:
+                await store.renew_lease(thread_id, lease.lease_token, ttl_seconds=SETTLE_LEASE)
+            except LeaseNotHeldError:
+                logger.warning("The lease of thread %s, which a settle held, is another's now", thread_id)
+                return
+            except Exception:
+                logger.warning("The lease of thread %s, which a settle holds, was not renewed: asked again", thread_id, exc_info=True)
+
+    renewed = asyncio.ensure_future(renewing())
+    try:
+        yield str(lease.lease_token)
+    finally:
+        renewed.cancel()
+        await asyncio.gather(renewed, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await store.release_lease(thread_id, lease.lease_token)
+
+
+async def settle_folder(
+    store: Any, session_factory: Any, copy: ThreadCopy, session: Any, turn: int, hold: Steps, held: tuple[UUID, str] | None,
+    *, redis: Any,
+) -> None:
+    """Settle every landing left running in this thread's folder, before anything of this turn's is looked at there.
+
+    A landing whose worker was lost, and whose turn was never taken up
+    again, left the folder as far as it got and the app keeping what it
+    replaced.  The next landing in the folder, any thread's of any
+    project's, ends it first, holding the folder (*hold*): complete where
+    it recorded, put back whole where it did not (:func:`settle`).  Whoever
+    settles one takes its thread's lease first, and holds it meanwhile.
+    One whose lease a worker holds is that worker's to finish: this landing
+    gives the folder back, waits, and takes it again, for
+    :data:`BUSY_PATIENCE` at most, then lands nothing (``_Waited``).  So it
+    never looks at a folder that holds half of another's landing, and no
+    pickup takes that landing's files for yours.  This turn's own landings
+    are its own to go on with.  An earlier turn's of this thread is settled
+    under this worker's own lease, *held*; and a deleted thread's, which
+    nobody holds, under none.
+
+    A landing settled ``escalated`` is told to its thread's master, and its
+    thread waits on you over it, once a landing.  Raises
+    :class:`LandingUnsettled` where one recorded and its row could not say
+    so: nothing lands in the folder until it can.  Then each landing ended
+    there whose forgetting never let go of what it kept is forgotten
+    (:func:`_forget_owed`).
+    """
+    patience = time.monotonic() + BUSY_PATIENCE
+    while True:
+        waits = False
+        for row in await running_in(session_factory, copy.device_id, copy.folder):
+            if row.saga_id in _own(session, turn):
+                continue
+            if row.thread_id is None or row.thread_id == session.id:
+                state, at_issue = await settle(session_factory, copy, turn, row, held if row.thread_id is not None else None)
+            else:
+                try:
+                    async with _lease_of(store, row.thread_id, f"settle:{session.id}") as taken:
+                        if taken is None:
+                            waits = True
+                            continue
+                        state, at_issue = await settle(session_factory, copy, turn, row, (row.thread_id, taken))
+                except LeaseLost as lost:
+                    if lost.session_id != row.thread_id:
+                        raise
+                    # Its thread's turn is a worker's again: that worker's to finish.
+                    waits = True
+                    continue
+            logger.warning("Settled landing %s of thread %s, left running in its folder: %s", row.saga_id, row.thread_id, state)
+            if state == "escalated" and row.thread_id is not None:
+                await _tell_escalated(
+                    session_factory, row.thread_id, saga_of(row), at_issue, redis=redis,
+                    waits=lambda thread, paths: waiting_on_you_here(thread, paths, escalated=True),
+                )
+        if not waits:
+            await _forget_owed(store, session_factory, copy, session, turn, held)
+            return
+        if time.monotonic() >= patience:
+            raise _Waited("a landing left running in the folder is its own worker's still")
+        # Its own worker's to finish, which needs the folder: given back meanwhile, and taken again.
+        await _given_back(hold, session, turn)
+        await asyncio.sleep(BUSY_WAIT)
+        await _held(copy, hold)
+
+
+async def _forget_owed(
+    store: Any, session_factory: Any, copy: ThreadCopy, session: Any, turn: int, held: tuple[UUID, str] | None,
+) -> None:
+    """Forget each landing ended in this folder whose forgetting never let go of what it kept, :data:`FORGET_AGAIN` at most.
+
+    A landing recorded, or put back whole, is forgotten at its end, which
+    lets go what the app kept of the files it replaced.  One whose
+    forgetting never ran, its worker lost or its computer away, or was
+    refused, is asked again by the next landing in its folder, once that
+    holds the folder and has settled what was left running.  Each under an
+    invocation of the settling's own, ``land:<turn>:settle:<saga>:forget``,
+    its thread's lease held as a settle holds it, and written into its row
+    as a step of its saga.  A landing put back whole keeps nothing, and its
+    forgetting names no apply.  One left ``escalated`` is not among them:
+    what it kept stays kept until a person settles it.  This turn's own are
+    its own.  As best it can: one not forgotten now is asked again by the
+    landing after.
+    """
+    try:
+        rows = await unforgotten_in(session_factory, copy.device_id, copy.folder, besides=_own(session, turn), most=FORGET_AGAIN)
+    except Exception:
+        logger.warning("The landings in %s that owe a forgetting were not read", copy.folder, exc_info=True)
+        return
+    for row in rows:
+        try:
+            if row.thread_id is None or row.thread_id == session.id:
+                await _forget_again(session_factory, copy, turn, row, held if row.thread_id is not None else None)
+                continue
+            async with _lease_of(store, row.thread_id, f"settle:{session.id}") as taken:
+                # Where a worker holds its thread's turn, that worker's to ask.
+                if taken is not None:
+                    await _forget_again(session_factory, copy, turn, row, (row.thread_id, taken))
+        except LeaseLost as lost:
+            if lost.session_id == session.id:
+                raise
+            logger.warning("The thread of landing %s is a worker's again: its forgetting is that worker's", row.saga_id)
+
+
+async def _forget_again(session_factory: Any, copy: ThreadCopy, turn: int, row: Any, held: tuple[UUID, str] | None) -> None:
+    """Ask the forgetting of the landing *row* records, which ended, once more; written into its row as a step of its saga."""
+    saga = saga_of(row)
+    orchestrator = _orchestrator(None)
+    orchestrator.adopt(saga)
+    # Put back whole, it keeps nothing: no apply is named, as none is kept.
+    nothing = {s.arguments["step"] for s in saga.steps if s.tool_name == "history.apply"} if row.saga_state == "compensated" else set()
+    steps = copy.steps(f"land:{turn}:settle:{row.saga_id}:forget")
+    await _forgotten(saga, orchestrator, steps, _Row(session_factory, row.id, saga, held=held), nothing, row.saga_state)
+
+
+async def settle(
+    session_factory: Any, copy: ThreadCopy, turn: int, row: Any, held: tuple[UUID, str] | None,
+) -> tuple[str, list[str]]:
+    """End the landing *row* records, which no worker goes on with; its state, and the files a person has to check.
+
+    Asked through this thread's own landing helper, under an invocation of
+    the settling's own, ``land:<turn>:settle:<saga>``: a settle begun again
+    asks the same steps in the same order, and the journal answers those
+    already done.  What the landing left open on its computer is closed
+    first, so none of it runs when its computer is back, and its steps are
+    taken from the journal, which holds each its computer was asked though
+    its row may have been written short of it (:func:`_as_asked`).  It may
+    have recorded wherever the journal holds its record, asked or answered:
+    the folder's history is asked whether ``main`` holds its saga, back to
+    the ``main`` that record named.  Held, it is ``completed``, its files
+    staying, and forgotten.  Where a pruning's cut hides that, it is given
+    up, ``escalated``, its files left as they are.  Else every apply it may
+    have sent is put back, newest first, and it is forgotten, or left
+    ``escalated`` where a file could not be put back.  A thread deleted
+    since has no journal: its row alone says.
+
+    *held* is the landing's thread and the lease token its settler holds it
+    by: the row is written only while that is its lease.  Raises
+    :class:`LandingUnsettled` where it recorded and its row could not say
+    so, and ``_Unsettled`` where its computer did not answer.
+    """
+    steps = copy.steps(f"land:{turn}:settle:{row.saga_id}")
+    saga = saga_of(row)
+    orchestrator = _orchestrator(None)
+    orchestrator.adopt(saga)
+    written = _Row(session_factory, row.id, saga, held=held)
+    if row.thread_id is not None:
+        record = _as_asked(saga, await copy.operations.close_landing(row.thread_id, row.saga_id))
+    else:
+        record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
+    if record is not None:
+        looked = await _looked(steps, saga, record)
+        if looked["landing"] is not None:
+            for it in saga.steps:
+                if it.tool_name in ("history.apply", "history.record"):
+                    # Recorded, so each ran: the record pushed what every apply wrote.
+                    it.state = StepState.COMMITTED
+            saga.transition(SagaState.COMPLETED)
+            await _written(
+                written.write, tries=2, state="completed", commit=looked["landing"], files=_row_files(saga),
+                picked_up=_row_picked_up(saga),
+            )
+            if written.state != "completed":
+                raise LandingUnsettled(f"landing {row.saga_id} recorded, and its row could not be written")
+            await _forgotten(saga, orchestrator, steps, written, set(), "completed")
+            return "completed", []
+        if looked["hidden"]:
+            at_issue = _given_up(saga, every=True)
+            await _written(written.write, tries=2, state="escalated")
+            return "escalated", at_issue
+    nothing: set[int] = set()
+    try:
+        failed = await _put_back(saga, steps, written, nothing, every=True)
+    except _Unsettled:
+        # As far as it got, for whoever settles it next.
+        await _written(written.write)
+        raise
+    state = "escalated" if failed else "compensated"
+    await _written(written.write, tries=2, state=state)
+    if failed:
+        return state, [it.arguments["path"] for it in failed]
+    await _forgotten(saga, orchestrator, steps, written, nothing, state)
+    return state, []
+
+
+async def _settled(
+    copy: ThreadCopy, session: Any, turn: int, row: Any, *, session_factory: Any, held: tuple[UUID, str] | None,
+) -> dict:
+    """A landing of this turn's own that the turn cannot go on with, settled as one left running is; its outcome, as its row says.
+
+    Unsettled where its computer did not answer, or where it recorded and
+    its row could not say so: the next landing in the folder settles it.
+    """
+    try:
+        await settle(session_factory, copy, turn, row, held)
+    except (_Unsettled, LandingUnsettled):
+        logger.warning("The landing %s of thread %s is left unsettled, as its row says", row.saga_id, session.id, exc_info=True)
+        return {**_of_row(row), "state": "unsettled", "landed": [], "commit": None}
+    return _of_row(await landing_row(session_factory, row.saga_id))
+
+
+#: The steps of a landing's row, by the operation of its computer's each one is.
+_STEPS = {
+    ("history", "pickup"): "history.pickup", ("history", "commit"): "history.commit",
+    ("land", "apply"): "history.apply", ("history", "record"): "history.record",
+}
+
+
+def _as_asked(saga: Saga, asked: list[tuple[str, dict, dict | None]]) -> SagaStep | None:
+    """*saga*'s steps as its computer was asked them, the journal's operations *asked*; its record step where the journal holds one.
+
+    A landing's row is written whole at its turning points, and a turn taken
+    up again writes its own steps as it asks them again: a row can lack a
+    step its computer was asked, and only the journal says that it was.
+    Each the journal holds is taken with what the row says of it, and with
+    its computer's answer, checked as one given now, where the row has none;
+    then those of the row's its computer was never asked.  One asked whose
+    answer is lost, closed or a refusal may have run.
+    """
+    rows = {(s.tool_name, json.dumps(s.arguments, sort_keys=True)): s for s in saga.steps}
+    steps: list[SagaStep] = []
+    for kind, args, outcome in asked:
+        name = _STEPS.get((kind, args.get("action")))
+        if name is None:
+            continue
+        arguments = {key: value for key, value in args.items() if key != "action"}
+        it = rows.pop((name, json.dumps(arguments, sort_keys=True)), None) or SagaStep(
+            step_id=f"step:{uuid4()}", tool_name=name, tool_call_id="", arguments=arguments, timeout_seconds=STEP_WAIT,
+        )
+        answer = answered(kind, args["action"], outcome)
+        if answer is not None:
+            it.execute_result = it.execute_result or answer
+            if it.state in (StepState.PENDING, StepState.EXECUTING):
+                it.state = StepState.COMMITTED
+        elif it.state is StepState.PENDING:
+            it.state = StepState.EXECUTING
+        steps.append(it)
+    unasked = {id(it) for it in rows.values()}
+    saga.steps = [*steps, *(it for it in saga.steps if id(it) in unasked)]
+    return next((it for it in steps if it.tool_name == "history.record"), None)
