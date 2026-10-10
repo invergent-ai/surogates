@@ -21,6 +21,8 @@ export interface DeviceOptions {
   token: string;
   journal: OperationJournal;
   executor: Executor;
+  // Whether this app keeps a copy of a folder for a project's thread to work in: its hello says so.
+  copies?: boolean;
   onStatus?: (status: LinkStatus) => void;
   // Who the server says this device is, at each connect, before the journal is claimed. A
   // throw refuses it: the link stops, as when any of its handlers throws, and says why.
@@ -48,6 +50,7 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
     token: options.token,
     delay: options.delay,
     openIds: () => runner.openIds(),
+    copies: options.copies,
     handlers: {
       onWelcome: (welcome) => {
         options.onWelcome?.(welcome);
