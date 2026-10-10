@@ -26,6 +26,18 @@ beforeAll(needsKvm);
 const KEY = "0123456789abcdef";
 const ONE = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 const TWO = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+
+// What an open names as set aside that was not set aside before it: each a whole copy or repository of the
+// thread's, named by its count, its time, the thread and which of the two. The place's names before it
+// are earlier tests'.
+const asideSince = (before: string[], opened: Record<string, unknown>): string[] => {
+  expect(Object.keys(opened).sort()).toEqual(["copy", "set_aside_folders"]);
+  expect(opened.copy).toBe("made");
+  const names = (opened.set_aside_folders as string[]).filter((name) => !before.includes(name));
+  for (const name of names) expect(name).toMatch(/^[0-9]{8}-[0-9]{8}T[0-9]{6}Z-[0-9a-f-]{36}\.(copy|repository)$/);
+  return names.map((name) => name.replace(/^[0-9]{8}-[0-9]{8}T[0-9]{6}Z-/, "")).sort();
+};
+const setAside = (store: string): string[] => (existsSync(join(store, "set-aside")) ? readdirSync(join(store, "set-aside")) : []);
 const THREE = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
 const NO_ID = "b".repeat(40);
 const YOU = { name: "u1", email: "user:u1@surogate" };
@@ -328,6 +340,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
   });
 
   it("runs nothing an earlier boot's guest left in the place: a repository it redirected to its own is made again", async () => {
+    // What the place has set aside before: what this test sets aside is named after it, by whichever
+    // request first finds the repository not whole.
+    const before = setAside(join(dir, "store"));
     expect((await subverted(PLANT)).excluded).toEqual(["planted"]);
     expect(lstatSync(join(dir, "store", "clones", ONE, "worktrees")).isSymbolicLink()).toBe(true);
     await nextGuest();
@@ -339,7 +354,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     expect(first).toEqual({
       error: { type: "history", code: "no_whole_copy", message: "refused the request: this thread has no whole copy, and its next open makes one" },
     });
-    expect(await history(ONE, "open")).toEqual({ copy: "made" });
+    // The repository it planted in is set aside whole, never read, and so is the copy that held this
+    // thread's change: the open names both, newest last.
+    expect(asideSince(before, await history(ONE, "open"))).toEqual([`${ONE}.copy`, `${ONE}.repository`]);
     expect(lstatSync(join(dir, "store", "clones", ONE, "worktrees")).isSymbolicLink()).toBe(false);
     await run(ONE, "echo 'after the next boot' > Report.docx");
     expect((await history(ONE, "snapshot", { reason: "before a step" })).hash).toMatch(/^[0-9a-f]{40}$/);
@@ -348,6 +365,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
   });
 
   it("reads no link an earlier boot's guest left among a thread's objects as one of them: its repository is made again", async () => {
+    const before = setAside(join(dir, "store"));
     // The other thread's work, not landed: its snapshot's commit and tree are loose objects of its own repository.
     await run(TWO, "echo \"B's, not landed\" > Secret.md");
     const unlanded = (await history(TWO, "snapshot", { reason: "before a step" })).hash as string;
@@ -363,7 +381,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     expect(first).toEqual({
       error: { type: "history", code: "no_whole_copy", message: "refused the request: this thread has no whole copy, and its next open makes one" },
     });
-    expect(await history(ONE, "open")).toEqual({ copy: "made" });
+    // The repository the links are in is set aside whole, never read; and the copy with it where it held
+    // work of the thread's that no landing holds.
+    const aside = asideSince(before, await history(ONE, "open"));
+    expect(aside).toContain(`${ONE}.repository`);
+    expect(aside.every((name) => name === `${ONE}.repository` || name === `${ONE}.copy`)).toBe(true);
     for (const id of linked) expect(lstatSync(at(id), { throwIfNoEntry: false })).toBeUndefined();
     // The other thread's snapshot is no object of this repository: git cannot go to it, and names no file of it.
     const again = await manager.history(restore, signal());
