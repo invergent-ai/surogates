@@ -1985,6 +1985,8 @@ class History:
 
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         timeout = _TIMEOUT.get() or _GIT_TIMEOUT
+        # The git that ran, past the options given before it, each ``-c`` and its value.
+        ran = args[2 * len(list(takewhile(lambda arg: arg == "-c", args[::2])))]
         try:
             result = subprocess.run(
                 ["git", *args], capture_output=True, text=True, env=_environ(env), cwd=cwd,
@@ -1993,9 +1995,9 @@ class History:
         except subprocess.TimeoutExpired as exc:
             # The git it killed held the index's lock, and no later git could run.
             Path(f"{env.get('GIT_INDEX_FILE') or Path(env['GIT_DIR']) / 'index'}.lock").unlink(missing_ok=True)
-            raise HistoryError(f"git {args[0]} timed out after {timeout}s") from exc
+            raise HistoryError(f"git {ran} timed out after {timeout}s") from exc
         if result.returncode != 0:
-            raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
+            raise HistoryError(f"git {ran} failed: {result.stderr.strip()}")
         # Only the line end: a name may start or end with a space.
         return result.stdout.removesuffix("\n")
 

@@ -678,6 +678,11 @@ def test_a_stop_puts_the_copy_back_and_takes_away_what_the_turn_made(tmp_path, f
     with refused("failed", "git read-tree failed"):
         one.restore("f" * 40)
     assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
+    # And it is named by the git that failed, whatever options it was run with: a file it may not read.
+    (one.copy / "locked.txt").write_text("not to be read\n")
+    (one.copy / "locked.txt").chmod(0)
+    with refused("failed", "^git add failed: "):
+        one.snapshot("before a step")
 
 
 THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f"
