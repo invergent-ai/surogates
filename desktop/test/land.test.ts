@@ -1254,17 +1254,15 @@ describe("a landing's helper in the file helper's sandbox", () => {
     const work = join(base, "work");
     // srt's own files go where its host points them, as the app's host does: never in the folder.
     for (const dir of [work, join(base, "srt")]) mkdirSync(dir);
-    // A host of the test's own: the file helper's policy, with the copy readable and the kept folder writable, around
-    // a helper that is asked a landing's steps. It says what it was answered.
+    // A host of the test's own: the file helper's policy as a landing's host asks for it, the copy to read and the kept
+    // folder to write, around a helper that is asked a landing's steps. It says what it was answered.
     const host = `
       import { spawnSync } from "node:child_process";
       import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
       const { hideSrtTmp, pathOutside, quote, sandboxPolicy } = await import(${JSON.stringify(dist("hosts/policy.js"))});
       const [folder, work, copy, kept, node, home] = process.argv.slice(1);
       const path = pathOutside(process.env.PATH, []);
-      const policy = sandboxPolicy({ folder, tmp: work, appDirs: ${JSON.stringify([...["../dist", "../node_modules"].map((dir) => fileURLToPath(new URL(dir, import.meta.url))), dirname(dirname(process.execPath))])} });
-      policy.filesystem.allowRead.push(copy, kept);
-      policy.filesystem.allowWrite.push(kept);
+      const policy = sandboxPolicy({ folder, tmp: work, reads: [copy], writes: [kept], appDirs: ${JSON.stringify([...["../dist", "../node_modules"].map((dir) => fileURLToPath(new URL(dir, import.meta.url))), dirname(dirname(process.execPath))])} });
       await SandboxManager.initialize(policy, () => Promise.resolve(false));
       const asked = ${JSON.stringify(`
         const { perform } = await import(${JSON.stringify(dist("files/operations.js"))});
