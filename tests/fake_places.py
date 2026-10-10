@@ -326,7 +326,7 @@ def _unrecorded(landing: _Landing, applied: list[dict[str, Any]], *, recorded: b
         if (landing.kept / f"{step}.json").is_symlink():
             return RECORDS_UNREAD
         try:
-            record = landing.read(step)
+            record = landing.read(step, as_the_app=True)
         except _Unreadable:
             return RECORDS_UNREAD
         if record is None:
@@ -621,6 +621,11 @@ class _Unreadable(_Refused):
         self.path = path
 
 
+# A step's record as these rules write one; and as the app's helper writes one, which says more of where the step got.
+_RECORD = {"path", "was", "wrote", "mode", "made", "above"}
+_APPS_RECORD = _RECORD | {"temp", "aside", "moved", "out", "back"}
+
+
 class _Landing:
     """One saga's steps in the folder, and what they kept: ``<kept>/<saga>/<step>.json``, and the file a step replaced at ``<step>``."""
 
@@ -633,7 +638,8 @@ class _Landing:
         names = os.listdir(self.kept) if self.kept.is_dir() else []
         return [int(match.group(1)) for name in names if (match := _STEP.fullmatch(name))]
 
-    def read(self, step: int) -> dict[str, Any] | None:
+    def read(self, step: int, *, as_the_app: bool = False) -> dict[str, Any] | None:
+        """A step's record as these rules write one, or None where it has none; *as_the_app*, the app's helper's too, as the app reads either (files/land.ts, recordsOf)."""
         try:
             text = (self.kept / f"{step}.json").read_text()
         except FileNotFoundError:
@@ -644,7 +650,7 @@ class _Landing:
             record = json.loads(text)
         except ValueError:
             record = None
-        if isinstance(record, dict) and record.keys() == {"path", "was", "wrote", "mode", "made", "above"} and landable(record["path"]):
+        if isinstance(record, dict) and (record.keys() == _RECORD or as_the_app and record.keys() == _APPS_RECORD) and landable(record["path"]):
             return record
         named = record.get("path") if isinstance(record, dict) else None
         raise _Unreadable(self.saga, step, named if isinstance(named, str) and landable(named) else None)
