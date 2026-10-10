@@ -391,7 +391,8 @@ async def file_history(
     is still kept is asked of the api's copy of the project's history: a
     pruned one is listed, as no longer kept.  A folder on a computer
     (*device_id*) has records of its own, and its computer holds its
-    versions: none of them can be had from here."""
+    versions: none of them can be had from here, and none names a landing
+    to undo, which nothing here undoes on a computer."""
     project = await _project(request, workstream_id, tenant, ctx)
     state = request.app.state
     master = await state.session_store.get_session(project.master_session_id)
@@ -401,7 +402,7 @@ async def file_history(
     if device_id is not None:
         for version in found:
             del version["blob"]
-            version["available"] = False
+            version.update(available=False, landing_id=None)
         return found
     try:
         kept = await BucketHistory.of(state.storage, master, state.settings.history).held(v["blob"] for v in found)

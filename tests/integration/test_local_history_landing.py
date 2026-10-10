@@ -204,12 +204,14 @@ async def test_a_turn_lands_in_its_folder_as_one_saga_in_its_computers_order_its
     assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)] and "landing" not in report.data
     [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
     assert end.data["saved"] is True
-    # A file's History lists that folder's versions, none of which can be had from here.
+    # A file's History lists that folder's versions, none of which can be had from here, nor undone.
     listed = await api.client.get(
         f"/v1/workstreams/{project['id']}/history", params={"path": "Report.docx", "device_id": here.device_id}, headers=api.auth(),
     )
     assert listed.status_code == 200, listed.text
-    assert [(v["id"], v["change"], v["available"]) for v in listed.json()] == [(f"{row.id}:f", "changed", False), (f"{row.id}:b", "added", False)]
+    assert [(v["id"], v["change"], v["available"], v["landing_id"]) for v in listed.json()] == [
+        (f"{row.id}:f", "changed", False, None), (f"{row.id}:b", "added", False, None),
+    ]
 
 
 async def test_a_turn_that_only_talks_asks_its_computer_nothing_at_its_end(api, here, monkeypatch):
