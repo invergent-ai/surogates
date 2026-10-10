@@ -192,6 +192,35 @@ _NOT_LANDED = {
     "compensated": "Not landed, and the project's files are as they were",
     "escalated": "Could not finish landing these; check them",
     "failed": "Not saved, because the landing failed",
+    "unsettled": "Not finished landing, and finished or put back before anything else lands in its folder",
+}
+#: Why a landing in a folder on the user's computer did not land, as its report says it; a refusal by its computer's word for it.
+_NOT_LANDED_HERE = {
+    "changed": "a file in its folder changed while its work landed",
+    "stale": "its copy was still being written while its work landed, by a command still running or a helper",
+    "unwritten": "its record on the server could not be written",
+    "busy": "another chat was landing in its folder for longer than a landing waits",
+    "unanswered": "its computer did not answer",
+    "refused": "its computer refused a step of it: {code}",
+    "too_large": "more of its files changed than one landing on a computer carries",
+    "yours_too_large": "the user changed more files in its folder since the folder's last landing than one landing can record",
+}
+#: Where the work of a thread on a computer is when its landing was put back: in its copy there, as its turn left it.
+_IN_ITS_COPY = "The thread's work is in its copy on its computer, and lands with its next turn"
+_NOT_IN_ONE_LANDING = {
+    "too_large": "The thread's work is in its copy on its computer, and lands once fewer of its files are changed",
+    # The cause is the user's, and so is what can be done now: nothing in the folder lands until then.
+    "yours_too_large": (
+        "The thread's work is in its copy on its computer. Nothing lands in that folder until the user's own changes there "
+        "can be recorded: for now the user can move some of the files they added to it out of it, or start a thread on a "
+        "folder inside it"
+    ),
+}
+#: What a report says its landing's helper found in its folder, left there by a landing that was cut short.
+_RECOVERED = {
+    "beside": "Kept beside a newer file of its name, after a landing in its folder was cut short",
+    "lost": "Gone with the folder it was in, after a landing in its folder was cut short",
+    "unread": "Not checked, after a landing in its folder was cut short, as its record there could not be read",
 }
 #: What a report adds of a landing left running whose versions from before the history had lost.
 _NONE_PUT_BACK = "The project's history no longer has their versions from before the landing, so none could be put back"
@@ -206,6 +235,8 @@ _NOT_MERGED = {
     "with": "Not merged, because they go with a change that was not merged (a move lands whole or not at all)",
     "kept": "Not kept, because the thread or another helper changed them first (their version stays)",
     "left": "Not merged, because the thread left the newer file as it is",
+    "protected": "Not merged, because a change to them could run code on the user's computer, which a landing never writes",
+    "linked": "Not merged, because the folder has a link there, or a file with a second name, which a landing never replaces",
 }
 
 
@@ -238,15 +269,43 @@ def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
         named = _listed(kept) if kept else "the turn's files could not be read"
         saved = data.get("saved") is True and data["landing"] != "escalated"
         words = _FAILED_KEPT if saved and data["landing"] == "failed" else _NOT_LANDED[data["landing"]]
+        here = data.get("landing_reason") if data.get("landing_reason") in _NOT_LANDED_HERE else None
+        if here is not None:
+            # On a computer, why; a refusal by a word of the server's own list, kept to a word.
+            code = "".join(c for c in str(data.get("landing_code") or "")[:64] if c.isascii() and (c.isalnum() or c == "_"))
+            words += f" ({_NOT_LANDED_HERE[here].format(code=code or 'other')})"
         # And that nothing is lost for it, when the turn is on the thread's branch.
         lines += f"\n{words}: {named}" + (f"\n{WORK_KEPT}" if saved else "")
+        if here is not None and data["landing"] == "compensated":
+            lines += f"\n{_NOT_IN_ONE_LANDING.get(here, _IN_ITS_COPY)}"
     elif kept:
         # A report from before reasons were given says the file changed.
         why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}
         for f in kept:
             why[f.get("reason") if f.get("reason") in _NOT_MERGED else "changed"].append(f)
         lines += "".join(f"\n{_NOT_MERGED[reason]}: {_listed(named)}" for reason, named in why.items() if named)
-    return lines + _left_out_lines(data, "excluded", "repositories", "not_taken")
+    return lines + _left_out_lines(data, "excluded", "repositories", "not_taken") + _recovered_lines(data)
+
+
+def _recovered_lines(data: dict) -> str:
+    """A report's lines on what its landing's helper found in its folder, left there by a landing cut short: a line a kind found."""
+    recovery = data.get("recovery")
+    lines = ""
+    for key, words in _RECOVERED.items() if isinstance(recovery, dict) else ():
+        found = [_found(key, entry) for entry in recovery.get(key) or [] if isinstance(entry, list)]
+        if found:
+            lines += f"\n{words}: {_listed([{'label': name} for name in found], limit=_MAX_LISTED_LEFT_OUT)}"
+    return lines
+
+
+def _found(key: str, entry: list) -> str:
+    """One thing a helper found: a file, and where it was kept beside the newer one; or a file whose record could not be read."""
+    named = [part if isinstance(part, str) else None for part in entry]
+    if key == "beside" and len(named) == 2 and None not in named:
+        return f"{named[0]} (as {named[1]})"
+    if key == "unread":
+        return (named[2] if len(named) == 3 else None) or "a file"
+    return named[0] if named and named[0] is not None else "a file"
 
 
 #: What a report says of the files a turn made that are in no landing, by where they were left.
