@@ -653,7 +653,9 @@ export interface AgentChatBrowserState {
 export interface AgentChatDeviceWaitState {
   deviceId: string;
   deviceName: string;
+  // `offline`: the computer is away. `copying`: it makes a thread's first copy of its `folder`.
   reason: string;
+  folder: string;
 }
 
 export interface AgentChatBrowserProfile {

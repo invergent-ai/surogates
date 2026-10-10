@@ -2098,7 +2098,9 @@ export function ChatThread({
         {deviceWait && (
           <>
             <LaptopIcon className="size-4 shrink-0" aria-hidden="true" />
-            {`Waiting for ${deviceWait.deviceName || "your computer"}. The chat goes on once it is back online.`}
+            {deviceWait.reason === "copying"
+              ? `Making this thread's copy of ${deviceWait.folder || "its folder"}…`
+              : `Waiting for ${deviceWait.deviceName || "your computer"}. The chat goes on once it is back online.`}
           </>
         )}
       </div>

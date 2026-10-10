@@ -1420,6 +1420,15 @@ describe("AgentChat", () => {
       stream.emit("device.resumed", 3, { device_id: "d-1" });
     });
     expect(region()?.textContent).toBe("");
+    // A thread's turn also waits while its computer makes its first copy of its folder, which can take minutes.
+    act(() => {
+      stream.emit("device.waiting", 4, { device_id: "d-1", device_name: "Flavius's ThinkPad", reason: "copying", folder: "/home/flavius/Reports" });
+    });
+    expect(region()?.textContent).toBe("Making this thread's copy of /home/flavius/Reports…");
+    act(() => {
+      stream.emit("device.resumed", 5, { device_id: "d-1" });
+    });
+    expect(region()?.textContent).toBe("");
   });
 
   it("marks the transcript and its composer as the one the host's transcript settings shape, with or without a chat", async () => {
