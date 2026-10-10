@@ -16,11 +16,11 @@ import { lstatSync, mkdirSync, realpathSync, rmdirSync, type Stats } from "node:
 import { join, resolve } from "node:path";
 
 import { checkFolder, type FolderCheck, type FolderGuards } from "../binding/folder.js";
-import { edgeRefused } from "../files/edge.js";
+import { edgeRefused, said } from "../files/edge.js";
 import { inside, realpath } from "../files/paths.js";
 import { PLACE_KEY } from "../guest/protocol.js";
 import type { HostStart } from "./messages.js";
-import { GLOB, isReserved } from "./policy.js";
+import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
 // How long a file helper has to say it is ready.
 export const READY_MS = 15_000;
@@ -32,6 +32,13 @@ export const LANDING_READY_MS = 600_000;
 
 // A thread's id, as the app names its copy by.
 const THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// The most bytes of a path this system takes, and of a name in one.
+const PATH_BYTES = 4095;
+const NAME_BYTES = 255;
+// A search's output is lines, each begun by its file's path: a path that holds a line break begins none.
+const LINE_BREAK = /[\n\r]/;
+// A path in a line of words, no further than a line goes.
+const shown = (path: string): string => (path.length > 300 ? `${path.slice(0, 300)}…` : path);
 
 // Where the app keeps a thread's copy, and what a folder's landings keep, in its data by its real path *data*.
 const copyAt = (data: string, key: string, thread: string): string => join(data, "history", key, "threads", thread);
@@ -55,6 +62,14 @@ export interface Start {
   only?: string;
   // How long its helper has to say it is ready.
   readyMs: number;
+  // What is said of a folder that is no longer the one this start names by its identity.
+  replaced: string;
+  /**
+   * *text*, words of a failure nothing told how to name its paths (a program's own, the system's),
+   * as this host says them: a copy's host names its files by the folder the copy stands for, never
+   * by the copy's own path.
+   */
+  named(text: string): string;
   /**
    * Makes what the app keeps for it and is not there yet, this user's alone, once the host holds
    * its folder. What it made, the last first: a start that then fails takes them away again.
@@ -96,42 +111,81 @@ function copyKey(path: unknown, dataDir: string): string | null {
   return path === copyAt(data, key, thread) ? key : null;
 }
 
-// The copy at *path* of the folder *at*, as a host may hold it or a landing read it; or why not.
-function checkCopy(path: string, dataDir: string, at: string, uid: number): FolderCheck {
-  const what = `the copy of ${at} this thread works in`;
-  if (copyKey(path, dataDir) === null) return { ok: false, missing: false, message: `${what} is not where the app keeps one` };
+// The copy at *path* of the folder *at*, as a host may hold it or a landing read it; or why not, said
+// by the folder: the copy's own path is the app's, and names nothing to whoever is answered.
+function checkCopy(path: unknown, dataDir: string, at: string, uid: number): FolderCheck {
+  const what = `the copy of ${shown(at)} this thread works in`;
+  const no = (message: string, missing = false): FolderCheck => ({ ok: false, missing, message });
+  if (typeof path !== "string" || copyKey(path, dataDir) === null) return no(`${what} is not where the app keeps one`);
+  // The key and the thread's id hold none of these: the app's data does, or does not.
+  if (LINE_BREAK.test(path)) return no(`this computer cannot work in ${what}: the path of the app's data holds a line break`);
+  if (GLOB.test(path)) return no(`this computer cannot sandbox ${what}: the path of the app's data holds *, ?, [ or ]`);
+  if (isReserved(path)) return no(`this computer cannot sandbox ${what}: the app's data is inside one of this computer's system folders`);
   const found = own(path, uid);
-  if (found === "missing") return { ok: false, missing: true, message: `${what} is not there` };
-  if (found === null) return { ok: false, missing: false, message: `${what} is not a folder of the app's own` };
-  if (GLOB.test(path)) return { ok: false, missing: false, message: `this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${path}` };
-  if (isReserved(path)) return { ok: false, missing: false, message: `the folder ${path} is inside one of this computer's system folders` };
+  if (found === "missing") return no(`${what} is not there`, true);
+  if (found === null) return no(`${what} is not a folder of the app's own`);
   return { ok: true, path, dev: found.dev, ino: found.ino };
 }
+
+// What the sandbox of a helper would be given of *apart*, folders it must hold nothing of, beside
+// what its start holds: by its working folder, by a folder of the app's own, or by one of the
+// system's, each as it is spelled and as it resolves. The first that is, holds or lies in one of
+// them, in words; or null. The sandbox is all that keeps a link a command left in a copy off what
+// it names: the folder itself, another thread's copy, the folder's history.
+function given(message: HostStart, appDirs: string[], apart: string[]): string | null {
+  const tmp = resolve(message.tmp);
+  // The policy's own list, less the folder a start holds: the working folder stands in for it here.
+  const admitted = sandboxPolicy({ folder: tmp, tmp, appDirs }).filesystem.allowRead ?? [];
+  const found = admitted.find((dir) => [dir, realpath(dir).path].some((spelled) => apart.some((one) => inside(spelled, one) || inside(one, spelled))));
+  return found === undefined ? null : found === tmp ? "its working folder" : found;
+}
+
+// Where the app keeps every folder's place, and what every folder's landings keep, in its data
+// *dataDir* by its real path: a helper's sandbox is given its own of each at most.
+const keptApart = (dataDir: string): string[] => {
+  const data = realData(dataDir);
+  return data === null ? [] : [join(data, "history"), join(data, "landings")];
+};
 
 // What a chat's start and a copy's have alike: their helper is given nothing beside the folder, and
 // is asked every kind; the root's commands write the folder.
 const plain = (): Pick<Start, "reads" | "writes" | "commands" | "readyMs" | "make"> => ({
   reads: [], writes: [], commands: true, readyMs: READY_MS, make: () => [],
 });
+// What a host on the folder itself says of one replaced since its chat was bound.
+const replaced = (folder: string): string => `the folder ${folder} was replaced after it was confirmed for this chat`;
+const asSaid = (text: string): string => text;
 
 // A chat's folder, as any may be one (binding/folder.ts).
 function onFolder(message: HostStart, guards: FolderGuards): StartCheck {
   const held = checkFolder(message.folder, guards);
-  return held.ok ? { ...held, ...plain(), env: {} } : held;
+  return held.ok ? { ...held, ...plain(), env: {}, replaced: replaced(message.folder), named: asSaid } : held;
 }
 
 // A thread's copy, named by the path of the folder it stands for. That path names the folder to the
-// helper and to the guest, and is looked at by neither, nor here: a whole path, as the helper takes
-// one (files/edge.ts), and no part of the app's own data or cache, as each is spelled and as it resolves.
+// helper and to the guest, byte for byte the path the guest mounts the copy at and the server sends
+// keys under, and is looked at by neither, nor here. So it is a whole path, as the helper takes one
+// (files/edge.ts), with no line break in it and no space after it, and one the system would take;
+// and no part of the app's own data or cache, as each is spelled and as it resolves.
 function onCopy(message: HostStart, guards: FolderGuards, uid: number): StartCheck {
   const { folder, at } = message;
   if (typeof at !== "string") return refused("a thread's copy stands for a folder by that folder's path");
   const apps = [guards.dataDir, guards.cacheDir].flatMap((dir) => [resolve(dir), realpath(resolve(dir)).path]);
-  if (copyKey(folder, guards.dataDir) !== null && (edgeRefused(folder, at) !== null || apps.some((dir) => inside(at, dir) || inside(dir, at)))) {
-    return refused(`${at} is no path a thread's copy can stand for`);
+  const whole = edgeRefused(folder, at) === null && !LINE_BREAK.test(at) && at.trimEnd() === at
+    && Buffer.byteLength(at) <= PATH_BYTES && at.split("/").every((name) => Buffer.byteLength(name) <= NAME_BYTES);
+  if (copyKey(folder, guards.dataDir) !== null && (!whole || apps.some((dir) => inside(at, dir) || inside(dir, at)))) {
+    return refused(`${shown(at)} is no path a thread's copy can stand for`);
   }
   const held = checkCopy(folder, guards.dataDir, at, uid);
-  return held.ok ? { ...held, ...plain(), env: { SUROGATE_AT: at } } : held;
+  if (!held.ok) return held;
+  // Its sandbox holds the copy and nothing else of the folder's: not the folder itself, nor any place or kept folder.
+  const through = given(message, guards.appDirs, [at, ...keptApart(guards.dataDir)]);
+  if (through !== null) return refused(`a thread's copy cannot stand for ${at}: its helper's sandbox would be given ${through}, and by it the folder itself or what the app keeps of it`);
+  return {
+    ...held, ...plain(), env: { SUROGATE_AT: at },
+    replaced: `the copy of ${at} this thread works in was made again after the app looked at it`,
+    named: (text) => said(text, { at, folder: held.path }),
+  };
 }
 
 // The folder a landing writes, as a chat's; with the thread's copy, read-only, and the folder the
@@ -141,13 +195,15 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
   const held = checkFolder(message.folder, guards);
   if (!held.ok) return held;
   const { copy, kept } = (typeof message.landing === "object" && message.landing !== null ? message.landing : {}) as Partial<NonNullable<HostStart["landing"]>>;
-  const key = copyKey(copy, guards.dataDir);
-  const from = key === null ? null : checkCopy(copy!, guards.dataDir, held.path, uid);
-  if (!from?.ok) return refused(`this landing's copy is not a thread's copy of the folder: ${from ? from.message : String(copy)}`);
+  const from = checkCopy(copy, guards.dataDir, held.path, uid);
+  if (!from.ok) return refused(`this landing's copy is not a thread's copy of the folder: ${from.message}`);
   // The copy is one, so the app's data is there, and no part of its path is one the sandbox cannot be given.
   const data = realpathSync(guards.dataDir);
-  if (kept !== keptAt(data, key!)) return refused(`this landing's kept folder is not the folder's own: ${String(kept)}`);
-  const notOwn = `this landing's kept folder is not a folder of the app's own: ${kept}`;
+  if (kept !== keptAt(data, copyKey(copy, guards.dataDir)!)) return refused(`this landing's kept folder is not the one the app keeps for ${held.path}`);
+  const notOwn = `the kept folder of ${held.path}'s landings is not a folder of the app's own`;
+  // Its sandbox holds, of the app's data, the copy and the kept folder alone: no other thread's copy, nor the folder's history.
+  const through = given(message, guards.appDirs, keptApart(guards.dataDir));
+  if (through !== null) return refused(`this landing's sandbox would be given ${through}, and by it what the app keeps of other threads and folders`);
   // The kept folder, and the folder that holds every folder's: there as folders of the app's own, or
   // not there yet. Neither is made here: a start that is refused, or waits for the folder in vain, leaves nothing.
   const lacking = (): string[] | null => {
@@ -185,8 +241,8 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
     return made;
   };
   return {
-    ...held, reads: [copy!], writes: [kept], env: { SUROGATE_COPY: copy!, SUROGATE_KEPT: kept }, commands: false, only: "land",
-    readyMs: LANDING_READY_MS, make,
+    ...held, reads: [from.path], writes: [kept], env: { SUROGATE_COPY: from.path, SUROGATE_KEPT: kept }, commands: false, only: "land",
+    readyMs: LANDING_READY_MS, make, replaced: replaced(message.folder), named: asSaid,
   };
 }
 

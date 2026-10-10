@@ -110,8 +110,8 @@ describe("the folder a tool host holds", () => {
     // Named through the link, it is no copy: a link is on its way.
     const through = join(linked, "history", KEY, "threads", THREAD);
     refused({ folder: through, at: folder, dataDir: linked }, /is not where the app keeps one$/);
-    refused({ dataDir: linked, landing: { copy: through, kept } }, /landing/);
-    refused({ dataDir: linked, landing: { copy, kept: join(linked, "landings", KEY) } }, /landing/);
+    refused({ dataDir: linked, landing: { copy: through, kept } }, /^this landing's copy is not a thread's copy of the folder: /);
+    refused({ dataDir: linked, landing: { copy, kept: join(linked, "landings", KEY) } }, /^this landing's kept folder is not the one the app keeps for /);
     // And a copy stands for no folder in the app's data, however that is spelled.
     for (const at of [linked, join(linked, "history"), dataDir, base]) {
       refused({ folder: copy, at, dataDir: linked }, /is no path a thread's copy can stand for$/, at);
@@ -174,6 +174,117 @@ describe("the folder a tool host holds", () => {
     expect(held({ folder: copy, at: join(home, "Other folder") })).toMatchObject({ ok: true });
     for (const at of [7, null, { path: folder }]) {
       expect(on({ folder: copy, at: at as unknown as string }), String(at)).toMatchObject({ ok: false, missing: false });
+    }
+  });
+
+  it("is named, for a copy, byte for byte as the guest mounts it and the server sends its keys: no stray space or line break, and no path the system would not take", () => {
+    // A space or a line break after it starts a helper that refuses every key under the true path; one inside it breaks a search's lines.
+    for (const at of [`${folder} `, `${folder}\n`, `${folder}\t`, `${folder}\r\n`, join(home, "Re\nports"), join(home, "Re\rports"), join(home, "new\nline", "Reports")]) {
+      refused({ folder: copy, at }, /is no path a thread's copy can stand for$/, JSON.stringify(at));
+    }
+    // A space inside a name is a name's own.
+    expect(held({ folder: copy, at: join(home, "My Reports", " drafts") })).toMatchObject({ ok: true });
+    // Longer than a path may be, or with a name longer than a name may be.
+    const long = (bytes: number) => `/${"a".repeat(bytes)}`;
+    expect(held({ folder: copy, at: `/home${long(255)}` })).toMatchObject({ ok: true });
+    expect(held({ folder: copy, at: `/home${long(254)}é` })).toMatchObject({ ok: false, missing: false });
+    expect(held({ folder: copy, at: `/home${long(256)}` })).toMatchObject({ ok: false, missing: false });
+    expect(held({ folder: copy, at: `/h${long(200).repeat(21)}`.slice(0, 4095) })).toMatchObject({ ok: true });
+    expect(held({ folder: copy, at: `/h${long(200).repeat(21)}`.slice(0, 4096) })).toMatchObject({ ok: false, missing: false });
+    // What is said of one names it no further than a line goes.
+    const said = on({ folder: copy, at: `/h${long(200).repeat(40)}` });
+    expect(!said.ok && said.message.length).toBeLessThan(400);
+  });
+
+  it("is no copy, to work in or to land from, in an app's data whose path holds a line break: a search there would name its files by the copy's path", () => {
+    const broken = join(home, "new\nline", "surogate");
+    const there = join(broken, "history", KEY, "threads", THREAD);
+    mkdirSync(there, { recursive: true });
+    expect(held({ folder: there, at: folder, dataDir: broken })).toEqual({
+      ok: false, missing: false, message: `this computer cannot work in the copy of ${folder} this thread works in: the path of the app's data holds a line break`,
+    });
+    refused({ dataDir: broken, landing: { copy: there, kept: join(broken, "landings", KEY) } }, /the path of the app's data holds a line break$/);
+  });
+
+  it("is no copy in an app's data the sandbox cannot be given: one whose path srt would read as a glob, or one in a folder of the system's", () => {
+    const globbed = join(home, "da[t]a");
+    const there = join(globbed, "history", KEY, "threads", THREAD);
+    mkdirSync(there, { recursive: true });
+    expect(held({ folder: there, at: folder, dataDir: globbed })).toEqual({
+      ok: false, missing: false, message: `this computer cannot sandbox the copy of ${folder} this thread works in: the path of the app's data holds *, ?, [ or ]`,
+    });
+    refused({ dataDir: globbed, landing: { copy: there, kept: join(globbed, "landings", KEY) } }, /the path of the app's data holds \*, \?, \[ or \]$/);
+    // Under /dev, which no sandbox is given: the devices' own.
+    const devices = mkdtempSync("/dev/shm/host-start-");
+    try {
+      const shared = join(devices, "history", KEY, "threads", THREAD);
+      mkdirSync(shared, { recursive: true });
+      expect(held({ folder: shared, at: folder, dataDir: devices })).toEqual({
+        ok: false, missing: false, message: `this computer cannot sandbox the copy of ${folder} this thread works in: the app's data is inside one of this computer's system folders`,
+      });
+    } finally {
+      rmSync(devices, { recursive: true, force: true });
+    }
+  });
+
+  it("holds nothing of the folder or of the folder's place through what else its helper's sandbox is given: its working folder, the app's own, the system's", () => {
+    const place = join(dataDir, "history", KEY);
+    const refusedBy = (more: Partial<HostStart>, appDirs: string[], what: string) => {
+      const checked = startOn(start({ folder: copy, at: folder, ...more }), home, appDirs);
+      expect(checked, what).toMatchObject({ ok: false, missing: false, message: expect.stringMatching(/^a thread's copy cannot stand for .*: its helper's sandbox would be given /) });
+      // Said by the folder, and by what the sandbox would be given: never by the copy.
+      expect(!checked.ok && checked.message, what).not.toContain(copy);
+    };
+    const app = join(base, "app");
+    mkdirSync(join(folder, "tmp"));
+    // The helper's working folder: in the folder, holding it, in the place, or the place itself.
+    for (const tmp of [join(folder, "tmp"), folder, home, join(place, "tmp"), place, join(dataDir, "history"), dataDir, join(place, "threads", OTHER)]) refusedBy({ tmp }, [app], tmp);
+    // The app's own folders, which every sandbox reads.
+    for (const dir of [home, folder, join(folder, "bin"), dataDir, place, join(place, "history.git"), join(place, "threads"), base]) refusedBy({}, [app, dir], dir);
+    // One that is a link to any of them: the sandbox is given where it leads.
+    symlinkSync(home, join(base, "app-link"));
+    refusedBy({}, [app, join(base, "app-link")], "a link to the home");
+    symlinkSync(place, join(base, "place-link"));
+    refusedBy({ tmp: join(base, "place-link", "tmp") }, [app], "a link to the place");
+    // A folder the system's own hold, which every sandbox reads.
+    for (const at of ["/opt/work", "/opt", "/usr/local/share/reports", "/etc/reports"]) refusedBy({ at }, [app], at);
+    // Its own working folder and the app's own folders, as the app gives them, are none of these.
+    expect(startOn(start({ folder: copy, at: folder }), home, [app, join(base, "runtime")])).toMatchObject({ ok: true });
+    // A landing's sandbox, too, is given nothing of the place but the copy it lands from.
+    for (const tmp of [join(place, "tmp"), place, join(place, "threads", OTHER), join(dataDir, "history")]) {
+      refused({ tmp, landing: { copy, kept } }, /^this landing's sandbox would be given /, tmp);
+    }
+    for (const dir of [place, join(place, "history.git"), join(place, "threads")]) {
+      const checked = startOn(start({ landing: { copy, kept } }), home, [app, dir]);
+      expect(checked, dir).toMatchObject({ ok: false, missing: false });
+    }
+  });
+
+  it("says why not by the folder, never by the copy's path or by where the app keeps what a landing replaces", () => {
+    mkdirSync(join(dataDir, "landings"));
+    const said: string[] = [];
+    const note = (more: Partial<HostStart>) => {
+      const checked = on(more);
+      expect(checked, JSON.stringify(more)).toMatchObject({ ok: false });
+      if (!checked.ok) said.push(checked.message);
+    };
+    const gone = join(dataDir, "history", KEY, "threads", OTHER);
+    note({ folder: gone, at: folder });
+    note({ folder: join(dataDir, "history", KEY, "threads", "none"), at: folder });
+    note({ folder: copy, at: folder, tmp: join(dataDir, "history", KEY, "tmp") });
+    note({ landing: { copy: gone, kept } });
+    note({ landing: { copy: join(dataDir, "history", KEY), kept } });
+    note({ landing: { copy, kept: join(dataDir, "landings", "fedcba9876543210") } });
+    symlinkSync(folder, kept);
+    note({ landing: { copy, kept } });
+    rmSync(copy, { recursive: true });
+    symlinkSync(folder, copy);
+    note({ folder: copy, at: folder });
+    note({ landing: { copy, kept } });
+    expect(said).toHaveLength(9);
+    for (const message of said) {
+      expect(message).toContain(folder);
+      for (const own of [copy, gone, kept, join(dataDir, "history", KEY, "threads"), join(dataDir, "landings")]) expect(message, message).not.toContain(own);
     }
   });
 
@@ -244,12 +355,12 @@ describe("what a landing's host is given beside the folder", () => {
     const checked = started({ landing: { copy, kept } });
     mkdirSync(join(base, "elsewhere"));
     symlinkSync(join(base, "elsewhere"), join(dataDir, "landings"));
-    expect(() => checked.make()).toThrow(/landing's kept folder is not a folder of the app's own/);
+    expect(() => checked.make()).toThrow(/landings is not a folder of the app's own$/);
     expect(readdirSync(join(base, "elsewhere"))).toEqual([]);
     rmSync(join(dataDir, "landings"));
     mkdirSync(join(dataDir, "landings"));
     symlinkSync(folder, kept);
-    expect(() => checked.make()).toThrow(/landing's kept folder is not a folder of the app's own/);
+    expect(() => checked.make()).toThrow(/landings is not a folder of the app's own$/);
     expect(readdirSync(folder)).toEqual([]);
   });
 });
@@ -259,6 +370,19 @@ describe("what a file helper is started with", () => {
     expect(started({}).env).toEqual({});
     expect(started({ folder: copy, at: folder }).env).toEqual({ SUROGATE_AT: folder });
     expect(started({ landing: { copy, kept } }).env).toEqual({ SUROGATE_COPY: copy, SUROGATE_KEPT: kept });
+  });
+
+  it("says of a folder replaced since its chat was bound what it said, and of a copy made again that it is the copy", () => {
+    expect(started({}).replaced).toBe(`the folder ${folder} was replaced after it was confirmed for this chat`);
+    expect(started({ landing: { copy, kept } }).replaced).toBe(`the folder ${folder} was replaced after it was confirmed for this chat`);
+    expect(started({ folder: copy, at: folder }).replaced).toBe(`the copy of ${folder} this thread works in was made again after the app looked at it`);
+  });
+
+  it("names its files by the folder's path in whatever is said of a copy's host, and leaves a chat's and a landing's words as they are", () => {
+    const text = `bwrap: Can't bind mount ${copy} on /newroot${copy}/x: ${kept}`;
+    expect(started({ folder: copy, at: folder }).named(text)).toBe(`bwrap: Can't bind mount ${folder} on /newroot${folder}/x: ${kept}`);
+    expect(started({}).named(text)).toBe(text);
+    expect(started({ landing: { copy, kept } }).named(text)).toBe(text);
   });
 
   it("is asked every kind in a chat's folder and in a copy, where commands write, and the land kind alone for a landing, which runs none", () => {

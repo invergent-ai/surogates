@@ -60,6 +60,8 @@ let only: string | null = null;
 let commands = true;
 // What a start made in the app's data for a helper that then never was ready: taken away as the host goes.
 let made: string[] = [];
+// Why a start failed, as this host says it: a copy's names its files by the folder's path (start.ts).
+let named = (text: string): string => text;
 // Held for the host's life: the kernel lets go of it when the host goes.
 let lock: Server | null = null;
 let recordPath: string | null = null;
@@ -90,7 +92,7 @@ process.on("message", (raw) => {
         (error: unknown) => send(
           {
             type: "failed",
-            message: error instanceof Error ? error.message : String(error),
+            message: named(error instanceof Error ? error.message : String(error)),
             ...(error instanceof FolderUnavailable ? { folder: true as const } : {}),
             ...(error instanceof FolderBusy ? { busy: true as const } : {}),
           },
@@ -186,9 +188,8 @@ async function start(message: HostStart): Promise<void> {
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
   const { path, dev, ino } = checked;
-  if (!confirmedFolder(message.expect, checked)) {
-    throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
-  }
+  named = checked.named;
+  if (!confirmedFolder(message.expect, checked)) throw new FolderUnavailable(checked.replaced);
   folder = { path, dev, ino };
   only = checked.only ?? null;
   commands = checked.commands;
