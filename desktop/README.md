@@ -86,10 +86,17 @@ One private destination is carried: a server the agent started in a chat's sandb
 `http://localhost:<port>/` (or `127.0.0.1`, or `[::1]`), once that chat's user has allowed
 the port in the desktop's own prompt. The proxy dials nothing on this computer for it: it
 knocks at a socket of the VM manager's, in the VM's runtime folder, which carries the
-connection into that chat's sandbox and no other. A port is one chat's at a time. It goes
-when the chat's browser is taken back in Settings, or the chat is deleted, and what the
-browser had open to it ends then. Plain requests only: a page's WebSocket and https to such
-a port are not carried.
+connection into that chat's sandbox and no other. A port is one chat's at a time: the
+prompt names the chat by its folder, and says which chat has the port when it is another's.
+Settings → Folders and permissions lists each port under its chat, with Take back. It goes
+then, when the chat's browser is taken back, or when the chat is deleted, and what the
+browser had open to it ends at once. A page's WebSocket to such a port is carried too, when it
+is a page of an allowed port that opens it, so a development server's page reloads by
+itself; https and `wss://` are not. A chat's sandbox takes 160 connections from the browser
+at once: past them the one that has carried nothing for longest ends, which a page hears as
+a connection lost. A tab that goes to a port not allowed is shown a short page of the
+proxy's own, which says that the chat's agent opens it and that the ports allowed are
+listed in Settings: nobody is asked from the browser.
 
 That proxy listens on this computer's loopback, where any program here can connect to it. A
 public site it carries for whoever asks, since that program reaches the site by itself.

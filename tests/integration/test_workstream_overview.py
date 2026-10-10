@@ -85,7 +85,8 @@ async def test_the_overview_reads_where_each_thread_stands(api):
     sales = next(row for row in listed if row["title"] == "Collect the sales data")
     path = "threads/Collect the sales data/notes.md"
     assert (sales["files"], sales["place"], sales["resolved_at"]) == (
-        [{"kind": "file", "label": path, "ref": path, "thread_id": sales["id"]}], {"kind": "cloud"}, None,
+        # No landing: its turn summary's file, with no mark.
+        [{"kind": "file", "label": path, "ref": path, "thread_id": sales["id"], "landing": None}], {"kind": "cloud"}, None,
     )
     meeting = next(row for row in listed if row["title"] == "Book the review meeting")
     assert meeting["resolved_at"].endswith("Z")

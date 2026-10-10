@@ -34,6 +34,7 @@ import re
 import time
 from functools import partial
 from typing import Any
+from uuid import UUID
 
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
 from surogates.governance.saga.compensator import compensate_history
@@ -48,18 +49,21 @@ from surogates.sandbox.history import (
     step_result,
 )
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.workstreams import is_project_thread
 from surogates.workstreams.history import (
     drop_landing,
     kept_refs,
     project_lock,
+    record_pickup,
     running_landings,
     saga_of,
     save_landing,
     start_landing,
     touch_landing,
 )
+from surogates.workstreams.stream import LANDED, project_of, publish
 
 logger = logging.getLogger(__name__)
 
@@ -146,11 +150,14 @@ class _Row:
     def __init__(self, session_factory: Any, row: int, saga: Any) -> None:
         self._session_factory, self._row, self._saga = session_factory, row, saga
         self._due = time.monotonic() + _ROW_EVERY
+        #: The state the row holds by this landing's own last write of it; None before any.
+        self.state: str | None = None
 
     async def write(self, **values: Any) -> None:
         """The steps as they are, and the landing's outcome once it has one."""
         began = time.monotonic()
         await save_landing(self._session_factory, self._row, self._saga, **values)
+        self.state = values.get("state", "running")
         done = time.monotonic()
         self._due = done + max(_ROW_EVERY, _ROW_SHARE * (done - began))
 
@@ -180,6 +187,7 @@ async def land_turn(
     saga_settings: Any,
     tool_saga_id: str | None,
     after_event_id: int,
+    redis: Any = None,
 ) -> dict | None:
     """Land *session*'s turn; its outcome, or None when the turn never used its pod.
 
@@ -231,7 +239,9 @@ async def land_turn(
     waited: set[int] = set()
     try:
         async with project_lock(session_factory, workstream) as held:
-            settled = await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited)
+            settled = await settle_running(
+                session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited, redis=redis,
+            )
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
             if outcome["state"] == "compensated":
@@ -282,7 +292,7 @@ async def land_turn(
 
 async def keep_copy(
     *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, action: str = "keep",
-    settle: bool = True, waited: set[int] | None = None,
+    settle: bool = True, waited: set[int] | None = None, redis: Any = None,
 ) -> dict | None:
     """Keep *session*'s copy in the project's history, under its lock; None when it holds none.
 
@@ -308,7 +318,9 @@ async def keep_copy(
         # Noted before the pod is asked: a Stop that cuts the call off may find the hand-off made.
         _HANDED_ON.setdefault(owner, [])
     workstream = session.config.get("workstream_id") or session.config["history_project"]
-    async with _guarded(session_factory, sandbox_pool, owner, workstream, saga_settings, settle=settle, waited=waited):
+    async with _guarded(
+        session_factory, sandbox_pool, owner, workstream, saga_settings, settle=settle, waited=waited, redis=redis,
+    ):
         kept = await _call(sandbox_pool, owner, action, **_kept_as(session), **({"base": True} if action == "keep" else {}))
     if action == "hand_off":
         _HANDED_ON.setdefault(owner, []).append(kept["commit"])
@@ -318,7 +330,7 @@ async def keep_copy(
 @contextlib.asynccontextmanager
 async def _guarded(
     session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, saga_settings: Any,
-    *, settle: bool = True, waited: set[int] | None = None,
+    *, settle: bool = True, waited: set[int] | None = None, redis: Any = None,
 ) -> Any:
     """The project's lock for a write of the history's refs that is no landing: a keep, a hand-off, a stop's drop.
 
@@ -333,7 +345,9 @@ async def _guarded(
         fenced = False
         if settle:
             try:
-                await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited)
+                await settle_running(
+                    session_factory, sandbox_pool, owner, workstream, saga_settings, held, waited=waited, redis=redis,
+                )
                 fenced = True
             except Exception:
                 logger.warning("Could not settle the landings left running in project %s", workstream, exc_info=True)
@@ -376,7 +390,9 @@ async def name_turn(store: Any, session: Any) -> None:
     session.config["turn_after"] = ended.id if ended else 0
 
 
-async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any) -> bool:
+async def drop_hand_off(
+    *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, redis: Any = None,
+) -> bool:
     """Take a thread's stopped turn's own files off its hand-off, so they do not land later; whether it was done.
 
     A turn that handed nothing on takes no lock and asks no pod.  One that
@@ -401,7 +417,7 @@ async def drop_hand_off(*, session_factory: Any, sandbox_pool: Any, session: Any
     gave = _HANDED_ON.pop(owner, None)
     if gave is None or not sandbox_pool.holds_copy(owner):
         return False
-    async with _guarded(session_factory, sandbox_pool, owner, session.config["workstream_id"], saga_settings):
+    async with _guarded(session_factory, sandbox_pool, owner, session.config["workstream_id"], saga_settings, redis=redis):
         return bool((await _call(sandbox_pool, owner, "drop_hand_off", gave=gave))["dropped"])
 
 
@@ -457,7 +473,7 @@ async def took_its_own(sandbox_pool: Any, owner: str) -> bool:
 
 def prune_later(
     *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, session_id: str, workstream: Any, packs: int,
-    saga_settings: Any, storage: Any = None, bucket: str | None = None, prefix: str = "",
+    saga_settings: Any, storage: Any = None, bucket: str | None = None, prefix: str = "", redis: Any = None,
 ) -> None:
     """Start the day's pruning after a landing, in no wake: the turn's lease goes without waiting for it.
 
@@ -474,6 +490,7 @@ def prune_later(
     pruning = asyncio.ensure_future(_pruned_then_gone(
         session_factory=session_factory, sandbox_pool=sandbox_pool, sandbox_id=sandbox_id, session_id=session_id,
         workstream=workstream, packs=packs, saga_settings=saga_settings, storage=storage, bucket=bucket, prefix=prefix,
+        redis=redis,
     ))
     _PRUNINGS.add(pruning)
     pruning.add_done_callback(_PRUNINGS.discard)
@@ -564,7 +581,7 @@ def _epoch(modified: Any) -> float:
 
 async def prune_after(
     *, session_factory: Any, sandbox_pool: Any, sandbox_id: str, workstream: Any, packs: int, saga_settings: Any,
-    storage: Any = None, bucket: str | None = None, prefix: str = "",
+    storage: Any = None, bucket: str | None = None, prefix: str = "", redis: Any = None,
 ) -> None:
     """Prune the project's history after a landing, in the landing's pod, under the project's lock again.
 
@@ -605,7 +622,7 @@ async def prune_after(
             # The lock is had: the settle's waits and the pod's call have bounds of their own.
             patience.reschedule(None)
             await settle_running(
-                session_factory, _Released(sandbox_pool, sandbox_id), sandbox_id, workstream, saga_settings, held,
+                session_factory, _Released(sandbox_pool, sandbox_id), sandbox_id, workstream, saga_settings, held, redis=redis,
             )
             old = await _old_packs(storage, bucket, prefix, _fence(saga_settings)) if storage is not None else None
             request = {
@@ -958,7 +975,9 @@ class _Unseen(Exception):
         self.missing = missing
 
 
-async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any, at_issue: list[str]) -> None:
+async def _tell_escalated(
+    session_factory: Any, thread_id: Any, saga: Any, at_issue: list[str], *, redis: Any = None,
+) -> None:
     """Report a landing a settle left ``escalated`` to its thread's master, as a turn's own is reported.
 
     No turn of the thread ends here, so the report has no words of its:
@@ -968,7 +987,9 @@ async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any, at_is
     thread's last report.  It is written once a landing, by its ``saga``:
     a row whose ``escalated`` could not be written is settled again by
     each later lock holder, and told by the first.  As best it can: the
-    row reads ``escalated`` whatever comes of the telling.
+    row reads ``escalated`` whatever comes of the telling.  Both are
+    written through a store that has *redis*, so the project's stream
+    names them as it names a turn's own.
     """
     from sqlalchemy import select
 
@@ -977,7 +998,7 @@ async def _tell_escalated(session_factory: Any, thread_id: Any, saga: Any, at_is
     from surogates.workstreams.store import WorkstreamStore
 
     try:
-        store = SessionStore(session_factory)
+        store = SessionStore(session_factory, redis)
         thread = await store.get_session(thread_id)
         named = await WorkstreamStore(session_factory).get_thread(thread_id)
         if thread.parent_id is None:
@@ -1016,7 +1037,7 @@ async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
 
 async def settle_running(
     session_factory: Any, sandbox_pool: Any, owner: str, workstream_id: Any, saga_settings: Any, held: Any,
-    *, waited: set[int] | None = None,
+    *, waited: set[int] | None = None, redis: Any = None,
 ) -> list[dict]:
     """Settle the project's landings left running, through *owner*'s pod; each ``{thread, state, files}``.
 
@@ -1029,6 +1050,13 @@ async def settle_running(
     put-back that failed, is reported to its thread's master, whichever
     lock holder found it so.  *waited* takes the rows found quiet for the
     fence, whose landings are dead whatever comes of settling them.
+
+    A landing it completes had pushed before its worker died: its row's
+    files are written only now, with no turn's end to announce them.  The
+    project's stream is told over *redis*, as a change of the landing's
+    thread, once the row says so and never before: a row whose write
+    failed is told of by the holder that writes it.  The wait a landing
+    left ``escalated`` puts on its thread reaches that stream over it too.
     """
     fence = _fence(saga_settings)
     settled: list[dict] = []
@@ -1045,14 +1073,16 @@ async def settle_running(
         orchestrator = _orchestrator(saga_settings)
         orchestrator.adopt(saga)
         at_issue: list[str] = []
+        written = _Row(session_factory, row.id, saga)
         state, _ = await _settle(
-            saga, orchestrator, sandbox_pool, owner, _Row(session_factory, row.id, saga),
-            recovered=True, held=held, at_issue=at_issue,
+            saga, orchestrator, sandbox_pool, owner, written, recovered=True, held=held, at_issue=at_issue,
         )
         done.add(row.id)
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
         if state == "escalated" and row.thread_id is not None:
-            await _tell_escalated(session_factory, row.thread_id, saga, at_issue)
+            await _tell_escalated(session_factory, row.thread_id, saga, at_issue, redis=redis)
+        if state == "completed" and written.state == "completed" and row.thread_id is not None:
+            await publish(redis, workstream_id, row.thread_id, LANDED)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
     return settled
 
@@ -1224,3 +1254,131 @@ def waiting_on_you(paths: list[str], *, escalated: bool) -> dict:
         # For the thread, which reads the wait as news, and for a later landing, which ends a wait whose files landed.
         "files": list(paths), "escalated": escalated,
     }
+
+
+def routine_project(session: Any) -> str | None:
+    """The project whose master *session* is a routine run of, in the master's pod over the real files; else None.
+
+    A thread's routine runs are its helpers, on copies of their own.
+    """
+    config = session.config or {}
+    if session.channel != "scheduled" or not config.get("scheduled_session_id") or config.get("history_thread"):
+        return None
+    return project_of(config.get("workspace_boundary"))
+
+
+async def routines_at_work(session_factory: Any, session: Any) -> bool:
+    """Whether another routine run of *session*'s master has called a tool and not ended: a change to the real files may be its."""
+    from sqlalchemy import exists, select
+
+    from surogates.db.models import Event
+    from surogates.db.models import Session as SessionRow
+
+    async with session_factory() as db:
+        return bool(await db.scalar(select(exists().where(
+            SessionRow.parent_id == session.parent_id, SessionRow.channel == "scheduled",
+            SessionRow.status == "active", SessionRow.id != session.id,
+            exists().where(Event.session_id == SessionRow.id, Event.type == EventType.TOOL_CALL.value),
+        ))))
+
+
+async def _prune_after_pickup(
+    *, session_factory: Any, sandbox_pool: Any, owner: str, workstream: Any, saga_settings: Any, held: Any,
+    packs: int, storage: Any, bucket: str | None, prefix: str,
+) -> None:
+    """The day's pruning after a pickup pushed alone, through the master's pod, under the pickup's own lock.
+
+    A project where routines run and no thread lands is pruned by no
+    landing: each pickup would leave its pack for good, and every new pod
+    copies them all.  Due as after a landing, by the mark the last pruning
+    left, and by a landing's rule: its bound, its fence, the packs the
+    bucket itself dates older.  The landings left running were settled
+    before the pickup.  It never fails its caller: the pickup stands, and
+    the history is pruned on a later day.
+    """
+    try:
+        if storage is not None and not await _due(storage, bucket, prefix):
+            return
+        old = await _old_packs(storage, bucket, prefix, _fence(saga_settings)) if storage is not None else None
+        request = {
+            "action": "prune", "keep": await kept_refs(session_factory, workstream), "now": time.time(),
+            "spare": _fence(saga_settings), **({"old": old} if old is not None else {}),
+        }
+        await held()
+        step_result(await sandbox_pool.execute(
+            owner, "_history", json.dumps(request), timeout=_PRUNE_BOUND + _PRUNE_PER_GIB * packs / 2**30,
+        ))
+    except Exception:
+        logger.warning("Could not prune the history of project %s", workstream, exc_info=True)
+
+
+async def pick_up_routine(
+    *, session_factory: Any, sandbox_pool: Any, session: Any, saga_settings: Any, yours: bool = False,
+    storage: Any = None, bucket: str | None = None, prefix: str = "", redis: Any = None,
+) -> dict | None:
+    """Record what a master's routine run changed in the real files as the routine's: its pickup, or None.
+
+    A pickup alone, pushed under the project's lock in the master's pod the
+    run worked in, once the landings a killed worker left running are
+    settled: what they applied is put back first, so it is no change of
+    the routine's, and one that had pushed is completed and told to the
+    project's stream over *redis*, as any lock holder's settle tells it.
+    One try: a pickup that fails, and one in a project
+    with no history yet, record nothing, and the next landing picks the
+    changes up as yours.
+
+    With *yours*, before the run's first call: what the real files changed
+    up to here is recorded by you, as a landing's pickup records it, so
+    the run's own pickup holds what changed while it worked and no more.
+    Not while another routine run of the project is at work: a change may
+    be its, and is left for a routine's pickup.
+
+    A pickup that pushed leaves the day's pruning, when it is due, to the
+    same pod under the same lock, its row written first: *storage* is
+    asked whether it is, and which packs are old, where the project's
+    files are under *prefix* of *bucket*.
+    """
+    workstream = routine_project(session)
+    owner = sandbox_session_key(session)
+    if workstream is None:
+        return None
+    if yours:
+        author = {"name": str(session.user_id), "email": f"user:{session.user_id}@surogate"}
+    else:
+        schedule = UUID(session.config["scheduled_session_id"])
+        try:
+            name = (await ScheduledSessionStore(session_factory).get(schedule)).name
+        except KeyError:
+            name = "A routine"
+        author = {"name": name, "email": f"routine:{schedule}@surogate"}
+    orchestrator = _orchestrator(saga_settings)
+    saga = orchestrator.create_saga(session.id, kind="landing")
+    pickup = orchestrator.add_step(
+        saga.saga_id, tool_name="history.pickup", tool_call_id="", max_retries=0, arguments={
+            "author": author, "push": True,
+            "trailers": [
+                ["Surogate-Project", workstream], ["Surogate-Agent", str(session.agent_id)],
+                ["Surogate-User", str(session.user_id)], ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", "pickup"],
+            ],
+        },
+    )
+    async with project_lock(session_factory, workstream) as held:
+        await settle_running(session_factory, sandbox_pool, owner, workstream, saga_settings, held, redis=redis)
+        if yours and await routines_at_work(session_factory, session):
+            return None
+        await held()
+        picked = await orchestrator.execute_step(
+            saga.saga_id, pickup.step_id, lambda: _call(sandbox_pool, owner, "pickup", **pickup.arguments),
+        )
+        if picked["commit"] is None:
+            return None
+        saga.transition(SagaState.COMPLETED)
+        await record_pickup(
+            session_factory, saga, workstream_id=workstream, commit=picked["commit"], picked_up=picked["picked_up"],
+            agent_id=str(session.agent_id), user_id=session.user_id,
+        )
+        await _prune_after_pickup(
+            session_factory=session_factory, sandbox_pool=sandbox_pool, owner=owner, workstream=workstream,
+            saga_settings=saga_settings, held=held, packs=picked["packs"], storage=storage, bucket=bucket, prefix=prefix,
+        )
+    return picked

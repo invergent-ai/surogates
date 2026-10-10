@@ -285,3 +285,30 @@ async def test_a_session_in_the_cloud_cannot_call_the_browsers_upload_it_was_not
     ran.assert_not_awaited()
     [answer] = [message["content"] for message in messages if message.get("role") == "tool"]
     assert json.loads(answer)["error"].startswith("Unknown tool: 'browser_upload_file'. Available tools: ")
+
+
+async def test_only_a_session_on_the_computer_is_told_how_its_browser_opens_the_chats_own_servers():
+    from surogates.harness.tool_schemas import describe_for_device
+    from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
+
+    tools = ToolRegistry()
+    ToolRuntime(tools).register_builtins()
+    schemas = tools.get_schemas()
+
+    def navigate(described: list[dict]) -> str:
+        return next(s["function"]["description"] for s in described if s["function"]["name"] == "browser_navigate")
+
+    cloud_text = navigate(schemas)
+    assert navigate(describe_for_device(schemas, device_session().config)) == f"{cloud_text} {DEVICE_SERVERS_NOTE}"
+    # What the agent must know to get there: the name, the scheme, the order, and that each port is asked for.
+    assert "`http://localhost:<port>/`" in DEVICE_SERVERS_NOTE
+    assert "not `0.0.0.0`" in DEVICE_SERVERS_NOTE and "not `https://`" in DEVICE_SERVERS_NOTE
+    assert "Start the server first, as a background command" in DEVICE_SERVERS_NOTE
+    assert "the user is asked to allow each port" in DEVICE_SERVERS_NOTE
+    assert "navigate to that port once yourself" in DEVICE_SERVERS_NOTE
+    # Nor the sandbox's own proxy, nor the computer's address on its network: neither is the way to its own server.
+    assert "not the sandbox's proxy" in DEVICE_SERVERS_NOTE and "No other address of the computer or of its networks opens" in DEVICE_SERVERS_NOTE
+    # A cloud session's browser is another machine's: it is told nothing of it, and the registry's schema keeps the cloud's text.
+    for cloud in ({}, None, {"execution": {"kind": "cloud"}}):
+        assert navigate(describe_for_device(schemas, cloud)) == cloud_text
+    assert navigate(schemas) == cloud_text

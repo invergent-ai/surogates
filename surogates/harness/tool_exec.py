@@ -38,6 +38,7 @@ from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import THREAD_REFUSED_AGENT_TYPES, is_project_thread, sub_agent, thread_refusal, under_a_thread
+from surogates.workstreams.stream import project_of
 
 # ---------------------------------------------------------------------------
 # Path sanitisation — replace workspace absolute paths with __WORKSPACE__
@@ -158,6 +159,11 @@ async def _build_session_sandbox_spec(
                     "carries no turn's name",
                 )
             sandbox_spec.env["HISTORY_TURN"] = str(session.config["turn_after"])
+    elif storage_bucket and thread is None and project_of(session.config.get("workspace_boundary")) is not None:
+        # A project's master's own pod, which its routine runs share: the
+        # real files at /workspace, whose changes a routine run's end records
+        # as the routine's.  Never a thread's or a helper's pod over the cap.
+        sandbox_spec.env["HISTORY_MAIN"] = "1"
     # Pass through skill-declared env vars to the sandbox pod.  Only
     # matters at provisioning time — env is baked into the pod spec.
     if not sandbox_spec.env.get("_passthrough_done"):
@@ -1860,7 +1866,7 @@ async def _run_single_tool(
                         kept = await keep_copy(
                             session_factory=session_factory, sandbox_pool=sandbox_pool, session=session,
                             # The fence its landings have, from the settings its turn's saga was made with.
-                            saga_settings=saga.settings if saga is not None else None, action="hand_off",
+                            saga_settings=saga.settings if saga is not None else None, action="hand_off", redis=redis,
                         )
                     except Exception as exc:
                         # A helper started now would work on old files with nobody told: none is started.

@@ -2613,3 +2613,111 @@ def test_across_a_prunings_cut_a_file_no_commit_left_explains_is_by_no_one(tmp_p
     # change, and what was changed behind it is not known.  A file a commit left names is by its author;
     # one none explains is by no one, never by whoever landed the cut's commit.
     assert held(turn) == {"Budget.xlsx": {"kind": "thread", "id": "t2", "title": "Draft B"}, "a.md": None, "notes.txt": None}
+
+
+def test_a_routines_pickups_are_none_of_the_twenty_a_pruning_keeps(tmp_path, project):
+    landings = []
+    for n in range(25):
+        history = a_pod(tmp_path, project)
+        (history.copy / "Budget.xlsx").write_bytes(os.urandom(50_000))  # an office file: no delta between versions
+        landings.append(land(history, f"saga:{n}")["commit"])
+    master = a_masters_pod(tmp_path, project)
+    for n in range(60):  # a routine that runs every five minutes, for five hours
+        with open(project / "notes.txt", "a") as notes:
+            notes.write(f"checked {n}\n")
+        master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+    durable = project / "_history"
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    # Twenty-five versions are more than twice the files: cut, but not into the last twenty changes that are no routine's.
+    assert (out["pruned"], out["commits"]) == (True, 80)
+    authors = git(durable, "log", "--first-parent", "--format=%ae", "refs/heads/main").splitlines()
+    assert (authors.count("routine:r1@surogate"), authors.count("thread:t1@surogate")) == (60, 20)
+    assert git(durable, "cat-file", "-s", f"{landings[-20]}:Budget.xlsx") == "50000" and not in_history(durable, landings[4])
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_routines_pickups_older_than_the_window_go_though_the_twenty_are_not_reached(tmp_path, project):
+    history = a_pod(tmp_path, project)
+    (history.copy / "a.md").write_text("a")
+    land(history)
+    master = a_masters_pod(tmp_path, project)
+    for n in range(30):
+        (project / "notes.txt").write_text(f"checked {n}\n")
+        master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+    # Two changes that are no routine's, in all: past ninety days the twenty are the last twenty commits, whoever made them.
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + 100 * 86_400, spare=0)
+    assert (out["pruned"], out["commits"]) == (True, 20)
+
+
+def test_a_masters_pod_prunes_a_history_routines_alone_wrote_and_a_thread_opens_on_it_whole(tmp_path, project):
+    history = a_pod(tmp_path, project)
+    (history.copy / "a.md").write_text("a")
+    land(history)
+    master = a_masters_pod(tmp_path, project)
+    for n in range(40):
+        with open(project / "notes.txt", "a") as notes:
+            notes.write(f"checked {n}\n")
+        master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+    durable = project / "_history"
+    packs = durable / "objects" / "pack"
+    assert len(list(packs.glob("*.pack"))) >= 40  # one a push, and no thread has landed since to fold them
+    out = master.prune(keep=[], now=time.time() + LATER, spare=0)
+    assert (out["pruned"], out["commits"], len(list(packs.iterdir()))) == (True, 42, 2)
+    assert git(durable, "fsck", "--no-dangling") == ""
+    # Not again the same day, by this pod or by a thread's.
+    assert master.prune(keep=[], now=time.time()) == {"pruned": False}
+    assert a_pod(tmp_path, project).prune(keep=[], now=time.time()) == {"pruned": False}
+    # A thread opens on what is left and lands; the master's pod goes on picking up.
+    pod = a_pod(tmp_path, project)
+    assert (pod.copy / "notes.txt").read_text().endswith("checked 39\n")
+    (pod.copy / "b.md").write_text("b")
+    land(pod, "saga:after")
+    (project / "notes.txt").write_text("once more\n")
+    again = master.pickup(author=ROUTINE, trailers=[["Surogate-Saga", "saga:again"], ["Surogate-Kind", "pickup"]], push=True)
+    assert [f["path"] for f in again["picked_up"]] == ["notes.txt"]
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+FORGED = {"name": "Draft A", "email": "routine:forged@surogate"}
+
+
+def a_routine_rewrites(tmp_path: Path, project: Path, times: int, author=ROUTINE) -> None:
+    """Five landings, then a routine that writes a file of 100 KB anew *times* times: no delta between its versions."""
+    for n in range(5):
+        history = a_pod(tmp_path, project)
+        (history.copy / f"l{n}.md").write_text(f"{n}")
+        land(history, f"saga:{n}")
+    master = a_masters_pod(tmp_path, project)
+    for n in range(times):
+        (project / "Model.bin").write_bytes(os.urandom(100_000))
+        master.pickup(author=author, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
+
+
+@pytest.mark.parametrize("author", [ROUTINE, FORGED], ids=["a routine", "a forged address"])
+def test_a_history_over_its_bound_is_cut_below_the_twenty_that_are_no_routines_to_the_bound_exactly(tmp_path, project, monkeypatch, author):
+    monkeypatch.setattr(history_module, "PRUNE_MOST", 3_000_000)
+    a_routine_rewrites(tmp_path, project, 60, author)
+    durable = project / "_history"
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    # Six changes that are no routine's: without the bound all sixty-six commits stay, sixty times the file.
+    # With it the oldest pickups go until what stays fits: one version more would not.
+    assert out["pruned"] and 20 < out["commits"] < 66
+    assert out["size"] <= 3_000_000 < out["size"] + 102_000
+    assert git(durable, "rev-list", "--first-parent", "--count", "refs/heads/main") == str(out["commits"])
+    assert git(durable, "fsck", "--no-dangling") == ""
+
+
+def test_a_history_over_its_bound_is_never_cut_below_the_last_twenty_commits(tmp_path, project, monkeypatch):
+    monkeypatch.setattr(history_module, "PRUNE_MOST", 500_000)
+    a_routine_rewrites(tmp_path, project, 60)
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    assert (out["pruned"], out["commits"]) == (True, 20) and out["size"] > 500_000
+
+
+def test_a_history_over_its_bound_but_not_twice_its_files_keeps_the_twenty_that_are_no_routines(tmp_path, project, monkeypatch):
+    monkeypatch.setattr(history_module, "PRUNE_MOST", 3_000_000)
+    (project / "Annual report.pdf").write_bytes(os.urandom(8_000_000))  # the project itself is large
+    a_routine_rewrites(tmp_path, project, 60)
+    out = a_pod(tmp_path, project).prune(keep=[], now=time.time() + LATER, spare=0)
+    assert (out["pruned"], out["commits"]) == (True, 66) and 3_000_000 < out["size"] <= 2 * out["files"]
+

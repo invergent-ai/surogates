@@ -141,7 +141,8 @@ export interface AgentChatThreadRow {
   reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
-  files: { kind: "file" | "artifact"; label: string; ref: string }[];
+  /** Each file's state in the project's files, from the thread's landings: null for an artifact. */
+  files: { kind: "file" | "artifact"; label: string; ref: string; landing?: "landed" | "redoing" | "not_merged" | "undone" | null }[];
 }
 
 export interface AgentChatIterationSummary {
