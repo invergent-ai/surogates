@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -85,8 +85,8 @@ describe("the agent, asked for a folder's history", () => {
     const mounted = places(async ({ action }) => said[action] ?? "{}");
     expect(await mounted.history(KEY, request, signal())).toEqual(NOT_HERE);
     await mounted.mount(KEY, R1, R2);
-    // Another place's key is no way to this one's history.
-    expect(await mounted.history(OTHER_KEY, request, signal())).toEqual(NOT_HERE);
+    // Another place's key is no way to this one's history, nor is a path that leads to it.
+    for (const key of [OTHER_KEY, `${OTHER_KEY}/../${KEY}`, `../places/${KEY}`, `${KEY}/`, ""]) expect(await mounted.history(key, request, signal())).toEqual(NOT_HERE);
     const refused = await mounted.history(KEY, { ...request, action: "open" }, signal());
     // The history's code for why not, and its own words, as text: no more of them than a message holds.
     expect(refused).toEqual({ error: { type: "history", code: "no_whole_copy", message: "x".repeat(2_000) } });
@@ -888,6 +888,17 @@ describe("the VM manager, asked for a folder's history", () => {
       });
     }
     expect(asked).toEqual([["mount", KEY, "r1", "r2"], ["history", KEY, "changed"]]);
+    // Nor from a history set aside under the key: the one at its path now is another, and the place must be let go first.
+    renameSync(join(dir, "store"), join(dir, "store.was"));
+    mkdirSync(join(dir, "store"));
+    expect(await manager.history(ask("changed"), signal())).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: it was moved while the sandbox holds it, and must be let go first" },
+    });
+    expect(asked).toHaveLength(2);
+    expect(await manager.unplace(place())).toBe(true);
+    expect(await manager.history(ask("changed"), signal())).toEqual({ ok: { paths: ["Report.docx"] } });
+    // Let go, it is added anew from the folder at its path, in whichever guest runs by then.
+    expect(asked.slice(2).map((entry) => (entry as string[])[0]).filter((what) => what !== "gone")).toEqual(["unmount", "mount", "history"]);
     await manager.stop();
   });
 
