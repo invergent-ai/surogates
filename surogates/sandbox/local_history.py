@@ -151,6 +151,8 @@ _MAKING = ".making"
 _GOING = ".going"
 #: A thread's repository is packed again at its turn's start once it holds more packs than this.
 _PACKS = 20
+#: Past this size a file is made no delta of another in a push's pack, nor at the repack after a push.
+_DELTAS_BELOW = "1m"
 #: A file in a thread's repository: what history left out of its copy when the copy last started from its base, each
 #: name with what tells it from a later write of it (:meth:`LocalHistory._remember`).
 _SEEN = "left-out"
@@ -317,16 +319,26 @@ class LocalHistory(History):
             self._main("update-ref", self.pushing, branch)
         super()._push(updates, expect=expect)
         self._borrow()
-        self._pack()
+        self._pack(versions=False)
 
-    def _pack(self) -> None:
+    def _fetch(self, *commits: str | None) -> None:
+        """Nothing: the thread's repository reads each commit the history holds where it lies, with its parents (:meth:`_borrow`)."""
+
+    def _pack(self, *, versions: bool) -> None:
         """Pack the thread's repository again, its own objects alone: what the history holds stays the history's.
 
-        Upkeep: a repository git cannot pack again still serves its thread's
-        turn, and holds all it held.
+        With *versions*, as at a turn's start once its snapshots have left
+        enough packs, git looks for deltas between large files too: the
+        versions of one file its snapshots took, often a small change each.
+        Without, as after every push, it looks among small files alone, and
+        keeps every delta it has: between large files the search costs much,
+        and in media and other compressed files finds nothing.  Upkeep: a
+        repository git cannot pack again still serves its thread's turn, and
+        holds all it held.
         """
+        large = [] if versions else ["-c", f"core.bigFileThreshold={_DELTAS_BELOW}"]
         try:
-            self._git(["repack", "-a", "-d", "-l", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
+            self._git([*large, "repack", "-a", "-d", "-l", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
         except HistoryError as why:
             logger.warning("A thread's repository could not be packed again, and is left as it is: %s", why)
 
@@ -348,6 +360,10 @@ class LocalHistory(History):
             # the folder do: a loose object apiece is a file made through the share, and each
             # later look for one a round trip to this computer.
             args = ["-c", "core.bigFileThreshold=1", *args]
+        elif args[0] == "pack-objects":
+            # A push's pack is no thin one: a delta in it is only ever of another file new in the same push,
+            # and between large files the search costs much and finds nothing in media and documents.
+            args = ["-c", f"core.bigFileThreshold={_DELTAS_BELOW}", *args]
         elif args[:2] == ["worktree", "add"]:
             # A copy's files are made through the share too: several at once.
             args = ["-c", "checkout.workers=8", "-c", "checkout.thresholdForParallelism=200", *args]
@@ -453,7 +469,7 @@ class LocalHistory(History):
                 (self.copy / ".git").unlink()
                 self.making.unlink()
             if len(list((self.repo / "objects" / "pack").glob("*.pack"))) > _PACKS:
-                self._pack()
+                self._pack(versions=True)
             if moves:
                 # Its snapshot before the turn finishes first what a cut request left.
                 moved = self._to_main()
@@ -680,7 +696,23 @@ class LocalHistory(History):
         With *stem*, the repository's just set aside, the copy takes its
         name.  The folder is opened as a folder, never through a link, and
         the rename goes by its handle.
+
+        A repository is kept borrowing the folder's history by the one line,
+        which names the history from the set-aside folder as from the
+        repositories': it reads all it names as it is, its own objects and
+        the history's.  One whose alternates were gone, or named another
+        store and were taken away, is given the line first, where its
+        objects' folders are its own, and its note of the history's packs
+        goes before that: cut before the rename, it is still no repository
+        that borrows as it must.  One whose history no longer holds a pack it
+        read from cannot be made whole by anything here.
         """
+        if left == self.repo and not self._lends() and all(
+            at.is_dir() and not at.is_symlink() for at in (left, left / "objects", left / "objects" / "info")
+        ):
+            if os.path.lexists(left / _BORROWED):
+                _removed(left / _BORROWED)
+            _pinned(left / _BORROWS, _ALTERNATES)
         folder = _opened_folder(str(self.aside_whole), None, True)
         try:
             if stem is None:
@@ -834,7 +866,6 @@ class LocalHistory(History):
         else:
             if left:
                 # Checked against the very files the landing will record, before anything is pushed.
-                self._fetch(step["main"])
                 landing = self._landed(step["turn"], step["applied"], step.get("pickup") or step["main"] or self._main("rev-parse", MAIN))
                 if self._as_landed(landing, step["turn"], list(left)) is None:
                     _refuse("a file it left out, or one in its way, was changed by somebody else since the thread's turn began")
@@ -925,7 +956,6 @@ class LocalHistory(History):
         try:
             # First, and before anything is written: a copy that is not whole is its next open's to make.
             index = self._copy("write-tree")
-            self._fetch(landing)
             files = self._as_landed(landing, turn, left)
             if files is None:
                 # No request records such a landing: the history is not as the platform wrote it.
@@ -1304,7 +1334,6 @@ class LocalHistory(History):
             return False
         begun = int(time.time())
         main = self._take().get(MAIN)
-        self._fetch(main)
         if main is not None:
             self._main("update-ref", MAIN, main)
         self._read_real(main)
