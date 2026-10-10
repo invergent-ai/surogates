@@ -466,7 +466,7 @@ def test_a_part_of_a_pickup_is_asked_only_of_a_pickup_this_thread_made_and_from_
     first = git(one.repo, "rev-list", "--max-parents=0", "refs/heads/main")
     for pickup in ("f" * 40, first, landing):
         # A commit this thread's repository does not hold, the folder's first, or a landing: none picked up your edits.
-        with refused("not_a_request", "it names no pickup of this thread's"):
+        with refused("not_a_request", "it names no commit of this thread's with one parent"):
             one.picked(pickup=pickup, after="Photos")
     for after in ("../outside", "/etc/passwd", "", "a//b", "x/", None, 7):
         with refused("not_a_request", "it names no file to go on from"):

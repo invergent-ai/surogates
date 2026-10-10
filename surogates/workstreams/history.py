@@ -470,6 +470,30 @@ _SINCE = text("""
      ORDER BY h.id DESC, changed.side
      LIMIT 1
 """)
+# :path's entries in the project's :most newest completed records that changed it, of its cloud files or of a folder
+# on the computer :device, each record's files before its pickup and each list in its own order, with who that
+# record's step says made them.  Only those entries are read out of a record, never the record whole.
+_VERSIONS = text("""
+    WITH matching AS (
+        SELECT id, kind, steps, files, picked_up, created_at, updated_at FROM workstream_history
+         WHERE workstream_id = :project AND device_id IS NOT DISTINCT FROM CAST(:device AS uuid) AND saga_state = 'completed'
+           AND (files @> CAST(:on AS jsonb) OR picked_up @> CAST(:on AS jsonb))
+         ORDER BY id DESC
+         LIMIT :most
+    )
+    SELECT m.id, m.kind, m.created_at, m.updated_at, e.side, e.entry, (
+               SELECT s->'arguments'->'author' FROM jsonb_array_elements(m.steps) s
+                WHERE s->>'tool_name' = CASE WHEN e.side = 'p' THEN :pickup WHEN m.kind = 'landing' THEN :commit ELSE :record END
+                LIMIT 1
+           ) AS author
+      FROM matching m
+     CROSS JOIN LATERAL (
+            SELECT 'f' AS side, f.entry, f.n FROM jsonb_array_elements(m.files) WITH ORDINALITY f(entry, n) WHERE f.entry->>'path' = :path
+            UNION ALL
+            SELECT 'p', p.entry, p.n FROM jsonb_array_elements(m.picked_up) WITH ORDINALITY p(entry, n) WHERE p.entry->>'path' = :path
+           ) e
+     ORDER BY m.id DESC, e.side, e.n
+""")
 #: The newest a record's id can be: what :func:`changed_since` reads up to, unless told.
 _NEWEST = 2**62
 
@@ -485,25 +509,19 @@ def _by(author: dict | None) -> dict:
     return {"kind": "thread", "thread_id": who["id"], "title": who["title"]} if who["kind"] == "thread" else who
 
 
-def changed_by(row: WorkstreamHistory, *, picked: bool) -> dict:
-    """Who a version a row records is by, as the wire's ``ChangedBy`` has it.
+def _version(row: Any, entry: dict, *, picked: bool) -> dict:
+    """The wire's ``FileVersion`` in snake_case of a row's *entry*, with ``blob``, its git blob id: None for a deletion.
 
-    A landing's files are its thread's, and what was picked up is by
-    whoever its pickup step names: you, or a routine.  A Restore's files
-    are by whoever its record names: you.  Each is read from the author
-    its step was given.
+    *row* is what :data:`_VERSIONS` reads of the row: its id, kind and
+    times, and the author its step was given.  A landing's files are its
+    thread's, and what was picked up is by whoever its pickup names: you,
+    or a routine.  A Restore's files are by whoever its record names: you.
     """
-    step = _PICKUP if picked else _COMMIT if row.kind == "landing" else _RECORD
-    return _by(next((s["arguments"].get("author") for s in row.steps if s["tool_name"] == step), None))
-
-
-def _version(row: WorkstreamHistory, entry: dict, *, picked: bool) -> dict:
-    """The wire's ``FileVersion`` in snake_case of a row's *entry*, with ``blob``, its git blob id: None for a deletion."""
     merged = entry.get("merged", True)
     return {
         "id": f"{row.id}:{'p' if picked else 'f'}",
         "path": entry["path"],
-        "by": changed_by(row, picked=picked),
+        "by": _by(row.author),
         "at": utc(row.updated_at),
         # One that took the file away is a deletion: there is nothing of it to keep.
         "change": (
@@ -526,46 +544,34 @@ async def versions(
     it is still kept.  A thread's version that did not land is listed, not
     merged; a version that landed names its landing's row, to undo, until
     an Undo put that file back.  The records are the cloud's, or those of a
-    folder on the computer *device_id*.
+    folder on the computer *device_id*.  Of each record only its entries
+    of the file are read out, with who its step says made them: a record
+    of a landing with many files is never read whole.
 
     The last is the file's first version, when it had one before its oldest
     record: your upload, which ``main``'s first commit took as it was and
     no row records.  It is that record's ``before``, by you, and its time
     is that record's: the latest it can be.
     """
-    on = [{"path": path}]
     async with session_factory() as db:
         # Each row holds a version at least, so no more rows than versions are read.
-        rows = (await db.execute(
-            select(WorkstreamHistory)
-            .where(
-                WorkstreamHistory.workstream_id == workstream_id,
-                WorkstreamHistory.device_id == device_id if device_id is not None else WorkstreamHistory.device_id.is_(None),
-                WorkstreamHistory.saga_state == "completed",
-                or_(WorkstreamHistory.files.contains(on), WorkstreamHistory.picked_up.contains(on)),
-            )
-            .order_by(WorkstreamHistory.id.desc())
-            .limit(limit)
-        )).scalars().all()
+        entries = (await db.execute(_VERSIONS, {
+            "project": workstream_id, "device": device_id, "on": json.dumps([{"path": path}]), "path": path, "most": limit,
+            "pickup": _PICKUP, "commit": _COMMIT, "record": _RECORD,
+        })).all()
     # A change an Undo put back already is none to undo again from its History.
-    undone = await undone_of(session_factory, workstream_id, device_id=device_id) if rows else frozenset()
+    undone = await undone_of(session_factory, workstream_id, device_id=device_id) if entries else frozenset()
     found = []
-    first: tuple[WorkstreamHistory, dict] | None = None
-    for row in rows:
-        # A row's files after its pickup: the pickup came first.
-        for entries, picked in ((row.files, False), (row.picked_up, True)):
-            for entry in entries:
-                if entry["path"] == path:
-                    version = _version(row, entry, picked=picked)
-                    if (row.id, path) in undone:
-                        version["landing_id"] = None
-                    found.append(version)
-                    first = (row, entry)
-    if first is not None and first[1]["before"] is not None:
-        row, entry = first
+    for entry in entries:
+        version = _version(entry, entry.entry, picked=entry.side == "p")
+        if (entry.id, path) in undone:
+            version["landing_id"] = None
+        found.append(version)
+    if entries and entries[-1].entry["before"] is not None:
+        last = entries[-1]
         found.append({
-            "id": f"{row.id}:b", "path": path, "by": YOU, "at": utc(row.created_at), "change": "added",
-            "merged": True, "landing_id": None, "blob": entry["before"],
+            "id": f"{last.id}:b", "path": path, "by": YOU, "at": utc(last.created_at), "change": "added",
+            "merged": True, "landing_id": None, "blob": last.entry["before"],
         })
     return found[:limit]
 
