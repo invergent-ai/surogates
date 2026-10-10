@@ -40,6 +40,7 @@ import { bridgeHandlers } from "./bridge.js";
 import { companyCaFile, trustCompanyCa } from "./company-ca.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
+import { Copying } from "./copying.js";
 import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
@@ -455,6 +456,8 @@ async function vmReady(signal: AbortSignal): Promise<void> {
 // alive in it, which Settings shows with Stop as they change.
 let vm: VmClient | null = null;
 const alive = new LiveProcesses();
+// The threads' copies of their folders being made in it, which the sidebar says as they go.
+const copying = new Copying(changed);
 const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = new VmClient({
@@ -789,6 +792,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: join(cacheHome, "surogate"), env, vm: vmFor(), changed,
         // A thread's history is made in the name of the account signed in on this device.
         user: credential.userId,
+        // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
+        making: (event) => copying.heard(event),
       }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       staging: browserTemp(profilesOf(root, credential)),
@@ -1614,6 +1619,7 @@ function state() {
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() || sessionStore.unencrypted()
       ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
+    copying: copying.line(),
     signIn: { needed: agent !== null && (signedIn === null || reloading), pending: signingIn !== null, failure: signInFailure },
     deviceAction: deviceAction(agent),
     // While a quit waits for the threads working on this computer: how many it waits for.
