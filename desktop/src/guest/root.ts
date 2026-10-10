@@ -37,6 +37,8 @@ export const slowerFor = (cmdline: string) => (/(?:^|\s)surogate\.emulated=1(?:\
 export const boundsFor = (slower: number) => ({
   emptyMs: 3_000 * slower, killedMs: 1_000 * slower, flushMs: 3_000 * slower, mountMs: 5_000 * slower,
   runnerReadyMs: 5_000 * slower, questionMs: 10_000 * slower, backstopMs: 10_000 * slower, ruleMs: 12_000 * slower,
+  // One request to a folder's history: past the history's own bound for opening a copy (local_history.py, _OPEN_TIMEOUT).
+  historyMs: 600_000 * slower,
 });
 // This guest's.
 export const BOUNDS = boundsFor(slowerFor((() => {
@@ -222,10 +224,11 @@ export async function flushRoot(share: Share, stalled: boolean): Promise<boolean
  * written out, each alone, and the guest powers off. Only the sessions disk could lose writes to
  * a power cut: the image and the agent disk are read-only, and the shares are written through.
  */
-export async function powerOff(): Promise<void> {
+export async function powerOff(ending: Promise<unknown> = Promise.resolve()): Promise<void> {
   await writeFile(join(CGROUPS, "cgroup.kill"), "1").catch(() => {});
   // Killed, they end at once; one waiting on a share that stalled cannot, and the guest powers off around it.
-  await emptied(CGROUPS, KILLED_MS).catch(() => {});
+  // *ending*: what else of the agent's is being ended, within as long.
+  await Promise.all([emptied(CGROUPS, KILLED_MS).catch(() => {}), ending]);
   // A share that stalled answers no flush: it is left to its bound.
   await Promise.all([...mounted].map((tag) => flush(join(SHARES, tag), KILLED_MS)));
   // Written out first: a root whose process cannot end still holds the disk in its own

@@ -10,9 +10,11 @@ import { perform } from "../src/files/operations.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
-  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
+  APP_DIRS, CANCELLED, forkHost, type Guard, HOST_STOPPED, type HostProcess, NO_COPY, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
   type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
+import { VmExecutor } from "../src/vm/executor.js";
+import type { VmOperation } from "../src/vm/manager.js";
 
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
 const ROOT_B = "22222222-2222-4222-8222-222222222222";
@@ -820,5 +822,79 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     });
     await executor.stop();
     expect(exited).toBe(true);
+  });
+});
+
+describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () => {
+  // Every kind an operation of a root's can have: the file helper's, a landing's and a history's among them, and
+  // one that is none; then those that run in the sandbox.
+  const FILE_KINDS = ["resolve", "check_write", "stat", "read", "read_lines", "write", "delete", "list_dir", "walk", "ripgrep", "land", "history", "checkpoint", "no-such-kind"];
+  const PROCESS_KINDS = ["run", "which", "start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"];
+  const refused = { error: { type: "unsupported", message: "This computer cannot work in a thread's copy of a folder yet" } };
+  let started: FakeHost[];
+  // ROOT_A is a project's thread, bound to its copy of the folder; ROOT_B a chat on the same folder itself.
+  const options = (): Partial<ToolHostsOptions> => ({
+    bindingOf: (root) => {
+      const folder = folders[ROOT_A]!;
+      return root === ROOT_A || root === ROOT_B ? { folder, ...identities.get(folder)!, ...(root === ROOT_A ? { history: ROOT_A } : {}) } : undefined;
+    },
+    spawnHost: () => {
+      const host = new FakeHost(answering);
+      started.push(host);
+      return host;
+    },
+  });
+  const args = () => ({ key: join(folders[ROOT_A]!, "a.txt"), path: "a.txt", data: "", command: "touch planted", workdir: null, timeout: 10 });
+
+  beforeEach(() => {
+    started = [];
+  });
+
+  it("runs nothing in the folder itself: until the copy is where its work goes, each of its operations is refused, and no host starts", async () => {
+    const executor = toolHosts(options());
+    for (const kind of FILE_KINDS) expect(await executor.run(op(kind, args()), signal()), kind).toEqual(refused);
+    expect(NO_COPY).toEqual(refused);
+    let ran = 0;
+    for (const guard of ["around", "before", null] as Guard[]) {
+      for (const kind of PROCESS_KINDS) {
+        const answer = await executor.guarded(op(kind, args()), signal(), guard, () => {
+          ran += 1;
+          return Promise.resolve({ ok: null });
+        });
+        expect(answer, kind).toEqual(refused);
+      }
+    }
+    expect([ran, started.length]).toEqual([0, 0]);
+    // Nothing of the app's was made for it, and nothing in the folder.
+    expect([readdirSync(folders[ROOT_A]!), readdirSync(base).sort()]).toEqual([[], ["a", "b", "tools"]]);
+    // A chat on the same folder itself works in it as before: the refusal is the copy's alone.
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(started.map((host) => host.sent[0])).toEqual([expect.objectContaining({ type: "start", folder: folders[ROOT_A] })]);
+  });
+
+  it("reaches neither a file host nor the sandbox through the executor the app runs its chats on", async () => {
+    const sent: VmOperation[] = [];
+    const executor = new VmExecutor({
+      ...(options() as Pick<ToolHostsOptions, "bindingOf" | "spawnHost">),
+      dataDir: join(base, "data"), cacheDir: join(base, "cache", "surogate"), env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8" },
+      vm: {
+        perform: (operation) => {
+          sent.push(operation);
+          return Promise.resolve({ ok: null });
+        },
+        teardown: () => Promise.resolve(),
+        onProcesses: () => () => {},
+        onAsk: () => () => {},
+      },
+    });
+    try {
+      for (const kind of [...FILE_KINDS, ...PROCESS_KINDS]) expect(await executor.run(op(kind, args()), signal()), kind).toEqual(refused);
+      expect([sent, started.length]).toEqual([[], 0]);
+      // The chat on the folder itself: what it asks of the sandbox goes there, on the folder.
+      expect(await executor.run(op("which", args(), ROOT_B), signal())).toEqual({ ok: null });
+      expect(sent.map((operation) => [operation.root, operation.folder.path, operation.at])).toEqual([[ROOT_B, folders[ROOT_A], undefined]]);
+    } finally {
+      await executor.stop();
+    }
   });
 });

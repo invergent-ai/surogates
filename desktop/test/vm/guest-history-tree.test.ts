@@ -1,8 +1,9 @@
 // A folder's history as the agent disk carries it, run in the guest by the guest's own python and git:
 // the tree at /run/surogate/agent/history, one request a run, as the guest's root outside every
-// root's namespaces, which is where the agent will run it. Master's agent has no way in to it yet,
-// so the guest's init starts the scenario (guest-history-tree.py) beside the agent, on the guest's
-// own disk, and it says each check on the console. Behind SUROGATE_VM_TESTS=1.
+// root's namespaces, which is where the agent runs it for a request (guest-history.test.ts). Here the
+// guest's init starts a scenario of its own (guest-history-tree.py) beside the agent, on the guest's
+// own disk: it reaches into the tree to cut a record and a move short, which no request can, and it
+// says each check on the console. Behind SUROGATE_VM_TESTS=1.
 
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
