@@ -1,6 +1,7 @@
 // The file helper's sandbox (spec, Section 11, "The file host, still in srt"): nothing
 // readable but the system, the app, the folder and the helper's working folder; nothing
-// writable but the folder and that working folder; no network.
+// writable but the folder and that working folder; no network. A landing's helper also reads the
+// thread's copy it lands from, and writes the folder its replaced files are kept in (Section 13).
 
 import { statSync } from "node:fs";
 import { dirname } from "node:path";
@@ -108,9 +109,11 @@ export interface PolicyInput {
   appDirs: string[];
   bwrapPath?: string;
   socatPath?: string;
+  reads?: string[]; // what else it may read, and not write: a landing's copy
+  writes?: string[]; // what else it may write: a landing's kept folder
 }
 
-export function sandboxPolicy({ folder, tmp, appDirs, bwrapPath, socatPath }: PolicyInput): SandboxRuntimeConfig {
+export function sandboxPolicy({ folder, tmp, appDirs, bwrapPath, socatPath, reads = [], writes = [] }: PolicyInput): SandboxRuntimeConfig {
   return {
     ...(bwrapPath ? { bwrapPath } : {}),
     ...(socatPath ? { socatPath } : {}),
@@ -118,8 +121,8 @@ export function sandboxPolicy({ folder, tmp, appDirs, bwrapPath, socatPath }: Po
     network: { allowedDomains: [], deniedDomains: [] },
     filesystem: {
       denyRead: ["/"],
-      allowRead: [...SYSTEM, ...appDirs, folder, tmp],
-      allowWrite: [folder, tmp],
+      allowRead: [...SYSTEM, ...appDirs, folder, tmp, ...reads, ...writes],
+      allowWrite: [folder, tmp, ...writes],
       // hideSrtTmp hides /tmp/claude under an empty tmpfs; this keeps it read-only
       // even where that tmpfs did not apply.
       denyWrite: SRT_TMP,

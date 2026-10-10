@@ -52,7 +52,7 @@ export type HistoryCode = (typeof SAID)[number] | "not_an_answer";
 const AGENTS = ["unavailable", "value", "other", "interrupted"] as const;
 
 export const NOT_A_REQUEST: Outcome = { error: { type: "value", message: "This request names no thread, user or action of a history's" } };
-const REFUSED: Outcome = {
+export const REFUSED: Outcome = {
   error: { type: "history", code: "not_an_answer", message: "This computer's sandbox answered what is not a history's answer, so it was not used" },
 };
 const NOT_A_FORGETTING: Outcome = {

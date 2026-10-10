@@ -22,9 +22,20 @@ export type NetworkAnswer = "allow" | "allow_session" | "deny";
 
 export interface HostStart {
   type: "start";
-  folder: string; // the bound folder; the host resolves it
-  // The folder's identity when the chat was bound, and that boot's id: a folder replaced since is not the chat's.
+  // What the host holds and its helper works in: the bound folder, which the host resolves; or a
+  // project thread's copy of it, in the app's data (spec, Section 13).
+  folder: string;
+  // That folder's identity: a chat's when it was bound, with that boot's id; a copy's when the app
+  // last looked at it. One replaced since is not the chat's.
   expect: { dev: number; ino: number; boot: string };
+  // A thread's copy alone: the path of the folder it is a copy of, by which its helper's requests
+  // and answers name its files.
+  at?: string;
+  // A landing's host alone, on the folder itself: the thread's copy its files come from, which
+  // its helper reads, and the folder in the app's data where it keeps the files it replaces.
+  landing?: { copy: string; kept: string };
+  // How long it waits for another host to let its folder go; LOCK_WAIT_MS unless said.
+  lockWaitMs?: number;
   tmp: string; // the file helper's working folder, which srt wraps it from
   dataDir: string; // the app's own data, never inside the folder
   cacheDir: string; // the app's own cache, <cache home>/surogate: the folder neither holds it nor lies in it
@@ -51,7 +62,8 @@ export type FromHost =
   // With the handles of the processes its folder's record keeps, as a registry answers for them.
   | { type: "ready"; processes: ProcessHandle[] }
   // folder: the bound folder is not there, is not a folder, or was replaced; the app answers folder_unavailable.
-  | { type: "failed"; message: string; folder?: true }
+  // busy: another host held the folder for as long as this one waited.
+  | { type: "failed"; message: string; folder?: true; busy?: true }
   | { type: "result"; id: string; outcome: Outcome };
 
 export const FOLDER_UNAVAILABLE: Outcome = {

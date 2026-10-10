@@ -21,6 +21,16 @@ describe("the file helper's sandbox policy", () => {
       },
     });
   });
+
+  it("reads what a helper is given to read beside its folder, and writes of it only what it is given to write", () => {
+    const { filesystem } = sandboxPolicy({ folder: "/f", tmp: "/t", appDirs: ["/app"], reads: ["/copy"], writes: ["/kept"] });
+    expect(filesystem).toEqual({
+      denyRead: ["/"],
+      allowRead: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve", "/app", "/f", "/t", "/copy", "/kept"],
+      allowWrite: ["/f", "/t", "/kept"],
+      denyWrite: ["/tmp/claude", "/private/tmp/claude"],
+    });
+  });
 });
 
 describe("the file helper's tools on this computer", () => {
