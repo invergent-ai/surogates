@@ -9,7 +9,7 @@ import { Failure, type Refusal } from "./answers.js";
 import { type Edge, inside, shown } from "./paths.js";
 
 // A path as a helper is given one: absolute, every name in it a name, no slash doubled or at its end, and not the root.
-const whole = (path: string): boolean => path.startsWith("/") && path !== "/" && !path.endsWith("/") && posix.normalize(path) === path;
+export const whole = (path: string): boolean => path.startsWith("/") && path !== "/" && !path.endsWith("/") && posix.normalize(path) === path;
 
 /**
  * Why a helper on *folder* cannot name it by *at*, the path it was started with, or null. The two are told apart by

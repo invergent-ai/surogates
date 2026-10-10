@@ -11,6 +11,7 @@ import { mkdirSync, rmdirSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
+import { type NoCopyAt, noCopyAt } from "../hosts/start.js";
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
 import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -52,6 +53,12 @@ export const NOT_FORGOTTEN: Outcome = {
 const NO_COPY_HERE = "This computer keeps no copy of a folder for a project's thread to work in, so the thread cannot work here";
 export const KEEPS_NO_COPY: Outcome = { error: { type: "binding", message: NO_COPY_HERE } };
 const BOUND: Outcome = { ok: null };
+// A project's thread on *folder*, which no copy of it could stand for by its path (hosts/start.ts): it works nowhere, and the
+// person is told to choose another folder.
+const noCopyOf = (folder: string, why: NoCopyAt): string => {
+  const reason = "given" in why ? `every sandbox of a thread's copy reads all of ${why.given}, which holds it or lies in it` : why.spelled;
+  return `The folder ${folder} cannot have a project's thread work in a copy of it, as ${reason}: choose another folder for the project's threads`;
+};
 // A bind that recorded *thread*'s copy says so: the server counts a thread bound on no other answer (surogates/devices/binding.py).
 const boundTo = (thread: string | undefined): Outcome => (thread === undefined ? BOUND : { ok: { history: { thread } } });
 
@@ -376,6 +383,13 @@ export class Binder implements Executor {
     if (copy !== undefined && this.options.keepsCopies !== true) {
       preparation.reject(new Error(NO_COPY_HERE));
       return KEEPS_NO_COPY;
+    }
+    // Nor where no host on its copy could stand for the folder by its path, as each one's start would refuse it.
+    const alone = copy === undefined ? null : noCopyAt(folder, this.options.guards);
+    if (alone !== null) {
+      const message = noCopyOf(folder, alone);
+      preparation.reject(new Error(message));
+      return { error: { type: "binding", message } };
     }
     const { dev, ino, mode } = preparation;
     try {

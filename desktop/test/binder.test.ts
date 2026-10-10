@@ -496,6 +496,26 @@ describe("a chat's bind operation", () => {
     await tools.stop();
   });
 
+  it("binds no thread to a copy of a folder whose path no copy can be named by, and says to choose another, where a chat still works", async () => {
+    for (const name of ["notes ", "notes\t", "new\nnotes"]) {
+      const at = join(base, name);
+      mkdirSync(at);
+      const user = new User();
+      const chooser = binder(user);
+      const ready = await confirmed(user, chooser, at);
+      const waiting = chooser.bindSession(ROOT, ready.token, WINDOW);
+      const answer = await chooser.admit(bindOp(ROOT, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: ROOT } } }), never());
+      expect(answer, JSON.stringify(name)).toMatchObject({ error: { type: "binding", message: expect.stringMatching(/: choose another folder for the project's threads$/) } });
+      expect(answer !== null && "error" in answer && answer.error.message.startsWith(`The folder ${at} cannot have a project's thread work in a copy of it`)).toBe(true);
+      await expect(waiting).rejects.toThrow(`The folder ${at} cannot have a project's thread work in a copy of it`);
+      expect(journal.bindings.all()).toEqual([]);
+      // A chat bound to the folder itself works there.
+      const plain = await confirmed(user, chooser, at);
+      expect(await chooser.admit(bindOp(OTHER, plain), never())).toEqual({ ok: null });
+      journal.bindings.retire(OTHER);
+    }
+  });
+
   it("acknowledges a thread's copy with every bind that recorded it, and with no other answer", async () => {
     const user = new User();
     const chooser = binder(user);

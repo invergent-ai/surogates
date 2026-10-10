@@ -12,7 +12,7 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { copyOf, keptOf, placeOf } from "../src/history/place.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { sandboxPolicy } from "../src/hosts/policy.js";
-import { LANDING_READY_MS, READY_MS, type Start, startOn } from "../src/hosts/start.js";
+import { LANDING_READY_MS, noCopyAt, READY_MS, type Start, startOn } from "../src/hosts/start.js";
 
 const KEY = "0123456789abcdef";
 const THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
@@ -215,6 +215,26 @@ describe("the folder a tool host holds", () => {
     // What is said of one names it no further than a line goes.
     const said = on({ folder: copy, at: `/h${long(200).repeat(40)}` });
     expect(!said.ok && said.message.length).toBeLessThan(400);
+  });
+
+  it("is refused for a copy by the folder's path alone exactly where the rule the binder binds by refuses that path", () => {
+    const guards = (appDirs: string[]) => ({ home, dataDir, cacheDir, appDirs });
+    const long = (bytes: number) => `/${"a".repeat(bytes)}`;
+    const cases: Array<[string, string[]]> = [
+      [folder, [join(base, "app")]], [join(home, "My Reports", " drafts"), [join(base, "app")]], [`/home${long(255)}`, [join(base, "app")]],
+      [`${folder} `, [join(base, "app")]], [`${folder}\t`, [join(base, "app")]], [`${folder}\n`, [join(base, "app")]], [join(home, "Re\nports"), [join(base, "app")]],
+      [`/home${long(256)}`, [join(base, "app")]], [`/h${long(200).repeat(21)}`.slice(0, 4096), [join(base, "app")]], [`${folder}/`, [join(base, "app")]], ["Reports", [join(base, "app")]],
+      ["/opt/work", [join(base, "app")]], ["/opt/venv/work", [join(base, "app")]], ["/usr/local/share/reports", [join(base, "app")]],
+      [dataDir, [join(base, "app")]], [join(cacheDir, "updates"), [join(base, "app")]], [base, [join(base, "app")]],
+      // A folder an app's folder holds, or that holds one, as every sandbox reads the app's.
+      [folder, [join(base, "app"), home]], [join(base, "app", "work"), [join(base, "app")]],
+    ];
+    for (const [at, appDirs] of cases) {
+      const started = startOn(start({ folder: copy, at, appDirs }), home, appDirs);
+      const what = JSON.stringify([at, appDirs]);
+      expect(started.ok || started.missing, what).toBe(noCopyAt(at, guards(appDirs)) === null);
+    }
+    expect(cases.filter(([at, appDirs]) => noCopyAt(at, guards(appDirs)) === null).map(([at]) => at)).toEqual([folder, join(home, "My Reports", " drafts"), `/home${long(255)}`]);
   });
 
   it("is no copy, to work in or to land from, in an app's data whose path holds a line break: a search there would name its files by the copy's path", () => {
