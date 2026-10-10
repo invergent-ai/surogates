@@ -30,6 +30,7 @@ if (location.protocol === "file:") {
     closeHistory: () => ipcRenderer.invoke("shell:history-close"),
     openVersion: (id: string) => ipcRenderer.invoke("shell:history-open", id),
     restoreVersion: (id: string) => ipcRenderer.invoke("shell:history-restore", id),
+    undoChange: (landingId: string) => ipcRenderer.invoke("shell:history-undo", landingId),
     back: () => ipcRenderer.invoke("shell:back"),
     forward: () => ipcRenderer.invoke("shell:forward"),
     reload: () => ipcRenderer.invoke("shell:reload"),

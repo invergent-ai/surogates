@@ -11,11 +11,13 @@ const VERSIONS = history[REPORT]![REVENUE]!;
 
 const RESTORED = { applied: [REVENUE], skipped: [], pickedUp: [REVENUE] };
 
+const UNDONE = { applied: [REVENUE], skipped: [{ path: "brief.docx", by: { kind: "you" as const }, pruned: false }], pickedUp: [] };
+
 function shown(
   answer: () => Promise<unknown> = async () => VERSIONS, open: () => Promise<unknown> = async () => undefined,
-  restore: () => Promise<unknown> = async () => RESTORED,
+  restore: () => Promise<unknown> = async () => RESTORED, undo: () => Promise<unknown> = async () => UNDONE,
 ) {
-  const source = { history: vi.fn(answer), openVersion: vi.fn(open), restore: vi.fn(restore) };
+  const source = { history: vi.fn(answer), openVersion: vi.fn(open), restore: vi.fn(restore), undo: vi.fn(undo) };
   const changed = vi.fn();
   return { source, changed, files: new FileHistory(source as never, changed) };
 }
@@ -26,11 +28,11 @@ describe("a file's History", () => {
     expect(files.shown).toBeNull();
     const reading = files.open(REPORT, REVENUE);
     // Shown at once, before it is read: the pane says which file while the agent answers.
-    expect(files.shown).toEqual({ path: REVENUE, versions: null, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: null, failure: null, opening: null, changing: null, result: null });
     expect(changed).toHaveBeenCalledTimes(1);
     await reading;
     expect(source.history).toHaveBeenCalledWith(REPORT, REVENUE, { kind: "cloud" });
-    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, changing: null, result: null });
     expect(changed).toHaveBeenCalledTimes(2);
     await files.read();
     expect(source.history).toHaveBeenCalledTimes(2);
@@ -55,14 +57,14 @@ describe("a file's History", () => {
     let refusal: string | null = "History is off: this project has more than 50,000 files.";
     const { files } = shown(async () => (refusal ? Promise.reject(new Error(refusal)) : VERSIONS));
     await files.open(REPORT, REVENUE);
-    expect(files.shown).toEqual({ path: REVENUE, versions: null, failure: "History is off: this project has more than 50,000 files.", opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: null, failure: "History is off: this project has more than 50,000 files.", opening: null, changing: null, result: null });
     refusal = null;
     await files.read();
-    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, changing: null, result: null });
     // A read that fails later says why, over the versions last read: they are what the agent last said.
     refusal = "This project's history is being read just now. Try again in a moment.";
     await files.read();
-    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: refusal, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: refusal, opening: null, changing: null, result: null });
     // What is thrown that is no Error is said as it is.
     const odd = shown(async () => Promise.reject("the page went away"));
     await odd.files.open(REPORT, REVENUE);
@@ -82,7 +84,7 @@ describe("a file's History", () => {
       const again = files.read();
       source.answered(sent.at(-1)!.id, { ok: VERSIONS });
       await again;
-      expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, restoring: null, result: null });
+      expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, changing: null, result: null });
     } finally {
       vi.useRealTimers();
     }
@@ -95,12 +97,12 @@ describe("a file's History", () => {
     const second = files.open(REPORT, "brief.docx");
     answers[0]!.resolve(VERSIONS);
     await first;
-    expect(files.shown).toEqual({ path: "brief.docx", versions: null, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: "brief.docx", versions: null, failure: null, opening: null, changing: null, result: null });
     // Nor a failure of the file shown before.
     const third = files.open(REPORT, REVENUE);
     answers[1]!.reject(new Error("History is off: this project has more than 50,000 files."));
     await second;
-    expect(files.shown).toEqual({ path: REVENUE, versions: null, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: null, failure: null, opening: null, changing: null, result: null });
     // Two reads of one file: the later one's answer stands, whichever comes first.
     const later = files.read();
     answers[3]!.resolve([VERSIONS[0]]);
@@ -133,7 +135,7 @@ describe("a file's History", () => {
     expect(source.openVersion).toHaveBeenCalledTimes(1);
     answers[0]!();
     await opening;
-    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: VERSIONS, failure: null, opening: null, changing: null, result: null });
     // Handed over, there is nothing to read again; and the next one opens.
     expect([source.history.mock.calls.length, changed.mock.calls.length]).toEqual([1, drawn + 2]);
     const next = files.openVersion("9:f");
@@ -151,7 +153,7 @@ describe("a file's History", () => {
       await expect(files.openVersion(id), JSON.stringify(id)).rejects.toThrow("No such version in the History shown");
     }
     expect(source.openVersion).not.toHaveBeenCalled();
-    expect(files.shown).toMatchObject({ failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toMatchObject({ failure: null, opening: null, changing: null, result: null });
   });
 
   it("says why a version could not be opened, in the agent's words, and reads the History again, which does not unsay it", async () => {
@@ -167,7 +169,7 @@ describe("a file's History", () => {
     listed = pruned;
     await files.openVersion("9:f");
     // Read again: the version is listed as no longer kept, and why it did not open is still said.
-    expect(files.shown).toEqual({ path: REVENUE, versions: pruned, failure: refusal, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: REVENUE, versions: pruned, failure: refusal, opening: null, changing: null, result: null });
     expect(source.history).toHaveBeenCalledTimes(2);
     await files.read();
     expect(files.shown!.failure).toBe(refusal);
@@ -232,7 +234,7 @@ describe("a file's History", () => {
     answers[1]!.reject(new Error("This version is no longer kept in the project's history."));
     await second;
     // The file shown now is another's: it is told nothing of that one, and is not read again for it.
-    expect(files.shown).toEqual({ path: "brief.docx", versions: VERSIONS, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: "brief.docx", versions: VERSIONS, failure: null, opening: null, changing: null, result: null });
     expect(source.history).toHaveBeenCalledTimes(3);
   });
 
@@ -244,27 +246,28 @@ describe("a file's History", () => {
     const drawn = changed.mock.calls.length;
     const restoring = files.restore("9:f");
     expect(source.restore).toHaveBeenCalledWith(REPORT, { versionId: "9:f", path: REVENUE });
-    expect(files.shown).toMatchObject({ restoring: "9:f", result: null, failure: null });
+    expect(files.shown).toMatchObject({ changing: "9:f", result: null, failure: null });
     expect(changed).toHaveBeenCalledTimes(drawn + 1);
     // A second click, on this version or another, restores nothing more while the first lands; a version still opens.
-    await expect(files.restore("9:f")).rejects.toThrow("A version of this file is already being restored");
-    await expect(files.restore("12:p")).rejects.toThrow("A version of this file is already being restored");
+    await expect(files.restore("9:f")).rejects.toThrow("A Restore or an Undo of this file is under way");
+    await expect(files.restore("12:p")).rejects.toThrow("A Restore or an Undo of this file is under way");
+    await expect(files.undo("9")).rejects.toThrow("A Restore or an Undo of this file is under way");
     await files.openVersion("12:p");
-    expect([source.restore.mock.calls.length, source.openVersion.mock.calls.length]).toEqual([1, 1]);
+    expect([source.restore.mock.calls.length, source.undo.mock.calls.length, source.openVersion.mock.calls.length]).toEqual([1, 0, 1]);
     listed = [{ ...VERSIONS[2]!, id: "21:f", by: { kind: "you" }, change: "restored", landingId: "21" }, ...VERSIONS];
     answers[0]!();
     await restoring;
     // What it did stays said, over the History read again: its newest version is the restore, by you.
-    expect(files.shown).toEqual({ path: REVENUE, versions: listed, failure: null, opening: null, restoring: null, result: RESTORED });
+    expect(files.shown).toEqual({ path: REVENUE, versions: listed, failure: null, opening: null, changing: null, result: { how: "restore", ...RESTORED } });
     expect(source.history).toHaveBeenCalledTimes(2);
     await files.read();
-    expect(files.shown!.result).toEqual(RESTORED);
+    expect(files.shown!.result).toEqual({ how: "restore", ...RESTORED });
     // The next thing asked of it takes what was said away as it begins.
     const opening = files.openVersion("12:p");
     expect(files.shown).toMatchObject({ result: null, failure: null });
     await opening;
     const next = files.restore("12:p");
-    expect(files.shown).toMatchObject({ result: null, restoring: "12:p" });
+    expect(files.shown).toMatchObject({ result: null, changing: "12:p" });
     answers[1]!();
     await next;
     expect(source.restore).toHaveBeenLastCalledWith(REPORT, { versionId: "12:p", path: REVENUE });
@@ -279,7 +282,7 @@ describe("a file's History", () => {
       await expect(files.restore(id), JSON.stringify(id)).rejects.toThrow("No such version in the History shown");
     }
     expect(source.restore).not.toHaveBeenCalled();
-    expect(files.shown).toMatchObject({ failure: null, restoring: null, result: null });
+    expect(files.shown).toMatchObject({ failure: null, changing: null, result: null });
   });
 
   it("says why a version was not restored, in the agent's words, through the read that follows, until the next is asked", async () => {
@@ -287,15 +290,15 @@ describe("a file's History", () => {
     const { source, files } = shown(undefined, undefined, async () => (refusal ? Promise.reject(new Error(refusal)) : RESTORED));
     await files.open(REPORT, REVENUE);
     await files.restore("9:f");
-    expect(files.shown).toMatchObject({ failure: refusal, restoring: null, result: null });
+    expect(files.shown).toMatchObject({ failure: refusal, changing: null, result: null });
     expect(source.history).toHaveBeenCalledTimes(2);
     await files.read();
     expect(files.shown!.failure).toBe(refusal);
     refusal = null;
     const next = files.restore("9:f");
-    expect(files.shown).toMatchObject({ failure: null, restoring: "9:f" });
+    expect(files.shown).toMatchObject({ failure: null, changing: "9:f" });
     await next;
-    expect(files.shown).toMatchObject({ failure: null, result: RESTORED });
+    expect(files.shown).toMatchObject({ failure: null, result: { how: "restore", ...RESTORED } });
   });
 
   it("says a Restore the page did not answer in its two minutes may still finish, and reads the History again", async () => {
@@ -310,14 +313,14 @@ describe("a file's History", () => {
       const restoring = files.restore("9:f");
       // The agent may wait twenty seconds for the project's lock and then land: two minutes, not a plain call's ten seconds.
       await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);
-      expect(files.shown).toMatchObject({ failure: null, restoring: "9:f" });
+      expect(files.shown).toMatchObject({ failure: null, changing: "9:f" });
       await vi.advanceTimersByTimeAsync(1);
       source.answered(sent.at(-1)!.id, { ok: VERSIONS });
       await restoring;
       // The agent goes on with a Restore whoever left: it may finish yet, and the project's change reads the History again then.
       expect(files.shown).toMatchObject({
         failure: "The agent's page did not answer in time: the restore may still finish, and this History shows it once it does",
-        restoring: null, result: null,
+        changing: null, result: null,
       });
       expect(sent.map((message) => message.method)).toEqual(["history", "restore", "history"]);
     } finally {
@@ -339,7 +342,93 @@ describe("a file's History", () => {
     await files.open(REPORT, "brief.docx");
     answers[1]!.reject(new Error("Your project's files are being saved right now. Try again in a moment."));
     await second;
-    expect(files.shown).toEqual({ path: "brief.docx", versions: VERSIONS, failure: null, opening: null, restoring: null, result: null });
+    expect(files.shown).toEqual({ path: "brief.docx", versions: VERSIONS, failure: null, opening: null, changing: null, result: null });
     expect(source.history).toHaveBeenCalledTimes(3);
+  });
+
+  it("undoes the change a version it shows came with, one at a time with a Restore, says what it did, and reads the History again", async () => {
+    const answers: Array<() => void> = [];
+    let listed = VERSIONS;
+    const { source, changed, files } = shown(async () => listed, undefined, undefined, () => new Promise((resolve) => answers.push(() => resolve(UNDONE))));
+    await files.open(REPORT, REVENUE);
+    const drawn = changed.mock.calls.length;
+    const undoing = files.undo("9");
+    expect(source.undo).toHaveBeenCalledWith(REPORT, { landingId: "9" });
+    expect(files.shown).toMatchObject({ changing: "9", result: null, failure: null });
+    expect(changed).toHaveBeenCalledTimes(drawn + 1);
+    // Neither a second Undo nor a Restore while it lands: either would land over it. A version still opens.
+    await expect(files.undo("9")).rejects.toThrow("A Restore or an Undo of this file is under way");
+    await expect(files.restore("9:f")).rejects.toThrow("A Restore or an Undo of this file is under way");
+    await files.openVersion("12:p");
+    expect([source.undo.mock.calls.length, source.restore.mock.calls.length, source.openVersion.mock.calls.length]).toEqual([1, 0, 1]);
+    listed = [{ ...VERSIONS[2]!, id: "22:f", by: { kind: "you" }, change: "undone", landingId: "22" }, ...VERSIONS];
+    answers[0]!();
+    await undoing;
+    expect(files.shown).toEqual({ path: REVENUE, versions: listed, failure: null, opening: null, changing: null, result: { how: "undo", ...UNDONE } });
+    expect(source.history).toHaveBeenCalledTimes(2);
+    // An Undo's own version can be undone in turn.
+    const again = files.undo("22");
+    answers[1]!();
+    await again;
+    expect(source.undo).toHaveBeenLastCalledWith(REPORT, { landingId: "22" });
+  });
+
+  it("undoes no change it does not show, none whose version is no longer kept, and none of a version that came with no landing", async () => {
+    // A deletion that came with a landing is a change all the same: its Undo brings the file back.
+    const gone = { ...VERSIONS[1]!, id: "20:f", change: "deleted" as const, landingId: "20" };
+    const pruned = { ...VERSIONS[2]!, id: "8:f", available: false, landingId: "8" };
+    const { source, files } = shown(async () => [gone, pruned, ...VERSIONS]);
+    await expect(files.undo("9")).rejects.toThrow("No such change in the History shown");
+    await files.open(REPORT, REVENUE);
+    // 12:p came with no landing: a pickup is no change to undo.
+    for (const id of ["99", "8", "12", "12:p", "9:f", "", null, undefined, 9, { landingId: "9" }, ["9"]]) {
+      await expect(files.undo(id), JSON.stringify(id)).rejects.toThrow("No such change in the History shown");
+    }
+    expect(source.undo).not.toHaveBeenCalled();
+    await files.undo("20");
+    expect(source.undo).toHaveBeenCalledWith(REPORT, { landingId: "20" });
+  });
+
+  it("says why a change was not undone, in the agent's words, through the read that follows, until the next is asked", async () => {
+    let refusal: string | null = "Stop the thread to undo its changes.";
+    const { source, files } = shown(undefined, undefined, undefined, async () => (refusal ? Promise.reject(new Error(refusal)) : UNDONE));
+    await files.open(REPORT, REVENUE);
+    await files.undo("9");
+    expect(files.shown).toMatchObject({ failure: refusal, changing: null, result: null });
+    expect(source.history).toHaveBeenCalledTimes(2);
+    await files.read();
+    expect(files.shown!.failure).toBe(refusal);
+    // An agent older than the app undoes nothing, and says so.
+    refusal = "This agent cannot undo a change yet";
+    await files.undo("9");
+    expect(files.shown!.failure).toBe(refusal);
+    refusal = null;
+    await files.undo("9");
+    expect(files.shown).toMatchObject({ failure: null, result: { how: "undo", ...UNDONE } });
+  });
+
+  it("says an Undo the page did not answer in its two minutes may still finish, and reads the History again", async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: Array<{ id: number; method: string }> = [];
+      const source = new PageProjects((message) => sent.push(message as never));
+      const files = new FileHistory(source, () => {});
+      const reading = files.open(REPORT, REVENUE);
+      source.answered(1, { ok: VERSIONS });
+      await reading;
+      const undoing = files.undo("9");
+      await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);
+      expect(files.shown).toMatchObject({ failure: null, changing: "9" });
+      await vi.advanceTimersByTimeAsync(1);
+      source.answered(sent.at(-1)!.id, { ok: VERSIONS });
+      await undoing;
+      expect(files.shown).toMatchObject({
+        failure: "The agent's page did not answer in time: the undo may still finish, and this History shows it once it does",
+        changing: null, result: null,
+      });
+      expect(sent.map((message) => message.method)).toEqual(["history", "undo", "history"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

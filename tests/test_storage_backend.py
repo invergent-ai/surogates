@@ -146,6 +146,23 @@ class TestLocalBackendObjects:
         await backend.upload("bucket", "new.bin", source, if_tag=now)
         assert await backend.read("bucket", "new.bin") == b"the version"
 
+    async def test_a_delete_takes_away_only_the_object_its_deleter_saw(self, backend: LocalBackend, tmp_path: Path):
+        await backend.write("bucket", "deep/key.bin", b"what the deleter saw")
+        seen = (await backend.stat("bucket", "deep/key.bin"))["etag"]
+        # Saved meanwhile: the save is not taken away.
+        await backend.write("bucket", "deep/key.bin", b"saved meanwhile")
+        with pytest.raises(Changed):
+            await backend.delete("bucket", "deep/key.bin", if_tag=seen)
+        assert await backend.read("bucket", "deep/key.bin") == b"saved meanwhile"
+        # As it was seen, it is taken away, its empty folders with it.
+        now = (await backend.stat("bucket", "deep/key.bin"))["etag"]
+        await backend.delete("bucket", "deep/key.bin", if_tag=now)
+        assert not await backend.exists("bucket", "deep/key.bin") and not (tmp_path / "bucket" / "deep").exists()
+        # Gone meanwhile is a change too; with no tag, a delete is as ever, a no-op on nothing.
+        with pytest.raises(Changed):
+            await backend.delete("bucket", "deep/key.bin", if_tag=now)
+        await backend.delete("bucket", "deep/key.bin")
+
     async def test_an_upload_that_fails_leaves_the_object_as_it_was(self, backend: LocalBackend, tmp_path: Path):
         await backend.write("bucket", "deep/key.bin", b"what the object held")
         with pytest.raises(OSError):
@@ -296,6 +313,52 @@ class _Bucket:
 
     async def abort_multipart_upload(self, **whole) -> dict:
         return {}
+
+
+class _Objects:
+    """An S3 client as a delete sees one: an object's ETag as the store answers it, and what was asked of it, in order."""
+
+    def __init__(self, etag: str | None) -> None:
+        self.etag, self.asked = etag, []
+
+    async def head_object(self, *, Bucket: str, Key: str) -> dict:
+        self.asked.append(("head", Key))
+        if self.etag is None:
+            raise KeyError(Key)
+        return {"ETag": self.etag, "ContentLength": 1}
+
+    async def delete_object(self, **asked) -> dict:
+        self.asked.append(("delete", asked))
+        return {}
+
+
+class TestS3BackendDelete:
+    """An object taken away only where it is the one its deleter saw: asked of right before the delete."""
+
+    def backend(self, monkeypatch, client: _Objects) -> S3Backend:
+        backend = S3Backend("http://s3.invalid")
+
+        @contextlib.asynccontextmanager
+        async def the_client():
+            yield client
+
+        monkeypatch.setattr(backend, "_client", the_client)
+        return backend
+
+    async def test_a_delete_asks_for_the_object_right_before_it_and_takes_away_only_the_one_its_deleter_saw(self, monkeypatch):
+        client = _Objects('"tag-2"')
+        backend = self.backend(monkeypatch, client)
+        with pytest.raises(Changed):
+            await backend.delete("bucket", "key.bin", if_tag='"tag-1"')
+        assert client.asked == [("head", "key.bin")]
+        await backend.delete("bucket", "key.bin", if_tag='"tag-2"')
+        assert client.asked[1:] == [("head", "key.bin"), ("delete", {"Bucket": "bucket", "Key": "key.bin"})]
+        # Gone meanwhile is a change; with no tag, nothing is asked first.
+        gone = _Objects(None)
+        with pytest.raises(Changed):
+            await self.backend(monkeypatch, gone).delete("bucket", "key.bin", if_tag='"tag-2"')
+        await self.backend(monkeypatch, gone).delete("bucket", "key.bin")
+        assert gone.asked == [("head", "key.bin"), ("delete", {"Bucket": "bucket", "Key": "key.bin"})]
 
 
 class TestS3BackendUpload:
