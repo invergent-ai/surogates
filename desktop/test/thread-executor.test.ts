@@ -577,6 +577,25 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     }
   });
 
+  it("are refused, and a deleted thread's hosts stopped, through the browser's layer above the executor too, as the app stacks them", async () => {
+    const browsing = new Browsing({
+      tools: executor,
+      browser: {
+        perform: async () => ({ ok: null }), forget: () => {}, stop: async () => {}, end: async () => {}, address: async () => "https://example.com/",
+        notComing: () => {}, pause: () => {}, show: async () => true, onDownload: () => {}, forwards: () => {},
+      },
+      bindingOf: (root) => bindings.get(root), launch: () => null, staging: join(dir, "staging"), ports: () => [],
+      vm: { forwards: () => {}, listening: async () => false, door: join(dir, "door") },
+    });
+    expect(browsing.refusal(land({ action: "recover" }, { sessionId: CHAT, callingSessionId: CHAT }))).toEqual(NOT_A_THREAD);
+    expect(browsing.refusal(history({ action: "record" }, { invocationId: "17" }))).toEqual(NOT_ITS_TURN);
+    expect(browsing.refusal(land({ action: "recover" }))).toBeNull();
+    await executor.run(op("resolve", { path: "" }), signal());
+    browsing.retired(THREAD);
+    await until(() => stops.length === 1);
+    expect(stops).toEqual([copyOf(THREAD)]);
+  });
+
   it("stop a deleted thread's hosts on its copy and leave the copy where it is; a chat and a root bound nowhere here are left alone", async () => {
     await executor.run(op("resolve", { path: "" }), signal());
     await executor.run(op("resolve", { path: "" }, CHAT), signal());
