@@ -1650,3 +1650,36 @@ body.quick-page {
 .version .from:empty {
   display: none;
 }
+
+.version .acts {
+  grid-column: 1 / span 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.version .acts:empty {
+  display: none;
+}
+
+.version .act {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* While a version is on its way to be saved, no other is opened. */
+.version .act[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The files that are gone, under those that are there. */
+.library #deleted-title {
+  margin: 12px 0 0;
+  font-weight: 600;
+}

@@ -11,14 +11,17 @@ import asyncio
 import contextlib
 import json
 import logging
+import unicodedata
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 from sse_starlette.sse import EventSourceResponse
+from starlette.types import Receive, Scope, Send
 
 from surogates.api.routes.sessions import DeviceExecution, _require_local_device, archive_session_tree
 from surogates.api.routes.workspace import _should_skip_dir
@@ -38,9 +41,9 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.bucket import BucketHistory, Busy, said
+from surogates.workstreams.bucket import BucketHistory, Busy, NotKept, Staged, said
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
-from surogates.workstreams.history import HISTORY_OFF, over_history_cap, versions
+from surogates.workstreams.history import HISTORY_OFF, deleted_files, over_history_cap, version_of, versions
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
 
@@ -364,9 +367,9 @@ async def project_library(
     return shown
 
 
-def _unread(exc: HistoryError) -> HTTPException:
+def _unread(exc: HistoryError | OSError) -> HTTPException:
     """A history the api could not read, in words: past a bound it keeps, said as it is; another request's
-    just now; or out of reach, with git's own words left to the log."""
+    just now; or out of reach, with git's own words, or its disk's, left to the log."""
     if (words := said(exc)) is not None:
         return HTTPException(status.HTTP_409_CONFLICT, words)
     if isinstance(exc, Busy):
@@ -404,6 +407,104 @@ async def file_history(
         blob = version.pop("blob")
         version["available"] = blob is None or kept is None or blob in kept
     return found
+
+
+@router.get("/{workstream_id}/history/deleted")
+async def deleted_history(workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant) -> dict[str, Any]:
+    """The project's files that are gone, the newest first and as many as the
+    shell takes: each the version that deleted it, read from the project's
+    latest records.  ``more`` says there may be others, deleted before
+    these.  The Library lists them under its files, so that a deleted
+    file's History is reached.  None in a project over the file cap, whose
+    History is off."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    if await over_history_cap(state.storage, await state.session_store.get_session(project.master_session_id)):
+        return {"files": [], "more": False}
+    found, more = await deleted_files(state.session_factory, project.id, limit=SHELL_LIMITS["deleted"])
+    for version in found:
+        del version["blob"]
+        version["available"] = True
+    return {"files": [version for version in found if units(version["path"]) <= SHELL_LIMITS["ref"]], "more": more}
+
+
+#: The longest name a file is saved under, in bytes: what a file's name may be nearly everywhere.
+_NAME_MOST = 255
+
+
+def _saved_as(path: str) -> str:
+    """The name a version of the file at *path* is saved under: the file's own, as a name and no more.
+
+    Its last part, with no control character and neither kind of slash, cut
+    to what a file's name may be with its extension kept.  A path that
+    ends in no name is saved as ``file``.
+    """
+    name = "".join(c for c in path.rsplit("/", 1)[-1].replace("\\", "_") if unicodedata.category(c) != "Cc")
+    if not name.strip(". "):
+        return "file"
+    stem, dot, extension = name.rpartition(".")
+    tail = f".{extension}" if stem and len(extension.encode()) <= 16 else ""
+    kept = (stem if tail else name).encode()[: _NAME_MOST - len(tail.encode())].decode(errors="ignore")
+    return f"{kept}{tail}"
+
+
+class _VersionFile(Response):
+    """A version of a file, sent from the file the api's copy wrote it out to: a piece at a time, and none of it kept after.
+
+    Data to save under the file's own name, whatever it holds: a page or
+    a drawing among a project's files is never one a browser shows.  Its
+    length is said first, so a version cut short on its way, as for a
+    client that takes it slower than a version has to be sent, is a failed
+    response to that client and never a shorter file.
+    """
+
+    media_type = "application/octet-stream"
+
+    def __init__(self, staged: Staged, path: str) -> None:
+        super().__init__(headers={
+            "Content-Length": str(staged.size),
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(_saved_as(path), safe='')}",
+            "X-Content-Type-Options": "nosniff",
+        })
+        self.staged = staged
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+            await self.staged.send(lambda piece: send({"type": "http.response.body", "body": piece, "more_body": True}))
+            await send({"type": "http.response.body", "body": b""})
+        finally:
+            # A client that left before a word was said took none of it either.
+            await self.staged.gone()
+
+
+@router.get("/{workstream_id}/history/{version}/file")
+async def version_file(
+    workstream_id: UUID, version: str, path: FilePath, request: Request, ctx: AgentRuntime, tenant: Tenant,
+) -> Response:
+    """Open version: the file at *path* as its version *version* left it,
+    to save.  The version is one the project's records name for that file:
+    neither *version* nor *path* reaches the storage, or git, which is asked
+    only for what the record holds.  Its bytes go from the api's copy of
+    the project's history to a file there, and from that file to the
+    client a piece at a time."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    master = await state.session_store.get_session(project.master_session_id)
+    if await over_history_cap(state.storage, master):
+        raise HTTPException(status.HTTP_409_CONFLICT, HISTORY_OFF)
+    entry = await version_of(state.session_factory, project.id, version, path)
+    if entry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such version.")
+    if entry["after"] is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This version deleted the file: there is nothing to open.")
+    try:
+        staged = await BucketHistory.of(state.storage, master, state.settings.history).version(entry["after"])
+    except NotKept as exc:
+        raise HTTPException(status.HTTP_410_GONE, str(exc)) from exc
+    except (HistoryError, OSError) as exc:
+        raise _unread(exc) from exc
+    return _VersionFile(staged, path)
 
 
 @router.get("/{workstream_id}/stream")
