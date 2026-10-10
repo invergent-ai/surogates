@@ -83,7 +83,8 @@ CANCELLED_OUTCOME: dict[str, Any] = {
 
 # A calling session in one of these records none of the agent's operations.  A
 # cancellation of it then cannot miss one recorded beside it.  The user's own
-# requests are refused only for a deleted chat (see _check_session).
+# requests, and a thread's own kinds, are refused only for a deleted chat (see
+# _check_session).
 _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 
 # The longest a stopped call waits to close its own operation.
@@ -182,7 +183,8 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
 
     Returns whether the session is stopped for this request: for the agent's
     operations, paused, deleted or failed, or under a deleted root; for the
-    user's own request, deleted, or under a deleted root.  The rows stay locked FOR SHARE until the operation commits,
+    user's own request and for a thread's own kinds, deleted, or under a
+    deleted root.  The rows stay locked FOR SHARE until the operation commits,
     so a pause or a delete waits for the operation it must cancel.
     """
     rows = (await db.execute(
@@ -234,9 +236,13 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
             raise ValueError("Only a deleted root session's folder is retired")
         # Recorded once its chat is deleted, for its computer to forget the folder.
         return False
-    if request.invocation_id.startswith(REQUEST_PREFIX):
+    if request.invocation_id.startswith(REQUEST_PREFIX) or request.kind in THREAD_KINDS:
         # The user's own look at the folder: a paused or failed chat's files
-        # are still theirs to open.  A deleted chat's are not.
+        # are still theirs to open.  A deleted chat's are not.  Nor are a
+        # thread's own kinds stopped with its turn, which no tool asks: a
+        # Stop pauses the thread before its turn hears of it, and what the
+        # turn must still do on its computer comes after, a snapshot put
+        # back or a landing finished, as does the open of a turn resumed.
         return "archived" in (calling.status, root.status)
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
 
@@ -471,8 +477,9 @@ class DeviceOperations:
         it, or at once if it already has.
 
         A new operation of the agent's from a stopped session (paused, deleted
-        or failed), or a new request of the user's from a deleted one, raises
-        "This session was stopped" and records nothing.  A caller that is
+        or failed), or a new request of the user's or one of a thread's own
+        kinds from a deleted one, raises "This session was stopped" and
+        records nothing.  A caller that is
         stopped while it waits, or while its request is being recorded, closes
         its own operation unless its turn is detached, handed to another
         worker that carries the wait on, or it is *keep_open*: a request whose

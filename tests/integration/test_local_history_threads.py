@@ -353,19 +353,50 @@ async def test_a_threads_own_kind_is_journaled_as_every_operation_is(api, sessio
     await eventually(lambda: has_pending(ops, device_id))
     assert await ops.cancel([thread.id]) == 1
     assert await asyncio.wait_for(waiting, 10) == CANCELLED_OUTCOME
-    # A stopped thread asks nothing new.
-    await store.update_session_status(thread.id, "paused")
-    with pytest.raises(DeviceOperationError, match="This session was stopped"):
-        await ops.run(OperationRequest(**{**fields_of(stale), "ordinal": 102, "lease_token": str(other.lease_token)}))
-    await store.update_session_status(thread.id, "active")
-    # And a computer revoked answers nothing: its operation is closed with the revocation.
+    # A computer revoked answers nothing: its operation is closed with the revocation.
     assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth())).status_code == 204
     revoked = await ops.run(OperationRequest(**{**fields_of(stale), "ordinal": 103, "lease_token": str(other.lease_token)}))
     assert revoked == REVOKED_OUTCOME
+    # And a deleted thread asks nothing new.
+    await store.update_session_status(thread.id, "archived")
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await ops.run(OperationRequest(**{**fields_of(stale), "ordinal": 104, "lease_token": str(other.lease_token)}))
 
 
 def fields_of(request: OperationRequest) -> dict:
     return {name: getattr(request, name) for name in OperationRequest.__dataclass_fields__}
+
+
+@pytest.mark.parametrize("kind", sorted(THREAD_KINDS))
+async def test_a_paused_or_failed_threads_own_kind_is_still_asked_and_a_deleted_ones_is_not(api, kind):
+    device, _, thread = await bound_with_copy(api)
+    store, ops = api.app.state.session_store, journal(api)
+    helper = await create_child_session(store=store, parent=thread, channel="worker")
+    action = sorted(THREAD_ACTIONS[kind])[0]
+    for status, invocation in (("paused", own(kind, action)), ("failed", own(kind, action).replace(":0", ":5", 1))):
+        await store.update_session_status(thread.id, status)
+        # What a stopped turn must still do on its computer, it can: put its copy back, finish or put back its landing.
+        operation_id = await recorded(api, asked(device, thread, kind, action, invocation=invocation))
+        assert operation_id in {op.id for op in await ops.pending(UUID(device["id"]), 1)}, status
+    await store.update_session_status(thread.id, "archived")
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await ops.run(asked(device, thread, kind, action, invocation=own(kind, action).replace(":0", ":9", 1)))
+    # Nor does a session under it, however it stands itself.
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await ops.run(asked(device, thread, "checkpoint", "take", invocation="checkpoint:9:0:call_1", calling=helper))
+    assert len(await ops.pending(UUID(device["id"]), 1)) == 2
+
+
+async def test_a_paused_threads_own_operations_of_the_files_and_commands_are_still_refused(api):
+    device, _, thread = await bound_with_copy(api)
+    await api.app.state.session_store.update_session_status(thread.id, "paused")
+    for kind, args in [("write", {"key": f"{FOLDER}/a.txt", "data": ""}), ("run", {"command": "ls"}), ("resolve", {"path": "a.txt"})]:
+        with pytest.raises(DeviceOperationError, match="This session was stopped"):
+            await journal(api).run(OperationRequest(
+                device_id=UUID(device["id"]), root_session_id=thread.id, calling_session_id=thread.id,
+                invocation_id="17:call_1", ordinal=1, kind=kind, args=args,
+            ))
+    assert await journal(api).pending(UUID(device["id"]), 1) == []
 
 
 # -- on the tests' computer: an app that keeps a copy of the folder for each thread ------------------------------
