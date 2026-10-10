@@ -238,6 +238,15 @@ export interface Untrusted {
   detail: string;
 }
 
+/**
+ * What a start trusts of the company's CA: the certificates the app's own connections trust, which
+ * its guest's commands trust too (vm/manager.ts), and what the user is told, or null.
+ */
+export interface CompanyTrust {
+  certificates: string[];
+  untrusted: Untrusted | null;
+}
+
 const ASK = "Ask your administrator to run Surogate's install script again with --ca-cert.";
 const NOT_TRUSTED = "Surogate could not trust your company's certificate authority";
 const NOT_REMOVED = "Surogate could not stop trusting your company's certificate authority";
@@ -245,12 +254,12 @@ const said = (error: unknown): string => (error instanceof Error ? error.message
 
 /**
  * The company's CA file at *path* (companyCertificates) trusted in both TLS stacks, for the user
- * whose home is *home* and whose XDG_DATA_HOME is *dataHome*: what the user is told when it is
- * not, or null. A file that is there and refused names no CA, as no file does: what an earlier
- * start added for Chromium goes, and Node is given nothing, so no start trusts a CA whose file it
- * refused. The app goes on with the public roots either way.
+ * whose home is *home* and whose XDG_DATA_HOME is *dataHome*: the certificates Node took, and what
+ * the user is told when the CA is not trusted, or null. A file that is there and refused names no
+ * CA, as no file does: what an earlier start added for Chromium goes, and Node is given nothing, so
+ * no start trusts a CA whose file it refused. The app goes on with the public roots either way.
  */
-export function trustCompanyCa(path: string, rootOwned: boolean, home: string, dataHome: string | undefined, certutil = CERTUTIL): Untrusted | null {
+export function trustCompanyCa(path: string, rootOwned: boolean, home: string, dataHome: string | undefined, certutil = CERTUTIL): CompanyTrust {
   let certificates: string[];
   try {
     certificates = companyCertificates(path, rootOwned);
@@ -258,19 +267,25 @@ export function trustCompanyCa(path: string, rootOwned: boolean, home: string, d
     try {
       trustInChromium([], home, dataHome, certutil);
     } catch (kept) {
-      return { message: NOT_TRUSTED, detail: `${said(error)}. Surogate could not take the certificate authority it trusted before out of your browser's trust: ${said(kept)}. ${ASK}` };
+      return { certificates: [], untrusted: { message: NOT_TRUSTED, detail: `${said(error)}. Surogate could not take the certificate authority it trusted before out of your browser's trust: ${said(kept)}. ${ASK}` } };
     }
-    return { message: NOT_TRUSTED, detail: `${said(error)}. Your company's certificate authority is not trusted until the file is mended. ${ASK}` };
+    return { certificates: [], untrusted: { message: NOT_TRUSTED, detail: `${said(error)}. Your company's certificate authority is not trusted until the file is mended. ${ASK}` } };
   }
+  // Only once Node has taken them: Chromium's refusal leaves the app's own connections trusting them.
+  let trusted: string[] = [];
   try {
     trustInNode(certificates);
+    trusted = certificates;
     trustInChromium(certificates, home, dataHome, certutil);
-    return null;
+    return { certificates: trusted, untrusted: null };
   } catch (error) {
     // The user's own database is theirs to change: an install run again changes nothing of it.
-    if (error instanceof DatabaseRefusal) return { message: certificates.length > 0 ? NOT_TRUSTED : NOT_REMOVED, detail: said(error) };
-    if (certificates.length > 0) return { message: NOT_TRUSTED, detail: `${said(error)}. ${ASK}` };
+    if (error instanceof DatabaseRefusal) return { certificates: trusted, untrusted: { message: certificates.length > 0 ? NOT_TRUSTED : NOT_REMOVED, detail: said(error) } };
+    if (certificates.length > 0) return { certificates: trusted, untrusted: { message: NOT_TRUSTED, detail: `${said(error)}. ${ASK}` } };
     // No CA any more, and no certutil to take the app's entries out with.
-    return { message: NOT_REMOVED, detail: `Your company's certificate authority could not be removed from your browser's trust: ${said(error)}. Ask your administrator to install the libnss3-tools package.` };
+    return {
+      certificates: [],
+      untrusted: { message: NOT_REMOVED, detail: `Your company's certificate authority could not be removed from your browser's trust: ${said(error)}. Ask your administrator to install the libnss3-tools package.` },
+    };
   }
 }
