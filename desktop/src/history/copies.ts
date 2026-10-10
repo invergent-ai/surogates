@@ -36,8 +36,21 @@ export interface Copy {
   at: string;
 }
 
-// What a root bound to a copy works in, or why it works nowhere.
-export type Opened = { copy: Copy } | { failed: Outcome };
+// One host's hold on its root's copy, given with the copy and let go by close: a hold is closed once.
+export interface Handle {
+  readonly root: string;
+}
+
+// What a root bound to a copy works in, with the hold on it of the host it is given for; or why it works nowhere.
+export type Opened = { copy: Copy; handle: Handle } | { failed: Outcome };
+
+// A copy the guest is asked to make, or to make again, for *root*'s work in *folder*: begun, and ended
+// however it ended. A first copy of a large folder takes minutes, and whoever shows this tells the person.
+export interface Making {
+  root: string;
+  folder: string;
+  state: "begun" | "ended";
+}
 
 export interface CopiesOptions {
   dataDir: string;
@@ -48,9 +61,14 @@ export interface CopiesOptions {
   idleMs?: number;
   // How long a place that is to be let go for another waits for the hosts on its copies to let them go.
   closeMs?: number;
-  // Told when the copy a root's host works in is that root's copy no more: the guest made it again,
-  // or its place is being let go. The host goes, and its close follows.
+  // Told when the copy a root's host works in is that root's copy no more: the guest made it again, left
+  // it other than whole, or its place is being let go. The host goes, and its close follows.
   replaced?(root: string): void;
+  // Told as the guest is asked to open a copy this computer does not know as whole, which it may make, from
+  // nothing or again, and as that ends.
+  making?(event: Making): void;
+  // How long an open runs before an answer that is no copy is taken as the history's bound cutting it.
+  cutMs?: number;
 }
 
 export const PLACE_IDLE_MS = 120_000;
@@ -60,6 +78,11 @@ export const CLOSE_MS = 30_000;
 const LOOK_MS = 5_000;
 // How often one operation asks again for its copy where the folder's place was let go under it.
 const TURNS = 4;
+// The history ends an open at its bound: its git calls at 570 s, the guest's agent the request at 600 s (and
+// this computer one the agent does not answer at 1,215 s). An open that ran this long and made no copy was cut.
+export const CUT_MS = 500_000;
+// A thread whose copy of a folder was cut so often is not made one again: each try starts it from nothing.
+const CUTS = 2;
 
 // Why a folder has no history, as its history says it (surogates/sandbox/local_history.py, _off):
 // more files than one tracks, or a name in it that is not UTF-8.
@@ -73,11 +96,25 @@ const OFF: Record<Reason, string> = {
 /** What every operation of a thread whose folder has no history is answered, but its turn's own open. */
 export const historyOff = (reason: Reason): Outcome => ({ error: { type: "history_off", message: OFF[reason] } });
 
+// What every operation of a thread is answered whose copy could not be made within the history's bound, twice.
+const TOO_LARGE: Outcome = {
+  error: {
+    type: "history_off",
+    message: "This folder is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less",
+  },
+};
+
 // The history's code for a copy whose making was cut short, or whose repository it had to make again
 // (local_history.py, NO_WHOLE_COPY): no request works in such a copy, and its next open makes it whole.
 // The words beside the code are a person's, and nothing here reads them.
 const NO_WHOLE_COPY: HistoryCode = "no_whole_copy";
 const notWhole = (outcome: Outcome): boolean => "error" in outcome && outcome.error.type === "history" && outcome.error.code === NO_WHOLE_COPY;
+// A step's refusals after which its copy is as it was: nothing ran, or what ran wrote none of the copy. Any other
+// answer that is not one may have been cut in the middle of the copy, or names it not whole.
+const AS_IT_WAS: ReadonlySet<unknown> = new Set<HistoryCode>(["not_a_request", "conflict", "landing_unsettled", "not_on_base", "name_not_utf8", "history_refused"]);
+// The agent's own "value" is a request it would not take, and ran nothing of.
+const asItWas = (outcome: Outcome): boolean =>
+  "error" in outcome && (outcome.error.type === "value" || (outcome.error.type === "history" && AS_IT_WAS.has(outcome.error.code)));
 
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not make this thread's copy of its folder: ${why}` },
@@ -116,12 +153,14 @@ async function look(path: string): Promise<Identity | "other" | null> {
   return answer;
 }
 
-// What the app knows of a folder's place: the place, its folder in the app's data as it was found, and
-// each root's copy in it as the guest's last answered open left it, which is whole while it is there.
+// What the app knows of a folder's place: the place, its folder in the app's data as it was found, each
+// root's copy in it as the guest's last answered open left it, which is whole while it is there, and how
+// often each root's open was cut by the history's bound.
 interface Known {
   place: Place;
   store: Identity;
   copies: Map<string, Identity>;
+  cuts: Map<string, number>;
 }
 
 // A place in the guest, as the first request since it was last let go gave it, and how much holds it.
@@ -131,16 +170,15 @@ interface Held {
   timer?: NodeJS.Timeout;
 }
 
-// A root whose copy hosts work in: how many, its copy as the last of them was given it, the hold on its
-// place, and how often a host took it, so that one which took it after its root was told is told too.
+// A root whose copy hosts work in: each host's hold, its copy as the last of them was given it, and the hold
+// on its place.
 interface Open {
   copy: Copy;
-  count: number;
+  handles: Set<Handle>;
   held: Held;
-  takes: number;
 }
 
-type Made = { copy: Copy; known: Known } | { failed: Outcome };
+type Made = { copy: Copy; known: Known; handle?: Handle } | { failed: Outcome };
 // A request not sent: the place it was for was let go before it could be.
 const STALE = Symbol("stale");
 
@@ -160,26 +198,29 @@ export class Copies {
   // Aborted at the app's stop: a copy's making is stopped by nothing else.
   private readonly halt = new AbortController();
   private readonly idleMs: number;
+  private readonly cutMs: number;
 
   constructor(private readonly options: CopiesOptions) {
     this.idleMs = options.idleMs ?? PLACE_IDLE_MS;
+    this.cutMs = options.cutMs ?? CUT_MS;
   }
 
   /**
-   * The copy *root* works in, made if there is none, for a file host that starts on it: held open,
-   * once for each copy answered, until as many closes. A cancel is answered at once, holds nothing,
-   * and the making goes on for the next to ask: git stopped mid-way would leave half a copy. Never rejects.
+   * The copy *root* works in, made if there is none, for a file host that starts on it, with that
+   * host's hold on it, which holds it open until it is closed. A cancel is answered at once, holds
+   * nothing, and the making goes on for the next to ask: git stopped mid-way would leave half a copy.
+   * Never rejects.
    */
   async open(root: string, bound: BoundFolder, signal: AbortSignal): Promise<Opened> {
     const work = this.inTurn(root, async (): Promise<Opened> => {
       const made = await this.ensured(root, bound, true);
-      return "failed" in made ? made : { copy: made.copy };
+      return "failed" in made ? made : { copy: made.copy, handle: made.handle! };
     }).catch((error: unknown): Opened => ({ failed: unavailable(describe(error)) }));
     const opened = await this.until(signal, work);
     if (opened !== "cancelled") return opened;
     // Whoever asked has gone, and nothing would let its copy go: it is let go once it is made.
     void work.then((taken) => {
-      if ("copy" in taken) this.close(root);
+      if ("handle" in taken) this.close(taken.handle);
     });
     return { failed: CANCELLED };
   }
@@ -199,13 +240,15 @@ export class Copies {
     return outcome === "cancelled" ? CANCELLED : outcome;
   }
 
-  /** One of *root*'s hosts has let its copy go: once the last has, the folder's place is let go when idle. */
-  close(root: string): void {
-    const open = this.opens.get(root);
-    if (!open) return;
-    open.count -= 1;
-    if (open.count > 0) return;
-    this.opens.delete(root);
+  /**
+   * The host given *handle* has let its root's copy go: once every host has, the folder's place is let
+   * go when idle. A hold closed already lets go of nothing more.
+   */
+  close(handle: Handle): void {
+    const open = this.opens.get(handle.root);
+    if (!open?.handles.delete(handle)) return;
+    if (open.handles.size > 0) return;
+    this.opens.delete(handle.root);
     this.release(open.held);
     this.changed();
   }
@@ -280,8 +323,7 @@ export class Copies {
   }
 
   private made(root: string, copy: Copy, known: Known, take: boolean): Made {
-    if (take) this.take(root, copy);
-    return { copy, known };
+    return take ? { copy, known, handle: this.take(root, copy) } : { copy, known };
   }
 
   // The place of *root*'s folder, and what the app knows of it. A place found before a letting go of its
@@ -294,18 +336,18 @@ export class Copies {
     for (let turn = 0; turn < TURNS; turn += 1) {
       const lettings = this.lettings.get(key) ?? 0;
       try {
-        const { place } = await placeOf(this.options.dataDir, bound, { letGo: (was) => this.letGo(was.key) });
+        const { place } = await placeOf(this.options.dataDir, bound, { letGo: (was, store) => this.letGo(was, store) });
         const store = await look(place.history);
         if (store === null || store === "other") return { failed: unavailable("its place in the app's data is not a folder of the app's own") };
         if ((this.lettings.get(key) ?? 0) !== lettings) continue;
         const known = this.known.get(key);
-        if (known && same(known.store, store)) return { known, place };
+        if (known && same(known.store, store)) return (known.cuts.get(root) ?? 0) >= CUTS ? { failed: TOO_LARGE } : { known, place };
         if (known) {
           // Not the place the app knew, though nothing of the app's let that one go: it goes now.
-          await this.letGo(key);
+          await this.letGo(known.place, known.store.ino);
           continue;
         }
-        const fresh: Known = { place, store, copies: new Map() };
+        const fresh: Known = { place, store, copies: new Map(), cuts: new Map() };
         this.known.set(key, fresh);
         return { known: fresh, place };
       } catch (error) {
@@ -319,9 +361,24 @@ export class Copies {
   // path is the whole copy, another one where the guest made it again, and anything else there is none.
   // STALE where the place was let go before the open could be asked.
   private async opened(known: Known, place: Place, root: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome | typeof STALE> {
+    // Not known as whole: the guest may make it, which takes as long as the folder is large.
+    const making = !known.copies.has(root);
     known.copies.delete(root);
-    const outcome = await this.request(known, place, root, "open", args, signal);
-    if (outcome === STALE || !("ok" in outcome) || offOf(outcome)) return outcome;
+    const sent = { at: Number.NaN };
+    const outcome = await this.request(known, place, root, "open", args, signal, () => {
+      sent.at = performance.now();
+      if (making) this.options.making?.({ root, folder: place.real.path, state: "begun" });
+    });
+    if (!Number.isNaN(sent.at)) {
+      if (making) this.options.making?.({ root, folder: place.real.path, state: "ended" });
+      const cut = outcome !== STALE && "error" in outcome && outcome.error.type !== "cancelled" && performance.now() - sent.at >= this.cutMs;
+      if (cut) known.cuts.set(root, (known.cuts.get(root) ?? 0) + 1);
+    }
+    if (outcome === STALE || !("ok" in outcome)) return outcome;
+    if (offOf(outcome)) {
+      this.unvouched(known, root);
+      return outcome;
+    }
     const found = await look(copyOf(place, root)).catch((error: unknown) => describe(error));
     // A folder of the app's own, and no other thread's copy: a guest that is not ours could move one to this name.
     const copy = typeof found === "object" && found !== null && ![...known.copies.values()].some((other) => same(other, found)) ? found : null;
@@ -335,36 +392,50 @@ export class Copies {
   // One request to *place*'s history for *root*'s copy, the place held in the guest while it runs: once
   // every letting go of the place asked before it has ended, or STALE where one let it go for another.
   private async request(
-    known: Known, place: Place, root: string, action: string, args: Record<string, unknown>, signal: AbortSignal,
+    known: Known, place: Place, root: string, action: string, args: Record<string, unknown>, signal: AbortSignal, sent?: () => void,
   ): Promise<Outcome | typeof STALE> {
     await this.settled(place.key);
     if (this.known.get(place.key) !== known) return STALE;
     const held = this.hold(place);
     let outcome: Outcome;
     try {
+      sent?.();
       outcome = await this.options.vm.history({ place, thread: root, user: this.options.user, action, args }, signal);
     } catch (error) {
       outcome = unavailable(describe(error));
     } finally {
       this.release(held);
     }
-    // Stopped, cut, or refused: what it may have left of the copy is the guest's next open's to make whole.
-    if (!("ok" in outcome)) known.copies.delete(root);
+    // An open answered with no copy, or a step stopped, cut or refused as not whole: what it may have left of the
+    // copy is the guest's next open's to make whole, and no host works in it meanwhile.
+    if (!("ok" in outcome) && (action === "open" || !asItWas(outcome))) this.unvouched(known, root);
     return outcome;
   }
 
-  // The place of *key* leaves this computer's hands, for another: each host on one of its copies is told
-  // to go, and lets its copy go, then the guest lets go of the place it was given. Rejects, and lets
-  // nothing go, where a host has not let go within closeMs.
-  private letGo(key: string): Promise<void> {
+  // The app vouches for *root*'s copy no more, before its root's next operation: the guest's next open makes it
+  // whole, and each host on it is told, as for a copy made again.
+  private unvouched(known: Known, root: string): void {
+    known.copies.delete(root);
+    if (this.opens.has(root)) this.options.replaced?.(root);
+  }
+
+  // The place *was*, whose folder in the app's data has the inode *store*, leaves this computer's hands, for
+  // another: each host on one of its copies is told to go, and lets its copy go, then the guest lets go of the
+  // place it was given. Only that place: one made at its path since, which the app may know and the guest
+  // hold under the same key, is another, and is left alone. False where the app holds nothing of it. Rejects,
+  // and lets nothing go, where a host has not let go within closeMs.
+  private letGo(was: Place, store: number): Promise<boolean> {
+    const { key } = was;
     const going = (this.leaving.get(key) ?? Promise.resolve()).then(async () => {
+      const known = this.known.get(key);
+      if (!known || known.place.history !== was.history || known.store.ino !== store) return false;
       const ms = this.options.closeMs ?? CLOSE_MS;
       const until = performance.now() + ms;
-      const told = new Map<Open, number>();
+      const told = new Set<Handle>();
       for (let opens = this.holding(key); opens.length > 0; opens = this.holding(key)) {
         // Told again where a host took the copy since: it holds the place as well.
-        for (const [root, open] of opens.filter(([, open]) => told.get(open) !== open.takes)) {
-          told.set(open, open.takes);
+        for (const [root, open] of opens.filter(([, open]) => [...open.handles].some((handle) => !told.has(handle)))) {
+          for (const handle of open.handles) told.add(handle);
           this.options.replaced?.(root);
         }
         // Let go as they were told.
@@ -377,10 +448,11 @@ export class Copies {
       this.lettings.set(key, (this.lettings.get(key) ?? 0) + 1);
       this.known.delete(key);
       const held = this.held.get(key);
-      if (!held) return;
+      if (!held) return true;
       this.held.delete(key);
       clearTimeout(held.timer);
       await this.options.vm.unplace(held.place);
+      return true;
     });
     this.chain(key, going);
     return going;
@@ -409,16 +481,17 @@ export class Copies {
     return [...this.opens].filter(([, open]) => open.copy.place.key === key);
   }
 
-  private take(root: string, copy: Copy): void {
+  private take(root: string, copy: Copy): Handle {
+    const handle: Handle = Object.freeze({ root });
     const open = this.opens.get(root);
     if (open) {
-      open.count += 1;
+      open.handles.add(handle);
       open.copy = copy;
-      open.takes += 1;
     } else {
-      this.opens.set(root, { copy, count: 1, held: this.hold(copy.place), takes: 1 });
+      this.opens.set(root, { copy, handles: new Set([handle]), held: this.hold(copy.place) });
     }
     this.changed();
+    return handle;
   }
 
   private hold(place: Place): Held {
