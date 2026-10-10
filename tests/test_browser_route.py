@@ -1324,6 +1324,12 @@ class TestACloudBrowserIsItsOwnUsers:
         # The key bound to the session's own agent reaches it.
         assert await cloud.answers(prefix="/v1/api", **{**theirs, "agent_id": "agent"}) == WORKS
 
+    async def test_a_key_of_another_organisation_bound_to_an_agent_of_that_name_is_answered_as_for_no_browser(self, cloud) -> None:
+        elsewhere = {"org_id": ORG_2, "user_id": None, "service_account_id": SERVICE, "agent_id": "agent"}
+        # Its teardown too, which answers a browser it finds of no other org as none to close.
+        assert await cloud.answers(prefix="/v1/api", **elsewhere) == NOT_THEIRS
+        assert cloud.untouched()
+
     async def test_a_token_for_one_session_reaches_that_sessions_browser_alone(self, cloud) -> None:
         assert await cloud.answers(prefix="/v1/api", user_id=None, session_scope_id=uuid4()) == NOT_THEIRS
         assert cloud.untouched()

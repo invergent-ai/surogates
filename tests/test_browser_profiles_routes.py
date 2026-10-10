@@ -366,3 +366,47 @@ def test_a_setup_browser_is_captured_by_its_own_user_and_by_no_other_member(monk
 
     assert capture(yours).status_code == 200
     assert (read, torn_down) == ([str(sid)], ["completed"])
+
+
+def test_a_key_of_another_organisation_bound_to_an_agent_of_that_name_captures_nothing(monkeypatch):
+    org, elsewhere, holder = uuid.uuid4(), uuid.uuid4(), str(uuid.uuid4())
+    store = _FakeStore()
+    row = _seed_profile(store)
+    sid = uuid.uuid4()
+    asked: list[str] = []
+
+    class _SessionStore:
+        async def get_session(self, _sid):
+            return type("S", (), {
+                "id": sid, "org_id": org, "user_id": None, "agent_id": "browser-setup",
+                "channel": "browser_setup", "config": {"browser": {"profile_id": str(row.id)}},
+            })()
+
+    class _Control:
+        async def held_by(self, _sid):
+            return holder
+
+    class _Resolver:
+        async def resolve(self, _sid, expected_org_id=None):
+            # The browser is the session's org's: one of another org is none.
+            asked.append(expected_org_id)
+            return None
+
+    def _never(_rest_url):
+        raise AssertionError("the browser was reached")
+
+    monkeypatch.setattr(bp, "KernelBrowserClient", _never)
+    app = _app(store, org_id=elsewhere)
+    app.dependency_overrides[bp.get_current_tenant] = lambda: TenantContext(
+        org_id=elsewhere, user_id=None, org_config={}, user_preferences={}, permissions=frozenset(), asset_root="/tmp",
+        service_account_id=uuid.uuid4(), service_account_agent_id="browser-setup",
+    )
+    app.state.session_store = _SessionStore()
+    app.state.browser_control = _Control()
+    app.state.browser_resolver = _Resolver()
+
+    refused = TestClient(app).post(
+        f"/browser-profiles/{row.id}/capture", params={"session_id": str(sid)}, json={"owner_user_id": holder},
+    )
+    # Stopped at the session, as for no session: its browser is not even looked for.
+    assert (refused.status_code, refused.json(), asked) == (404, {"detail": "Session not found"}, [])

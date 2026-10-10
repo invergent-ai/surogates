@@ -154,13 +154,15 @@ def reaches_its_browser(tenant: TenantContext, session: Any) -> bool:
     alone, as for a browser on their computer (``_its_own``): nobody else of the organisation, an
     administrator included.  A service's own token, as the ops proxy's on ``/v1/api/*``, names the
     user it acts for (``owner_user_id``) and is trusted across its org, as on a session's other
-    routes; one bound to an agent reaches that agent's sessions alone.
+    routes; one bound to an agent reaches that agent's sessions of its own org alone.
 
-    Checked against the session row's own user and agent, never a request-supplied one.
+    Checked against the session row's own org, user and agent, never a request-supplied one.
     """
     if _a_services(tenant):
         bound = tenant.service_account_agent_id
-        return bound is None or not session.agent_id or session.agent_id == bound
+        if bound is None:
+            return True
+        return session.org_id == tenant.org_id and (not session.agent_id or session.agent_id == bound)
     return _its_own(tenant, session.org_id, session.user_id, session.id)
 
 
