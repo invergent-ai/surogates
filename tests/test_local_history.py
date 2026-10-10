@@ -1271,6 +1271,9 @@ def test_a_threads_repository_that_does_not_read_its_history_as_it_borrowed_it_i
     copy, repository = (tmp_path / "store" / "set-aside" / name for name in opened["set_aside_folders"])
     assert (copy.suffix, repository.suffix) == (".copy", ".repository") and as_it_is(copy) == held
     assert git(repository, "cat-file", "-p", f"{tip}:Draft.md") == "in a snapshot"
+    # Set aside, it names no other store an earlier guest gave it: its alternates are the one line or none.
+    alternates = repository / "objects" / "info" / "alternates"
+    assert not os.path.lexists(alternates) or alternates.read_text() == "../../../history.git/objects\n"
     assert (again.repo / "objects" / "info" / "alternates").read_text() == "../../../history.git/objects\n"
     connected(tmp_path / "store")
     assert files_of(again.copy) == files_of(folder) and again.changed() == {"paths": []}
