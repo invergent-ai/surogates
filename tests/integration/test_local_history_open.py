@@ -121,6 +121,11 @@ def asked(computer, kind: str | None = None) -> list[tuple[str, str]]:
     return [(invocation, action) for invocation, _, asked_kind, action in computer.app.places.asked if kind in (None, asked_kind)]
 
 
+def opened(computer) -> list[tuple[str, str]]:
+    """The opens *computer*'s app ran, each as (invocation, action), in order: not what a turn's end asks to land it."""
+    return [(invocation, action) for invocation, action in asked(computer, "history") if action == "open"]
+
+
 async def opens_of(api, session) -> list[tuple[str, str]]:
     """Each open the journal holds for *session*, oldest first: its name, and how it ended (``ok``, its refusal's type, or ``open``)."""
     async with api.app.state.session_factory() as db:
@@ -266,7 +271,7 @@ async def test_each_turn_opens_its_threads_copy_at_its_start_before_its_prompt_o
     assert "Instructions v2, by you" in second._prompt.folder_context
     sent_after_the_open(await journal_of(api, thread, since=since))
     # Once a turn, under the turn's own name.
-    assert asked(computer, "history") == [("open:0", "open"), (f"open:{ended}", "open")]
+    assert opened(computer) == [("open:0", "open"), (f"open:{ended}", "open")]
     assert await opens_of(api, thread) == [("open:0", "ok"), (f"open:{ended}", "ok")]
     assert await status_of(api, thread) == "completed"
 
@@ -294,7 +299,8 @@ async def test_an_open_refused_in_a_way_asking_again_passes_is_asked_again_at_on
     assert await opens_of(api, thread) == [("open:0", "history"), ("open:0:1", "history"), ("open:0:2", "ok")]
     sent_after_the_open(await journal_of(api, thread, since=since))
     assert (computer.app.places.copy(str(thread.id)) / "Budget.xlsx").read_text() == "Total,42\n"
-    assert not (computer.folder / "Budget.xlsx").exists() and await status_of(api, thread) == "completed"
+    # In the folder only as its turn's end landed it there, from the copy.
+    assert (computer.folder / "Budget.xlsx").read_text() == "Total,42\n" and await status_of(api, thread) == "completed"
 
 
 async def test_a_turn_whose_open_is_never_answered_asks_it_a_bounded_number_of_times_then_fails_before_its_prompt(api, computer, monkeypatch):
@@ -328,8 +334,9 @@ async def test_a_turns_open_waits_for_a_computer_that_is_away_and_the_whole_turn
     assert not turn.done() and worker.model_asked == 0 and await operations_of(api, thread) == [("bind", "bind"), ("history", "open:0")]
     await computer.app.connect()
     await asyncio.wait_for(turn, 30)
-    assert asked(computer, "history") == [("open:0", "open")]
-    assert (copy / "Budget.xlsx").read_text() == "Total,42\n" and not (computer.folder / "Budget.xlsx").exists()
+    assert opened(computer) == [("open:0", "open")]
+    # Made in the copy, and in the folder only as its turn's end landed it there.
+    assert (copy / "Budget.xlsx").read_text() == "Total,42\n" == (computer.folder / "Budget.xlsx").read_text()
 
 
 async def test_a_turn_whose_worker_was_killed_in_its_open_waits_for_that_asking_and_its_computer_hears_it_once(api, computer, monkeypatch):
@@ -355,7 +362,7 @@ async def test_a_turn_whose_worker_was_killed_in_its_open_waits_for_that_asking_
     assert not turn.done() and worker.model_asked == 0 and await operations_of(api, thread) == [("bind", "bind"), ("history", "open:0")]
     await let_go()
     await asyncio.wait_for(turn, 30)
-    assert asked(computer, "history") == [("open:0", "open")] and await opens_of(api, thread) == [("open:0", "ok")]
+    assert opened(computer) == [("open:0", "open")] and await opens_of(api, thread) == [("open:0", "ok")]
     assert (computer.app.places.copy(str(thread.id)) / "Notes.md").read_text() == "notes\n"
 
 
@@ -393,7 +400,7 @@ async def test_a_helper_a_thread_delegates_to_works_only_after_the_threads_open_
     assert (computer.app.places.copy(str(thread.id)) / "Notes.md").read_text() == "notes\n"
     # Its operations came after the thread's open was answered, and it asked none of its own.
     sent_after_the_open(await journal_of(api, thread, since=since))
-    assert await opens_of(api, helper) == [] and asked(computer, "history") == [("open:0", "open")]
+    assert await opens_of(api, helper) == [] and opened(computer) == [("open:0", "open")]
 
 
 # -- a Stop -------------------------------------------------------------------------------------------------------
@@ -607,10 +614,11 @@ async def test_only_a_threads_own_turn_opens_its_copy_and_no_other_sessions_turn
     async with api.app.state.session_factory() as db:
         opens = (await db.execute(text(
             "SELECT calling_session_id, root_session_id, invocation_id FROM device_operations WHERE kind = 'history'"
-            " AND root_session_id IN (:a, :b) ORDER BY created_at"
+            " AND args->>'action' = 'open' AND root_session_id IN (:a, :b) ORDER BY created_at"
         ), {"a": thread.id, "b": other.id})).all()
     assert [tuple(row) for row in opens] == [(thread.id, thread.id, "open:0"), (other.id, other.id, "open:0")]
-    assert not (computer.folder / "Notes.md").exists() and not (computer.folder / "Budget.xlsx").exists()
+    # Each file reached the folder only as a thread's turn end landed it: the helper's with its thread's.
+    assert (computer.folder / "Notes.md").read_text() == "notes\n" and (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
 
 
 async def test_a_thread_or_a_chat_bound_to_its_folder_itself_asks_no_open_and_works_there_as_before(api, laptop, monkeypatch):
