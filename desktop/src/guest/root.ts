@@ -69,7 +69,7 @@ const ENTER_ROOT = "/run/surogate/agent/enter-root";
 const LAYOUT = "/etc/surogate/environment";
 const FIRST_UID = 10_000;
 // A share's number in its guest is never used again there, so it grows with every folder added.
-const TAG = /^r[1-9][0-9]{0,8}$/;
+export const TAG = /^r[1-9][0-9]{0,8}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
 // no ':', newline, NUL or '/', no leading '-', at most 256 characters.
 const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
