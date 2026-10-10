@@ -3,7 +3,7 @@
 // its roots' servers reached through the manager's door, as the agent's browser's proxy reaches them.
 // Behind SUROGATE_VM_TESTS=1 (npm run build first).
 
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import type { Duplex } from "node:stream";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { LET_GO_MS } from "../../src/guest/listeners.js";
 import { MAX_INBOUND } from "../../src/guest/protocol.js";
 import { DOOR } from "../../src/vm/inbound.js";
 import { type Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
@@ -273,6 +274,43 @@ require("node:http").createServer((req, res) => res.end(JSON.stringify(seen))).l
     }
     expect((await settled("quiet", 0)).open).toBe(0);
     manager.forwards(KEY, []);
+  });
+
+  it("keeps none of the connections a browser let go to a server that never ends its half: the chat's runner has let go of each after its bound, and the chat's commands still run", { timeout: 180_000 }, async () => {
+    // A server that reads, says nothing, and keeps its own half open whatever its peer does.
+    const never = 'require("node:net").createServer({ allowHalfOpen: true }, (socket) => socket.on("error", () => {}).resume()).listen(8009, "127.0.0.1")';
+    expect(await op(ROOT, "start", background(`node -e '${never}'`))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    await listens(ROOT, 8009);
+    manager.forwards(KEY, [[8009, ROOT]]);
+    // The descriptors of the chat's runner, which starts each of its commands.
+    const descriptors = async () => Number(await said(ROOT, "ls /proc/$PPID/fd | wc -l"));
+    const before = await descriptors();
+    for (let round = 0; round < 3; round += 1) {
+      const held = await Promise.all(Array.from({ length: 100 }, () => hold(8009)));
+      expect(held.every(({ said: answer }) => answer() === "200\n")).toBe(true);
+      for (const { socket } of held) socket.destroy();
+      await new Promise((done) => setTimeout(done, 300));
+    }
+    const kept = await descriptors();
+    await new Promise((done) => setTimeout(done, LET_GO_MS + 1_500));
+    const after = await descriptors();
+    console.log(`the runner's descriptors with 300 connections let go to a server that never ends its half: ${before} before, ${kept} just after, ${after} once its bound had passed`);
+    expect(kept - before).toBeGreaterThan(300);
+    expect(after - before).toBeLessThan(10);
+    expect(await run(ROOT, "true")).toMatchObject({ ok: { returncode: 0 } });
+    manager.forwards(KEY, []);
+  });
+
+  it("leaves a server asked whether it listens nothing to say of it: python's own writes no error, at the question or once the bound has passed", async () => {
+    expect(await op(ROOT, "start", background("python3 -m http.server 8010 --bind 127.0.0.1 2> asked.log"))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    await listens(ROOT, 8010);
+    for (let n = 0; n < 5; n += 1) expect(await manager.listening(ROOT, 8010)).toBe(true);
+    await new Promise((done) => setTimeout(done, LET_GO_MS + 1_500));
+    // It still serves, and its log holds that one request and nothing else.
+    expect(await said(ROOT, "curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 5 http://127.0.0.1:8010/")).toBe("200");
+    const log = readFileSync(join(dir, "a", "asked.log"), "utf8");
+    console.log(`python3 -m http.server's log after it was asked whether it listens: ${JSON.stringify(log)}`);
+    expect(log.trim().split("\n")).toEqual([expect.stringMatching(/^127\.0\.0\.1 - - \[.+\] "GET \/ HTTP\/1\.1" 200 -$/)]);
   });
 
   it("closes every connection held into a chat when its root is torn down, within a second: read, unread, or saying nothing", async () => {

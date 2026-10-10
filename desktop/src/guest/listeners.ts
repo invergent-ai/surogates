@@ -84,13 +84,17 @@ function join(a: Socket, b: Socket): void {
 // that listens on "localhost" may have taken either. The one the browser's address named is tried first.
 const LOOPBACK = { 4: ["127.0.0.1", "::1"], 6: ["::1", "127.0.0.1"] } as const;
 
+// How long a root's server has to end its own half once the agent's end of a connection into the root has ended.
+export const LET_GO_MS = 5_000;
+
 /**
  * A connection into the root (spec, Section 5), for the agent, which asked for it under *id*: to
  * *port* of the root's own loopback and nowhere else, the family *first* names before the other, then
  * to the root's socket at *path* with its line, and each carries the other's bytes. Where nothing
- * takes it, the line says why. Never rejects.
+ * takes it, the line says why. Once the agent's end has ended, the server has *letGoMs* to end its
+ * own, its last bytes carried meanwhile; then both ends go. Never rejects.
  */
-export async function carryIn(path: string, id: string, port: number, first: 4 | 6 = 4): Promise<void> {
+export async function carryIn(path: string, id: string, port: number, first: 4 | 6 = 4, letGoMs = LET_GO_MS): Promise<void> {
   let reason = "EINVAL";
   for (const host of Number.isInteger(port) && port > 0 && port < 65_536 && (first === 4 || first === 6) ? LOOPBACK[first] : []) {
     const reached = await new Promise<Socket | string>((resolve) => {
@@ -104,6 +108,15 @@ export async function carryIn(path: string, id: string, port: number, first: 4 |
     }
     const agent = connect({ path, allowHalfOpen: true });
     agent.write(inboundLine(id));
+    // The agent ends its end when the browser has let the connection go. A server that never ends its own
+    // would keep it, and the runner's two descriptors, for good: enough of them leave the root's commands none.
+    agent.once("end", () => {
+      const late = setTimeout(() => {
+        reached.destroy();
+        agent.destroy();
+      }, letGoMs);
+      reached.once("close", () => clearTimeout(late));
+    });
     return join(reached, agent);
   }
   const agent = connect({ path });

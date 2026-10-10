@@ -1090,7 +1090,7 @@ class ArtifactCompletionMixin:
                     sandbox_pool=self._sandbox_pool, session=session,
                     saga_settings=self._saga_settings,
                     tool_saga_id=tool_saga.saga_id if tool_saga is not None else None,
-                    after_event_id=self._turn_after_event_id,
+                    after_event_id=self._turn_after_event_id, redis=self._redis,
                 )
             except Exception:
                 logger.exception("Landing failed for %s", session.id)
@@ -1108,7 +1108,7 @@ class ArtifactCompletionMixin:
             try:
                 kept = await keep_copy(
                     session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
-                    session=session, saga_settings=self._saga_settings, action="hand_back",
+                    session=session, saga_settings=self._saga_settings, action="hand_back", redis=self._redis,
                 )
                 not_kept = kept["not_kept"] if kept else []
             except Exception:
@@ -1402,7 +1402,7 @@ class ArtifactCompletionMixin:
                 packs=landing.get("packs", 0), saga_settings=self._saga_settings,
                 # The bucket itself says which packs are old: no pod's clock, and not the worker's.
                 storage=self._storage, bucket=session.config.get("storage_bucket"),
-                prefix=boundary_workspace_prefix(session.config, session, session.id),
+                prefix=boundary_workspace_prefix(session.config, session, session.id), redis=self._redis,
             )
 
     async def _kept_apart(self, session: Any) -> dict[str, Any]:
@@ -1475,7 +1475,7 @@ class ArtifactCompletionMixin:
                 session=session, saga_settings=self._saga_settings, yours=yours,
                 # For the day's pruning after it: the bucket itself says whether it is due, and which packs are old.
                 storage=self._storage, bucket=session.config.get("storage_bucket"),
-                prefix=boundary_workspace_prefix(session.config, session, owner),
+                prefix=boundary_workspace_prefix(session.config, session, owner), redis=self._redis,
             )
         except Exception:
             # The changes are picked up at the next landing, as yours.
@@ -1522,6 +1522,7 @@ class ArtifactCompletionMixin:
                 kept = await keep_copy(
                     session_factory=self._session_factory, sandbox_pool=self._sandbox_pool,
                     session=session, saga_settings=self._saga_settings, action="keep_apart" if helper else "keep",
+                    redis=self._redis,
                 )
                 saved = kept is not None
                 left = kept.get("left", []) if kept else []
