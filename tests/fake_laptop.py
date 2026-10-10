@@ -594,6 +594,7 @@ class FakeLaptop:
         if not copy:
             return {"ok": None}
         self.places.threads[root] = root
+        self.places.bound[root] = folder
         # It says that it keeps the copy: the server binds the thread with one on that word alone.
         return {"ok": {"history": {"thread": root}}}
 
