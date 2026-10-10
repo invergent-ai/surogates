@@ -16,6 +16,7 @@ import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
+import { THREAD } from "../vm/history.js";
 import { type ApprovalPrompts, Approvals, type DownloadBy } from "./approvals.js";
 import { BOOT_ID, checkFolder, confirmedFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
@@ -123,6 +124,13 @@ interface Preparation {
 }
 
 const token = () => randomBytes(32).toString("base64url");
+
+// The thread a bind's history names, or null for one that names none: a thread is a session's id,
+// by which its copy's folder is named in the app's data.
+function threadOf(history: unknown): string | null {
+  const thread = typeof history === "object" && history !== null && !Array.isArray(history) ? (history as { thread?: unknown }).thread : undefined;
+  return typeof thread === "string" && THREAD.test(thread) ? thread : null;
+}
 
 const day = (now: Date) =>
   `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -338,11 +346,16 @@ export class Binder implements Executor {
     // asked; in the same tick, so a chat's bind in the same burst cannot slip in before the approvals look.
     if (operation.kind !== "bind") return this.options.refusal?.(operation) ?? this.approvals.admit(operation, signal, download);
     const root = operation.sessionId;
-    const { folder, nonce } = operation.args;
+    const { folder, nonce, history } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;
     if (!own || typeof folder !== "string" || typeof nonce !== "string") return NOT_BOUND;
+    // A project's thread is bound to a copy of the folder (spec, Section 13): the server asks for
+    // one by naming the thread, which is the root itself. A root is never given another's copy,
+    // and one asked for is never answered with the folder itself.
+    const copy = history === undefined ? undefined : threadOf(history);
+    if (copy === null || (copy !== undefined && copy !== root)) return NOT_BOUND;
     const known = this.options.bindings.get(root);
-    if (known) return known.nonce === nonce && known.folder === folder ? BOUND : ALREADY_BOUND;
+    if (known) return known.nonce === nonce && known.folder === folder && known.history === copy ? BOUND : ALREADY_BOUND;
     const preparation = this.byNonce.get(nonce);
     if (!preparation) return NOT_BOUND;
     // One use, whatever the answer.
@@ -353,7 +366,7 @@ export class Binder implements Executor {
     }
     const { dev, ino, mode } = preparation;
     try {
-      this.options.bindings.add({ root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now() });
+      this.options.bindings.add({ root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now(), ...(copy === undefined ? {} : { history: copy }) });
     } catch (error) {
       report(this.options.onError, error);
       preparation.reject(error instanceof Error ? error : new Error(String(error)));
