@@ -46,8 +46,14 @@ class Tools implements ToolLayer {
   // The ports each chat's sandbox listens on, and each question the stack's approvals asked of it.
   listens: number[] = [];
   readonly probed: Array<[string, number]> = [];
+  // Whether a project's thread is given a copy of its folder to work in here.
+  copies = false;
 
   constructor(private readonly base: string, private readonly order: string[]) {}
+
+  keepsCopies(): boolean {
+    return this.copies;
+  }
 
   guards(): FolderGuards {
     return { home: join(this.base, "home"), dataDir: join(this.base, "data"), cacheDir: join(this.base, "cache"), appDirs: [] };
@@ -170,6 +176,21 @@ function op(id: string, kind: string, args: Record<string, unknown>, own = false
 const results = (id: string) => server.received.filter((frame) => frame.type === "op_result" && frame.id === id);
 
 describe("one agent's device", () => {
+  it.each([[true, { ok: { history: { thread: ROOT } } }], [false, null]] as const)(
+    "binds a project's thread to its copy only where its tools keep copies (%s), and says so to the server",
+    async (copies, answer) => {
+      tools.copies = copies;
+      const device = await start();
+      await server.until(() => statuses.includes("connected"));
+      const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+      server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce, history: { thread: ROOT } }, true));
+      await server.until(() => results("bind-1").length === 1);
+      if (answer) expect(results("bind-1")[0]?.outcome).toEqual(answer);
+      else expect(results("bind-1")[0]?.outcome).toMatchObject({ error: { type: "binding" } });
+      expect(tools.bindings?.get(ROOT)?.history).toBe(copies ? ROOT : undefined);
+    },
+  );
+
   it("runs a bound chat's operations on its tools, through the binder", async () => {
     const device = await start();
     await server.until(() => statuses.includes("connected"));

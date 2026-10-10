@@ -97,6 +97,7 @@ const binder = confirm && hosts
     guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
+    keepsCopies: hosts.keepsCopies(),
     approvalPrompts: {
       approve: (request) => {
         say({ event: "approval", ...request });

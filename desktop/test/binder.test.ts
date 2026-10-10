@@ -10,11 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalPrompts, ApprovalRequest } from "../src/binding/approvals.js";
 import {
-  ALREADY_BOUND, Binder, type BinderOptions, type FolderLook, type FolderPrompts, type FolderSheet, NOT_FORGOTTEN, NOT_RECORDED,
+  ALREADY_BOUND, Binder, type BinderOptions, type FolderLook, type FolderPrompts, type FolderSheet, KEEPS_NO_COPY, NOT_FORGOTTEN, NOT_RECORDED,
   type Prepared,
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
+import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { NOT_BOUND, ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -92,10 +93,15 @@ function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
     guards: { home: join(base, "home"), dataDir: join(base, "data"), cacheDir: join(base, "cache"), appDirs: [join(base, "app")] },
     agent: "Research assistant",
     hosts,
+    // Its tools make a thread's copy of its folder to work in, as the app's do.
+    keepsCopies: true,
     approvalPrompts: allowing,
     ...overrides,
   });
 }
+
+// A bind's answer where it recorded *thread*'s copy: the one answer that has the server count the thread bound.
+const keeps = (thread: string): Outcome => ({ ok: { history: { thread } } });
 
 const never = () => new AbortController().signal;
 
@@ -433,7 +439,7 @@ describe("a chat's bind operation", () => {
       expect(journal.bindings.get(root)).toBeUndefined();
     }
     expect(journal.bindings.all()).toEqual([]);
-    expect(await chooser.admit(copy({ thread: ROOT }), never())).toEqual({ ok: null });
+    expect(await chooser.admit(copy({ thread: ROOT }), never())).toEqual(keeps(ROOT));
     expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes, history: ROOT });
     // A chat bound without one works in the folder itself.
     const plain = await confirmed(user, chooser, join(base, "other"));
@@ -449,7 +455,7 @@ describe("a chat's bind operation", () => {
     const restarted = binder(new User());
     const again = (root: string, history?: unknown) =>
       restarted.admit(bindOp(root, { folder: notes, nonce }, { args: { folder: notes, nonce, ...(history === undefined ? {} : { history }) } }), never());
-    expect(await again(ROOT, { thread: ROOT })).toEqual({ ok: null });
+    expect(await again(ROOT, { thread: ROOT })).toEqual(keeps(ROOT));
     // A thread bound to a copy is never answered as bound to the folder itself, nor the other way.
     expect(await again(ROOT)).toEqual(ALREADY_BOUND);
     expect(await again(OTHER)).toEqual({ ok: null });
@@ -459,8 +465,9 @@ describe("a chat's bind operation", () => {
     expect(journal.bindings.all().map((bound) => bound.history)).toEqual([ROOT, undefined]);
   });
 
-  it("works nowhere once it is bound to its copy where the tool hosts make no copies: they start none for it on the folder", async () => {
+  it("binds a thread to its copy only where its tools make one, and is never answered as bound to the folder itself where they make none", async () => {
     let started = 0;
+    // Tool hosts with nothing to make copies, as the binder is told they are.
     const tools = new ToolHosts({
       bindingOf: (root) => journal.bindings.get(root),
       dataDir: join(base, "data"), cacheDir: join(base, "cache"), env: { HOME: join(base, "home") },
@@ -470,23 +477,48 @@ describe("a chat's bind operation", () => {
       },
     });
     const user = new User();
-    const chooser = binder(user, { hosts: tools });
+    const chooser = binder(user, { hosts: tools, keepsCopies: tools.keepsCopies() });
     const ready = await confirmed(user, chooser);
-    expect(await chooser.admit(bindOp(ROOT, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: ROOT } } }), never())).toEqual({ ok: null });
-    for (const [kind, args] of [["write", { key: join(notes, "a.txt"), data: "" }], ["run", { command: "touch planted" }], ["land", { action: "forget", saga: "s" }]] as const) {
+    const waiting = chooser.bindSession(ROOT, ready.token, WINDOW);
+    const refused = { error: { type: "binding", message: "This computer keeps no copy of a folder for a project's thread to work in, so the thread cannot work here" } };
+    expect(await chooser.admit(bindOp(ROOT, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: ROOT } } }), never())).toEqual(refused);
+    await expect(waiting).rejects.toThrow("This computer keeps no copy of a folder for a project's thread to work in");
+    // Nothing is recorded, so every operation of the thread finds no folder.
+    expect(journal.bindings.all()).toEqual([]);
+    for (const [kind, args] of [["write", { key: join(notes, "a.txt"), data: "" }], ["run", { command: "touch planted" }]] as const) {
       const operation: Operation = { ...bindOp(ROOT, ready), id: `${kind}-1`, invocationId: "call", ordinal: 1, kind, args };
-      // Free to work, so nobody is asked; and what it would work on is refused.
-      expect(await chooser.admit(operation, never())).toBeNull();
-      expect(await chooser.run(operation, never())).toEqual({
-        error: { type: "unavailable", message: "This computer could not open the folder's sandbox: it has none to make this thread's copy of its folder in" },
-      });
+      expect(await chooser.run(operation, never())).toEqual(FOLDER_UNAVAILABLE);
     }
+    // A chat bound to a folder itself is bound as ever.
+    const plain = await confirmed(user, chooser, join(base, "other"));
+    expect(await chooser.admit(bindOp(OTHER, plain), never())).toEqual({ ok: null });
     expect([started, readdirSync(notes)]).toEqual([0, []]);
     await tools.stop();
   });
 
+  it("acknowledges a thread's copy with every bind that recorded it, and with no other answer", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    const bind = bindOp(ROOT, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: ROOT } } });
+    expect(await chooser.admit(bind, never())).toEqual(keeps(ROOT));
+    // The same bind sent again, as after the app stopped between its record and its answer.
+    expect(await chooser.admit(bind, never())).toEqual(keeps(ROOT));
+    // Its binding is the journal's, with the copy, once the server has recorded the answer.
+    chooser.acknowledged(bind.id);
+    expect(await chooser.bindSession(ROOT, ready.token, WINDOW)).toMatchObject({ root: ROOT, folder: notes, history: ROOT });
+    // Answers that record no copy name none: the folder bound itself, a chat already bound, or no bind at all.
+    const plain = await confirmed(user, chooser, join(base, "other"));
+    const answers = [
+      await chooser.admit(bindOp(OTHER, plain), never()),
+      await chooser.admit(bindOp(OTHER, plain, { args: { folder: plain.folder, nonce: plain.nonce, history: { thread: OTHER } } }), never()),
+      await chooser.admit(bindOp(THIRD, { folder: notes, nonce: "z".repeat(32) }, { args: { folder: notes, nonce: "z".repeat(32), history: { thread: THIRD } } }), never()),
+    ];
+    expect(answers).toEqual([{ ok: null }, ALREADY_BOUND, NOT_BOUND]);
+  });
+
   it("never answers with a message that ends in a full stop", () => {
-    for (const outcome of [NOT_BOUND, ALREADY_BOUND, NOT_RECORDED]) {
+    for (const outcome of [NOT_BOUND, ALREADY_BOUND, NOT_RECORDED, KEEPS_NO_COPY]) {
       expect("error" in outcome && outcome.error.message.endsWith(".")).toBe(false);
     }
   });

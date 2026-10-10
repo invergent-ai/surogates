@@ -48,7 +48,12 @@ export const NOT_RECORDED: Outcome = {
 export const NOT_FORGOTTEN: Outcome = {
   error: { type: "binding", message: "This computer could not forget the folder of a deleted chat" },
 };
+// A project's thread whose tools here make no copy of its folder to work in: it works nowhere, and never in the folder.
+const NO_COPY_HERE = "This computer keeps no copy of a folder for a project's thread to work in, so the thread cannot work here";
+export const KEEPS_NO_COPY: Outcome = { error: { type: "binding", message: NO_COPY_HERE } };
 const BOUND: Outcome = { ok: null };
+// A bind that recorded *thread*'s copy says so: the server counts a thread bound on no other answer (surogates/devices/binding.py).
+const boundTo = (thread: string | undefined): Outcome => (thread === undefined ? BOUND : { ok: { history: { thread } } });
 
 // The project's thread a folder is asked for: its names, as the page sent them.
 export interface ThreadLabel {
@@ -88,6 +93,8 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
+  // Whether the hosts give a project's thread a copy of its folder to work in: without, a bind that asks for one is refused.
+  keepsCopies?: boolean;
   refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
   retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
   // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
@@ -351,11 +358,12 @@ export class Binder implements Executor {
     if (!own || typeof folder !== "string" || typeof nonce !== "string") return NOT_BOUND;
     // A project's thread is bound to a copy of the folder (spec, Section 13): the server asks for
     // one by naming the thread, which is the root itself. A root is never given another's copy,
-    // and one asked for is never answered with the folder itself.
+    // and one asked for is never answered with the folder itself: the answer names the copy it
+    // recorded, or refuses.
     const copy = history === undefined ? undefined : threadOf(history);
     if (copy === null || (copy !== undefined && copy !== root)) return NOT_BOUND;
     const known = this.options.bindings.get(root);
-    if (known) return known.nonce === nonce && known.folder === folder && known.history === copy ? BOUND : ALREADY_BOUND;
+    if (known) return known.nonce === nonce && known.folder === folder && known.history === copy ? boundTo(known.history) : ALREADY_BOUND;
     const preparation = this.byNonce.get(nonce);
     if (!preparation) return NOT_BOUND;
     // One use, whatever the answer.
@@ -363,6 +371,11 @@ export class Binder implements Executor {
     if (folder !== preparation.folder) {
       preparation.reject(new Error("The server named another folder for this chat"));
       return NOT_BOUND;
+    }
+    // Nothing here would make the thread's copy: it is bound to nothing, so that it works nowhere.
+    if (copy !== undefined && this.options.keepsCopies !== true) {
+      preparation.reject(new Error(NO_COPY_HERE));
+      return KEEPS_NO_COPY;
     }
     const { dev, ino, mode } = preparation;
     try {
@@ -374,7 +387,7 @@ export class Binder implements Executor {
     }
     preparation.root = root;
     this.answered.set(operation.id, preparation);
-    return BOUND;
+    return boundTo(copy);
   }
 
   // A deleted chat's root: its binding goes, so nothing more runs for it; its folder stays as it is.

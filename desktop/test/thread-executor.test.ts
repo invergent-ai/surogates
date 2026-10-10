@@ -203,6 +203,19 @@ describe("a thread's operations, through the app's executor", { timeout: 10_000 
     expect([starts.map((start) => start.folder), performed]).toEqual([[copy], []]);
   });
 
+  it("tell the binder that a thread works in a copy here, through the browser's layer above them too", () => {
+    const browsing = new Browsing({
+      tools: executor,
+      browser: {
+        perform: async () => ({ ok: null }), forget: () => {}, stop: async () => {}, end: async () => {}, address: async () => "https://example.com/",
+        notComing: () => {}, pause: () => {}, show: async () => true, onDownload: () => {}, forwards: () => {},
+      },
+      bindingOf: (root) => bindings.get(root), launch: () => null, staging: join(dir, "staging"), ports: () => [],
+      vm: { forwards: () => {}, listening: async () => false, door: join(dir, "door") },
+    });
+    expect([executor.keepsCopies(), browsing.keepsCopies()]).toEqual([true, true]);
+  });
+
   it("say when the guest is asked to make a thread's copy, and when that ends, and nothing for a copy known whole", async () => {
     await executor.run(op("resolve", { path: "" }), signal());
     await executor.run(op("which", { name: "git" }), signal());
