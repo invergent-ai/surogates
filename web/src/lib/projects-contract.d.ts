@@ -84,7 +84,7 @@ export interface FileVersion {
 // The project's files that are gone, the newest first: each the version that deleted it.
 export interface DeletedFiles {
   files: FileVersion[];
-  more: boolean; // others were deleted before these, and are not listed
+  more: boolean; // others may have been deleted before these, and are not listed
 }
 
 export interface Routine {

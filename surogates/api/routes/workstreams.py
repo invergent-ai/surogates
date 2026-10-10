@@ -413,10 +413,10 @@ async def file_history(
 async def deleted_history(workstream_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant) -> dict[str, Any]:
     """The project's files that are gone, the newest first and as many as the
     shell takes: each the version that deleted it, read from the project's
-    records.  ``more`` says there are others, deleted before these.  The
-    Library lists them under its files, so that a deleted file's History
-    is reached.  None in a project over the file cap, whose History is
-    off."""
+    latest records.  ``more`` says there may be others, deleted before
+    these.  The Library lists them under its files, so that a deleted
+    file's History is reached.  None in a project over the file cap, whose
+    History is off."""
     project = await _project(request, workstream_id, tenant, ctx)
     state = request.app.state
     if await over_history_cap(state.storage, await state.session_store.get_session(project.master_session_id)):
@@ -452,7 +452,10 @@ class _VersionFile(Response):
     """A version of a file, sent from the file the api's copy wrote it out to: a piece at a time, and none of it kept after.
 
     Data to save under the file's own name, whatever it holds: a page or
-    a drawing among a project's files is never one a browser shows.
+    a drawing among a project's files is never one a browser shows.  Its
+    length is said first, so a version cut short on its way, as for a
+    client that takes it slower than a version has to be sent, is a failed
+    response to that client and never a shorter file.
     """
 
     media_type = "application/octet-stream"

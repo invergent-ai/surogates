@@ -1005,6 +1005,9 @@ async def test_open_version_answers_the_file_as_that_version_left_it_as_data_to_
     assert [(await opened(api, project, v["id"], "Report.docx")).content for v in (by_b, yours, upload)] == [
         b"PK\x03\x04 report v1 by A by B", b"PK\x03\x04 report v1 by A, then by you", b"PK\x03\x04 report v1",
     ]
+    # What the file was before a record that picked it up and then changed it: before the pickup, which came first.
+    before = await opened(api, project, f"{by_b['id'].split(':')[0]}:b", "Report.docx")
+    assert (before.status_code, before.content) == (200, b"PK\x03\x04 report v1 by A")
     # What went to the client is gone from the api's copy.
     assert written_out(await copy_of(api, project)) == []
 
@@ -1301,13 +1304,35 @@ async def test_the_deleted_files_are_those_the_clouds_landed_records_took_away_t
         (f"{first}:p", "yours.md", "you", None), (f"{row.id}:f", "notes.txt", "thread", str(row.id)),
     ]
     assert listed["more"] is False
+    # A record that picked a file up and then changed it again: what its files did is the newer.  A file you
+    # deleted that the thread then made again is there; one you changed that the thread then took away is gone, by the thread.
+    both = await recorded(
+        api, row, saga="saga:both",
+        picked_up=[*gone("yours.md"), {"path": "taken.md", "before": kept, "after": kept}],
+        files=[{"path": "yours.md", "before": None, "after": kept, "merged": True}, *gone("taken.md")],
+    )
+    listed = await deleted_of(api, project)
+    assert [(v["id"], v["path"], v["by"]["kind"]) for v in listed["files"]] == [
+        (f"{both}:f", "taken.md", "thread"), (f"{second}:p", "c.md", "you"), (f"{first}:f", "a.md", "thread"),
+        (f"{first}:f", "b.md", "thread"), (f"{row.id}:f", "notes.txt", "thread"),
+    ]
     # No more of them than the shell takes: the newest, and that there are others is said.
     monkeypatch.setitem(SHELL_LIMITS, "deleted", 3)
     listed = await deleted_of(api, project)
-    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["c.md", "a.md", "b.md"], True)
+    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["taken.md", "c.md", "a.md"], True)
     monkeypatch.setitem(SHELL_LIMITS, "deleted", 5)
     assert (await deleted_of(api, project))["more"] is False
     # A file whose path is longer than the shell takes is left out, as the Library leaves it out.
     await recorded(api, row, saga="saga:long", files=gone("d/" * 2048 + "e.md"))
     listed = await deleted_of(api, project)
-    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["c.md", "a.md", "b.md", "yours.md"], True)
+    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["taken.md", "c.md", "a.md", "b.md"], True)
+    # They are looked for among the project's latest records, and no further back however many it has: a file an
+    # older record took away is listed no more, and that there may be such files is said.
+    monkeypatch.setitem(SHELL_LIMITS, "deleted", 500)
+    monkeypatch.setattr(rows_module, "_GONE_AMONG", 3)
+    listed = await deleted_of(api, project)
+    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["taken.md", "c.md"], True)
+    # With every record of the project among them, none is left out, and none is said to be.
+    monkeypatch.setattr(rows_module, "_GONE_AMONG", 7)
+    listed = await deleted_of(api, project)
+    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["taken.md", "c.md", "a.md", "b.md", "notes.txt"], False)

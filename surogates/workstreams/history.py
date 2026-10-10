@@ -270,28 +270,37 @@ HISTORY_OFF = "History is off: this project has more than 50,000 files."
 _ROW_ID = re.compile(r"[0-9]{1,18}")
 #: The step whose author a version is by: a row's files are its commit's, and what it picked up its pickup's.
 _STEP = {False: "history.commit", True: "history.pickup"}
-# The project's cloud files that are gone: each one's newest landed record, where that took the file away, the
-# newest first and :most of them, with who that record's step says it is by.  A row's files come after its pickup.
+#: The most of a project's latest records its deleted files are looked for among: what the list costs
+#: is bounded whatever the project's age.  A file deleted before them is listed no more.
+_GONE_AMONG = 10_000
+# The project's cloud files that are gone, looked for among its latest :among records: each one's newest landed
+# record, where that took the file away, the newest first and :most of them, with who that record's step says it
+# is by.  A row's files come after its pickup.  One row at least, with how many records were looked among.
 _GONE = text("""
-    SELECT gone.id, gone.side, gone.path, h.updated_at, (
+    WITH recent AS (
+        SELECT id, files, picked_up FROM workstream_history
+         WHERE workstream_id = :project AND device_id IS NULL AND saga_state = 'completed'
+         ORDER BY created_at DESC, id DESC LIMIT :among
+    ), changed AS (
+        SELECT r.id, 'f' AS side, f->>'path' AS path, f->'after' AS after
+          FROM recent r, jsonb_array_elements(r.files) f
+         WHERE jsonb_typeof(f->'path') = 'string' AND f->'merged' IS DISTINCT FROM 'false'::jsonb
+        UNION ALL
+        SELECT r.id, 'p', p->>'path', p->'after'
+          FROM recent r, jsonb_array_elements(r.picked_up) p
+         WHERE jsonb_typeof(p->'path') = 'string'
+    ), newest AS (
+        SELECT DISTINCT ON (path) id, side, path, after FROM changed ORDER BY path, id DESC, side
+    ), gone AS (
+        SELECT id, side, path FROM newest WHERE after = 'null'::jsonb ORDER BY id DESC, side, path LIMIT :most
+    )
+    SELECT among.records, gone.id, gone.side, gone.path, h.updated_at, (
                SELECT s->'arguments'->'author' FROM jsonb_array_elements(h.steps) s
                 WHERE s->>'tool_name' = CASE gone.side WHEN 'p' THEN :pickup ELSE :commit END LIMIT 1
            ) AS author
-      FROM (
-        SELECT id, side, path FROM (
-            SELECT DISTINCT ON (path) id, side, path, after FROM (
-                SELECT h.id, 'f' AS side, f->>'path' AS path, f->'after' AS after
-                  FROM workstream_history h, jsonb_array_elements(h.files) f
-                 WHERE h.workstream_id = :project AND h.device_id IS NULL AND h.saga_state = 'completed'
-                   AND jsonb_typeof(f->'path') = 'string' AND f->'merged' IS DISTINCT FROM 'false'::jsonb
-                UNION ALL
-                SELECT h.id, 'p', p->>'path', p->'after'
-                  FROM workstream_history h, jsonb_array_elements(h.picked_up) p
-                 WHERE h.workstream_id = :project AND h.device_id IS NULL AND h.saga_state = 'completed'
-                   AND jsonb_typeof(p->'path') = 'string'
-            ) changed ORDER BY path, id DESC, side
-        ) newest WHERE after = 'null'::jsonb ORDER BY id DESC, side, path LIMIT :most
-      ) gone JOIN workstream_history h ON h.id = gone.id
+      FROM (SELECT count(*) AS records FROM recent) among
+      LEFT JOIN gone ON true
+      LEFT JOIN workstream_history h ON h.id = gone.id
      ORDER BY gone.id DESC, gone.side, gone.path
 """)
 
@@ -414,23 +423,27 @@ async def version_of(session_factory: Any, workstream_id: UUID | str, version: s
 
 
 async def deleted_files(session_factory: Any, workstream_id: UUID | str, *, limit: int) -> tuple[list[dict], bool]:
-    """The project's cloud files that are gone, *limit* at most and the newest first, and whether there are more.
+    """The project's cloud files that are gone, *limit* at most and the newest first, and whether there may be more.
 
     Each is the version that deleted it, as :func:`versions` gives one.  A
     file is gone when its newest landed record took it away: one made again
     since is not.  The Library lists the real files, so without these a
-    deleted file would have no way to its History.  Only that many are
-    read out of the records, and of each only what a version says: none of
-    the rows that hold them is read whole.
+    deleted file would have no way to its History.  They are looked for
+    among the project's latest records, a bounded number of them, and only
+    that many are read out, of each only what a version says: none of the
+    rows that hold them is read whole.  There may be more where more were
+    found than are listed, and where the project has records older than
+    those looked among.
     """
     async with session_factory() as db:
-        found = (await db.execute(_GONE, {
-            "project": workstream_id, "most": limit + 1, "commit": _STEP[False], "pickup": _STEP[True],
+        answered = (await db.execute(_GONE, {
+            "project": workstream_id, "among": _GONE_AMONG, "most": limit + 1, "commit": _STEP[False], "pickup": _STEP[True],
         })).all()
+    found = [found for found in answered if found.id is not None]
     return [
         {
             "id": f"{row}:{side}", "path": path, "by": _by(author), "at": utc(at), "change": "deleted",
             "merged": True, "landing_id": None if side == "p" else str(row), "blob": None,
         }
-        for row, side, path, at, author in found[:limit]
-    ], len(found) > limit
+        for _, row, side, path, at, author in found[:limit]
+    ], len(found) > limit or answered[0].records >= _GONE_AMONG

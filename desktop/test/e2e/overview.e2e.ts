@@ -1513,7 +1513,7 @@ describe("a file's History in the Library", () => {
     await page.click('[data-tab="library"]');
     await expect.poll(() => texts(page, "#deleted-files .path")).toEqual(["old-forecast.xlsx", markup]);
     expect(await texts(page, "#deleted-files .from")).toEqual(["Deleted by you", "Deleted by the thread youU+200B"]);
-    expect(await page.textContent("#more-deleted")).toBe("Files deleted before these are not listed.");
+    expect(await page.textContent("#more-deleted")).toBe("Files deleted longer ago are not listed.");
     expect(await page.isVisible("#more-deleted")).toBe(true);
     expect(await page.$$eval("#deleted img", (found) => found.length)).toBe(0);
     // A file that is among the project's files again, as one its user uploaded anew, is not gone; one on a computer is another file.
@@ -1525,6 +1525,21 @@ describe("a file's History in the Library", () => {
       fake.changed(project!, null);
     }, [REPORT, markup]);
     await expect.poll(() => texts(page, "#deleted-files .path")).toEqual([markup]);
+    // A thread whose files changed may have taken one away: the list is read again with its row.
+    await (await served(client)).evaluate((fake, [project, thread]) => {
+      const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
+      row.files = row.files.slice(1);
+      fake.data.deleted[project!]!.files.unshift({ ...fake.data.deleted[project!]!.files[0]!, id: "31:f", path: "threads/sales/north.csv" });
+      fake.changed(project!, thread!);
+    }, [REPORT, IDLE]);
+    await expect.poll(() => texts(page, "#deleted-files .path")).toEqual(["threads/sales/north.csv", markup]);
+    // With none to list, that the agent looked no further back is still said; and nothing is, once it has looked at all.
+    await (await served(client)).evaluate((fake, project) => {
+      fake.data.deleted[project] = { files: [], more: true };
+      fake.changed(project, null);
+    }, REPORT);
+    await expect.poll(() => texts(page, "#deleted-files .path")).toEqual([]);
+    expect([await page.isVisible("#deleted"), await page.isVisible("#more-deleted")]).toEqual([true, true]);
     await (await served(client)).evaluate((fake, project) => {
       fake.data.deleted[project] = { files: [], more: false };
       fake.changed(project, null);

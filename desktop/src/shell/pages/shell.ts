@@ -53,7 +53,7 @@ interface State {
       place: ThreadRow["place"];
     }>;
     routines: Array<{ name: string; scheduleDisplay: string }>;
-    // Its files that are gone, each the version that deleted it; more: others, deleted before these, are not listed.
+    // Its files that are gone, each the version that deleted it; more: others, deleted longer ago, may not be listed.
     deleted: { files: Version[]; more: boolean };
   } | null;
   reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
@@ -374,8 +374,10 @@ function renderOverview(state: State): void {
   byId("deleted-files").replaceChildren(...deleted.map((version) => historyRow(
     version.path, listRow(version.path, what(version, "deleted"), ago(version.at)), "deleted",
   )));
-  byId("deleted").hidden = deleted.length === 0;
-  byId("more-deleted").hidden = overview?.deleted.more !== true;
+  // Where the agent looked no further back, it is said, though none is listed.
+  const more = overview?.deleted.more === true;
+  byId("deleted").hidden = deleted.length === 0 && !more;
+  byId("more-deleted").hidden = !more;
   const routines = overview?.routines ?? [];
   byId("routine-list").replaceChildren(...routines.map((routine) => listRow(routine.name, routine.scheduleDisplay, "")));
   document.querySelector<HTMLElement>('[data-tab="routines"]')!.hidden = routines.length === 0;
