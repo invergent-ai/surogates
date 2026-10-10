@@ -678,8 +678,62 @@ def test_the_first_look_says_whether_main_carries_a_landings_saga(tmp_path, proj
     (history.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
     landed = land(history, "saga:mine")
     looked = history.fetch(saga="saga:mine")
-    assert (looked["main"], looked["has_saga"]) == (landed["commit"], True)
-    assert history.fetch(saga="saga:another")["has_saga"] is False
+    assert (looked["main"], looked["landing"], looked["hidden"]) == (landed["commit"], landed["commit"], False)
+    assert history.fetch(saga="saga:another")["landing"] is None
+    # A saga whose name another's begins with is not that one, and no look names a landing unasked.
+    assert history.fetch(saga="saga:min")["landing"] is None and history.fetch()["landing"] is None
+
+
+def landed_over(tmp_path, project) -> tuple[History, str, str, str]:
+    """A pod that looks, ``main`` before B's landing, B's landing, and A's landing over it."""
+    earlier = a_pod(tmp_path, project, "t0")
+    (earlier.copy / "first.md").write_text("first")
+    began = land(earlier, "saga:first")["commit"]
+    first, second = a_pod(tmp_path, project, "t1"), a_pod(tmp_path, project, "t2")
+    (second.copy / "B.md").write_text("by B")
+    by_b = land(second, "saga:b")["commit"]
+    (first.copy / "A.md").write_text("by A")
+    by_a = land(first, "saga:a")["commit"]
+    return a_pod(tmp_path, project, "t3"), began, by_b, by_a
+
+
+def test_a_look_finds_a_landing_other_landings_went_over_in_mains_history(tmp_path, project):
+    holder, began, by_b, by_a = landed_over(tmp_path, project)
+    looked = holder.fetch(saga="saga:b", since=began)
+    assert (looked["main"], looked["landing"], looked["hidden"]) == (by_a, by_b, False)
+    # With no word of where it began too: the whole of main's history is looked through.
+    assert holder.fetch(saga="saga:b")["landing"] == by_b
+
+
+def test_a_look_takes_a_landing_main_moved_on_without_for_not_pushed(tmp_path, project):
+    holder, began, by_b, by_a = landed_over(tmp_path, project)
+    # Looked for back to where it began, and met: it is not there, and nothing hides it.
+    looked = holder.fetch(saga="saga:never", since=began)
+    assert (looked["landing"], looked["hidden"]) == (None, False)
+    # So is one of a history whose main was written anew, or that began with none: its first commit is met.
+    assert (holder.fetch(saga="saga:never", since="0" * 39 + "1")["hidden"], holder.fetch(saga="saga:never")["hidden"]) == (False, False)
+    # A cut elsewhere, below a thread's turn, hides none of main's own commits.
+    (project / "_history" / "shallow").write_text(git(project / "_history", "rev-parse", f"{by_a}^2") + "\n")
+    assert holder.fetch(saga="saga:never")["hidden"] is False
+
+
+def test_a_look_a_prunings_cut_ends_says_the_landing_is_hidden_unless_it_is_found_first(tmp_path, project):
+    holder, began, by_b, by_a = landed_over(tmp_path, project)
+    durable = project / "_history"
+    # Cut at B's landing: it stays, and main as it began on is no longer under it, though A's turn started there.
+    assert git(durable, "rev-parse", f"{by_a}^2^") == began
+    (durable / "shallow").write_text(f"{by_b}\n")
+    looked = holder.fetch(saga="saga:b", since=began)
+    assert (looked["landing"], looked["hidden"]) == (by_b, False)
+    looked = holder.fetch(saga="saga:never", since=began)
+    assert (looked["landing"], looked["hidden"]) == (None, True)
+    assert holder.fetch(saga="saga:never")["hidden"] is True
+    # Where it began is still met above the cut: not pushed, and not hidden.
+    assert holder.fetch(saga="saga:never", since=by_b)["hidden"] is False
+    # Cut above B's landing: whether it pushed is not known.
+    (durable / "shallow").write_text(f"{by_a}\n")
+    looked = holder.fetch(saga="saga:b", since=began)
+    assert (looked["landing"], looked["hidden"]) == (None, True)
 
 
 def test_a_look_fetches_the_commits_it_is_asked_for_and_names_those_the_history_no_longer_has(tmp_path, project):

@@ -870,7 +870,7 @@ async def test_a_masters_pod_runs_only_the_steps_that_need_no_copy(tmp_path, mon
                 "error": f"This pod has no copy of a project's files: it cannot {action}",
             }
         # What settles a landing left running needs no copy: the look, and a put-back.
-        assert await run("_history", action="fetch") == {"main": None, "has_saga": False, "packs": 0, "missing": []}
+        assert await run("_history", action="fetch") == {"main": None, "landing": None, "hidden": False, "packs": 0, "missing": []}
         assert await run("_history", action="unapply", path="gone.md", before=None, after=None) == {
             "path": "gone.md", "before": None, "after": None,
         }
