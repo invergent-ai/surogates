@@ -246,6 +246,81 @@ async def test_handler_exits_quickly_when_session_already_paused():
     assert result["reason"] == "session.paused"
 
 
+async def _asked_while(store: FakeSessionStore, *said: dict) -> dict:
+    """The question's outcome when its user sends *said*, each a message's data, while it waits; then answers it."""
+    session_id = uuid4()
+
+    async def the_user() -> None:
+        for data in said:
+            await asyncio.sleep(0.05)
+            await store.emit_event(session_id, EventType.USER_MESSAGE, data)
+        await asyncio.sleep(0.05)
+        await store.emit_event(session_id, EventType.ASK_USER_QUESTION_RESPONSE, {
+            "tool_call_id": "tc", "responses": [{"question": "Which quarter?", "answer": "Q3", "is_other": False}],
+        })
+
+    raw, _ = await asyncio.wait_for(asyncio.gather(
+        _ask_user_question_handler(
+            {"questions": [{"prompt": "Which quarter?"}]},
+            session_id=session_id, session_store=store, tool_call_id="tc", lease_token=uuid4(),
+        ),
+        the_user(),
+    ), timeout=5.0)
+    return json.loads(raw)
+
+
+@pytest.mark.asyncio
+async def test_a_command_typed_while_the_question_waits_dismisses_it():
+    result = await _asked_while(FakeSessionStore(), {"content": "/goal status"})
+    # Not answered, and the model is told why, with what it asked: it may ask again.
+    assert result == {
+        "cancelled": True, "reason": "dismissed", "detail": ask_module.DISMISSED_BY_A_COMMAND,
+        "questions_asked": [{"prompt": "Which quarter?", "allow_other": True}],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("said", [
+    {"content": "Use the Q3 figures."},
+    # The harness's own messages are no command of its user's, whatever their words.
+    {"content": "/goal status", "synthetic": "outcome_continuation"},
+], ids=["a plain message", "the harness's message"])
+async def test_only_a_command_its_user_typed_dismisses_the_question(said):
+    result = await _asked_while(FakeSessionStore(), said)
+    assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
+
+
+@pytest.mark.asyncio
+async def test_a_question_answered_before_its_user_typed_a_command_keeps_its_answer():
+    session_id, store = uuid4(), FakeSessionStore()
+
+    async def the_user() -> None:
+        # Both before the wait looks again.
+        await asyncio.sleep(0.05)
+        await store.emit_event(session_id, EventType.ASK_USER_QUESTION_RESPONSE, {
+            "tool_call_id": "tc", "responses": [{"question": "Which quarter?", "answer": "Q3", "is_other": False}],
+        })
+        await store.emit_event(session_id, EventType.USER_MESSAGE, {"content": "/goal status"})
+
+    raw, _ = await asyncio.wait_for(asyncio.gather(
+        _ask_user_question_handler(
+            {"questions": [{"prompt": "Which quarter?"}]},
+            session_id=session_id, session_store=store, tool_call_id="tc", lease_token=uuid4(),
+        ),
+        the_user(),
+    ), timeout=5.0)
+    result = json.loads(raw)
+    assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
+
+
+@pytest.mark.asyncio
+async def test_a_command_typed_before_the_question_was_asked_does_not_dismiss_it():
+    store = FakeSessionStore()
+    await store.emit_event(uuid4(), EventType.USER_MESSAGE, {"content": "/goal status"})
+    result = await _asked_while(store)
+    assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
+
+
 class NudgedStore(FakeSessionStore):
     """A store whose events wake every listener, like SessionStore's Redis nudge."""
 

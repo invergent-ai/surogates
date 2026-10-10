@@ -38,9 +38,11 @@ from surogates.scheduled.materialize import materialize_scheduled_run
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.session.interactive_input import pending_input_for_session
 from surogates.session.provisioning import create_child_session
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
+from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
@@ -2317,6 +2319,79 @@ async def test_a_threads_work_left_unsaved_before_a_command_still_lands_at_its_n
 
     # A turn on its user's computer that only talks has that work to land all the same.
     assert await lands(workers.store, thread, 0, [])
+
+
+# -- A question that waits for its user --
+
+
+ASKS = (
+    {"role": "assistant", "content": "", "tool_calls": [{
+        "id": "call_ask", "type": "function",
+        "function": {"name": "ask_user_question", "arguments": json.dumps({"questions": [{"prompt": "Which quarter?"}]})},
+    }]},
+    {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1},
+)
+
+
+async def a_question_waits(workers: Workers, chat: UUID) -> asyncio.Task:
+    """The model's turn on "Draft the report." asks its user a question: the wake that waits for the answer."""
+    workers.replies.append(ASKS)
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    waiting = asyncio.create_task(asking.wake(chat))
+    async with asyncio.timeout(10):
+        while not await workers.store.get_events(chat, types=[EventType.INBOX_INPUT_REQUIRED]):
+            await asyncio.sleep(0.02)
+    return waiting
+
+
+async def what_the_question_got(workers: Workers, chat: UUID) -> dict:
+    """What the question's call gave the model."""
+    [result] = [
+        event for event in await workers.store.get_events(chat, types=[EventType.TOOL_RESULT])
+        if event.data["tool_call_id"] == "call_ask"
+    ]
+    return json.loads(result.data["content"])
+
+
+async def test_a_command_typed_while_a_question_waits_dismisses_the_question_and_is_run(workers):
+    chat = await workers.chat()
+    waiting = await a_question_waits(workers, chat)
+
+    await workers.says(chat, "/goal status")
+    await asyncio.wait_for(waiting, 10)
+
+    # The question is not answered, and its turn ends there: the model is not asked again in it.
+    got = await what_the_question_got(workers, chat)
+    assert (got["cancelled"], got["reason"], got["detail"]) == (True, "dismissed", DISMISSED_BY_A_COMMAND)
+    assert (len(workers.requests), await workers.status(chat)) == (1, "completed")
+    assert await pending_input_for_session(workers.store, session_id=chat) is None
+    # The command's own wake runs it.
+    await workers.wake(chat)
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command"], "No active outcome. Set one with /goal <text>.")
+    # The model reads at its next turn that its question went unanswered, and may ask it again.
+    await workers.says(chat, "Q3, then.")
+    await workers.wake(chat)
+    [told] = [message for message in workers.requests[-1] if message.get("tool_call_id") == "call_ask"]
+    assert json.loads(told["content"])["detail"] == DISMISSED_BY_A_COMMAND
+
+
+async def test_a_question_dismissed_while_its_user_said_more_goes_on_with_what_they_said(workers):
+    chat = await workers.chat()
+    waiting = await a_question_waits(workers, chat)
+
+    # What a channel that takes no typed words for an answer delivers: a message, for the turn to read.
+    await workers.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Use the Q3 figures."})
+    await workers.says(chat, "/goal status")
+    await asyncio.wait_for(waiting, 10)
+
+    # The question is dismissed, and the turn goes on with what its user said; the command waits for its end.
+    assert (await what_the_question_got(workers, chat))["reason"] == "dismissed"
+    assert (len(workers.requests), workers.requests[-1][-1]) == (2, {"role": "user", "content": "Use the Q3 figures."})
+    assert workers.ran == []
+    await workers.wake(chat)
+    assert workers.ran == ["_handle_goal_command"]
 
 
 # -- A routine's run --

@@ -20,7 +20,9 @@ Round-trip
    to prevent expiry, and returns the answers as JSON.  It wakes on the
    session's Redis nudge when there is one, and polls the event log when not.
 7. If the user pauses the session instead of answering, the handler exits
-   with ``cancelled: true`` so the LLM sees a clean termination.
+   with ``cancelled: true`` so the LLM sees a clean termination.  So it
+   does, with ``reason: "dismissed"``, when the user types a command
+   instead: the harness ends the turn there and runs the command.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.harness.slash_skill import names_builtin_command
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
 from surogates.session.interactive_input import expire_input_request
@@ -60,6 +63,13 @@ _LEASE_RENEW_INTERVAL_SECONDS = 30.0
 # than the wait cannot belong to a live tool call.
 ASK_USER_QUESTION_MAX_WAIT_SECONDS = 30 * 60  # 30 minutes
 _MAX_WAIT_SECONDS = ASK_USER_QUESTION_MAX_WAIT_SECONDS
+
+#: Why a question its user typed a command over went unanswered, for the model.
+DISMISSED = "dismissed"
+DISMISSED_BY_A_COMMAND = (
+    "The user typed a command instead of answering, so the question was not answered. "
+    "Ask it again if you still need the answer."
+)
 
 
 ASK_USER_QUESTION_DESCRIPTION = (
@@ -272,6 +282,13 @@ async def _until_nudged(pubsub: Any | None, *, within: float) -> None:
         await asyncio.sleep(min(_POLL_INTERVAL_SECONDS, within))
 
 
+def _typed_a_command(event: Any) -> bool:
+    """Whether *event*, a ``user.message``, is a built-in command its user typed, whatever its arguments."""
+    data = event.data or {}
+    content = data.get("content")
+    return not data.get("synthetic") and isinstance(content, str) and names_builtin_command(content)
+
+
 async def _wait_for_response(
     *,
     session_id: UUID,
@@ -279,9 +296,10 @@ async def _wait_for_response(
     session_store: Any,
     lease_token: Any | None,
     redis: Any | None = None,
+    asked_at: int = 0,
 ) -> dict[str, Any]:
-    """Wait for the matching ``ASK_USER_QUESTION_RESPONSE`` event or a
-    session stop.
+    """Wait for the matching ``ASK_USER_QUESTION_RESPONSE`` event, a
+    command its user typed instead, or a session stop.
 
     With *redis* it wakes on the session's event nudge and rechecks at a
     bounded interval, so a lost nudge only delays the answer.  Without
@@ -289,11 +307,17 @@ async def _wait_for_response(
 
     Returns ``{"responses": [...], "cancelled": False}`` on success, or
     ``{"cancelled": True, "reason": <why>}`` when the user stopped the
-    chat (session paused/completed/failed) or we hit the wait cap.
+    chat (session paused/completed/failed), typed a command after event
+    *asked_at*, the question's, or we hit the wait cap.
+
+    A command is never a question's answer, and its user waits for it: it
+    dismisses the question, and the harness runs it once the turn has
+    ended.  Any other message is the question's answer where its route
+    takes it for one, and waits for the turn otherwise.
 
     Only ``ASK_USER_QUESTION_RESPONSE`` events are read from the log --
     filtering by ``tool_call_id`` is enough because each id is unique
-    per LLM call.
+    per LLM call -- and the messages written since the question.
     Cancel detection uses the session's current status rather than an
     event-log scan so we never confuse a fresh pause with a historical one.
 
@@ -303,6 +327,7 @@ async def _wait_for_response(
     deadline = asyncio.get_running_loop().time() + _MAX_WAIT_SECONDS
     next_renew = asyncio.get_running_loop().time() + _LEASE_RENEW_INTERVAL_SECONDS
     cursor = 0
+    said = asked_at
 
     # Subscribe before the first check: an answer landing in between still
     # wakes the wait.
@@ -330,7 +355,9 @@ async def _wait_for_response(
                     )
                 next_renew = now + _LEASE_RENEW_INTERVAL_SECONDS
 
-            # 1. Look for this tool call's response.
+            # 1. Look for this tool call's response, and for a command its
+            #    user typed instead: whichever came first.
+            answer: tuple[int, dict[str, Any]] | None = None
             events = await session_store.get_events(
                 session_id,
                 after=cursor,
@@ -342,8 +369,17 @@ async def _wait_for_response(
                 if data.get("tool_call_id") == tool_call_id:
                     responses = data.get("responses")
                     if isinstance(responses, list):
-                        return {"responses": responses, "cancelled": False}
-                    return {"cancelled": True, "reason": "malformed_response"}
+                        answer = event.id, {"responses": responses, "cancelled": False}
+                    else:
+                        answer = event.id, {"cancelled": True, "reason": "malformed_response"}
+                    break
+            messages = await session_store.get_events(session_id, after=said, types=[EventType.USER_MESSAGE])
+            said = max([said, *(event.id for event in messages)])
+            command = next((event.id for event in messages if _typed_a_command(event)), None)
+            if answer is not None and (command is None or answer[0] < command):
+                return answer[1]
+            if command is not None:
+                return {"cancelled": True, "reason": DISMISSED}
 
             # 2. Has the session been stopped?  Status is the authoritative
             #    current state -- the pause endpoint both emits SESSION_PAUSE
@@ -410,7 +446,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
     except AskUserQuestionSchemaError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
-    await session_store.emit_event(
+    asked_at = await session_store.emit_event(
         session_id,
         EventType.INBOX_INPUT_REQUIRED,
         {
@@ -429,6 +465,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
             session_store=session_store,
             lease_token=lease_token,
             redis=kwargs.get("redis"),
+            asked_at=asked_at,
         )
 
     if outcome.get("cancelled"):
@@ -446,10 +483,12 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
                 "Failed to expire the inbox item for ask_user_question %s",
                 tool_call_id, exc_info=True,
             )
+        reason = outcome.get("reason", "cancelled")
         return json.dumps(
             {
                 "cancelled": True,
-                "reason": outcome.get("reason", "cancelled"),
+                "reason": reason,
+                **({"detail": DISMISSED_BY_A_COMMAND} if reason == DISMISSED else {}),
                 "questions_asked": questions,
             },
             ensure_ascii=False,

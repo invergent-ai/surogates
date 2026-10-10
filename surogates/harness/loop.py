@@ -1136,6 +1136,13 @@ class AgentHarness(
             return None, new_cursor
         return coalesce_user_messages(rendered), new_cursor
 
+    async def _said_to_the_model(self, session: Session, after_event_id: int) -> bool:
+        """Whether a message the model is to read arrived past the steer cursor *after_event_id*: the turn's next request reads it."""
+        return any(
+            self._is_plain_message(session, event)
+            for event in await self._store.get_events(session.id, after=after_event_id, types=list(MESSAGE_TYPES))
+        )
+
     async def _abort_iteration_with_pause(
         self,
         session: Session,
@@ -3744,6 +3751,7 @@ class AgentHarness(
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
             )
+            question_dismissed = _question_dismissed(tool_calls_raw, tool_results)
 
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
@@ -3846,6 +3854,23 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="whiteboard_sketch_drawn",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A question its user dismissed by typing a command ends the turn,
+            # as the model's answer would: the command's own wake runs it, and
+            # the model reads at its next turn that the question went
+            # unanswered.  Not while something else its user said waits for
+            # the model: the turn goes on with it.
+            if question_dismissed and not await self._said_to_the_model(session, steer_cursor):
+                logger.info(
+                    "Session %s: its user dismissed a question with a command; ending turn", session.id,
+                )
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="question_dismissed",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -5935,6 +5960,23 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
         data = getattr(event, "data", None)
         return data.get("metadata") if isinstance(data, dict) else None
     return None
+
+
+def _question_dismissed(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
+    """Whether a question of *tool_calls_raw*'s went unanswered because its user typed a command instead."""
+    from surogates.tools.builtin.ask_user_question import DISMISSED
+
+    asked = {call.get("id") for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
+    for result in tool_results:
+        if result.get("tool_call_id") not in asked:
+            continue
+        try:
+            got = json.loads(result.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(got, dict) and got.get("reason") == DISMISSED:
+            return True
+    return False
 
 
 def _whiteboard_sketch_turn_done(
