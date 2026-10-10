@@ -512,7 +512,8 @@ describe("a landing cut short by a kill", () => {
     ["before the landing's file is moved out", ["renameSync", 0, "/Report\\.docx$", 1]],
     ["with the landing's file moved out and the name empty", ["linkSync", 1, "/Report\\.docx$", 1]],
     ["with the real file back and the landing's still beside it", ["unlinkSync", 0, "\\.surogate-", 1]],
-    ["before what the step kept is dropped", ["unlinkSync", 0, "/1\\.json$", 1]],
+    ["before what the step kept is dropped", ["unlinkSync", 0, "/1(\\.json)?$", 1]],
+    ["with what the step kept dropped, and its record not yet", ["unlinkSync", 0, "/1(\\.json)?$", 2]],
   ])("ends a put-back that is killed %s: the user's file is at its name after the helper's next start", { timeout: 60_000 }, async (_where, cut) => {
     const target = join(folder, "Report.docx");
     writeFileSync(target, V1);
@@ -609,7 +610,7 @@ describe("a landing cut short by a kill", () => {
     await cutBetween("docs/Report.docx");
     renameSync(join(folder, "docs"), join(base, "docs.taken"));
     symlinkSync(join(base, "elsewhere"), join(folder, "docs"));
-    const [own] = readdirSync(join(base, "docs.taken"));
+    const own = readdirSync(join(base, "docs.taken")).find((name) => readFileSync(join(base, "docs.taken", name), "utf8") === V1);
     expect(await restart()).toEqual({ ok: { restored: [], beside: [], lost: [["docs/Report.docx", own]] } });
     expect(readFileSync(join(base, "docs.taken", own!), "utf8")).toBe(V1);
     expect(readdirSync(join(base, "elsewhere"))).toEqual(["Report.docx"]);
@@ -861,9 +862,37 @@ describe("a landing's step, when it fails or is asked again", () => {
     expect(readFileSync(target, "utf8")).toBe("saved by you as it was put back");
     expect(readdirSync(folder)).toEqual(["Report.docx"]);
     expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
+    expect(JSON.parse(readFileSync(join(kept, SAGA, "1.json"), "utf8"))).toMatchObject({ temp: null, aside: null, out: null, back: null });
     // The step is as it was: nothing for the next start to end, and still there to settle.
     expect(await restart()).toEqual({ ok: { restored: [], beside: [], lost: [] } });
     expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
+  });
+
+  it("leaves a file made at the name while a put-back had it empty, and nothing of the landing's beside it", { timeout: 60_000 }, async () => {
+    const target = join(folder, "Report.docx");
+    writeFileSync(target, "the report, v1");
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    await helper([apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!)]);
+    // Made between the landing's file leaving the name and the replaced one taking it.
+    const { answers } = await helper([unapply(1, "Report.docx")], ["linkSync", 1, "/Report\\.docx$", 1, `fs.writeFileSync(${JSON.stringify(target)}, "made by you as it was put back")`]);
+    expect(answers).toMatchObject([{ error: { type: "conflict" } }]);
+    expect(readFileSync(target, "utf8")).toBe("made by you as it was put back");
+    expect(readdirSync(folder)).toEqual(["Report.docx"]);
+    expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
+  });
+
+  it("moves a folder back to its name when one took the file's place just as the file was moved aside", { timeout: 60_000 }, async () => {
+    const target = join(folder, "Report.docx");
+    writeFileSync(target, "the report, v1");
+    const after = turn("Report.docx", "the report, by the thread");
+    const seen = await looked("Report.docx");
+    const swap = `const at = ${JSON.stringify(target)}; fs.rmSync(at); fs.mkdirSync(at); fs.writeFileSync(at + "/inside.txt", "yours, in the folder you made");`;
+    const { answers } = await helper([apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!)], ["renameSync", 0, "/Report\\.docx$", 1, swap]);
+    expect(answers).toMatchObject([{ error: { type: "conflict" } }]);
+    expect(readFileSync(join(target, "inside.txt"), "utf8")).toBe("yours, in the folder you made");
+    expect(readdirSync(folder)).toEqual(["Report.docx"]);
+    expect(existsSync(join(kept, SAGA))).toBe(false);
   });
 
   it("answers a recovery with nothing where no landing was cut short", async () => {
