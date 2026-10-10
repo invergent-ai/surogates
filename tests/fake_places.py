@@ -33,11 +33,21 @@ settles one otherwise changes this file with it.
 - The hold: any ``land`` operation takes the folder, and another root's is
   answered ``busy`` at once, where the app waits up to 150 s first; it lapses
   after two idle minutes, and a landing's helper is started anew with each
-  hold, which recovers first.
-- ``land`` ``forget`` carries ``applied``: the app asks the history's
-  ``forget`` first, and answers with its refusal where it refuses, and with
-  ``value`` where its answer is no forgetting's; only where the history says
-  the landing may go is the helper's ``forget`` asked, and the folder let go.
+  hold, which recovers first.  The forgetting of a landing the turn only
+  settled, asked under ``land:<turn>:settle:…``, lets the folder go no more
+  than the settle did; and a hold given back (``forget {saga: "hold:…"}``)
+  by a root that holds nothing is answered ``{}``, nothing taken and nothing
+  asked (desktop/src/hosts/tool-hosts.ts, ``ToolHosts.land``).
+- ``land`` ``forget`` carries ``applied``, each apply that was sent with its
+  step, and is ``value`` where it names none as the app takes one: the app
+  asks the history's ``forget`` first, and answers with its refusal where it
+  refuses, and with ``value`` where its answer is no forgetting's; then
+  ``os``/``EIO`` where the helper's records of the saga cannot all be read
+  (one that is none, a link in a record's or a folder's stead), and
+  ``conflict`` where the helper holds a record of a step ``applied`` leaves
+  out, or names for another file, or, where the history holds no landing of
+  the saga, a step still keeps the file it replaced; only then is the
+  helper's ``forget`` asked, and the folder let go.
 - A folder with no history: the app's open answers ``{history: "off",
   reason}``, and every other operation of a thread's, its file operations
   among them, ``history_off``.  The thread works nowhere.
@@ -80,6 +90,14 @@ FOLDER_UNAVAILABLE = {"error": {"type": "folder_unavailable", "message": "The fo
 # As desktop/src/history/copies.ts answers every kind but a turn's open on a folder with no history.
 HISTORY_OFF = {"error": {"type": "history_off", "message": "This folder has no history on this computer"}}
 BUSY = {"error": {"type": "busy", "message": "Another chat is working in this folder on this computer"}}
+# As desktop/src/history/kinds.ts answers a landing's forgetting that names no saga or applies it takes.
+NOT_A_FORGETTING_ASKED = {"error": {
+    "type": "value", "message": "A landing's forgetting names its saga, and each apply that was sent for it: its step, its file and that file's two versions",
+}}
+# As desktop/src/history/kinds.ts answers a forgetting whose records on the computer cannot all be read.
+RECORDS_UNREAD = {"error": {
+    "type": "os", "code": "EIO", "message": "This computer's records of this landing cannot all be read, so nothing the landing kept was forgotten",
+}}
 # As desktop/src/vm/history.ts answers an answer to a forgetting that is none.
 NOT_A_FORGETTING = {"error": {
     "type": "value", "message": "This is no answer of a folder's history to forgetting a landing, so what the landing kept was not forgotten",
@@ -92,6 +110,8 @@ ACTIONS = {
 }
 #: How long the folder is held for a landing with no step, as the app lets a landing's host idle.
 IDLE_S = 120.0
+#: A step a turn's landing asks for a landing it only settles, one another left running in the folder (the app's ``SETTLES``).
+_SETTLES = re.compile(r"land:[^:]+:settle:")
 
 
 def cannot(kind: str) -> dict[str, Any]:
@@ -184,7 +204,7 @@ class Places:
         if self.off is not None:
             return {"ok": {"history": "off", "reason": self.off}} if (kind, action) == ("history", "open") else HISTORY_OFF
         if kind == "land":
-            return self._land(root, thread, action, args)
+            return self._land(root, thread, action, args, invocation)
         if kind == "checkpoint":
             if action == "take":
                 return self._ask(thread, "snapshot", {"reason": args.get("reason")})
@@ -228,11 +248,17 @@ class Places:
             # As the guest's main(): anything else that went wrong is the history's failure.
             return {"error": {"type": "history", "code": "failed", "message": str(failed)}}
 
-    def _land(self, root: str, thread: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _land(self, root: str, thread: str, action: str, args: dict[str, Any], invocation: str) -> dict[str, Any]:
         now = time.monotonic()
+        holds = self.holder == root and self._helper is not None and now - self._held_at <= self.idle_s
+        if action == "forget" and str(args.get("saga", "")).startswith("hold:") and not holds:
+            # A hold given back where the root holds nothing: nothing to let go, and no landing's host started to say so.
+            return {"ok": {}}
+        if action == "forget" and not _forgetting(args):
+            return NOT_A_FORGETTING_ASKED
         if self.holder not in (None, root) and now - self._held_at <= self.idle_s:
             return BUSY
-        if self.holder != root or self._helper is None or now - self._held_at > self.idle_s:
+        if not holds:
             # A landing's host, its helper started anew on the folder, with the thread's copy.
             self._helper = LandHelper(self.real, self.copy(thread), self.kept)
         self.holder, self._held_at = root, now
@@ -245,10 +271,69 @@ class Places:
         ok = forgotten.get("ok")
         if not (isinstance(ok, dict) and ok.keys() == {"landing"} and (ok["landing"] is None or _id(ok["landing"]))):
             return NOT_A_FORGETTING
+        if (unrecorded := _unrecorded(_Landing(self._helper, args["saga"]), args["applied"], recorded=ok["landing"] is not None)) is not None:
+            return unrecorded
         outcome = self._helper.land({"action": "forget", "saga": args.get("saga")})
-        if "ok" in outcome:
+        # The turn's own landing over, the folder is let go; not at the forgetting of one it only settled.
+        if "ok" in outcome and not _SETTLES.match(invocation):
             self.holder, self._helper = None, None
         return outcome
+
+
+def _forgetting(args: dict[str, Any]) -> bool:
+    """Whether a landing's forgetting names a saga and every apply sent for it as the app takes them: a step once, a file, two versions."""
+    saga, applied = args.get("saga"), args.get("applied")
+    if not (isinstance(saga, str) and _SAGA.fullmatch(saga) and isinstance(applied, list) and len(applied) <= 50_000):
+        return False
+    steps = [entry.get("step") if isinstance(entry, dict) else None for entry in applied]
+    return len(set(steps)) == len(steps) and all(
+        type(step) is int and 0 <= step <= 2**53 - 1
+        and isinstance(path := entry.get("path"), str) and 0 < len(path) <= 4_096 and "\0" not in path
+        and all(entry.get(side) is None or (isinstance(entry.get(side), str) and _ID.fullmatch(entry[side])) for side in ("before", "after"))
+        and {"before", "after"} <= entry.keys()
+        for step, entry in zip(steps, applied, strict=True)
+    )
+
+
+def _unrecorded(landing: _Landing, applied: list[dict[str, Any]], *, recorded: bool) -> dict[str, Any] | None:
+    """The app's refusal of a forgetting by the helper's own records of the landing, as the app reads them.
+
+    Records that cannot all be read; a step it holds a record of that
+    *applied* leaves out or names for another file; and, for a landing the
+    history does not hold (*recorded* false), a step that still keeps the
+    file it replaced.
+    """
+    if any(path.is_symlink() or (path.exists() and not path.is_dir()) for path in (landing.store, landing.kept)):
+        return RECORDS_UNREAD
+    named = {entry["step"]: entry["path"] for entry in applied}
+    records: dict[int, str] = {}
+    try:
+        steps, names = landing.steps(), os.listdir(landing.kept) if landing.kept.is_dir() else []
+    except OSError:
+        return RECORDS_UNREAD
+    for step in sorted(steps):
+        if (landing.kept / f"{step}.json").is_symlink():
+            return RECORDS_UNREAD
+        try:
+            record = landing.read(step)
+        except _Unreadable:
+            return RECORDS_UNREAD
+        if record is None:
+            continue
+        records[step] = path = record["path"]
+        if named.get(step) != path:
+            return {"error": {"type": "conflict", "message": (
+                f"Step {step} of this landing, of {path}, was applied on this computer, and the steps named to forget the landing leave it out, "
+                "so nothing the landing kept was forgotten"
+            )}}
+    keeping = sorted(int(name) for name in names if _KEPT.fullmatch(name))
+    if recorded or not keeping:
+        return None
+    of = f", of {records[keeping[0]]}," if keeping[0] in records else ""
+    return {"error": {"type": "conflict", "message": (
+        f"Step {keeping[0]} of this landing{of} was neither recorded nor put back on this computer, "
+        "and keeps the file it replaced, so nothing the landing kept was forgotten"
+    )}}
 
 
 def _protected_held(answer: dict[str, Any]) -> dict[str, Any]:
@@ -309,6 +394,7 @@ _SAGA = re.compile(r"[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}")
 _REVISION = re.compile(r"[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+")
 _ID = re.compile(r"[0-9a-f]{40}")
 _STEP = re.compile(r"(0|[1-9][0-9]*)\.json")
+_KEPT = re.compile(r"0|[1-9][0-9]*")
 _MAX_LAND_BYTES = 1 << 30
 _MAX_KEPT_BYTES = 4 << 30
 _HOLD = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW
