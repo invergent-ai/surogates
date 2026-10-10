@@ -8,7 +8,7 @@
 import { join } from "node:path";
 
 import { NUL_REFUSED, valueError } from "./answers.js";
-import { expandUser, inside, realpath } from "./paths.js";
+import { edgeOn, expandUser, inside, ledTo, realpath } from "./paths.js";
 
 const HOME_FILES = [
   ".ssh/authorized_keys", ".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/config", ".bashrc", ".zshrc",
@@ -43,13 +43,14 @@ export const KEY_FOLDERS: ReadonlySet<string> = new Set(PROTECTED_PAIRS.map(([fi
 // next status; so can a hook.
 export const GIT_CONFIGS: ReadonlySet<string> = new Set(["config", "config.worktree", "commondir"]);
 
-const real = (path: string) => realpath(path).path;
-
-// check_write: a refusal for the model, or null. *path* is as the model wrote it.
-export function checkWrite(folder: string, home: string, path: string): string | null {
+// check_write: a refusal for the model, or null. *path* is as the model wrote it: on a copy by the folder's path,
+// *at*, and judged by the name it leads to there.
+export function checkWrite(folder: string, home: string, path: string, at = folder): string | null {
   if (path.includes("\0")) throw valueError(NUL_REFUSED);
   const expanded = expandUser(path, home);
-  const resolved = real(expanded.startsWith("/") ? expanded : `${folder}/${expanded}`);
+  const edge = edgeOn(folder, at);
+  const real = (path: string) => realpath(path, undefined, edge).path;
+  const resolved = ledTo(expanded.startsWith("/") ? expanded : `${at}/${expanded}`, edge).path;
   const files = new Set([...HOME_FILES.map((file) => real(join(home, file))), ...SYSTEM_FILES.map(real)]);
   const folders = [...HOME_FOLDERS.map((name) => join(home, name)), ...SYSTEM_FOLDERS].map((name) => `${real(name)}/`);
   if (files.has(resolved) || folders.some((prefix) => resolved.startsWith(prefix))) {
@@ -58,7 +59,7 @@ export function checkWrite(folder: string, home: string, path: string): string |
   if (SENSITIVE_PREFIXES.some((prefix) => resolved.startsWith(prefix)) || SENSITIVE_PATHS.includes(resolved)) {
     return `Refusing to write to sensitive system path: ${path}\nUse the terminal tool with sudo if you need to modify system files.`;
   }
-  return protectedInFolder(folder, resolved) ? inFolderRefusal(path) : null;
+  return protectedInFolder(at, resolved) ? inFolderRefusal(path) : null;
 }
 
 // Whether a key in the folder names, or lies under, one of srt's protected names.
