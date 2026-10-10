@@ -96,13 +96,26 @@ def test_duplicate_mentions_reported_once():
 
 
 def test_pathological_input_stays_linear():
-    """Many dots must not drive the filename scan quadratic."""
+    """Many dots must not drive the filename scan quadratic: four times the dots cost
+    about four times as much, where a quadratic scan costs sixteen.
+
+    Each cost is the scan's own CPU time, the least of three runs: a busy host slows
+    every run alike, and takes the thread off its CPU without counting that, so the
+    ratio is the scan's and not the host's load.
+    """
     import time
 
-    user = "." * 50_000 + " done"
-    start = time.monotonic()
-    missing_deliverables(user, [])
-    assert time.monotonic() - start < 2.0
+    def cost(dots: int) -> float:
+        user = "." * dots + " done"
+        runs = []
+        for _ in range(3):
+            start = time.thread_time()
+            missing_deliverables(user, [])
+            runs.append(time.thread_time() - start)
+        return min(runs)
+
+    small, large = cost(2_500), cost(10_000)
+    assert large < 8 * small, (small, large)
 
 
 def test_nudge_names_the_missing_files():
