@@ -27,7 +27,10 @@ request writes a file of the folder; a copy cut short in its making is made
 again before anything is read from it; and a push that counted is caught up
 with, a landing's by making the copy the landing's files, before the copy is
 read as anything's base.  So is a clean copy's move to ``main`` that was cut
-between its files and its base.
+between its files and its base.  What history leaves out in a copy, a
+``__pycache__/`` or a ``.env``, outlives the turn that wrote it too: a turn's
+write there is only what is new or written again since the copy last
+started from its base, and never what the harness keeps there.
 
 Nothing a thread made is removed to make its copy again.  A copy that is
 not whole, or a repository that is not, is renamed into the place's
@@ -50,7 +53,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
@@ -131,6 +134,14 @@ _MAKING = ".making"
 _GOING = ".going"
 #: A thread's repository is packed again at its turn's start once it holds more packs than this.
 _PACKS = 20
+#: A file in a thread's repository: what history left out of its copy when the copy last started from its base, each
+#: name with what tells it from a later write of it (:meth:`LocalHistory._remember`).
+_SEEN = "left-out"
+#: The most of that file one request reads.
+_SEEN_BYTES = 64 << 20
+#: How a landing's own commit names each file it left out that no landing writes, its path spelt
+#: as JSON: the copy keeps the thread's version of each (:meth:`LocalHistory.record`).
+_LEFT = "Surogate-Left"
 #: What a thread's copy held of its own when a record or a move made it other files is kept
 #: for the last sixteen times that happened: the oldest goes for one more.
 _ASIDE = 16
@@ -170,7 +181,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "fetch": ("fetch", frozenset({"commits", "saga", "since"})),
     "pickup": ("pickup", frozenset({"author", "trailers"})),
     "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
-    "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup"})),
+    "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup", "left"})),
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
     "forget": ("forget", frozenset({"saga", "applied"})),
 }
@@ -187,6 +198,11 @@ class LocalHistory(History):
 
     excludes: ClassVar[list[str]] = LOCAL_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = LOCAL_PLATFORM
+    # A thread's copy on a computer holds them from its first step on: the
+    # turn's mark and what its tools keep, and the whiteboard's canvas.
+    # Counted as a write history leaves out, they would hold every deletion
+    # of every turn.
+    harness: ClassVar[tuple[str, ...]] = (".surogates-results/", "_whiteboard/")
 
     def __post_init__(self) -> None:
         # The cloud tells a thread's pod its turn so that its copy takes up its helpers' hand-offs by it.
@@ -348,6 +364,8 @@ class LocalHistory(History):
                 shutil.rmtree(self._admin, ignore_errors=True)
                 self.copy.parent.mkdir(parents=True, exist_ok=True)
                 self.making.write_bytes(b"")
+                # A copy made holds nothing history leaves out: what the old one held is no later turn's to be told from.
+                (self.repo / _SEEN).unlink(missing_ok=True)
                 self._git(
                     ["worktree", "add", "-q", "--lock", str(self.copy), f"threads/{self.thread}"],
                     env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
@@ -697,8 +715,8 @@ class LocalHistory(History):
         self._catch_up()
         return super().keep(**step)
 
-    def record(self, **step: Any) -> dict:
-        """The cloud's record, and then the copy is made the landing's files.
+    def record(self, *, left: Sequence[str] = (), **step: Any) -> dict:
+        """The cloud's record, and then the copy is made the landing's files, but for *left*.
 
         A pod is made anew from the landing; a copy here outlives it.  A
         file the landing left out is the newer one in the copy from now on,
@@ -710,19 +728,42 @@ class LocalHistory(History):
         a ref of the thread's repository, and is not one the copy is put
         back to (:meth:`restore`).
 
+        *left* are the files no landing ever writes, a name that runs code
+        or a link's place in the folder, each by its path and never a
+        pattern: nobody else changed them, so each stays in the copy as the
+        turn left it, a file it deleted still gone, and the folder's history
+        records none of them as landed.  They are the thread's work still,
+        for a later turn to land.  The landing's own commit names them, so
+        a record cut after its push leaves them so too, finished by the next
+        act (:meth:`_finish_record`).  A *left* that would keep the thread's
+        version where somebody else changed the file since the turn began,
+        or where a file of theirs is in its way, is refused before anything
+        is pushed (:meth:`_as_landed`).
+
         Safe to repeat wherever ``main`` is by then: no lock is held across
         a computer's absence, so another thread may have landed since a try
         cut after its push.  The landing is found by its saga where the
         thread's own branch has it, and the copy of a thread that has worked
         on since is left alone.
         """
+        if not isinstance(left, (list, tuple)) or not all(_walked(path) for path in left):
+            _refuse("a file it left out has no path in the folder")
+        if any(f"{key}: ".startswith(f"{_LEFT}: ") for key, _ in step["trailers"]):
+            _refuse("a trailer it names is the history's own")
         self._catch_up()
         saga = f"Surogate-Saga: {dict(map(tuple, step['trailers']))['Surogate-Saga']}"
         found = self._landing(self._take())
         if found is not None and saga in found[2]:
             commit = found[0]
         else:
-            commit = super().record(**step)["commit"]
+            if left:
+                # Checked against the very files the landing will record, before anything is pushed.
+                self._fetch(step["main"])
+                landing = self._landed(step["turn"], step["applied"], step.get("pickup") or step["main"] or self._main("rev-parse", MAIN))
+                if self._as_landed(landing, step["turn"], list(left)) is None:
+                    _refuse("a file it left out, or one in its way, was changed by somebody else since the thread's turn began")
+            named = [*step["trailers"], *([_LEFT, json.dumps(path)] for path in left)]
+            commit = super().record(**{**step, "trailers": named})["commit"]
             self._catch_up()
         return {"commit": commit, "set_aside": self._asides().get(step["turn"], (None, None))[1]}
 
@@ -774,11 +815,12 @@ class LocalHistory(History):
         thread's old version of a file the landing left out would be its
         change to the newer one.  The history holds a landing of the
         thread's that :attr:`landed` does not name, and the copy is made its
-        files now.
+        files now, but for those its commit names as left out, which no
+        landing writes: each is as the turn has it (:meth:`_as_landed`).
 
         What the copy holds that is neither the turn's file nor the
         landing's is set aside first, on a ref (:meth:`_set_aside`).  A copy
-        whose index is the landing's already was made so, git writing the
+        whose index is those files already was made so, git writing the
         index last, and is left as it is, with whatever the thread has
         written since.  Safe to cut anywhere: the ref that says it is done
         moves last.  Where it cannot be done the request is refused, and
@@ -800,18 +842,28 @@ class LocalHistory(History):
             return
         if self._ref(self.landed) == found[0]:
             return
-        landing, turn, _ = found
+        landing, turn, message = found
+        left = _left_in(message)
         try:
             # First, and before anything is written: a copy that is not whole is its next open's to make.
             index = self._copy("write-tree")
             self._fetch(landing)
-            if index != self._tree(landing):
+            files = self._as_landed(landing, turn, left)
+            if files is None:
+                # No request records such a landing: the history is not as the platform wrote it.
+                raise HistoryError(
+                    "refused the project's history: a landing names as left out a file somebody else changed since its turn began",
+                    code=HISTORY_REFUSED,
+                )
+            if index != files:
                 self._add_all(self._copy)
                 held = self._copy("write-tree")
                 sides = [commit for commit in (landing, turn) if self._has(commit)]
                 if self._beyond(held, sides):
                     self._set_aside(held, turn, onto=sides[-1])
-                self._copy("read-tree", "-u", "--reset", landing)
+                self._copy("read-tree", "-u", "--reset", files)
+            # Its base is this landing: what the copy holds beside it was there before the next turn.
+            self._remember()
             for ref in (self.branch, self.base, self.synced, self.landed):
                 self._main("update-ref", ref, landing)
         except HistoryError as why:
@@ -821,6 +873,51 @@ class LocalHistory(History):
                 "refused the request: a landing of this thread's is in the history, and its copy "
                 f"could not be made the landing's files: {why}", code=RECORD_UNFINISHED,
             ) from None
+
+    def _as_landed(self, landing: str, turn: str, left: list[str]) -> str | None:
+        """The tree a copy is made after *landing*: its files, but each of *left* as *turn*, the thread's, has it.
+
+        A file the turn deleted is not there, nor one of the landing's where
+        a file of the turn's needs its name for a folder.  The same tree for
+        the same landing at every try, made where a cut leaves nothing the
+        next request reads.
+
+        None where that tree would hold the thread's own over somebody
+        else's.  The copy may differ from the landing only where the
+        landing's file is still the turn's base's: nobody changed it since
+        the turn began.  Anywhere else (another thread's landing, a save of
+        yours picked up, a file of theirs in the way of the thread's) the
+        copy would hold the thread's version, or no file, on a base that has
+        theirs, and its next landing would write that over theirs as its
+        own change.
+        """
+        wanted = set(left)
+        fields = iter(self._main("diff", "--raw", "-z", "--no-renames", "--no-abbrev", landing, turn).split("\0"))
+        entries = []
+        for meta in fields:
+            if not meta:
+                break
+            path = next(fields)
+            if path in wanted:
+                _, mode, _, blob, _ = meta.split(" ")
+                entries.append(f"0 {_ZERO}\t{path}\0" if blob == _ZERO else f"{mode} {blob}\t{path}\0")
+        if not entries:
+            return self._tree(landing)
+        index = self.repo / "left.index"
+        index.unlink(missing_ok=True)
+        env = {"GIT_DIR": str(self.repo), "GIT_INDEX_FILE": str(index)}
+        try:
+            self._git(["read-tree", landing], env=env, cwd=self.repo)
+            # Each in place of whatever of the landing's is in its way: git's index-info replaces it.
+            self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.repo, input="".join(entries))
+            files = self._git(["write-tree"], env=env, cwd=self.repo)
+        finally:
+            index.unlink(missing_ok=True)
+        return None if self._differ(landing, files) & self._differ(f"{turn}^1", landing) else files
+
+    def _differ(self, one: str, other: str) -> set[str]:
+        """The names at which the trees of *one* and *other* differ."""
+        return {name for name in self._main("diff", "--name-only", "--no-renames", "-z", one, other).split("\0") if name}
 
     def _finish_move(self) -> None:
         """Finish a move of the thread's clean copy to ``main`` that was cut after it began.
@@ -857,6 +954,7 @@ class LocalHistory(History):
                 self._copy("read-tree", "-u", "--reset", to)
             for ref in (self.branch, self.base):
                 self._main("update-ref", ref, to)
+            self._remember()
             self._main("update-ref", "-d", self.moving)
         except HistoryError as why:
             if why.code != FAILED:
@@ -909,6 +1007,118 @@ class LocalHistory(History):
                 kept[ref[-40:]] = (ref, commit)
         return kept
 
+    def _excluded(self) -> tuple[list[str], list[str], bool]:
+        """The cloud's, counting only what the copy's turns wrote since it last started from its base.
+
+        A pod's copy starts with nothing history leaves out, so whatever it
+        holds its turn made.  A copy here outlives its turn: a
+        ``__pycache__/``, a ``node_modules/``, a checked-out repository or a
+        ``.env`` an earlier landing found in it is there for good.  Counted
+        again at every landing, it would be said again to be unsaved, and
+        would hold every deletion of every later turn as a move git could
+        not see.  So what the copy held when its base was last set
+        (:meth:`_remember`) is neither said nor counted: only a name that is
+        new since, or one written again since, a folder's by anything in it.
+        What the harness writes is never counted.  Each name is looked up
+        once, by the names git lists, however many files are in them.
+        """
+        excluded, repositories, _ = super()._excluded()
+        seen, now = self._seen(), self._left_out()
+        names = set(seen["names"])
+        fresh = {name for name, token in now.items() if seen["files"].get(name) != token}
+        wrote = any(not name.startswith(self.harness) for name in fresh)
+        return (
+            [name for name in excluded if name not in names or name in fresh],
+            [name for name in repositories if name not in names or name in fresh],
+            wrote,
+        )
+
+    def _left_out(self) -> dict[str, str]:
+        """Each name history leaves out in the copy, with what tells it from a later write of it.
+
+        Listed by git as the cloud's :meth:`_excluded` lists them, by the
+        excludes alone: a file, by its :func:`_state`; or a folder all of
+        which is left out, a ``node_modules/`` or another repository's,
+        which git does not go into, as one name, told apart by the name
+        and the state of everything in it.  A folder's are read by this
+        computer, not git, and never decoded: a name in it that is not
+        UTF-8 counts with the folder, and refuses nothing.  Looked at
+        without following a link.
+        """
+        found: dict[str, str] = {}
+        listed = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory").split("\0")
+        copy = os.open(self.copy, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for name in listed:
+                if not name:
+                    continue
+                if not name.endswith("/"):
+                    try:
+                        found[name] = _state(os.stat(name, dir_fd=copy, follow_symlinks=False))
+                    except OSError:
+                        pass  # gone since it was listed: no file of the copy's now
+                    continue
+                inside = hashlib.sha1()
+                folders = [name.rstrip("/")]
+                while folders:
+                    at = folders.pop()
+                    try:
+                        with os.scandir(os.path.join(self.copy, at)) as entries:
+                            for entry in sorted(entries, key=lambda e: e.name):
+                                if entry.is_dir(follow_symlinks=False):
+                                    folders.append(f"{at}/{entry.name}")
+                                else:
+                                    said = f"{at}/{entry.name}\0{_state(entry.stat(follow_symlinks=False))}\0"
+                                    inside.update(said.encode("utf-8", "surrogateescape"))
+                    except OSError:
+                        inside.update(b"\0unread\0")
+                found[name] = inside.hexdigest()
+        finally:
+            os.close(copy)
+        return found
+
+    def _seen(self) -> dict[str, Any]:
+        """What :meth:`_remember` last wrote, read as data; nothing where it wrote none, or what is there is not it.
+
+        A copy with no note was made since its base was last set, and holds
+        nothing history leaves out that its turns did not write.
+        """
+        nothing: dict[str, Any] = {"names": [], "files": {}}
+        try:
+            fd = os.open(self.repo / _SEEN, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
+            return nothing
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return nothing
+        with open(fd, "rb") as file:
+            try:
+                # One longer than a request reads is cut short, and no note.
+                seen = json.loads(file.read(_SEEN_BYTES))
+            except (ValueError, RecursionError):
+                return nothing
+        names, files = (seen.get("names"), seen.get("files")) if isinstance(seen, dict) else (None, None)
+        if not isinstance(names, list) or not isinstance(files, dict) or not all(isinstance(token, str) for token in files.values()):
+            return nothing
+        return {"names": [name for name in names if isinstance(name, str)], "files": files}
+
+    def _remember(self) -> None:
+        """Write down what history leaves out of the copy now, which has just started from its base.
+
+        Where a record makes the copy the landing's files and where an open
+        moves it to ``main``, and where the next act finishes either that was
+        cut.  Not where a failed turn is kept: nothing of that turn has
+        landed, and what it wrote is still its thread's to land.  Upkeep:
+        where it cannot be written the last note stands, which counts more
+        as written since, never less.  Replaced, never written through.
+        """
+        try:
+            excluded, repositories, _ = super()._excluded()
+            seen = {"names": sorted({*excluded, *repositories}), "files": self._left_out()}
+            _replace(self.repo / _SEEN, json.dumps(seen).encode())
+        except (HistoryError, OSError) as why:
+            logger.warning("What history leaves out of a thread's copy could not be noted, and the last note stands: %s", why)
+
     def forget(self, *, saga: str, applied: list[dict] | None = None) -> dict:
         """Whether what the landing of *saga* kept of the folder's files may be forgotten; refused while it may not.
 
@@ -931,13 +1141,11 @@ class LocalHistory(History):
             _refuse("it names no files a landing applied")
         files = []
         for change in applied:
-            path = PurePosixPath(change["path"])
-            # Spelt as it is walked: from the folder's top, down, each part a name.
-            if path.is_absolute() or not path.parts or ".." in path.parts or str(path) != change["path"]:
+            if not _walked(change["path"]):
                 _refuse("a file it applied has no path in the folder")
             if "before" not in change:
                 _refuse("a file it applied has no version from before it")
-            files.append((path.parts, change["before"]))
+            files.append((PurePosixPath(change["path"]).parts, change["before"]))
         main = self._take().get(MAIN)
         if main is not None and (landing := self._landing_of(saga, main, None)[0]) is not None:
             return {"landing": landing}
@@ -1040,6 +1248,8 @@ class LocalHistory(History):
         self._main("update-ref", self.moving, start)
         self._switch(tip, start)
         self._main("update-ref", self.base, start)
+        # Its base is the folder as it is now: what the copy holds beside it was there before this turn.
+        self._remember()
         self._main("update-ref", "-d", self.moving)
         return True
 
@@ -1153,6 +1363,31 @@ def _utf8(name: str) -> bool:
     return True
 
 
+def _walked(path: object) -> bool:
+    """Whether *path* names a file in the folder as a landing names one: spelt as it is walked, from the folder's top, down, each part a name."""
+    if not (isinstance(path, str) and _utf8(path)) or "\0" in path:
+        return False
+    parts = PurePosixPath(path)
+    return not parts.is_absolute() and bool(parts.parts) and ".." not in parts.parts and str(parts) == path
+
+
+def _left_in(message: list[str]) -> list[str]:
+    """The files a landing's own commit names as left out, each read as data; refused where one is no file of the folder."""
+    left = []
+    for line in message:
+        if line.startswith(f"{_LEFT}: "):
+            try:
+                path = json.loads(line[len(_LEFT) + 2:])
+            except (ValueError, RecursionError):
+                path = None
+            if not _walked(path):
+                raise HistoryError(
+                    "refused the project's history: a landing names as left out what is no file of the folder", code=HISTORY_REFUSED,
+                )
+            left.append(path)
+    return left
+
+
 def _linked(top: Path) -> bool:
     """Whether the repository at *top* holds anything but files and folders: a link, a pipe, a device.
 
@@ -1225,6 +1460,15 @@ def _emptied(name: str, inside: int) -> None:
                 os.unlink(held, dir_fd=folder)
     finally:
         os.close(folder)
+
+
+def _state(found: os.stat_result) -> str:
+    """What tells a file from a later write of it: which file it is, its size and when it was written.
+
+    Not when it last changed otherwise: a link made to it, a new mode, or a
+    move of the folder it is in changes that, and writes nothing.
+    """
+    return f"{found.st_ino}:{found.st_size}:{found.st_mtime_ns}"
 
 
 def _recorded(name: str | Path, *, dir_fd: int | None = None) -> tuple[str, str] | None:
