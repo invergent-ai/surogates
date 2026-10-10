@@ -911,6 +911,23 @@ async def test_only_the_clouds_completed_records_are_a_files_versions(api, tmp_p
     assert await history_of(api, project, "Report.docx", device_id="00000000-0000-4000-8000-000000000000") == []
 
 
+async def test_a_landing_on_a_computer_left_running_is_settled_by_no_pod(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    # A computer's landing of the same file, left running long ago with its apply done: its folder's, not the cloud's.
+    left = await recorded(api, row, saga="saga:computer", saga_state="'running'", device_id="gen_random_uuid()")
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("UPDATE workstream_history SET updated_at = now() - interval '1 hour' WHERE id = :id"), {"id": left})
+        await db.commit()
+    other = await a_thread(api, "Draft B", await master_of(api, project))
+    await edited(pool, other, "echo b > b.md")
+    await ends(api, pool, other)
+    # The next lock holder settled none of it: the cloud's file is as the cloud's landing left it, and the row as it was.
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A" and (pods.project / "b.md").read_text() == "b\n"
+    async with api.app.state.session_factory() as db:
+        found = (await db.execute(select(WorkstreamHistory).where(WorkstreamHistory.id == left))).scalar_one()
+    assert (found.saga_state, found.steps) == ("running", row.steps)
+
+
 async def test_a_project_over_the_file_cap_says_its_history_is_off(api, monkeypatch, tmp_path):
     project, *_ = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
     monkeypatch.setattr(rows_module, "HISTORY_CAP", 1)  # its two files are over it

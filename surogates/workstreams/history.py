@@ -85,14 +85,16 @@ async def project_lock(
 async def start_landing(
     session_factory: Any, saga: Saga, *, workstream_id: UUID | str, thread_id: UUID | None, agent_id: str,
     user_id: UUID | None, tool_saga_id: str | None, events: tuple[int, int] | None,
-    kind: str = "landing", undoes: list[int] | None = None,
+    kind: str = "landing", undoes: list[int] | None = None, device_id: UUID | None = None, folder: str | None = None,
 ) -> int:
     """The row of a landing about to take its first step, the saga ``running``; its id.
 
     *kind* is ``landing`` for a thread's.  A landing by you has no thread:
     ``pickup`` for your edits, pushed alone before a file of them is
     written over, and ``restore`` or ``undo`` for the landing that follows;
-    an Undo names the rows it *undoes*.
+    an Undo names the rows it *undoes*.  A landing in *folder* on the
+    computer *device_id* names both (:mod:`surogates.harness.local_landing`);
+    neither, it is of the project's cloud files.
     """
     async with session_factory() as db, db.begin():
         return (await db.execute(
@@ -100,9 +102,19 @@ async def start_landing(
                 workstream_id=workstream_id, kind=kind, saga_id=saga.saga_id, saga_state="running",
                 steps=saga.to_dict()["steps"], thread_id=thread_id, tool_saga_id=tool_saga_id,
                 events=Range(events[0], events[1], bounds="[]") if events else None,
-                agent_id=agent_id, user_id=user_id, undoes=undoes,
+                agent_id=agent_id, user_id=user_id, undoes=undoes, device_id=device_id, folder=folder,
             ).returning(WorkstreamHistory.id)
         )).scalar_one()
+
+
+async def landing_row(session_factory: Any, saga_id: str) -> WorkstreamHistory | None:
+    """The row of the landing *saga_id*, as it was last written; None where it has none.
+
+    A landing on a computer is named after its turn's invocation, so a turn
+    taken up again after its worker was lost finds the row its first run made.
+    """
+    async with session_factory() as db:
+        return (await db.execute(select(WorkstreamHistory).where(WorkstreamHistory.saga_id == saga_id))).scalar_one_or_none()
 
 
 async def save_landing(
@@ -174,12 +186,20 @@ async def touch_landing(session_factory: Any, row: int) -> None:
 
 
 async def running_landings(session_factory: Any, workstream_id: UUID | str) -> list[tuple[WorkstreamHistory, float]]:
-    """The project's landings still ``running``, oldest first, each with the seconds since its row last changed."""
+    """The landings of the project's cloud files still ``running``, oldest first, each with the seconds since its row last changed.
+
+    A landing in a folder on a computer is that folder's to settle: no pod
+    and no lock of the project's reaches it, and a pod that took one would
+    put its files back in the cloud's.
+    """
     quiet = func.extract("epoch", func.now() - WorkstreamHistory.updated_at)
     async with session_factory() as db:
         rows = await db.execute(
             select(WorkstreamHistory, quiet)
-            .where(WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.saga_state == "running")
+            .where(
+                WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.saga_state == "running",
+                WorkstreamHistory.device_id.is_(None),
+            )
             .order_by(WorkstreamHistory.id)
         )
         return [(row, float(seconds)) for row, seconds in rows.all()]
