@@ -39,10 +39,12 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 from uuid import UUID
 
+from surogates.devices.operations import LeaseLost
 from surogates.governance.saga import SagaOrchestrator, SagaState, SagaStep, StepState, compensate_step
 from surogates.governance.saga.compensator import compensate_history
 from surogates.governance.saga.orchestrator import (
@@ -152,10 +154,16 @@ class _Row:
     step done that is not: an apply it shows ``pending`` may have run, and
     one it shows ``committed`` may have been put back.  Recovery puts both
     back, which is safe to repeat.
+
+    With *held*, a thread and the lease token its writer holds it by, the
+    row is written, marked and dropped only while that is the thread's
+    lease, and :class:`LeaseLost` where it is not: a landing on a computer,
+    which no lock of the project's guards, is its thread's lease holder's.
     """
 
-    def __init__(self, session_factory: Any, row: int, saga: Any) -> None:
-        self._session_factory, self._row, self._saga = session_factory, row, saga
+    def __init__(self, session_factory: Any, row: int, saga: Any, *, held: tuple[UUID, str] | None = None) -> None:
+        self._session_factory, self._row, self._saga, self._held = session_factory, row, saga, held
+        self._fence = {"held": held} if held is not None else {}
         self._due = time.monotonic() + _ROW_EVERY
         #: The state the row holds by this landing's own last write of it; None before any.
         self.state: str | None = None
@@ -163,21 +171,25 @@ class _Row:
     async def write(self, **values: Any) -> None:
         """The steps as they are, and the landing's outcome once it has one."""
         began = time.monotonic()
-        await save_landing(self._session_factory, self._row, self._saga, **values)
+        self._fenced(await save_landing(self._session_factory, self._row, self._saga, **values, **self._fence))
         self.state = values.get("state", "running")
         done = time.monotonic()
         self._due = done + max(_ROW_EVERY, _ROW_SHARE * (done - began))
 
     async def drop(self) -> None:
         """Take the row away: its landing changed no file."""
-        await drop_landing(self._session_factory, self._row)
+        self._fenced(await drop_landing(self._session_factory, self._row, **self._fence))
 
     async def alive(self) -> None:
         """Mark the row alive, with its steps when they were last written long enough ago."""
         if time.monotonic() >= self._due:
             await self.write()
         else:
-            await touch_landing(self._session_factory, self._row)
+            self._fenced(await touch_landing(self._session_factory, self._row, **self._fence))
+
+    def _fenced(self, written: bool | None) -> None:
+        if self._held is not None and not written:
+            raise LeaseLost(self._held[0])
 
 
 async def _call(sandbox_pool: Any, owner: str, action: str, **arguments: Any) -> dict:
@@ -1009,6 +1021,7 @@ class _Unseen(Exception):
 
 async def _tell_escalated(
     session_factory: Any, thread_id: Any, saga: Any, at_issue: list[str], *, redis: Any = None,
+    waits: Callable[[Any, list[str]], dict] | None = None,
 ) -> None:
     """Report a landing a settle left ``escalated`` to its thread's master, as a turn's own is reported.
 
@@ -1021,7 +1034,9 @@ async def _tell_escalated(
     each later lock holder, and told by the first.  As best it can: the
     row reads ``escalated`` whatever comes of the telling.  Both are
     written through a store that has *redis*, so the project's stream
-    names them as it names a turn's own.
+    names them as it names a turn's own.  *waits* words the wait the
+    thread puts on you, given the thread and the files: where None, as
+    the cloud's files are worded (:func:`waiting_on_you`).
     """
     from sqlalchemy import select
 
@@ -1043,7 +1058,10 @@ async def _tell_escalated(
         if told is not None:
             return
         # Its thread waits on you over those files, whichever lock holder found it so.
-        await store.emit_event(thread_id, EventType.INBOX_ACTION_REQUIRED, waiting_on_you(at_issue, escalated=True))
+        await store.emit_event(
+            thread_id, EventType.INBOX_ACTION_REQUIRED,
+            waits(thread, at_issue) if waits is not None else waiting_on_you(at_issue, escalated=True),
+        )
         await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
             "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
             "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in at_issue],
@@ -1059,11 +1077,15 @@ async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
 
     A write that fails is caught up by the next, or by the next lock
     holder's settle, which puts the files back again, or finds the landing
-    pushed again: both are safe to repeat.
+    pushed again: both are safe to repeat.  Not one its lease's holder
+    refused (:class:`LeaseLost`): the row is no longer its writer's, who
+    stands down.
     """
     for _ in range(tries):
         try:
             return await write(**values)
+        except LeaseLost:
+            raise
         except Exception:
             logger.warning("A landing's row was not written", exc_info=True)
 

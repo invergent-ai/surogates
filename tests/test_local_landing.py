@@ -102,6 +102,9 @@ def report(**data) -> str:
     ("unwritten", "its record on the server could not be written"),
     ("busy", "another chat was landing in its folder for longer than a landing waits"),
     ("unanswered", "its computer did not answer"),
+    ("settling", (
+        "a landing left unfinished in its folder had recorded, and the server could not write that down, so nothing lands there until it can"
+    )),
 ])
 def test_a_report_says_why_a_landing_on_a_computer_did_not_land_and_that_its_work_is_in_its_copy(reason, words):
     said = report(landing="compensated", landing_reason=reason)
