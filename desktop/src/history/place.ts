@@ -5,7 +5,8 @@
 //       history.git/               the folder's history
 //       clones/<thread>/           a thread's own repository
 //       threads/<thread>/          the thread's copy, which is also its root's share
-//   <data>/history/<key>.json      which folder it is the history of
+//   <data>/history/<key>.json      which folder it is the history of: its path, and its device's
+//                                  and its file's numbers as digits
 //   <data>/landings/<key>/         what a landing keeps of the files it replaces, until it is recorded
 //
 // <key> is the checkpoint manager's (surogates/tools/utils/checkpoint_manager.py,
@@ -39,6 +40,9 @@ import type { Folder, Place } from "../vm/manager.js";
 const LOOK_MS = 5_000;
 
 const NOT_THE_APPS = "This folder's history is not a folder of the app's own";
+// How often one ask looks again at a place that was changed while it waited for the folder's look or for the
+// sandbox: another thread's ask changes it once, and then it is the folder's own.
+const TURNS = 8;
 
 // The folder is not the one its thread was bound to: another folder, a link, or nothing is at its path now.
 export class FolderReplaced extends Error {}
@@ -94,11 +98,19 @@ interface Recorded {
   boot: string;
 }
 
-const isRecorded = (value: unknown): value is Recorded => {
-  const record = value as Recorded | null;
-  return typeof record === "object" && record !== null && typeof record.path === "string" && Number.isSafeInteger(record.dev)
-    && Number.isSafeInteger(record.ino) && typeof record.boot === "string";
-};
+// A device's or a file's number as a record holds it: its digits, whole. A binding keeps each as the number
+// stat gave, past 2^53 too, where SMB, CIFS and overlayfs give them (journal/bindings.ts), and a record keeps the
+// same number: none is written or read as a fraction, which would round it. Null for what is no whole number.
+const digitsOf = (value: number): string | null => (Number.isInteger(value) ? BigInt(value).toString() : null);
+const DIGITS = /^-?[0-9]{1,309}$/;
+
+// The number a record's digits are, where they are those of a number a binding can hold, spelt as digitsOf
+// spells it: it began as that number, so Number() gives it back exactly. Null for anything else.
+function numberOf(digits: unknown): number | null {
+  if (typeof digits !== "string" || !DIGITS.test(digits)) return null;
+  const value = Number(BigInt(digits));
+  return digitsOf(value) === digits ? value : null;
+}
 
 // Whether the folder at *path* is *other*, or lies in it: both real paths.
 const within = (path: string, other: string) => path === other || path.startsWith(other.endsWith(sep) ? other : other + sep);
@@ -126,15 +138,17 @@ function textOf(record: string): string | null {
 // Which folder a record says its place is the history of; null for one that cannot be read.
 function recordedIn(text: string | null): Recorded | null {
   try {
-    const recorded: unknown = text === null ? null : JSON.parse(text);
-    return isRecorded(recorded) ? recorded : null;
+    const record = (text === null ? null : JSON.parse(text)) as { path?: unknown; dev?: unknown; ino?: unknown; boot?: unknown } | null;
+    if (typeof record !== "object" || record === null || typeof record.path !== "string" || typeof record.boot !== "string") return null;
+    const [dev, ino] = [numberOf(record.dev), numberOf(record.ino)];
+    return dev === null || ino === null ? null : { path: record.path, dev, ino, boot: record.boot };
   } catch {
     return null;
   }
 }
 
 // Whole or not at all, and on disk before any history is made in the place.
-function write(record: string, recorded: Recorded): void {
+function write(record: string, recorded: { path: string; dev: string; ino: string; boot: string }): void {
   const temp = `${record}.${process.pid}`;
   const fd = openSync(temp, "w", 0o600);
   try {
@@ -201,10 +215,17 @@ function stamped(paths: string[]): string {
  * is set aside only once *options.letGo* has settled for it: the answer then says which place was
  * renamed, and where it and what its landings kept are now. For a thread bound to a folder that is
  * no longer the one at its path it rejects with FolderReplaced, and nothing is made or renamed.
- * Any other rejection says why this folder has no place, in words for a person.
+ *
+ * One ask makes at most one place and sets aside at most one, whatever it then reads: a place it
+ * made that is not found to be this folder's is left as it is, and the ask rejects. So does one
+ * whose place was changed each time it waited. Any rejection but FolderReplaced says why this
+ * folder has no place, in words for a person.
  */
 export async function placeOf(dataDir: string, bound: BoundFolder, options: PlaceOptions): Promise<Placed> {
   const key = keyOf(bound.folder);
+  const [dev, ino] = [digitsOf(bound.dev), digitsOf(bound.ino)];
+  // No folder has such numbers, and no record could say that a place is its history.
+  if (dev === null || ino === null) throw new Error(`The folder ${bound.folder} was bound with no device and file number of a folder's, so it has no history`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const data = realpathSync(dataDir);
   // Apart from the folder, both ways: in a folder that held the app's data, the place's own files would
@@ -217,14 +238,19 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
   const record = join(histories, `${key}.json`);
   const kept = join(data, "landings", key);
   const real: Folder = { path: bound.folder, dev: bound.dev, ino: bound.ino, boot: bound.boot };
-  let aside: Placed["aside"];
-  for (;;) {
+  const place: Place = { key, history, real };
+  // The place as it lies: its folder, its record as text, which folder that names, and whether it is this one.
+  const read = () => {
     const there = own(histories) && own(history) ? lstatSync(history).ino : null;
     const text = textOf(record);
     const recorded = recordedIn(text);
     // One folder's, whichever of the two was read in an earlier boot: only an identity read in this one says which device it is on.
     const same = recorded !== null && recorded.path === bound.folder && (confirmedFolder(recorded, bound) || confirmedFolder(bound, recorded));
-    if (there !== null && same) return { place: { key, history, real }, ...(aside ? { aside } : {}) };
+    return { there, text, recorded, found: there !== null && same, lost: there === null && same };
+  };
+  for (let turn = 0; turn < TURNS; turn += 1) {
+    const { there, text, recorded, found, lost } = read();
+    if (found) return { place };
     if (!(await live(bound, options))) throw new FolderReplaced(`The folder ${bound.folder} is not the one this thread was bound to`);
     // The place as the sandbox may hold it: the recorded folder's, or this folder's where no record says.
     const was: Place = { key, history, real: recorded ? { path: recorded.path, dev: recorded.dev, ino: recorded.ino, boot: recorded.boot } : real };
@@ -233,6 +259,7 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     // folder may have done all of this. From here to the place's making nothing waits.
     if ((lstatSync(history, { throwIfNoEntry: false })?.ino ?? null) !== there || textOf(record) !== text) continue;
     const stamp = stamped([history, kept]);
+    let aside: Placed["aside"];
     if (there !== null) {
       renameSync(history, `${history}${stamp}`);
       if (text !== null) renameSync(record, `${history}${stamp}.json`);
@@ -240,13 +267,18 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     }
     // What the landings of a place before this one kept is that folder's, and goes aside with it. Where only the
     // place's own folder was lost, its record still names this folder, and what its landings kept is its own.
-    if (!(there === null && same) && lstatSync(kept, { throwIfNoEntry: false }) !== undefined) {
+    if (!lost && lstatSync(kept, { throwIfNoEntry: false }) !== undefined) {
       renameSync(kept, `${kept}${stamp}`);
       if (aside) aside.kept = `${kept}${stamp}`;
     }
     if (there === null && !own(histories)) mkdirSync(histories, { mode: 0o700 });
     // The record first: cut between the two, the place is made at the next ask, and none is ever found without its record.
-    write(record, { path: bound.folder, dev: bound.dev, ino: bound.ino, boot: bound.boot });
+    write(record, { path: bound.folder, dev, ino, boot: bound.boot });
     mkdirSync(history, { mode: 0o700 });
+    // Read as the next ask will read it. This ask has made its one place: one that is not found to be this
+    // folder's is left as it is, and nothing more is renamed for it.
+    if (read().found) return { place, ...(aside ? { aside } : {}) };
+    throw new Error(`This computer could not record which folder the history of ${bound.folder} belongs to, so it was not used`);
   }
+  throw new Error(`The history of the folder ${bound.folder} was changed each time it was looked at, so it was not found`);
 }

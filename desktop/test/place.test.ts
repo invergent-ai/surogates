@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID, checkFolder } from "../src/binding/folder.js";
 import { copyOf, FolderReplaced, keptOf, keyOf, type Looked, placeOf, type PlaceOptions } from "../src/history/place.js";
+import { OperationJournal } from "../src/journal/journal.js";
 import type { Place } from "../src/vm/manager.js";
 
 const THREAD = "44444444-4444-4444-8444-444444444444";
@@ -31,6 +32,23 @@ const CUT = `data:text/javascript,${encodeURIComponent(`
         process.kill(process.pid, "SIGKILL");
         for (;;);
       }
+      return real(...args);
+    };
+  }
+  syncBuiltinESMExports();
+`)}`;
+// Loaded the same way: every record is written as what no record is, so that none reads back as its folder's.
+// With a stop of its own: the process ends at the sixth place made or set aside, however the ask goes on.
+const GARBLED = `data:text/javascript,${encodeURIComponent(`
+  import fs from "node:fs";
+  import { syncBuiltinESMExports } from "node:module";
+  const write = fs.writeFileSync;
+  fs.writeFileSync = (file, data, ...rest) => write(file, typeof file === "number" && String(data).startsWith("{") ? "{" : data, ...rest);
+  let done = 0;
+  for (const name of ["mkdirSync", "renameSync"]) {
+    const real = fs[name];
+    fs[name] = (...args) => {
+      if (/\\/history\\/[0-9a-f]{16}(\\.was-[0-9]+)?$/.test(String(args[name === "mkdirSync" ? 0 : 1])) && ++done > 5) process.exit(97);
       return real(...args);
     };
   }
@@ -78,6 +96,9 @@ const replaced = (to = "Documents.old") => {
   mkdirSync(folder);
 };
 const histories = () => readdirSync(join(data, "history")).sort();
+// A place's record as it is written: which folder, its device's and its file's numbers digit for digit.
+const recordOf = ({ path, dev, ino, boot }: { path: string; dev: number; ino: number; boot: string }) =>
+  JSON.stringify({ path, dev: BigInt(dev).toString(), ino: BigInt(ino).toString(), boot });
 // Everything under *dir*, as paths from it.
 const tree = (dir: string) => (existsSync(dir) ? (readdirSync(dir, { recursive: true }) as string[]).sort() : []);
 
@@ -102,9 +123,7 @@ describe("a folder's place in the app's data", () => {
     expect(await placeOf(data, bound(), sandbox)).toEqual({ place: first });
     expect(histories()).toEqual([first.key, `${first.key}.json`]);
     // What it is the history of is kept beside it, where the guest, which is given the place, cannot write.
-    expect(JSON.parse(readFileSync(join(data, "history", `${first.key}.json`), "utf8"))).toEqual({
-      path: folder, dev: statSync(folder).dev, ino: statSync(folder).ino, boot: BOOT_ID,
-    });
+    expect(readFileSync(join(data, "history", `${first.key}.json`), "utf8")).toBe(recordOf({ path: folder, ...statSync(folder), boot: BOOT_ID }));
     expect(existsSync(join(first.history, "history.git"))).toBe(true);
     // The folder is not looked at for a place that is its own: one that does not answer holds nothing up.
     expect(await placed(bound(), { ...sandbox, look: () => new Promise<Looked>(() => {}) })).toEqual(first);
@@ -214,12 +233,12 @@ describe("a folder's place in the app's data", () => {
     // Cut after its record was written, before its folder was made; or its folder alone was lost since. What its
     // landings kept is this folder's own, by its record: a landing cut short in it is still put back from there.
     mkdirSync(join(data, "history"), { mode: 0o700 });
-    writeFileSync(join(data, "history", `${key}.json`), JSON.stringify({ path: folder, dev, ino, boot }));
+    writeFileSync(join(data, "history", `${key}.json`), recordOf({ path: folder, dev, ino, boot }));
     lost();
     const place = await placed();
     expect([readdirSync(place.history), tree(keptOf(data, place))]).toEqual([[], ["saga-1", "saga-1/0"]]);
     // With no record of whose it was, or another folder's, what was kept is not this folder's: set aside, and kept.
-    for (const [nth, record] of [null, JSON.stringify({ path: folder, dev, ino: ino + 1, boot })].entries()) {
+    for (const [nth, record] of [null, recordOf({ path: folder, dev, ino: ino + 1, boot })].entries()) {
       lost();
       if (record === null) rmSync(join(data, "history", `${key}.json`));
       else writeFileSync(join(data, "history", `${key}.json`), record);
@@ -287,6 +306,140 @@ describe("an ask for a folder's place, cut short by a kill", () => {
   });
 });
 
+describe("one ask for a folder's place", () => {
+  // The most the sandbox is asked in one of these tests: past it the ask is ended, so that one that goes round
+  // and round fills no disk.
+  const MOST = 3;
+  // A sandbox that counts what it is asked, and a look that answers the folder as *binding* holds it, whatever
+  // numbers those are.
+  const counting = (binding: ReturnType<typeof bound>, most = MOST) => {
+    const counts = { letGo: 0, looks: 0 };
+    const options: PlaceOptions = {
+      letGo: () => {
+        counts.letGo += 1;
+        return counts.letGo > most ? Promise.reject(new Error("the test ends the ask here")) : Promise.resolve(true);
+      },
+      look: () => {
+        counts.looks += 1;
+        return Promise.resolve({ found: { directory: true, dev: binding.dev, ino: binding.ino }, real: binding.folder });
+      },
+    };
+    return { counts, options };
+  };
+  const setAside = () => histories().filter((name) => /\.was-[0-9]+$/.test(name));
+
+  it.each([
+    // The journal's own (journal.test.ts, "read back a folder whose device and inode numbers are past 2^53").
+    ["as the journal's own test has them", 2 ** 53 + 4, 2 ** 53 + 2, "9007199254740996", "9007199254740994"],
+    ["the largest a device and a file have", 2 ** 64 - 2 ** 11, 2 ** 64 - 2 ** 11, "18446744073709549568", "18446744073709549568"],
+    ["a device's alone", 2 ** 62, 7, "4611686018427387904", "7"],
+  ])("answers, and makes one place, for a folder whose device and file numbers are past 2^53: %s", async (_which, dev, ino, devDigits, inoDigits) => {
+    const large = { folder, dev, ino, boot: BOOT_ID };
+    const { counts, options } = counting(large);
+    const key = keyOf(folder);
+    expect(await placeOf(data, large, options)).toEqual({ place: { key, history: join(data, "history", key), real: { path: folder, dev, ino, boot: BOOT_ID } } });
+    // Nothing was set aside for it, and the sandbox was asked nothing.
+    expect([counts.letGo, histories()]).toEqual([0, [key, `${key}.json`]]);
+    // Its record holds each number whole, digit for digit: none is rounded on its way there.
+    expect(JSON.parse(readFileSync(join(data, "history", `${key}.json`), "utf8"))).toEqual({ path: folder, dev: devDigits, ino: inoDigits, boot: BOOT_ID });
+    // And back: the binding as the journal keeps it and reads it finds the place by its record alone, with no look.
+    const journal = new OperationJournal(join(base, "journal.sqlite"));
+    journal.bindings.add({ root: THREAD, nonce: "n", folder, dev, ino, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const kept = journal.bindings.get(THREAD)!;
+    journal.close();
+    expect([kept.dev, kept.ino]).toEqual([dev, ino]);
+    mkdirSync(join(data, "history", key, "history.git"));
+    for (let again = 0; again < 3; again += 1) expect((await placeOf(data, kept, options)).place.history).toBe(join(data, "history", key));
+    expect([counts, histories(), readdirSync(join(data, "history", key))]).toEqual([{ letGo: 0, looks: 1 }, [key, `${key}.json`], ["history.git"]]);
+  });
+
+  it("has no place for a binding whose numbers are no folder's, and makes nothing for it", async () => {
+    for (const [dev, ino] of [[1.5, 7], [7, Number.NaN], [Number.POSITIVE_INFINITY, 7]] as const) {
+      const none = { folder, dev, ino, boot: BOOT_ID };
+      const { counts, options } = counting(none);
+      await expect(placeOf(data, none, options)).rejects.toThrow("was bound with no device and file number of a folder's");
+      expect([counts.letGo, tree(data)]).toEqual([0, []]);
+    }
+  });
+
+  it.each([
+    ["what is no JSON", () => "{"],
+    ["nothing", () => ""],
+    ["null", () => "null"],
+    ["a list", () => "[]"],
+    ["its numbers as numbers, which a reader may round", () => JSON.stringify({ path: folder, ...bound() })],
+    ["digits that are no number a binding holds", () => JSON.stringify({ path: folder, dev: "9007199254740993", ino: String(bound().ino), boot: BOOT_ID })],
+    ["a number with a nought before it", () => JSON.stringify({ path: folder, dev: `0${bound().dev}`, ino: String(bound().ino), boot: BOOT_ID })],
+    ["a number with a sign before it", () => JSON.stringify({ path: folder, dev: String(bound().dev), ino: `+${bound().ino}`, boot: BOOT_ID })],
+    ["no boot", () => JSON.stringify({ path: folder, dev: String(bound().dev), ino: String(bound().ino) })],
+  ])("sets a place whose record holds %s aside once, makes this folder's once, and answers", async (_what, text) => {
+    const first = await placed();
+    mkdirSync(join(first.history, "history.git"));
+    writeFileSync(join(data, "history", `${first.key}.json`), text());
+    const { counts, options } = counting(bound());
+    const { place, aside } = await placeOf(data, bound(), options);
+    expect([counts.letGo, setAside(), readdirSync(place.history)]).toEqual([1, [aside!.history.split("/").pop()], []]);
+    expect(readdirSync(aside!.history)).toEqual(["history.git"]);
+    // Asked again, it is the folder's own: nothing more is set aside, and the sandbox is asked nothing more.
+    for (let again = 0; again < 3; again += 1) expect(await placeOf(data, bound(), options)).toEqual({ place });
+    expect([counts.letGo, setAside().length, readFileSync(join(data, "history", `${first.key}.json`), "utf8")]).toEqual([1, 1, recordOf({ path: folder, ...bound() })]);
+  });
+
+  it("takes no digits that only round to the folder's number for the folder's", async () => {
+    const large = { folder, dev: 7, ino: 2 ** 53, boot: BOOT_ID };
+    const { counts, options } = counting(large);
+    const { place } = await placeOf(data, large, options);
+    mkdirSync(join(place.history, "history.git"));
+    // One more than the folder's: a number no binding holds, which a reader that rounds would take for the folder's.
+    writeFileSync(join(data, "history", `${place.key}.json`), JSON.stringify({ path: folder, dev: "7", ino: "9007199254740993", boot: BOOT_ID }));
+    const { aside } = await placeOf(data, large, options);
+    expect([counts.letGo, readdirSync(aside!.history), readdirSync(place.history)]).toEqual([1, ["history.git"], []]);
+  });
+
+  // One ask, in a process of its own in which no record that is written reads back as any folder's.
+  const garbled = () => {
+    const asked = spawnSync(process.execPath, ["--import", GARBLED, "--input-type=module", "-e", `
+      const { placeOf } = await import(process.argv[1]);
+      let letGo = 0;
+      const answer = await placeOf(process.argv[2], JSON.parse(process.argv[3]), { letGo: () => Promise.resolve(letGo += 1) })
+        .then((placed) => ({ placed }), (error) => ({ rejected: error.message }));
+      console.log(JSON.stringify({ ...answer, letGo }));
+    `, BUILT, data, JSON.stringify(bound())], { env: { PATH: process.env.PATH }, encoding: "utf8" });
+    expect([asked.status, asked.signal], asked.stderr).toEqual([0, null]);
+    return JSON.parse(asked.stdout) as { placed?: unknown; rejected?: string; letGo: number };
+  };
+
+  it("makes at most one place and sets aside at most one where the record it writes does not read back, and says so", async () => {
+    const refusal = `This computer could not record which folder the history of ${folder} belongs to, so it was not used`;
+    // With no place yet: one is made, found not to be the folder's, and left; nothing is renamed.
+    expect(garbled()).toEqual({ rejected: refusal, letGo: 0 });
+    expect([histories(), setAside()]).toEqual([[keyOf(folder), `${keyOf(folder)}.json`], []]);
+    // With another folder's place there: that one is set aside, once, and one is made.
+    rmSync(join(data, "history"), { recursive: true });
+    const first = await placed();
+    mkdirSync(join(first.history, "history.git"));
+    replaced();
+    expect(garbled()).toEqual({ rejected: refusal, letGo: 1 });
+    expect([setAside().length, readdirSync(join(data, "history", setAside()[0]!)), readdirSync(first.history)]).toEqual([1, ["history.git"], []]);
+  });
+
+  it("gives up, in words, on a place that is changed each time the sandbox lets it go, and renames nothing", async () => {
+    const first = await placed();
+    mkdirSync(join(first.history, "history.git"));
+    replaced();
+    const record = join(data, "history", `${first.key}.json`);
+    const { counts, options } = counting(bound(), 50);
+    const changing: PlaceOptions = { ...options, letGo: async (place) => {
+      // Another thread's ask, as it seems: the record is another's again by the time the sandbox has let go.
+      writeFileSync(record, recordOf({ path: join(base, `Elsewhere-${counts.letGo}`), dev: 1, ino: 1, boot: BOOT_ID }));
+      return options.letGo(place);
+    } };
+    await expect(placeOf(data, bound(), changing)).rejects.toThrow(`The history of the folder ${folder} was changed each time it was looked at, so it was not found`);
+    expect(counts.letGo).toBeLessThanOrEqual(8);
+    expect([setAside(), readdirSync(first.history)]).toEqual([[], ["history.git"]]);
+  });
+});
+
 describe("another folder at the path of one that has a place", () => {
   let first: Place;
   let was: ReturnType<typeof bound>;
@@ -315,7 +468,7 @@ describe("another folder at the path of one that has a place", () => {
     });
     expect(histories()).toEqual([first.key, `${first.key}.json`, `${first.key}.was-${stamp}`, `${first.key}.was-${stamp}.json`]);
     expect(readdirSync(aside!.history)).toEqual(["history.git"]);
-    expect(JSON.parse(readFileSync(`${aside!.history}.json`, "utf8"))).toEqual({ path: folder, dev: was.dev, ino: was.ino, boot: BOOT_ID });
+    expect(readFileSync(`${aside!.history}.json`, "utf8")).toBe(recordOf({ path: folder, dev: was.dev, ino: was.ino, boot: BOOT_ID }));
     expect(readFileSync(join(aside!.kept!, "saga-1", "0"), "utf8")).toBe("a file of the first folder\n");
     // The new one holds nothing of the old: no history, and nothing a landing kept.
     expect([readdirSync(second.history), existsSync(keptOf(data, second)), statSync(second.history).mode & 0o777]).toEqual([[], false, 0o700]);
@@ -431,7 +584,7 @@ describe("another folder at the path of one that has a place", () => {
     await expect(placeOf(data, bound(), noFolder)).rejects.toThrow(FolderReplaced);
     expect(histories()).toEqual([first.key, `${first.key}.json`]);
     // A record with this folder's numbers and another folder's path is another folder's.
-    writeFileSync(record, JSON.stringify({ path: join(base, "Elsewhere"), dev, ino, boot }));
+    writeFileSync(record, recordOf({ path: join(base, "Elsewhere"), dev, ino, boot }));
     const { aside } = await placeOf(data, bound(), sandbox);
     expect(aside?.place.real).toEqual({ path: join(base, "Elsewhere"), dev, ino, boot });
   });
@@ -461,12 +614,12 @@ describe("another folder at the path of one that has a place", () => {
     const earlier = { ...now, dev: now.dev + 1, boot: "an-earlier-boot" };
     // Its record from this boot, and a thread bound in an earlier one; then the other way round.
     expect((await placeOf(data, earlier, sandbox))).toEqual({ place: { ...first, real: { path: folder, dev: earlier.dev, ino: earlier.ino, boot: earlier.boot } } });
-    writeFileSync(record, JSON.stringify({ path: folder, dev: earlier.dev, ino: earlier.ino, boot: earlier.boot }));
+    writeFileSync(record, recordOf({ path: folder, dev: earlier.dev, ino: earlier.ino, boot: earlier.boot }));
     expect(await placeOf(data, now, sandbox)).toEqual({ place: first });
     expect(await placeOf(data, earlier, sandbox)).toMatchObject({ place: { history: first.history } });
     expect([histories(), readdirSync(first.history), letGo]).toEqual([[first.key, `${first.key}.json`], ["history.git"], []]);
     // In one boot a device's number says which folder it is: another under the same number of a file is another folder.
-    writeFileSync(record, JSON.stringify({ path: folder, dev: now.dev + 1, ino: now.ino, boot: BOOT_ID }));
+    writeFileSync(record, recordOf({ path: folder, dev: now.dev + 1, ino: now.ino, boot: BOOT_ID }));
     expect((await placeOf(data, now, sandbox)).aside?.history).toMatch(/\.was-[0-9]+$/);
   });
 
