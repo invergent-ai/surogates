@@ -12,7 +12,7 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { copyOf, keptOf, placeOf } from "../src/history/place.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { sandboxPolicy } from "../src/hosts/policy.js";
-import { LANDING_READY_MS, noCopyAt, READY_MS, type Start, startOn } from "../src/hosts/start.js";
+import { noCopyAt, READY_MS, type Start, startOn } from "../src/hosts/start.js";
 
 const KEY = "0123456789abcdef";
 const THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
@@ -436,16 +436,9 @@ describe("what a file helper is started with", () => {
     expect(started({})).not.toHaveProperty("only");
     expect(started({ folder: copy, at: folder })).toMatchObject({ commands: true, readyMs: READY_MS });
     expect(started({ folder: copy, at: folder })).not.toHaveProperty("only");
-    expect(started({ landing: { copy, kept } })).toMatchObject({ commands: false, only: "land", readyMs: LANDING_READY_MS });
-  });
-
-  it("has as long to be ready, for a landing, as a put-back of the largest file a folder's landings keep takes on a slow disk", () => {
-    // What a chat's helper has is what it had: it does nothing before it is ready.
+    // A landing's helper has as long to be ready as a chat's: it puts back what a step cut short in the first step it is asked.
+    expect(started({ landing: { copy, kept } })).toMatchObject({ commands: false, only: "land", readyMs: READY_MS });
     expect(READY_MS).toBe(15_000);
-    // A landing's puts back what a step cut short left first: a copy of the file the step replaced, of up to the
-    // 4 GiB a folder's landings keep, where the app's data is on another filesystem than the folder. Measured on a
-    // server's own disk, at some 230 MiB a second, that took 17.9 s. At 2 MiB a second it takes 2,048 s.
-    expect(LANDING_READY_MS).toBe(15_000 + 2_048_000);
   });
 });
 

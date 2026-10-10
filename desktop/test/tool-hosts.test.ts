@@ -17,7 +17,6 @@ import { keyOf } from "../src/history/place.js";
 import type { Binding } from "../src/journal/bindings.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
-import { LANDING_READY_MS } from "../src/hosts/start.js";
 import {
   APP_DIRS, type BoundFolder, CANCELLED, folderBusy, forkHost, type Guard, HOST_STOPPED, type HostProcess, LAND_WAIT_MS, NODE, NOT_BOUND, nothingToLand, QUIT_STEP_MS,
   RETIRE_STEP_MS, START_TIMEOUT_MS, type ThreadCopies, ToolHosts, type ToolHostsOptions,
@@ -1358,7 +1357,7 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(closed).toEqual([{ handle: { root: ROOT_A }, gone: 1, released: [] }]);
   });
 
-  it("gives a landing's host its wait for the folder, its helper's put-back of what a landing cut short, and a host's own time to start", async () => {
+  it("gives a landing's host its wait for the folder and a host's own time to start: its helper puts back what a landing cut short in a step, not in its start", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const executor = threads({ spawnHost: spawnHost(onStop) });
@@ -1366,7 +1365,7 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
       void executor.land(landing("revisions", { paths: [] }), signal()).then((outcome) => {
         answered = outcome;
       });
-      const bound = LAND_WAIT_MS + LANDING_READY_MS + START_TIMEOUT_MS;
+      const bound = LAND_WAIT_MS + START_TIMEOUT_MS;
       await vi.advanceTimersByTimeAsync(bound - 1);
       expect([answered, fakes[0]?.killed]).toEqual([null, 0]);
       await vi.advanceTimersByTimeAsync(1);
@@ -1797,8 +1796,8 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
   const told = (root = ROOT_A) => join(base, "data", "tmp", `${root}.land`);
   // Loaded into a landing's file helper before its own code: at the first link that gives a.txt its name, it is held
   // there until the test says go, or ends there as a kill does. In an apply, that is the second of its two renames,
-  // the user's file moved aside and its name empty; in a helper's start, it is its put-back of what a step cut short
-  // left, before it says it is ready. Once a helper, and for at most 20 s.
+  // the user's file moved aside and its name empty; in a helper's first step, it is its put-back of what a step cut
+  // short left. Once a helper, and for at most 20 s.
   const BETWEEN = `data:text/javascript,${encodeURIComponent(`
     import fs from "node:fs";
     import { syncBuiltinESMExports } from "node:module";
@@ -2002,7 +2001,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     landed(folder, before);
   });
 
-  it("puts back the user's file at its name, when the next landing's host starts, after a helper killed between an apply's two renames", async () => {
+  it("puts back the user's file at its name, in the first step of the next landing's host, after a helper killed between an apply's two renames", async () => {
     const folder = changed();
     const executor = threads({ spawnHost: upset() });
     arm("kill");
@@ -2013,7 +2012,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     // The name is empty, and the user's file lies beside it under a name of the landing's own.
     const beside = readdirSync(folder).filter((name) => name.startsWith(".surogate-"));
     expect([existsSync(join(folder, "a.txt")), beside.length, beside.some((name) => lstatSync(join(folder, name)).ino === was)]).toEqual([false, 2, true]);
-    // The next landing's host puts it back before it is ready, and says so.
+    // The next landing's host puts it back in its first step, and says so.
     expect(await executor.land(step("recover"), signal())).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
     expect(lies(folder)).toEqual(before);
     expect(lstatSync(join(folder, "a.txt")).ino).toBe(was);
@@ -2026,8 +2025,8 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     const before = lies(folder);
     expect(await executor.land(await looked(executor), signal())).toEqual(HOST_STOPPED);
     await until(() => exits === 1);
-    // The next landing's helper is held inside its put-back, before it says it is ready; and the step its host was
-    // started for is cancelled meanwhile.
+    // The next landing's helper is held inside its put-back, in the step its host was started for; and that step is
+    // cancelled meanwhile.
     arm("hold");
     const cancel = new AbortController();
     const recovering = executor.land(step("recover"), cancel.signal);
@@ -2038,7 +2037,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect([exits, existsSync(join(folder, "a.txt"))]).toEqual([1, false]);
     writeFileSync(join(told(), "go"), "");
-    // Ready, with no step waiting, it idles out; the user's file is back at its name, and a chat on the folder is served.
+    // Its step answered, with no other waiting, it idles out; the user's file is back at its name, and a chat on the folder is served.
     await until(() => exits === 2, 15_000);
     expect(lies(folder)).toEqual(before);
     expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });

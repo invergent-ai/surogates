@@ -963,6 +963,22 @@ const CUT = `data:text/javascript,${encodeURIComponent(`
   };
   syncBuiltinESMExports();
 `)}`;
+// Loaded into a file helper before its own code: before the first link it makes at a.txt, it waits as long as it is
+// told, as a put-back copying a large file to a slow disk does.
+const SLOW_LINK = `data:text/javascript,${encodeURIComponent(`
+  import fs from "node:fs";
+  import { syncBuiltinESMExports } from "node:module";
+  const real = fs.linkSync;
+  let once = false;
+  fs.linkSync = (...args) => {
+    if (!once && /\\/a\\.txt$/.test(String(args[1]))) {
+      once = true;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LAND_SLOW_MS));
+    }
+    return real(...args);
+  };
+  syncBuiltinESMExports();
+`)}`;
 // A file's blob id, as git names its bytes.
 const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
 
@@ -1372,27 +1388,41 @@ describe("a tool host for a landing", { timeout: 60_000 }, () => {
 
 describe("what a landing cut short left, when the next landing's host starts", { timeout: 90_000 }, () => {
   beforeEach(lay);
-  it("is put back before the host says it is ready: the user's very file is at its name again", async () => {
+  it("is put back by the first step its host is asked, before that step looks at the folder: the user's very file is at its name again", async () => {
     const ino = await cut();
     const harness = forLanding();
     await ready(harness);
+    // Ready at once: nothing is put back before a step is asked.
+    expect(existsSync(join(reports, "a.txt"))).toBe(false);
+    const looked = await harness.op("1", "land", { action: "revisions", paths: ["a.txt"] }) as { ok: { revisions: Array<[string, string]> } };
     const now = lstatSync(join(reports, "a.txt"), { bigint: true });
     expect([readFileSync(join(reports, "a.txt"), "utf8"), now.ino, now.nlink, readdirSync(reports).sort()]).toEqual(["the user's own\n", ino, 1n, ["a.txt", "sub"]]);
-    expect(await harness.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
+    expect(looked.ok.revisions).toEqual([["a.txt", expect.stringMatching(new RegExp(`^[0-9]+:${ino}:`))]]);
+    expect(await harness.op("2", "land", { action: "recover" })).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
   });
 
-  it("is put back however long that takes the folder's disk, within the bound a landing's helper has: one not ready after the time a chat's has is waited for, and a chat's is not", async () => {
+  it("is put back however long that takes the folder's disk, in the step, which no bound of a start cuts: a landing's helper not ready in the time a chat's has is not waited for", async () => {
     const ino = await cut();
     // Both timers start as the helper is started, in the host itself: the helper's first word comes after a chat's bound, whatever the load.
     const late = { HELPER_LATE_MS: String(READY_MS + 2_500) };
-    // A chat's host on another folder, its helper as late: it has what it had.
     mkdirSync(join(home, "Notes"));
     const [chat, landing] = [upset(late), upset(late)];
     chat.send({ ...start, folder: join(home, "Notes"), expect: bound(join(home, "Notes")), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") });
     landing.send({ ...start, folder: reports, expect: bound(reports), landing: { copy, kept }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "landing") });
     const said = (harness: Harness) => harness.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 40_000);
-    expect(await said(chat)).toMatchObject({ type: "failed", message: expect.stringMatching(/^the file helper did not start/) });
-    expect(await said(landing)).toMatchObject({ type: "ready" });
+    for (const harness of [chat, landing]) expect(await said(harness)).toMatchObject({ type: "failed", message: expect.stringMatching(/^the file helper did not start/) });
+    expect(existsSync(join(reports, "a.txt"))).toBe(false);
+    // A landing's helper whose put-back takes longer than that, held inside it, is answered when it is done.
+    const slow = upset({ HELPER_ENV: JSON.stringify({ NODE_OPTIONS: `--import=${SLOW_LINK}`, LAND_SLOW_MS: String(READY_MS + 2_500) }) });
+    slow.send({ ...start, folder: reports, expect: bound(reports), landing: { copy, kept }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "landing") });
+    await ready(slow);
+    const began = Date.now();
+    slow.send({ type: "op", id: "1", kind: "land", args: { action: "recover" } });
+    expect(await slow.until((messages) => {
+      const answer = messages.find((message) => message.type === "result" && message.id === "1");
+      return answer?.type === "result" ? answer.outcome : undefined;
+    }, 40_000)).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
+    expect(Date.now() - began).toBeGreaterThanOrEqual(READY_MS + 2_500);
     expect([readFileSync(join(reports, "a.txt"), "utf8"), lstatSync(join(reports, "a.txt"), { bigint: true }).ino]).toEqual(["the user's own\n", ino]);
   });
 });

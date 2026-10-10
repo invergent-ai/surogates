@@ -62,7 +62,7 @@ let holding: Set<string>;
 let unanswered: Array<() => void>;
 
 // A step's record, as a landing's helper writes it before the step changes anything (files/land.ts).
-const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null });
+const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0 });
 
 // A file host that says it is ready, answers each operation as a file helper on an empty folder would, and lets
 // a command run. A landing's answers its steps as the land kind does, keeping a record of each apply until it is put

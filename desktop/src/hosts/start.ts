@@ -24,16 +24,9 @@ import { THREAD } from "../vm/history.js";
 import type { HostStart } from "./messages.js";
 import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
-// How long a file helper has to say it is ready.
+// How long a file helper has to say it is ready. Every helper does nothing before it is: a landing's
+// puts back what a step cut short in the first step it is asked (files/land.ts), however long that takes.
 export const READY_MS = 15_000;
-// A landing's helper first puts back what a step cut short left (files/land.ts). Where the app's
-// data is on another filesystem than the folder, it copies the file the step replaced, which may
-// be as large as all a folder's landings keep; and a copy that is stopped is begun again from
-// nothing. A helper given less time than that copy takes is stopped at every start, and the
-// user's file is never back at its name. So it has the copy's time on a slow disk, and a helper's own.
-const KEPT_BYTES = 4 * 1024 * 1024 * 1024; // files/land.ts, MAX_KEPT_BYTES
-const SLOW_DISK_BYTES_A_SECOND = 2 * 1024 * 1024; // a slow stick, or a share over a poor link
-export const LANDING_READY_MS = READY_MS + (KEPT_BYTES / SLOW_DISK_BYTES_A_SECOND) * 1000;
 
 // The most bytes of a path this system takes, and of a name in one.
 const PATH_BYTES = 4095;
@@ -277,7 +270,7 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
   };
   return {
     ...held, reads: [from.path], writes: [kept], env: { SUROGATE_COPY: from.path, SUROGATE_COPY_IS: isOf(from), SUROGATE_KEPT: kept }, commands: false, only: "land",
-    readyMs: LANDING_READY_MS, make, replaced: replaced(message.folder), named: asSaid,
+    readyMs: READY_MS, make, replaced: replaced(message.folder), named: asSaid,
   };
 }
 

@@ -32,7 +32,6 @@ import type { Folder, ProcessesChange } from "../vm/manager.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
-import { LANDING_READY_MS } from "./start.js";
 
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -53,14 +52,14 @@ export const IDLE_MS = 120_000;
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
 // How long the app's quit waits for a step a landing's helper runs (files/land.ts); every other stop of its host waits
 // for the step whole. Past it the host is stopped: the step's record, written before each of its moves, names what it
-// was doing, and the next landing's helper in that folder puts that back before it is ready. A step stages a file of
-// at most a GiB, about ten seconds on a disk that writes 100 MiB a second; one that copies a replaced file of several
-// GiB between two filesystems can run past it.
+// was doing, and it is put back as this computer's tools next start, or by the first step of the next landing's helper
+// in that folder. A step stages a file of at most a GiB, about ten seconds on a disk that writes 100 MiB a second; one
+// that copies a replaced file of several GiB between two filesystems can run past it, and its copy goes on from there.
 export const QUIT_STEP_MS = 30_000;
 // How long a deleted thread's landing's host that has written nothing in the folder is given for the step its helper
 // runs, a look or a forgetting, before it is stopped: the deletion is answered at once, and its folder held no longer
-// than this past it. Past it, what the step was doing is named by its record, and the next landing's helper in that
-// folder puts it back before it is ready. A landing that has written is never stopped for its thread's deletion.
+// than this past it. Past it, what the step was doing is named by its record, and is put back as the quit's is. A
+// landing that has written is never stopped for its thread's deletion.
 export const RETIRE_STEP_MS = QUIT_STEP_MS;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A step a turn's landing asks for a landing it only settles, one another left running in the folder: named so by the
@@ -579,9 +578,9 @@ export class ToolHosts implements Executor {
     const lockWaitMs = this.options.landWaitMs ?? LAND_WAIT_MS;
     // A working folder of its own: the thread's host on its copy runs beside it, and each sandbox writes its own.
     const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${root}.land`)), landing: { copy: copy.folder.path, kept }, lockWaitMs };
-    // Its wait for the folder, then its helper's put-back of what a landing there cut short, which it does before it
-    // says it is ready (files/helper.ts), then a host's own start.
-    const startMs = lockWaitMs + LANDING_READY_MS + (this.options.startTimeoutMs ?? START_TIMEOUT_MS);
+    // Its wait for the folder, then a host's own start. What a landing there cut short its helper puts back in the first
+    // step it is asked, which no stop of this host cuts (files/land.ts).
+    const startMs = lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS);
     const host = new Host(
       (this.options.spawnHost ?? forkHost)(), start, works, startMs, this.options.idleMs ?? IDLE_MS, () => {
         if (this.landers.get(root) === host) this.landers.delete(root);
@@ -864,8 +863,7 @@ class Host {
 
   // With no operation running and no background process alive, the host keeps its
   // folder for idleMs. Out of the list first: the next operation for this root starts a new host.
-  // Never while it starts: a landing's helper puts back what a step cut short before it says it is
-  // ready, and one stopped there begins that again from nothing. Its start is bounded by its own time.
+  // Never while it starts: its start is bounded by its own time.
   private idle(): void {
     clearTimeout(this.idleTimer);
     if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished || this.unanswered.size > 0) return;
