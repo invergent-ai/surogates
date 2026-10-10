@@ -1016,11 +1016,11 @@ def test_a_landing_that_left_nothing_out_leaves_the_copy_and_what_was_written_si
 
 
 def test_a_thread_keeps_what_its_last_sixteen_records_set_aside(tmp_path, folder, monkeypatch):
-    monkeypatch.setattr(local_history, "_ASIDE", 2)
+    monkeypatch.setattr(local_history, "_ASIDE", 4)
     one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
     assert local_history.LocalHistory is LocalHistory
     kept = []
-    for n in range(3):
+    for n in range(5):
         (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report %d" % n)
         (two.copy / "Report.docx").write_bytes(b"PK\x03\x04 B's report %d" % n)
         land(one, f"saga:a{n}")
@@ -1034,7 +1034,9 @@ def test_a_thread_keeps_what_its_last_sixteen_records_set_aside(tmp_path, folder
         assert one.open() == {"copy": "moved"}
     # The oldest goes for one more, by the count in each one's name.
     left = dict(line.split(" refs/set-aside/t2/") for line in git(two.repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/set-aside/").splitlines())
-    assert (list(left), [name[:9] for name in left.values()]) == (kept[1:], ["00000002-", "00000003-"])
+    assert (list(left), [name[:9] for name in left.values()]) == (kept[1:], ["00000002-", "00000003-", "00000004-", "00000005-"])
+    # And an open names them as they were set aside, the oldest first.
+    assert two.open() == {"copy": "moved", "set_asides": kept[1:]}
 
 
 def test_a_landing_the_history_holds_whose_copy_cannot_be_made_its_files_refuses_every_act_and_writes_nothing(tmp_path, folder):
@@ -1128,6 +1130,7 @@ def test_what_a_landing_kept_is_forgotten_once_each_file_it_applied_is_as_it_was
     "a file you changed after the landing wrote it", "a link where the landing's file was",
     "the first try's file, its commit step tried again after a late write",
     "a link where the file's folder was", "a folder where the file the landing made was",
+    "a link where the file the landing made was",
 ])
 def test_a_put_back_that_is_not_whole_is_not_taken_for_one(tmp_path, folder, left):
     one, turn, replaced = a_landing_applied_and_not_recorded(tmp_path, folder)
@@ -1143,6 +1146,10 @@ def test_a_put_back_that_is_not_whole_is_not_taken_for_one(tmp_path, folder, lef
     elif left.startswith("a folder"):
         (folder / "notes.txt").write_bytes(replaced["notes.txt"])
         (folder / "Summary.md").mkdir()
+    elif left.startswith("a link where the file the landing made"):
+        # To nothing: no file is there, as before the landing, and a name is.
+        (folder / "notes.txt").write_bytes(replaced["notes.txt"])
+        (folder / "Summary.md").symlink_to(folder / "none")
     elif left.startswith("a file you changed"):
         # Neither the landing's nor what was there before it: the put-back leaves it, and keeps what the landing replaced.
         (folder / "notes.txt").write_text("the thread's notes\nand a line of yours, after the landing\n")
@@ -1190,7 +1197,7 @@ def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, fo
     for args in ({}, {"applied": None}, {"applied": "notes.txt"}, {"applied": {"path": "notes.txt"}}):
         answer = ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", **args}})
         assert answer == {"error": {"code": "not_a_request", "message": "refused the request: it names no files a landing applied"}}, args
-    for path in ("/etc/passwd", "../notes.txt", "sub//notes.txt", "sub/./notes.txt", ""):
+    for path in ("/etc/passwd", "../notes.txt", "sub//notes.txt", "sub/./notes.txt", "", "."):
         answer = ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": [{"path": path, "before": None, "after": None}]}})
         assert answer == {"error": {"code": "not_a_request", "message": "refused the request: a file it applied has no path in the folder"}}, path
     wrote = [{"path": "notes.txt", "before": "0" * 40, "after": None}]
@@ -1687,6 +1694,11 @@ def test_a_move_of_a_clean_copy_cut_part_way_through_its_files_is_finished_by_wh
         assert (answer["commit"], answer["changes"]) == (None, [])
     # Finished, and no longer said to be under way: a later act would put the copy back to where it was going.
     assert not git(ours.repo, "for-each-ref", "refs/moving/")
+    # The branch moved with the base: a snapshot of the turn that goes on is one the copy is put back to.
+    here = ours.snapshot("before a step")
+    (ours.copy / "junk.md").write_text("made by a step that is stopped\n")
+    ours.restore(here)
+    assert not (ours.copy / "junk.md").exists()
     asides = git(ours.repo, "for-each-ref", "--format=%(objectname)", "refs/set-aside/").split()
     if written_since:
         # Neither what the copy held nor what main holds: set aside before the copy is made main's files, and named.
