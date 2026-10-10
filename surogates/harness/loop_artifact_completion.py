@@ -1340,7 +1340,7 @@ class ArtifactCompletionMixin:
             )
         try:
             # A thread stopped while it landed stays as the Stop left it.
-            if not (landing is not None and (landing.get("stopped") or landing.get("reason") == "stopped")):
+            if not (landing is not None and landing.get("stop_heard")):
                 await self._store.update_session_status(session.id, "completed")
         except Exception:
             logger.warning(
