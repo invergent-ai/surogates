@@ -17,9 +17,9 @@ beforeEach(() => {
 afterEach(() => rmSync(base, { recursive: true, force: true }));
 
 // The helper outside any sandbox: what it says to a line it cannot act on.
-async function lines(input: string[], count: number): Promise<unknown[]> {
+async function lines(input: string[], count: number, more: Record<string, string> = {}): Promise<unknown[]> {
   const child = spawn(process.execPath, [HELPER], {
-    env: { SUROGATE_FOLDER: base, HOME: base, PATH: "/usr/bin:/bin" },
+    env: { SUROGATE_FOLDER: base, HOME: base, PATH: "/usr/bin:/bin", ...more },
     stdio: ["pipe", "pipe", "inherit"],
   });
   const heard: unknown[] = [];
@@ -65,5 +65,15 @@ describe("the file helper", () => {
       { id: "2", outcome: malformed },
       { id: "3", outcome: malformed },
     ]);
+  });
+
+  it("lands only as a landing's helper, which is given a thread's copy and a folder to keep replaced files in", async () => {
+    const look = JSON.stringify({ id: "1", kind: "land", args: { action: "revisions", paths: ["a.txt", "b.txt"] } });
+    const unsupported = { id: "1", outcome: { error: { type: "unsupported", message: "This computer cannot do 'land' yet" } } };
+    // A chat's own helper, and one given only half of a landing's.
+    expect((await lines([look], 2))[1]).toEqual(unsupported);
+    expect((await lines([look], 2, { SUROGATE_COPY: join(base, "copy") }))[1]).toEqual(unsupported);
+    const landing = await lines([look], 2, { SUROGATE_COPY: join(base, "copy"), SUROGATE_KEPT: join(base, "kept") });
+    expect(landing[1]).toMatchObject({ id: "1", outcome: { ok: { revisions: [["a.txt", expect.stringMatching(/^\d+:\d+:6:/)], ["b.txt", "absent"]] } } });
   });
 });
