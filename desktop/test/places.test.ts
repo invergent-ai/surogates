@@ -59,6 +59,7 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
     {
       mount: async (key, history, real) => void asked.push(["mount", key, history, real]),
       unmount: async (key) => void asked.push(["unmount", key]),
+      history: async () => ({ ok: {} }),
       ...places,
     },
   );
@@ -276,6 +277,7 @@ describe("the agent's control port, asked for a place", () => {
       places && {
         mount: async (key, history, real) => void asked.push(["mount", key, history, real]),
         unmount: async (key) => void asked.push(["unmount", key]),
+        history: async () => ({ ok: {} }),
         ...places,
       },
     );

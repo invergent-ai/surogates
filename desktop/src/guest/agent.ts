@@ -60,6 +60,9 @@ const roots = new Roots({
   hostSilenceMs: 25_000,
 });
 new Inbound(await openPort(await findPort(INBOUND_PORT)), (root, to, first) => roots.reach(root, to, first));
-const control = new Control(say, roots, { setClock, powerOff, woke: (ms) => roots.woke(ms), heard: () => roots.heard() }, new Places());
+const places = new Places();
+// The guest's stop ends what a folder's history runs with what the roots run: nothing of either writes on while it goes.
+const stop = () => powerOff(places.stop());
+const control = new Control(say, roots, { setClock, powerOff: stop, woke: (ms) => roots.woke(ms), heard: () => roots.heard() }, places);
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();

@@ -68,13 +68,16 @@ export type ToAgent =
   | { type: "place"; id: number; key: string; history: Share; real: Share }
   // Both mounts of a place go: the host removes its two shares next.
   | { type: "unplace"; id: number; key: string }
+  // One request to a place's history, which the agent runs as its own user, outside every root's
+  // namespaces: *action* with its arguments, for *thread*'s copy, made for *user*. Answered by a result.
+  | { type: "history"; id: number; key: string; thread: string; user: string; action: string; args: Record<string, unknown> }
   // The computer woke: its clock now, in milliseconds since the epoch, and how long it slept.
   // Every run's backstop in the guest falls that much later, whatever the guest's clock did.
   | { type: "time"; id: number; now: number; slept: number }
   // The host's stop: every root ends, the sessions disk is written out, and the guest
   // powers off. Answered by the VM's exit.
   | { type: "shutdown"; id: number }
-  | { type: "cancel"; id: number }; // the op of that id
+  | { type: "cancel"; id: number }; // the op, or the history request, of that id
 
 export type FromAgent =
   | { type: "hello"; id: number }
