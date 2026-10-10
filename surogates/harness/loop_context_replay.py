@@ -209,7 +209,7 @@ _NOT_LANDED_HERE = {
         "so nothing lands there until it can"
     ),
     "stopped": "the thread was stopped before its landing wrote a file",
-    "deleted": "the thread was deleted while its landing was under way",
+    "deleted": "the thread was deleted before its landing finished",
 }
 #: How a landing whose thread was stopped once it was under way ended: it was not interrupted.
 _STOPPED_UNDER_WAY = {
