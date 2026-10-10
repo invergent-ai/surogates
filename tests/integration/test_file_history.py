@@ -21,6 +21,7 @@ from surogates.workstreams import bucket as bucket_module
 from surogates.workstreams import history as rows_module
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import BucketHistory
+from surogates.workstreams.derive import utc
 from surogates.workstreams.store import WorkstreamStore
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
@@ -543,10 +544,13 @@ async def test_a_files_first_version_your_upload_is_listed_after_two_changes_lan
         "id": f"{landing.id}:b", "path": "Report.docx", "by": {"kind": "you"}, "at": upload["at"], "change": "added",
         "merged": True, "landing_id": None, "available": True,
     }
-    assert upload["at"] <= by_a["at"] <= by_b["at"]
+    assert (upload["at"], by_a["at"]) == (utc(landing.created_at), utc(landing.updated_at))
+    assert upload["at"] < by_a["at"] <= by_b["at"]
     # A file a thread made has no version from before it; one it then took away is listed as deleted, with nothing to keep.
-    await edited(pool, first, "echo a > a.md")
+    # A landing of two files is a version of each, and of no other.
+    await edited(pool, first, "echo a > a.md && printf ' more' >> notes.txt")
     await ends(api, pool, first)
+    assert [v["path"] for v in await history_of(api, project, "notes.txt")] == ["notes.txt", "notes.txt"]
     [made] = await history_of(api, project, "a.md")
     assert (made["change"], made["by"]["kind"]) == ("added", "thread")
     await edited(pool, first, "rm a.md")
@@ -650,6 +654,10 @@ async def test_only_the_clouds_completed_records_are_a_files_versions(api, tmp_p
                 f"SELECT {of}, {device}, 'landing', :saga, :state, thread_id, agent_id, steps, files "
                 "FROM workstream_history WHERE id = :id"
             ), {"saga": f"{saga}:{row.id}", "state": state, "id": row.id, **({"other": other["id"]} if of == ":other" else {})})
+        # The computer's version is one the cloud's history never held.
+        await db.execute(text(
+            "UPDATE workstream_history SET files = jsonb_set(files, '{0,after}', to_jsonb(repeat('c', 40))) WHERE saga_id = :saga"
+        ), {"saga": f"saga:computer:{row.id}"})
         await db.commit()
         computer = (await db.execute(
             text("SELECT device_id, id FROM workstream_history WHERE saga_id = :saga"), {"saga": f"saga:computer:{row.id}"},
@@ -667,6 +675,8 @@ async def test_a_project_over_the_file_cap_says_its_history_is_off(api, monkeypa
     monkeypatch.setattr(rows_module, "_COUNTED", {})
     refused = await history_of(api, project, "Report.docx", status=409)
     assert refused["detail"] == "History is off: this project has more than 50,000 files."
+    # A folder on a computer is counted by its computer, not by the cloud's files.
+    assert await history_of(api, project, "Report.docx", device_id="00000000-0000-4000-8000-000000000000") == []
     # The copy is not brought in to say so.
     assert not list((Path(api.app.state.settings.history.copies_path)).glob("*/objects/pack/*.pack"))
 

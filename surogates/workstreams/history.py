@@ -291,7 +291,7 @@ def _version(row: WorkstreamHistory, entry: dict, *, picked: bool) -> dict:
         # One that took the file away is a deletion: there is nothing of it to keep.
         "change": "deleted" if entry["after"] is None else "added" if entry["before"] is None else "changed",
         "merged": merged,
-        "landing_id": str(row.id) if merged and not picked and row.kind == "landing" else None,
+        "landing_id": str(row.id) if merged and not picked else None,
         "blob": entry["after"],
     }
 

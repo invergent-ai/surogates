@@ -131,7 +131,26 @@ async def test_git_runs_only_in_the_apis_copy_under_its_own_config(tmp_path, sto
     # Nothing of the bucket's ran, and none of it is in the copy.
     assert not ran.exists()
     assert "fsmonitor" not in (history.clone / "config").read_text()
-    assert not (history.clone / "hooks" / "reference-transaction").exists()
+    assert not (history.clone / "hooks").exists()
+
+
+async def test_git_runs_under_none_of_the_apis_own_git_settings(tmp_path, storage, project, monkeypatch):
+    one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    made = {index.name: index.read_bytes() for index in (project / "_history" / "objects" / "pack").glob("*.idx")}
+    # The api's own process, as an operator or another feature may leave it: a git config of the user's, and git's
+    # variables set for some other repository.
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / ".gitconfig").write_text("[pack]\n\tindexVersion = 1\n")
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere"))
+    history = bucket(tmp_path, storage)
+    assert (await history.sync())[MAIN] == one
+    v2 = blob_of(b"PK\x03\x04 report v2")
+    assert await history.held([v2]) == {v2}
+    assert {index.name: index.read_bytes() for index in (history.clone / "objects" / "pack").glob("*.idx")} == made
+    assert list((tmp_path / "elsewhere").iterdir()) == []
 
 
 async def test_a_pack_never_passes_through_the_apis_memory_whole(tmp_path, storage, project, monkeypatch):
@@ -224,6 +243,19 @@ async def test_a_copy_not_used_for_a_while_is_removed_and_the_copies_stay_within
     assert (await old.sync())[MAIN] == (await idle.sync())[MAIN]
 
 
+async def test_a_copy_asked_again_was_used_just_now_however_long_ago_it_was_made(tmp_path, storage, project):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    copies = tmp_path / "api"
+    asked, left = (BucketHistory(storage, "agent", PREFIX, copies / name) for name in ("asked", "left"))
+    for history in (asked, left):
+        await history.sync()
+    for history in (asked, left):
+        os.utime(history.clone / "HEAD", (time.time() - 700, time.time() - 700))
+    assert await asked.held([blob_of(b"never held")]) == set()
+    await BucketHistory(storage, "agent", PREFIX, copies / "new").sync()
+    assert sorted(p.name for p in copies.iterdir() if p.is_dir()) == ["asked", "new"]
+
+
 async def test_a_copy_another_request_is_reading_or_bringing_in_is_never_removed(tmp_path, storage, project):
     landed(tmp_path, project, "saga:1", {"Report.docx": os.urandom(2**20)})
     copies = tmp_path / "api"
@@ -288,6 +320,45 @@ async def test_a_pack_whose_push_has_not_finished_or_that_is_no_packs_name_is_no
     history = bucket(tmp_path, storage)
     await history.sync()
     assert [pack.name for pack in packs_of(history)] == [pack.name for pack in pushed]
+
+
+async def test_a_pack_a_pruning_took_between_the_listing_and_its_read_is_left_out(tmp_path, storage, project, monkeypatch):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    gone, *others = sorted((project / "_history" / "objects" / "pack").glob("*.pack"))
+    read = storage.download
+
+    async def download(bucket_name, key, target, **limit):
+        if key.endswith(gone.name):
+            raise KeyError(key)
+        return await read(bucket_name, key, target, **limit)
+
+    monkeypatch.setattr(storage, "download", download)
+    history = bucket(tmp_path, storage)
+    assert MAIN in await history.sync()
+    assert [pack.name for pack in packs_of(history)] == [pack.name for pack in others]
+    # It is asked for again at the next read: nothing marks it as the copy's.
+    monkeypatch.setattr(storage, "download", read)
+    await history.sync()
+    assert gone.name in [pack.name for pack in packs_of(history)]
+
+
+async def test_each_new_pack_is_indexed_beside_no_other_so_a_history_of_many_packs_is_not_read_as_many_times_over(
+    tmp_path, storage, project, monkeypatch,
+):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    run, indexed = subprocess.run, []
+
+    def spied(command, **how):
+        if "index-pack" in command:
+            indexed.append(how["env"].get("GIT_OBJECT_DIRECTORY"))
+        return run(command, **how)
+
+    monkeypatch.setattr(module.subprocess, "run", spied)
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    # Git opens every pack of the objects it runs over: each new pack is indexed over a folder that holds it alone.
+    assert len(indexed) == 2 and all(folder and Path(folder).parent == history.clone for folder in indexed)
+    assert len(set(indexed)) == 2
 
 
 async def test_a_pack_that_grew_since_it_was_listed_is_refused(tmp_path, storage, project, monkeypatch):
