@@ -297,6 +297,14 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
     expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
   });
 
+  it("leaves an entry of the user's whose name is one of the app's and goes on in a space, and is not stopped by it, with a CA to trust or with none", () => {
+    // certutil lists it as it lists the app's own, and finds no entry by the app's name.
+    added(own(), another, `${NICKNAME} 0123456789abcdef `, "CT,C,C");
+    trustInChromium([], home, data());
+    trustInChromium([pem(company)], home, data());
+    expect(entries(own())).toEqual([`${NICKNAME} 0123456789abcdef CT,C,C`, `${nickname(company)} C,,`]);
+  });
+
   it("trusts again a certificate of its own the database holds untrusted", () => {
     added(own(), company, nickname(company), ",,");
     trustInChromium([pem(company)], home, data());

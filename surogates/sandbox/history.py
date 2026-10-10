@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
+from typing import ClassVar
 
 from surogates.tools.utils.checkpoint_manager import DEFAULT_EXCLUDES
 
@@ -170,12 +171,30 @@ def tracked(path: str) -> bool:
     return _EXCLUDED.search(path) is None
 
 
+#: Why a request to a history was not answered, for whoever asked to go by.  A code is never
+#: changed; the words beside it are a person's, and may be.  ``failed``: git, or the system
+#: under it, did not do what was asked.  ``history_refused``: the project's history is not what
+#: the platform wrote, and nothing was read from it.  ``conflict``: git did what was asked, and
+#: what a landing expected is no longer there: ``main`` or a ref moved in the history, or a real
+#: file changed.
+FAILED = "failed"
+HISTORY_REFUSED = "history_refused"
+CONFLICT = "conflict"
+
+
 class HistoryError(RuntimeError):
-    """A history operation failed."""
+    """A history operation failed: :attr:`code` says which way, and the message says it to a person."""
+
+    def __init__(self, message: str, *, code: str = FAILED) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class HistoryConflict(HistoryError):
-    """A real file is not the version a landing expected."""
+    """A real file, or the history itself, is not as a landing expected: told from a failure by its code."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code=CONFLICT)
 
 
 class LandingStepError(RuntimeError):
@@ -215,6 +234,11 @@ class History:
     user: str       # who started the thread: main's first commit is theirs
     helper: str | None = None  # a thread's helper's own session: its pod and copy are its own
     turn: str | None = None    # the thread's turn this pod is opened for: required but in a helper's pod
+
+    #: What neither a copy nor history holds, and which of it is the platform's own:
+    #: never a file of the project's, never reported as unsaved.  A place's own.
+    excludes: ClassVar[list[str]] = HISTORY_EXCLUDES
+    platform: ClassVar[tuple[str, ...]] = PLATFORM_EXCLUDES
 
     @property
     def branch(self) -> str:
@@ -366,7 +390,7 @@ class History:
         # inode numbers and change times differ from pod to pod.
         self._main("config", "core.checkStat", "minimal")
         (self.repo / "info").mkdir(exist_ok=True)
-        (self.repo / "info" / "exclude").write_text("\n".join(HISTORY_EXCLUDES) + "\n")
+        (self.repo / "info" / "exclude").write_text("\n".join(self.excludes) + "\n")
         (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
 
     def _read_real(self, main: str | None) -> None:
@@ -515,7 +539,7 @@ class History:
                 self._push(taken, expect={})
             return {"commit": None, "base": base, "changes": [], "overlapped": [], **left_out}
         saga = f"Surogate-Saga: {dict(map(tuple, trailers))['Surogate-Saga']}"
-        if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").splitlines():
+        if self._copy("diff", "--cached", "--name-only", "HEAD") or saga not in self._copy("log", "-1", "--format=%B").split("\n"):
             self._copy(*_as(author), "commit", "-q", "--allow-empty", "-m", "Turn", "-m", _block(trailers))
         # Also what a try of this step cut off after its push named, when the ref had gone with that push.
         pushed = refs.get(self.branch)
@@ -1459,10 +1483,10 @@ class History:
         if head is not None:
             text = head.decode(errors="replace")
             if not (text.startswith("ref: ") and text.endswith("\n")):
-                raise HistoryError("refused the project's history: its HEAD is not one the platform writes")
+                raise HistoryError("refused the project's history: its HEAD is not one the platform writes", code=HISTORY_REFUSED)
             _checked_ref(text[5:-1], "its HEAD")
             if config != _CONFIG:
-                raise HistoryError("refused the project's history: its config is not the platform's own")
+                raise HistoryError("refused the project's history: its config is not the platform's own", code=HISTORY_REFUSED)
         self._durable_shallow()
 
     def _durable_shallow(self) -> list[str]:
@@ -1472,13 +1496,28 @@ class History:
         return [_checked_id(c, "its shallow") for c in data.decode(errors="replace").split()]
 
     def _fetch(self, *commits: str | None) -> None:
-        """*commits* from the durable history as last taken, at depth 1, where this repository lacks them."""
-        wanted = [c for c in dict.fromkeys(commits) if c and not self._has(c)]
+        """*commits* from the durable history as last taken, at depth 1, where this repository lacks them.
+
+        It lacks one it holds no further than the commit itself: a fetch
+        killed after it stored its objects and before it wrote ``shallow``
+        leaves a commit whose parents are not there and whose history is
+        not said to be cut there, which git reads and cannot walk from.
+        Fetched again, it comes whole.
+        """
+        wanted = [c for c in dict.fromkeys(commits) if c and not self._whole(c)]
         if wanted:
             self._git(
                 ["fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", str(self._taken), *wanted],
                 env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
             )
+
+    def _whole(self, commit: str) -> bool:
+        """Whether this repository holds *commit* as a fetch leaves it: with its parents, or named in ``shallow``."""
+        try:
+            self._main("rev-list", "-n", "1", "--end-of-options", commit)
+        except HistoryError:
+            return False
+        return True
 
     def _push(self, updates: dict[str, str | None], *, expect: dict[str, str | None]) -> None:
         """Make the durable history's refs *updates*, where *expect* still holds: a pack, then ``packed-refs``.
@@ -1670,8 +1709,8 @@ class History:
         return self._main("rev-parse", f"{commit}^{{tree}}")
 
     def _message(self, commit: str) -> list[str]:
-        """*commit*'s message, line by line."""
-        return self._main("log", "-1", "--format=%B", "--end-of-options", commit).splitlines()
+        """*commit*'s message, line by line: by the line end alone, which is all a trailer's value cannot hold."""
+        return self._main("log", "-1", "--format=%B", "--end-of-options", commit).split("\n")
 
     def _diff(self, base: str, turn: str) -> tuple[dict[str, tuple[str | None, str | None]], list[tuple[str, str]]]:
         """Each file the turn changed since *base*, as ``(before, after)``, and the renames git paired."""
@@ -1877,7 +1916,7 @@ class History:
         empty = self._copy("ls-files", "-z", "--others", "--exclude-standard", "--directory").split("\0")
         made = {n for n in empty if n and not (self.project / n).is_dir()}
         names = sorted(ignored | made)
-        names = [n for n in names if not n.startswith(PLATFORM_EXCLUDES)]
+        names = [n for n in names if not n.startswith(self.platform)]
         repositories = {
             n for n in names
             if n.endswith("/") and ((self.copy / n / ".git").exists() or (self.project / n / ".git").exists())
@@ -1990,6 +2029,8 @@ class History:
 
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         timeout = _TIMEOUT.get() or _GIT_TIMEOUT
+        # The git that ran, past the options given before it, each ``-c`` and its value.
+        ran = args[2 * len(list(takewhile(lambda arg: arg == "-c", args[::2])))]
         try:
             result = subprocess.run(
                 ["git", *args], capture_output=True, text=True, env=_environ(env), cwd=cwd,
@@ -1998,9 +2039,9 @@ class History:
         except subprocess.TimeoutExpired as exc:
             # The git it killed held the index's lock, and no later git could run.
             Path(f"{env.get('GIT_INDEX_FILE') or Path(env['GIT_DIR']) / 'index'}.lock").unlink(missing_ok=True)
-            raise HistoryError(f"git {args[0]} timed out after {timeout}s") from exc
+            raise HistoryError(f"git {ran} timed out after {timeout}s") from exc
         if result.returncode != 0:
-            raise HistoryError(f"git {args[0]} failed: {result.stderr.strip()}")
+            raise HistoryError(f"git {ran} failed: {result.stderr.strip()}")
         # Only the line end: a name may start or end with a space.
         return result.stdout.removesuffix("\n")
 
@@ -2092,7 +2133,7 @@ def _opened_folder(name: str, inside: int | None, make: bool) -> int | None:
         except OSError as exc:
             # A link, or a file, where the folder is: the first is ELOOP or, with a folder asked for, ENOTDIR.
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                raise HistoryError("refused the project's history: a folder of it is a link") from None
+                raise HistoryError("refused the project's history: a folder of it is a link", code=HISTORY_REFUSED) from None
             raise
     return None
 
@@ -2125,11 +2166,11 @@ def _opened(path: Path | str, what: str, *, dir_fd: int | None = None) -> int | 
         return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise HistoryError(f"refused the project's history: its {what} is a link") from None
+            raise HistoryError(f"refused the project's history: its {what} is a link", code=HISTORY_REFUSED) from None
         raise
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise HistoryError(f"refused the project's history: its {what} is not a file")
+        raise HistoryError(f"refused the project's history: its {what} is not a file", code=HISTORY_REFUSED)
     # Another pod may have rewritten it.
     os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
     return fd
@@ -2181,14 +2222,14 @@ def _block(trailers: list[list[str]]) -> str:
 def _checked_id(value: str, where: str) -> str:
     """*value*, a commit id read from *where*; refused when it is anything else, never quoted: it reaches the pod's logs."""
     if not _ID.fullmatch(value):
-        raise HistoryError(f"refused the project's history: {where} holds what is not a commit id")
+        raise HistoryError(f"refused the project's history: {where} holds what is not a commit id", code=HISTORY_REFUSED)
     return value
 
 
 def _checked_ref(value: str, where: str) -> str:
     """*value*, a ref of the history read from *where*; refused when it is anything else."""
     if not _REF.fullmatch(value) or ".." in value:
-        raise HistoryError(f"refused the project's history: {where} holds what is not one of its refs")
+        raise HistoryError(f"refused the project's history: {where} holds what is not one of its refs", code=HISTORY_REFUSED)
     return value
 
 
