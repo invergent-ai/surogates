@@ -31,8 +31,9 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
-from surogates.devices.history import NowhereToWork, opens_its_copy
+from surogates.devices.history import ComputerRefused, NowhereToWork, opens_its_copy
 from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
+from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
@@ -1286,6 +1287,61 @@ class AgentHarness(
             del _STOPS_NOT_WRITTEN[session.id]
         await name_turn(self._store, session)
 
+    async def _opened_for_the_turn(self, session: Session, lease: SessionLease) -> bool:
+        """Open a thread's copy on its computer for the turn now starting; whether the turn goes on.
+
+        The turn is named first, as its loop would name it, and its open is
+        asked under that name (``tool_exec._open_local_copy``).  A Stop ends
+        the open wherever it is, before it is asked, while it waits, or once
+        a Stop's pause closed it: its operation is closed, and the turn ends
+        stopped.  Nowhere to work ends the turn failed, saying why, before
+        its prompt is built.  An open the journal itself refused, the thread
+        held by another worker now or deleted, ends this wake with nothing
+        sent.
+        """
+        await self._name_the_turn(session)
+        opening = asyncio.ensure_future(_open_local_copy(
+            session, self._store, lease, session_factory=self._session_factory, redis=self._redis,
+        ))
+        # A Stop cancels it, as it cancels a resumed call: the cancel closes its operation in the journal.
+        self._active_executor = SimpleNamespace(discard=opening.cancel)
+        # A Stop that landed before this point only set the flag.
+        if self._check_interrupt():
+            opening.cancel()
+        try:
+            await opening
+        except asyncio.CancelledError:
+            if not self._check_interrupt() or asyncio.current_task().cancelling():
+                raise
+            await self._abort_iteration_with_pause(session, None)
+            return False
+        except NowhereToWork as nowhere:
+            logger.warning(
+                "Session %s: its thread has nowhere to work on its computer (%s), and its turn sends it nothing",
+                session.id, nowhere.code or nowhere.why,
+            )
+            await self._fail_session(
+                session, [], lease, reason="nowhere_to_work", cost_tracker=SessionCostTracker(),
+                why=nowhere.why, code=nowhere.code, error_title=str(nowhere),
+                error_category="storage_error", retryable=nowhere.retryable,
+            )
+            return False
+        except DeviceOperationError as refused:
+            # Closed by the pause of a Stop, or refused as a stopped thread's: the turn ends stopped.
+            if (
+                self._check_interrupt() or (isinstance(refused, ComputerRefused) and refused.kind == "cancelled")
+                or (await self._store.get_session(session.id)).status == "paused"
+            ):
+                await self._abort_iteration_with_pause(session, None)
+                return False
+            logger.warning(
+                "Session %s: its copy was not opened for its turn, and this wake sends nothing: %s", session.id, refused,
+            )
+            return False
+        finally:
+            self._active_executor = None
+        return True
+
     async def _write_that_the_turn_was_stopped(self, session: Session, reason: str) -> bool:
         """Have a turn-ending event after a thread's turn that is stopped here, before anything else of the stop.
 
@@ -1799,6 +1855,14 @@ class AgentHarness(
                 EventType.HARNESS_WAKE,
                 {"worker_id": self._worker_id, "cursor": cursor, NAMES_ANSWERS: True},
             )
+
+            # A thread that works in a copy of its own on its computer opens
+            # it for the turn now, before anything else of the turn reaches
+            # that computer: a call resumed, the prompt's folder context, a
+            # step, the turn's mark, an artifact.  One with nowhere to work,
+            # or stopped meanwhile, ends its turn here.
+            if opens_its_copy(session) and not await self._opened_for_the_turn(session, lease):
+                return
 
             # 5'. Another worker woke a local-folder session since this one
             # did: it may have compacted or cleared the history, and reset
@@ -2319,7 +2383,8 @@ class AgentHarness(
         - Per-session cost tracking
         """
         self._turn_after_event_id = max((e.id for e in all_events or []), default=0)
-        if is_project_thread(session.config):
+        # A thread that opens its copy had its turn named by its wake, before the open.
+        if is_project_thread(session.config) and session.config.get("turn_after") is None:
             await self._name_the_turn(session)
         # What the real files changed before a routine run's first call is yours, not its.
         await self._pick_up_routine(session, yours=True)
@@ -3623,29 +3688,6 @@ class AgentHarness(
 
             # 6. Append assistant message to the in-memory message list.
             messages.append(assistant_message)
-
-            # A thread that works in a copy of its own on its computer opens
-            # it for the turn before anything of these steps reaches that
-            # computer, the turn's mark among them.  One with nowhere to work
-            # runs no step: its turn ends here, failed, saying why.
-            if opens_its_copy(session):
-                try:
-                    await _open_local_copy(
-                        session, self._store, lease, session_factory=self._session_factory, redis=self._redis,
-                    )
-                except NowhereToWork as nowhere:
-                    logger.warning(
-                        "Session %s: its thread has nowhere to work on its computer (%s), and runs no step",
-                        session.id, nowhere.code or nowhere.why,
-                    )
-                    if streaming_executor is not None:
-                        streaming_executor.discard()
-                    await self._fail_session(
-                        session, messages, lease, reason="nowhere_to_work", cost_tracker=cost_tracker,
-                        why=nowhere.why, code=nowhere.code, error_title=str(nowhere),
-                        error_category="storage_error", retryable=nowhere.retryable,
-                    )
-                    return
 
             # 7. Execute tool calls.
             await self._mark_turn_start(session)

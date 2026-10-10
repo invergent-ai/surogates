@@ -41,11 +41,11 @@ takes (``surogates.devices.link.MAX_FRAME_CHARS``, 2 MiB), and none of these
 kinds is answered with a transfer.  The bounds are the app's own
 (``desktop/src/vm/history.ts``): what its check passes on, this one takes.
 
-A turn of the thread's opens its copy before its steps
-(:meth:`ThreadCopy.opened`).  A thread whose folder has no history, whose
-computer's app keeps no copy for it or gives it none of a folder too large
-to copy, or whose copy cannot be opened there, has nowhere to work: its turn runs no step, and says why in the words of
-:data:`NOWHERE`.
+A turn of the thread's opens its copy at its start, before anything else
+of the turn reaches the computer (:meth:`ThreadCopy.opened`).  A thread
+whose folder or computer is no place for it, or whose copy cannot be opened
+there, has nowhere to work: its turn sends nothing more, and says why in the
+words of :data:`NOWHERE`.
 """
 
 from __future__ import annotations
@@ -101,14 +101,17 @@ _ERRNOS = frozenset(errno.errorcode.values())
 _OTHER = "other"
 
 #: How many times a turn asks its computer to open the thread's copy: a refusal the next asking
-#: may pass is asked again at the turn's next step, and one at the last asking stands for the turn.
+#: may pass is asked again at once, and one at the last asking stands for the turn.
 OPEN_TRIES = 3
 #: The refusals of a turn's open that the next asking may pass, each of which may have done part
 #: of the work: the history's for a copy that is not whole, and for a move or a record of the
 #: thread's that was cut, which its next open makes or finishes; its guest's for a request it gave
-#: up on; and one that ended without its answer, stopped, cut off, or before the guest was there.
+#: up on; and one that ended without its answer, cut off, or before the guest was there.
 _PASSING_CODES = frozenset({"no_whole_copy", "move_unfinished", "record_unfinished", "no_answer"})
-_PASSING_KINDS = frozenset({"cancelled", "interrupted", "unavailable"})
+_PASSING_KINDS = frozenset({"interrupted", "unavailable"})
+#: The refusal of an open its turn's Stop closed: no reason of the folder's, and nothing more of
+#: the turn is asked.
+_STOPPED = "cancelled"
 #: Why a thread has nowhere to work where its copy could not be opened: no reason of its folder's.
 _REFUSED = "refused"
 #: The refusal of a computer whose app gives the thread no copy of a folder too large to copy in
@@ -580,46 +583,40 @@ class ThreadCopy:
         """
         return await self.steps(f"open:{turn}:{again}" if again else f"open:{turn}").history("open")
 
-    async def opened(self, turn: int) -> dict[str, Any] | None:
-        """The copy brought to the turn *turn* before the turn's next step: the open's answer, or None to go on without it.
+    async def opened(self, turn: int) -> dict[str, Any]:
+        """The copy brought to the turn *turn*: the open's answer, which every step of the turn works from.
 
         The journal holds each asking of the turn's.  An answer is the
-        turn's: every later step reads it there, checked as one given now,
-        and the computer hears nothing.  An asking still open is waited for.
-        A refusal the next asking may pass is asked again at the turn's next
-        step, under its next name, up to :data:`OPEN_TRIES` askings: until
-        then None, and the step runs in the copy as the computer's app keeps
-        it, never in the folder.
+        turn's: asked again, it is read there, checked as one given now, and
+        the computer hears nothing.  An asking still open is waited for.  A
+        refusal the next asking may pass is asked again at once, under the
+        turn's next name, up to :data:`OPEN_TRIES` askings.
 
         Raises :class:`NowhereToWork` where the thread has nowhere to work:
         its folder has no history, its computer's app keeps no copy for it
-        or gives it none of a folder too large to copy, or it refused in a
-        way asking again would not pass, or at the turn's last asking.  Asked again, it raises the same, and the computer
-        hears nothing.  The journal's own refusals pass through as they are:
-        the computer heard nothing of them.
+        or gives it none of a folder too large to copy, or it refused at the
+        turn's last asking or in a way asking again would not pass.  Raises the
+        :class:`ComputerRefused` of an open its turn's Stop closed: nothing
+        more is asked.  Asked again, it raises the same, and the computer
+        hears nothing.  The journal's own refusals pass through as they are.
         """
-        asked = await self.operations.opens(self._session.id, turn)
-        if asked:
-            # The turn's last asking, read again: its answer stands for the turn.
-            answer = await self._asking(turn, asked - 1)
-            if answer is not None:
-                return answer
-        return await self._asking(turn, asked)
-
-    async def _asking(self, turn: int, number: int) -> dict[str, Any] | None:
-        """The turn's asking *number*, from 0: its answer, None for a refusal the next asking may pass, or :class:`NowhereToWork`."""
-        try:
-            answer = await self.open(turn, again=number)
-        except ComputerRefused as refusal:
-            if number + 1 < OPEN_TRIES and (refusal.code in _PASSING_CODES or refusal.kind in _PASSING_KINDS):
-                return None
-            why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or _REFUSED
-            raise NowhereToWork(why, code=code_of(refusal)) from None
-        except NotAnAnswer as refusal:
-            raise NowhereToWork(_REFUSED, code=code_of(refusal)) from None
-        if "history" in answer:
-            raise NowhereToWork(answer["reason"])
-        return answer
+        number = max(await self.operations.opens(self._session.id, turn) - 1, 0)
+        while True:
+            try:
+                answer = await self.open(turn, again=number)
+            except ComputerRefused as refusal:
+                if refusal.kind == _STOPPED:
+                    raise
+                if number + 1 < OPEN_TRIES and (refusal.code in _PASSING_CODES or refusal.kind in _PASSING_KINDS):
+                    number += 1
+                    continue
+                why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or _REFUSED
+                raise NowhereToWork(why, code=code_of(refusal)) from None
+            except NotAnAnswer as refusal:
+                raise NowhereToWork(_REFUSED, code=code_of(refusal)) from None
+            if "history" in answer:
+                raise NowhereToWork(answer["reason"])
+            return answer
 
     async def take(self, turn: int, step: int, call: str, reason: str) -> str:
         """A snapshot of the copy before the turn's step *step*, the tool call *call*; its commit."""

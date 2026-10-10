@@ -612,10 +612,10 @@ def nowhere(its: ThreadCopy, turn: int = 7) -> NowhereToWork:
 
 MOVED = {"ok": {"copy": "moved"}}
 #: What the next asking may pass: the history's for what its next open finishes or makes whole, its guest's for a
-#: request it gave up on, and the app's and the journal's for one that ended without its answer.
+#: request it gave up on, and the app's for one that ended without its answer.
 PASSING = [
     *({"type": "history", "code": code, "message": "no"} for code in ("no_whole_copy", "move_unfinished", "record_unfinished", "no_answer")),
-    *({"type": kind, "message": "no"} for kind in ("cancelled", "interrupted", "unavailable")),
+    *({"type": kind, "message": "no"} for kind in ("interrupted", "unavailable")),
 ]
 
 
@@ -631,12 +631,10 @@ def test_a_turns_open_is_heard_once_and_its_answer_is_every_later_steps():
 
 
 @pytest.mark.parametrize("error", PASSING)
-def test_a_refusal_the_next_asking_may_pass_is_asked_again_at_the_turns_next_step_under_its_next_name(error):
+def test_a_refusal_the_next_asking_may_pass_is_asked_again_at_once_under_the_turns_next_name(error):
     journal = Opens({"error": error}, {"error": error}, MOVED)
     its = ThreadCopy(journal, a_project_thread(), lease_token=None)
-    # Its step runs, in the copy as its computer's app keeps it: no refusal puts a thread in its folder.
-    assert asyncio.run(its.opened(7)) is None
-    assert asyncio.run(its.opened(7)) is None
+    # Nothing else of the turn waits on the computer meanwhile: its open is asked until it is answered.
     assert asyncio.run(its.opened(7)) == {"copy": "moved"}
     assert asyncio.run(its.opened(7)) == {"copy": "moved"}
     assert journal.heard == ["open:7", "open:7:1", "open:7:2"]
@@ -646,14 +644,23 @@ def test_a_refusal_the_next_asking_may_pass_is_asked_again_at_the_turns_next_ste
 def test_a_turn_asks_its_open_a_bounded_number_of_times_and_a_refusal_at_the_last_leaves_it_nowhere_to_work(error):
     journal = Opens(*[{"error": error}] * (OPEN_TRIES + 3))
     its = ThreadCopy(journal, a_project_thread(), lease_token=None)
-    for _ in range(OPEN_TRIES - 1):
-        assert asyncio.run(its.opened(7)) is None
     # The last asking's refusal stands for the turn: asked again, it is not heard again.
     for _ in range(3):
         stood = nowhere(its)
         assert (stood.why, stood.code, str(stood)) == ("refused", code_of(ComputerRefused(error["type"], "no", error.get("code"))), NOWHERE["refused"])
     assert journal.heard == ["open:7", *(f"open:7:{n}" for n in range(1, OPEN_TRIES))]
     assert OPEN_TRIES == 3
+
+
+def test_an_open_a_stop_closed_ends_the_turns_askings_and_is_no_reason_of_the_folders():
+    journal = Opens({"error": {"type": "cancelled", "message": "Stopped before the computer reported a result."}})
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    for _ in range(2):
+        with pytest.raises(ComputerRefused) as stopped:
+            asyncio.run(its.opened(7))
+        assert stopped.value.kind == "cancelled" and not isinstance(stopped.value, NowhereToWork)
+    # Nothing more of the turn is asked of its computer.
+    assert journal.heard == ["open:7"]
 
 
 @pytest.mark.parametrize(("outcome", "why"), [
@@ -675,15 +682,21 @@ def test_a_thread_whose_folder_has_no_history_or_whose_app_keeps_no_copy_for_it_
     assert journal.heard == ["open:7"]
 
 
-@pytest.mark.parametrize("outcome", [
+#: The refusals of an open that asking again would not pass.
+LASTING = [
     *({"error": {"type": "history", "code": code, "message": "no"}} for code in sorted(
         HISTORY_CODES - {"no_whole_copy", "move_unfinished", "record_unfinished", "no_answer", "name_not_utf8"},
     )),
-    *({"error": {"type": kind, "message": "no"}} for kind in sorted(REFUSALS - {"history", NO_COPY, "history_off", "cancelled", "interrupted", "unavailable"})),
+    *({"error": {"type": kind, "message": "no"}} for kind in sorted(
+        REFUSALS - {"history", NO_COPY, "history_off", "cancelled", "interrupted", "unavailable"},
+    )),
     # What is no refusal a computer's app gives, and what is no answer.
     {"error": "no"}, {"error": {"type": "history", "code": "<b>", "message": "no"}},
     {"ok": {"copy": "/etc", "session": "another"}}, {"ok": {"history": "off"}}, {"ok": None}, {"okay": 1},
-])
+]
+
+
+@pytest.mark.parametrize("outcome", LASTING)
 def test_a_refusal_asking_again_would_not_pass_leaves_the_thread_nowhere_to_work_at_once(outcome):
     journal = Opens(outcome)
     its = ThreadCopy(journal, a_project_thread(), lease_token=None)
@@ -699,8 +712,6 @@ def test_a_folder_whose_copy_was_cut_twice_by_its_bound_leaves_its_thread_nowher
     journal = Opens(cut, cut, too_large)
     its = ThreadCopy(journal, a_project_thread(), lease_token=None)
     # As the app answers: two makings of the copy cut short by their bound, then no copy for the thread.
-    assert asyncio.run(its.opened(7)) is None
-    assert asyncio.run(its.opened(7)) is None
     stood = nowhere(its)
     assert (stood.why, stood.code, str(stood), stood.retryable) == ("history_off", "history_off", NOWHERE["history_off"], False)
     assert journal.heard == ["open:7", "open:7:1", "open:7:2"]

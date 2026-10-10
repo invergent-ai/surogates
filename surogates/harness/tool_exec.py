@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, Callable
 from surogates.devices.binding import device_of
 from surogates.devices.history import ThreadCopy, thread_copy
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
-from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
@@ -295,26 +294,19 @@ async def _turn_now(store: Any, session: Any) -> int:
 
 async def _open_local_copy(
     session: Any, store: Any, lease: Any, *, session_factory: Any, redis: Any,
-) -> tuple[ThreadCopy, int, dict[str, Any] | None]:
-    """Bring a thread's copy on its user's computer to its turn, before the turn's next step: the copy, the turn, and the open's answer.
+) -> tuple[ThreadCopy, int, dict[str, Any]]:
+    """A thread's copy on its user's computer, brought to the turn now running: the copy, the turn's name, and its open's answer.
 
-    Its computer hears it once a turn (:meth:`ThreadCopy.opened`).  None for
-    an answer where a refusal the next asking may pass is all there is, or
-    the journal refused the asking itself, for a stopped session or a lease
-    another worker holds now: the step goes on, in the copy as the app keeps
-    it, and meets any such refusal itself.  Raises ``NowhereToWork`` where
-    the thread has nowhere to work: the turn runs no step.
+    Asked at the turn's start, before anything else of the turn reaches the
+    computer (``AgentHarness._opened_for_the_turn``), and answered from the
+    journal to every later asking of the turn's, a step's among them
+    (:meth:`ThreadCopy.opened`).  Raises ``NowhereToWork`` where the thread
+    has nowhere to work, the ``ComputerRefused`` of an open the turn's Stop
+    closed, and the journal's own refusals.
     """
     copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=str(lease.lease_token))
     turn = await _turn_now(store, session)
-    try:
-        opened = await copy.opened(turn)
-    except DeviceOperationError:
-        logger.warning("The copy of thread %s was not opened for its turn %s", session.id, turn, exc_info=True)
-        return copy, turn, None
-    if opened is None:
-        logger.info("The copy of thread %s is not opened for its turn %s yet: its next step asks again", session.id, turn)
-    return copy, turn, opened
+    return copy, turn, await copy.opened(turn)
 
 
 async def _apply_ssh_access(
