@@ -1753,7 +1753,7 @@ async def test_a_restore_goes_on_to_its_end_when_who_asked_for_it_leaves(api, mo
 
 
 # Where a Restore can die, killed, the bucket or the database refusing: each between two of its steps,
-# or inside one, and what the file holds then.  The ruling's two are between its pickup's row and the
+# or inside one, and what the file holds then: two of them between its pickup's row and the
 # pickup's push.
 KILLS = {
     # After its look at your edit, before anything is written.
