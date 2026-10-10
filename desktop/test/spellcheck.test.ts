@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -78,6 +78,10 @@ describe("the app's dictionary", () => {
     placeDictionary(SHIPPED, userData);
     expect(readFileSync(placed).equals(readFileSync(join(SHIPPED, DICTIONARY)))).toBe(true);
     expect(readdirSync(join(userData, "Dictionaries"))).toEqual([DICTIONARY]);
+    // At a first run it is the first to make the app's data folders: each is the user's alone, as the app's others are.
+    const fresh = join(mkdtempSync(join(dir, "data-home-")), "surogate");
+    placeDictionary(SHIPPED, join(fresh, "electron"));
+    for (const folder of [fresh, join(fresh, "electron"), join(fresh, "electron", "Dictionaries")]) expect(statSync(folder).mode & 0o777, folder).toBe(0o700);
   });
 
   it("gives every session made en-US alone, and the app's own folder to ask any dictionary of; one that cannot be placed is said", () => {

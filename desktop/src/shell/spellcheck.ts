@@ -34,7 +34,8 @@ export function placeDictionary(shipped: string, userData: string): void {
     // None yet.
   }
   if (there?.equals(own)) return;
-  mkdirSync(folder, { recursive: true });
+  // At a first run this makes the app's data folders before Chromium does: each the user's alone, as Chromium makes them.
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
   const next = `${placed}.${process.pid}.tmp`;
   writeFileSync(next, own);
   renameSync(next, placed);
