@@ -274,20 +274,23 @@ describe("a thread's copy of its folder", () => {
   });
 
   it.each([
-    ["cap", /more files than a project's history on this computer takes.*Choose a folder inside it/],
-    ["names", /a file whose name a project's history on this computer cannot record.*Choose a folder inside it/],
-  ] as const)("is made nowhere for a folder with no history (%s): its thread works nowhere, is told why, and is asked about again", async (reason, words) => {
+    ["cap", "more files than a project's history on this computer takes, so no thread of the project works in it. Choose a folder inside it that holds fewer"],
+    [
+      "names",
+      "a file whose name a project's history on this computer cannot record, as it is not UTF-8, so no thread of the project works in it. "
+        + "Choose a folder inside it that holds no such name, or rename the file",
+    ],
+  ] as const)("is made nowhere for a folder with no history (%s): its thread works nowhere, is told why in words that name the folder, and is asked about again", async (reason, words) => {
     // However few files it holds: the guest's word can only deny a thread its copy.
     const one = copies((request) => (request.action === "open" ? { ok: { history: "off", reason } } : undefined));
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: historyOff(reason) });
-    const off = historyOff(reason);
-    expect("error" in off && off.error.type).toBe("history_off");
-    expect("error" in off && off.error.message).toMatch(words);
+    const off = { error: { type: "history_off", message: `The folder ${folder} holds ${words}` } };
+    expect(historyOff(reason, folder)).toEqual(off);
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: off });
     // A turn's own open is answered as the history said it; every other operation is told why.
     expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { history: "off", reason } });
-    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(historyOff(reason));
+    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(off);
     // Nothing is remembered of it: the folder may change.
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: historyOff(reason) });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: off });
     expect(asked.map((request) => [request.action, request.args])).toEqual([
       ["open", { moves: false }], ["open", {}], ["open", { moves: false }], ["open", { moves: false }],
     ]);
@@ -691,7 +694,7 @@ describe("a copy being made", () => {
     const large = {
       error: {
         type: "history_off",
-        message: "This folder is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less",
+        message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less`,
       },
     };
     expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large });
