@@ -19,6 +19,9 @@ export interface Binding {
   boot: string; // the boot dev was read in: a reboot can renumber a mount; "" when unread
   mode: Mode;
   boundAt: number;
+  // A project's thread, which works in a copy of the folder that is its own: the thread, which is
+  // the root itself. Without it, a chat that works in the folder itself.
+  history?: string;
 }
 
 // Read as bigints: node:sqlite throws on an INTEGER above 2^53, and SMB/CIFS and
@@ -33,12 +36,13 @@ interface Row {
   boot: string;
   mode: string;
   bound_at: bigint;
+  history: string | null;
 }
 
 const read = (row: Row | undefined): Binding | undefined =>
   row && {
     root: row.root, nonce: row.nonce, folder: row.folder, dev: Number(row.dev), ino: Number(row.ino), boot: row.boot,
-    mode: row.mode as Mode, boundAt: Number(row.bound_at),
+    mode: row.mode as Mode, boundAt: Number(row.bound_at), ...(row.history === null ? {} : { history: row.history }),
   };
 
 export class Bindings {
@@ -58,8 +62,8 @@ export class Bindings {
   /** Record a root's binding. A root is bound once: a second binding for it throws. */
   add(binding: Binding): void {
     this.db
-      .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt);
+      .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at, history) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt, binding.history ?? null);
     this.changed(binding.root);
   }
 

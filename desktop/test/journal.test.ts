@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { cpSync, mkdtempSync, rmSync, statSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -343,6 +344,23 @@ describe("the bindings", () => {
     after.close();
   });
 
+  it("keep the thread whose copy a root works in, and none for a chat that works in its folder itself", () => {
+    const before = new OperationJournal(path);
+    before.bindings.add({ ...binding("r1", 1), history: "r1" });
+    before.bindings.add(binding("r2", 2));
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.get("r1")).toEqual({ ...binding("r1", 1), history: "r1" });
+    expect(after.bindings.get("r2")).toEqual(binding("r2", 2));
+    expect(after.bindings.all().map((bound) => bound.history)).toEqual(["r1", undefined]);
+    expect(after.bindings.last()).toEqual(binding("r2", 2));
+    // A mode changed, and what its user allowed it, leave the copy it works in as it was.
+    after.bindings.setMode("r1", "ask");
+    after.bindings.allowDomain("r1", "example.com");
+    expect(after.bindings.get("r1")).toEqual({ ...binding("r1", 1), mode: "ask", history: "r1" });
+    after.close();
+  });
+
   it("bind a root once", () => {
     const journal = new OperationJournal(path);
     journal.bindings.add(binding("r1", 1));
@@ -521,5 +539,161 @@ describe("a device the agent revoked", () => {
     bind("r3", "/home/me/Budget", 2);
     expect(journal.bindings.folders()).toEqual(["/home/me/Report", "/home/me/Budget"]);
     journal.close();
+  });
+});
+
+// The journal as the build before a binding could name a thread's copy made it and wrote it: its tables
+// word for word, and each statement it has for a binding.
+describe("a journal written before a binding could name a thread's copy", () => {
+  const TABLES = `
+    PRAGMA locking_mode = EXCLUSIVE;
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = FULL;
+    PRAGMA fullfsync = ON;
+    PRAGMA checkpoint_fullfsync = ON;
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS operations (
+      id TEXT PRIMARY KEY,
+      digest TEXT,
+      state TEXT NOT NULL,
+      outcome TEXT,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS operations_by_state ON operations (state, updated_at);
+    CREATE TABLE IF NOT EXISTS bindings (
+      root TEXT PRIMARY KEY,
+      nonce TEXT NOT NULL,
+      folder TEXT NOT NULL,
+      dev INTEGER NOT NULL,
+      ino INTEGER NOT NULL,
+      boot TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      bound_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS domains (
+      root TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      PRIMARY KEY (root, domain)
+    );
+    CREATE TABLE IF NOT EXISTS browsing (root TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS browser_ports (port INTEGER PRIMARY KEY, root TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS chunks (
+      id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      data BLOB NOT NULL,
+      PRIMARY KEY (id, seq)
+    );
+  `;
+  const ADD = `INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+  const binding = (root: string, boundAt: number, mode: Binding["mode"] = "free"): Binding => ({
+    root, nonce: `nonce-${root}`, folder: `/home/me/${root}`, dev: 2049, ino: 7_340_033, boot: "boot-1", mode, boundAt,
+  });
+  // That build, on the journal's file: what it does when it opens one, and its binding of a root.
+  const earlier = (): DatabaseSync => {
+    const db = new DatabaseSync(path);
+    db.exec(TABLES);
+    return db;
+  };
+  const bind = (db: DatabaseSync, { root, nonce, folder, dev, ino, boot, mode, boundAt }: Binding) => {
+    db.prepare(ADD).run(root, nonce, folder, dev, ino, boot, mode, boundAt);
+  };
+  const columns = (db: DatabaseSync) => (db.prepare(`PRAGMA table_info(bindings)`).all() as Array<{ name: string }>).map((column) => column.name);
+  // Two chats on their folders, one that asks, with what its user allowed it and an operation it had answered.
+  const written = () => {
+    const db = earlier();
+    bind(db, binding("r0", 1));
+    bind(db, binding("r1", 2, "ask"));
+    db.exec(`
+      INSERT INTO domains VALUES ('r1', 'example.com');
+      INSERT INTO browsing VALUES ('r1');
+      INSERT INTO browser_ports VALUES (3000, 'r1');
+      INSERT INTO operations VALUES ('a', 'digest-a', 'finished', '{"ok":"done"}', 1);
+      INSERT INTO meta VALUES ('device_id', 'device-1');
+    `);
+    db.close();
+  };
+  const asItWas = (journal: OperationJournal) => {
+    expect(journal.bindings.all()).toEqual([binding("r0", 1), binding("r1", 2, "ask")]);
+    expect(journal.bindings.domains("r1")).toEqual(["example.com"]);
+    expect([journal.bindings.browsing("r1"), journal.bindings.forwards()]).toEqual([true, [{ port: 3000, root: "r1" }]]);
+    expect(journal.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: "done" } });
+    expect([journal.claim("device-1"), journal.claim("device-2")]).toEqual([true, false]);
+  };
+
+  it("opens with each chat as it was, on its folder itself, and takes a thread's copy beside them", () => {
+    written();
+    const journal = new OperationJournal(path);
+    asItWas(journal);
+    journal.bindings.add({ ...binding("r2", 3), history: "r2" });
+    journal.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.all()).toEqual([binding("r0", 1), binding("r1", 2, "ask"), { ...binding("r2", 3), history: "r2" }]);
+    after.close();
+  });
+
+  it("is still a journal that build opens, reads and writes once this one has opened it", () => {
+    written();
+    const journal = new OperationJournal(path);
+    journal.bindings.add({ ...binding("r2", 3), history: "r2" });
+    journal.close();
+    // That build again: every statement it has for a binding, on the journal as this one left it.
+    const db = earlier();
+    bind(db, binding("r3", 4));
+    const select = db.prepare(`SELECT * FROM bindings WHERE root = ?`);
+    expect(select.get("r0")).toMatchObject({ root: "r0", nonce: "nonce-r0", folder: "/home/me/r0", dev: 2049, ino: 7_340_033, boot: "boot-1", mode: "free", bound_at: 1 });
+    expect((db.prepare(`SELECT * FROM bindings ORDER BY bound_at, rowid`).all() as Array<{ root: string }>).map((row) => row.root)).toEqual(["r0", "r1", "r2", "r3"]);
+    expect((db.prepare(`SELECT * FROM bindings ORDER BY bound_at DESC, rowid DESC LIMIT 1`).get() as { root: string }).root).toBe("r3");
+    expect(db.prepare(`SELECT folder FROM bindings GROUP BY folder ORDER BY MIN(bound_at), MIN(rowid)`).all()).toHaveLength(4);
+    expect(db.prepare(`UPDATE bindings SET mode = ? WHERE root = ? AND mode <> ?`).run("free", "r1", "free").changes).toBe(1);
+    expect(db.prepare(`INSERT OR IGNORE INTO domains (root, domain) SELECT root, ? FROM bindings WHERE root = ?`).run("example.org", "r3").changes).toBe(1);
+    expect(db.prepare(`DELETE FROM bindings WHERE root = ?`).run("r0").changes).toBe(1);
+    // What it cannot know: it reads a thread bound to its copy as a chat on the folder itself.
+    expect(select.get("r2")).toMatchObject({ root: "r2", folder: "/home/me/r2", mode: "free" });
+    db.close();
+    // And this build after it: the chat that build bound works in its folder, and the thread's copy is still its own.
+    const after = new OperationJournal(path);
+    expect(after.bindings.all()).toEqual([binding("r1", 2, "free"), { ...binding("r2", 3), history: "r2" }, binding("r3", 4)]);
+    expect(after.bindings.domains("r3")).toEqual(["example.org"]);
+    after.close();
+  });
+
+  // The app killed while this build alters the journal it opened: a process of its own that opens the journal as
+  // the app does, runs *sql* and is killed there, with nothing closed.
+  const killedIn = (sql: string) => {
+    const killed = spawnSync(process.execPath, ["--no-warnings", "-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA locking_mode = EXCLUSIVE; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+      db.exec(process.argv[2]);
+      process.kill(process.pid, "SIGKILL");
+    `, path, sql]);
+    expect(killed.signal).toBe("SIGKILL");
+  };
+  const ALTER = `ALTER TABLE bindings ADD COLUMN history TEXT`;
+
+  it.each([
+    ["before the change was kept", `BEGIN IMMEDIATE; ${ALTER};`, 0, false],
+    ["once it was kept, and before anything else", ALTER, 0, true],
+    // As a power cut leaves it: the last of the change's writes is not whole.
+    ["while the change was being kept", ALTER, 100, false],
+  ])("opens with each chat as it was when the app was killed %s", (_when, sql, torn, altered) => {
+    written();
+    killedIn(sql);
+    if (torn > 0) truncateSync(`${path}-wal`, statSync(`${path}-wal`).size - torn);
+    // What the kill left, read in a copy so that the journal itself is opened as the kill left it: the bindings
+    // with the change whole, or without it.
+    const copy = join(dir, "left.sqlite");
+    for (const suffix of ["", "-wal"]) cpSync(`${path}${suffix}`, `${copy}${suffix}`);
+    const left = new DatabaseSync(copy);
+    expect(columns(left).includes("history")).toBe(altered);
+    left.close();
+    const journal = new OperationJournal(path);
+    asItWas(journal);
+    journal.bindings.add({ ...binding("r2", 3), history: "r2" });
+    journal.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.get("r2")).toEqual({ ...binding("r2", 3), history: "r2" });
+    expect(after.bindings.get("r0")).toEqual(binding("r0", 1));
+    after.close();
   });
 });

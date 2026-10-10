@@ -75,7 +75,8 @@ export class OperationJournal {
           ino INTEGER NOT NULL,
           boot TEXT NOT NULL,
           mode TEXT NOT NULL,
-          bound_at INTEGER NOT NULL
+          bound_at INTEGER NOT NULL,
+          history TEXT
         );
         CREATE TABLE IF NOT EXISTS domains (
           root TEXT NOT NULL,
@@ -91,6 +92,11 @@ export class OperationJournal {
           PRIMARY KEY (id, seq)
         );
       `);
+      // A journal written before a binding could name a thread's copy: its chats work in their folders
+      // themselves, as they did. One statement, kept whole or not at all, and no row is written again;
+      // the build that wrote the journal still reads it afterwards, and names its own columns when it binds.
+      const columns = this.db.prepare(`PRAGMA table_info(bindings)`).all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "history")) this.db.exec(`ALTER TABLE bindings ADD COLUMN history TEXT`);
       this.bindings = new Bindings(this.db);
       // Opened once per process: what a crash cut off is interrupted before
       // anything is reported or run.
