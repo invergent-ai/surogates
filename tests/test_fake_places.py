@@ -162,6 +162,8 @@ class Real:
             env={"SUROGATE_FOLDER": str(folder), "HOME": str(folder.parent), "PATH": "/usr/bin:/bin", "SUROGATE_COPY": str(copy), "SUROGATE_KEPT": str(kept)},
         )
         assert json.loads(self.process.stdout.readline()) == {"ready": True}
+        # Where the app reads the helper's records of a landing, as it reads the rules' own (tests.fake_places._Landing).
+        self.folder, self.copy, self.store = folder, copy, kept
         self.asked = 0
 
     def land(self, args: dict[str, Any]) -> dict[str, Any]:

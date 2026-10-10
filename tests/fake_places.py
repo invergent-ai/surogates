@@ -275,9 +275,7 @@ class Places:
         ok = forgotten.get("ok")
         if not (isinstance(ok, dict) and ok.keys() == {"landing"} and (ok["landing"] is None or _id(ok["landing"]))):
             return NOT_A_FORGETTING
-        # The app reads the helper's records beside it, whichever helper it started: these rules, or its own.
-        records = _Landing(LandHelper(self.real, self.copy(thread), self.kept), args["saga"])
-        if (unrecorded := _unrecorded(records, args["applied"], recorded=ok["landing"] is not None)) is not None:
+        if (unrecorded := _unrecorded(_Landing(self._helper, args["saga"]), args["applied"], recorded=ok["landing"] is not None)) is not None:
             return unrecorded
         outcome = self._helper.land({"action": "forget", "saga": args.get("saga")})
         # The turn's own landing over, the folder is let go, its helper with it; not at the forgetting of one it only settled.
@@ -308,22 +306,6 @@ def _forgetting(args: dict[str, Any]) -> bool:
     )
 
 
-def _recorded(landing: _Landing, step: int) -> str | None:
-    """The file the helper's record of *step* names, whichever helper wrote it: these rules', or the app's own, which says more of
-    each step (``land.ts`` ``stepOf``); None where there is none, and :class:`_Unreadable` where it is no record of either."""
-    try:
-        record = landing.read(step)
-    except _Unreadable:
-        try:
-            record = json.loads((landing.kept / f"{step}.json").read_text())
-        except (OSError, UnicodeDecodeError, ValueError):
-            record = None
-        if isinstance(record, dict) and record.keys() == _APPS_RECORD and landable(record["path"]):
-            return record["path"]
-        raise
-    return None if record is None else record["path"]
-
-
 def _unrecorded(landing: _Landing, applied: list[dict[str, Any]], *, recorded: bool) -> dict[str, Any] | None:
     """The app's refusal of a forgetting by the helper's own records of the landing, as the app reads them.
 
@@ -344,12 +326,12 @@ def _unrecorded(landing: _Landing, applied: list[dict[str, Any]], *, recorded: b
         if (landing.kept / f"{step}.json").is_symlink():
             return RECORDS_UNREAD
         try:
-            path = _recorded(landing, step)
+            record = landing.read(step, as_the_app=True)
         except _Unreadable:
             return RECORDS_UNREAD
-        if path is None:
+        if record is None:
             continue
-        records[step] = path
+        records[step] = path = record["path"]
         if named.get(step) != path:
             return {"error": {"type": "conflict", "message": (
                 f"Step {step} of this landing, of {path}, was applied on this computer, and the steps named to forget the landing leave it out, "
@@ -424,8 +406,6 @@ _REVISION = re.compile(r"[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+")
 _ID = re.compile(r"[0-9a-f]{40}")
 _STEP = re.compile(r"(0|[1-9][0-9]*)\.json")
 _KEPT = re.compile(r"0|[1-9][0-9]*")
-#: What the app's own helper writes of a step (``land.ts``): the rules' record, and what its steps cut short need.
-_APPS_RECORD = {"path", "was", "wrote", "mode", "made", "above", "temp", "aside", "moved", "out", "back"}
 _MAX_LAND_BYTES = 1 << 30
 _MAX_KEPT_BYTES = 4 << 30
 _HOLD = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -641,6 +621,11 @@ class _Unreadable(_Refused):
         self.path = path
 
 
+# A step's record as these rules write one; and as the app's helper writes one, which says more of where the step got.
+_RECORD = {"path", "was", "wrote", "mode", "made", "above"}
+_APPS_RECORD = _RECORD | {"temp", "aside", "moved", "out", "back"}
+
+
 class _Landing:
     """One saga's steps in the folder, and what they kept: ``<kept>/<saga>/<step>.json``, and the file a step replaced at ``<step>``."""
 
@@ -653,7 +638,8 @@ class _Landing:
         names = os.listdir(self.kept) if self.kept.is_dir() else []
         return [int(match.group(1)) for name in names if (match := _STEP.fullmatch(name))]
 
-    def read(self, step: int) -> dict[str, Any] | None:
+    def read(self, step: int, *, as_the_app: bool = False) -> dict[str, Any] | None:
+        """A step's record as these rules write one, or None where it has none; *as_the_app*, the app's helper's too, as the app reads either (files/land.ts, recordsOf)."""
         try:
             text = (self.kept / f"{step}.json").read_text()
         except FileNotFoundError:
@@ -664,7 +650,7 @@ class _Landing:
             record = json.loads(text)
         except ValueError:
             record = None
-        if isinstance(record, dict) and record.keys() == {"path", "was", "wrote", "mode", "made", "above"} and landable(record["path"]):
+        if isinstance(record, dict) and (record.keys() == _RECORD or as_the_app and record.keys() == _APPS_RECORD) and landable(record["path"]):
             return record
         named = record.get("path") if isinstance(record, dict) else None
         raise _Unreadable(self.saga, step, named if isinstance(named, str) and landable(named) else None)
