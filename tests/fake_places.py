@@ -120,7 +120,7 @@ FINISHING = {"history": {"fetch", "record", "forget"}, "land": {"recover", "unap
 # The actions of each of a thread's kinds the app takes.
 ACTIONS = {
     "checkpoint": {"take", "restore"},
-    "history": {"open", "changed", "fetch", "pickup", "commit", "record", "keep", "forget"},
+    "history": {"open", "changed", "fetch", "pickup", "picked", "commit", "record", "keep", "forget"},
     "land": {"recover", "revisions", "apply", "unapply", "forget"},
 }
 #: How long the folder is held for a landing with no step, as the app lets a landing's host idle.

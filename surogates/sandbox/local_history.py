@@ -147,6 +147,10 @@ _LEFT = "Surogate-Left"
 _ASIDE = 16
 #: Where a place keeps a thread's copy and its repository that were made again, each renamed there as it was.
 _SET_ASIDE = "set-aside"
+#: The most one answer names of the files a pickup picked up, in characters of each as JSON spells it, which one
+#: frame of the desktop's link carries with room: a part.  Every part after the first is asked for after it, from
+#: the file it ended at (:meth:`LocalHistory.picked`).  A part holds one file at least, however long its name.
+_PICKED_CHARS = 1 << 20
 #: A thread's name is one name, of these alone: it names a folder of the place's, and none of another's.
 _NAMED = "[A-Za-z0-9_-]{1,64}"
 #: What one is named there: the order it was set aside in, counted over the place; when, by this
@@ -180,6 +184,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "restore": ("restore", frozenset({"commit"})),
     "fetch": ("fetch", frozenset({"commits", "saga", "since"})),
     "pickup": ("pickup", frozenset({"author", "trailers"})),
+    "picked": ("picked", frozenset({"pickup", "after"})),
     "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
     "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup", "left"})),
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
@@ -1187,9 +1192,38 @@ class LocalHistory(History):
                 os.close(fd)
 
     def pickup(self, *, author: dict[str, str], trailers: list[list[str]], push: bool = False) -> dict:
+        """The cloud's pickup, its files named in parts: this answer names the first, and ``more`` how many are left after it.
+
+        Your edits since ``main`` are any number of files, and one answer
+        to the desktop is one frame of its link: a part names as many as
+        :data:`_PICKED_CHARS` holds, and each part after it is asked for
+        from the file the last one ended at (:meth:`picked`).  No ref
+        moves, as in the cloud: the landing's record pushes the pickup.
+        Only so: a folder's history records no routine's run.
+        """
         if push:
             _refuse("a folder's history records no routine's run: a pickup is a landing's first step here, pushed with its record")
-        return super().pickup(author=author, trailers=trailers)
+        picked = super().pickup(author=author, trailers=trailers)
+        return {**picked, **_part(picked["picked_up"])}
+
+    def picked(self, *, pickup: str, after: str) -> dict:
+        """The files the pickup *pickup* picked up after the file *after*, as many as one answer names: ``{picked_up, more}``.
+
+        A pickup's own answer names its first part, and each part after it
+        is asked from the last file the one before it named; ``more`` is
+        how many are left after this one.  Each is in the order the pickup
+        names its files, by their paths, so its parts name each file once.
+        It only reads: *pickup* is this thread's commit of your edits on
+        ``main``, and its files are what it changed of its one parent.  A
+        part asked again is the same part.
+        """
+        if not _walked(after):
+            _refuse("it names no file to go on from")
+        parents = self._parents(pickup) if self._has(pickup) else []
+        if len(parents) != 1:
+            _refuse("it names no pickup of this thread's")
+        versions, _ = self._diff(parents[0], pickup)
+        return _part([{"path": path, "before": was, "after": now} for path, (was, now) in sorted(versions.items()) if path > after])
 
     def apply(self, *args: Any, **kwargs: Any) -> dict:
         _refuse(_NO_WRITER)
@@ -1369,6 +1403,21 @@ def _walked(path: object) -> bool:
         return False
     parts = PurePosixPath(path)
     return not parts.is_absolute() and bool(parts.parts) and ".." not in parts.parts and str(parts) == path
+
+
+def _part(picked: list[dict]) -> dict:
+    """*picked*, a pickup's files from where its asker has them, as one answer names them: those that fit it, and how many are left.
+
+    As many as :data:`_PICKED_CHARS` holds of them as JSON spells them,
+    every character past the basic ones as its escape, which is never less
+    than the desktop counts; and never more than a list of an answer holds.
+    """
+    size = 0
+    for n, entry in enumerate(picked):
+        size += len(json.dumps(entry)) + 2
+        if n and (size > _PICKED_CHARS or n == HISTORY_CAP):
+            return {"picked_up": picked[:n], "more": len(picked) - n}
+    return {"picked_up": picked, "more": 0}
 
 
 def _left_in(message: list[str]) -> list[str]:

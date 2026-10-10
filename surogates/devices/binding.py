@@ -34,11 +34,12 @@ RETIRE = "retire"
 
 # The kinds only a project thread's own turn asks its computer for
 # (surogates.devices.history), and the actions of each: a snapshot of its
-# copy or the copy put back; a step of its folder's history; a landing's
-# look at the folder, its writes into it, and its forgetting of what it kept.
+# copy or the copy put back; a step of its folder's history, a part of a
+# pickup's files among them; a landing's look at the folder, its writes into
+# it, and its forgetting of what it kept.
 THREAD_ACTIONS: dict[str, frozenset[str]] = {
     "checkpoint": frozenset({"take", "restore"}),
-    "history": frozenset({"open", "changed", "fetch", "pickup", "commit", "record", "keep", "forget"}),
+    "history": frozenset({"open", "changed", "fetch", "pickup", "picked", "commit", "record", "keep", "forget"}),
     "land": frozenset({"recover", "revisions", "apply", "unapply", "forget"}),
 }
 THREAD_KINDS = frozenset(THREAD_ACTIONS)

@@ -25,7 +25,7 @@ import type { Operation, Outcome } from "../link/protocol.js";
 // snapshot's listing, a pruning and the file helper's other kinds are none of them.
 export const THREAD_ACTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["checkpoint", new Set(["take", "restore"])],
-  ["history", new Set(["open", "changed", "fetch", "pickup", "commit", "record", "keep", "forget"])],
+  ["history", new Set(["open", "changed", "fetch", "pickup", "picked", "commit", "record", "keep", "forget"])],
   ["land", new Set(["recover", "revisions", "apply", "unapply", "forget"])],
 ]);
 export const THREAD_KINDS: ReadonlySet<string> = new Set(THREAD_ACTIONS.keys());
