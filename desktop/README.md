@@ -62,6 +62,12 @@ and connects to no host.
 The file hosts and their helpers run on the app's own node, `bin/node`: Node 22 for
 linux-x64, pinned by hash and stripped (`scripts/node.sh`, which the build runs).
 
+The app's pages and the agent's web client are spell-checked in en-US alone, with Chromium's
+en-US dictionary that the app ships, `dictionaries/en-US-10-1.bdic`, pinned by hash
+(`scripts/dictionary.sh`, which the build runs). The app puts it where Chromium looks before any
+of its sessions starts, and points Chromium's dictionary downloads at its own folder
+(`src/shell/spellcheck.ts`): no dictionary is downloaded from Google's servers.
+
 Electron never runs as Node: its RunAsNode fuse is off (`scripts/fuses.mjs`; this
 package's own Electron keeps the inspector, which the end-to-end tests drive).
 

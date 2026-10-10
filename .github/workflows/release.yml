@@ -317,8 +317,8 @@ jobs:
         env:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: |
-          # The app's node is fetched and checked against its pin, never one a runner kept.
-          rm -rf bin
+          # The app's node and its spelling dictionary are fetched and checked against their pins, never ones a runner kept.
+          rm -rf bin dictionaries
           npm ci
           node node_modules/electron/install.js
           npm run build

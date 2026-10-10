@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -82,6 +83,42 @@ describe("the shell", () => {
     // The strips the window is dragged by are the controls' height, as Claude Desktop's are.
     expect(await page.$eval("#sidebar .top", (found) => found.getBoundingClientRect().height)).toBe(36);
     expect(layout.close.right <= controls.left || layout.close.top >= controls.bottom).toBe(true);
+  });
+
+  it("spell-checks its pages and the agent's web client in en-US alone, from the dictionary it ships, with no request for one", async () => {
+    // Every connection for Chromium's dictionary server, and the hosts it sends a download to, comes to
+    // a server of the test's, which counts it and ends it; the computer's locale is German.
+    let dialled = 0;
+    const server = createServer((socket) => {
+      dialled += 1;
+      socket.on("error", () => {});
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      seedAgent();
+      app = await launch(home, { LANG: "de_DE.UTF-8", LANGUAGE: "de" }, [`--host-resolver-rules=MAP *.gvt1.com 127.0.0.1:${port}`]);
+      await shellPage(app);
+      // The window's own session, and the web client's partition, once its view is made.
+      const languages = () => app!.evaluate(({ webContents }) => [...new Set(webContents.getAllWebContents().map((contents) => contents.session))]
+        .map((made) => made.getSpellCheckerLanguages()));
+      await expect.poll(async () => (await languages()).length).toBe(2);
+      expect(await languages()).toEqual([["en-US"], ["en-US"]]);
+      const shipped = readFileSync(join(import.meta.dirname, "..", "..", "dictionaries", "en-US-10-1.bdic"));
+      expect(readFileSync(join(home, "surogate", "electron", "Dictionaries", "en-US-10-1.bdic")).equals(shipped)).toBe(true);
+      // A field each spell-checks, as the quick entry's and the web client's are: still nothing is asked for.
+      // A page still loading, as the web client's is between its tries, is given two seconds.
+      await app.evaluate(({ webContents }) => Promise.all(webContents.getAllWebContents().map((contents) => Promise.race([
+        contents.executeJavaScript("document.body.insertAdjacentHTML('beforeend', '<textarea spellcheck=true>Teh qiuck brwon fox</textarea>'); document.querySelector('textarea:last-of-type').focus();")
+          .catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 2_000)),
+      ]))));
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      expect(dialled).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("opens where it was left, and never smaller than 960 by 600", async () => {

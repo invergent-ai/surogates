@@ -55,6 +55,7 @@ import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
 import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
+import { ownSpelling } from "./spellcheck.js";
 import { appTools, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
 import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
@@ -78,6 +79,7 @@ const PAGES_PRELOAD = join(import.meta.dirname, "pages-preload.cjs");
 const BRIDGE_PRELOAD = join(import.meta.dirname, "preload.cjs");
 const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
+const DICTIONARIES = join(import.meta.dirname, "..", "..", "dictionaries");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
@@ -88,6 +90,8 @@ const root = join(dataHome, "surogate");
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
 app.setPath("userData", join(root, "electron"));
+// Before ready too: the default session is made then, and spell-checks with the app's own dictionary.
+ownSpelling(app, DICTIONARIES, console.error);
 
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
