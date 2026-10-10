@@ -156,6 +156,18 @@ def handles_of_versions() -> list[str]:
     return [fd for fd in os.listdir("/proc/self/fd") if "/out/" in os.path.realpath(f"/proc/self/fd/{fd}")]
 
 
+def let_go_on_the_loop(monkeypatch) -> list[bool]:
+    """Whether each version let go from now on was let go on the loop's own thread, where a large file's going would stall it."""
+    where, let_go = [], module._let_go
+
+    def noted(*args) -> None:
+        where.append(threading.current_thread() is threading.main_thread())
+        let_go(*args)
+
+    monkeypatch.setattr(module, "_let_go", noted)
+    return where
+
+
 def no_ones(history: BucketHistory) -> bool:
     """Whether the copy is no request's: its lock can be taken."""
     held = os.open(module._lock_of(history.clone), os.O_RDWR)
@@ -1199,13 +1211,14 @@ async def test_a_question_git_takes_too_long_over_is_stopped_and_said_to_have_fa
 
 
 
-async def test_a_version_is_written_to_a_file_of_the_copy_and_is_gone_once_it_is_sent(tmp_path, storage, project):
+async def test_a_version_is_written_to_a_file_of_the_copy_and_is_gone_once_it_is_sent(tmp_path, storage, project, monkeypatch):
     one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
     landed(tmp_path, project, "saga:2", {"Report.docx": b"PK\x03\x04 report v3"})
     v1, v2 = (git(project / "_history", "rev-parse", f"{one}{side}:Report.docx") for side in ("^1", ""))
     history = bucket(tmp_path, storage)
     await history.sync()
     held = module._size(history.clone)
+    on_the_loop = let_go_on_the_loop(monkeypatch)
     staged = await history.version(v2)
     # A file of the copy's own, counted with all else the copy holds until it is sent.
     [file] = staged_in(history)
@@ -1213,6 +1226,8 @@ async def test_a_version_is_written_to_a_file_of_the_copy_and_is_gone_once_it_is
     assert module._size(history.clone) == held + 14
     assert await sent(staged) == b"PK\x03\x04 report v2"
     assert (staged_in(history), module._size(history.clone)) == ([], held)
+    # Let go off the loop: a large file takes its time to leave a disk.
+    assert on_the_loop == [False]
     # The file as it was before its first landing is a version too; and one let go unsent is gone as well.
     assert await sent(await history.version(v1)) == b"PK\x03\x04 report v1"
     (await history.version(v2)).close()
@@ -1313,6 +1328,49 @@ async def test_a_version_larger_than_one_may_be_or_than_the_copy_has_room_for_is
     assert (staged_in(history), no_ones(history)) == ([], True)
 
 
+async def test_a_version_the_copies_together_have_no_room_for_waits_for_room_where_no_other_copy_can_go(tmp_path, storage, project):
+    data = os.urandom(2**20)
+    landed(tmp_path, project, "saga:1", {"Report.docx": data})
+    report = blob_of(data)
+
+    def copy_of(name: str, **bounds: float) -> BucketHistory:
+        return BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / name, Bounds(**bounds))
+
+    here, other = copy_of("here"), copy_of("other")
+    for history in (here, other):
+        await history.sync()
+    held, ago = module._size(here.clone), time.time() - 120
+    # Room for the two copies, a byte short of the version beside them.  The other was used just now: it is not
+    # removed for this, and the disk is not used past the bound either.  The version waits.
+    tight = copy_of("here", copies=2 * held + 2**20 - 1)
+    with pytest.raises(Busy, match="being read just now"):
+        await tight.version(report)
+    assert (staged_in(here), other.clone.exists()) == ([], True)
+    # Not used for a minute, the other goes, and the version is written out.
+    os.utime(other.clone / "HEAD", (ago, ago))
+    assert await sent(await tight.version(report)) == data
+    assert not other.clone.exists()
+    # A copy with a version of its own on its way is in use, however long ago it was asked: it is never removed.
+    await other.sync()
+    sending = await other.version(report)
+    os.utime(other.clone / "HEAD", (ago, ago))
+    with pytest.raises(Busy, match="being read just now"):
+        await copy_of("here", copies=2 * held + 2 * 2**20 - 1).version(report)
+    assert (staged_in(here), other.clone.exists(), len(staged_in(other))) == ([], True, 1)
+    assert await sent(await copy_of("here", copies=2 * held + 2 * 2**20).version(report)) == data
+    # And a third copy, one that can go, goes for it though the copies not in use would fit without that.
+    third = copy_of("third")
+    await third.sync()
+    os.utime(third.clone / "HEAD", (ago, ago))
+    assert await sent(await copy_of("here", copies=2 * held + 2 * 2**20).version(report)) == data
+    assert (third.clone.exists(), other.clone.exists()) == (False, True)
+    assert await sent(sending) == data
+    # A version the copies could not hold with its own copy alone is not one to wait for.
+    with pytest.raises(HistoryError) as refused:
+        await copy_of("here", copies=held + 2**20 - 1).version(report)
+    assert said(refused.value) == "This version is larger than Surogate can read here."
+
+
 async def test_a_pack_the_copy_has_room_for_once_a_version_on_its_way_out_has_gone_is_told_to_try_again(tmp_path, storage, project):
     data = os.urandom(2**20)
     landed(tmp_path, project, "saga:1", {"Report.docx": data})
@@ -1379,6 +1437,7 @@ async def test_a_version_whose_request_left_while_it_was_written_is_gone_once_gi
         return run(command, **how)
 
     monkeypatch.setattr(module.subprocess, "run", slow)
+    on_the_loop = let_go_on_the_loop(monkeypatch)
     request = asyncio.create_task(history.version(v2))
     assert await asyncio.to_thread(writing.wait, 20)
     # Its client went away.
@@ -1394,7 +1453,7 @@ async def test_a_version_whose_request_left_while_it_was_written_is_gone_once_gi
         await asyncio.sleep(0.05)
     # What it wrote was no one's to send: gone, and no handle of it is left open in the api.
     assert (staged_in(history), no_ones(history), handles_of_versions()) == ([], True, [])
-    assert history.clone not in module._USING
+    assert (history.clone in module._USING, on_the_loop) == (False, [False])
     monkeypatch.setattr(module.subprocess, "run", run)
     assert await sent(await history.version(v2)) == b"PK\x03\x04 report v2"
 
@@ -1471,6 +1530,25 @@ async def test_a_version_git_takes_longer_to_write_than_it_may_is_stopped_and_re
     assert said(refused.value) == "This version is larger than Surogate can read here."
     assert time.monotonic() - began < 2.5
     assert (staged_in(history), no_ones(history)) == ([], True)
+
+
+async def test_a_version_git_wrote_out_short_is_not_sent_as_if_it_were_whole(tmp_path, storage, project, monkeypatch):
+    landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
+    v2 = blob_of(b"PK\x03\x04 report v2")
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    run = subprocess.run
+
+    def cut(command, **how):
+        done = run(command, **how)
+        if "blob" in command:
+            os.ftruncate(how["stdout"], 5)  # as a disk that filled under it, with git none the wiser
+        return done
+
+    monkeypatch.setattr(module.subprocess, "run", cut)
+    with pytest.raises(HistoryError, match="at another size than the history holds it at") as refused:
+        await history.version(v2)
+    assert (said(refused.value), isinstance(refused.value, NotKept), staged_in(history), no_ones(history)) == (None, False, [], True)
 
 
 async def test_a_version_git_stored_as_a_change_to_another_is_written_whole_and_refused_in_words_past_gits_memory(

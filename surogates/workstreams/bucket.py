@@ -631,15 +631,22 @@ def _room_for(clone: Path, size: int, bounds: Bounds) -> tuple[Path, int]:
     Refused in words where the version is larger than one may be, or than
     the copy has room for with all else it holds.  Told to try again where
     the copy has room for it only once the versions on their way out of it
-    have gone.  Other copies make room for it as they do for a pack.
+    have gone.  Other copies make room for it as they do for a pack; and
+    where those left cannot go, in use or used just now, it waits for room
+    too: no version is written out past what the copies may hold together.
     """
     out = clone / _OUT
     held, going = _size(clone), _size(out)
-    if size > bounds.file or held - going + size > bounds.packs:
+    if size > bounds.file or held - going + size > min(bounds.packs, bounds.copies):
         raise HistoryError(VERSION_TOO_LARGE)
     if held + size > bounds.packs:
         raise Busy(BUSY)
-    _make_room(_others(clone, bounds), held + size, bounds)
+    # With what the copies in use hold, which are removed for no one.
+    mine = held + size + sum(_size(other) for other in clone.parent.iterdir() if other != clone and _USING.get(other) and other.is_dir())
+    others = _others(clone, bounds)
+    _make_room(others, mine, bounds)
+    if mine + sum(kept for _, _, kept in others) > bounds.copies:
+        raise Busy(BUSY)
     out.mkdir(exist_ok=True)
     path = out / os.urandom(8).hex()
     handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC, 0o600)
