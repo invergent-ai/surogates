@@ -450,18 +450,6 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       expect(trustCompanyCa(file(), false, home, data(), gone)).toEqual({ certificates: [], untrusted: null });
     });
 
-    it("gives the guest no CA that Node did not take, whatever the file holds", () => {
-      writeFileSync(file(), pem(company));
-      node.refuses = "Node cannot take this certificate";
-      try {
-        expect(trustCompanyCa(file(), false, home, data())).toEqual({
-          certificates: [], untrusted: { message: NOT_TRUSTED, detail: `Node cannot take this certificate. ${ASK}` },
-        });
-      } finally {
-        node.refuses = undefined;
-      }
-    });
-
     it("says what keeps a CA untrusted as before: the database's own refusal alone, and a missing certutil as the administrator's", () => {
       writeFileSync(file(), pem(company));
       // Either way the app's own connections trust it, and so do its guest's commands.
@@ -476,5 +464,25 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       expect(said?.message).toBe(NOT_TRUSTED);
       expect(said?.detail).toMatch(new RegExp(`^certutil could not change ${own()}: .*SEC_ERROR_TOKEN_NOT_LOGGED_IN[^\\n]*$`));
     });
+  });
+});
+
+// Node refuses before certutil is ever started: this needs none.
+describe("the company's CA a start gives its guest", () => {
+  it("is none that Node did not take, whatever the file holds", () => {
+    const file = join(home, "ca.pem");
+    writeFileSync(file, pem(company));
+    node.refuses = "Node cannot take this certificate";
+    try {
+      expect(trustCompanyCa(file, false, home, data(), join(home, "no-certutil"))).toEqual({
+        certificates: [],
+        untrusted: {
+          message: "Surogate could not trust your company's certificate authority",
+          detail: "Node cannot take this certificate. Ask your administrator to run Surogate's install script again with --ca-cert.",
+        },
+      });
+    } finally {
+      node.refuses = undefined;
+    }
   });
 });
