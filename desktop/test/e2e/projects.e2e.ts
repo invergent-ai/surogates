@@ -77,6 +77,8 @@ const clickBoth = (page: Page, first: string, second: string) => page.evaluate((
   document.querySelector<HTMLElement>(two!)!.click();
 }, [first, second]);
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+// The fake agent's page as a test holds its answers: each project it was asked for, and what its answers wait for.
+type Holding = { gotten: string[]; held: Promise<void> | null; letGo?: () => void };
 
 describe("the sidebar's projects", () => {
   it("are the agent's, last active first, marked when a thread waits on the user, and searched by name", async () => {
@@ -165,17 +167,28 @@ describe("the sidebar's projects", () => {
   });
 
   it("apply only the latest choice of what the centre shows", async () => {
-    const { page, client } = await signedIn();
+    const { shell, page, client } = await signedIn();
     await clickBoth(page, row(REPORT), row(BUDGET));
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
     await expect.poll(() => page.textContent("#title")).toBe("Budget");
     await client.waitForLoadState();
     await pause(500);
+    // The page holds its answers until the Projects page has been chosen: two clicks in one frame are two
+    // messages to the main process, and on a busy computer the page's answer to the first can reach it before
+    // the second does, which opens Report and then the Projects page, as two clicks apart would.
+    await client.evaluate(() => {
+      const fake = (window as unknown as { fakeProjects: Holding }).fakeProjects;
+      fake.held = new Promise((resolve) => (fake.letGo = resolve));
+    });
     await clickBoth(page, row(REPORT), "#open-projects");
-    // Report's answer comes after the Projects page was chosen: it opens nothing.
-    await pause(1_000);
     await expect.poll(() => page.isVisible("#projects-page")).toBe(true);
-    expect(client.url()).toBe(`${origin}/chat/${MASTERS[BUDGET]}`);
+    await expect.poll(() => client.evaluate(() => (window as unknown as { fakeProjects: Holding }).fakeProjects.gotten.at(-1))).toBe(REPORT);
+    await client.evaluate(() => (window as unknown as { fakeProjects: Holding }).fakeProjects.letGo!());
+    // Report's answer has reached the main process once a call the page makes after it has been answered:
+    // it came after the Projects page was chosen, and opened nothing.
+    await client.evaluate(() => window.surogateDesktop!.getDevice().catch(() => null));
+    expect([await webShown(shell), client.url()]).toEqual([false, `${origin}/chat/${MASTERS[BUDGET]}`]);
+    expect(await page.isVisible("#projects-page")).toBe(true);
   });
 
   it("keep serving when the web client is sent to an address outside the agent's, which opens in the browser", async () => {
