@@ -5,7 +5,7 @@
 // operation. Behind SUROGATE_VM_TESTS=1: the image built by images/guest/build.sh, and npm run build and npm run
 // agent-disk first.
 
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,8 +13,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../../src/binding/folder.js";
 import { keyOf } from "../../src/history/place.js";
-import type { HostStart } from "../../src/hosts/messages.js";
-import { forkHost } from "../../src/hosts/tool-hosts.js";
+import type { FromHost, HostStart, ToHost } from "../../src/hosts/messages.js";
+import { forkHost, type HostProcess, ToolHosts } from "../../src/hosts/tool-hosts.js";
 import { OperationJournal } from "../../src/journal/journal.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient } from "../../src/vm/client.js";
@@ -213,5 +213,143 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("threads on a folder, thr
     expect(existsSync(`${copy}.making`)).toBe(false);
     expect(files(copy)).toEqual(files(large));
     expect(await command(THREE, "ls data | wc -l")).toMatchObject({ output: `${FILES}\n` });
+  });
+});
+
+// A thread's copy made again while one of its commands is under way, as the copies say when they vouch for it no more:
+// the tool hosts as the app's executor drives them, the copies a stand-in that gives the copy at its path as it is.
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's commands, its copy made again under them", { timeout: 300_000 }, () => {
+  const FOUR = "5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c";
+  const FIVE = "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d";
+  let dir: string;
+  let data: string;
+  let folder: string;
+  let run: string;
+  let vm: VmClient;
+  let count = 0;
+  const made: ToolHosts[] = [];
+  const copyOf = (root: string) => join(data, "history", keyOf(folder), "threads", root);
+  const asideOf = (root: string) => `${copyOf(root)}.aside`;
+  const names = (at: string) => readdirSync(at).sort();
+  // The copy made again, as the guest's next open does once the copies vouch for it no more: the one before set aside, and
+  // another at its path.
+  const again = (root: string) => {
+    renameSync(copyOf(root), asideOf(root));
+    mkdirSync(copyOf(root));
+    writeFileSync(join(copyOf(root), "marker"), "copy made again\n");
+  };
+  const hostsOf = (spawnHost?: () => HostProcess) => {
+    const { dev, ino } = statSync(folder);
+    const place = { key: keyOf(folder), history: join(data, "history", keyOf(folder)), real: { path: folder, dev, ino, boot: BOOT_ID } };
+    const hosts = new ToolHosts({
+      bindingOf: (root) => ({ folder, dev, ino, boot: BOOT_ID, history: root }),
+      copies: {
+        open: async (root) => {
+          const at = statSync(copyOf(root));
+          return { copy: { place, folder: { path: copyOf(root), dev: at.dev, ino: at.ino, boot: BOOT_ID }, at: folder }, handle: Object.freeze({ root }) };
+        },
+        close: () => {},
+      },
+      dataDir: data, cacheDir: join(dir, "cache", "surogate"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 60_000,
+      release: (root) => vm.teardown(root),
+      ...(spawnHost ? { spawnHost } : {}),
+    });
+    made.push(hosts);
+    return hosts;
+  };
+  // A command of *root*'s as the executor runs one: under its host's hook guard, in the guest, which shares what the host holds.
+  const command = (hosts: ToolHosts, root: string, line: string, sent: () => void = () => {}) => {
+    count += 1;
+    const operation: Operation = {
+      id: `run-${count}`, sessionId: root, callingSessionId: root, invocationId: "17", ordinal: count, kind: "run", args: { command: line, workdir: null, timeout: 30 }, digest: "d",
+    };
+    return hosts.guarded(operation, signal(), "around", ({ folder: shared, at }, aborted, ended) => {
+      sent();
+      return vm.perform({ id: operation.id, root, folder: shared, ...(at === undefined ? {} : { at }), kind: "run", args: operation.args, ended }, aborted);
+    });
+  };
+
+  beforeAll(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-threads-again-")));
+    data = join(dir, "data");
+    folder = join(dir, "Documents");
+    mkdirSync(folder);
+    for (const root of [FOUR, FIVE]) {
+      mkdirSync(copyOf(root), { recursive: true });
+      writeFileSync(join(copyOf(root), "marker"), "first copy\n");
+    }
+    run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
+    vm = new VmClient({
+      vm: {
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        run, console: join(dir, "console.log"), user: USER, kvm: KVM,
+      },
+    });
+  });
+
+  afterAll(async () => {
+    for (const hosts of made) await hosts.stop();
+    await vm?.stop();
+    if (run) rmSync(run, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("run the next host's commands in the copy made again, though one sent as the guest booted was shared the copy before after its letting go", async () => {
+    // The app's own hosts, and the thread's first command booting the guest.
+    const hosts = hostsOf();
+    let sent = false;
+    const first = command(hosts, FOUR, "cat marker; echo first > first.txt", () => void (sent = true));
+    await until(() => sent, 60_000);
+    // Its host is told to go as the guest boots: the guest's letting go of the root finds nothing shared yet.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    hosts.replaced(FOUR);
+    // The command runs once the guest is up, in the copy it named, shared after that letting go; its host has gone by then.
+    expect(await first).toMatchObject({ error: { type: "interrupted" } });
+    again(FOUR);
+    expect(await command(hosts, FOUR, "cat marker; echo next > next.txt")).toMatchObject({ ok: { output: "copy made again\n" } });
+    expect([names(copyOf(FOUR)), names(asideOf(FOUR))]).toEqual([["marker", "next.txt"], ["first.txt", "marker"]]);
+  });
+
+  it("run no command of a host told to go once its letting go began, though its hook guard answers it as it stops", async () => {
+    // A host that holds the hook guard's question of the second command until its stop, then answers it, as host.ts does.
+    let hold = false;
+    const held: string[] = [];
+    const host = (): HostProcess => {
+      const heard: Array<(message: FromHost) => void> = [];
+      const exits: Array<() => void> = [];
+      const say = (message: FromHost) => heard.forEach((listener) => listener(message));
+      return {
+        send: (message: ToHost) => queueMicrotask(() => {
+          if (message.type === "start") say({ type: "ready", processes: [] });
+          else if (message.type === "refusal") {
+            if (hold) held.push(message.id);
+            else say({ type: "result", id: message.id, outcome: { ok: null } });
+          } else if (message.type === "after") say({ type: "result", id: message.id, outcome: message.outcome });
+          else if (message.type === "stop") {
+            for (const id of held.splice(0)) say({ type: "result", id, outcome: { ok: null } });
+            exits.splice(0).forEach((listener) => listener());
+          }
+        }),
+        onMessage: (listener) => void heard.push(listener),
+        onExit: (listener) => void exits.push(listener),
+        kill: () => exits.splice(0).forEach((listener) => listener()),
+      };
+    };
+    const hosts = hostsOf(host);
+    expect(await command(hosts, FIVE, "cat marker")).toMatchObject({ ok: { output: "first copy\n" } });
+    hold = true;
+    const late = command(hosts, FIVE, "cat marker; touch late.txt");
+    await until(() => held.length === 1);
+    hold = false;
+    hosts.replaced(FIVE);
+    expect(await late).toEqual({
+      error: {
+        type: "unavailable",
+        message: `This computer could not open the folder's sandbox: the copy of ${folder} this thread works in was made again while this was asked, so it was not done. Ask again`,
+      },
+    });
+    again(FIVE);
+    expect(await command(hosts, FIVE, "cat marker; ls")).toMatchObject({ ok: { output: "copy made again\nmarker\n" } });
+    expect([names(copyOf(FIVE)), names(asideOf(FIVE))]).toEqual([["marker"], ["marker"]]);
   });
 });
