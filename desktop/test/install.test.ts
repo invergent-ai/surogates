@@ -3757,6 +3757,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
   // An entry as the app names one for a company's CA, and what the script says of a database it leaves.
   const OURS = "Surogate company CA 0123456789abcdef";
   const STILL = "an entry of Surogate's for the company's certificate authority may still be trusted there";
+  // And what finishes it: the uninstall again, or what the database's owner runs.
+  const AGAIN = "run Surogate Desktop's install script with --uninstall again once it answers";
+  const byHand = (folder: string) => `its owner lists its entries with certutil -L -d sql:${folder}, and takes one out with certutil -D -d sql:${folder} -n and its name`;
   // As *user*, or as root where there is none.
   const run = (user: string, command: string) => (user === "root" ? root(command) : as(user, command));
   // The system's own certutil, where a stand-in has its place too.
@@ -3837,12 +3840,12 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(Date.now() - began).toBeLessThan(15_000);
       expect(forgotten).toMatchObject({ status: 0, stderr: "" });
       expect(forgotten.stdout.split("\n")).toEqual([
-        "Surogate Desktop: this computer's list of users did not answer within 1 seconds: an entry of Surogate's for the company's certificate authority may still be trusted in the browsers of the users it did not name",
-        `Surogate Desktop: left the NSS database in /home/linker/.pki/nssdb as it is, as it is not linker's own: ${STILL}`,
-        `Surogate Desktop: left stuck's NSS databases as they are, as /home/stuck/.pki/nssdb did not answer within 1 seconds: ${STILL}`,
-        `Surogate Desktop: could not take ${OURS} out of hung's NSS database in /home/hung/.pki/nssdb: their browsers go on trusting it`,
-        `Surogate Desktop: left hung's NSS databases as they are, as /home/hung/.local/share/pki/nssdb did not answer within 1 seconds: ${STILL}`,
-        `Surogate Desktop: left slow's NSS databases as they are, as this computer's list of users and groups did not answer within 1 seconds: ${STILL}`,
+        `Surogate Desktop: this computer's list of users did not answer within 1 seconds: an entry of Surogate's for the company's certificate authority may still be trusted in the browsers of the users it did not name: ${AGAIN}`,
+        `Surogate Desktop: left the NSS database in /home/linker/.pki/nssdb as it is, as it is not linker's own: ${STILL}: ${byHand("/home/linker/.pki/nssdb")}`,
+        `Surogate Desktop: left stuck's NSS databases as they are, as /home/stuck/.pki/nssdb did not answer within 1 seconds: ${STILL}: ${AGAIN}`,
+        `Surogate Desktop: could not take ${OURS} out of hung's NSS database in /home/hung/.pki/nssdb: their browsers go on trusting it until hung runs: certutil -D -d sql:/home/hung/.pki/nssdb -n '${OURS}'`,
+        `Surogate Desktop: left hung's NSS databases as they are, as /home/hung/.local/share/pki/nssdb did not answer within 1 seconds: ${STILL}: ${AGAIN}`,
+        `Surogate Desktop: left slow's NSS databases as they are, as this computer's list of users and groups did not answer within 1 seconds: ${STILL}: ${AGAIN}`,
         "",
       ]);
       // certutil ran as each database's own user, in all of that user's groups and in no language, and as no one else: never as root.
@@ -3882,8 +3885,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(Date.now() - began).toBeLessThan(12_000);
       expect(forgotten).toMatchObject({ status: 0, stderr: "" });
       expect(forgotten.stdout.split("\n")).toEqual([
-        `Surogate Desktop: left holder's NSS databases as they are, as /home/holder/.pki/nssdb did not answer within 2 seconds: ${STILL}`,
-        `Surogate Desktop: left writer's NSS database in /home/writer/.pki/nssdb as it is, as certutil could not read it: ${STILL}`,
+        `Surogate Desktop: left holder's NSS databases as they are, as /home/holder/.pki/nssdb did not answer within 2 seconds: ${STILL}: ${AGAIN}`,
+        `Surogate Desktop: left writer's NSS database in /home/writer/.pki/nssdb as it is, as certutil could not read it: ${STILL}: ${byHand("/home/writer/.pki/nssdb")}`,
         "",
       ]);
       expect(entries("last", "/home/last/.pki/nssdb")).toBe("IT Root C,,\n");
@@ -3967,8 +3970,8 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(removed.stdout.replaceAll("\r", "").split("\n")).toEqual([
       "Surogate Desktop: removing it needs administrator rights: sudo asks for your password once",
       "Surogate Desktop: removed from this computer",
-      `Surogate Desktop: could not take ${OURS} out of tester's NSS database in /home/tester/dat/pki/nssdb: their browsers go on trusting it`,
-      `Surogate Desktop: left other's NSS database in /home/other/.local/share/pki/nssdb as it is, as certutil could not read it: ${STILL}`,
+      `Surogate Desktop: could not take ${OURS} out of tester's NSS database in /home/tester/dat/pki/nssdb: their browsers go on trusting it until tester runs: certutil -D -d sql:/home/tester/dat/pki/nssdb -n '${OURS}'`,
+      `Surogate Desktop: left other's NSS database in /home/other/.local/share/pki/nssdb as it is, as certutil could not read it: ${STILL}: ${byHand("/home/other/.local/share/pki/nssdb")}`,
       "",
     ]);
     // As each database's own user, in all of their groups, in no language, with no terminal: and for no user who has no database.

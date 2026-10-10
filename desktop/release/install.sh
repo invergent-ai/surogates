@@ -1297,9 +1297,11 @@ forget_company_ca() {
   local user="$1" uid="$2" gid="$3" home="$4" db number groups listed line name ended ends
   local ours='^(Surogate company CA [0-9a-f]{16}) +[^ ,]*,[^ ,]*,[^ ,]* *$'
   local still="an entry of Surogate's for the company's certificate authority may still be trusted there"
+  # What finishes it: this again, or what the database's owner runs.
+  local again="run Surogate Desktop's install script with --uninstall again once it answers" by_hand
   number="$(listing id -u -- "$user")" && groups="$(listing id -G -- "$user")" && ended=0 || ended="$?"
   if outlasted "$ended"; then
-    say "left $(named "$user")'s NSS databases as they are, as this computer's list of users and groups did not answer within $SMALL_WAIT seconds: $still"
+    say "left $(named "$user")'s NSS databases as they are, as this computer's list of users and groups did not answer within $SMALL_WAIT seconds: $still: $again"
     return 0
   fi
   [ "$ended" -eq 0 ] && [ "$number" = "$uid" ] && [[ "$groups" =~ ^[0-9]+(\ [0-9]+)*$ ]] || return 0
@@ -1308,14 +1310,15 @@ forget_company_ca() {
   number+=":$(as_theirs "$SMALL_WAIT" "$home" id -g 2>/dev/null)" || number=
   [ "$number" = "$uid:$gid" ] || return 0
   for db in "${@:5}"; do
+    by_hand="its owner lists its entries with certutil -L -d sql:$(named "$db"), and takes one out with certutil -D -d sql:$(named "$db") -n and its name"
     as_theirs "$SMALL_WAIT" "$home" test -f "$db/cert9.db" && ended=0 || ended="$?"
     if outlasted "$ended"; then
-      say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still"
+      say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still: $again"
       return 0
     fi
     [ "$ended" -eq 0 ] || continue
     if ! as_theirs "$SMALL_WAIT" "$home" test -O "$db/cert9.db"; then
-      say "left the NSS database in $(named "$db") as it is, as it is not $(named "$user")'s own: $still"
+      say "left the NSS database in $(named "$db") as it is, as it is not $(named "$user")'s own: $still: $by_hand"
       continue
     fi
     # Its list, a megabyte of it at most, and then how certutil and root's reader of it ended.
@@ -1324,11 +1327,11 @@ forget_company_ca() {
     listed="${listed%$'\n'*}"
     [[ "$ends" =~ ^[0-9]+\ [0-9]+$ ]] || ends="1 1"
     if outlasted "${ends% *}" || outlasted "${ends#* }"; then
-      say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still"
+      say "left $(named "$user")'s NSS databases as they are, as $(named "$db") did not answer within $SMALL_WAIT seconds: $still: $again"
       return 0
     fi
     if [ "$ends" != "0 0" ] || [ "${#listed}" -gt 1048576 ]; then
-      say "left $(named "$user")'s NSS database in $(named "$db") as it is, as certutil could not read it: $still"
+      say "left $(named "$user")'s NSS database in $(named "$db") as it is, as certutil could not read it: $still: $by_hand"
       continue
     fi
     # "<name>   <SSL>,<S/MIME>,<code signing>" a line.
@@ -1340,7 +1343,7 @@ forget_company_ca() {
       # A name of the user's that goes on in spaces is listed as the app's is, and is not found by
       # the app's: it is theirs, and stays with nothing said.
       outlasted "$ended" || as_theirs "$SMALL_WAIT" "$home" certutil -L -d "sql:$db" -n "$name" >/dev/null 2>&1 || continue
-      say "could not take $name out of $(named "$user")'s NSS database in $(named "$db"): their browsers go on trusting it"
+      say "could not take $name out of $(named "$user")'s NSS database in $(named "$db"): their browsers go on trusting it until $(named "$user") runs: certutil -D -d sql:$(named "$db") -n '$name'"
     done <<<"$listed"
   done
 }
@@ -1359,7 +1362,7 @@ forget_company_cas() {
     return 0
   fi
   if ! users="$(listing getent passwd)"; then
-    say "this computer's list of users did not answer within $SMALL_WAIT seconds: an entry of Surogate's for the company's certificate authority may still be trusted in the browsers of the users it did not name"
+    say "this computer's list of users did not answer within $SMALL_WAIT seconds: an entry of Surogate's for the company's certificate authority may still be trusted in the browsers of the users it did not name: run Surogate Desktop's install script with --uninstall again once it answers"
     # Its last line may be half of one.
     if [[ "$users" == *$'\n'* ]]; then users="${users%$'\n'*}"; else users=; fi
   fi
