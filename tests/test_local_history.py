@@ -288,6 +288,65 @@ def test_a_landing_whose_commit_names_as_left_out_what_is_no_path_of_the_folder_
     assert (git(one.repo, "for-each-ref"), files_of(one.copy)) == (refs, held)
 
 
+def somebody_elses(tmp_path: Path, folder: Path, case: str) -> tuple[LocalHistory, dict, str]:
+    """Thread ``t1``'s landing up to its record, with a *left* that names a file somebody else changed since its turn
+    began, or one in the way of such a file; the record's step, and the file whose version is the other's."""
+    (folder / "X.md").write_text("X v1\n")
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 report by one")
+    if case == "a file the thread never touched, which another thread landed":
+        (two.copy / "X.md").write_text("X by thread two\n")
+        land(two, "saga:2", B)
+        return one, up_to_its_record(one, "saga:1", A, ("X.md",)), "X.md"
+    if case == "a file the commit step held, which you saved since":
+        (one.copy / "notes.txt").write_text("notes by one\n")
+        (folder / "notes.txt").write_text("notes saved by you\n")
+        step = up_to_its_record(one, "saga:1", A, ("notes.txt",))
+        return one, step, "notes.txt"
+    # The thread's own file, where another thread landed a folder of that name.
+    (one.copy / "a").write_text("a file of one's\n")
+    (two.copy / "a").mkdir()
+    (two.copy / "a" / "b.md").write_text("b by thread two\n")
+    land(two, "saga:2", B)
+    return one, up_to_its_record(one, "saga:1", A, ("a",)), "a/b.md"
+
+
+SOMEBODY_ELSES = [
+    "a file the thread never touched, which another thread landed",
+    "a file the commit step held, which you saved since",
+    "a file in the way of one another thread landed",
+]
+
+
+@pytest.mark.parametrize("case", SOMEBODY_ELSES)
+def test_a_record_refuses_to_leave_out_a_file_somebody_else_changed_since_its_turn_began_and_pushes_nothing(tmp_path, folder, case):
+    one, step, theirs = somebody_elses(tmp_path, folder, case)
+    store = tmp_path / "store" / "history.git"
+    before, pushed, held, refs = as_it_is(folder), git(store, "for-each-ref"), files_of(one.copy), git(one.repo, "for-each-ref")
+    with refused("not_a_request", "refused the request: a file it left out, or one in its way, was changed by somebody else since the thread's turn began"):
+        one.record(**step)
+    # Before its push: the folder, its history, the copy and the thread's refs are as they were.
+    assert (as_it_is(folder), git(store, "for-each-ref")) == (before, pushed)
+    assert (files_of(one.copy), git(one.repo, "for-each-ref")) == (held, refs)
+    # The same landing with nothing left out records, and the copy takes the other's file, as for any file it leaves out.
+    one.record(**{**step, "left": []})
+    assert (one.copy / theirs).read_bytes() == (folder / theirs).read_bytes()
+    assert theirs not in one.changed()["paths"]
+
+
+@pytest.mark.parametrize("case", SOMEBODY_ELSES)
+def test_a_landing_whose_commit_names_as_left_out_a_file_somebody_else_changed_since_its_turn_began_is_refused(tmp_path, folder, case):
+    one, step, _ = somebody_elses(tmp_path, folder, case)
+    # What no request writes: the cloud's half of a record, its trailers naming such a file as left out.
+    named = [*step["trailers"], *(["Surogate-Left", json.dumps(path)] for path in step.pop("left"))]
+    History.record(one, **{**step, "trailers": named})
+    refs, held = git(one.repo, "for-each-ref"), files_of(one.copy)
+    for ask in (lambda h: h.open(), lambda h: h.changed(), lambda h: h.snapshot("before a step")):
+        with refused("history_refused", "refused the project's history: a landing names as left out a file somebody else changed since its turn began"):
+            ask(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"))
+    assert (git(one.repo, "for-each-ref"), files_of(one.copy)) == (refs, held)
+
+
 @pytest.mark.parametrize("first", ["open", "changed", "snapshot", "commit", "keep", "record"])
 def test_a_record_that_left_files_out_cut_after_its_push_leaves_them_as_the_thread_has_them_whichever_act_comes_next(tmp_path, first):
     root = tmp_path / "whole"

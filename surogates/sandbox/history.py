@@ -668,6 +668,23 @@ class History:
             raise HistoryConflict("main moved in the project's history since the landing began")
         self._fetch(main)
         main_tip = pickup or main or self._main("rev-parse", MAIN)
+        tree = self._landed(turn, applied, main_tip)
+        # The message on stdin too: a landing may leave out any number of files, each a trailer.
+        landing = self._git(
+            [*_as(author), "commit-tree", tree, "-p", main_tip, "-p", turn, "-F", "-"],
+            env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project,
+            input=f"Landing\n\n{_block(trailers)}\n",
+        )
+        self._push({MAIN: landing, self.branch: landing, self.base: landing}, expect={MAIN: main})
+        for ref in (MAIN, self.branch, self.base, self.synced):
+            self._main("update-ref", ref, landing)
+        with contextlib.suppress(HistoryError, OSError):
+            # A cache: without it the next pod reads every real file once.
+            self._keep_index(landing)
+        return {"commit": landing}
+
+    def _landed(self, turn: str, applied: list[dict], main_tip: str) -> str:
+        """The files a landing of *turn* records: *main_tip*'s, with *applied*, each file written with the mode the turn gives it; their tree."""
         index = self.repo / "landing.index"
         index.unlink(missing_ok=True)
         env = {"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(index)}
@@ -686,19 +703,7 @@ class History:
         self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.project, input=entries)
         tree = self._git(["write-tree"], env=env, cwd=self.project)
         index.unlink()
-        # The message on stdin too: a landing may leave out any number of files, each a trailer.
-        landing = self._git(
-            [*_as(author), "commit-tree", tree, "-p", main_tip, "-p", turn, "-F", "-"],
-            env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project,
-            input=f"Landing\n\n{_block(trailers)}\n",
-        )
-        self._push({MAIN: landing, self.branch: landing, self.base: landing}, expect={MAIN: main})
-        for ref in (MAIN, self.branch, self.base, self.synced):
-            self._main("update-ref", ref, landing)
-        with contextlib.suppress(HistoryError, OSError):
-            # A cache: without it the next pod reads every real file once.
-            self._keep_index(landing)
-        return {"commit": landing}
+        return tree
 
     def fetch(self, commits: Iterable[str] = (), saga: str | None = None, since: str | None = None) -> dict:
         """``main`` in the durable history now, fetched with *commits*: a landing's first look, under the project's lock.

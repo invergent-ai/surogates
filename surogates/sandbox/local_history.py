@@ -727,7 +727,10 @@ class LocalHistory(History):
         records none of them as landed.  They are the thread's work still,
         for a later turn to land.  The landing's own commit names them, so
         a record cut after its push leaves them so too, finished by the next
-        act (:meth:`_finish_record`).
+        act (:meth:`_finish_record`).  A *left* that would keep the thread's
+        version where somebody else changed the file since the turn began,
+        or where a file of theirs is in its way, is refused before anything
+        is pushed (:meth:`_as_landed`).
 
         Safe to repeat wherever ``main`` is by then: no lock is held across
         a computer's absence, so another thread may have landed since a try
@@ -745,6 +748,12 @@ class LocalHistory(History):
         if found is not None and saga in found[2]:
             commit = found[0]
         else:
+            if left:
+                # Checked against the very files the landing will record, before anything is pushed.
+                self._fetch(step["main"])
+                landing = self._landed(step["turn"], step["applied"], step.get("pickup") or step["main"] or self._main("rev-parse", MAIN))
+                if self._as_landed(landing, step["turn"], list(left)) is None:
+                    _refuse("a file it left out, or one in its way, was changed by somebody else since the thread's turn began")
             named = [*step["trailers"], *([_LEFT, json.dumps(path)] for path in left)]
             commit = super().record(**{**step, "trailers": named})["commit"]
             self._catch_up()
@@ -832,6 +841,12 @@ class LocalHistory(History):
             index = self._copy("write-tree")
             self._fetch(landing)
             files = self._as_landed(landing, turn, left)
+            if files is None:
+                # No request records such a landing: the history is not as the platform wrote it.
+                raise HistoryError(
+                    "refused the project's history: a landing names as left out a file somebody else changed since its turn began",
+                    code=HISTORY_REFUSED,
+                )
             if index != files:
                 self._add_all(self._copy)
                 held = self._copy("write-tree")
@@ -851,13 +866,22 @@ class LocalHistory(History):
                 f"could not be made the landing's files: {why}", code=RECORD_UNFINISHED,
             ) from None
 
-    def _as_landed(self, landing: str, turn: str, left: list[str]) -> str:
+    def _as_landed(self, landing: str, turn: str, left: list[str]) -> str | None:
         """The tree a copy is made after *landing*: its files, but each of *left* as *turn*, the thread's, has it.
 
         A file the turn deleted is not there, nor one of the landing's where
         a file of the turn's needs its name for a folder.  The same tree for
         the same landing at every try, made where a cut leaves nothing the
         next request reads.
+
+        None where that tree would hold the thread's own over somebody
+        else's.  The copy may differ from the landing only where the
+        landing's file is still the turn's base's: nobody changed it since
+        the turn began.  Anywhere else (another thread's landing, a save of
+        yours picked up, a file of theirs in the way of the thread's) the
+        copy would hold the thread's version, or no file, on a base that has
+        theirs, and its next landing would write that over theirs as its
+        own change.
         """
         wanted = set(left)
         fields = iter(self._main("diff", "--raw", "-z", "--no-renames", "--no-abbrev", landing, turn).split("\0"))
@@ -878,9 +902,14 @@ class LocalHistory(History):
             self._git(["read-tree", landing], env=env, cwd=self.repo)
             # Each in place of whatever of the landing's is in its way: git's index-info replaces it.
             self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.repo, input="".join(entries))
-            return self._git(["write-tree"], env=env, cwd=self.repo)
+            files = self._git(["write-tree"], env=env, cwd=self.repo)
         finally:
             index.unlink(missing_ok=True)
+        return None if self._differ(landing, files) & self._differ(f"{turn}^1", landing) else files
+
+    def _differ(self, one: str, other: str) -> set[str]:
+        """The names at which the trees of *one* and *other* differ."""
+        return {name for name in self._main("diff", "--name-only", "--no-renames", "-z", one, other).split("\0") if name}
 
     def _finish_move(self) -> None:
         """Finish a move of the thread's clean copy to ``main`` that was cut after it began.
