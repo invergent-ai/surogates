@@ -892,8 +892,14 @@ async def _lease_of(store: Any, thread_id: UUID, owner: str) -> AsyncIterator[st
 
     Whoever settles a thread's landing holds that thread's turn meanwhile:
     a worker of its own that still ran finds its lease taken at its next
-    step, and stands down.  Renewed while the settle runs, and given back.
+    step, and stands down.  Renewed while the settle runs, a renewal that
+    failed asked again at the next; and given back.  Taken by another all
+    the same, it is renewed no more: the settle stops at its next step,
+    whose write of the row finds the lease another's (:class:`LeaseLost`).
     """
+    # Imported here: the session's store imports the harness.
+    from surogates.session.store import LeaseNotHeldError
+
     lease = await store.try_acquire_lease(thread_id, owner, ttl_seconds=SETTLE_LEASE)
     if lease is None:
         yield None
@@ -902,7 +908,13 @@ async def _lease_of(store: Any, thread_id: UUID, owner: str) -> AsyncIterator[st
     async def renewing() -> None:
         while True:
             await asyncio.sleep(SETTLE_RENEW)
-            await store.renew_lease(thread_id, lease.lease_token, ttl_seconds=SETTLE_LEASE)
+            try:
+                await store.renew_lease(thread_id, lease.lease_token, ttl_seconds=SETTLE_LEASE)
+            except LeaseNotHeldError:
+                logger.warning("The lease of thread %s, which a settle held, is another's now", thread_id)
+                return
+            except Exception:
+                logger.warning("The lease of thread %s, which a settle holds, was not renewed: asked again", thread_id, exc_info=True)
 
     renewed = asyncio.ensure_future(renewing())
     try:

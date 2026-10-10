@@ -150,3 +150,42 @@ def test_a_report_says_why_a_landing_on_a_computer_left_a_file_out_that_no_landi
     ])
     assert "Not merged, because a change to them could run code on the user's computer, which a landing never writes: .vscode/tasks.json" in said
     assert "Not merged, because the folder has a link there, or a file with a second name, which a landing never replaces: Twin.txt" in said
+
+
+class Leases:
+    """A session store's leases as a settle asks them: each renewal answered in turn by *renewals*, an exception raised."""
+
+    def __init__(self, *renewals) -> None:
+        self.renewals, self.asked, self.released = list(renewals), 0, []
+
+    async def try_acquire_lease(self, session_id, owner, *, ttl_seconds):
+        return SimpleNamespace(lease_token=uuid4())
+
+    async def renew_lease(self, session_id, token, *, ttl_seconds):
+        self.asked += 1
+        answer = self.renewals.pop(0) if self.renewals else "active"
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    async def release_lease(self, session_id, token):
+        self.released.append(token)
+
+
+async def test_a_settle_holds_the_lost_threads_lease_through_a_failed_renewal_and_lets_it_go_once_another_holds_it(monkeypatch):
+    import asyncio
+
+    from surogates.session.store import LeaseNotHeldError
+
+    monkeypatch.setattr(local_landing, "SETTLE_RENEW", 0.05)
+    # A renewal the database could not answer is asked again at the next tick: the lease does not lapse under the settle.
+    store = Leases(ConnectionError("the database went away"))
+    async with local_landing._lease_of(store, uuid4(), "settle:t") as token:
+        assert token is not None
+        await asyncio.sleep(0.5)
+    assert store.asked >= 4 and len(store.released) == 1
+    # Another worker holds it now: it is asked no more, and the settle's next step finds the lease another's.
+    store = Leases(LeaseNotHeldError("taken"))
+    async with local_landing._lease_of(store, uuid4(), "settle:t"):
+        await asyncio.sleep(0.5)
+    assert store.asked == 1
