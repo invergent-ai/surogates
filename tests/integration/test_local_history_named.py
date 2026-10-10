@@ -26,7 +26,7 @@ from tests.test_fake_places import built_helper  # noqa: F401  (a fixture)
 from tests.test_steer_loop import _final_response
 
 from .test_devices import FOLDER, api, link_url  # noqa: F401  (api and link_url are fixtures)
-from .test_local_history_landing import files_of, here, kept, lie_at, ran, records, said, seen, told  # noqa: F401  (here is a fixture)
+from .test_local_history_landing import files_of, here, holding, kept, lie_at, ran, records, said, seen, told  # noqa: F401  (here is a fixture)
 from .test_local_history_open import begun_with_copy, turn_end, woken
 from .test_local_history_threads import blob, computer, connected_thread, tool  # noqa: F401  (computer is a fixture)
 from .test_local_threads import journal
@@ -307,6 +307,31 @@ async def test_a_write_its_computer_has_not_answered_yet_names_its_file(api, com
         **asked, invocation_id="request:later", ordinal=2, kind="write", args={"key": key["ok"], "data": base64.b64encode(b"later\n").decode()},
     ))
     assert await ops.named(thread.id, FOLDER) == {"later.md"}
+
+
+@pytest.mark.parametrize("what", ["a command", "a write"])
+async def test_what_was_asked_before_a_landing_and_ended_after_it_began_is_counted_after_it(api, computer, monkeypatch, what):
+    kind = "run" if what == "a command" else "write"
+    _, master, thread = await begun_with_copy(api, computer)
+    ops = journal(api)
+    asked = {"device_id": UUID(computer.device_id), "root_session_id": thread.id, "calling_session_id": thread.id}
+    # Asked before the thread's landing, and taken by its computer, which has not answered it: it may still run, so it
+    # is the next landing's to count.
+    held = holding(computer, lambda frame: frame["invocation_id"] == "request:early" and frame["kind"] in ("run", "write"))
+    if what == "a command":
+        await ops._record(OperationRequest(
+            **asked, invocation_id="request:early", ordinal=1, kind="run", args={"command": "true", "workdir": None, "timeout": 60},
+        ))
+    else:
+        key = await JournalRunner(ops, **asked, invocation_id="request:early").run("resolve", {"path": "Early.md"})
+        await ops._record(OperationRequest(
+            **asked, invocation_id="request:early", ordinal=2, kind="write", args={"key": key["ok"], "data": base64.b64encode(b"early\n").decode()},
+        ))
+    await woken(api, monkeypatch, thread, [ONE_FILE, _final_response("Done.")])
+    assert [row.saga_state for row in await records(api, thread)] == ["completed"] and [f["kind"] for f in held] == [kind]
+    # It ends after that landing began: inside the next landing's window, though it was asked before it.
+    assert await ops.cancel_invocation(thread.id, "request:early") == 1
+    assert await ops.named(thread.id, FOLDER) == (None if what == "a command" else {"early.md"})
 
 
 @pytest.mark.parametrize("what", ["a process it started", "a command not answered yet", "a write it resolved nothing for"])
