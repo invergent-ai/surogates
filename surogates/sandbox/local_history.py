@@ -55,7 +55,6 @@ from typing import Any, ClassVar, NoReturn
 from surogates.sandbox.history import (
     _ATTRIBUTES,
     _CHECKPOINT,
-    _ID,
     _OPEN_TIMEOUT,
     _TIMEOUT,
     FAILED,
@@ -368,10 +367,10 @@ class LocalHistory(History):
         Every ref it has is read where it lies, packed or loose.  ``main``
         there is the folder's files, never a thread's work, and a commit the
         folder's history holds is kept there, by *refs* a history of the
-        platform's own.  A ref that names any other commit names a
-        snapshot, a turn not pushed or what a record set aside, which this
-        repository alone holds.  So does one that cannot be read as a ref:
-        in doubt, it is the thread's own.
+        platform's own.  A ref that names anything else names a snapshot,
+        a turn as the thread committed it or what a record set aside, which
+        this repository alone holds.  So does one that cannot be read: in
+        doubt, it is the thread's own.
         """
         try:
             named = {}
@@ -384,8 +383,6 @@ class LocalHistory(History):
                 for name in files:
                     named[os.path.relpath(Path(at, name), self.repo)] = Path(at, name).read_text().removesuffix("\n")
             commits = set(named.values()) - {named.get(MAIN)}
-            if not all(_ID.fullmatch(commit) for commit in commits):
-                return True
             if commits and refs:
                 said = self._git(
                     ["cat-file", "--batch-check"], env={"GIT_DIR": str(self._taken)}, cwd=self._taken,
@@ -398,24 +395,25 @@ class LocalHistory(History):
             return True
 
     def _holds_its_own(self, refs: dict[str, str] | None) -> bool:
-        """Whether the thread's copy holds anything of the thread's own: a file that nothing kept holds at its name.
+        """Whether the thread's copy holds anything of the thread's own: a file that what it is made again from has not, at its name.
 
         Each file and each link in it is read, with the mode git would
-        record for it.  Beside a whole repository, with no *refs*, what is
-        kept is the thread's branch there, which the copy is made again
-        from: a copy whose making was cut holds some of its files and no
-        more.  Else it is the thread's branch and ``main`` in the folder's
-        history, whose *refs* these are, and the folder itself as it is.  A
-        file that is not there in the copy is nothing it holds, and neither
-        is a folder.  What history leaves out is the thread's own, and so is
-        anything that cannot be read, or is neither a file nor a link: in
-        doubt, it is.
+        record for it.  Beside a whole repository, with no *refs*, the copy
+        is made again from the thread's branch there: a copy whose making
+        was cut holds some of that branch's files and no more.  Else, by the
+        *refs* of the folder's history, it is made again from the thread's
+        branch there where that holds work not landed, and otherwise from
+        the folder as it is.  A file that is not in the copy is nothing it
+        holds, and neither is a folder.  What history leaves out is the
+        thread's own, and so is anything that cannot be read, or is neither
+        a file nor a link: in doubt, it is.
         """
         try:
             if refs is None:
-                kept = [self._files(self.repo, self.branch)]
+                again: dict[str, tuple[str, str]] | None = self._files(self.repo, self.branch)
             else:
-                kept = [self._files(self._taken, refs[ref]) for ref in (self.branch, MAIN) if ref in refs]
+                branch, base = (self._files(self._taken, refs[ref]) if ref in refs else None for ref in (self.branch, self.base))
+                again = branch if None not in (branch, base) and branch != base else None
             # Git's own, which a copy's making leaves in it until it has ended.
             gits = ("100644", _blob_of(f"gitdir: {self._admin}\n".encode()))
             folders = [self.copy]
@@ -426,11 +424,8 @@ class LocalHistory(History):
                             folders.append(Path(entry.path))
                             continue
                         name, found = os.path.relpath(entry.path, self.copy), _recorded(entry.path)
-                        if found is None or not (
-                            any(files.get(name) == found for files in kept)
-                            or (refs is not None and self._in_folder(name) == found)
-                            or (name, found) == (".git", gits)
-                        ):
+                        there = self._in_folder(name) if again is None else again.get(name)
+                        if found is None or found != there and (name, found) != (".git", gits):
                             return True
             return False
         except (HistoryError, OSError, ValueError) as doubt:
@@ -503,26 +498,18 @@ class LocalHistory(History):
         if folder is None:
             return {}
         try:
-            found = sorted(
-                (named[1], named[2], name) for name in os.listdir(folder)
-                if (named := _WHOLE.fullmatch(name)) and stat.S_ISDIR(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
-            )
-            kept = [entry for entry in found if not entry[2].endswith(".gone")]
-            gone = [entry for entry in found if entry[2].endswith(".gone")]
+            kept, gone = _asides_in(folder)
             times = list(dict.fromkeys(nth for nth, _, _ in kept))
             mine = list(dict.fromkeys(nth for nth, thread, _ in kept if thread == self.thread))
             newest = {thread: nth for nth, thread, _ in kept}.values()
             going = {*mine[:-_ASIDE_WHOLE], *(nth for nth in times[:-_ASIDE_WHOLE_IN_ALL] if nth not in newest)}
-            for nth, thread, name in [entry for entry in kept if entry[0] in going]:
+            for name in [name for nth, _, name in kept if nth in going]:
                 try:
                     os.rename(name, f"{name}.gone", src_dir_fd=folder, dst_dir_fd=folder)
+                    logger.warning("What was set aside as %s is let go, for what was set aside since", name)
                 except OSError as why:
                     logger.warning("What was set aside as %s could not be let go, and is kept: %s", name, why)
-                    continue
-                logger.warning("What was set aside as %s is let go, for what was set aside since", name)
-                kept.remove((nth, thread, name))
-                gone.append((nth, thread, f"{name}.gone"))
-            gone.sort()
+            kept, gone = _asides_in(folder)
             untold = list(dict.fromkeys(nth for nth, thread, _ in gone if thread == self.thread))[:-_ASIDE_GONE]
             for nth, thread, name in list(gone):
                 try:
@@ -1068,6 +1055,19 @@ def _removed(path: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def _asides_in(folder: int) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """What the set-aside folder open as *folder* holds of this module's naming, the oldest first: the kept, and those let go.
+
+    Each is its count, its thread and its name.  Only a folder is one: a
+    link or a file under such a name is nothing this module left.
+    """
+    found = sorted(
+        (named[1], named[2], name) for name in os.listdir(folder)
+        if (named := _WHOLE.fullmatch(name)) and stat.S_ISDIR(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
+    )
+    return [aside for aside in found if not aside[2].endswith(".gone")], [aside for aside in found if aside[2].endswith(".gone")]
 
 
 def _emptied(name: str, inside: int) -> None:
