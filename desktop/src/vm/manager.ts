@@ -191,10 +191,11 @@ interface Root {
   setup: Promise<Outcome | null> | null; // null once set up, or why not
 }
 
-// A place's two shares, once the agent has mounted them.
+// A place's two shares, once the agent has mounted them, and the folder its history's share serves.
 interface Placed {
   history: Share;
   real: Share;
+  store: { dev: number; ino: number };
 }
 
 // Whether the folder at *path* is *other*, or lies in it: both real paths.
@@ -451,6 +452,7 @@ export class Guest {
    */
   async place(place: Place): Promise<Outcome | null> {
     let known = this.places.get(place.key);
+    const held = known !== undefined;
     if (!known) {
       const entry = { place, placed: this.placed(place) };
       entry.placed.catch(() => {
@@ -462,11 +464,24 @@ export class Guest {
     // A key is one folder's: its mounts are never answered as another folder's, or another history's.
     if (!samePlace(known.place, place)) return unavailable(`${NO_HISTORY}: its key is another folder's place in the sandbox`);
     try {
-      await known.placed;
+      const placed = await known.placed;
+      if (held) await this.still(place, placed);
       return null;
     } catch (error) {
       if (this.left) return SANDBOX_STOPPED;
       return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`${NO_HISTORY}: ${describe(error)}`);
+    }
+  }
+
+  // Throws unless the history of *place*, held as *placed*, is still the folder at its path. A share
+  // serves the folder it was made on wherever that is moved: a history renamed aside, with another
+  // made at its path, would be answered as held while the guest's git wrote the one set aside.
+  private async still(place: Place, placed: Placed): Promise<void> {
+    const store = await Promise.race([look(place.history), late(this.shareMs)]);
+    if (store === "late") throw new Error(`its place in the app's data did not answer within ${this.shareMs / 1000} s`);
+    const { found } = store;
+    if (!found?.directory || store.real !== place.history || found.dev !== placed.store.dev || found.ino !== placed.store.ino) {
+      throw new Error("it was moved while the sandbox holds it, and must be let go first");
     }
   }
 
@@ -489,7 +504,7 @@ export class Guest {
       const folder = await this.vm.share(place.real.path, 0, deadline, true);
       shares.push(folder);
       const answer = await this.request({ type: "place", key: place.key, history, real: folder }, this.setupMs);
-      if (answer?.type === "done") return { history, real: folder };
+      if (answer?.type === "done") return { history, real: folder, store: store.found };
       if (!answer) {
         this.lose();
         throw new Error("the guest did not answer");

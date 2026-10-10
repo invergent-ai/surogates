@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -660,6 +660,29 @@ describe("the VM manager, asked for a folder's place", () => {
     expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);
     expect(readFileSync(join(dir, "Documents", "Report.docx"), "utf8")).toBe("the real report\n");
     expect(readdirSync(join(dir, "store"))).toEqual(["HEAD"]);
+  });
+
+  it("answers no place as held whose history was set aside under it: it must be let go first", async () => {
+    const asked: unknown[] = [];
+    const manager = new VmManager(options(), recording(asked));
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(await manager.place(place(), signal())).toBeNull();
+    const moved = { error: { type: "unavailable", message: "This computer's sandbox could not add this folder's history: it was moved while the sandbox holds it, and must be let go first" } };
+    // Renamed aside, and another made at its path: the guest's share still serves the one renamed.
+    renameSync(join(dir, "store"), join(dir, "store.was-1"));
+    expect(await manager.place(place(), signal())).toEqual(moved);
+    mkdirSync(join(dir, "store"));
+    expect(await manager.place(place(), signal())).toEqual(moved);
+    expect(asked).toHaveLength(3);
+    // Let go, it is added anew, from the folder that is at its path now.
+    expect(await manager.unplace(place())).toBe(true);
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(await manager.place(place(), signal())).toBeNull();
+    expect(asked.slice(3)).toEqual([
+      ["unmount", KEY], ["unshare", R2], ["unshare", R1],
+      ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2],
+    ]);
+    await manager.stop();
   });
 
   it("lets go only of the place it holds for that folder and history: a folder refused a key takes nothing of its holder's", async () => {

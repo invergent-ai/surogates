@@ -46,7 +46,7 @@ const fakeVm = (roots: ControlRoots, shared: string[] = []): BootVm => async () 
     inbound.destroy();
     gone("");
   };
-  const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill });
+  const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill }, { mount: async () => {}, unmount: async () => {} });
   createInterface({ input: guest }).on("line", (line) => control.receive(line));
   control.hello();
   const share = async (folder: string) => {
@@ -62,7 +62,8 @@ const within = <T>(answer: Promise<T>, ms: number) =>
 
 // A folder on a FUSE mount whose daemon is stopped, in a folder of its own: every look into it
 // waits, as on a dead network mount. Bound first, as a chat's folder is; let go by *release*.
-function stalledFolder(): { folder: Folder; release: () => void } {
+// With *stopped* false it answers until *stall* is called.
+function stalledFolder(stopped = true): { folder: Folder; stall: () => void; release: () => void } {
   const fuse = mkdtempSync(join(dir, "fuse-"));
   for (const name of ["lower/folder", "upper", "work", "mnt"]) mkdirSync(join(fuse, name), { recursive: true });
   const mnt = join(fuse, "mnt");
@@ -74,9 +75,11 @@ function stalledFolder(): { folder: Folder; release: () => void } {
     const path = join(mnt, "folder");
     const { dev, ino } = statSync(path);
     const pid = Number(spawnSync("pgrep", ["-f", `^fuse-overlayfs .* ${mnt}$`], { encoding: "utf8" }).stdout.trim());
-    process.kill(pid, "SIGSTOP");
+    const stall = () => process.kill(pid, "SIGSTOP");
+    if (stopped) stall();
     return {
       folder: { path, dev, ino },
+      stall,
       release: () => {
         try {
           process.kill(pid, "SIGCONT");
@@ -157,6 +160,22 @@ describe("a folder's place on a mount that does not answer", () => {
       expect(await within(manager.place(other, new AbortController().signal), 3_000)).toEqual(refused("its place in the app's data", "0.3"));
       expect(performance.now() - begun).toBeLessThan(2_000);
       expect(shared).toEqual([]);
+      await manager.stop();
+    } finally {
+      release();
+    }
+  });
+
+  it("is not answered as held once its history's mount stops answering, within the share's bound", async () => {
+    const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots));
+    const { folder, stall, release } = stalledFolder(false);
+    try {
+      const place: Place = { key: KEY, history: folder.path, real: answering("Documents") };
+      expect(await within(manager.place(place, new AbortController().signal), 3_000)).toBeNull();
+      stall();
+      const begun = performance.now();
+      expect(await within(manager.place(place, new AbortController().signal), 3_000)).toEqual(refused("its place in the app's data", "0.3"));
+      expect(performance.now() - begun).toBeLessThan(2_000);
       await manager.stop();
     } finally {
       release();
