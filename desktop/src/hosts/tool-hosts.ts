@@ -45,6 +45,9 @@ export const HOST_STOPPED: Outcome = {
   },
 };
 export const NOT_BOUND: Outcome = { error: { type: "binding", message: "This folder was not confirmed on this computer" } };
+// A root bound to a thread's copy of its folder (spec, Section 13): its work goes to the copy or
+// nowhere, never to the folder itself.
+export const NO_COPY: Outcome = { error: { type: "unsupported", message: "This computer cannot work in a thread's copy of a folder yet" } };
 
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
@@ -54,8 +57,9 @@ const unavailable = (why: string): Outcome => ({
 // and its look after it, its refusal alone, or neither.
 export type Guard = "around" | "before" | null;
 
-// What a host needs of a root's binding: its folder, and that folder's identity when it was bound.
-export type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot">;
+// What a host needs of a root's binding: its folder, that folder's identity when it was bound,
+// and the thread whose copy of it the root works in, if it is a project's thread.
+export type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot" | "history">;
 
 export interface HostProcess {
   send(message: ToHost): void;
@@ -175,6 +179,7 @@ export class ToolHosts implements Executor {
     if (this.stopping) return unavailable("the app is quitting");
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
+    if (binding.history !== undefined) return NO_COPY;
     return this.hostFor(operation.sessionId, binding).run(operation, signal);
   }
 
@@ -189,6 +194,7 @@ export class ToolHosts implements Executor {
     if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return Promise.resolve(FOLDER_UNAVAILABLE);
+    if (binding.history !== undefined) return Promise.resolve(NO_COPY);
     return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended) => inner(binding, aborted, ended));
   }
 
