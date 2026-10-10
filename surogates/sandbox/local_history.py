@@ -573,6 +573,8 @@ class LocalHistory(History):
             # Spelt as it is walked: from the folder's top, down, each part a name.
             if path.is_absolute() or not path.parts or ".." in path.parts or str(path) != change["path"]:
                 _refuse("a file it applied has no path in the folder")
+            if "before" not in change:
+                _refuse("a file it applied has no version from before it")
             files.append((path.parts, change["before"]))
         main = self._take().get(MAIN)
         if main is not None and (landing := self._landing_of(saga, main, None)[0]) is not None:

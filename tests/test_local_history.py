@@ -1200,6 +1200,9 @@ def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, fo
     for path in ("/etc/passwd", "../notes.txt", "sub//notes.txt", "sub/./notes.txt", "", "."):
         answer = ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": [{"path": path, "before": None, "after": None}]}})
         assert answer == {"error": {"code": "not_a_request", "message": "refused the request: a file it applied has no path in the folder"}}, path
+    # What was there before each file is said, None for nothing: left unsaid it is not taken for nothing.
+    answer = ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": [{"path": "none.txt", "after": None}]}})
+    assert answer == {"error": {"code": "not_a_request", "message": "refused the request: a file it applied has no version from before it"}}
     wrote = [{"path": "notes.txt", "before": "0" * 40, "after": None}]
     assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": wrote}})["error"]["code"] == "landing_unsettled"
     assert ask(tree, {**place, "action": "forget", "args": {"saga": "saga:1", "applied": []}}) == {"landing": None}
