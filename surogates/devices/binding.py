@@ -27,6 +27,12 @@ BIND = "bind"
 # The same for a deleted root's retirement: its computer forgets the folder.
 RETIRE = "retire"
 
+# The kinds only a project thread's own turn asks its computer for
+# (surogates.devices.history): a snapshot of its copy or the copy put back,
+# a step of its folder's history, a landing's look at the folder and its
+# writes into it.
+THREAD_KINDS = frozenset({"checkpoint", "history", "land"})
+
 # The sandbox keys of the session on the user's computer this task works for,
 # set by AgentHarness.wake (see surogates.devices.sandbox).  Here, not there,
 # so the workspace fallback can read it without importing the device journal.
@@ -39,6 +45,21 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
     if not isinstance(execution, dict) or execution.get("kind") != "device":
         return None
     return UUID(execution["device_id"])
+
+
+def copy_of(config: dict[str, Any] | None) -> UUID | None:
+    """The thread whose copy of the folder a session works in on its computer.
+
+    None for a session in the cloud, and for one whose computer bound it to
+    the folder itself.  Stamped with the session's device, so a session
+    created under a thread names the thread's copy, and its bind carries the
+    same (``DeviceOperations.bind``): the computer then never gives the
+    thread the folder itself.
+    """
+    if device_of(config) is None:
+        return None
+    history = config["execution"].get("history")
+    return UUID(history["thread"]) if isinstance(history, dict) else None
 
 
 def is_binding_root(session_id: UUID, config: dict[str, Any] | None) -> bool:

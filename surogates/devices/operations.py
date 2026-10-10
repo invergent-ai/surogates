@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.db.models import Session as SessionRow
-from surogates.devices.binding import BIND, RETIRE, binding_of, device_of, is_binding_root
+from surogates.devices.binding import BIND, RETIRE, binding_of, copy_of, device_of, is_binding_root
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import (
@@ -208,6 +208,13 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
     if (is_binding or is_retiring) and not is_binding_root(root.id, root.config):
         # A session created under another works in that session's folder.
         raise ValueError("Only a root session is bound to a folder")
+    if is_binding:
+        # The bind and the session say the same, and the copy is the root's
+        # own: else the worker and the computer would each take the thread to
+        # work somewhere else.
+        copy = copy_of(root.config)
+        if copy not in (None, root.id) or request.args.get("history") != (None if copy is None else {"thread": str(copy)}):
+            raise ValueError("A root is bound with a copy only where the server made it a thread that works in one")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
     if is_retiring:
@@ -572,12 +579,16 @@ class DeviceOperations:
         except Exception:
             logger.warning("could not publish %s on %s", message, channel, exc_info=True)
 
-    async def bind(self, *, session_id: UUID, device_id: UUID, folder: str, nonce: str) -> None:
+    async def bind(
+        self, *, session_id: UUID, device_id: UUID, folder: str, nonce: str, history: UUID | None = None,
+    ) -> None:
         """Ask the device to bind a new root session to *folder*, without waiting.
 
         The app answers once its user has confirmed that folder under *nonce*.
-        For an HTTP request, so a database outage fails it rather than holding
-        it open.
+        With *history*, the thread the session is, the app binds it to a copy
+        of the folder that the folder's history makes for that thread, never
+        to the folder itself.  For an HTTP request, so a database outage
+        fails it rather than holding it open.
         """
         operation_id, outcome = await self._record(OperationRequest(
             device_id=device_id,
@@ -586,7 +597,7 @@ class DeviceOperations:
             invocation_id=BIND,
             ordinal=0,
             kind=BIND,
-            args={"folder": folder, "nonce": nonce},
+            args={"folder": folder, "nonce": nonce, **({"history": {"thread": str(history)}} if history is not None else {})},
         ))
         if outcome is None:
             await self._announce(control_channel(device_id), f"op:{operation_id}")
