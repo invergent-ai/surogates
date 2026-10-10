@@ -331,11 +331,13 @@ describe("the projects the page serves", () => {
       vi.advanceTimersByTime(ANSWER_TIMEOUT_MS + 15_000);
       const by = { kind: "thread", threadId: "t-1", title: "Draft A" };
       source.answered(1, { ok: { applied: [REVENUE], skipped: [{ path: "b.md", by, why: "x" }, { path: "c.md", by: null }], pickedUp: [REVENUE], secret: "x" } });
-      expect(await restored).toEqual({ applied: [REVENUE], skipped: [{ path: "b.md", by }, { path: "c.md", by: null }], pickedUp: [REVENUE] });
+      expect(await restored).toEqual({
+        applied: [REVENUE], skipped: [{ path: "b.md", by, pruned: false }, { path: "c.md", by: null, pruned: false }], pickedUp: [REVENUE],
+      });
       // Someone the app has no name for is no one it names: the answer is still taken.
       const later = source.restore(REPORT, asked);
       source.answered(2, { ok: { applied: [], skipped: [{ path: "b.md", by: { kind: "agent", name: "Reviewer" } }], pickedUp: [] } });
-      expect(await later).toEqual({ applied: [], skipped: [{ path: "b.md", by: null }], pickedUp: [] });
+      expect(await later).toEqual({ applied: [], skipped: [{ path: "b.md", by: null, pruned: false }], pickedUp: [] });
       const refusals: unknown[] = [
         null, [], undefined, { applied: [REVENUE], skipped: [] }, { applied: REVENUE, skipped: [], pickedUp: [] },
         { applied: [7], skipped: [], pickedUp: [] }, { applied: ["a".repeat(4097)], skipped: [], pickedUp: [] },
@@ -353,6 +355,41 @@ describe("the projects the page serves", () => {
       await expect(busy).rejects.toThrow("Your project's files are being saved right now. Try again in a moment.");
       // Two minutes, and no longer.
       const slow = source.restore(REPORT, asked);
+      let settled = false;
+      void slow.catch(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(slow).rejects.toBeInstanceOf(TimedOut);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ask the page to undo a landing or a thread's changes, with the time a landing takes, and take what it did field by field", async () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const { source, last } = page();
+      const undone = source.undo(REPORT, { landingId: "9" });
+      expect(last()).toEqual({ type: "call", id: 1, method: "undo", args: [REPORT, { landingId: "9" }], deadline: 1_000 + LONG_ANSWER_TIMEOUT_MS });
+      // The agent waits for the project's lock, then puts back each file a step at a time: past a plain call's bound.
+      vi.advanceTimersByTime(ANSWER_TIMEOUT_MS + 15_000);
+      const by = { kind: "thread", threadId: "t-1", title: "Draft B" };
+      source.answered(1, {
+        ok: { applied: [REVENUE], skipped: [{ path: "b.md", by }, { path: "c.md", by: null, pruned: true }, { path: "d.md", by: null, pruned: 1 }], pickedUp: [] },
+      });
+      expect(await undone).toEqual({
+        applied: [REVENUE], pickedUp: [],
+        skipped: [{ path: "b.md", by, pruned: false }, { path: "c.md", by: null, pruned: true }, { path: "d.md", by: null, pruned: false }],
+      });
+      const all = source.undo(REPORT, { threadId: FIXTURE_IDS.question });
+      expect(last()).toMatchObject({ method: "undo", args: [REPORT, { threadId: FIXTURE_IDS.question }] });
+      source.answered(2, { error: "Stop the thread to undo its changes." });
+      await expect(all).rejects.toThrow("Stop the thread to undo its changes.");
+      const odd = source.undo(REPORT, { landingId: "9" });
+      source.answered(3, { ok: { applied: "everything", skipped: [], pickedUp: [] } });
+      await expect(odd).rejects.toThrow("The agent's page answered undo with something Surogate cannot use");
+      const slow = source.undo(REPORT, { landingId: "9" });
       let settled = false;
       void slow.catch(() => { settled = true; });
       await vi.advanceTimersByTimeAsync(LONG_ANSWER_TIMEOUT_MS - 1);

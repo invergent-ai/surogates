@@ -185,10 +185,10 @@ export function changedByOf(by: unknown): ChangedBy | null {
   return null;
 }
 
-/** What POST /v1/workstreams/{id}/history/restore answers. */
+/** What POST /v1/workstreams/{id}/history/restore and /undo answer. */
 export interface UndoResultResponse {
   applied: string[];
-  skipped: { path: string; by: unknown }[];
+  skipped: { path: string; by: unknown; pruned?: unknown }[];
   picked_up: string[];
 }
 
@@ -197,16 +197,16 @@ const paths = (value: unknown): string[] => {
   return value.map((path: string) => path);
 };
 
-// What a Restore did, each list as this page knows it: one it cannot read refuses the answer, and
-// someone it has no name for is no one it names.
+// What a Restore or an Undo did, each list as this page knows it: one it cannot read refuses the answer,
+// someone it has no name for is no one it names, and a file is said to be no longer kept only by a plain yes.
 export function undoResultOf(result: UndoResultResponse): UndoResult {
   if (!Array.isArray(result.skipped)) throw new TypeError("Not a list of files left as they were");
   return {
     applied: paths(result.applied),
     skipped: result.skipped.map((left) => {
-      const { path, by } = (typeof left === "object" && left !== null ? left : {}) as Record<string, unknown>;
+      const { path, by, pruned } = (typeof left === "object" && left !== null ? left : {}) as Record<string, unknown>;
       if (typeof path !== "string") throw new TypeError("A file left as it was names no file");
-      return { path, by: by === null ? null : changedByOf(by) };
+      return { path, by: by === null ? null : changedByOf(by), pruned: pruned === true };
     }),
     pickedUp: paths(result.picked_up),
   };

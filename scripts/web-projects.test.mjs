@@ -615,7 +615,7 @@ test("a Restore is asked at its route and answers what it restored, what it left
   }));
   assert.deepEqual(await routes.restore("p-1", { versionId: "12:f", path: "threads/Draft A/A.docx" }), {
     applied: ["threads/Draft A/A.docx"], pickedUp: ["threads/Draft A/A.docx"],
-    skipped: [{ path: "b.md", by: { kind: "thread", threadId: "t-2", title: "Draft B" } }, { path: "c.md", by: null }],
+    skipped: [{ path: "b.md", by: { kind: "thread", threadId: "t-2", title: "Draft B" }, pruned: false }, { path: "c.md", by: null, pruned: false }],
   });
   // The version and the path are the body's, as they are: neither is any part of the address.
   await routes.restore("p-1", { versionId: "../../sessions?x=1#y", path: "a b/c&d.md" });
@@ -630,7 +630,52 @@ test("a Restore's answer says only what this page knows: a field or someone it h
   const { routes } = routesOver(() => Response.json({
     applied: ["a.md"], picked_up: [], skipped: [{ path: "b.md", by: { kind: "agent", name: "Reviewer" }, why: "kept" }], said_later: true,
   }));
-  assert.deepEqual(await routes.restore("p-1", { versionId: "1:f", path: "a.md" }), { applied: ["a.md"], pickedUp: [], skipped: [{ path: "b.md", by: null }] });
+  assert.deepEqual(await routes.restore("p-1", { versionId: "1:f", path: "a.md" }), { applied: ["a.md"], pickedUp: [], skipped: [{ path: "b.md", by: null, pruned: false }] });
+});
+
+test("an Undo is asked at its route, of a landing or of a thread's changes, and answers what it put back, what it left and why", async () => {
+  const { asked, routes } = routesOver(() => Response.json({
+    applied: ["A.docx", "a.md"], picked_up: ["notes.md"],
+    skipped: [
+      { path: "notes.md", by: { kind: "you" } }, { path: "b.md", by: { kind: "routine", name: "Tidy" } },
+      // Its version from before is no longer kept; and a later server's word for it that is no yes.
+      { path: "c.md", by: null, pruned: true }, { path: "d.md", by: null, pruned: "yes" },
+    ],
+  }));
+  const put = {
+    applied: ["A.docx", "a.md"], pickedUp: ["notes.md"],
+    skipped: [
+      { path: "notes.md", by: { kind: "you" }, pruned: false }, { path: "b.md", by: { kind: "routine", name: "Tidy" }, pruned: false },
+      { path: "c.md", by: null, pruned: true }, { path: "d.md", by: null, pruned: false },
+    ],
+  };
+  assert.deepEqual(await routes.undo("p-1", { landingId: "12" }), put);
+  assert.deepEqual(await routes.undo("p-1", { threadId: "t-1" }), put);
+  // The landing and the thread are the body's, as they are: neither is any part of the address.
+  await routes.undo("p-1", { landingId: "../../sessions?x=1#y" });
+  assert.deepEqual(asked, [
+    ["POST", "/api/v1/workstreams/p-1/history/undo", { landing: "12" }, "application/json"],
+    ["POST", "/api/v1/workstreams/p-1/history/undo", { thread: "t-1" }, "application/json"],
+    ["POST", "/api/v1/workstreams/p-1/history/undo", { landing: "../../sessions?x=1#y" }, "application/json"],
+  ]);
+});
+
+test("an Undo the agent refuses says why in the agent's words, and an answer that is not an Undo's is the route's own failure", async () => {
+  for (const [status, detail] of [
+    [409, "Stop the thread to undo its changes."],
+    [409, "This change was undone already."],
+    [409, "Report.docx could not be put back as it was. Open its History to restore the version you want."],
+    [404, "No such change."],
+    // A server from before Undo has no such route.
+    [404, "Not Found"],
+  ]) {
+    const { routes } = routesOver(() => Response.json({ detail }, { status }));
+    await assert.rejects(routes.undo("p-1", { threadId: "t-1" }), { message: detail });
+  }
+  for (const body of [null, { applied: "a.md", skipped: [], picked_up: [] }, { applied: [], skipped: [{ by: null }], picked_up: [] }]) {
+    const odd = routesOver(() => Response.json(body));
+    await assert.rejects(odd.routes.undo("p-1", { landingId: "3" }), { message: "The change could not be undone." }, JSON.stringify(body));
+  }
 });
 
 test("a Restore the agent refuses says why in the agent's words, and an answer that is not a Restore's is the route's own failure", async () => {

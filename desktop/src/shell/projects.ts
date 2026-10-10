@@ -10,17 +10,17 @@ import type {
 
 // How long the page has to answer a call.
 export const ANSWER_TIMEOUT_MS = 10_000;
-// A version opened, and a Restore, get longer: the agent has a version written out and sends it whole,
-// and the page reads it whole before it hands any of it over to save; or the agent waits up to twenty
-// seconds for the project's lock, then lands.
+// A version opened, a Restore and an Undo get longer: the agent has a version written out and sends it
+// whole, and the page reads it whole before it hands any of it over to save; or the agent waits up to
+// twenty seconds for the project's lock, then lands.
 export const LONG_ANSWER_TIMEOUT_MS = 120_000;
 
 const METHODS = [
   "list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "history", "openVersion",
-  "deleted", "restore",
+  "deleted", "restore", "undo",
 ] as const;
 type Method = (typeof METHODS)[number];
-const LONG: readonly Method[] = ["openVersion", "restore"];
+const LONG: readonly Method[] = ["openVersion", "restore", "undo"];
 
 // What the main process sends the page's preload. A call's deadline is when its time runs out
 // (Date.now()'s clock): a page that holds the call until it serves drops it after that.
@@ -140,15 +140,16 @@ function deletedOf(value: unknown): DeletedFiles {
   return { files: listed, more: more as boolean };
 }
 
-// What a Restore did: the files it restored, each it left as it was with who changed it since, and each
-// whose edit it recorded first. Someone the app has no name for is no one it names.
+// What a Restore or an Undo did: the files it restored or put back, each it left as it was with who changed
+// it since or that its version from before is no longer kept, and each whose edit it recorded first. Someone
+// the app has no name for is no one it names, and a file is no longer kept only by a plain yes.
 function resultOf(value: unknown): UndoResult {
   const { applied, skipped, pickedUp } = fields(value);
   const paths = (list: unknown): string[] => listOf(list, 2_000, (path) => (need(text(path, 4096)), path as string));
   const left = listOf(skipped, 2_000, (file) => {
-    const { path, by } = fields(file);
+    const { path, by, pruned } = fields(file);
     need(typeof file === "object" && file !== null && text(path, 4096));
-    return { path: path as string, by: by === null ? null : changedByOf(by) };
+    return { path: path as string, by: by === null ? null : changedByOf(by), pruned: pruned === true };
   });
   return { applied: paths(applied), skipped: left, pickedUp: paths(pickedUp) };
 }
@@ -182,6 +183,7 @@ const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   openVersion: (value) => need(value === undefined || value === null),
   deleted: deletedOf,
   restore: resultOf,
+  undo: resultOf,
 };
 
 interface Call {
@@ -218,6 +220,7 @@ export class PageProjects implements ProjectsSource {
   openVersion = (projectId: string, input: { versionId: string; path: string }) => this.call<void>("openVersion", projectId, input);
   deleted = (projectId: string) => this.call<DeletedFiles>("deleted", projectId);
   restore = (projectId: string, input: { versionId: string; path: string }) => this.call<UndoResult>("restore", projectId, input);
+  undo = (projectId: string, target: { landingId: string } | { threadId: string }) => this.call<UndoResult>("undo", projectId, target);
 
   subscribe(projectId: string, onChange: (threadId: string | null) => void): () => void {
     const id = this.next++;

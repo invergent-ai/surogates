@@ -155,6 +155,11 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFil
     // The version and its file go in the body, as they are: neither is any part of the address.
     restore: async (projectId, { versionId, path }) =>
       asked(`${project(projectId)}/history/restore`, sent("POST", { version: versionId, path }), "The version could not be restored.", PUT_BACK),
+    // The landing, or the thread, goes in the body, as it is.
+    undo: async (projectId, target) => {
+      const body = "landingId" in target ? { landing: target.landingId } : { thread: target.threadId };
+      return asked(`${project(projectId)}/history/undo`, sent("POST", body), "The change could not be undone.", PUT_BACK);
+    },
     deleted: async (projectId) =>
       asked(`${project(projectId)}/history/deleted`, undefined, "Failed to fetch the project's deleted files", DELETED),
     start: async (projectId, proposalId, key) =>
