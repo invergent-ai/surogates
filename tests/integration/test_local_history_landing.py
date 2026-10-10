@@ -640,10 +640,13 @@ async def test_what_the_folders_helper_found_left_by_a_landing_cut_short_is_told
     assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)]
 
 
-async def test_a_turns_end_taken_up_again_finds_its_landing_ended_and_gives_its_hold_of_the_folder_back(api, computer, monkeypatch):
+async def test_a_turns_end_taken_up_again_finds_its_landing_ended_tells_what_it_told_and_gives_its_hold_of_the_folder_back(api, computer, monkeypatch):
     _, master, thread = await begun_with_copy(api, computer)
     store = api.app.state.session_store
-    assert not (await tool(api, thread, "terminal", command="printf ' edited' >> Report.docx")).get("error")
+    command = "printf ' edited' >> Report.docx && printf 'more\\n' >> Plans/Q3.md"
+    assert not (await tool(api, thread, "terminal", command=command)).get("error")
+    # You save the report after the landing looked: its first run leaves it out, for the thread to redo.
+    lie_at(computer, "revisions", lambda frame, outcome: (computer.folder / "Report.docx").write_bytes(b"PK report v2, by you") and None)
     lease = await store.try_acquire_lease(thread.id, "worker-local", ttl_seconds=60)
 
     async def lands() -> dict:
@@ -664,14 +667,19 @@ async def test_a_turns_end_taken_up_again_finds_its_landing_ended_and_gives_its_
             await lands()
     # Recorded, and lost before its forgetting: the folder is held for the thread, and what it replaced is kept.
     saga = f"saga:{uuid5(thread.id, 'land:0')}"
-    assert computer.app.places.holder == str(thread.id) and kept(computer) == {f"{saga}/0": (0o600, b"PK report v1")}
+    assert computer.app.places.holder == str(thread.id) and kept(computer) == {f"{saga}/0": (0o600, b"Q3 plan\n")}
     before = len(computer.app.places.asked)
     again = await lands()
     # Taken up again, it finds its landing ended: its computer is asked only to give the folder back.
     assert ran(computer)[before:] == [("land:0:release", "forget")] and computer.app.places.holder is None
-    assert (again["state"], [(f["ref"], f["landing"]) for f in again["files"]]) == ("completed", [("Report.docx", "landed")])
+    # And it tells what its first run would have: the file it landed, and the one it left out, which the thread redoes.
+    assert again["state"] == "completed" and again["saved"] is True
+    assert [(f["ref"], f["landing"], f.get("reason")) for f in again["files"]] == [
+        ("Plans/Q3.md", "landed", None), ("Report.docx", "redoing", "changed"),
+    ]
+    assert again["redo"] == [{"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}}]
     # What it kept stays for the next landing in the folder to forget: the hold's forgetting drops none of it.
-    assert kept(computer) == {f"{saga}/0": (0o600, b"PK report v1")}
+    assert kept(computer) == {f"{saga}/0": (0o600, b"Q3 plan\n")}
     await store.release_lease(thread.id, lease.lease_token)
 
 

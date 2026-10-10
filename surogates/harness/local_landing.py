@@ -53,7 +53,7 @@ from surogates.governance.saga.orchestrator import SagaTimeoutError
 from surogates.harness.landing import TURN_ENDS, _orchestrator, _Row, _row_picked_up, _tell, _written, redo_files
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.session.events import EventType
-from surogates.workstreams.history import landing_row, start_landing
+from surogates.workstreams.history import landing_row, saga_of, start_landing
 
 logger = logging.getLogger(__name__)
 
@@ -352,21 +352,42 @@ def _not_begun(refused: BaseException) -> dict:
 
 
 def _of_row(row: Any) -> dict:
-    """The outcome of a landing whose row says it ended: the files it recorded, each landed or not."""
-    files = row.files or []
+    """The outcome of a landing whose row says it ended, as its own run gave it: what it landed, what it left out, and why.
+
+    Read from its steps, as :func:`_row_files` is: the commit's one answer,
+    the files no landing writes that its record left in the copy, and the
+    files its record landed.  So a turn's end taken up again after its
+    first run was lost before telling tells the same, the files to redo
+    among it.
+    """
+    saga = saga_of(row)
+    commit = next((s.execute_result for s in saga.steps if s.tool_name == "history.commit" and s.execute_result), None) or {}
+    record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
+    left = set(record.arguments.get("left", [])) if record is not None else set()
+    changes = commit.get("changes", [])
+    held = {o["path"] for o in commit.get("overlapped", [])}
+    overlapped = [*commit.get("overlapped", []), *({**c, "reason": "linked"} for c in changes if c["path"] in left and c["path"] not in held)]
+    landed = record.arguments["applied"] if record is not None and row.saga_state == "completed" else []
     return {
-        "saga": row.saga_id, "state": row.saga_state, "commit": row.commit,
-        "landed": [{"path": f["path"], "before": f["before"], "after": f["after"]} for f in files if f.get("merged")],
-        "overlapped": [], "excluded": [], "repositories": [], "not_taken": [], "picked_up": row.picked_up or [],
-        "files": [
-            {
-                "kind": "file", "label": f["path"], "ref": f["path"], "landing": "landed" if f.get("merged") else "not_merged",
-                **({"change": "deleted"} if f.get("merged") and f["after"] is None else {}),
-            }
-            for f in files
-        ],
-        "saved": row.saga_state == "completed", "packs": 0, "forgot": False,
+        "saga": row.saga_id, "state": row.saga_state, "commit": row.commit, "landed": landed, "overlapped": overlapped,
+        "excluded": commit.get("excluded", []), "repositories": commit.get("repositories", []), "not_taken": commit.get("not_taken", []),
+        "files": _told(changes, landed, overlapped), "picked_up": row.picked_up or [], "saved": False, "packs": 0, "forgot": False,
     }
+
+
+def _told(changes: list[dict], landed: list[dict], overlapped: list[dict]) -> list[dict]:
+    """A landing's files as its turn's report names them: each landed, or left out, and why."""
+    applied = {c["path"]: c for c in landed}
+    reasons = {o["path"]: o["reason"] for o in overlapped}
+    return [
+        {
+            "kind": "file", "label": path, "ref": path, "landing": "landed" if path in applied else "not_merged",
+            # A landed deletion is no file to open: the report names it apart.
+            **({"change": "deleted"} if path in applied and applied[path]["after"] is None else {}),
+            **({"reason": reasons[path]} if path in reasons else {}),
+        }
+        for path in sorted({c["path"] for c in changes} | set(reasons))
+    ]
 
 
 def _row_files(saga: Saga) -> list[dict]:
@@ -538,17 +559,7 @@ async def _land(
             outcome.update(commit=pushed, landed=landed, picked_up=_row_picked_up(saga))
     if outcome["state"] != "escalated":
         outcome["forgot"] = await _forgotten(saga, orchestrator, steps, row, nothing, outcome["state"])
-    applied = {c["path"]: c for c in outcome["landed"]}
-    reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
-    outcome["files"] = [
-        {
-            "kind": "file", "label": path, "ref": path, "landing": "landed" if path in applied else "not_merged",
-            # A landed deletion is no file to open: the report names it apart.
-            **({"change": "deleted"} if path in applied and applied[path]["after"] is None else {}),
-            **({"reason": reasons[path]} if path in reasons else {}),
-        }
-        for path in sorted({c["path"] for c in changes} | set(reasons))
-    ]
+    outcome["files"] = _told(changes, outcome["landed"], outcome["overlapped"])
     return outcome
 
 
