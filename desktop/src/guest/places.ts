@@ -77,9 +77,11 @@ export function askHistory(asked: Asked, signal: AbortSignal, command: readonly 
     });
     const pieces: Buffer[] = [];
     let size = 0;
+    // The history itself has ended, and its group with it.
+    let left = false;
     const end = () => {
       try {
-        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        if (child.pid !== undefined && !left) process.kill(-child.pid, "SIGKILL");
       } catch {
         // The group has gone.
       }
@@ -99,6 +101,7 @@ export function askHistory(asked: Asked, signal: AbortSignal, command: readonly 
     child.once("exit", () => {
       signal.removeEventListener("abort", end);
       end();
+      left = true;
     });
     child.once("close", (code) => {
       signal.removeEventListener("abort", end);
