@@ -15,6 +15,7 @@ import {
   projectSummaryOf,
   routineOf,
   threadRowOf,
+  undoResultOf,
 } from "../lib/projects-wire.ts";
 import { type EventStreamLike, projectStream } from "../lib/reopening-stream.ts";
 import { savedName } from "../lib/save-file.ts";
@@ -96,6 +97,7 @@ const VERSION = one(["id", "path", "at"], fileVersionOf);
 // GET …/history/deleted answers {files, more}. Whether there are more is a plain yes, or it is no.
 const DELETED = one([], (body: { files?: unknown; more?: unknown }): DeletedFiles => ({ files: many(VERSION)(body.files), more: body.more === true }));
 const ROUTINES = (body: unknown) => many(ROUTINE)((body as { items?: unknown } | null)?.items);
+const PUT_BACK = one([], undoResultOf);
 
 export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFile: SaveFile): WorkstreamRoutes {
   // A body that is no JSON, or not the route's shape, is the route's own failure: never an
@@ -150,6 +152,9 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFil
       });
       saveFile(new Blob([held], { type: "application/octet-stream" }), savedName(path));
     },
+    // The version and its file go in the body, as they are: neither is any part of the address.
+    restore: async (projectId, { versionId, path }) =>
+      asked(`${project(projectId)}/history/restore`, sent("POST", { version: versionId, path }), "The version could not be restored.", PUT_BACK),
     deleted: async (projectId) =>
       asked(`${project(projectId)}/history/deleted`, undefined, "Failed to fetch the project's deleted files", DELETED),
     start: async (projectId, proposalId, key) =>

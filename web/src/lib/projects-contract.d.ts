@@ -81,6 +81,15 @@ export interface FileVersion {
   landingId: string | null; // the landing it came with
 }
 
+// What a Restore did: the files it made that version again; each it left as it was, and who changed it
+// since (null: no one this client has a name for); and each whose edit it recorded first, as a version in
+// its History, before it was written over.
+export interface UndoResult {
+  applied: string[];
+  skipped: { path: string; by: ChangedBy | null }[];
+  pickedUp: string[];
+}
+
 // The project's files that are gone, the newest first: each the version that deleted it.
 export interface DeletedFiles {
   files: FileVersion[];
@@ -114,6 +123,8 @@ export interface ProjectsSource {
   history(projectId: string, path: string, place: ThreadPlace): Promise<FileVersion[]>;
   // Open version: the file as that version left it, handed to the user to save.
   openVersion(projectId: string, input: { versionId: string; path: string }): Promise<void>;
+  // Restore: the file made that version again, as a landing by you, your edit to it recorded first.
+  restore(projectId: string, input: { versionId: string; path: string }): Promise<UndoResult>;
   // The Library lists the deleted files under its files, so that a deleted file's History is reached.
   deleted(projectId: string): Promise<DeletedFiles>;
   // threadId null: something project-wide changed; refetch the list

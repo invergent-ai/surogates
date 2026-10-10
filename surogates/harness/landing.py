@@ -23,6 +23,12 @@ back.  The next holder of the
 project's lock settles a landing a killed worker left running before it
 does anything else, and moves no ``main`` while one that pushed has a row
 that does not say so.
+
+A landing by you, a Restore, runs in the api as a thread's does here, by
+these same rules (:mod:`surogates.workstreams.undo`): its pickup of your
+edits is a saga of its own, pushed alone, whose one step pushes as a
+record does, and its row is written before it pushes.  Each lock holder,
+a thread's pod or the api, settles what the other left running.
 """
 
 from __future__ import annotations
@@ -874,9 +880,15 @@ def _cancelling() -> bool:
 
 
 def _row_picked_up(saga: Any) -> list[dict]:
-    """A completed landing row's pickup: your edits it recorded on ``main``, each ``{path, before, after}``."""
-    pickup = next((s.execute_result for s in saga.steps if s.tool_name == "history.pickup"), None) or {}
-    return pickup.get("picked_up", [])
+    """A completed landing row's pickup: your edits it recorded on ``main``, each ``{path, before, after}``.
+
+    A pickup pushed alone was told them before it pushed: its row holds
+    them among its arguments, though its answer was never written.
+    """
+    pickup = next((s for s in saga.steps if s.tool_name == "history.pickup"), None)
+    if pickup is None:
+        return []
+    return (pickup.execute_result or pickup.arguments).get("picked_up", [])
 
 
 def _row_files(saga: Any, state: str) -> list[dict]:
@@ -900,9 +912,11 @@ async def _settle(
     It pushed only when ``main``'s history carries its saga, looked for
     back to ``main`` as the landing began on it: one that pushed and was
     then landed over is found under the landings since, and is not put
-    back.  ``main`` moved without it means another landing went first,
-    with this one's lock lost, or a command rewrote the history, and is
-    taken for not pushed.  Where a pruning's cut ends the look first,
+    back.  Its push is its record; or, for a pickup of yours pushed alone,
+    that pickup, which names the ``main`` it pushes on as a record does.
+    ``main`` moved without it means another landing went first, with this
+    one's lock lost, or a command rewrote the history, and is taken for
+    not pushed.  Where a pruning's cut ends the look first,
     whether it pushed is not known: it is given up as one whose base is
     gone, its files left as they are, since ``main`` may hold them.  A
     *recovered* landing's steps are as its row last had them: a step it
@@ -945,10 +959,11 @@ async def _settle(
         except _Unseen as unseen:
             gone = unseen.missing
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
+    # Its push, whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
+    push = record or next((s for s in saga.steps if s.tool_name == "history.pickup" and "main" in s.arguments), None)
     hidden = False
-    # Whatever its state: a try that pushed shows ``pending`` again in its retry's wait.
-    if record is not None:
-        looked = await look(saga=saga.saga_id, since=record.arguments["main"])
+    if push is not None:
+        looked = await look(saga=saga.saga_id, since=push.arguments["main"])
         if looked["landing"] is not None:
             if saga.state is SagaState.RUNNING:
                 saga.transition(SagaState.COMPLETED)
@@ -1055,7 +1070,7 @@ async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
 
 async def settle_running(
     session_factory: Any, sandbox_pool: Any, owner: str, workstream_id: Any, saga_settings: Any, held: Any,
-    *, waited: set[int] | None = None, redis: Any = None,
+    *, waited: set[int] | None = None, redis: Any = None, master: Any = None,
 ) -> list[dict]:
     """Settle the project's landings left running, through *owner*'s pod; each ``{thread, state, files}``.
 
@@ -1073,8 +1088,10 @@ async def settle_running(
     files are written only now, with no turn's end to announce them.  The
     project's stream is told over *redis*, as a change of the landing's
     thread, once the row says so and never before: a row whose write
-    failed is told of by the holder that writes it.  The wait a landing
-    left ``escalated`` puts on its thread reaches that stream over it too.
+    failed is told of by the holder that writes it.  One no thread made, a
+    landing by you, is told as *master*'s, when the holder names it.  The
+    wait a landing left ``escalated`` puts on its thread reaches that
+    stream over it too.
 
     LandingUnsettled when that row could not be written: its landing is
     in ``main`` and its row does not say so, and a holder that went on to
@@ -1107,8 +1124,8 @@ async def settle_running(
             await _tell_escalated(session_factory, row.thread_id, saga, at_issue, redis=redis)
         if state == "completed" and written.state != "completed":
             raise LandingUnsettled(f"landing {row.saga_id} pushed, and its row could not be written")
-        if state == "completed" and row.thread_id is not None:
-            await publish(redis, workstream_id, row.thread_id, LANDED)
+        if state == "completed" and (row.thread_id or master) is not None:
+            await publish(redis, workstream_id, row.thread_id or master, LANDED)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
     return settled
 

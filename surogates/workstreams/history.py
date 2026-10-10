@@ -47,15 +47,24 @@ REFS_BOUND = 4 * 2**20
 _COUNTED: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
+class ProjectBusy(RuntimeError):
+    """Another landing held the project's lock for longer than its waiter's patience."""
+
+
 @asynccontextmanager
-async def project_lock(session_factory: Any, workstream_id: UUID | str) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+async def project_lock(
+    session_factory: Any, workstream_id: UUID | str, *, patience: float | None = None,
+) -> AsyncIterator[Callable[[], Awaitable[None]]]:
     """Hold *workstream_id*'s lock for the block, on a connection of its own; a check that it is still held.
 
     Tried, not waited for in Postgres: a landing waiting for the lock holds
     no pooled connection between its tries.  The lock goes with its
-    connection, unseen, so the check asks that connection to answer.
+    connection, unseen, so the check asks that connection to answer.  With
+    *patience*, :class:`ProjectBusy` once that many seconds of tries have
+    failed: a person waits on a landing of theirs.
     """
     key = func.hashtext(f"workstream:{workstream_id}")
+    deadline = None if patience is None else time.monotonic() + patience
     while True:
         async with session_factory() as db, db.begin():
             if (await db.execute(select(func.pg_try_advisory_xact_lock(key)))).scalar():
@@ -68,21 +77,30 @@ async def project_lock(session_factory: Any, workstream_id: UUID | str) -> Async
 
                 yield held
                 return
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ProjectBusy(f"project {workstream_id}'s files are being changed")
         await asyncio.sleep(LOCK_POLL)
 
 
 async def start_landing(
-    session_factory: Any, saga: Saga, *, workstream_id: UUID | str, thread_id: UUID, agent_id: str,
+    session_factory: Any, saga: Saga, *, workstream_id: UUID | str, thread_id: UUID | None, agent_id: str,
     user_id: UUID | None, tool_saga_id: str | None, events: tuple[int, int] | None,
+    kind: str = "landing", undoes: list[int] | None = None,
 ) -> int:
-    """The row of a landing about to take its first step, the saga ``running``; its id."""
+    """The row of a landing about to take its first step, the saga ``running``; its id.
+
+    *kind* is ``landing`` for a thread's.  A landing by you has no thread:
+    ``pickup`` for your edits, pushed alone before a file of them is
+    written over, and ``restore`` or ``undo`` for the landing that follows;
+    an Undo names the rows it *undoes*.
+    """
     async with session_factory() as db, db.begin():
         return (await db.execute(
             insert(WorkstreamHistory).values(
-                workstream_id=workstream_id, kind="landing", saga_id=saga.saga_id, saga_state="running",
+                workstream_id=workstream_id, kind=kind, saga_id=saga.saga_id, saga_state="running",
                 steps=saga.to_dict()["steps"], thread_id=thread_id, tool_saga_id=tool_saga_id,
                 events=Range(events[0], events[1], bounds="[]") if events else None,
-                agent_id=agent_id, user_id=user_id,
+                agent_id=agent_id, user_id=user_id, undoes=undoes,
             ).returning(WorkstreamHistory.id)
         )).scalar_one()
 
@@ -268,14 +286,18 @@ async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str
 HISTORY_OFF = "History is off: this project has more than 50,000 files."
 #: A row's id as a version names it: digits the column holds, never what a guess could overflow.
 _ROW_ID = re.compile(r"[0-9]{1,18}")
-#: The step whose author a version is by: a row's files are its commit's, and what it picked up its pickup's.
-_STEP = {False: "history.commit", True: "history.pickup"}
+#: The step whose author a version is by: what a row picked up is its pickup's; a thread's landing's files are
+#: its commit's, and the files of a landing by you, which has no turn to commit, its record's.
+_PICKUP, _COMMIT, _RECORD = "history.pickup", "history.commit", "history.record"
+#: How a version came to be, for a landing by you: by its row's kind.
+_MADE = {"restore": "restored"}
 #: The most of a project's latest records its deleted files are looked for among: what the list costs
 #: is bounded whatever the project's age.  A file deleted before them is listed no more.
 _GONE_AMONG = 10_000
 # The project's cloud files that are gone, looked for among its latest :among records: each one's newest landed
 # record, where that took the file away, the newest first and :most of them, with who that record's step says it
-# is by.  A row's files come after its pickup.  One row at least, with how many records were looked among.
+# is by: its pickup's, its commit's, or the record's of a landing by you.  A row's files come after its pickup.
+# One row at least, with how many records were looked among.
 _GONE = text("""
     WITH recent AS (
         SELECT id, files, picked_up FROM workstream_history
@@ -296,7 +318,8 @@ _GONE = text("""
     )
     SELECT among.records, gone.id, gone.side, gone.path, h.updated_at, (
                SELECT s->'arguments'->'author' FROM jsonb_array_elements(h.steps) s
-                WHERE s->>'tool_name' = CASE gone.side WHEN 'p' THEN :pickup ELSE :commit END LIMIT 1
+                WHERE s->>'tool_name' = CASE WHEN gone.side = 'p' THEN :pickup WHEN h.kind = 'landing' THEN :commit ELSE :record END
+                LIMIT 1
            ) AS author
       FROM (SELECT count(*) AS records FROM recent) among
       LEFT JOIN gone ON true
@@ -320,10 +343,12 @@ def changed_by(row: WorkstreamHistory, *, picked: bool) -> dict:
     """Who a version a row records is by, as the wire's ``ChangedBy`` has it.
 
     A landing's files are its thread's, and what was picked up is by
-    whoever its pickup step names: you, or a routine.  Each is read from the
-    author its step was given.
+    whoever its pickup step names: you, or a routine.  A Restore's files
+    are by whoever its record names: you.  Each is read from the author
+    its step was given.
     """
-    return _by(next((s["arguments"].get("author") for s in row.steps if s["tool_name"] == _STEP[picked]), None))
+    step = _PICKUP if picked else _COMMIT if row.kind == "landing" else _RECORD
+    return _by(next((s["arguments"].get("author") for s in row.steps if s["tool_name"] == step), None))
 
 
 def _version(row: WorkstreamHistory, entry: dict, *, picked: bool) -> dict:
@@ -335,7 +360,10 @@ def _version(row: WorkstreamHistory, entry: dict, *, picked: bool) -> dict:
         "by": changed_by(row, picked=picked),
         "at": utc(row.updated_at),
         # One that took the file away is a deletion: there is nothing of it to keep.
-        "change": "deleted" if entry["after"] is None else "added" if entry["before"] is None else "changed",
+        "change": (
+            "deleted" if entry["after"] is None else _MADE[row.kind] if not picked and row.kind in _MADE
+            else "added" if entry["before"] is None else "changed"
+        ),
         "merged": merged,
         "landing_id": str(row.id) if merged and not picked else None,
         "blob": entry["after"],
@@ -437,7 +465,7 @@ async def deleted_files(session_factory: Any, workstream_id: UUID | str, *, limi
     """
     async with session_factory() as db:
         answered = (await db.execute(_GONE, {
-            "project": workstream_id, "among": _GONE_AMONG, "most": limit + 1, "commit": _STEP[False], "pickup": _STEP[True],
+            "project": workstream_id, "among": _GONE_AMONG, "most": limit + 1, "pickup": _PICKUP, "commit": _COMMIT, "record": _RECORD,
         })).all()
     found = [found for found in answered if found.id is not None]
     return [
