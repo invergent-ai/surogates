@@ -60,6 +60,18 @@ function received(message: ToManager): void {
     answer(id, manager.perform(message.operation, controller.signal).finally(() => running.delete(id)));
   } else if (message.type === "teardown") {
     answer(message.id, (manager?.teardown(message.root) ?? Promise.resolve()).then(() => ({ ok: null })));
+  } else if (message.type === "place" || message.type === "history") {
+    const { id } = message;
+    if (!manager) return void send({ type: "result", id, outcome: unavailable("was not started") });
+    const controller = new AbortController();
+    running.set(id, controller);
+    // A history's answer is the guest's as the manager checked it (history.ts): nothing else of the guest's goes on to the app.
+    const work = message.type === "place"
+      ? manager.place(message.place, controller.signal).then((failure): Outcome => failure ?? { ok: null })
+      : manager.history(message.request, controller.signal);
+    answer(id, work.finally(() => running.delete(id)));
+  } else if (message.type === "unplace") {
+    answer(message.id, (manager?.unplace(message.place) ?? Promise.resolve(false)).then((ok) => ({ ok })));
   } else if (message.type === "forwards") {
     manager?.forwards(message.key, message.ports);
   } else if (message.type === "listening") {
