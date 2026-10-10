@@ -33,7 +33,11 @@ settles one otherwise changes this file with it.
 - The hold: any ``land`` operation takes the folder, and another root's is
   answered ``busy`` at once, where the app waits up to 150 s first; it lapses
   after two idle minutes, and a landing's helper is started anew with each
-  hold, which recovers first.
+  hold, which recovers first.  The forgetting of a landing the turn only
+  settled, asked under ``land:<turn>:settle:…``, lets the folder go no more
+  than the settle did; and a hold given back (``forget {saga: "hold:…"}``)
+  by a root that holds nothing is answered ``{}``, nothing taken and nothing
+  asked (desktop/src/hosts/tool-hosts.ts, ``ToolHosts.land``).
 - ``land`` ``forget`` carries ``applied``: the app asks the history's
   ``forget`` first, and answers with its refusal where it refuses, and with
   ``value`` where its answer is no forgetting's; only where the history says
@@ -92,6 +96,8 @@ ACTIONS = {
 }
 #: How long the folder is held for a landing with no step, as the app lets a landing's host idle.
 IDLE_S = 120.0
+#: A step a turn's landing asks for a landing it only settles, one another left running in the folder (the app's ``SETTLES``).
+_SETTLES = re.compile(r"land:[^:]+:settle:")
 
 
 def cannot(kind: str) -> dict[str, Any]:
@@ -184,7 +190,7 @@ class Places:
         if self.off is not None:
             return {"ok": {"history": "off", "reason": self.off}} if (kind, action) == ("history", "open") else HISTORY_OFF
         if kind == "land":
-            return self._land(root, thread, action, args)
+            return self._land(root, thread, action, args, invocation)
         if kind == "checkpoint":
             if action == "take":
                 return self._ask(thread, "snapshot", {"reason": args.get("reason")})
@@ -228,11 +234,15 @@ class Places:
             # As the guest's main(): anything else that went wrong is the history's failure.
             return {"error": {"type": "history", "code": "failed", "message": str(failed)}}
 
-    def _land(self, root: str, thread: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _land(self, root: str, thread: str, action: str, args: dict[str, Any], invocation: str) -> dict[str, Any]:
         now = time.monotonic()
+        holds = self.holder == root and self._helper is not None and now - self._held_at <= self.idle_s
+        if action == "forget" and str(args.get("saga", "")).startswith("hold:") and not holds:
+            # A hold given back where the root holds nothing: nothing to let go, and no landing's host started to say so.
+            return {"ok": {}}
         if self.holder not in (None, root) and now - self._held_at <= self.idle_s:
             return BUSY
-        if self.holder != root or self._helper is None or now - self._held_at > self.idle_s:
+        if not holds:
             # A landing's host, its helper started anew on the folder, with the thread's copy.
             self._helper = LandHelper(self.real, self.copy(thread), self.kept)
         self.holder, self._held_at = root, now
@@ -246,7 +256,8 @@ class Places:
         if not (isinstance(ok, dict) and ok.keys() == {"landing"} and (ok["landing"] is None or _id(ok["landing"]))):
             return NOT_A_FORGETTING
         outcome = self._helper.land({"action": "forget", "saga": args.get("saga")})
-        if "ok" in outcome:
+        # The turn's own landing over, the folder is let go; not at the forgetting of one it only settled.
+        if "ok" in outcome and not _SETTLES.match(invocation):
             self.holder, self._helper = None, None
         return outcome
 
