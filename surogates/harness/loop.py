@@ -31,6 +31,7 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
+from surogates.devices.history import NowhereToWork, opens_its_copy
 from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -76,7 +77,7 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
-from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
+from surogates.harness.tool_exec import _open_local_copy, execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
@@ -3622,6 +3623,29 @@ class AgentHarness(
 
             # 6. Append assistant message to the in-memory message list.
             messages.append(assistant_message)
+
+            # A thread that works in a copy of its own on its computer opens
+            # it for the turn before anything of these steps reaches that
+            # computer, the turn's mark among them.  One with nowhere to work
+            # runs no step: its turn ends here, failed, saying why.
+            if opens_its_copy(session):
+                try:
+                    await _open_local_copy(
+                        session, self._store, lease, session_factory=self._session_factory, redis=self._redis,
+                    )
+                except NowhereToWork as nowhere:
+                    logger.warning(
+                        "Session %s: its thread has nowhere to work on its computer (%s), and runs no step",
+                        session.id, nowhere.code or nowhere.why,
+                    )
+                    if streaming_executor is not None:
+                        streaming_executor.discard()
+                    await self._fail_session(
+                        session, messages, lease, reason="nowhere_to_work", cost_tracker=cost_tracker,
+                        why=nowhere.why, code=nowhere.code, error_title=str(nowhere),
+                        error_category="storage_error", retryable=nowhere.retryable,
+                    )
+                    return
 
             # 7. Execute tool calls.
             await self._mark_turn_start(session)

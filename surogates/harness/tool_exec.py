@@ -21,7 +21,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
+from surogates.devices.history import ThreadCopy, thread_copy
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
+from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
@@ -278,6 +280,41 @@ async def _snapshot_copy(
         logger.warning("Snapshot %s failed for session %s", reason, session.id, exc_info=True)
         return None
     return taken.get("hash")
+
+
+async def _turn_now(store: Any, session: Any) -> int:
+    """The name of a thread's turn now running: as its loop named it, or by its last turn end where no loop did."""
+    named = session.config.get("turn_after")
+    if named is not None:
+        return named
+    from surogates.harness.landing import TURN_ENDS
+
+    ended = await store.last_event(session.id, *TURN_ENDS)
+    return ended.id if ended else 0
+
+
+async def _open_local_copy(
+    session: Any, store: Any, lease: Any, *, session_factory: Any, redis: Any,
+) -> tuple[ThreadCopy, int, dict[str, Any] | None]:
+    """Bring a thread's copy on its user's computer to its turn, before the turn's next step: the copy, the turn, and the open's answer.
+
+    Its computer hears it once a turn (:meth:`ThreadCopy.opened`).  None for
+    an answer where a refusal the next asking may pass is all there is, or
+    the journal refused the asking itself, for a stopped session or a lease
+    another worker holds now: the step goes on, in the copy as the app keeps
+    it, and meets any such refusal itself.  Raises ``NowhereToWork`` where
+    the thread has nowhere to work: the turn runs no step.
+    """
+    copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=str(lease.lease_token))
+    turn = await _turn_now(store, session)
+    try:
+        opened = await copy.opened(turn)
+    except DeviceOperationError:
+        logger.warning("The copy of thread %s was not opened for its turn %s", session.id, turn, exc_info=True)
+        return copy, turn, None
+    if opened is None:
+        logger.info("The copy of thread %s is not opened for its turn %s yet: its next step asks again", session.id, turn)
+    return copy, turn, opened
 
 
 async def _apply_ssh_access(

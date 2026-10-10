@@ -172,6 +172,8 @@ class NowhereToWork(Exception):
         super().__init__(NOWHERE[why])
         self.why = why
         self.code = code
+        #: Whether a later turn may find otherwise: only one whose copy could not be opened.
+        self.retryable = why == _REFUSED
 
 
 def opens_its_copy(session: Any) -> bool:
