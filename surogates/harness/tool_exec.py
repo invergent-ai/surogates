@@ -621,6 +621,15 @@ def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None
     return None
 
 
+def refused_before_it_runs(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> bool:
+    """Whether a call of a session on its user's computer is refused before its tool runs, so it changes nothing there.
+
+    By the thread's own rule, or as a tool no computer has (both are
+    answered in ``_run_single_tool`` before anything is dispatched).
+    """
+    return thread_refuses(tool_name, arguments, config) is not None or tool_name in UNAVAILABLE_TOOLS
+
+
 #: What a thread's step says of files it and a helper both changed.
 NOT_TAKEN_UP = "Changed here and by a helper, so this copy keeps its own version (the helper's is in the history)"
 

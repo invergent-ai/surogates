@@ -18,11 +18,13 @@ type:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from surogates.governance.saga.state_machine import SagaStateError, SagaStep
+from surogates.governance.saga.state_machine import Saga, SagaState, SagaStateError, SagaStep, StepState
 
 if TYPE_CHECKING:
     from surogates.sandbox.pool import SandboxPool
@@ -141,46 +143,102 @@ async def compensate_history(
     ))
 
 
-async def compensate_on_computer(step: SagaStep, *, copy: Any, turn: int) -> dict:
-    """Compensate a step of a project's thread on its user's computer: its copy put back to the snapshot taken before it.
+#: What its person reads where a Stop of a thread on their computer did not take all of the turn back: some
+#: of it stays in the thread's copy, or had already landed in the folder.  The owner's words, and these alone.
+STOP_LEFT_IN_COPY = (
+    "Stopped, but not all of this turn could be taken back. What the steps below changed stays in this "
+    "thread's copy, and lands in your folder with the thread's next turn."
+)
+STOP_LEFT_LANDED = "Stopped, but part of this turn had already landed in your folder, so it was not taken back."
+#: Why a step was not taken back, as its person reads it.
+WHY_NOT_TAKEN_BACK = {
+    "no_snapshot": "no snapshot of the copy was taken before it",
+    "landed": "it had already landed in your folder",
+    "not_answered": "your computer did not answer in time",
+    "refused": "your computer did not put the copy back",
+    "not_asked": "your computer could not be asked to put the copy back",
+}
+
+
+async def undo_on_computer(saga: Saga, *, copy: Any, turn: int, ran: Callable[[SagaStep], bool]) -> list[dict]:
+    """Put a stopped turn's copy of a project's thread on its user's computer back to where the turn started.
 
     *copy* is the thread's (``surogates.devices.history.ThreadCopy``), and
-    *turn* the name of the turn the step was taken in.  The folder itself
-    changes only at a landing, so nothing here reaches it.  A snapshot taken
-    before a landing of the thread's recorded is on a base the copy has left:
-    that step's work landed, and is not taken back.
+    *turn* the name the turn's snapshots were taken under.  Every step that
+    began, however it was left, is put back by its snapshot, newest first,
+    each restore bounded by its step's timeout.  The copy is then where the
+    oldest snapshot put back left it: that step and every one after it are
+    taken back, those with no snapshot of their own among them.  The folder
+    changes only at a landing, so nothing here reaches it.
+
+    Answers each step before that one that is not taken back, oldest first,
+    as ``{step_id, tool, why}`` and the file it named (``path``): ``why`` a
+    key of :data:`WHY_NOT_TAKEN_BACK`, and ``code`` the computer's for a
+    refusal.  A step that never ran (by *ran*) is not among them: it
+    changed nothing.  A snapshot taken before a landing of the thread's recorded is
+    on a base the copy has left: that step's work had landed.  The saga
+    ends ``escalated`` where any step is not taken back, else ``completed``.
     """
     # Imported here: the devices' modules reach this one through the governance package they import.
-    from surogates.devices.history import ComputerRefused, code_of
+    from surogates.devices.history import ComputerRefused, NotAnAnswer, code_of
+    from surogates.devices.workspace import DeviceOperationError
 
-    try:
-        await copy.restore(turn, step.checkpoint_hash)
-    except ComputerRefused as refused:
-        # The folder's history's refusal of a snapshot that is not built on the copy's base as it stands.
-        if refused.code == "not_on_base":
-            raise SagaStateError(
-                f"Step {step.step_id} ({step.tool_name}) cannot be taken back: its work has landed in the folder "
-                "since its snapshot was taken, and the thread's copy stays as the landing left it"
-            ) from None
-        # The computer's refusal by its code: its words are its own.
-        raise SagaStateError(
-            f"Step {step.step_id} ({step.tool_name}) was not taken back: the computer refused to put the thread's "
-            f"copy back ({code_of(refused)})"
-        ) from None
+    saga.transition(SagaState.COMPENSATING)
+    began = [s for s in saga.steps if s.state in (StepState.EXECUTING, StepState.COMMITTED, StepState.FAILED)]
+    back_from = len(began)
+    why: dict[str, tuple[str, str | None]] = {}
+    for index in range(len(began) - 1, -1, -1):
+        step = began[index]
+        if step.checkpoint_hash is None:
+            continue
+        try:
+            await asyncio.wait_for(copy.restore(turn, step.checkpoint_hash), timeout=step.timeout_seconds)
+        except TimeoutError:
+            why[step.step_id] = ("not_answered", None)
+        except ComputerRefused as refused:
+            # The folder's history's refusal of a snapshot that is not built on the copy's base as it stands.
+            why[step.step_id] = ("landed", None) if refused.code == "not_on_base" else ("refused", code_of(refused))
+        except NotAnAnswer as refused:
+            why[step.step_id] = ("refused", code_of(refused))
+        except DeviceOperationError as refused:
+            logger.warning("Step %s (%s) was not put back: %s", step.step_id, step.tool_name, refused)
+            why[step.step_id] = ("not_asked", None)
+        else:
+            back_from = index
+    left = []
+    for index, step in enumerate(began):
+        if index >= back_from or not ran(step):
+            step.state = StepState.COMPENSATED
+            continue
+        step.state = StepState.COMPENSATION_FAILED
+        reason, code = why.get(step.step_id, ("no_snapshot", None))
+        step.error = WHY_NOT_TAKEN_BACK[reason]
+        path = step.arguments.get("path") if isinstance(step.arguments, dict) else None
+        left.append({
+            "step_id": step.step_id, "tool": step.tool_name, "why": reason,
+            **({"code": code} if code else {}), **({"path": path} if isinstance(path, str) else {}),
+        })
+    if left:
+        saga.transition(SagaState.ESCALATED)
+        saga.error = f"{len(left)} step(s) not taken back"
+    else:
+        saga.transition(SagaState.COMPLETED)
     logger.info(
-        "Compensated step %s (%s): the thread's copy is back at %s", step.step_id, step.tool_name, step.checkpoint_hash[:8],
+        "Put the copy of thread %s back: %d step(s) of its turn taken back, %d not",
+        saga.session_id, len(began) - back_from, len(left),
     )
-    return {"restored": step.checkpoint_hash}
+    return left
 
 
-def not_taken_back(step: SagaStep) -> str:
-    """What is said of a step of a thread on its user's computer that a stop did not take back: why, in words."""
-    if step.checkpoint_hash is None:
-        return (
-            f"Step {step.step_id} ({step.tool_name}) cannot be taken back: no snapshot of the thread's copy was taken "
-            "before it"
-        )
-    return step.error or f"Step {step.step_id} ({step.tool_name}) was not taken back"
+def stop_left(left: list[dict]) -> dict:
+    """What a Stop says where it did not take all of the turn back, as the chat draws a turn's failure: why, step by step."""
+    staying = any(entry["why"] != "landed" for entry in left)
+    named = [f"{entry['tool']} ({entry['path']})" if "path" in entry else entry["tool"] for entry in left]
+    lines = [f"{step}: {WHY_NOT_TAKEN_BACK[entry['why']]}" for step, entry in zip(named, left)]
+    return {
+        "error_title": STOP_LEFT_IN_COPY if staying else STOP_LEFT_LANDED, "error_detail": "\n".join(lines),
+        "error_category": "storage_error", "retryable": False, "not_taken_back": left,
+    }
 
 
 async def compensate_step(
