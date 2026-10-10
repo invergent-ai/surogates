@@ -441,6 +441,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     expect(snapshot).toEqual({ hash: expect.stringMatching(/^[0-9a-f]{40}$/) });
     expect(await said(ONE, "restore", { commit: snapshot.hash })).toEqual({});
     expect(await said(ONE, "open")).toEqual({ copy: "kept" });
+    // Inside a turn, as the app opens a copy before a step: it stays where its branch is.
+    expect(await said(TWO, "open", { moves: false })).toEqual({ copy: "kept" });
+    expect(await code(TWO, "open", { moves: "yes" })).toBe("not_a_request");
     // A request that is none of a folder's history, an id that is none, a commit the repository does not hold.
     expect(await code(ONE, "prune", { keep: [] })).toBe("not_a_request");
     expect(await code(ONE, "apply", { path: "A.md", before: null, after: NO_ID })).toBe("not_a_request");
