@@ -10,6 +10,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlPlaces } from "../src/guest/control.js";
 import { type Asked, askHistory, Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
+import { boundsFor } from "../src/guest/root.js";
 import type { Outcome } from "../src/link/protocol.js";
 import { checked, forgettable, type HistoryRequest, named } from "../src/vm/history.js";
 import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
@@ -24,6 +25,7 @@ const BLOB = "b".repeat(40);
 const signal = () => new AbortController().signal;
 const NO_ANSWER = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
 const NOT_HERE = { error: { type: "unavailable", message: "This folder's history is not in the sandbox" } };
+const HELD = { error: { type: "unavailable", message: "This folder's history is held by a request before this one, which has not ended" } };
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -197,6 +199,46 @@ describe("the agent, asked for a folder's history", () => {
     await again;
     expect(order).toEqual(["mount r1", "mount r2", "start 1", "ended 1", "umount real", "umount history", "mount r3", "mount r4"]);
     expect(await mounted.history(KEY, { ...request, args: { n: 3 } }, signal())).toEqual({ ok: {} });
+  });
+
+  it("bounds a request that waits its turn as one that runs: behind one whose processes cannot end it answers that the history is held, and never starts", async () => {
+    const order: string[] = [];
+    // A history that does not end, whatever it is told: its processes wait on a share that stalled.
+    const stuck = (waitMs?: number) => new Places({
+      folder: join(dir, "places"), mount: async () => {}, unmount: async () => {}, historyMs: 60, waitMs,
+      ask: ({ args }) => new Promise<string>(() => void order.push(`start ${String(args.n)}`)),
+    });
+    const mounted = stuck(120);
+    await mounted.mount(KEY, R1, R2);
+    await mounted.mount(OTHER_KEY, { kind: "virtiofs", tag: "r3" }, { kind: "virtiofs", tag: "r4" });
+    const began = performance.now();
+    const first = mounted.history(KEY, { ...request, args: { n: 1 } }, signal());
+    const second = mounted.history(KEY, { ...request, args: { n: 2 } }, signal());
+    expect(await first).toEqual(NO_ANSWER);
+    expect(await second).toEqual(HELD);
+    expect(performance.now() - began).toBeGreaterThanOrEqual(115);
+    // One asked later waits as long from when it is asked; a cancel is still answered at once.
+    const later = performance.now();
+    const cancel = new AbortController();
+    const fourth = mounted.history(KEY, { ...request, args: { n: 4 } }, cancel.signal);
+    cancel.abort();
+    expect(await fourth).toEqual(CANCELLED);
+    expect(await mounted.history(KEY, { ...request, args: { n: 3 } }, signal())).toEqual(HELD);
+    expect(performance.now() - later).toBeGreaterThanOrEqual(115);
+    expect(performance.now() - began).toBeLessThan(2_000);
+    // None of them started, then or after; and another place's requests are not held.
+    void mounted.history(OTHER_KEY, { ...request, args: { n: 5 } }, signal());
+    await until(() => order.length === 2);
+    expect(order).toEqual(["start 1", "start 5"]);
+    // Unless it is told otherwise a request waits as long as the one before it may run, and as long again as what that ran has to end.
+    order.length = 0;
+    const usual = stuck();
+    await usual.mount(KEY, R1, R2);
+    const from = performance.now();
+    void usual.history(KEY, { ...request, args: { n: 1 } }, signal());
+    expect(await usual.history(KEY, { ...request, args: { n: 2 } }, signal())).toEqual(HELD);
+    expect(performance.now() - from).toBeGreaterThanOrEqual(60 + boundsFor(1).killedMs - 5);
+    expect(order).toEqual(["start 1"]);
   });
 
   it("ends every request at the guest's stop, within its bound, and starts none after", async () => {
