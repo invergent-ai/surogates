@@ -1813,9 +1813,10 @@ def test_what_was_set_aside_whole_is_named_in_the_answer_the_agent_gives(tmp_pat
 
 
 #: One request, as its runner takes it, run to its end or killed at one of its steps: each git it
-#: runs, and each file it writes or puts in its place.  Killed, every process of it goes at once.
+#: runs, each file it writes or puts in its place, and each folder it renames; where it is asked
+#: to, each file and folder it removes too.  Killed, every process of it goes at once.
 STEPPED = """
-import json, os, pathlib, signal, subprocess, sys
+import json, os, pathlib, shutil, signal, subprocess, sys
 at, before, count = int(sys.argv[2]), sys.argv[3], [0]
 def stepped(real):
     def step(*args, **kwargs):
@@ -1824,8 +1825,10 @@ def stepped(real):
             os.killpg(0, signal.SIGKILL)
         return real(*args, **kwargs)
     return step
-subprocess.run, os.replace = stepped(subprocess.run), stepped(os.replace)
+subprocess.run, os.replace, os.rename = stepped(subprocess.run), stepped(os.replace), stepped(os.rename)
 pathlib.Path.write_bytes = stepped(pathlib.Path.write_bytes)
+if sys.argv[4]:
+    os.unlink, os.rmdir = stepped(os.unlink), stepped(os.rmdir)
 from surogates.sandbox import local_history
 try:
     answer = local_history.run(json.loads(sys.argv[1]))
@@ -1837,12 +1840,13 @@ OURS, THEIRS, NEW = THREAD, THREAD.replace("0b6c", "1b6c"), THREAD.replace("0b6c
 SAGA = [["Surogate-Saga", "saga:ours"]]
 
 
-def stepped(root: Path, thread: str, action: str, args: dict, at: int = 0, before: str = "") -> dict | None:
+def stepped(root: Path, thread: str, action: str, args: dict, at: int = 0, before: str = "", removals: bool = False) -> dict | None:
     """*thread*'s request on the folder under *root*, killed at its step *at*, or right before the git that is
-    *before*; its steps and answer when it ran to its end."""
+    *before*; its steps and answer when it ran to its end.  With *removals*, each file and each folder it
+    removes is a step too."""
     request = {"store": str(root / "store"), "folder": str(root / "Documents"), "thread": thread, "user": "u1", "action": action, "args": args}
     ran = subprocess.run(
-        [sys.executable, "-c", STEPPED, json.dumps(request), str(at), before], capture_output=True, text=True,
+        [sys.executable, "-c", STEPPED, json.dumps(request), str(at), before, "removals" * removals], capture_output=True, text=True,
         cwd=Path(__file__).parents[1], start_new_session=True, timeout=300,
     )
     if at or before:
@@ -1916,19 +1920,19 @@ def the_next_turn_lands_whole(root: Path, kept: dict, *, landed: bool, new: str 
     assert files_of(fresh.copy) == files_of(folder)
 
 
-def each_cut(tmp_path: Path, thread: str, action: str, args: dict):
+def each_cut(tmp_path: Path, thread: str, action: str, args: dict, removals: bool = False):
     """The folder under ``tmp_path/whole`` copied for each step of *thread*'s request, and the request killed at that step."""
     whole = tmp_path / "whole"
     shutil.copytree(whole, tmp_path / "counted", symlinks=True)
-    steps = stepped(tmp_path / "counted", thread, action, args)["steps"]
+    steps = stepped(tmp_path / "counted", thread, action, args, removals=removals)["steps"]
     assert steps > 1
     for at in range(1, steps + 1):
         root = tmp_path / f"cut-{at}"
         shutil.copytree(whole, root, symlinks=True)
-        before = files_of(root / "Documents")
-        stepped(root, thread, action, args, at)
-        # The history writes no file of the folder, at any step.
-        assert files_of(root / "Documents") == before, at
+        before = as_it_is(root / "Documents")
+        stepped(root, thread, action, args, at, removals=removals)
+        # The history writes no file of the folder, at any step: every name, mode, time and byte is as it was.
+        assert as_it_is(root / "Documents") == before, at
         yield at, root
 
 
@@ -2161,3 +2165,74 @@ def test_a_move_that_cannot_be_finished_refuses_every_act_and_moves_nothing(tmp_
         with refused("move_unfinished", "refused the request: this thread's copy was being moved to main, and the move could not be finished: git write-tree failed"):
             ask(LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1"))
     assert (git(ours.repo, "for-each-ref"), files_of(ours.copy)) == (refs, held)
+
+
+#: What an earlier guest, a cut or a fault can leave of a thread's place, that has its next open make its copy again.
+BROKEN = {
+    "its repository's first open is not marked as ended": lambda ours: (ours.repo / "made").unlink(),
+    "a link is in its repository": lambda ours: (ours.repo / "refs" / "elsewhere").symlink_to(ours.repo.parent),
+    "its copy's index is gone": lambda ours: (ours.repo / "worktrees" / ours.thread / "index").unlink(),
+}
+
+
+def held_in(top: Path) -> list[tuple[str, int, bytes]]:
+    """Every name under *top* with its mode and what it holds, but where a copy's git folder names the copy's
+    path: that is another's under each cut's own folder, and is written again there, staged first."""
+    return [(name, mode, held) for name, mode, _, held in as_it_is(top) if Path(name).name not in ("gitdir", ".~gitdir")]
+
+
+@pytest.mark.parametrize("broken", list(BROKEN))
+def test_an_open_that_sets_a_copy_aside_killed_at_any_step_leaves_it_whole_under_one_name_and_the_next_makes_a_whole_copy(tmp_path, broken):
+    ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    # The thread's work is in a snapshot, and in its copy since: a file in no snapshot, and one history leaves out.
+    LocalHistory.at(tmp_path / "whole" / "store", tmp_path / "whole" / "Documents", thread=OURS, user="u1").snapshot("before a step")
+    (ours.copy / "late.md").write_text("in no snapshot\n")
+    (ours.copy / "scratch.tmp").write_text("left out of history\n")
+    BROKEN[broken](ours)
+    copy, repository = as_it_is(ours.copy), held_in(ours.repo)
+    with_repository = not broken.startswith("its copy")
+    for at, root in each_cut(tmp_path, OURS, "open", {}, removals=True):
+        place, aside = root / "store", root / "store" / "set-aside"
+        # Cut anywhere, each is whole under one name, its own or the one it was set aside under: never part
+        # of it under each, and never under neither.
+        assert [as_it_is(at_) == copy for at_ in (place / "threads" / OURS, *aside.glob("*.copy"))].count(True) == 1, at
+        if with_repository:
+            assert [held_in(at_) == repository for at_ in (place / "clones" / OURS, *aside.glob("*.repository"))].count(True) == 1, at
+        # The thread's next turn opens on a whole copy and lands, and nothing of anyone's goes with it.
+        the_next_turn_lands_whole(root, kept, landed=False)
+        # From then on what was set aside is told, and is all the place keeps so: the copy once, as it was,
+        # and the repository where that was made again too.
+        opened = LocalHistory.at(place, root / "Documents", thread=OURS, user="u1").open()
+        assert opened.get("set_aside_folders") == set_aside_whole(place), at
+        assert [as_it_is(aside / name) for name in opened["set_aside_folders"] if name.endswith(".copy")] == [copy], at
+        assert [held_in(aside / name) for name in opened["set_aside_folders"] if name.endswith(".repository")] == (
+            [repository] if with_repository else []
+        ), at
+
+
+def test_an_open_that_lets_the_oldest_set_aside_go_killed_at_any_step_keeps_the_rest_whole_and_none_half_gone(tmp_path):
+    ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
+    # The thread's copy was set aside whole four times, as many as a thread keeps, and is about to be once more.
+    for count in range(4):
+        names = set_aside_once_more(ours, f"unlanded, {count}\n")["set_aside_folders"]
+    assert len(names) == 4
+    (ours.copy / "unlanded.md").write_text("unlanded, 4\n")
+    (ours.repo / "worktrees" / OURS / "index").unlink()
+    held = [*(as_it_is(tmp_path / "whole" / "store" / "set-aside" / name) for name in names), as_it_is(ours.copy)]
+    for at, root in each_cut(tmp_path, OURS, "open", {}, removals=True):
+        folder, aside = root / "Documents", root / "store" / "set-aside"
+        # Cut anywhere: only the oldest is ever going, and each of the others is whole under its name.
+        assert [name for name in names if not (aside / name).exists()] in ([], names[:1]), at
+        assert all(as_it_is(aside / name) == was for name, was in zip(names, held) if (aside / name).exists()), at
+        again = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+        opened = again.open()
+        # After the next open the thread keeps its last four, each whole, the one just set aside among them;
+        # the oldest is gone whole, and said to be.
+        assert opened["set_aside_folders"][:3] == names[1:] and opened["set_aside_gone"] == names[:1], at
+        assert [as_it_is(aside / name) for name in opened["set_aside_folders"]] == held[1:], at
+        assert set_aside_whole(root / "store") == sorted([f"{names[0]}.gone", *opened["set_aside_folders"]]), at
+        assert not any((aside / f"{names[0]}.gone").iterdir()), at
+        # And the thread's turn lands from the copy made again.
+        (again.copy / "after.md").write_text("the turn after\n")
+        assert [c["path"] for c in land(again, "saga:after", B)["changes"]] == ["after.md"], at
+        assert {name: dict(files_of(folder)).get(name) for name in kept} == kept, at
