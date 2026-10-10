@@ -1496,13 +1496,28 @@ class History:
         return [_checked_id(c, "its shallow") for c in data.decode(errors="replace").split()]
 
     def _fetch(self, *commits: str | None) -> None:
-        """*commits* from the durable history as last taken, at depth 1, where this repository lacks them."""
-        wanted = [c for c in dict.fromkeys(commits) if c and not self._has(c)]
+        """*commits* from the durable history as last taken, at depth 1, where this repository lacks them.
+
+        It lacks one it holds no further than the commit itself: a fetch
+        killed after it stored its objects and before it wrote ``shallow``
+        leaves a commit whose parents are not there and whose history is
+        not said to be cut there, which git reads and cannot walk from.
+        Fetched again, it comes whole.
+        """
+        wanted = [c for c in dict.fromkeys(commits) if c and not self._whole(c)]
         if wanted:
             self._git(
                 ["fetch", "-q", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", str(self._taken), *wanted],
                 env={"GIT_DIR": str(self.repo)}, cwd=self.repo,
             )
+
+    def _whole(self, commit: str) -> bool:
+        """Whether this repository holds *commit* as a fetch leaves it: with its parents, or named in ``shallow``."""
+        try:
+            self._main("rev-list", "-n", "1", "--end-of-options", commit)
+        except HistoryError:
+            return False
+        return True
 
     def _push(self, updates: dict[str, str | None], *, expect: dict[str, str | None]) -> None:
         """Make the durable history's refs *updates*, where *expect* still holds: a pack, then ``packed-refs``.
