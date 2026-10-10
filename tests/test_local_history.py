@@ -1742,6 +1742,62 @@ def test_a_copy_made_again_from_a_turn_kept_in_the_history_is_read_against_that_
         assert sorted((c["path"], c["after"] is None) for c in land(again, "saga:1")["changes"]) == [("Draft.md", False), ("notes.txt", True)]
 
 
+#: What a thread can do to its copy after a snapshot, and the files a copy made again then holds as its work.
+SINCE = {
+    "a file a snapshot took, taken away since, and a change undone": (
+        lambda one, start: ((one.copy / "wrong.md").unlink(), (one.copy / "notes.txt").write_text("v1 notes\n")), ["kept.md"],
+    ),
+    "a step put back, with no snapshot since": (lambda one, start: one.restore(start), ["kept.md"]),
+    "a file of the folder's, taken away": (lambda one, start: (one.copy / "Report.docx").unlink(), ["kept.md", "notes.txt", "wrong.md"]),
+    "a file it changed again": (lambda one, start: (one.copy / "wrong.md").write_text("changed again, in no snapshot\n"), ["kept.md", "notes.txt"]),
+}
+
+
+@pytest.mark.parametrize("since", list(SINCE))
+def test_a_copy_made_again_from_its_branch_holds_as_the_threads_work_only_what_the_copy_and_the_branch_both_held(tmp_path, folder, since):
+    one = a_copy(tmp_path, folder)
+    place = tmp_path / "store"
+    (one.copy / "kept.md").write_text("the turn's, and still there\n")
+    start = LocalHistory.at(place, folder, thread="t1", user="u1").snapshot("a turn's start")
+    (one.copy / "wrong.md").write_text("what a step made\n")
+    (one.copy / "notes.txt").write_text("changed by the step\n")
+    LocalHistory.at(place, folder, thread="t1", user="u1").snapshot("before a step")
+    then, lands = SINCE[since]
+    then(LocalHistory.at(place, folder, thread="t1", user="u1"), start)
+    (one.repo / "worktrees" / "t1" / "index").unlink()
+    was, theirs = as_it_is(one.copy), as_it_is(folder)
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    opened = again.open()
+    # The copy is set aside as it was, what it no longer held with the rest.
+    assert set(opened) == {"copy", "set_aside_folders"} and opened["copy"] == "kept", opened
+    [copy] = opened["set_aside_folders"]
+    assert (as_it_is(place / "set-aside" / copy), as_it_is(folder)) == (was, theirs)
+    # In the copy made again, a file the two did not hold alike is as the thread's base has it: nothing the
+    # copy no longer held comes back as the thread's work, and nothing it held is taken away as its work.
+    assert again.changed() == {"paths": lands}
+    assert (again.copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    assert [c["path"] for c in land(again, "saga:1")["changes"]] == lands
+    assert sorted(p.name for p in folder.iterdir()) == sorted(["Report.docx", "notes.txt", *(name for name in lands if name != "notes.txt")])
+
+
+def test_a_file_a_thread_put_back_is_not_taken_away_as_its_work_by_the_copy_made_again(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    place = tmp_path / "store"
+    # A snapshot took the file's removal; the thread has written it again since, and no snapshot took that.
+    (one.copy / "notes.txt").unlink()
+    LocalHistory.at(place, folder, thread="t1", user="u1").snapshot("before a step")
+    (one.copy / "notes.txt").write_text("written again by the thread\n")
+    (one.repo / "worktrees" / "t1" / "index").unlink()
+    was = as_it_is(one.copy)
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    opened = again.open()
+    [copy] = opened.get("set_aside_folders", [])
+    assert opened == {"copy": "moved", "set_aside_folders": [copy]} and as_it_is(place / "set-aside" / copy) == was
+    # The copy made again has the file as its base has it: its landing removes nothing from the folder.
+    assert (again.copy / "notes.txt").read_text() == "v1 notes\n" and again.changed() == {"paths": []}
+    assert land(again, "saga:1")["commit"] is None and (folder / "notes.txt").read_text() == "v1 notes\n"
+
+
 def test_a_file_the_folder_holds_is_the_threads_own_where_its_copy_is_made_again_from_its_branch(tmp_path, folder):
     one = a_copy_with_nothing_of_its_own(tmp_path, folder)
     # You saved a file the thread's branch does not hold yet, and the thread wrote the same.
@@ -1767,7 +1823,7 @@ def test_a_copy_that_cannot_be_read_whole_is_set_aside(tmp_path, folder, lost):
     assert files_of(kept) == files_of(folder)
 
 
-@pytest.mark.parametrize("lost, failed", [("refs/heads/threads/t1", "^git worktree failed: ")])
+@pytest.mark.parametrize("lost, failed", [("refs/heads/threads/t1", "^git worktree failed: "), ("refs/bases/t1", "^git rev-parse failed: ")])
 def test_a_copy_whose_branch_cannot_be_read_is_set_aside_before_its_open_fails(tmp_path, folder, lost, failed):
     one = a_copy_with_nothing_of_its_own(tmp_path, folder)
     was = as_it_is(one.copy)

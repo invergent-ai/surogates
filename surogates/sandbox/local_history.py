@@ -61,6 +61,7 @@ from surogates.sandbox.history import (
     _CHECKPOINT,
     _OPEN_TIMEOUT,
     _TIMEOUT,
+    _ZERO,
     FAILED,
     HISTORY_CAP,
     HISTORY_EXCLUDES,
@@ -395,16 +396,45 @@ class LocalHistory(History):
         The copy was whole once, and a thread may have worked in it.  Where
         it is its branch's files exactly, it is removed and the one made
         again is the same.  Else it is set aside whole, what it no longer
-        holds with the rest.
+        holds with the rest, and the copy made again holds as the thread's
+        work only what the copy and the branch both held.  Each file the two
+        did not hold alike is first put, in a commit on the branch, as the
+        thread's base has it.  So a file a snapshot took, and the copy no
+        longer held, does not come back as the thread's work; one a snapshot
+        took away, and the copy held again, is not taken away as its work;
+        and the thread's next landing writes neither into the folder.  The
+        commit comes before the rename: cut after it, the same copy is found
+        beside a branch that has those files so already.
         """
         held = self._held()
         try:
-            tip = self._files(self.repo, self.branch)
+            tip, base = self._files(self.repo, self.branch), self._files(self.repo, self.base)
         except HistoryError as doubt:
-            # No branch to make a copy from again: the open fails on it, with the copy kept.
-            logger.warning("A thread's copy whose branch could not be read is set aside as it is: %s", doubt)
+            # No branch or no base to make a copy from again: the open fails on it, with the copy kept.
+            logger.warning("A thread's copy whose branch or base could not be read is set aside as it is: %s", doubt)
             return self._out_of_the_way({self.copy: True})
-        self._out_of_the_way({self.copy: held != tip})
+        if held == tip:
+            return self._out_of_the_way({self.copy: False})
+        held = held or {}
+        entries = "".join(
+            "{} {}\t{}\0".format(*base.get(name, ("0", _ZERO)), name)
+            for name in sorted({*tip, *held}) if held.get(name) != tip.get(name) and tip.get(name) != base.get(name)
+        )
+        if entries:
+            index = self.repo / "again.index"
+            index.unlink(missing_ok=True)
+            env = {"GIT_DIR": str(self.repo), "GIT_INDEX_FILE": str(index)}
+            try:
+                self._git(["read-tree", self.branch], env=env, cwd=self.repo)
+                self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.repo, input=entries)
+                tree = self._git(["write-tree"], env=env, cwd=self.repo)
+            finally:
+                index.unlink(missing_ok=True)
+            self._main("update-ref", self.branch, self._main(
+                *_as(_CHECKPOINT), "commit-tree", tree, "-p", self._main("rev-parse", self.branch),
+                "-m", "What the copy no longer held as its branch did, as its base has it",
+            ))
+        self._out_of_the_way({self.copy: True})
 
     def _out_of_the_way(self, own: dict[Path, bool]) -> None:
         """Set aside whole each folder of *own* that is the thread's own, and remove the others; then the bound.
