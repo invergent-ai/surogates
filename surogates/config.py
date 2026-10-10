@@ -747,7 +747,7 @@ class HistorySettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_HISTORY_"}
 
     copies_path: str = ""  # where the copies are kept; empty: surogates-history in the temp folder
-    packs_bound: int = 4 * 2**30  # the largest history, its packs in the bucket, the api copies
+    packs_bound: int = 4 * 2**30  # the largest copy of one history: its packs, and the indexes the api makes of them
     copies_bound: int = 8 * 2**30  # the copies on the api's disk, every project's together
     copy_idle: int = 600  # seconds a copy stays unused before it is removed
 
