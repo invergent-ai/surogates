@@ -6,15 +6,19 @@ one request a run.  A folder's place in the app's data is laid out as a
 pod sees a project:
 
     <store>/history.git/       the folder's history: packs and packed-refs, each written whole
-    <store>/clones/<thread>/   a thread's own repository, fetched from it at depth 1
+    <store>/clones/<thread>/   a thread's own repository, which borrows the history's objects
     <store>/threads/<thread>/  the thread's copy, where its tools and commands work
     <store>/threads/<thread>.making   there while that copy is being made, and gone once its making has ended
     <store>/set-aside/         a copy or a repository that was made again, as it was, under a name no thread has
 
 and the folder itself, shared read-only, is the real files.  Git reads the
 history where it lies: it is on this computer's disk, and no thread's
-command can reach it.  A landing's applies are not git's here: the desktop's
-file helper writes the folder, and the record takes what it applied.
+command can reach it.  A thread's repository holds only what the history
+lacks: it reads the history's objects as its own, the folder's first commit
+is the history's first, pushed with the folder's first copy, and a push is
+followed by a repack that lets go of what the history now holds.  A
+landing's applies are not git's here: the desktop's file helper writes the
+folder, and the record takes what it applied.
 
 A place outlives the guest that wrote it, and nothing one boot's guest left
 there is trusted by the next.  Before its first git, each run puts right
@@ -42,6 +46,7 @@ what it is made again from.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import json
@@ -62,6 +67,7 @@ from typing import Any, ClassVar, NoReturn
 from surogates.sandbox.history import (
     _ATTRIBUTES,
     _CHECKPOINT,
+    _ID,
     _OPEN_TIMEOUT,
     _TIMEOUT,
     _ZERO,
@@ -120,10 +126,21 @@ _OVERRIDES = {
     "core.hooksPath": "/dev/null", "core.fsmonitor": "false", "commit.gpgSign": "false",
     "gc.auto": "0", "maintenance.auto": "false", "fetch.recurseSubmodules": "false", "submodule.recurse": "false",
     "safe.directory": "*", "core.checkStat": "minimal",
+    # The history's objects are read as packs alone: nothing beside them steers a walk of them.
+    "core.commitGraph": "false", "core.multiPackIndex": "false", "pack.useBitmaps": "false",
 }
-#: What git reads in a repository to find another, or a program, and this module never writes:
-#: none is left in a thread's repository or in the folder's history.
+#: What git reads in a repository to find another, or a program: none is left in a thread's
+#: repository or in the folder's history, but the one this module writes, a thread's
+#: repository's alternates.
 _REDIRECTS = ("commondir", "hooks", "modules", "objects/info/alternates", "objects/info/http-alternates")
+#: Where a thread's repository names the object store it borrows, and that store, the folder's
+#: history's, from the repository's own objects: the file's one line.
+_BORROWS = "objects/info/alternates"
+_ALTERNATES = "../../../history.git/objects\n"
+#: A file in a thread's repository: each of the history's packs it may read objects from, by its id.
+_BORROWED = "borrowed"
+#: What the history's packs folder holds: a push's packs and their indexes.
+_PACK = re.compile(r"pack-([0-9a-f]{40})\.(pack|idx)")
 #: A file in a thread's repository once its first open has ended: without it, the repository's making was cut short.
 _MADE = "made"
 #: Beside a thread's copy, under the copy's name and this, from before the copy's first file is
@@ -195,6 +212,9 @@ class LocalHistory(History):
     store: Path | None = None  # the folder's history in the app's data
     #: Holds one entry once this history has put its place right (:meth:`_pin`): it lasts one request.
     pinned: list[bool] = field(default_factory=list, init=False, repr=False, compare=False)
+    #: Holds one entry where this request found the thread's repository not borrowing the folder's
+    #: history as it must (:meth:`_borrows`): no git runs in it, and the thread's next open makes it again.
+    astray: list[bool] = field(default_factory=list, init=False, repr=False, compare=False)
 
     excludes: ClassVar[list[str]] = LOCAL_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = LOCAL_PLATFORM
@@ -235,6 +255,11 @@ class LocalHistory(History):
         return f"refs/moving/{self.thread}"
 
     @property
+    def pushing(self) -> str:
+        """The thread's branch as this repository last pushed it, named from before the push: a push cut before the repository noted it is its own."""
+        return f"refs/pushing/{self.thread}"
+
+    @property
     def aside(self) -> str:
         """Under it, what the copy held of its own when a record or a move made it other files: ``<nth>-<what it was made>``."""
         return f"refs/set-aside/{self.thread}"
@@ -266,14 +291,55 @@ class LocalHistory(History):
             )
         return refs
 
+    def _init(self) -> None:
+        """The cloud's, the repository borrowing the folder's history from before its first git: it holds no second copy of what the history holds."""
+        if (self.repo / "HEAD").exists():
+            return
+        self.repo.mkdir(parents=True, exist_ok=True)
+        with self._folder("objects", make=True):
+            # Where its one alternate leads, there before git first looks: the history's first push makes the rest.
+            pass
+        self._borrow()
+        self.astray.clear()
+        super()._init()
+
+    def _push(self, updates: dict[str, str | None], *, expect: dict[str, str | None]) -> None:
+        """The cloud's push, and then the thread's repository lets go of what the history now holds.
+
+        The branch it pushes is named first (:attr:`pushing`): the history's
+        objects are the repository's to read, so only that tells a push cut
+        before the repository noted it from a branch it never pushed
+        (:meth:`_finish_record`).  The pack the push wrote is noted before
+        anything is read from it (:meth:`_borrow`), and the repack lets go of
+        every object the history holds.
+        """
+        if (branch := updates.get(self.branch)) is not None:
+            self._main("update-ref", self.pushing, branch)
+        super()._push(updates, expect=expect)
+        self._borrow()
+        self._pack()
+
+    def _pack(self) -> None:
+        """Pack the thread's repository again, its own objects alone: what the history holds stays the history's.
+
+        Upkeep: a repository git cannot pack again still serves its thread's
+        turn, and holds all it held.
+        """
+        try:
+            self._git(["repack", "-a", "-d", "-l", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
+        except HistoryError as why:
+            logger.warning("A thread's repository could not be packed again, and is left as it is: %s", why)
+
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         self._pin()
-        if env.get("GIT_DIR") == str(self._admin) and not (
+        within = env.get("GIT_DIR")
+        if (self.astray and within in (str(self.repo), str(self._admin))) or (within == str(self._admin) and not (
             (self._admin / "index").is_file() and self.copy.is_dir() and not os.path.lexists(self.making)
-        ):
-            # A copy whose making was cut short holds some of its files: committed, the rest would
-            # land as deletions.  Git writes a copy's index when the last of its files is written,
-            # and the mark of its making goes after that.
+        )):
+            # A repository that does not borrow the history as it must may name what neither it nor
+            # the history holds: no git reads it.  A copy whose making was cut short holds some of
+            # its files: committed, the rest would land as deletions.  Git writes a copy's index
+            # when the last of its files is written, and the mark of its making goes after that.
             raise HistoryError(
                 "refused the request: this thread has no whole copy, and its next open makes one", code=NO_WHOLE_COPY,
             )
@@ -297,11 +363,17 @@ class LocalHistory(History):
 
         With none yet, the cloud's open: ``main`` is the folder as it is, by
         you, the branch starts there, and the copy is its worktree, with no
-        ``.git`` in it.  A folder history cannot record gets none
+        ``.git`` in it.  The repository borrows the history's objects from
+        before its first git (:meth:`_init`).  On a folder with no history,
+        ``main`` is then pushed with its index: the folder's first commit is
+        its history's first, which every later thread's copy is made from
+        and borrows, and a first open has ended only once it is.  A folder
+        history cannot record gets none
         (``{"history": "off", "reason": ...}``, see :meth:`_off`), and nothing
         is made.  A repository whose first open did not end, cut short or
-        set aside for a redirect in it, is made again as the first, and
-        whatever is at its copy's path with it.  A copy whose folder was
+        set aside for a redirect in it, or one that does not borrow the
+        history as it must (:meth:`_borrows`), is made again as the first,
+        and whatever is at its copy's path with it.  A copy whose folder was
         removed, whose own making was cut short, or whose index is gone, is
         made again from its branch.  Then, where it *moves*, as at a turn's
         start, a copy with nothing unlanded moves to ``main``'s tip, your
@@ -342,18 +414,26 @@ class LocalHistory(History):
             if os.path.lexists(self.making) and os.path.lexists(self.copy):
                 # A making that did not end: no thread worked in what it left, whatever that holds.
                 _let_go(self.copy)
-            if not ((self.repo / "HEAD").is_file() and (self.repo / _MADE).is_file()):
-                # No repository, or one whose first open did not end: neither it nor whatever
-                # is at its copy's path is whole.
+            if self.astray or not ((self.repo / "HEAD").is_file() and (self.repo / _MADE).is_file()):
+                # No repository, one whose first open did not end, or one that may name what neither
+                # it nor the history holds: neither it nor whatever is at its copy's path is whole.
                 self._make_way()
                 if (reason := self._off()) is not None:
                     return {"history": "off", "reason": reason, **self._asides_whole()}
                 self.copy.parent.mkdir(parents=True, exist_ok=True)
                 self.making.write_bytes(b"")
                 self._open()
-                if (found := self._landing(self._take())) is not None:
+                refs = self._take()
+                if MAIN not in refs:
+                    main = self._main("rev-parse", MAIN)
+                    self._push({MAIN: main}, expect={MAIN: None})
+                    with contextlib.suppress(HistoryError, OSError):
+                        # A cache: without it the next thread's first copy reads every file of the folder.
+                        self._keep_index(main)
+                elif (found := self._landing(refs)) is not None:
                     # Made from the history as it is: no record of the thread's is owed to this copy.
                     self._main("update-ref", self.landed, found[0])
+                # Last: until the folder's first commit is the history's, the first open has not ended.
                 (self.repo / _MADE).write_bytes(b"")
                 self.making.unlink()
                 return {"copy": "made", **self._asides_whole()}
@@ -373,11 +453,7 @@ class LocalHistory(History):
                 (self.copy / ".git").unlink()
                 self.making.unlink()
             if len(list((self.repo / "objects" / "pack").glob("*.pack"))) > _PACKS:
-                try:
-                    self._git(["repack", "-a", "-d", "-q"], env={"GIT_DIR": str(self.repo)}, cwd=self.repo)
-                except HistoryError as why:
-                    # Upkeep: a repository git cannot pack again still serves its thread's turn.
-                    logger.warning("A thread's repository could not be packed again, and is left as it is: %s", why)
+                self._pack()
             if moves:
                 # Its snapshot before the turn finishes first what a cut request left.
                 moved = self._to_main()
@@ -830,14 +906,16 @@ class LocalHistory(History):
         from noting is noted here too.  The thread's next push expects the
         branch where this repository last left it, and a copy here outlives
         the turn that pushed: left unnoted, every later landing of the
-        thread's would be refused as one whose branch moved.  A branch this
-        repository did not make is still that.
+        thread's would be refused as one whose branch moved.  It named the
+        branch it was pushing first (:attr:`pushing`).  A branch this
+        repository did not push is still that, though it reads every commit
+        the history holds.
         """
         refs = self._take()
         found = self._landing(refs)
         if found is None:
             pushed = refs.get(self.branch)
-            if pushed is not None and pushed != self._ref(self.synced) and self._has(pushed):
+            if pushed is not None and pushed != self._ref(self.synced) and pushed == self._ref(self.pushing):
                 self._main("update-ref", self.synced, pushed)
             return
         if self._ref(self.landed) == found[0]:
@@ -1084,19 +1162,13 @@ class LocalHistory(History):
         nothing history leaves out that its turns did not write.
         """
         nothing: dict[str, Any] = {"names": [], "files": {}}
+        if (data := _read_as_data(self.repo / _SEEN, _SEEN_BYTES)) is None:
+            return nothing
         try:
-            fd = os.open(self.repo / _SEEN, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        except OSError:
+            # One longer than a request reads is cut short, and no note.
+            seen = json.loads(data)
+        except (ValueError, RecursionError):
             return nothing
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            return nothing
-        with open(fd, "rb") as file:
-            try:
-                # One longer than a request reads is cut short, and no note.
-                seen = json.loads(file.read(_SEEN_BYTES))
-            except (ValueError, RecursionError):
-                return nothing
         names, files = (seen.get("names"), seen.get("files")) if isinstance(seen, dict) else (None, None)
         if not isinstance(names, list) or not isinstance(files, dict) or not all(isinstance(token, str) for token in files.values()):
             return nothing
@@ -1294,12 +1366,19 @@ class LocalHistory(History):
         - anything but files and folders in the thread's repository, a link
           among its loose objects as any other: the repository is set aside
           as it is, with no git run in it, and its next open makes it again;
+        - in the history's objects, anything but its packs and their
+          indexes, which is all a push writes there: removed;
         - in both, a ``commondir``, ``hooks``, ``modules`` or alternates,
-          which name another repository or a program: removed; and each
-          config is the one this module writes;
+          which name another repository or a program: removed, but for the
+          thread's repository's own alternates where they are the one line
+          that borrows the history's objects; and each config is the one
+          this module writes;
         - in the thread's repository, the attributes convert nothing, no
           worktree is there but the copy's, and the copy's own git folder
-          names its repository, its copy and its branch.
+          names its repository, its copy and its branch;
+        - a thread's repository that does not borrow the history as it must
+          (:meth:`_borrows`) is read by no git, and its next open makes it
+          again; one that does notes the history's packs as they are now.
 
         Each file is replaced, never written through.
         """
@@ -1320,11 +1399,12 @@ class LocalHistory(History):
         if self.repo.is_dir() and _linked(self.repo):
             self._set_aside_whole(self.repo)
             self._asides_whole()
+        _packs_alone(self.store / "objects")
         for repo, config in ((self.repo, _CONFIG), (self.store, _STORE_CONFIG)):
             if not repo.is_dir():
                 continue
             for name in _REDIRECTS:
-                if os.path.lexists(repo / name):
+                if os.path.lexists(repo / name) and not (repo == self.repo and name == _BORROWS and self._lends()):
                     _removed(repo / name)
             if (repo / "HEAD").exists() or os.path.lexists(repo / "config"):
                 _pinned(repo / "config", config)
@@ -1346,7 +1426,63 @@ class LocalHistory(History):
                 _pinned(self._admin / "HEAD", f"ref: {self.branch}\n")
                 if os.path.lexists(self._admin / "config.worktree"):
                     _removed(self._admin / "config.worktree")
+            if self._borrows():
+                self._borrow()
+            else:
+                self.astray.append(True)
         self.pinned.append(True)
+
+    def _lends(self) -> bool:
+        """Whether the thread's repository's alternates are the one line that borrows the folder's history's objects: a file of its own, read as data."""
+        return _read_as_data(self.repo / _BORROWS, len(_ALTERNATES) + 1) == _ALTERNATES.encode()
+
+    def _lent(self) -> set[str]:
+        """The folder's history's packs a thread's repository may read objects from, each by its id: those whose pack and index are both there."""
+        try:
+            with os.scandir(self.store / "objects" / "pack") as entries:
+                held = {named.groups() for entry in entries if (named := _PACK.fullmatch(entry.name)) and entry.is_file(follow_symlinks=False)}
+        except (FileNotFoundError, NotADirectoryError):
+            return set()
+        return {pack for pack, kind in held if kind == "pack" and (pack, "idx") in held}
+
+    def _borrows(self) -> bool:
+        """Whether the thread's repository reads the objects of the folder's history, and of no other store, as it did.
+
+        Its alternates are the one line, and each of the history's packs its
+        note names (:meth:`_borrow`) is in the history still.  Otherwise it
+        may name what neither it nor the history holds: a repack lets go of
+        every object its alternates find elsewhere, and a history taken away
+        by hand and made again by another thread's first copy holds none of
+        the packs it read from, whatever its name.  Read as data, following
+        no link.
+        """
+        noted = _read_as_data(self.repo / _BORROWED, _SEEN_BYTES)
+        if not self._lends() or noted is None:
+            return False
+        packs = noted.decode(errors="replace").split()
+        return all(_ID.fullmatch(pack) for pack in packs) and set(packs) <= self._lent()
+
+    def _borrow(self) -> None:
+        """Have the thread's repository read the folder's history's objects where they lie, and note the history's packs it may read them from.
+
+        Its alternates are one line, written whole: git reads the objects in
+        the history's packs as its own, so the repository holds no second
+        copy of what the history holds.  An object there is not written
+        here, and one written here before the history held it goes at the
+        next repack (:meth:`_pack`).  Each pack is noted before anything is
+        read from it, so that a history that no longer holds one is known
+        (:meth:`_borrows`).  The repository reads the history's commits as
+        the history does, cut where the history's are.  No git runs here:
+        :meth:`_pin` calls it before it has ended.
+        """
+        (self.repo / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        _pinned(self.repo / _BORROWED, "".join(f"{pack}\n" for pack in sorted(self._lent())))
+        _pinned(self.repo / _BORROWS, _ALTERNATES)
+        cut = "".join(f"{commit}\n" for commit in self._durable_shallow())
+        if cut:
+            _pinned(self.repo / "shallow", cut)
+        elif os.path.lexists(self.repo / "shallow"):
+            _removed(self.repo / "shallow")
 
 
 def _refuse(why: str) -> NoReturn:
@@ -1406,6 +1542,37 @@ def _linked(top: Path) -> bool:
                 elif not entry.is_file(follow_symlinks=False):
                     return True
     return False
+
+
+def _packs_alone(objects: Path) -> None:
+    """Make the folder's history's *objects* what its pushes write there: ``pack``, holding packs and their indexes alone.
+
+    What a thread's repository borrows is read there, and git reads all of
+    it.  Anything else is an earlier guest's: a loose object, which a
+    thread's git would read as the object it is named for; ``info``, with
+    its alternates and its commit graph; a multi-pack index, a bitmap, a
+    reverse index, a promisor or a keep mark.  A link among them is no
+    file: :func:`_linked` has refused the history whole for it first.
+    """
+    if not objects.is_dir():
+        return
+    for entry in list(objects.iterdir()):
+        if entry.name != "pack":
+            _removed(entry)
+    if (objects / "pack").is_dir():
+        for entry in list((objects / "pack").iterdir()):
+            if _PACK.fullmatch(entry.name) is None or not entry.is_file():
+                _removed(entry)
+
+
+def _read_as_data(path: Path, most: int) -> bytes | None:
+    """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with open(fd, "rb") as file:
+            return file.read(most) if stat.S_ISREG(os.fstat(fd).st_mode) else None
+    except OSError:
+        return None
 
 
 def _pinned(path: Path, text: str) -> None:
