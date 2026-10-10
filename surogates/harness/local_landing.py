@@ -849,7 +849,11 @@ async def _land(
         landed = [c for c in changes if c["path"] not in held]
         record = step(
             "record", turn=turned["commit"], applied=landed, author=thread, main=picked["main"], pickup=picked["commit"],
-            trailers=[*audit, ["Surogate-Kind", "landing"], *(["Surogate-Not-Merged", o["path"]] for o in overlapped)],
+            # What it left out of the thread's: never a file nothing the thread did named, which is none of its.
+            trailers=[
+                *audit, ["Surogate-Kind", "landing"],
+                *(["Surogate-Not-Merged", o["path"]] for o in overlapped if o["reason"] not in NOT_ITS_OWN),
+            ],
             # What no landing writes stays in the copy as the thread left it: the commit's own changes, and none else.
             left=sorted(o["path"] for o in overlapped if o["reason"] in NEVER_LANDS),
         )

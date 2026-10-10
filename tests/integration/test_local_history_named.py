@@ -78,6 +78,9 @@ async def test_a_copy_short_of_files_its_thread_never_touched_deletes_none_of_th
     assert end.data["saved"] is True
     [row] = await records(api, thread)
     assert [(f["path"], f["merged"]) for f in row.files] == [("Budget.xlsx", True)]
+    # Nor does the folder's history name them as the thread's, left out of its landing.
+    [record] = [s for s in row.steps if s["tool_name"] == "history.record"]
+    assert [value for key, value in record["arguments"]["trailers"] if key == "Surogate-Not-Merged"] == []
     assert kept(here) == {} and here.app.places.holder is None
 
 
