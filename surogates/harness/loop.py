@@ -31,7 +31,7 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
-from surogates.devices.history import ComputerRefused, NowhereToWork, opens_its_copy
+from surogates.devices.history import ComputerRefused, NowhereToWork, opens_its_copy, thread_copy
 from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.agent_resolver import (
@@ -78,7 +78,7 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
-from surogates.harness.tool_exec import _open_local_copy, execute_single_tool, execute_tool_calls
+from surogates.harness.tool_exec import _open_local_copy, _turn_now, execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.pool import sandbox_session_key
@@ -1141,12 +1141,15 @@ class AgentHarness(
         session: Session,
         saga: Any,
         cost_tracker: SessionCostTracker | None = None,
+        *,
+        lease: SessionLease | None = None,
     ) -> None:
         """Tear down sandbox + sagas and emit SESSION_PAUSE, then clear.
 
         Shared by the iteration-top interrupt check and the pre-emission
         staleness guard so both paths perform the same cleanup before
-        returning from the loop.
+        returning from the loop.  The sagas are put back as the worker
+        holding *lease*.
         """
         reason_msg = self._interrupt_message or "interrupted"
         # A project thread's turn that is stopped is over from here on, whatever becomes of this worker.
@@ -1155,7 +1158,7 @@ class AgentHarness(
         named = is_project_thread(session.config) and session.config.get("turn_after") is not None
         stop_written = named and await self._write_that_the_turn_was_stopped(session, reason_msg)
         if saga is not None and saga.active_sagas:
-            await self._compensate_sagas(saga, session, "interrupt")
+            await self._compensate_sagas(saga, session, "interrupt", lease=lease)
         # A project's stopped turn spent what it spent: settle its holds now,
         # or a resolved thread keeps them reserved.  Only a project's session
         # holds its next turn again at its wake; any other session's next
@@ -2678,7 +2681,7 @@ class AgentHarness(
 
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga, cost_tracker)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                 return
 
             # --- Mid-turn steering ---
@@ -3074,7 +3077,7 @@ class AgentHarness(
             # user turn at the next iteration boundary by the steer
             # injector, so the buffered response is delivered, not discarded.
             if self._check_interrupt():
-                await self._abort_iteration_with_pause(session, saga, cost_tracker)
+                await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                 return
 
             response_data["turn_id"] = turn_id
@@ -4089,19 +4092,27 @@ class AgentHarness(
                 saga_complete_event(stale.saga_id, status=status.value, steps_executed=len(stale.steps)),
             )
 
-    async def _compensate_sagas(self, saga: Any, session: Any, reason: str) -> None:
+    async def _compensate_sagas(self, saga: Any, session: Any, reason: str, *, lease: SessionLease | None = None) -> None:
         """Compensate all active sagas on interrupt/crash/failure.
 
         Runs compensation for committed steps in reverse order and emits
         SAGA_COMPENSATE events.  Checkpoint restores go through the
         sandbox pool (same path as ``_checkpoint`` take/restore).
+
+        A project's thread on its user's computer puts its copy there back
+        instead, through the computer, as the worker holding *lease*: every
+        step that began from a snapshot, newest first, one the stop cut
+        short or another worker resumed among them, so the copy is where
+        its turn started.  Each step it does not take back is named in
+        words.  Nothing of it reaches the folder.
         """
         from functools import partial
 
         from surogates.governance.events import saga_compensate_event, saga_complete_event
-        from surogates.governance.saga.compensator import compensate_step
-        from surogates.governance.saga.state_machine import SagaState
+        from surogates.governance.saga.compensator import compensate_on_computer, compensate_step, not_taken_back
+        from surogates.governance.saga.state_machine import SagaState, StepState
 
+        on_computer = opens_its_copy(session)
         for active in list(saga.active_sagas):
             # Guard against double-compensation: if a prior crash happened
             # mid-compensation, reconstruction leaves the saga in
@@ -4116,14 +4127,21 @@ class AgentHarness(
                 continue
 
             try:
+                if on_computer:
+                    # A step the stop cut short, or another worker resumed, never
+                    # said it ended: it may have changed the copy all the same.
+                    for step in active.steps:
+                        if step.state is StepState.EXECUTING and step.checkpoint_hash is not None:
+                            step.transition(StepState.COMMITTED)
                 # Capture count before compensate() transitions steps
                 # away from COMMITTED (after which committed_steps is empty).
                 committed_count = len(active.committed_steps)
                 try:
                     # Ensure the sandbox is still available for compensation
                     # (it may have been destroyed on a prior crash).  Only a
-                    # step that can be undone needs it.
-                    if self._sandbox_pool is not None and any(
+                    # step that can be undone needs it, and a thread on its
+                    # user's computer none: its snapshots are in its copy there.
+                    if not on_computer and self._sandbox_pool is not None and any(
                         s.is_compensable for s in active.committed_steps
                     ):
                         from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -4144,23 +4162,33 @@ class AgentHarness(
                     active.error = "Sandbox unavailable for compensation"
                     failed = active.committed_steps
                 else:
-                    compensator = partial(
-                        compensate_step,
-                        sandbox_pool=self._sandbox_pool,
-                        session_id=sandbox_session_key(session),
-                    )
+                    if on_computer:
+                        compensator = partial(
+                            compensate_on_computer,
+                            copy=thread_copy(
+                                session, session_factory=self._session_factory, redis=self._redis,
+                                lease_token=str(lease.lease_token) if lease is not None else None,
+                            ),
+                            # The turn as it was named at its start: the stop's own end came after.
+                            turn=await _turn_now(self._store, session),
+                        )
+                    else:
+                        compensator = partial(
+                            compensate_step,
+                            sandbox_pool=self._sandbox_pool,
+                            session_id=sandbox_session_key(session),
+                        )
                     failed = await saga.compensate(active.saga_id, compensator)
                 failed_ids = [s.step_id for s in failed]
-                await self._store.emit_event(
-                    session.id,
-                    EventType.SAGA_COMPENSATE,
-                    saga_compensate_event(
-                        active.saga_id,
-                        steps_rolled_back=committed_count - len(failed),
-                        reason=reason,
-                        failed_steps=failed_ids if failed_ids else None,
-                    ),
+                compensated = saga_compensate_event(
+                    active.saga_id,
+                    steps_rolled_back=committed_count - len(failed),
+                    reason=reason,
+                    failed_steps=failed_ids if failed_ids else None,
                 )
+                if on_computer and failed:
+                    compensated["not_taken_back"] = {s.step_id: not_taken_back(s) for s in failed}
+                await self._store.emit_event(session.id, EventType.SAGA_COMPENSATE, compensated)
                 # The saga is over: a rebuilt one must not take later steps.
                 await self._store.emit_event(
                     session.id,

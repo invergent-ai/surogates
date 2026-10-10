@@ -11,6 +11,9 @@ type:
   per-tool-call rollback).
 * **MCP tools** -- call the undo tool declared by the MCP server
   (e.g. ``delete_jira_ticket`` to undo ``create_jira_ticket``).
+* **A project's thread on its user's computer** -- put its copy there back
+  to the snapshot the step began from, through the computer's own
+  ``checkpoint`` kind.
 """
 
 from __future__ import annotations
@@ -136,6 +139,48 @@ async def compensate_history(
     return step_result(await sandbox_pool.execute(
         session_id, "_history", json.dumps({**step.arguments, "made": made, "action": "unapply", "ran": ran}),
     ))
+
+
+async def compensate_on_computer(step: SagaStep, *, copy: Any, turn: int) -> dict:
+    """Compensate a step of a project's thread on its user's computer: its copy put back to the snapshot taken before it.
+
+    *copy* is the thread's (``surogates.devices.history.ThreadCopy``), and
+    *turn* the name of the turn the step was taken in.  The folder itself
+    changes only at a landing, so nothing here reaches it.  A snapshot taken
+    before a landing of the thread's recorded is on a base the copy has left:
+    that step's work landed, and is not taken back.
+    """
+    # Imported here: the devices' modules reach this one through the governance package they import.
+    from surogates.devices.history import ComputerRefused, code_of
+
+    try:
+        await copy.restore(turn, step.checkpoint_hash)
+    except ComputerRefused as refused:
+        # The folder's history's refusal of a snapshot that is not built on the copy's base as it stands.
+        if refused.code == "not_on_base":
+            raise SagaStateError(
+                f"Step {step.step_id} ({step.tool_name}) cannot be taken back: its work has landed in the folder "
+                "since its snapshot was taken, and the thread's copy stays as the landing left it"
+            ) from None
+        # The computer's refusal by its code: its words are its own.
+        raise SagaStateError(
+            f"Step {step.step_id} ({step.tool_name}) was not taken back: the computer refused to put the thread's "
+            f"copy back ({code_of(refused)})"
+        ) from None
+    logger.info(
+        "Compensated step %s (%s): the thread's copy is back at %s", step.step_id, step.tool_name, step.checkpoint_hash[:8],
+    )
+    return {"restored": step.checkpoint_hash}
+
+
+def not_taken_back(step: SagaStep) -> str:
+    """What is said of a step of a thread on its user's computer that a stop did not take back: why, in words."""
+    if step.checkpoint_hash is None:
+        return (
+            f"Step {step.step_id} ({step.tool_name}) cannot be taken back: no snapshot of the thread's copy was taken "
+            "before it"
+        )
+    return step.error or f"Step {step.step_id} ({step.tool_name}) was not taken back"
 
 
 async def compensate_step(
