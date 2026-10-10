@@ -24,11 +24,14 @@ import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
 // How long a file helper has to say it is ready.
 export const READY_MS = 15_000;
-// A landing's helper first puts back what a step cut short left (files/land.ts): where the app's
-// data is on another filesystem than the folder, by a copy of a file of up to 1 GiB. A helper
-// stopped before that ends is stopped again at the next start, and the file is never put back.
-// So it has as long as that copy takes at under 2 MiB a second, a slow stick's or a share's rate.
-export const LANDING_READY_MS = 600_000;
+// A landing's helper first puts back what a step cut short left (files/land.ts). Where the app's
+// data is on another filesystem than the folder that is a copy of the file the step replaced, as
+// large as all a folder's landings may keep, and a copy that is stopped starts again from nothing:
+// a helper given less time than the copy takes is stopped at every start, and the user's file is
+// never back at its name. So it has that copy's time on a slow disk beside a helper's own.
+const KEPT_BYTES = 4 * 1024 * 1024 * 1024; // files/land.ts, MAX_KEPT_BYTES
+const SLOW_DISK_BYTES_A_SECOND = 2 * 1024 * 1024; // a slow stick, or a share over a poor link
+export const LANDING_READY_MS = READY_MS + (KEPT_BYTES / SLOW_DISK_BYTES_A_SECOND) * 1000;
 
 // A thread's id, as the app names its copy by.
 const THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

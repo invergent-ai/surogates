@@ -393,12 +393,13 @@ describe("what a file helper is started with", () => {
     expect(started({ landing: { copy, kept } })).toMatchObject({ commands: false, only: "land", readyMs: LANDING_READY_MS });
   });
 
-  it("has as long to be ready, for a landing, as a put-back of the largest file a landing writes takes on a slow disk", () => {
+  it("has as long to be ready, for a landing, as a put-back of the largest file a folder's landings keep takes on a slow disk", () => {
     // What a chat's helper has is what it had: it does nothing before it is ready.
     expect(READY_MS).toBe(15_000);
-    // A landing's puts back what a step cut short left first: a copy of up to 1 GiB where the app's data is on
-    // another filesystem than the folder. At 2 MiB a second, a slow stick or a share, that is 512 s.
-    expect(LANDING_READY_MS / 1000).toBeGreaterThanOrEqual((1024 * 1024 * 1024) / (2 * 1024 * 1024));
+    // A landing's puts back what a step cut short left first: a copy of the file the step replaced, of up to the
+    // 4 GiB a folder's landings keep, where the app's data is on another filesystem than the folder. Measured on a
+    // server's own disk, at some 230 MiB a second, that took 17.9 s. At 2 MiB a second it takes 2,048 s.
+    expect(LANDING_READY_MS).toBe(15_000 + 2_048_000);
   });
 });
 

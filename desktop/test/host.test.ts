@@ -825,19 +825,32 @@ function startedWith(harness: Harness): { told: Record<string, string>; cwd: str
 }
 
 // Loaded into a host before its own code, to do to it what this computer could: hold back what its file helper says
-// (a helper slow to be ready), start that helper with another environment (a host that got it wrong), or fail the
-// making of srt's folder in words of the system's own.
+// (a helper slow to be ready), start that helper with another environment (a host that got it wrong), fail the
+// making of srt's folder in words of the system's own, or put a link where its folder is just as its sandbox is made
+// (and the folder back once the sandbox is up), as whoever can write the folder's parent might.
 const UPSET = `data:text/javascript,${encodeURIComponent(`
   import cp from "node:child_process";
   import fs from "node:fs";
   import { syncBuiltinESMExports } from "node:module";
   import { PassThrough } from "node:stream";
-  const { HELPER_LATE_MS: late, HELPER_ENV: env, SRT_FAILS: fails } = process.env;
+  const { HELPER_LATE_MS: late, HELPER_ENV: env, SRT_FAILS: fails, FOLDER_SWAPPED: swapped, FOLDER_PUT_BACK: back } = process.env;
   const [spawn, mkdir] = [cp.spawn, fs.mkdirSync];
   cp.spawn = (...args) => {
     const helper = Array.isArray(args[1]) && String(args[1].at(-1)).includes("/files/helper.js");
     if (helper && env) Object.assign(args[2].env, JSON.parse(env));
+    const [folder, to] = helper && swapped ? JSON.parse(swapped) : [];
+    if (folder) {
+      fs.renameSync(folder, folder + ".true");
+      fs.symlinkSync(to, folder);
+    }
     const child = spawn(...args);
+    // Before the host reads the helper's first word: the sandbox is made by then.
+    if (folder && back) {
+      child.stdout.once("data", () => {
+        fs.unlinkSync(folder);
+        fs.renameSync(folder + ".true", folder);
+      });
+    }
     if (helper && late) {
       const said = child.stdout;
       child.stdout = new PassThrough();
@@ -850,9 +863,10 @@ const UPSET = `data:text/javascript,${encodeURIComponent(`
     return mkdir(...args);
   };
   syncBuiltinESMExports();
-`)}`;
-// A host so upset, and no other: its own node is the test's, started through a line that loads the above first.
-function upset(how: { HELPER_LATE_MS?: string; HELPER_ENV?: string; SRT_FAILS?: string }): Harness {
+`).replaceAll("'", "%27")}`;
+// A host so upset, and no other: its own node is the test's, started through a line of sh that loads the above first
+// (so the above is written with no apostrophe left in it, which would end the line's word).
+function upset(how: { HELPER_LATE_MS?: string; HELPER_ENV?: string; SRT_FAILS?: string; FOLDER_SWAPPED?: string; FOLDER_PUT_BACK?: string }): Harness {
   const node = join(base, "upset-node");
   // Written once: a second writing would be of a program another host is just being started from.
   if (!existsSync(node)) writeFileSync(node, `#!/bin/sh\nexec '${process.execPath}' --import '${UPSET}' "$@"\n`, { mode: 0o755 });
@@ -1017,6 +1031,33 @@ describe("a tool host on a thread's copy", { timeout: 60_000 }, () => {
     }
   });
 
+  it("works in the copy it checked or not at all: a link put at the copy's path just as its sandbox is made, left there or taken away once the sandbox is up, starts no helper", async () => {
+    // What whoever can write the folder's place might time: after the host's look at the copy, before its sandbox binds it.
+    for (const [what, target] of [
+      ["the folder itself", () => reports], ["another thread's copy", () => other], ["the folder's place", () => place], ["the helper's own working folder", () => join(data, "tmp", THREAD)],
+    ] as const) {
+      for (const back of [false, true]) {
+        rmSync(base, { recursive: true, force: true });
+        mkdirSync(base);
+        lay();
+        mkdirSync(join(data, "tmp", THREAD), { recursive: true });
+        // The user's own, the other copy, the folder's history and the rest of the app's data; and the copy's files, wherever the copy lies.
+        const outside = () => [home, other, join(place, "history.git"), join(place, "clones"), join(data, "devices")].map((dir) => seen(dir));
+        const inCopy = (at: string) => Object.entries(seen(at)).filter(([path]) => path !== at).map(([path, is]) => [path.slice(at.length), is]);
+        const before = [outside(), inCopy(copy)];
+        const harness = upset({ FOLDER_SWAPPED: JSON.stringify([copy, target()]), ...(back ? { FOLDER_PUT_BACK: "1" } : {}) });
+        harness.send({ ...start, folder: copy, at: reports, expect: bound(copy), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", THREAD) });
+        const said = await failed(harness);
+        // The sandbox is not made over a link: its helper never runs, so nothing is asked of it. Said by the folder's path.
+        expect(said, what).toEqual({ type: "failed", message: expect.stringMatching(/^the file helper exited: bwrap: Can't bind mount /) });
+        expect(JSON.stringify(said), what).not.toContain(copy);
+        expect(await harness.exited, what).toBe(1);
+        // Nothing on this computer was written: not the folder, the other copy, the place, nor the copy that was moved aside.
+        expect([outside(), inCopy(existsSync(`${copy}.true`) ? `${copy}.true` : copy)], what).toEqual(before);
+      }
+    }
+  });
+
   it("says nothing by the copy's own path: what its host words itself, a failed start, a busy copy, the hook guard's refusal and its notice, names the folder", async () => {
     const said: unknown[] = [];
     const note = async (harness: Harness) => {
@@ -1145,6 +1186,28 @@ describe("a tool host for a landing", { timeout: 60_000 }, () => {
     expect([readFileSync(join(reports, "a.txt"), "utf8"), readdirSync(kept)]).toEqual(["the user's own\n", []]);
     harness.send({ type: "stop" });
     expect(await harness.exited).toBe(0);
+  });
+
+  it("never runs a program from the thread's copy, or from what it keeps, outside its sandbox: a command wrote the one, and its helper writes the other", async () => {
+    const proof = join(base, "ran-outside");
+    // srt looks up which and rg through the host's own PATH, out here: neither the copy nor the kept folder may be on it.
+    for (const dir of [join(copy, "bin"), join(kept, "bin")]) {
+      mkdirSync(dir, { recursive: true });
+      for (const name of ["which", "rg"]) writeFileSync(join(dir, name), `#!/bin/sh\necho "$0" >> '${proof}'\nexec /usr/bin/${name} "$@"\n`, { mode: 0o755 });
+    }
+    const harness = host(
+      { folder: reports, landing: { copy, kept }, env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "landing") }, undefined,
+      { ...process.env, PATH: `${copy}/bin:${kept}/bin:${process.env.PATH ?? ""}` },
+    );
+    await ready(harness);
+    expect(await land(harness, "1", { action: "revisions", paths: ["a.txt"] })).toMatchObject({ ok: { revisions: [["a.txt", expect.stringMatching(/^[0-9]+:/)]] } });
+    expect(existsSync(proof)).toBe(false);
+    // The same line run by a chat's host, for which they are folders like any other, does run them: the test's own control.
+    const chat = host({ folder: join(home, "Reports", "sub"), env: { ...start.env, HOME: home }, tmp: join(data, "tmp", "chat") }, undefined, {
+      ...process.env, PATH: `${copy}/bin:${process.env.PATH ?? ""}`,
+    });
+    await failed(chat);
+    expect(readFileSync(proof, "utf8")).toContain(`${copy}/bin/which`);
   });
 
   it("takes the land kind and no other, and guards no command: its folder is the user's own, and no record of it is the landing's to keep", async () => {
