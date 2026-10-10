@@ -234,7 +234,10 @@ describe("the browser's prompts", () => {
     const content = approval({ kind: "browser", chat: CHAT, action: "port", detail: "3000" });
     expect(content.title).toBe("Let acme.surogate.ai's browser open port 3000 of this chat's servers?");
     expect(content.lead).toBe("acme.surogate.ai wants to open a server it started for this chat, in the chat's sandbox, in its browser on this computer.");
-    expect(content.details).toEqual([{ label: "Address", value: "http://localhost:3000/", code: true, keep: "" }]);
+    // Which chat's servers: the chat is named by its folder, as its other prompts name it.
+    expect(content.details).toEqual([
+      { label: "Address", value: "http://localhost:3000/", code: true, keep: "" }, { label: "Folder", value: CHAT.folder, code: true, keep: "" },
+    ]);
     expect(content.notes).toEqual([
       "Its browser is shared by all of acme.surogate.ai's chats: while this is allowed, a page open in any of them can reach this port too.",
       "A page of another site cannot fetch from it, post to it, frame it or open a socket to it. It can still send a tab there, as a link does.",
@@ -243,11 +246,21 @@ describe("the browser's prompts", () => {
     // Kept for the chat or not at all: one page load makes many connections, so there is no allowing one.
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
     // A sub-agent's, and a port another chat's servers have in the browser now.
-    const held = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "port", detail: "5173", held: "other" });
+    // A sub-agent's, and a port another chat's servers have in the browser now: which chat, by its folder, and that allowing moves it.
+    const held = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "port", detail: "5173", held: { root: "other", folder: "/home/me/taxes" } });
     expect(held.lead.startsWith("A sub-agent of acme.surogate.ai wants to open a server")).toBe(true);
-    expect(held.notes[0]).toBe("Another chat's server has port 5173 in the browser now. Allowing this gives the port to this chat.");
+    expect(held.notes[0]).toBe("A chat on /home/me/taxes has port 5173 in the browser now. Allowing this moves the port to this chat.");
     expect(held.notes).toHaveLength(4);
     expect(held.height).toBeGreaterThan(content.height);
+    // Another chat on this chat's own folder, and one whose folder is not known.
+    const beside = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: CHAT.folder } });
+    expect(beside.notes[0]).toBe("Another chat on this folder has port 5173 in the browser now. Allowing this moves the port to this chat.");
+    const unknown = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: null } });
+    expect(unknown.notes[0]).toBe("Another chat has port 5173 in the browser now. Allowing this moves the port to this chat.");
+    // A folder's name is shown as text, however long: the window grows for its lines, and scrolls past its most.
+    const long = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: `/home/me/${"a-long-name/".repeat(80)}taxes` } });
+    expect(long.height).toBeGreaterThan(held.height);
+    expect(long.height).toBe(720);
   });
 
   it("shows what an act would do in the page, whole, with the operation's buttons", () => {

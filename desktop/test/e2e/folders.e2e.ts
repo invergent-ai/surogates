@@ -2,12 +2,14 @@
 // work on, its chats, and what each chat's user allowed it. The chats are bound over the fake
 // agent's link, as the agent binds them once its user has accepted the folder sheet.
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { BOOT_ID } from "../../src/binding/folder.js";
+import { OperationJournal } from "../../src/journal/journal.js";
 import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
 
@@ -278,7 +280,7 @@ describe("Settings → Folders and permissions", () => {
     // refused twice, in the same words, and then go through.
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
-      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], processes: [{ id: "p-1", command: "npm run serve" }] };
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], ports: [], processes: [{ id: "p-1", command: "npm run serve" }] };
       const refusals = { takeBack: 2, stop: 2 };
       for (const channel of ["settings:folders", "settings:take-back", "settings:stop"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
@@ -357,20 +359,62 @@ describe("Settings → Folders and permissions", () => {
     await expect.poll(() => texts(again, "#folders .row .label > span:first-child")).toEqual(["Receipts"]);
   });
 
+  it("lists each port of a chat's own servers its user let the browser open, lowest first, and takes one back: the browser's line and the other port's stay", async () => {
+    // The chat as an earlier run of the app left it: bound, its browser allowed, and two ports of its servers with it.
+    const data = join(home, "surogate", "devices", agent.link.identity.device_id);
+    mkdirSync(data, { recursive: true });
+    const { dev, ino } = statSync(folders[0]!);
+    const before = new OperationJournal(join(data, "journal.sqlite"));
+    before.bindings.add({ root: CHAT, nonce: "nonce", folder: folders[0]!, dev, ino, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    before.bindings.allowBrowser(CHAT);
+    before.bindings.allowPort(CHAT, 8000);
+    before.bindings.allowPort(CHAT, 3000);
+    before.close();
+    const { shell, page } = await signedIn();
+    const settings = await foldersSettings(shell, page);
+    await expect.poll(() => texts(settings, "#folders .row .line"), { timeout: 10_000 }).toEqual([
+      "Uses the browser on this computerTake back",
+      "Its browser opens port 3000 of this chat's serversTake back", "Its browser opens port 8000 of this chat's serversTake back",
+    ]);
+    // The button of the line that says *held*.
+    const taking = (held: string) => settings.locator("#folders .row .line", { hasText: held }).locator("button");
+    expect(await taking("port 3000").getAttribute("aria-label")).toBe("Take back port 3000 of this chat's servers");
+    await taking("port 3000").click();
+    await expect.poll(() => texts(settings, "#folders .row .line"), { timeout: 10_000 }).toEqual([
+      "Uses the browser on this computerTake back", "Its browser opens port 8000 of this chat's serversTake back",
+    ]);
+    // One Settings does not show is refused: taken back already, never allowed, another chat's, or no port at all.
+    const take = (root: string, port: unknown) => settings.evaluate(([chat, number]) =>
+      (window as unknown as { surogateSettings: { takePortBack(root: string, port: unknown): Promise<void> } }).surogateSettings.takePortBack(chat as string, number)
+        .then(() => "done", (error: Error) => error.message), [root, port] as const);
+    const REFUSED = "Error invoking remote method 'settings:take-back-port': Error: This chat's servers are not open to the browser on that port";
+    for (const port of [3000, 5000, "8000", 0, 8000.5, null]) expect(await take(CHAT, port), String(port)).toBe(REFUSED);
+    expect(await take(OTHER, 8000)).toBe(REFUSED);
+    await expect.poll(() => texts(settings, "#folders .row .line")).toEqual([
+      "Uses the browser on this computerTake back", "Its browser opens port 8000 of this chat's serversTake back",
+    ]);
+    // The browser taken back takes the last port with it.
+    await taking("Uses the browser").click();
+    await expect.poll(() => texts(settings, "#folders .row .line"), { timeout: 10_000 }).toEqual([]);
+  });
+
   it("keeps the keyboard on its Take back or Stop as the list is drawn again, and gives it to the next once its line goes", async () => {
     const { shell, page } = await signedIn();
     const settings = await foldersSettings(shell, page);
     // The list as the main process would answer it, the test's own: a chat with two hosts, the browser and a process.
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
-      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], browser: true, processes: [{ id: "p-1", command: "npm run serve" }] };
-      for (const channel of ["settings:folders", "settings:take-back", "settings:take-back-browser", "settings:stop"]) contents.ipc.removeHandler(channel);
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], browser: true, ports: [3000, 8000], processes: [{ id: "p-1", command: "npm run serve" }] };
+      for (const channel of ["settings:folders", "settings:take-back", "settings:take-back-browser", "settings:take-back-port", "settings:stop"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
       contents.ipc.handle("settings:take-back", (_event, _root, host) => {
         chat.hosts = chat.hosts.filter((found) => found !== host);
       });
       contents.ipc.handle("settings:take-back-browser", () => {
         chat.browser = false;
+      });
+      contents.ipc.handle("settings:take-back-port", (_event, _root, port) => {
+        chat.ports = chat.ports.filter((found) => found !== port);
       });
       contents.ipc.handle("settings:stop", (_event, _root, id) => {
         chat.processes = chat.processes.filter((found) => found.id !== id);
@@ -394,10 +438,22 @@ describe("Settings → Folders and permissions", () => {
     await settings.keyboard.up("Enter");
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await focused()).toBe("Take back the browser on this computer");
-    // The browser's line is one of them: taken back, the line under it takes its place.
+    // The browser's line is one of them: taken back, the line under it takes its place, a port's.
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("Take back port 3000 of this chat's servers");
+    // Each port's line keeps the keyboard as the list is drawn again, the second of them too, and gives it to the next once it goes.
+    await settings.focus('[aria-label="Take back port 8000 of this chat\'s servers"]');
+    await settings.evaluate(() => Object.assign(document.activeElement!, { drawnBefore: true }));
+    await shell.evaluate(({ webContents }) => {
+      webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!.send("settings:changed");
+    });
+    await expect.poll(() => settings.evaluate(() => !("drawnBefore" in document.activeElement!))).toBe(true);
+    expect(await focused()).toBe("Take back port 8000 of this chat's servers");
     await settings.keyboard.press("Enter");
     await expect.poll(focused).toBe("Stop npm run serve");
-    // The last line's place is the one before it.
+    // The last line's place is the one before it, a port's.
+    await settings.keyboard.press("Enter");
+    await expect.poll(focused).toBe("Take back port 3000 of this chat's servers");
     await settings.keyboard.press("Enter");
     await expect.poll(focused).toBe("Take back example.com");
     // Nothing left to take back or stop: the section's heading has the keyboard.
@@ -407,8 +463,8 @@ describe("Settings → Folders and permissions", () => {
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
       const chats = [
-        { root: "r-2", title: "Alpha", mode: "free", hosts: ["alpha.example"], processes: [] },
-        { root: "r-3", title: "Beta", mode: "free", hosts: ["beta.example"], processes: [] },
+        { root: "r-2", title: "Alpha", mode: "free", hosts: ["alpha.example"], ports: [], processes: [] },
+        { root: "r-3", title: "Beta", mode: "free", hosts: ["beta.example"], ports: [], processes: [] },
       ];
       for (const channel of ["settings:folders", "settings:take-back"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats }]);

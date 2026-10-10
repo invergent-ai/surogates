@@ -38,18 +38,20 @@ describe("Settings → Folders and permissions", () => {
     journal.bindings.allowDomain(THIRD, "example.com");
     journal.bindings.allowDomain(THIRD, "[::1]");
     journal.bindings.allowBrowser(SECOND);
+    journal.bindings.allowPort(SECOND, 8000);
+    journal.bindings.allowPort(SECOND, 3000);
     const titles: Record<string, string> = { [FIRST]: "Quarterly report", [SECOND]: "Receipts", [THIRD]: "A chat" };
     expect(await listFolders(journal.bindings, async (root) => titles[root]!, new LiveProcesses())).toEqual([
       {
         folder: "/home/me/notes",
         chats: [
-          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [], browser: false, processes: [] },
+          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [], browser: false, ports: [], processes: [] },
           // The hosts its user let it reach, in the order allowed.
-          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"], browser: false, processes: [] },
+          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"], browser: false, ports: [], processes: [] },
         ],
       },
-      // Its user let its agent use the browser on this computer.
-      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [], browser: true, processes: [] }] },
+      // Its user let its agent use the browser on this computer, and open two ports of the chat's own servers there, lowest first.
+      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [], browser: true, ports: [3000, 8000], processes: [] }] },
     ]);
   });
 

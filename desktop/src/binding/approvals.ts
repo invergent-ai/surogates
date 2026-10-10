@@ -82,8 +82,11 @@ export type ApprovalRequest =
   // files: an upload's, the files of the chat's folder it gives the page, each path whole and an item of its own, with no
   // detail: joined in one text, a name that holds a line break would read as two files.
   // A port of the chat's own servers the browser would open ("port", its number the detail), in either mode.
-  // held: the chat whose servers have that port in the browser now, when it is another's.
-  | { kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null; files?: string[]; held?: string };
+  // held: the chat whose servers have that port in the browser now, when it is another's, with the folder it works on, where that is known.
+  | {
+    kind: "browser"; chat: ChatLabel; action: BrowserAction; detail: string; page?: string | null; files?: string[];
+    held?: { root: string; folder: string | null };
+  };
 
 // down and up: a mouse button pressed and held, and released, each where it is.
 export type BrowserAction = "use" | "port" | "open" | "script" | "click" | "down" | "up" | "type" | "press" | "drag" | "upload" | "other";
@@ -435,13 +438,14 @@ export class Approvals {
     if (asking.aborted) return browserDenied(BROWSER_DENIED.act);
     if (listening === "busy") return SANDBOX_BUSY(port);
     if (listening !== true) return NOT_LISTENING(port);
-    let held: string | undefined;
+    let held: { root: string; folder: string | null } | undefined;
     try {
-      held = this.options.bindings.portOwner(port);
+      const owner = this.options.bindings.portOwner(port);
+      if (owner !== undefined && owner !== root) held = { root: owner, folder: this.options.bindings.get(owner)?.folder ?? null };
     } catch (error) {
       return browserDenied(couldNotAsk(error));
     }
-    const answer = await ask({ kind: "browser", chat, action: "port", detail: String(port), ...(held !== undefined && held !== root ? { held } : {}) });
+    const answer = await ask({ kind: "browser", chat, action: "port", detail: String(port), ...(held === undefined ? {} : { held }) });
     if (typeof answer !== "string") return answer;
     if (answer !== "allow_session") return browserDenied(portDenied(port));
     try {
