@@ -14,6 +14,7 @@ import pytest_asyncio
 from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
+from surogates.voice.lines import default_lines
 from surogates.voice.sessions import HEARD_NONE, CallSession
 from tests.integration.conftest import create_org, create_user
 
@@ -93,12 +94,16 @@ async def test_barge_in_mid_generation_records_only_what_was_heard(call):
 
 
 async def test_barge_in_after_the_answer_was_written_tells_the_agent_on_the_next_turn(call):
+    # A call in Romanian.  The note is the agent's to read and never spoken: English, whatever the call's language.
+    call.language, call.lines = "ro", default_lines("ro")
     await call.send("Spune-mi știrile")
     await call.store.emit_event(call.session_id, EventType.LLM_RESPONSE,
                                 {"message": {"role": "assistant", "content": "Prima știre... A doua știre..."}})
     await call.record_heard("Prima știre")
     await call.send("Stop")
-    assert (await _user_messages(call))[-1] == "[Apelantul te-a întrerupt; din răspunsul tău anterior a auzit doar: «Prima știre».] Stop"
+    assert (await _user_messages(call))[-1] == (
+        "[The caller interrupted you; of your previous answer they heard only: «Prima știre».] Stop"
+    )
 
 
 async def test_cut_before_a_word_was_heard(call):
