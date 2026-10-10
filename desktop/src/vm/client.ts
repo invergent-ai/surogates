@@ -4,7 +4,7 @@
 // and the cross-check, a Node child process. Its guest goes with it (pdeathsig).
 
 import { fork } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -13,9 +13,10 @@ import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser } from "../guest/protocol.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
-import { Backoff } from "./backoff.js";
+import { Backoff, MOST_MS } from "./backoff.js";
+import { type HistoryRequest, named, NOT_A_REQUEST, REFUSED } from "./history.js";
 import { DOOR, REACH_MS } from "./inbound.js";
-import { type Boot, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
+import { aborted, type Boot, late, LET_GO, type Place, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
 
 // The same from src/vm and from dist/vm.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -33,6 +34,43 @@ const TEARDOWN_MS = (emulated: boolean) => {
   const { setupMs, shareMs } = WAITS[emulated ? "emulated" : "kvm"];
   return 2 * setupMs + shareMs + 5_000;
 };
+// The manager's own bounds on a folder's place, which its answers are held to here.
+interface PlaceWaits {
+  setupMs: number;
+  shareMs: number;
+  historyMs: number;
+  // A boot of the guest at its longest, however the guest will run, which no boot says before it has: its backoff's
+  // wait, an emulated guest's hello, twice where the sessions disk could not be checked and the guest boots again on
+  // a new one, and the power-off of a guest that was stopping when the boot was asked for.
+  bootMs: number;
+}
+// Past those bounds, each from when the manager is asked (manager.ts, Guest.place, Guest.history, Guest.unplace):
+// - a place's adding: a boot; its two folders' look and their shares, by one deadline, the agent's answer, and the
+//   two shares' removal where the agent refused; then, for a place held already, the look that it is still there;
+// - a request to its history: its place's adding, then the agent's answer, past which the manager gives the guest up;
+// - a place's letting go: the manager's wait for what was asked of the place before it, a boot under way, the place
+//   still being added, the agent's answer and the two shares' removal, one after the other.
+const PLACE_MS = ({ bootMs, setupMs, shareMs }: PlaceWaits) => bootMs + setupMs + 4 * shareMs + 5_000;
+const HISTORY_MS = (waits: PlaceWaits) => PLACE_MS(waits) + waits.historyMs;
+const UNPLACE_MS = ({ bootMs, setupMs, shareMs }: PlaceWaits) => bootMs + 3 * setupMs + 5 * shareMs + 5_000;
+
+const NOT_A_PLACE: Outcome = { error: { type: "value", message: "This names no place of a folder's history" } };
+// Whether *place* has a place's fields, each of which the manager's guest reads as it is: no other is sent to it.
+function whole(place: Place): boolean {
+  if (typeof place !== "object" || place === null || typeof place.key !== "string" || typeof place.history !== "string") return false;
+  return typeof place.real === "object" && place.real !== null && typeof place.real.path === "string";
+}
+
+// What a manager sent as its answer, where it is one: an ok, or an error of a type and words. Null for anything
+// else, as a manager that ended while it wrote may leave.
+function outcomeOf(sent: unknown): Outcome | null {
+  if (typeof sent !== "object" || sent === null) return null;
+  if (!("error" in sent)) return "ok" in sent ? (sent as Outcome) : null;
+  const { error } = sent as { error: unknown };
+  if (typeof error !== "object" || error === null) return null;
+  const { type, message } = error as { type?: unknown; message?: unknown };
+  return typeof type === "string" && typeof message === "string" ? (sent as Outcome) : null;
+}
 
 /**
  * The VM's files for an app whose data is *dataDir*: the sessions disk and the
@@ -76,6 +114,12 @@ export type ToManager =
   | { type: "cancel"; id: string }
   // Everything of a root ends in the guest: its folder is being let go. Answered as a result.
   | { type: "teardown"; id: string; root: string }
+  // A folder's place for the agent's own git (spec, Section 13), added to the guest, booted for it; one request to
+  // its history, the place added first; and the place let go. Each is answered as a result: a place's ok is null,
+  // and a letting-go's true or false. A place and a request are stopped by a cancel of their id.
+  | { type: "place"; id: string; place: Place }
+  | { type: "history"; id: string; request: HistoryRequest }
+  | { type: "unplace"; id: string; place: Place }
   // The app's answer to an ask of the host proxy's.
   | { type: "answer"; id: number; allow: boolean }
   // What the browser of the device that knocks with *key* may open: each port of a chat's own servers, and the chat's root.
@@ -134,6 +178,14 @@ export function forkManager(script = MANAGER): ManagerProcess {
   };
 }
 
+// What was asked of a place, until it has reached the manager: *end* ends one that has not. A letting-go has no
+// end, and has reached it once it is answered.
+interface Asked {
+  reached: Promise<void>;
+  end?(): void;
+}
+const reachedAll = (asked: Asked[]) => Promise.all(asked.map(({ reached }) => reached));
+
 // Who answers a root's ask: the device whose chat it is, or null for a root that is not its.
 export type Asker = (root: string, asked: NetworkAsk) => Promise<NetworkAnswer> | null;
 
@@ -168,6 +220,10 @@ export class VmClient {
   private probes = 0;
   // What each device's browser may open, by its key: told to each manager as it starts.
   private readonly forwarded = new Map<string, Array<[number, string]>>();
+  // What was asked of each place, by its key, and has not reached the manager yet, with each letting-go it has
+  // not answered: what is asked of the place next is sent after them, so the manager has a place's requests in
+  // the order they were asked, which it keeps to itself (manager.ts, VmManager.unplace).
+  private readonly turns = new Map<string, Set<Asked>>();
   /** Where a browser's proxy knocks for a connection into a chat's sandbox: the manager's door, there while a guest runs. */
   readonly door: string;
 
@@ -181,7 +237,157 @@ export class VmClient {
    * waits for it, and one that comes while a manager that went backs off waits for it,
    * until it is cancelled or the VM is stopped. Never rejects.
    */
-  async perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
+  perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
+    return this.request(operation.id, { type: "op", operation }, signal);
+  }
+
+  /**
+   * Null once *place* is in the guest, booted for it if none runs: a folder's history and the
+   * folder itself, for the agent's own git. Otherwise the answer that says why not, as the manager
+   * gave it (manager.ts, VmManager.place). Waits and cancels as an operation does, in its place's
+   * turn, and its manager's answer is bounded, as a request's to the place's history is. Never rejects.
+   */
+  async place(place: Place, signal: AbortSignal): Promise<Outcome | null> {
+    if (!whole(place)) return NOT_A_PLACE;
+    const id = `place-${randomUUID()}`;
+    const outcome = await this.ofPlace(place.key, id, { type: "place", id, place }, signal, PLACE_MS);
+    if (!("ok" in outcome)) return outcome;
+    // A place added is answered null, and nothing else is.
+    return outcome.ok === null ? null : REFUSED;
+  }
+
+  /**
+   * One request to a folder's history: git in the guest, its place added first. The answer is the
+   * manager's (manager.ts, VmManager.history): the guest's, checked in the manager's process before
+   * it comes to this one, or why there is none. It waits as an operation does, and is sent in the
+   * order it was asked of its place: after a letting-go of the place asked before it has been
+   * answered, and before one asked after it, which ends it if it has not reached the manager once
+   * a place's time has passed. A cancel is answered at once, and stops its git. A manager that has
+   * not answered once it is past its own bounds is killed, as at a teardown, and the request is
+   * answered as stopped by the sandbox. Never rejects.
+   */
+  history(request: HistoryRequest, signal: AbortSignal): Promise<Outcome> {
+    if (!named(request)) return Promise.resolve(NOT_A_REQUEST);
+    if (!whole(request.place)) return Promise.resolve(NOT_A_PLACE);
+    const id = `history-${randomUUID()}`;
+    return this.ofPlace(request.place.key, id, { type: "history", id, request }, signal, HISTORY_MS);
+  }
+
+  // *message*, sent under *id* in the turn of the place of *key*: once what was asked of the place before it has
+  // reached the manager, and a letting-go among that has been answered. Noted until it has reached the manager
+  // itself; a letting-go asked meanwhile ends it once that has waited a place's time, and it is answered as let
+  // go, with nothing sent. *ms* bounds its manager's answer.
+  private async ofPlace(
+    key: string, id: string, message: Extract<ToManager, { type: "place" | "history" }>, signal: AbortSignal, ms: (waits: PlaceWaits) => number,
+  ): Promise<Outcome> {
+    const overtaken = new AbortController();
+    const ended = AbortSignal.any([signal, overtaken.signal]);
+    let unsent = true;
+    let reach = () => {};
+    const reached = new Promise<void>((resolve) => {
+      reach = () => {
+        unsent = false;
+        resolve();
+      };
+    });
+    const before = this.turn(key, { reached, end: () => void (unsent && overtaken.abort()) });
+    const answered = (async () => {
+      // The app's quit ends the wait too, and the request then answers it.
+      await Promise.race([reachedAll(before), aborted(AbortSignal.any([ended, this.halted.signal]))]);
+      return ended.aborted ? CANCELLED : this.request(id, message, ended, { ms, sent: reach });
+    })();
+    // At once, though what says when the VM can boot may not heed a cancel.
+    const outcome = await Promise.race([answered, aborted(ended)]);
+    reach();
+    if (outcome === "aborted" || (outcome === CANCELLED && !signal.aborted)) return signal.aborted ? CANCELLED : LET_GO;
+    return outcome;
+  }
+
+  // Notes *asked* for the place of *key* until it has reached the manager, and gives what was asked of the place before it.
+  private turn(key: string, asked: Asked): Asked[] {
+    const noted = this.turns.get(key) ?? new Set();
+    const before = [...noted];
+    this.turns.set(key, noted.add(asked));
+    void asked.reached.then(() => {
+      noted.delete(asked);
+      if (noted.size === 0 && this.turns.get(key) === noted) this.turns.delete(key);
+    });
+    return before;
+  }
+
+  /**
+   * *place* leaves the guest, if a manager runs: no thread works on its folder any more, and a guest
+   * that holds nothing else stops. True once it has; false where the guest holds no place for that
+   * folder and history, as when no manager runs: none is started to ask, and what a manager that
+   * went held went with it. It is sent after what was asked of the place before it: what has not
+   * reached the manager once a place's time has passed is ended, and answered as let go, as the
+   * manager ends what it has not answered by then. A manager that has not answered once it is past
+   * its own bounds is killed, as at a teardown. Never rejects.
+   */
+  unplace(place: Place): Promise<boolean> {
+    if (!whole(place)) return Promise.resolve(false);
+    let reach = () => {};
+    const reached = new Promise<void>((resolve) => {
+      reach = resolve;
+    });
+    const before = this.turn(place.key, { reached });
+    const gone = (async () => {
+      // A letting-go asked before this one is answered first, as the manager would have it: what was asked between
+      // the two has its turn then, and a place's time from then.
+      await reachedAll(before.filter(({ end }) => !end));
+      const sent = reachedAll(before);
+      if (before.length > 0 && (await Promise.race([sent, late(this.waits.setupMs)])) === "late") {
+        for (const asked of before) asked.end?.();
+        await sent;
+      }
+      const manager = this.manager;
+      if (!manager || this.stopping) return false;
+      const id = `unplace-${randomUUID()}`;
+      return new Promise<boolean>((resolve) => {
+        const bounded = this.bounded(manager, UNPLACE_MS);
+        this.pending.set(id, (outcome) => {
+          bounded();
+          this.pending.delete(id);
+          const answer = outcomeOf(outcome);
+          resolve(answer !== null && "ok" in answer && answer.ok === true);
+        });
+        manager.send({ type: "unplace", id, place });
+      });
+    })();
+    void gone.then(reach);
+    return gone;
+  }
+
+  // The manager's own bounds on a place: its options', else those of the guest as its last boot ran.
+  private get waits(): PlaceWaits {
+    const table = WAITS[this.emulated ? "emulated" : "kvm"];
+    const { setupMs = table.setupMs, shareMs = table.shareMs, historyMs = table.historyMs, powerOffMs = WAITS.emulated.powerOffMs } = this.options.vm;
+    return { setupMs, shareMs, historyMs, bootMs: MOST_MS + 2 * WAITS.emulated.helloMs + powerOffMs };
+  }
+
+  // Kills *manager* once it has had *ms* of its own bounds and the returned function has not been called: one that
+  // has not answered by then is wedged, and its guest goes with it, as at a teardown. What it was asked is then
+  // answered as all it was doing is, at its exit.
+  private bounded(manager: ManagerProcess, ms: (waits: PlaceWaits) => number): () => void {
+    const asked = performance.now();
+    let timer: NodeJS.Timeout | undefined;
+    const look = () => {
+      // By the guest's waits as they are now: a boot may have said since that it runs emulated.
+      const left = asked + ms(this.waits) - performance.now();
+      if (left <= 0) return manager.kill();
+      timer = setTimeout(look, left);
+      timer.unref();
+    };
+    look();
+    return () => clearTimeout(timer);
+  }
+
+  // *message*, sent to the manager under *id* once the VM can boot and a manager runs, and its answer. What is
+  // asked of a place (*own*) is bounded, tells when the manager has it, and takes no answer that is none.
+  private async request(
+    id: string, message: Extract<ToManager, { type: "op" | "place" | "history" }>, signal: AbortSignal,
+    own?: { ms: (waits: PlaceWaits) => number; sent(): void },
+  ): Promise<Outcome> {
     if (this.options.ready && !this.stopping) {
       try {
         await this.options.ready(AbortSignal.any([signal, this.halted.signal]));
@@ -205,18 +411,21 @@ export class VmClient {
       return unavailable(`did not start: ${error instanceof Error ? error.message : String(error)}`);
     }
     return new Promise((resolve) => {
+      const bounded = own ? this.bounded(manager, own.ms) : () => {};
       const answer = (outcome: Outcome) => {
+        bounded();
         signal.removeEventListener("abort", cancel);
-        this.pending.delete(operation.id);
-        resolve(outcome);
+        this.pending.delete(id);
+        resolve(own ? (outcomeOf(outcome) ?? REFUSED) : outcome);
       };
       const cancel = () => {
-        manager.send({ type: "cancel", id: operation.id });
+        manager.send({ type: "cancel", id });
         answer(CANCELLED);
       };
-      this.pending.set(operation.id, answer);
+      this.pending.set(id, answer);
       signal.addEventListener("abort", cancel, { once: true });
-      manager.send({ type: "op", operation });
+      manager.send(message);
+      own?.sent();
     });
   }
 
@@ -339,6 +548,8 @@ export class VmClient {
     }, this.options.pingMs ?? PING_MS);
     keepalive.unref();
     manager.onMessage((message) => {
+      // What is no message at all is none of a manager's.
+      if (typeof message !== "object" || message === null) return;
       if (message.type === "ready") {
         ran = true;
         this.backoff.up();

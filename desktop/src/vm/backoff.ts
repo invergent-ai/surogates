@@ -4,7 +4,7 @@
 // the guest (manager.ts) keep one each, so a start that keeps failing does not loop.
 
 const FIRST_MS = 1_000;
-const MOST_MS = 60_000;
+export const MOST_MS = 60_000;
 const STAYED_MS = 30_000;
 
 export class Backoff {
