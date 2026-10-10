@@ -63,6 +63,10 @@ const NOT_A_FORGETTING: Outcome = {
 const PATH_UNITS = 4_096;
 const MAX_FILES = 50_000;
 const MESSAGE_UNITS = 2_000;
+// The most names one open gives of what was set aside whole of a thread's own, kept or gone. A thread keeps the
+// last four times that happened and is told the last sixteen times one went, each time of a copy, a repository
+// or both: eight names and thirty-two, with room.
+const ASIDE_NAMES = 64;
 
 /** Whether *request* names a thread, a user and an action as a history's request does: no other is asked of a guest, and none is booted for it. */
 export function named({ place, thread, user, action, args }: HistoryRequest): boolean {
@@ -94,9 +98,9 @@ const oneOf = <T extends string>(...values: readonly T[]): Parse<T> => (value) =
 const said = oneOf(...SAID);
 const agents = oneOf(...AGENTS);
 
-function list<T>(item: Parse<T>): Parse<T[]> {
+function list<T>(item: Parse<T>, most = MAX_FILES): Parse<T[]> {
   return (value) => {
-    if (!Array.isArray(value) || value.length > MAX_FILES) return undefined;
+    if (!Array.isArray(value) || value.length > most) return undefined;
     const parsed: T[] = [];
     for (const entry of value) {
       const one = item(entry);
@@ -160,15 +164,33 @@ const turn: Parse<unknown> = (value) => {
 // The landing where main holds it, recorded; null where each file it applied is in the folder as it was before.
 const forgetting = fields({ landing: idOrNull });
 
-// Each action's answer (local_history.py's _ACTIONS).
+// A copy or a repository of *thread*'s own that an open made again and the place keeps set aside whole, by its
+// folder's name there (local_history.py): the order it was set aside in, when, whose, and which of the two. A
+// name of any other thread's, or told to a check that was not told whose request it was, is none.
+const ASIDE = /^[0-9]{8}-[0-9]{8}T[0-9]{6}Z-$/;
+const aside = (thread: string | undefined): Parse<string> => (value) => {
+  if (typeof value !== "string" || thread === undefined || !THREAD.test(thread)) return undefined;
+  const own = [".copy", ".repository"].some((kind) => value.length === 26 + thread.length + kind.length && value.endsWith(`${thread}${kind}`));
+  return own && ASIDE.test(value.slice(0, 26)) ? value : undefined;
+};
+
+// An open's answer, to a request for *thread*'s copy.
+// *set_asides*: the snapshots of what the copy held of its own when a record or a move made it other files,
+// the oldest first, at every open while the thread's repository holds any. A folder with no history says
+// why: more files than history tracks, or a name in it that is not UTF-8. On either form,
+// *set_aside_folders*: what of the thread's own the place keeps set aside whole, the oldest first, and
+// *set_aside_gone*: what of it went at the place's bound, by the names it had; each only where it holds a name.
+function opened(thread: string | undefined): Parse<unknown> {
+  const names = list(aside(thread), ASIDE_NAMES);
+  const whole = { set_aside_folders: names, set_aside_gone: names };
+  return either(
+    fields({ copy: oneOf("made", "moved", "kept"), set_asides: list(id), ...whole }, ["set_asides", "set_aside_folders", "set_aside_gone"]),
+    fields({ history: oneOf("off"), reason: oneOf("cap", "names"), ...whole }, ["set_aside_folders", "set_aside_gone"]),
+  );
+}
+
+// Every other action's answer (local_history.py's _ACTIONS).
 const ANSWERS: Record<string, Parse<unknown>> = {
-  // *set_asides*: the snapshots of what the copy held of its own when a record or a move made it other files,
-  // the oldest first, at every open while the thread's repository holds any. A folder with no history says
-  // why: more files than history tracks, or a name in it that is not UTF-8.
-  open: either(
-    fields({ copy: oneOf("made", "moved", "kept"), set_asides: list(id) }, ["set_asides"]),
-    fields({ history: oneOf("off"), reason: oneOf("cap", "names") }),
-  ),
   changed: fields({ paths: list(path) }),
   snapshot: fields({ hash: id }),
   restore: fields({}),
@@ -185,7 +207,7 @@ const ANSWERS: Record<string, Parse<unknown>> = {
   forget: forgetting,
 };
 
-function taken(action: string, outcome: unknown): Outcome {
+function taken(action: string, outcome: unknown, thread: string | undefined): Outcome {
   if (typeof outcome !== "object" || outcome === null || Array.isArray(outcome)) return REFUSED;
   if ("error" in outcome) {
     const { error } = outcome;
@@ -201,20 +223,21 @@ function taken(action: string, outcome: unknown): Outcome {
     const known = said(code);
     return known === undefined ? REFUSED : { error: { type, code: known, message: words } };
   }
-  const parse = Object.hasOwn(ANSWERS, action) ? ANSWERS[action] : undefined;
+  const parse = action === "open" ? opened(thread) : Object.hasOwn(ANSWERS, action) ? ANSWERS[action] : undefined;
   const answer = parse?.((outcome as { ok?: unknown }).ok);
   return answer === undefined ? REFUSED : { ok: answer };
 }
 
 /**
- * What the guest sent as the outcome of *action*, as this computer takes it: its own fields alone, or
- * a refusal. Nothing of its shape is taken for granted, so it never throws: what is no outcome at
- * all is refused as an answer that is none is. An error of the type "history" always has a code,
- * one of HistoryCode; any other error is the agent's own, of a type it has, and has none.
+ * What the guest sent as the outcome of *action*, asked for *thread*'s copy, as this computer takes it:
+ * its own fields alone, or a refusal. Nothing of its shape is taken for granted, so it never throws:
+ * what is no outcome at all is refused as an answer that is none is. An error of the type "history"
+ * always has a code, one of HistoryCode; any other error is the agent's own, of a type it has, and has
+ * none. Checking takes time that grows with the answer's size, whatever it is made of.
  */
-export function checked(action: string, outcome: unknown): Outcome {
+export function checked(action: string, outcome: unknown, thread?: string): Outcome {
   try {
-    return taken(action, outcome);
+    return taken(action, outcome, thread);
   } catch {
     // Only what is no data at all can throw when it is read: no line of the control port parses to it.
     return REFUSED;

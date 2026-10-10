@@ -488,6 +488,65 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("restore", { ok: { commit: ID } })).toEqual({ ok: {} });
   });
 
+  // What of a thread's own the place keeps set aside whole, each by its folder's name there: the order it was set
+  // aside in, when, whose, and which of the two.
+  const aside = (n: number, kind: string, thread = THREAD) => `${String(n).padStart(8, "0")}-20261010T03${String(n % 60).padStart(2, "0")}00Z-${thread}.${kind}`;
+
+  it("takes from an open the names of what was set aside whole of the request's own thread, kept and gone, on either of its forms", () => {
+    const kept = [aside(3, "repository"), aside(3, "copy"), aside(7, "copy")];
+    const gone = [aside(1, "copy"), aside(2, "repository")];
+    for (const answer of [
+      { copy: "made", set_aside_folders: kept }, { copy: "made", set_aside_folders: kept, set_aside_gone: gone },
+      { copy: "kept", set_asides: [ID], set_aside_gone: gone }, { history: "off", reason: "cap", set_aside_folders: kept },
+      { history: "off", reason: "names", set_aside_folders: kept, set_aside_gone: gone },
+      // As many as a thread is told of, with room: it keeps four times, of two names each, and is told the last sixteen times one went.
+      { copy: "moved", set_aside_folders: Array.from({ length: 64 }, (_unused, n) => aside(n, "copy")), set_aside_gone: Array.from({ length: 64 }, (_unused, n) => aside(n, "repository")) },
+    ]) {
+      expect(checked("open", { ok: answer }, THREAD)).toEqual({ ok: answer });
+    }
+    // No other action's answer names any.
+    expect(checked("snapshot", { ok: { hash: ID, set_aside_folders: kept } }, THREAD)).toEqual({ ok: { hash: ID } });
+  });
+
+  const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+  it.each<[string, unknown]>([
+    // Another thread's, or no thread's the check was told of.
+    ["another thread's", [aside(1, "copy", OTHER)]],
+    ["one that ends in the thread's and starts with another's", [`${aside(1, "copy", OTHER).slice(0, -5)}-${THREAD}.copy`]],
+    ["a name that is the thread's alone", [`${THREAD}.copy`]],
+    // A name that is not as the history makes one.
+    ["a path out of the place", [`../../${aside(1, "copy")}`]],
+    ["a path into it", [`${aside(1, "copy")}/Report.docx`]],
+    ["a third kind", [aside(1, "gone")]],
+    ["one that went, by the name it has on disk", [`${aside(1, "copy")}.gone`]],
+    ["a count of fewer digits", [aside(1, "copy").slice(1)]],
+    ["a count that is none", [`x${aside(1, "copy").slice(1)}`]],
+    ["a time that is none", [aside(1, "copy").replace("T03", "T3x")]],
+    ["upper case", [aside(1, "copy").toUpperCase()]],
+    ["a line more", [`${aside(1, "copy")}\n`]],
+    ["no text", [7]],
+    ["none", [null]],
+    ["a list in a list", [[aside(1, "copy")]]],
+    // What is no list, or more than any thread is told.
+    ["text", aside(1, "copy")],
+    ["an object", { 0: aside(1, "copy"), length: 1 }],
+    ["sixty-five", Array.from({ length: 65 }, (_unused, n) => aside(n, "copy"))],
+    ["a million", Array<string>(1_000_000).fill(aside(1, "copy"))],
+  ])("refuses an open that names, among what was set aside, %s", (_what, names) => {
+    for (const key of ["set_aside_folders", "set_aside_gone"]) {
+      expect(checked("open", { ok: { copy: "made", [key]: names } }, THREAD)).toEqual(NOT_AN_ANSWER);
+      expect(checked("open", { ok: { history: "off", reason: "cap", [key]: names } }, THREAD)).toEqual(NOT_AN_ANSWER);
+    }
+  });
+
+  it("refuses every name of what was set aside where it is not told whose the request was", () => {
+    for (const thread of [undefined, "", OTHER, THREAD.toUpperCase(), `${THREAD} `, ".*"]) {
+      expect(checked("open", { ok: { copy: "made", set_aside_folders: [aside(1, "copy")] } }, thread)).toEqual(NOT_AN_ANSWER);
+    }
+    // An open that names none is an open's answer whoever asked.
+    expect(checked("open", { ok: { copy: "made" } })).toEqual({ ok: { copy: "made" } });
+  });
+
   it("knows every action a folder's history takes, and no other", () => {
     const actions = /^_ACTIONS[^]*?^\}/m.exec(source("local_history.py"))![0];
     expect([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort()).toEqual(Object.keys(answers).sort());

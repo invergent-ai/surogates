@@ -131,7 +131,7 @@ export class ControlLink {
    */
   history(key: string, thread: string, user: string, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     const asked: Request = { type: "history", key, thread, user, action, args };
-    return this.cancellable(asked, signal, (reply) => checked(action, reply.type === "result" ? reply.outcome : undefined));
+    return this.cancellable(asked, signal, (reply) => checked(action, reply.type === "result" ? reply.outcome : undefined, thread));
   }
 
   // *message*, cancelled by *signal*; its answer, as *read* takes it.

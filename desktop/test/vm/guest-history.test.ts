@@ -393,7 +393,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     const reply = await guest.request({ type: "history", key: at, thread, user: "u1", action, args });
     expect(reply).toMatchObject({ type: "result" });
     const { outcome } = reply as { outcome: Outcome };
-    expect(checked(action, outcome), `${action} answered ${JSON.stringify(outcome)}`).toEqual(outcome);
+    expect(checked(action, outcome, thread), `${action} answered ${JSON.stringify(outcome)}`).toEqual(outcome);
     if ("ok" in outcome) answered.set(action, [...(answered.get(action) ?? []), outcome.ok]);
     else refused.add(String(outcome.error.code));
     return outcome;
