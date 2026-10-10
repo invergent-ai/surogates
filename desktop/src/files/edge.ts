@@ -42,17 +42,22 @@ function namedBytes(encoded: string, { at, folder }: Edge): string {
   return Buffer.concat([Buffer.from(`${at}/`), bytes.subarray(prefix.length)]).toString("base64");
 }
 
+// A line of rg --json that is no event. Whatever it is, it does not say the copy's path, as JSON writes it or as it is.
+function unread(line: string, edge: Edge): string {
+  const written = { at: JSON.stringify(edge.at).slice(1, -1), folder: JSON.stringify(edge.folder).slice(1, -1) };
+  return written.folder === edge.folder ? said(line, edge) : said(said(line, written), edge);
+}
+
 // One event of rg --json, its file named by the folder's path. Its lines are the file's own text, and stay.
 function event(line: string, edge: Edge): string {
   let parsed: { data?: { path?: { text?: unknown; bytes?: unknown } } } | null;
   try {
     parsed = JSON.parse(line) as typeof parsed;
   } catch {
-    // No event: whatever it is, it does not say the copy's path, as JSON writes it or as it is.
-    const written = { at: JSON.stringify(edge.at).slice(1, -1), folder: JSON.stringify(edge.folder).slice(1, -1) };
-    return written.folder === edge.folder ? said(line, edge) : said(said(line, written), edge);
+    return unread(line, edge);
   }
-  const path = parsed?.data?.path;
+  if (typeof parsed !== "object" || parsed === null) return unread(line, edge);
+  const path = parsed.data?.path;
   if (typeof path !== "object" || path === null) return line;
   const [form, written] = typeof path.text === "string" ? (["text", path.text] as const) : typeof path.bytes === "string" ? (["bytes", path.bytes] as const) : [];
   if (form === undefined) return line;

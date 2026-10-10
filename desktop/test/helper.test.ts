@@ -114,6 +114,10 @@ describe("the file helper on a thread's copy", () => {
     for (const [at, why] of cases) {
       expect(await started({ SUROGATE_AT: at }), JSON.stringify(at)).toEqual({ said: "", failed: why, code: 2 });
     }
+    // Nor with a folder of its own that is no whole path: the two could not be told apart by their names.
+    expect(await started({ SUROGATE_FOLDER: `${base}/`, SUROGATE_AT: join(dirname(base), "Reports") })).toEqual({
+      said: "", failed: "the file helper's SUROGATE_FOLDER must be a whole path for SUROGATE_AT to name it by another\n", code: 2,
+    });
     // One that is a whole path of another folder starts, and ends when it is asked no more.
     expect(await started({ SUROGATE_AT: join(dirname(base), "Reports") })).toEqual({ said: '{"ready":true}\n', failed: "", code: 0 });
   });

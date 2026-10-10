@@ -135,8 +135,11 @@ describe("a file helper on a thread's copy", () => {
 
   it("answers its own path as it answers any path outside the folder: nothing in the words says the copy is there", async () => {
     const nowhere = join(base, "nowhere", "at", "all");
+    // A link in the copy, too: asked by the copy's own path, it is not looked at.
+    symlinkSync("/etc", join(copy, "system"));
     const asks: Array<[string, (path: string) => Record<string, unknown>]> = [
       ["resolve", (path) => ({ path: join(path, "a.txt") })], ["resolve", (path) => ({ path: join(path, "missing.txt") })],
+      ["resolve", (path) => ({ path: join(path, "system", "hosts") })], ["check_write", (path) => ({ path: join(path, "system", "passwd") })],
       ["check_write", (path) => ({ path: join(path, ".vscode", "settings.json") })], ["stat", (key) => ({ key: join(key, "a.txt") })],
       ["read", (key) => ({ key: join(key, "a.txt"), max_bytes: null })], ["read_lines", (key) => ({ key: join(key, "a.txt"), ...lines })],
       ["write", (key) => ({ key: join(key, "a.txt"), data: data("x") })], ["delete", (key) => ({ key: join(key, "a.txt") })],
@@ -399,6 +402,7 @@ describe("a search in a thread's copy", () => {
 
   it("names no file by the copy's path in a line of rg's that is no event", () => {
     expect(searched("json", `rg: ${copy}/a.txt went wrong\n`, { at, folder: copy })).toBe(`rg: ${at}/a.txt went wrong\n`);
+    expect(searched("json", JSON.stringify(`${copy}/a.txt`), { at, folder: copy })).toBe(JSON.stringify(`${at}/a.txt`));
     // As JSON writes a path: a quote in the copy's is escaped there.
     const quoted = { at, folder: join(base, 'da"ta', THREAD) };
     expect(searched("json", `{"data":{"path":{"text":${JSON.stringify(`${quoted.folder}/a.txt`).slice(0, -1)}`, quoted)).toBe(`{"data":{"path":{"text":"${at}/a.txt`);
