@@ -671,6 +671,21 @@ describe("a place another folder at the path takes", () => {
     expect(asked).toHaveLength(2);
   });
 
+  it("waits no longer than its hosts take: one that lets its copy go as it is told is not waited for", async () => {
+    const one: Copies = copies(undefined, {
+      replaced: (root) => {
+        replaced.push(root);
+        one.close(root);
+      },
+    });
+    await one.open(ROOT, bound(), signal());
+    replace();
+    const begun = performance.now();
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(replaced).toEqual([ROOT]);
+  });
+
   it("is the old folder's thread's no more: an operation of its that comes while the place is let go works nowhere, and asks the guest nothing", async () => {
     const was = bound();
     const one = copies();

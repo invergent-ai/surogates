@@ -367,6 +367,8 @@ export class Copies {
           told.set(open, open.takes);
           this.options.replaced?.(root);
         }
+        // Let go as they were told.
+        if (this.holding(key).length === 0) break;
         const left = until - performance.now();
         if (left <= 0) throw new Error(`a thread still works in the history of the folder that was at this path, and did not let it go within ${ms / 1000} s`);
         await this.change(left);
