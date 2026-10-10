@@ -175,13 +175,15 @@ async def landed(api, thread, turn: int) -> None:
     looked = dict((await landing.land("revisions", paths=paths))["revisions"])
     picked = await landing.history("pickup", author={"name": "you", "email": "user:you@surogate"}, trailers=trailers)
     committed = await landing.history("commit", author=author, trailers=trailers, pickup=picked["commit"])
-    for step, change in enumerate(committed["changes"]):
-        await landing.land("apply", saga=saga, step=step, expected=looked[change["path"]], **change)
+    applied = [{**change, "step": step} for step, change in enumerate(committed["changes"])]
+    for change in applied:
+        await landing.land("apply", saga=saga, expected=looked[change["path"]], **change)
     await landing.history(
         "record", turn=committed["commit"], applied=committed["changes"], author=author, trailers=trailers,
         main=picked["main"], pickup=picked["commit"],
     )
-    await landing.land("forget", saga=saga, applied=committed["changes"])
+    # Each apply named by the step it was applied under, as the computer forgets a landing.
+    await landing.land("forget", saga=saga, applied=applied)
 
 
 # -- a snapshot before every step ---------------------------------------------------------------------------------
