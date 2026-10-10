@@ -214,13 +214,13 @@ test("a row maps to the shell's ThreadRow field by field", () => {
   assert.deepEqual(threadRowOf({
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     status_line: "Waiting for thinkpad", progress: { done: 1, total: 2 },
-    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", thread_id: "t-1" }],
+    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", thread_id: "t-1", landing: "redoing" }],
     place: { kind: "device", device_id: "d-1", device_name: "thinkpad", online: false },
     created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }), {
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     statusLine: "Waiting for thinkpad", progress: { done: 1, total: 2 },
-    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1" }],
+    files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1", landing: "redoing" }],
     place: { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false },
     createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z", resolvedAt: null,
   });
@@ -229,6 +229,20 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z",
     resolved_at: "2026-10-07T12:00:00Z",
   }).place, { kind: "cloud" });
+  // A mark of a later server is no mark the page knows: the file is served with none, and every known mark as it is.
+  const marked = (landing) => threadRowOf({
+    id: "t-4", title: "Draft C", group: "idle", reason: null, status_line: null, progress: null,
+    files: [{ kind: "file", label: "c.md", ref: "c.md", thread_id: "t-4", landing }],
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).files[0].landing;
+  assert.deepEqual(["kept_apart", "toString", "", 7].map(marked), [null, null, null, null]);
+  assert.deepEqual(["landed", "redoing", "not_merged", "undone", null].map(marked), ["landed", "redoing", "not_merged", "undone", null]);
+  // A server from before file history sends a file with no mark: the page serves none.
+  assert.deepEqual(threadRowOf({
+    id: "t-3", title: "Draft B", group: "idle", reason: null, status_line: null, progress: null,
+    files: [{ kind: "file", label: "b.md", ref: "b.md", thread_id: "t-3" }],
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).files, [{ kind: "file", label: "b.md", ref: "b.md", threadId: "t-3", landing: null }]);
 });
 
 // The project routes over a fake fetch: *answer* gives each request's response, and every
@@ -431,7 +445,9 @@ test("a project route that refuses says the route's own words", async () => {
 });
 
 const EVENTS = 'event: ready\ndata: {}\n\nevent: change\ndata: {"thread_id": "t-1", "type": "session.complete"}\n\n'
-  + 'event: change\ndata: {"thread_id": null, "type": "worker.spawned"}\n\nevent: change\ndata: not json\n\n';
+  + 'event: change\ndata: {"thread_id": null, "type": "worker.spawned"}\n\nevent: change\ndata: not json\n\n'
+  // A landing another lock holder finished: a change of its thread's row, as any other is.
+  + 'event: change\ndata: {"thread_id": "t-2", "type": "history.landed"}\n\n';
 
 test("a project is followed at its own stream, over the fetch it was given: ready and each change", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -440,7 +456,7 @@ test("a project is followed at its own stream, over the fetch it was given: read
   const stop = routes.subscribe("p-1", (threadId) => heard.push(threadId));
   t.after(stop);
   await settled();
-  assert.deepEqual(heard, [null, "t-1", null, null]);
+  assert.deepEqual(heard, [null, "t-1", null, null, "t-2"]);
   assert.deepEqual(asked, [["GET", "/api/v1/workstreams/p-1/stream", undefined]]);
 });
 

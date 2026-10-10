@@ -26,6 +26,14 @@ const STATE_LABEL: Record<AgentChatWorker["state"], string> = {
 // A card names its first few files; the thread holds the rest.
 const FILES_SHOWN = 3;
 
+// A file's state in the project's files, after its name, where it has one to say.
+const MARKS: Record<NonNullable<AgentChatThreadRow["files"][number]["landing"]>, string | null> = {
+  landed: null,
+  redoing: "being redone",
+  not_merged: "not merged",
+  undone: "undone",
+};
+
 function firstLine(text: string | null): string | null {
   return text?.split("\n").find((line) => line.trim())?.trim() ?? null;
 }
@@ -110,21 +118,35 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
       )}
       {files.length > 0 && (
         <ul className="mt-1 flex flex-wrap gap-x-3 text-xs">
-          {files.slice(0, FILES_SHOWN).map((file) => (
-            <li key={`${file.kind}:${file.ref}`} className="min-w-0 max-w-full truncate" title={file.label}>
-              {file.kind === "file" && onFileSelect ? (
-                <button
-                  type="button"
-                  className="min-w-0 max-w-full truncate underline"
-                  onClick={() => onFileSelect(file.ref)}
-                >
-                  <bdi>{file.label}</bdi>
-                </button>
-              ) : (
-                <bdi>{file.label}</bdi>
-              )}
-            </li>
-          ))}
+          {files.slice(0, FILES_SHOWN).map((file) => {
+            // Only a live row's file has one: a report's files say nothing of the project's.
+            // A mark this card has no words for, as a later server may send, is no mark.
+            const landing = "landing" in file && file.landing && Object.hasOwn(MARKS, file.landing) ? file.landing : null;
+            const mark = landing ? MARKS[landing] : null;
+            return (
+              // A long name is cut, its mark never.
+              <li key={`${file.kind}:${file.ref}`} className="flex min-w-0 max-w-full" title={file.label}>
+                {file.kind === "file" && onFileSelect ? (
+                  <button
+                    type="button"
+                    className="min-w-0 truncate underline"
+                    onClick={() => onFileSelect(file.ref)}
+                  >
+                    <bdi>{file.label}</bdi>
+                  </button>
+                ) : (
+                  <span className="min-w-0 truncate">
+                    <bdi>{file.label}</bdi>
+                  </span>
+                )}
+                {mark && (
+                  <span data-mark={landing} className="shrink-0 whitespace-pre text-muted-foreground">
+                    {` · ${mark}`}
+                  </span>
+                )}
+              </li>
+            );
+          })}
           {files.length > FILES_SHOWN && <li>+{files.length - FILES_SHOWN} more</li>}
         </ul>
       )}

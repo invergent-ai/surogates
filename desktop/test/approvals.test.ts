@@ -1067,7 +1067,7 @@ describe("the browser on this computer", () => {
       for (const url of [
         "https://localhost:3000/", "http://example.com:3000/", "http://app.localhost:3000/", "http://0.0.0.0:3000/", "http://127.0.0.2:3000/",
         "http://[::ffff:127.0.0.1]:3000/", "http://[::]:3000/", "http://localhost.example.com:3000/", "http://user@localhost:3000/", "ws://localhost:3000/",
-        "not an address",
+        "http://localhost.:3000/", "not an address",
       ]) {
         expect(await approvals.admit(open(url), never()), url).toBeNull();
       }
@@ -1175,20 +1175,21 @@ describe("the browser on this computer", () => {
 
     it("says when another chat's server has the port in the browser, and gives it to the chat allowed last", async () => {
       bind(ROOT, "free");
-      bind(OTHER, "free");
+      // The other chat works on another folder: each is named by its own.
+      journal.bindings.add({ root: OTHER, nonce: "nonce-other", folder: "/home/me/taxes", dev: 1, ino: 2, boot: BOOT_ID, mode: "free", boundAt: 2 });
       for (const root of [ROOT, OTHER]) journal.bindings.allowBrowser(root);
       journal.bindings.allowPort(OTHER, 3000);
       user = new User("deny");
       approvals = made(user);
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toEqual(PORT_DENIED(3000));
-      expect(user.asked).toEqual([{ ...port(3000), held: OTHER }]);
+      expect(user.asked).toEqual([{ ...port(3000), held: { root: OTHER, folder: "/home/me/taxes" } }]);
       expect(journal.bindings.portOwner(3000)).toBe(OTHER);
       user.auto = "allow_session";
       expect(await approvals.admit(open("http://localhost:3000/"), never())).toBeNull();
       expect([journal.bindings.portOwner(3000), journal.bindings.ports(OTHER)]).toEqual([ROOT, []]);
       // The chat it was taken from is asked again at its next navigation there, and told who has it.
       expect(await approvals.admit(open("http://localhost:3000/", OTHER), never())).toBeNull();
-      expect(user.asked.at(-1)).toEqual({ ...port(3000, OTHER), held: ROOT });
+      expect(user.asked.at(-1)).toEqual({ ...port(3000, OTHER), chat: { ...chat(OTHER), root: OTHER, folder: "/home/me/taxes" }, held: { root: ROOT, folder: FOLDER } });
     });
 
     it("refuses a port it could not record, or whose owner it could not read: the proxy lets through only what is kept", async () => {

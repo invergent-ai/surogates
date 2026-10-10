@@ -44,6 +44,8 @@ PROJECT_WIDE_TYPES = frozenset(t.value for t in (
 RESOLVED = "thread.resolved"
 REOPENED = "thread.reopened"
 EXPIRED = "inbox.expired"
+#: A landing finished by another lock holder: a change to a thread's files that no turn's end names.
+LANDED = "history.landed"
 
 
 def channel(workstream_id: UUID | str) -> str:

@@ -155,4 +155,45 @@ describe("the projects the page serves", () => {
     expect(heard).toEqual([]);
     expect(sent).toHaveLength(2);
   });
+
+  it("take a row's files with their marks, and a mark it does not know as no mark", async () => {
+    const { source } = page();
+    const marked = source.threads(REPORT);
+    source.answered(1, { ok: threads[REPORT] });
+    const rows = await marked;
+    expect(rows.flatMap((row) => row.files.map((file) => file.landing))).toEqual(
+      expect.arrayContaining(["landed", "redoing", "not_merged", "undone", null]),
+    );
+    // A later agent's mark, or what is no mark at all: the list is taken whole, that file with none.
+    const later = source.threads(REPORT);
+    const odd = ["kept_apart", "toString", "", 7, { mark: "landed" }];
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.idle)!;
+    const files = [...odd.map((landing, at) => ({ ...row.files[0]!, ref: `odd-${at}.csv`, landing })), ...row.files];
+    source.answered(2, { ok: threads[REPORT]!.map((found) => (found === row ? { ...row, files } : found)) });
+    const taken = await later;
+    expect(taken.map((found) => found.id)).toEqual(threads[REPORT]!.map((found) => found.id));
+    expect(taken.find((found) => found.id === row.id)!.files.map((file) => [file.ref, file.landing])).toEqual([
+      ...odd.map((_, at) => [`odd-${at}.csv`, null]), ...row.files.map((file) => [file.ref, file.landing]),
+    ]);
+  });
+
+  it("take the rows of an agent older than the app, whose files carry no mark, with none", async () => {
+    const { source } = page();
+    const asked = source.threads(REPORT);
+    // As a page built before file history maps a row: no landing on a file.
+    const older = threads[REPORT]!.map(({ files, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
+    source.answered(1, { ok: older });
+    const rows = await asked;
+    expect(rows.map((row) => row.id)).toEqual(threads[REPORT]!.map((row) => row.id));
+    expect(rows.flatMap((row) => row.files).length).toBeGreaterThan(0);
+    expect(rows.every((row) => row.files.every((file) => file.landing === null))).toBe(true);
+  });
+
+  it("take a row of an agent newer than the app, leaving out what it does not know of", async () => {
+    const { source } = page();
+    const asked = source.threads(REPORT);
+    const row = threads[REPORT]![0]!;
+    source.answered(1, { ok: [{ ...row, landingId: "41", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
+    expect(await asked).toEqual([row]);
+  });
 });

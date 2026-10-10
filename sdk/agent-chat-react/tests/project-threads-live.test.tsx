@@ -240,6 +240,30 @@ describe("a thread's card, live", () => {
     expect(status()).toBe("Working");
   });
 
+  it("reads a thread's row again when the stream says a landing of it was finished, and marks its files as they stand", async () => {
+    const stream = new FakeStream();
+    let current = row({ group: "idle", files: [{ kind: "file", label: "Budget.xlsx", ref: "Budget.xlsx", landing: "redoing" }] });
+    const live = project(stream, () => [current]);
+    const adapter = { ...NO_BROWSER_ADAPTER, ...live } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => root?.render(<Live adapter={adapter} />));
+    const files = () => [...container!.querySelectorAll("li")].map((item) => item.textContent);
+    stream.emit("ready");
+    await settle();
+    expect(files()).toEqual(["Budget.xlsx · being redone"]);
+    // No event of the thread's own: another lock holder finished its landing.
+    current = row({ group: "idle", files: [
+      { kind: "file", label: "Budget.xlsx", ref: "Budget.xlsx", landing: "not_merged" },
+      { kind: "file", label: "b.md", ref: "b.md", landing: "landed" },
+    ] });
+    stream.emit("change", { thread_id: THREAD, type: "history.landed" });
+    await settle();
+    expect(live.listProjectThreads).toHaveBeenLastCalledWith({ projectId: "project-1", threadId: THREAD });
+    expect(files()).toEqual(["Budget.xlsx · not merged", "b.md"]);
+  });
+
   it("gives a master's cards, through AgentChat, their rows, their Start and their View thread", async () => {
     const PROPOSAL = "5d1c0e7a-3f42-4b8e-9a61-2c7d8e9f0a1b";
     const events = new FakeStream();

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import type { BrowserContext, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 
 import { ADDRESS_MS } from "../src/binding/approvals.js";
 import { CANCELLED, type Launch, PAUSED } from "../src/browser/client.js";
@@ -29,7 +30,7 @@ import {
   NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
-import { BrowserProxy } from "../src/browser/proxy.js";
+import { BrowserProxy, notOpenPage } from "../src/browser/proxy.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
 
@@ -3087,6 +3088,8 @@ new Image().src = "http://" + own("image") + "/";
     // The port the browser names is that of a service of this computer's own, which listens there on both of its
     // loopback's families: a dial that strays to either is heard.
     let chat: Server;
+    // Its live sockets: each is told "reload" as it opens, and answered what it says.
+    let sockets: WebSocketServer;
     let door: TcpServer;
     let own: TcpServer[];
     let at: number;
@@ -3100,6 +3103,14 @@ new Image().src = "http://" + own("image") + "/";
     const NOT_ALLOWED = () => ({
       error: { type: "browser", message: `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${at})` },
     });
+    // A page's live socket to *to*, kept as window.live: what it heard first, the server's word and its own sent back, or that none opened.
+    const LIVE = (to = `"ws://" + location.host + "/live"`) => `return new Promise((done) => {
+  const socket = window.live = new WebSocket(${to});
+  const heard = [];
+  window.ended = new Promise((ended) => { socket.onclose = (event) => { ended("closed " + event.code + " " + event.wasClean); done("no socket"); }; });
+  socket.onmessage = (event) => { if (heard.push(event.data) === 2) done(heard.join(", ")); };
+  socket.onopen = () => socket.send("hello");
+});`;
 
     beforeEach(async () => {
       asked = [];
@@ -3127,6 +3138,13 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
 </script>`);
         }
         if (req.url === "/code.js") return void res.writeHead(200, { "content-type": "text/javascript" }).end("window.coded = 'coded';");
+        // A service worker that would answer every request of the port's pages.
+        if (req.url === "/sw.js") {
+          return void res.writeHead(200, { "content-type": "text/javascript" })
+            .end(`self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", (event) => event.respondWith(new Response("<title>Served by the worker</title>", { headers: { "content-type": "text/html" } })));`);
+        }
         // An answer that goes on until the browser lets go of it.
         if (req.url?.startsWith("/endless")) {
           res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" });
@@ -3135,9 +3153,14 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
         }
         res.writeHead(200, { "content-type": "text/html", "access-control-allow-origin": "*" }).end(req.url === "/api" ? "api" : "<title>Chat page</title>");
       });
-      chat.on("upgrade", (req, socket) => {
+      sockets = new WebSocketServer({ noServer: true });
+      chat.on("upgrade", (req, socket, head) => {
         asked.push(`SOCKET ${req.url} from ${req.headers.origin}`);
-        socket.destroy();
+        sockets.handleUpgrade(req, socket, head, (live) => {
+          live.on("error", () => {});
+          live.on("message", (said) => live.send(`echo ${String(said)}`));
+          live.send("reload");
+        });
       });
       await new Promise<void>((done) => chat.listen(0, "127.0.0.1", () => done()));
       const chatPort = (chat.address() as { port: number }).port;
@@ -3166,6 +3189,7 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
     afterEach(async () => {
       // The browser first: its connections end with it.
       await host.close();
+      for (const live of sockets.clients) live.terminate();
       for (const socket of behind) socket.destroy();
       await Promise.all([chat, door, ...own].map((server) => new Promise<void>((done) => server.close(() => done()))));
       rmSync(folder, { recursive: true, force: true });
@@ -3185,10 +3209,16 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
       const named4 = knocks.length;
       expect((await op(a, "browser.navigate", { url: `http://[::1]:${at}/` })).ok?.title).toBe("Chat page");
       expect([new Set(knocks.slice(0, named4)), new Set(knocks.slice(named4))]).toEqual([new Set([`${KEY} ${at}`]), new Set([`${KEY} ${at} 6`])]);
-      // A page's live socket is not carried yet: it does not open, and the chat's server hears none.
+      // The page's live socket goes the same way, and by the port's other names from the page too.
       asked = [];
-      expect(await script(a, `return new Promise((done) => { const socket = new WebSocket("ws://" + location.host + "/live"); socket.onopen = () => done("open"); socket.onerror = () => done("no socket"); });`)).toBe("no socket");
-      expect(asked).toEqual([]);
+      expect(await script(a, LIVE())).toBe("reload, echo hello");
+      expect(await script(a, LIVE(`"ws://localhost:${at}/live-by-name"`))).toBe("reload, echo hello");
+      expect(await script(a, LIVE(`"ws://127.0.0.1:${at}/live-by-address"`))).toBe("reload, echo hello");
+      expect(asked).toEqual([`SOCKET /live from http://[::1]:${at}`, `SOCKET /live-by-name from http://[::1]:${at}`, `SOCKET /live-by-address from http://[::1]:${at}`]);
+      expect(knocks.slice(-3)).toEqual([`${KEY} ${at} 6`, `${KEY} ${at}`, `${KEY} ${at}`]);
+      // Over TLS it opens no more than https does: the proxy cannot see who asks inside it.
+      expect(await script(a, LIVE(`"wss://localhost:${at}/secure"`))).toBe("no socket");
+      expect(asked).toHaveLength(3);
       // This computer's own service on that very port heard nothing, on either family.
       expect(hits).toEqual([]);
     }, 60_000);
@@ -3215,7 +3245,7 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
       expect(hits).toEqual([]);
     }, 90_000);
 
-    it("says why a navigation to a chat's port did not open: not allowed, taken back, not yet told at the door, over https, or nothing answering there now", async () => {
+    it("says why a navigation to a chat's port did not open: not allowed, taken back, not yet told at the door, over https, a sandbox that is full, or nothing answering there now", async () => {
       const a = session();
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/` })).toEqual(NOT_ALLOWED());
       host.forwards([at], doorPath(), KEY);
@@ -3235,6 +3265,22 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?nothing` })).toEqual(NOT_RUNNING);
       host.forwards([at], join(folder, "gone.sock"), KEY);
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?gone` })).toEqual(NOT_RUNNING);
+      // A sandbox that holds every connection it takes from the browser, the device's or the chat's, is not one whose server stopped.
+      host.forwards([at], doorPath(), "cd".repeat(32));
+      for (const full of ["502 busy", "502 EMFILE"]) {
+        closed = full;
+        expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?${full.slice(4)}` }), full).toEqual({
+          error: {
+            type: "browser",
+            message: `The sandbox holds as many connections from the agent's browser as it takes, so port ${at} of this chat's servers did not open. `
+              + `Close a page of a chat's servers in the browser, then open http://localhost:${at}/ again.`,
+          },
+        });
+      }
+      // A name with a dot after it is no chat's: this computer's own, as ever.
+      expect(await op(a, "browser.navigate", { url: `http://localhost.:${at}/` })).toEqual({
+        error: { type: "browser", message: `The agent's browser does not reach this computer's own services (localhost:${at})` },
+      });
       // Taken back: the page it had open reaches the port no more.
       host.forwards([at], doorPath(), KEY);
       expect(await op(a, "browser.navigate", { url: `http://localhost:${at}/?again` })).toMatchObject({ ok: { title: "Chat page" } });
@@ -3264,17 +3310,88 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
       expect(hits).toEqual([]);
     }, 60_000);
 
-    it("asks nobody and carries nothing when its user, holding the browser, goes to a port not allowed: the proxy refuses it, as it does a page's own request there", async () => {
+    it("carries a page's live socket for as long as the page keeps it: closed by the page, with its tab, at the door, or with the port taken back, it ends whole and nothing stays behind the door", async () => {
+      host.forwards([at], doorPath(), KEY);
+      const [a, b] = [session(), session()];
+      // What is open behind the door once the pages' own requests have ended: their sockets.
+      const live = () => expect.poll(() => [behind.size, sockets.clients.size], { timeout: 5_000 });
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` })).ok?.title).toBe("Chat page");
+      expect(await script(a, LIVE())).toBe("reload, echo hello");
+      await live().toEqual([1, 1]);
+      // A word of the server's reaches the page long after: a file changed, and the page is told to load again.
+      await script(a, `window.told = new Promise((done) => { window.live.onmessage = (event) => done(event.data); }); return 1;`);
+      for (const client of sockets.clients) client.send("changed");
+      expect(await script(a, "return window.told;")).toBe("changed");
+      // The page closes it: a close the two ends agreed on.
+      expect(await script(a, "window.live.close(); return window.ended;")).toBe("closed 1005 true");
+      await live().toEqual([0, 0]);
+      // Its tab closed with a socket open.
+      expect(await script(a, LIVE())).toBe("reload, echo hello");
+      await live().toEqual([1, 1]);
+      expect(await op(a, "browser.close")).toEqual({ ok: { closed: true } });
+      await live().toEqual([0, 0]);
+      // Ended behind the door, as the sandbox ends the connection idle longest when a chat has every one it takes:
+      // the page hears its socket close as a connection lost, and its next one opens.
+      expect((await op(b, "browser.navigate", { url: `http://127.0.0.1:${at}/?b` })).ok?.title).toBe("Chat page");
+      expect(await script(b, LIVE())).toBe("reload, echo hello");
+      await live().toEqual([1, 1]);
+      for (const socket of behind) socket.destroy();
+      expect(await script(b, "return window.ended;")).toBe("closed 1006 false");
+      expect(await script(b, LIVE())).toBe("reload, echo hello");
+      await live().toEqual([1, 1]);
+      // The port taken back: it ends at once, and no socket opens there after.
+      host.forwards([], doorPath(), KEY);
+      expect(await script(b, "return window.ended;")).toBe("closed 1006 false");
+      await live().toEqual([0, 0]);
+      expect(await script(b, LIVE())).toBe("no socket");
+      expect(hits).toEqual([]);
+    }, 60_000);
+
+    it("lets no service worker of a chat's page stand between another page and the port", async () => {
+      host.forwards([at], doorPath(), KEY);
+      const [a, b] = [session(), session()];
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` })).ok?.title).toBe("Chat page");
+      // A chat's page is a secure context, which may have service workers: its try at one gives it nothing, and
+      // the worker's script is not asked of the chat's server.
+      expect(await script(a, `return [isSecureContext, String(await navigator.serviceWorker.register("/sw.js"))];`)).toEqual([true, "undefined"]);
+      expect(asked.filter((line) => line.includes("/sw.js"))).toEqual([]);
+      // One registered through the prototype's own register is the page's own request for its script, and answers no page.
+      await script(a, `await ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, "/sw.js");
+await Promise.race([navigator.serviceWorker.ready, new Promise((done) => setTimeout(done, 1000))]);`);
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/?again` })).ok?.title).toBe("Chat page");
+      expect(await script(a, "return navigator.serviceWorker.controller === null;")).toBe(true);
+      // Another chat's tab at the port is answered by the chat's server, its page's own request too.
+      expect((await op(b, "browser.navigate", { url: `http://localhost:${at}/?other` })).ok?.title).toBe("Chat page");
+      expect(await script(b, `return fetch("/api", { cache: "no-store" }).then((answer) => answer.text());`)).toBe("api");
+      expect(await script(b, "return navigator.serviceWorker.controller === null;")).toBe(true);
+      expect(hits).toEqual([]);
+    }, 60_000);
+
+    it("asks nobody and carries nothing when its user, holding the browser, goes to a port not allowed: the tab is shown the proxy's own page, which says what the port is", async () => {
       const a = session();
       expect((await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1")).ok?.opened).toBe(true);
       const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
       host.pause("chat-1", true);
       // A tab its user opens themselves, and an address of a chat's server they go to in it.
       const theirs = await context.newPage();
-      const answer = await theirs.goto(`http://localhost:${at}/theirs`).catch(() => null);
-      expect(answer?.status() ?? 403).toBe(403);
-      // The browser's own page for the refusal, once it has come.
-      await theirs.waitForURL((url) => url.protocol === "chrome-error:", { timeout: 5_000 }).catch(() => {});
+      const answer = await theirs.goto(`http://localhost:${at}/theirs/<b>there</b>?"><script>document.title = "theirs"</script>`);
+      expect([answer?.status(), await answer?.text()]).toEqual([403, notOpenPage(at)]);
+      expect(answer?.headers()).toMatchObject({
+        "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
+      });
+      expect([await theirs.title(), await theirs.locator("body").innerText()]).toEqual([
+        `Port ${at} is not open`,
+        `Port ${at} of a chat's servers is not open in this browser\n\nIt opens when that chat's agent navigates to it and the chat's user allows it.\n\n`
+          + "The ports allowed now are listed in Surogate's Settings, under Folders and permissions.",
+      ]);
+      // A page that sends its tab there is shown the same.
+      const sent = await context.newPage();
+      await sent.goto("http://fixture.test/second");
+      await sent.evaluate(`location.href = "http://127.0.0.1:${at}/sent"`);
+      await expect.poll(() => sent.title(), { timeout: 10_000 }).toBe(`Port ${at} is not open`);
+      // Nothing in that page runs or loads: it asks for nothing of the port.
+      expect(await sent.evaluate(`fetch("/fetched", { cache: "no-store" }).then(() => "fetched", () => "nothing")`)).toBe("nothing");
+      await sent.close();
       expect([asked, knocks, hits]).toEqual([[], [], []]);
       // Allowed for a chat, the same tab opens it: the port is the browser's, whichever tab asks.
       host.forwards([at], doorPath(), KEY);
