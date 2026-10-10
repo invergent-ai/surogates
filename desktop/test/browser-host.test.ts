@@ -3101,6 +3101,8 @@ new Image().src = "http://" + own("image") + "/";
     let closed: string;
     // A second port the door carries to the same server, where a test opens one: none unless it does.
     let second: number;
+    // Whose server the chat's answers say they are from: a port's next chat is served by its own.
+    let serving: string;
     const doorPath = () => join(folder, "browser.sock");
     const NOT_ALLOWED = () => ({
       error: { type: "browser", message: `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${at})` },
@@ -3120,6 +3122,7 @@ new Image().src = "http://" + own("image") + "/";
       behind = new Set();
       closed = "403 refused";
       second = 0;
+      serving = "first";
       for (;;) {
         const [six, four] = own = [0, 1].map(() => createTcp((socket) => {
           hits.push("this computer's own");
@@ -3141,6 +3144,18 @@ fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.text()).the
 </script>`);
         }
         if (req.url === "/code.js") return void res.writeHead(200, { "content-type": "text/javascript" }).end("window.coded = 'coded';");
+        // A page and its script that the server lets be kept for an hour and longer, and checked by their date.
+        if (req.url === "/kept" || req.url === "/kept.js") {
+          const kept = { "cache-control": "public, max-age=3600, immutable", "last-modified": new Date(Date.now() - 30 * 24 * 3600 * 1000).toUTCString() };
+          return void (req.url === "/kept"
+            ? res.writeHead(200, { "content-type": "text/html", ...kept }).end(`<title>Kept by ${serving}</title><script src="/kept.js"></script>`)
+            : res.writeHead(200, { "content-type": "text/javascript", ...kept }).end(`window.by = "${serving}";`));
+        }
+        // A page of the port that writes its local storage on and on, and a page of the second port that frames it.
+        if (req.url === "/writer") {
+          return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Writer</title><script>setInterval(() => localStorage.setItem("late", "by the frame"), 50);</script>`);
+        }
+        if (req.url === "/framing") return void res.writeHead(200, { "content-type": "text/html" }).end(`<title>Framing</title><iframe src="http://localhost:${at}/writer"></iframe>`);
         // A service worker that would answer every request of the port's pages.
         if (req.url === "/sw.js") {
           return void res.writeHead(200, { "content-type": "text/javascript" })
@@ -3449,6 +3464,83 @@ return { local: localStorage.getItem("kept"), cookies: document.cookie.split("; 
       expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t4", [second]: "u1" });
       expect(hits).toEqual([]);
     }, 120_000);
+
+    it("leaves nothing of a port's former chat once the port turns: no page holding a document of its origins, a frame of one in another port's page or a blob tab, and no answer of its server kept to be shown again", async () => {
+      second = at === 65_535 ? at - 1 : at + 1;
+      const [FIRST, NEXT] = ["chat-first", "chat-next"];
+      const at_ = (session: string, address: string, root: string) => op(session, "browser.navigate", { url: address }, root).then((answer) => answer.ok?.title);
+      host.forwards([at, second], doorPath(), KEY, [[at, "t1"], [second, "u1"]]);
+      const [a, b, c] = [session(), session(), session()];
+      // The first chat's server's page and script, which it lets be kept.
+      expect(await at_(a, `http://localhost:${at}/kept`, FIRST)).toBe("Kept by first");
+      expect(await script(a, "return window.by;", FIRST)).toBe("first");
+      // A blob tab of the port's origin, opened by its page, and a frame of it in the chat's page at its other port: each
+      // writes the port's local storage on and on.
+      expect(await script(a, `window.open(URL.createObjectURL(new Blob(['<title>Blob</title><script>setInterval(() => localStorage.setItem("late", "by the blob tab"), 50);<' + '/script>'], { type: "text/html" })));
+return 1;`, FIRST)).toBe(1);
+      expect(await at_(c, `http://localhost:${second}/framing`, FIRST)).toBe("Framing");
+      const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+      await expect.poll(() => context.pages().some((page) => page.url().startsWith(`blob:http://localhost:${at}/`)), { timeout: 10_000 }).toBe(true);
+      const blob = context.pages().find((page) => page.url().startsWith(`blob:http://localhost:${at}/`))!;
+      const framing = context.pages().find((page) => page.url() === `http://localhost:${second}/framing`)!;
+      await expect.poll(() => blob.evaluate(`localStorage.getItem("late")`), { timeout: 10_000 }).not.toBeNull();
+      await expect.poll(() => framing.frames()[1]?.evaluate(`localStorage.getItem("late")`).catch(() => null), { timeout: 10_000 }).not.toBeNull();
+      // The port moves to another chat, whose server answers as its own.
+      serving = "next";
+      host.forwards([at, second], doorPath(), KEY, [[at, "t2"], [second, "u1"]]);
+      asked = [];
+      // The next chat's tab is answered by its own server, the page and its script, both asked of it.
+      expect(await at_(b, `http://localhost:${at}/kept`, NEXT)).toBe("Kept by next");
+      expect(await script(b, "return window.by;", NEXT)).toBe("next");
+      expect(asked).toEqual(["GET /kept from nobody", `GET /kept.js from http://localhost:${at}/kept`]);
+      // Every page that held a document of the port's origins closed, the other port's page that framed it too, and
+      // nothing writes there after the clear.
+      expect([blob.isClosed(), framing.isClosed()]).toEqual([true, true]);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(await script(b, `return localStorage.getItem("late");`, NEXT)).toBeNull();
+      // The chat's sessions find a new tab.
+      expect((await op(c, "browser.navigate", { url: "http://fixture.test/" }, FIRST)).ok?.opened).toBe(true);
+      expect(hits).toEqual([]);
+    }, 90_000);
+
+    it("carries nothing to a port that turned until the running browser's profile is cleared of it: the former chat's page still open there reaches no server meanwhile", async () => {
+      const [FIRST, NEXT] = ["chat-first", "chat-next"];
+      host.forwards([at], doorPath(), KEY, [[at, "t1"]]);
+      const [a, kept] = [session(), session()];
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` }, FIRST)).ok?.title).toBe("Chat page");
+      // A tab elsewhere, so the browser runs on once the former page closes.
+      expect((await op(kept, "browser.navigate", { url: "http://fixture.test/" }, FIRST)).ok?.title).toBe("Fixture");
+      const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+      const former = context.pages().find((page) => page.url() === `http://localhost:${at}/`)!;
+      // The clear held back until the test lets it go.
+      const slow = host as unknown as { clearTurned: (...args: unknown[]) => Promise<void> };
+      const clear = slow.clearTurned.bind(host);
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      slow.clearTurned = async (...args) => {
+        await held;
+        return clear(...args);
+      };
+      host.forwards([at], doorPath(), KEY, [[at, "t2"]]);
+      const knocked = knocks.length;
+      asked = [];
+      // The former chat's page, open at the port while its clear waits: what it asks of the port is refused at the proxy,
+      // and goes no further, a fetch and a reload alike.
+      expect(await former.evaluate(`fetch("/api", { method: "POST", body: "x" }).then((answer) => answer.status, () => "failed")`)).toBe(403);
+      await former.reload().catch(() => {});
+      expect(await former.title()).toBe(`Port ${at} is not open`);
+      expect([knocks.length - knocked, asked]).toEqual([0, []]);
+      // Cleared: the port is carried again, to the next chat's tab, and the former page is gone.
+      release();
+      const b = session();
+      expect((await op(b, "browser.navigate", { url: `http://localhost:${at}/` }, NEXT)).ok?.title).toBe("Chat page");
+      expect([former.isClosed(), asked]).toEqual([true, ["GET / from nobody"]]);
+      // In the same browser: carried again once cleared, and not by a launch.
+      expect(await (host as unknown as { running: Promise<BrowserContext> }).running).toBe(context);
+      expect(hits).toEqual([]);
+    }, 60_000);
 
     it("asks nobody and carries nothing when its user, holding the browser, goes to a port not allowed: the tab is shown the proxy's own page, which says what the port is", async () => {
       const a = session();

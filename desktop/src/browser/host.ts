@@ -550,6 +550,12 @@ function clearedIn(profile: string): Record<string, string> {
   return {};
 }
 
+// The chat port a document at *address* is of, by its origin: a blob's address is its origin's too.
+const portOfDocument = (address: string): number | null => {
+  const origin = URL.parse(address)?.origin;
+  return origin === undefined || origin === "null" ? null : chatPortOf(origin);
+};
+
 function keepCleared(profile: string, record: Record<string, string>): void {
   const path = join(profile, CLEARED);
   writeFileSync(`${path}.${process.pid}.tmp`, JSON.stringify(record));
@@ -813,22 +819,35 @@ export class BrowserHost {
    * device knocks with there (BrowserProxy.forwards): what it carries to a port no longer among them ends now.
    * And the mark of each port's last *turns*: a running or launching browser is cleared of each port that turned
    * since its profile was (clearTurned), before any operation told after this acts; another profile, at its launch.
+   * Until it is, its proxy carries nothing to such a port: a page of the port's former chat still open there would
+   * reach the new chat's server, with the former's storage.
    */
   forwards(ports: readonly number[], door: string, key: string, turns: ReadonlyArray<readonly [number, string]>): void {
     this.forwarded = { ports: [...ports], door, key };
-    this.proxy?.server.forwards(ports, door, key);
     this.turns = new Map(turns);
     const running = this.running;
+    this.carry(running === null ? null : this.profile);
     if (running !== null) this.clearing = this.clearing.then(() => this.clearRunning(running)).catch(() => {});
   }
 
-  // The browser *running* launches, cleared of each port that turned once it runs. One whose clear fails closes
-  // whole before anything acts in it: the next launch clears it.
+  // What the proxy carries: every port told, but one that turned since *profile*, the running browser's, was last
+  // cleared of it. With no browser, every port told: the next launch holds back what its own profile owes.
+  private carry(profile: string | null): void {
+    if (!this.forwarded) return;
+    const record = profile === null ? null : clearedIn(profile);
+    const owed = new Set(record === null ? [] : [...this.turns].filter(([port, turn]) => record[String(port)] !== turn).map(([port]) => port));
+    this.proxy?.server.forwards(this.forwarded.ports.filter((port) => !owed.has(port)), this.forwarded.door, this.forwarded.key);
+  }
+
+  // The browser *running* launches, cleared of each port that turned once it runs, and its proxy carries those
+  // ports again. One whose clear fails closes whole before anything acts in it: the next launch clears it, and
+  // its proxy carries them only then.
   private async clearRunning(running: Promise<BrowserContext>): Promise<void> {
     const context = await running.catch(() => null);
     if (context === null || this.live !== context || this.profile === null) return;
     try {
       await this.clearTurned(context, this.profile);
+      this.carry(this.profile);
     } catch {
       await this.closePages(context.pages());
     }
@@ -836,17 +855,17 @@ export class BrowserHost {
 
   /**
    * What *context*'s profile, *profile*, still keeps of each chat port that turned since it was last cleared of it
-   * there: every page whose address is at one of the port's origins closes (a frame of one in another page stays),
-   * then what each origin stores goes, its service workers with it, and so do the cookies the port's pages set; and
-   * the profile's record says so. Nothing else is touched: another port's origins, and the cookies another port set.
-   * A browser that quits with the last of those pages is cleared at its next launch.
+   * there: every page that holds a document of one of the port's origins closes, at its own address or in a frame,
+   * a blob's by its origin; then what each origin stores goes, its service workers with it, and so do the cookies
+   * the port's pages set; and the profile's record says so. Nothing else is touched: another port's origins, and the
+   * cookies another port set. A browser that quits with the last of those pages is cleared at its next launch.
    */
   private async clearTurned(context: BrowserContext, profile: string): Promise<void> {
     const record = clearedIn(profile);
     const due = [...this.turns].filter(([port, turn]) => record[String(port)] !== turn);
     if (due.length === 0) return;
     const ports = new Set(due.map(([port]) => port));
-    const turned = (page: Page) => ports.has(chatPortOf(page.url()) ?? 0);
+    const turned = (page: Page) => page.frames().some((frame) => ports.has(portOfDocument(frame.url()) ?? 0));
     await this.closePages(context.pages().filter(turned));
     const keeper = context.pages().find((page) => !page.isClosed());
     if (keeper === undefined) return;
@@ -2107,8 +2126,8 @@ export class BrowserHost {
       const server = new BrowserProxy(this.options.proxy);
       return { server, port: await server.listen() };
     })();
-    // What was told before any proxy ran.
-    if (this.forwarded) this.proxy.server.forwards(this.forwarded.ports, this.forwarded.door, this.forwarded.key);
+    // What was told before any proxy ran, but a port the profile has not been cleared of since it turned.
+    this.carry(launch.profile);
     keepWebRtcProxied(launch.profile);
     // Its first launch: what a host that was killed left staged here goes, and this host's own folder is made.
     let staging = this.staging;
@@ -2135,8 +2154,10 @@ export class BrowserHost {
       await this.bypassWorkers(context);
       await this.saysDownloads(context, staging);
       this.spare = await this.proxied(context, this.proxy.server);
-      // Before anything acts in it: what its profile kept of the chat ports that turned since it last ran.
+      // Before anything acts in it: what its profile kept of the chat ports that turned since it last ran. Then its
+      // proxy carries them.
       await this.clearTurned(context, launch.profile);
+      this.carry(launch.profile);
     } catch (error) {
       await context.close().catch(() => {});
       throw error;

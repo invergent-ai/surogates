@@ -97,11 +97,15 @@ prompt names the chat by its folder, and says which chat has the port when it is
 Settings → Folders and permissions lists each port under its chat, with Take back. It goes
 then, when the chat's browser is taken back, or when the chat is deleted, and what the
 browser had open to it ends at once. Each time a port is given to a chat, moves to another or
-goes, the browser's pages at its three names close, and what they stored there goes too:
-local storage, IndexedDB, Cache Storage, service workers and the cookies the port's pages
-set, in the browser running then and in each of the agent's browser profiles at its next
-launch, before anything acts in it. A cookie is its host's and not its port's, so a page of
-one port still reads the cookies another port's pages set. A page's WebSocket to such a port
+goes, every page of the browser that holds a document of its three names closes, at its own
+address, in a frame or as a blob of one, and what they stored there goes too: local storage,
+IndexedDB, Cache Storage, service workers and the cookies the port's pages set, in the browser
+running then and in each of the agent's browser profiles at its next launch, before anything
+acts in it. Until then the proxy carries nothing to that port. The browser keeps no answer of a
+chat's server (the proxy marks each `no-store`), so a port's next chat is always answered by its
+own. A cookie is its host's and not its port's, so a page of one port still reads the cookies
+another port's pages set; and an `about:blank` window a page of the port opened, which shares
+its origin, is not seen as one of its pages. A page's WebSocket to such a port
 is carried too, when it is a page of an allowed port that opens it, so a development server's
 page reloads by itself; https and `wss://` are not. A chat's sandbox takes 160 connections from the browser
 at once: past them the one that has carried nothing for longest ends, which a page hears as

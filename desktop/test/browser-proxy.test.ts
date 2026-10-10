@@ -86,6 +86,13 @@ beforeEach(async () => {
     // A site that asks for a proxy's sign-in, as only a proxy may.
     if (req.url === "/sign-in") return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"', "x-of-the-site": "chosen" }).end("the site's own words");
     if (req.url === "/sign-in-bare") return void res.writeHead(407).end("the site's own words");
+    // An answer its server lets be kept, an hour and longer, and checked again by its date and its tag.
+    if (req.url === "/kept") {
+      return void res.writeHead(200, {
+        "content-type": "text/plain", "cache-control": "public, max-age=3600, immutable", expires: "Thu, 01 Jan 2099 00:00:00 GMT",
+        "last-modified": "Mon, 01 Jan 2024 00:00:00 GMT", etag: '"kept"',
+      }).end("kept");
+    }
     res.writeHead(201, { "content-type": "text/plain" }).end("hello from the site");
   });
   // Reads all it is sent, and never closes, the browser's end or not.
@@ -966,6 +973,26 @@ describe("a chat's own servers, through the browser's proxy", () => {
     expect([await navigated("0.0.0.0:3003"), await navigated("app.localhost:3003"), await navigated("localhost.:3003")]).toEqual([BARE, BARE, BARE]);
     expect(await raw(`GET http://localhost:3003/ HTTP/1.1\r\nHost: localhost:3003\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\r\n`)).toMatch(CHALLENGED);
     expect([knocks, dialed, seen]).toEqual([[], [], []]);
+  });
+
+  it("lets the browser keep nothing a chat's server answers, whatever the server says of it, by each of its names: a public site's answer keeps its own word", async () => {
+    // The answer's head, as the browser reads it.
+    const head = (target: string, headers: Record<string, string>) => new Promise<IncomingHttpHeaders>((done, fail) => {
+      const asked = request({ host: "127.0.0.1", port, path: target, headers: { host: new URL(target).host, ...headers, "proxy-authorization": signed } }, (answer) => {
+        answer.resume();
+        answer.on("end", () => done(answer.headers));
+      });
+      asked.on("error", fail);
+      asked.end();
+    });
+    for (const name of ["localhost", "127.0.0.1", "[::1]"]) {
+      for (const headers of [own, { "sec-fetch-site": "same-origin", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "script" }]) {
+        const answered = await head(`http://${name}:3000/kept`, headers);
+        expect(answered["cache-control"], `${name} ${headers["sec-fetch-dest"]}`).toBe("no-store");
+      }
+    }
+    expect(knocks).toHaveLength(6);
+    expect((await head("http://example.com/kept", own))["cache-control"]).toBe("public, max-age=3600, immutable");
   });
 
   it("gives the browser none of a chat's server's own 407: 502 in its place, in the proxy's words, and the server let go", async () => {
