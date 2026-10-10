@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -32,6 +35,9 @@ from surogates.devices.history import (
 )
 from surogates.devices.operations import DeviceOperations, OperationConflict
 from surogates.devices.workspace import RESULT_TRANSFERS, DeviceOperationError
+from surogates.sandbox import history as sandbox_history
+from surogates.sandbox import local_history
+from surogates.sandbox.history import HistoryError
 
 A, B, C = "a" * 40, "b" * 40, "c" * 40
 THREAD = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f"
@@ -549,3 +555,138 @@ def test_the_bounds_of_an_answer_are_the_ones_said():
     by = {"kind": "thread", "id": THREAD, "title": "x" * MAX_PATH}
     held = {**HONEST["history", "commit"][0], "overlapped": [{**VERSION, "reason": "changed", "by": by}]}
     assert checked("history", "commit", held) == held
+
+
+def history_codes() -> set[str]:
+    """Every code the folder's history refuses with, as its two modules spell them."""
+    return {
+        value for module in (sandbox_history, local_history) for name, value in vars(module).items()
+        if name.isupper() and isinstance(value, str) and value == name.lower()
+    }
+
+
+def test_every_code_the_folders_history_has_and_every_action_it_takes_is_one_this_module_knows():
+    # Its ten, and none it says to a person alone: the guest's and the app's own are beside them.
+    assert history_codes() == HISTORY_CODES - {"no_answer", "not_an_answer"}
+    # A thread's history steps and its snapshots, as the app passes them on: none is asked that the history
+    # does not take, and the history takes none that is not asked and checked here.
+    assert set(local_history._ACTIONS) == ACTIONS["history"] | {"snapshot", "restore"}
+
+
+class Folder:
+    """A folder of the user's and its place, the history in it run as the guest runs it, each answer taken as the server takes it."""
+
+    def __init__(self, base: Path, *files: tuple[str, bytes]) -> None:
+        self.real = base / "Documents"
+        self.real.mkdir(parents=True)
+        for name, data in files:
+            (self.real / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.real / name).write_bytes(data)
+        self.store = base / "place"
+
+    def copy(self, thread: str) -> Path:
+        return self.store / "threads" / thread
+
+    def run(self, thread: str, action: str, **args: Any) -> dict:
+        """The history's answer, or its refusal as the app passes one on, by its code."""
+        try:
+            return {"ok": local_history.run({
+                "store": str(self.store), "folder": str(self.real), "thread": thread, "user": "u1", "action": action, "args": args,
+            })}
+        except HistoryError as refused:
+            return {"error": {"type": "history", "code": refused.code, "message": str(refused)}}
+
+    def taken(self, thread: str, kind: str, action: str, **args: Any) -> dict:
+        """*action*, asked of the history, its answer taken as the server takes it: whole, and nothing of it dropped."""
+        asked = {("checkpoint", "take"): "snapshot", ("checkpoint", "restore"): "restore"}.get((kind, action), action)
+        outcome = self.run(thread, asked, **({"commit": args.pop("hash")} if asked == "restore" else args))
+        assert "ok" in outcome, outcome
+        assert checked(kind, action, outcome["ok"], thread=thread) == outcome["ok"]
+        return outcome["ok"]
+
+    def refused(self, thread: str, action: str, **args: Any) -> str:
+        outcome = self.run(thread, action, **args)
+        refusal = refused(outcome)
+        assert refusal is not None and (refusal.kind, refusal.code) == ("history", outcome["error"]["code"]), outcome
+        return refusal.code
+
+
+def landed(folder: Folder, thread: str, turn: dict) -> None:
+    """The applies of *turn*, as a landing's helper makes them: each file of the copy's, or none."""
+    for change in turn["changes"]:
+        target = folder.real / change["path"]
+        if change["after"] is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(folder.copy(thread) / change["path"], target)
+
+
+def test_what_the_folders_own_history_answers_a_thread_is_taken_whole_and_each_refusal_by_its_code(tmp_path):
+    folder = Folder(tmp_path, ("Report.docx", b"PK report v1"), ("notes.txt", b"v1 notes\n"))
+    one, two = str(uuid4()), str(uuid4())
+    a = {"name": "Draft A", "email": f"thread:{one}@surogate"}
+    b = {"name": "Draft B", "email": f"thread:{two}@surogate"}
+    yours = {"name": "u1", "email": "user:u1@surogate"}
+    assert folder.taken(one, "history", "open") == {"copy": "made"}
+    assert folder.taken(two, "history", "open") == {"copy": "made"}
+    # A step of thread one's, its snapshot first.
+    first = folder.taken(one, "checkpoint", "take", reason="before write_file")["hash"]
+    (folder.copy(one) / "Report.docx").write_bytes(b"PK report v2, by A")
+    (folder.copy(one) / "Reports").mkdir()
+    (folder.copy(one) / "Reports" / "Q3.md").write_text("Q3\n")
+    (folder.copy(one) / "node_modules" / "x").mkdir(parents=True)
+    (folder.copy(one) / "node_modules" / "x" / "index.js").write_text("x\n")
+    (folder.copy(one) / "notes.txt").unlink()
+    assert folder.taken(one, "history", "changed") == {"paths": ["Report.docx", "Reports/Q3.md", "notes.txt"]}
+    # Its landing, step by step, as the worker will ask it.
+    saga = f"saga:{uuid4()}"
+    trailers = [["Surogate-Saga", saga], ["Surogate-Thread", one]]
+    picked = folder.taken(one, "history", "pickup", author=yours, trailers=[*trailers, ["Surogate-Kind", "pickup"]])
+    turn = folder.taken(one, "history", "commit", author=a, trailers=[*trailers, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    # Each file the turn changed lands, or is left out with why.
+    assert sorted(change["path"] for change in turn["changes"] + turn["overlapped"]) == ["Report.docx", "Reports/Q3.md", "notes.txt"]
+    assert turn["excluded"] == ["node_modules/"]
+    assert folder.taken(one, "history", "fetch", saga=saga, since=picked["main"])["landing"] is None
+    # Not recorded, and not put back: what it kept is not to be forgotten.
+    landed(folder, one, turn)
+    assert folder.refused(one, "forget", saga=saga, applied=turn["changes"]) == "landing_unsettled"
+    recorded = folder.taken(
+        one, "history", "record", turn=turn["commit"], applied=turn["changes"], author=a,
+        trailers=[*trailers, ["Surogate-Kind", "landing"]], main=picked["main"], pickup=picked["commit"],
+    )
+    assert folder.taken(one, "history", "fetch", saga=saga, since=picked["main"])["landing"] == recorded["commit"]
+    assert folder.taken(one, "history", "forget", saga=saga, applied=turn["changes"]) == {"landing": recorded["commit"]}
+    # The folder held for a landing, and let go with nothing kept.
+    assert folder.taken(one, "history", "forget", saga=f"hold:{uuid4()}", applied=[]) == {"landing": None}
+    # A snapshot from before the landing is not one the copy is put back to.
+    assert folder.refused(one, "restore", commit=first) == "not_on_base"
+    # Thread two changed the file one landed: its commit says who changed it since.
+    (folder.copy(two) / "Report.docx").write_bytes(b"PK report v2, by B")
+    saga = f"saga:{uuid4()}"
+    trailers = [["Surogate-Saga", saga], ["Surogate-Thread", two]]
+    picked = folder.taken(two, "history", "pickup", author=yours, trailers=[*trailers, ["Surogate-Kind", "pickup"]])
+    turn = folder.taken(two, "history", "commit", author=b, trailers=[*trailers, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
+    assert [(o["path"], o["reason"], o["by"]) for o in turn["overlapped"]] == [
+        ("Report.docx", "changed", {"kind": "thread", "id": one, "title": "Draft A"}),
+    ]
+    # Its turn kept, as a failed turn's is; its copy then keeps its work at its next open.
+    kept = folder.taken(two, "history", "keep", author=b, trailers=[*trailers, ["Surogate-Kind", "kept"]], base=False)
+    assert kept["not_taken"] == []
+    assert folder.taken(two, "history", "open") == {"copy": "kept"}
+    taken = folder.taken(two, "checkpoint", "take", reason="before patch")["hash"]
+    (folder.copy(two) / "Report.docx").write_bytes(b"PK a step's change")
+    assert folder.taken(two, "checkpoint", "restore", hash=taken) == {}
+    assert (folder.copy(two) / "Report.docx").read_bytes() == b"PK report v2, by B"
+    # What is no request, and a copy that is not whole.
+    assert folder.refused(two, "prune") == "not_a_request"
+    assert folder.refused(two, "restore", commit="f" * 40) == "failed"
+    shutil.rmtree(folder.copy(two))
+    assert folder.refused(two, "changed") == "no_whole_copy"
+
+
+def test_a_folder_the_history_cannot_record_is_said_so_in_an_answer_this_module_takes(tmp_path):
+    folder = Folder(tmp_path, ("Report.docx", b"PK report v1"))
+    os.close(os.open(os.fsencode(folder.real) + b"/caf\xe9.txt", os.O_CREAT | os.O_WRONLY, 0o644))
+    thread = str(uuid4())
+    assert folder.taken(thread, "history", "open") == {"history": "off", "reason": "names"}
