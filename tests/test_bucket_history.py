@@ -1724,14 +1724,39 @@ async def test_a_pickup_pushes_nothing_where_a_file_was_saved_again_since_it_was
     assert git(durable, "rev-parse", MAIN) == two
 
 
+async def test_the_files_main_records_are_read_in_one_look_of_the_copy_however_many(tmp_path, storage, project, monkeypatch):
+    files = {f"part-{n:03}.csv": f"{n}\n".encode() for n in range(150)}
+    one = landed(tmp_path, project, "saga:1", files)
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    looks, asked = [], []
+    current, git_run = BucketHistory._current, BucketHistory._git
+
+    async def looked(self, wanted):
+        looks.append(wanted)
+        return await current(self, wanted)
+
+    async def ran(self, turns, seconds, *args, **more):
+        asked.append(args[0])
+        return await git_run(self, turns, seconds, *args, **more)
+
+    monkeypatch.setattr(BucketHistory, "_current", looked)
+    monkeypatch.setattr(BucketHistory, "_git", ran)
+    answered = await history.recorded(one, [*files, "no-such.md", "part-000.csv"])
+    assert answered == {**{path: blob_of(data) for path, data in files.items()}, "no-such.md": None}
+    # One look of the copy, and the files asked of git as many at a time as one question names.
+    assert (len(looks), asked.count("ls-tree")) == (1, 3)
+    assert await history.recorded(None, ["Report.docx"]) == {"Report.docx": None} and await history.recorded(one, []) == {}
+
+
 async def test_an_apply_and_its_record_land_on_main_and_the_next_pod_has_them(tmp_path, storage, project):
     one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
     v1 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx")
     history = bucket(tmp_path, storage)
     main = (await history.fetch())["main"]
     now = await history.real("Report.docx")
-    assert (now, await history.recorded(main, "Report.docx"), await history.recorded(main, "no-such.md")) == (
-        blob_of(b"PK\x03\x04 report v2"), now, None,
+    assert (now, await history.recorded(main, ["Report.docx", "no-such.md"])) == (
+        blob_of(b"PK\x03\x04 report v2"), {"Report.docx": now, "no-such.md": None},
     )
     applied = await history.apply("Report.docx", now, v1)
     assert applied == {"path": "Report.docx", "before": now, "after": v1, "made": []}
@@ -2042,7 +2067,7 @@ async def test_a_path_that_is_none_of_the_projects_files_reaches_neither_the_sto
     monkeypatch.setattr(module, "_child", lambda *args, **more: reached.append(("git", args)))
     v2 = blob_of(b"PK\x03\x04 report v2")
     for act in (
-        lambda: history.real(path), lambda: history.edits(["Report.docx", path]), lambda: history.recorded(one, path),
+        lambda: history.real(path), lambda: history.edits(["Report.docx", path]), lambda: history.recorded(one, ["Report.docx", path]),
         lambda: history.apply(path, None, v2), lambda: history.unapply(path, None, v2),
         lambda: history.pickup(main=one, picked_up=[{"path": path, "before": None, "after": v2}], author=YOU, trailers=by_saga("s", "pickup")),
         lambda: history.record(applied=[{"path": path, "before": None, "after": v2}], author=YOU, trailers=by_saga("s", "restore"), main=one),
@@ -2064,7 +2089,7 @@ async def test_a_version_that_is_no_id_reaches_neither_the_storage_nor_git(tmp_p
     for crafted in ("--output=/tmp/ran", "HEAD", f"{one}:Report.docx", v2.upper(), v2[:39], f"{v2}\n", ""):
         for act in (
             lambda: history.apply("Report.docx", v2, crafted), lambda: history.apply("Report.docx", crafted, v2),
-            lambda: history.unapply("Report.docx", crafted, v2), lambda: history.recorded(crafted, "Report.docx"),
+            lambda: history.unapply("Report.docx", crafted, v2), lambda: history.recorded(crafted, ["Report.docx"]),
             lambda: history.pickup(main=crafted, picked_up=[], author=YOU, trailers=by_saga("s", "pickup")),
             lambda: history.pickup(main=one, picked_up=[{"path": "a.md", "before": None, "after": crafted}], author=YOU, trailers=by_saga("s", "pickup")),
             lambda: history.record(applied=[{"path": "a.md", "before": None, "after": crafted}], author=YOU, trailers=by_saga("s", "restore"), main=one),

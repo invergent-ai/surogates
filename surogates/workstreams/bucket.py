@@ -579,16 +579,22 @@ class BucketHistory:
         return await self._held(read)
 
     @_using
-    async def recorded(self, main: str | None, path: str) -> str | None:
-        """The blob of *path* in the files of *main*, a commit of the history's; None when it has none there."""
-        self._key(path)
-        if main is None:
-            return None
+    async def recorded(self, main: str | None, paths: Iterable[str]) -> dict[str, str | None]:
+        """The blob of each of *paths* in the files of *main*, a commit of the history's; None for one it has none of there.
+
+        Every file in one look of the copy, as many as an Undo writes.
+        """
+        wanted = list(dict.fromkeys(paths))
+        for path in wanted:
+            self._key(path)
+        if main is None or not wanted:
+            return dict.fromkeys(wanted)
         _checked_id(main, "a commit")
 
-        async def read() -> str | None:
+        async def read() -> dict[str, str | None]:
             await self._current([])
-            return (await self._entries(main, [path])).get(path, (None, None))[1]
+            found = await self._entries(main, wanted)
+            return {path: found.get(path, (None, None))[1] for path in wanted}
 
         return await self._held(read)
 
