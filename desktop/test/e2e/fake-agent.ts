@@ -380,9 +380,10 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // thread answers, whose unreachable, when set, makes the list and every call on a project fail as
 // the web client's fetch does with the agent out of reach, whose lag is how many ms a change of a
 // project takes to answer once it is made, as a slow agent's, and a version to be handed over to
-// save, whose asked keeps each version it was asked to open or to restore, whose unopened, when set,
-// is why it opens none, whose unrestored, when set, is why it restores none, whose put, when set, is
-// what a Restore answers, and whose register() registers the source, or with the methods it lacks the
+// save, whose asked keeps each version it was asked to open or to restore and each change to undo, whose
+// unopened, when set, is why it opens none, whose unrestored and notUndone, when set, are why it restores
+// or undoes none, whose put, when set, is what a Restore or an Undo answers, and whose register()
+// registers the source, or with the methods it lacks the
 // source of an agent older than the app, which serves less. What it changes of a project it keeps at
 // the fake agent, so the next load serves it.
 // The source's methods read it through this, as an object's own methods may.
@@ -398,6 +399,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     asked: [] as string[][],
     unopened: null as string | null,
     unrestored: null as string | null,
+    notUndone: null as string | null,
     put: null as UndoResult | null,
     register: (_lacks?: string[]) => {},
     changed: (id: string, threadId: string | null) => {
@@ -471,6 +473,24 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
         }
         fake.changed(project, null);
       }
+      return answer;
+    },
+    // An Undo lands as the agent's does: each file it put back has a newest version, undone by you, and the
+    // project's stream says the project changed.
+    async undo(id: string, target: { landingId: string } | { threadId: string }) {
+      const project = this.one(id).id;
+      fake.asked.push(["undo", "landingId" in target ? target.landingId : target.threadId]);
+      await new Promise((resolve) => setTimeout(resolve, fake.lag));
+      if (fake.notUndone) throw new Error(fake.notUndone);
+      const answer = fake.put ?? { applied: [], skipped: [], pickedUp: [] };
+      for (const path of answer.applied) {
+        const versions = (this.served.history[project] ??= {})[path] ??= [];
+        const made = String(200 + versions.length);
+        versions.unshift({
+          id: `${made}:f`, path, by: { kind: "you" }, at: new Date().toISOString(), change: "undone", merged: true, available: true, landingId: made,
+        });
+      }
+      if (answer.applied.length > 0) fake.changed(project, null);
       return answer;
     },
     async create(input: { name: string; goal?: string; instructions?: string }) {

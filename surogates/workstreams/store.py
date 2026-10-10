@@ -17,7 +17,7 @@ from surogates.db.models import Event, InboxItem, Workstream, WorkstreamHistory,
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import master_instructions
-from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of
+from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of, undone_files
 
 
 def _any(ids: Any) -> Any:
@@ -153,7 +153,7 @@ class WorkstreamStore:
         Without files, only each thread's newest turn summary is read, for
         its status line, and a row's files are that turn's alone: reading
         every summary is most of the cost of a project's rows.  Nor are its
-        landings read then, which mark its files.
+        landings read then, which mark its files, nor the project's Undos.
         """
         query = (
             select(WorkstreamThread, SessionRow.status, SessionRow.updated_at, SessionRow.config["execution"])
@@ -197,13 +197,18 @@ class WorkstreamStore:
             summaries = await db.scalars(select(Event).where(
                 Event.session_id == _any(ids), Event.type == EventType.TURN_SUMMARY.value,
             )) if with_files else ()
-            # The files each landing recorded, which mark a row's: the cloud's
-            # records, asked by project, which the table's index is on.
+            # The files each landing recorded, and the project's Undos, which mark a
+            # row's: the cloud's records, asked by project, which the table's index is on.
+            here = (WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None))
             landings = (await db.execute(
                 select(WorkstreamHistory.thread_id, WorkstreamHistory.id, WorkstreamHistory.files).where(
-                    WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None),
-                    WorkstreamHistory.thread_id == _any(ids), WorkstreamHistory.kind == "landing",
+                    *here, WorkstreamHistory.thread_id == _any(ids), WorkstreamHistory.kind == "landing",
                     WorkstreamHistory.saga_state == "completed", func.jsonb_array_length(WorkstreamHistory.files) > 0,
+                )
+            )).all() if with_files else ()
+            undos = (await db.execute(
+                select(WorkstreamHistory.id, WorkstreamHistory.undoes, WorkstreamHistory.files).where(
+                    *here, WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
                 )
             )).all() if with_files else ()
             items_of, events_of, landings_of = defaultdict(list), defaultdict(list), defaultdict(list)
@@ -213,6 +218,7 @@ class WorkstreamStore:
                 events_of[event.session_id].append(event)
             for landed_by, row_id, files in landings:
                 landings_of[landed_by].append({"id": row_id, "files": files})
+        undone = undone_files({"id": row_id, "undoes": undoes, "files": files} for row_id, undoes, files in undos)
         redoing = await self._redoing(landings_of)
         return [
             ThreadFacts(
@@ -221,6 +227,7 @@ class WorkstreamStore:
                 place=place_of(execution),
                 items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
                 landings=tuple(landings_of[thread.session_id]), redoing=redoing.get(thread.session_id, frozenset()),
+                undone=undone,
             )
             for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]

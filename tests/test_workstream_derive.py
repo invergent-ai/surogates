@@ -16,7 +16,9 @@ from uuid import UUID
 
 import pytest
 
-from surogates.workstreams.derive import GROUPS, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of
+from surogates.workstreams.derive import (
+    GROUPS, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of, undone_files,
+)
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
 CONTRACT = Path(__file__).resolve().parents[1] / "web/src/lib/projects-contract.d.ts"
@@ -69,6 +71,7 @@ def row(thread_id: str, title: str, minutes: float, *, group: str, reason=None, 
         "status_line": status_line, "progress": progress,
         # A thread with no landing: its files are its turn summaries', with no mark.
         "files": [{"kind": kind, "label": label, "ref": ref, "thread_id": thread_id, "landing": None} for kind, label, ref in files],
+        "landing_id": None,
         "place": place, "created_at": wire(ago(minutes + 60)), "updated_at": wire(ago(minutes)),
         "resolved_at": resolved_at and wire(resolved_at),
     }
@@ -387,3 +390,45 @@ def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_
         {"kind": "file", "label": markup, "ref": markup, "thread_id": IDLE, "landing": "not_merged"},
         {"kind": "file", "label": longest, "ref": longest, "thread_id": IDLE, "landing": "landed"},
     ]
+
+
+def test_a_file_an_undo_put_back_is_undone_and_the_card_undoes_the_newest_landing_still_as_it_landed():
+    given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(
+        landing(40, ("plan.md", None, "p1", True), ("gone.md", "g1", None, True)),
+        landing(41, ("report.docx", "b1", "b2", True), ("notes.md", "n1", "n2", False)),
+    ), undone=frozenset({(41, "report.docx")}))
+    assert marks(given) == [("notes.md", "not_merged"), ("report.docx", "undone"), ("plan.md", "landed")]
+    # The newest landing has nothing left as it landed: what it left out is no change of its. The one
+    # before it has, its deletion among them, which an Undo brings back.
+    assert derive_thread(given, now=NOW)["landing_id"] == "40"
+    assert derive_thread(replace(given, undone=frozenset()), now=NOW)["landing_id"] == "41"
+    assert derive_thread(replace(given, undone=given.undone | {(40, "plan.md")}), now=NOW)["landing_id"] == "40"
+
+
+def test_a_thread_with_every_landing_undone_or_none_has_none_for_its_card_to_undo():
+    landed = landing(40, ("plan.md", None, "p1", True), ("gone.md", "g1", None, True))
+    given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(landed,), undone=frozenset({(40, "plan.md"), (40, "gone.md")}))
+    assert derive_thread(given, now=NOW)["landing_id"] is None
+    # A landing that left every file out changed none of them.
+    assert derive_thread(replace(given, landings=(landing(41, ("notes.md", "n1", "n2", False)),)), now=NOW)["landing_id"] is None
+    assert derive_thread(facts(IDLE, "Draft A", 5, "completed"), now=NOW)["landing_id"] is None
+
+
+def undo_row(row_id: int, undoes: list[int], *paths: str) -> dict:
+    """An Undo's row as the store reads it: the rows it undid, and each file it put back."""
+    return {"id": row_id, "undoes": undoes, "files": [{"path": p, "before": "x", "after": "y", "merged": True} for p in paths]}
+
+
+def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_undo_is_undone_itself():
+    first, second = undo_row(50, [40, 41], "plan.md"), undo_row(51, [50], "plan.md")
+    assert undone_files([first]) == {(40, "plan.md"), (41, "plan.md")}
+    assert undone_files([second, first]) == {(50, "plan.md")}
+    # A third undoes the second: the first stands again, and what it put back is undone again.
+    assert undone_files([first, second, undo_row(52, [51], "plan.md")]) == {(51, "plan.md"), (40, "plan.md"), (41, "plan.md")}
+
+
+def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
+    # The second Undo left b.md as it was, changed since: what the first put back of it stays put back.
+    first, second = undo_row(50, [40], "a.md", "b.md"), undo_row(51, [50], "a.md")
+    assert undone_files([first, second]) == {(50, "a.md"), (40, "b.md")}
+    assert undone_files([]) == frozenset()
