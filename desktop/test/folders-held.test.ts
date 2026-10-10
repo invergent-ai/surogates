@@ -86,6 +86,21 @@ describe("the folders the app holds", () => {
     expect(said).toEqual(["/dead"]);
   });
 
+  it("say a folder that did not answer in its time by when it is left out, also where its look took a moment to begin, and to each who asks after", async () => {
+    const said: string[] = [];
+    // A look that takes two milliseconds to begin, as one on a busy computer does: the clock moves on before it is under way.
+    const look = (folder: string) => {
+      const until = Date.now() + 2;
+      while (Date.now() < until) {}
+      return folder === "/dead" ? new Promise<Stats>(() => {}) : Promise.resolve({ dev: 4, ino: 1 } as Stats);
+    };
+    const looks = new FolderLooks(look, 50, (folder) => said.push(folder));
+    expect(await looks.held(["/dead"])).toEqual([]);
+    expect(said).toEqual(["/dead"]);
+    expect(await looks.held(["/dead", "/1"])).toEqual([{ dev: 4, ino: 1 }]);
+    expect(said).toEqual(["/dead"]);
+  });
+
   it("begin no third look while two have not answered within their bound: the threads left are the app's, and a folder that would have answered is not held", async () => {
     const asked: string[] = [];
     const dead = new FolderLooks((folder) => (asked.push(folder), folder.startsWith("/dead") ? new Promise<Stats>(() => {}) : Promise.resolve({ dev: 3, ino: 3 } as Stats)), 20);

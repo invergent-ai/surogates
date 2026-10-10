@@ -205,6 +205,42 @@ describe("applyAgentChatEvent", () => {
     });
   });
 
+  it("draws a stop's pause that says what it could not take back as a failure is drawn, and a plain stop as before", () => {
+    const stopped = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "session.pause",
+      eventId: 20,
+      data: {},
+    });
+    expect(stopped.terminal).toBe(true);
+    expect(stopped.messages).toHaveLength(0);
+
+    const said = applyAgentChatEvent(stopped, {
+      type: "session.pause",
+      eventId: 21,
+      data: {
+        reason: "interrupted",
+        error_category: "storage_error",
+        error_title: "Stopped, but not all of this turn could be taken back.",
+        error_detail: "terminal: no snapshot of the copy was taken before it",
+        retryable: false,
+      },
+    });
+    expect(said.terminal).toBe(true);
+    expect(said.messages).toHaveLength(1);
+    expect(said.messages[0]).toMatchObject({
+      id: "error-21",
+      role: "system",
+      systemKind: "error",
+      status: "error",
+      errorInfo: {
+        category: "storage_error",
+        title: "Stopped, but not all of this turn could be taken back.",
+        detail: "terminal: no snapshot of the copy was taken before it",
+        retryable: false,
+      },
+    });
+  });
+
   it("attaches artifact metadata as a system timeline message", () => {
     const next = applyAgentChatEvent(createInitialAgentChatState(), {
       type: "artifact.created",

@@ -57,11 +57,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     console.log(`the guest's: ${said[0]}; ${said[timed]}`);
     expect(said.slice(1).map((line, n) => (n + 1 === timed ? "timed" : line))).toEqual([
       "each thread's copy is made",
+      "each thread's repository borrows the folder's history, which holds the folder's first commit",
       "the first thread's turn landed, and what it kept may be forgotten only then",
       "a record cut after its push is finished at the thread's next open, and its next landing takes nothing of the other's",
       "what a copy held beyond its turn is set aside, named at every open, and the copy is not put back to it",
       "a clean copy's move to main cut before its base moved is finished by the next act",
       "what a landing left out stays in the copy as the thread left it, by the guest's git, and so when its record is cut after its push",
+      "no thread's repository names what neither it nor the history holds, by the guest's git",
       "timed",
       "passed",
     ]);

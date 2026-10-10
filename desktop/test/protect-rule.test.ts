@@ -104,7 +104,13 @@ function verdicts(bin: string, paths: string[], args: string[] = []): boolean[] 
   return out.map((v) => v === "1");
 }
 
-describe("the guest rule mirrors protect.ts", () => {
+// Each test here is CPU work of a fixed size and times nothing: the rule's verdict and protect.ts's on each of
+// some 775,000 paths. The first takes about 4 s alone, and was measured at up to 15 s where other work shares
+// the computer's cores, as a full suite's lanes do: past vitest's 10 s default, which is a bound on a hang and
+// not on this work. So the bound here is a hang's still, four times the longest measured.
+const VERDICTS_MS = 60_000;
+
+describe("the guest rule mirrors protect.ts", { timeout: VERDICTS_MS }, () => {
   const cc = ["cc", "clang", "gcc"].find((c) => { try { execFileSync(c, ["--version"]); return true; } catch { return false; } });
   // Made with the harness: vitest runs no afterAll for a suite whose tests are all filtered out or skipped.
   let dir: string | undefined;
