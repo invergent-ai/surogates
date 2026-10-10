@@ -147,6 +147,23 @@ export interface AgentChatThreadRow {
   landingId?: string | null;
 }
 
+/** Who changed a project's file (`ChangedBy`, `web/src/lib/projects-contract.d.ts`). */
+export type AgentChatChangedBy =
+  | { kind: "you" }
+  | { kind: "thread"; threadId: string; title: string }
+  | { kind: "routine"; name: string };
+
+/**
+ * What an Undo of a project's changes did (`UndoResult`): the files it put back; each it left as it
+ * was, with who changed it since (null: no one the adapter has a name for), or that its version from
+ * before is no longer kept (pruned); and each whose edit it recorded first.
+ */
+export interface AgentChatUndoResult {
+  applied: string[];
+  skipped: { path: string; by: AgentChatChangedBy | null; pruned?: boolean }[];
+  pickedUp?: string[];
+}
+
 export interface AgentChatIterationSummary {
   iterationIndex: number;
   summary: string;
@@ -1023,6 +1040,14 @@ export interface AgentChatAdapter {
   }): Promise<AgentChatThreadRow[]>;
   /** The project's stream. It opens itself again after a failure; its ``onerror`` means the project is gone. */
   openProjectStream?(input: { projectId: string }): AgentChatProjectStream;
+  /**
+   * Undo a project thread's landing, or all its changes, from its card, as a landing by the user
+   * (POST /v1/workstreams/{projectId}/history/undo).
+   */
+  undoProjectChanges?(input: {
+    projectId: string;
+    target: { landingId: string } | { threadId: string };
+  }): Promise<AgentChatUndoResult>;
   /** Start a thread a project's master proposed, from its card (POST /v1/workstreams/{projectId}/threads). */
   startProposedThread?(input: {
     projectId: string;
