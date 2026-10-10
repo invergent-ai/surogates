@@ -53,7 +53,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
@@ -139,6 +139,9 @@ _PACKS = 20
 _SEEN = "left-out"
 #: The most of that file one request reads.
 _SEEN_BYTES = 64 << 20
+#: How a landing's own commit names each file it left out that no landing writes, its path spelt
+#: as JSON: the copy keeps the thread's version of each (:meth:`LocalHistory.record`).
+_LEFT = "Surogate-Left"
 #: What a thread's copy held of its own when a record or a move made it other files is kept
 #: for the last sixteen times that happened: the oldest goes for one more.
 _ASIDE = 16
@@ -178,7 +181,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "fetch": ("fetch", frozenset({"commits", "saga", "since"})),
     "pickup": ("pickup", frozenset({"author", "trailers"})),
     "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
-    "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup"})),
+    "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup", "left"})),
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
     "forget": ("forget", frozenset({"saga", "applied"})),
 }
@@ -704,8 +707,8 @@ class LocalHistory(History):
         self._catch_up()
         return super().keep(**step)
 
-    def record(self, **step: Any) -> dict:
-        """The cloud's record, and then the copy is made the landing's files.
+    def record(self, *, left: Sequence[str] = (), **step: Any) -> dict:
+        """The cloud's record, and then the copy is made the landing's files, but for *left*.
 
         A pod is made anew from the landing; a copy here outlives it.  A
         file the landing left out is the newer one in the copy from now on,
@@ -717,19 +720,33 @@ class LocalHistory(History):
         a ref of the thread's repository, and is not one the copy is put
         back to (:meth:`restore`).
 
+        *left* are the files no landing ever writes, a name that runs code
+        or a link's place in the folder, each by its path and never a
+        pattern: nobody else changed them, so each stays in the copy as the
+        turn left it, a file it deleted still gone, and the folder's history
+        records none of them as landed.  They are the thread's work still,
+        for a later turn to land.  The landing's own commit names them, so
+        a record cut after its push leaves them so too, finished by the next
+        act (:meth:`_finish_record`).
+
         Safe to repeat wherever ``main`` is by then: no lock is held across
         a computer's absence, so another thread may have landed since a try
         cut after its push.  The landing is found by its saga where the
         thread's own branch has it, and the copy of a thread that has worked
         on since is left alone.
         """
+        if not isinstance(left, (list, tuple)) or not all(_walked(path) for path in left):
+            _refuse("a file it left out has no path in the folder")
+        if any(f"{key}: ".startswith(f"{_LEFT}: ") for key, _ in step["trailers"]):
+            _refuse("a trailer it names is the history's own")
         self._catch_up()
         saga = f"Surogate-Saga: {dict(map(tuple, step['trailers']))['Surogate-Saga']}"
         found = self._landing(self._take())
         if found is not None and saga in found[2]:
             commit = found[0]
         else:
-            commit = super().record(**step)["commit"]
+            named = [*step["trailers"], *([_LEFT, json.dumps(path)] for path in left)]
+            commit = super().record(**{**step, "trailers": named})["commit"]
             self._catch_up()
         return {"commit": commit, "set_aside": self._asides().get(step["turn"], (None, None))[1]}
 
@@ -781,11 +798,12 @@ class LocalHistory(History):
         thread's old version of a file the landing left out would be its
         change to the newer one.  The history holds a landing of the
         thread's that :attr:`landed` does not name, and the copy is made its
-        files now.
+        files now, but for those its commit names as left out, which no
+        landing writes: each is as the turn has it (:meth:`_as_landed`).
 
         What the copy holds that is neither the turn's file nor the
         landing's is set aside first, on a ref (:meth:`_set_aside`).  A copy
-        whose index is the landing's already was made so, git writing the
+        whose index is those files already was made so, git writing the
         index last, and is left as it is, with whatever the thread has
         written since.  Safe to cut anywhere: the ref that says it is done
         moves last.  Where it cannot be done the request is refused, and
@@ -807,18 +825,20 @@ class LocalHistory(History):
             return
         if self._ref(self.landed) == found[0]:
             return
-        landing, turn, _ = found
+        landing, turn, message = found
+        left = _left_in(message)
         try:
             # First, and before anything is written: a copy that is not whole is its next open's to make.
             index = self._copy("write-tree")
             self._fetch(landing)
-            if index != self._tree(landing):
+            files = self._as_landed(landing, turn, left)
+            if index != files:
                 self._add_all(self._copy)
                 held = self._copy("write-tree")
                 sides = [commit for commit in (landing, turn) if self._has(commit)]
                 if self._beyond(held, sides):
                     self._set_aside(held, turn, onto=sides[-1])
-                self._copy("read-tree", "-u", "--reset", landing)
+                self._copy("read-tree", "-u", "--reset", files)
             # Its base is this landing: what the copy holds beside it was there before the next turn.
             self._remember()
             for ref in (self.branch, self.base, self.synced, self.landed):
@@ -830,6 +850,37 @@ class LocalHistory(History):
                 "refused the request: a landing of this thread's is in the history, and its copy "
                 f"could not be made the landing's files: {why}", code=RECORD_UNFINISHED,
             ) from None
+
+    def _as_landed(self, landing: str, turn: str, left: list[str]) -> str:
+        """The tree a copy is made after *landing*: its files, but each of *left* as *turn*, the thread's, has it.
+
+        A file the turn deleted is not there, nor one of the landing's where
+        a file of the turn's needs its name for a folder.  The same tree for
+        the same landing at every try, made where a cut leaves nothing the
+        next request reads.
+        """
+        wanted = set(left)
+        fields = iter(self._main("diff", "--raw", "-z", "--no-renames", "--no-abbrev", landing, turn).split("\0"))
+        entries = []
+        for meta in fields:
+            if not meta:
+                break
+            path = next(fields)
+            if path in wanted:
+                _, mode, _, blob, _ = meta.split(" ")
+                entries.append(f"0 {_ZERO}\t{path}\0" if blob == _ZERO else f"{mode} {blob}\t{path}\0")
+        if not entries:
+            return self._tree(landing)
+        index = self.repo / "left.index"
+        index.unlink(missing_ok=True)
+        env = {"GIT_DIR": str(self.repo), "GIT_INDEX_FILE": str(index)}
+        try:
+            self._git(["read-tree", landing], env=env, cwd=self.repo)
+            # Each in place of whatever of the landing's is in its way: git's index-info replaces it.
+            self._git(["update-index", "-z", "--index-info"], env=env, cwd=self.repo, input="".join(entries))
+            return self._git(["write-tree"], env=env, cwd=self.repo)
+        finally:
+            index.unlink(missing_ok=True)
 
     def _finish_move(self) -> None:
         """Finish a move of the thread's clean copy to ``main`` that was cut after it began.
@@ -1042,13 +1093,11 @@ class LocalHistory(History):
             _refuse("it names no files a landing applied")
         files = []
         for change in applied:
-            path = PurePosixPath(change["path"])
-            # Spelt as it is walked: from the folder's top, down, each part a name.
-            if path.is_absolute() or not path.parts or ".." in path.parts or str(path) != change["path"]:
+            if not _walked(change["path"]):
                 _refuse("a file it applied has no path in the folder")
             if "before" not in change:
                 _refuse("a file it applied has no version from before it")
-            files.append((path.parts, change["before"]))
+            files.append((PurePosixPath(change["path"]).parts, change["before"]))
         main = self._take().get(MAIN)
         if main is not None and (landing := self._landing_of(saga, main, None)[0]) is not None:
             return {"landing": landing}
@@ -1264,6 +1313,31 @@ def _utf8(name: str) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+def _walked(path: object) -> bool:
+    """Whether *path* names a file in the folder as a landing names one: spelt as it is walked, from the folder's top, down, each part a name."""
+    if not (isinstance(path, str) and _utf8(path)) or "\0" in path:
+        return False
+    parts = PurePosixPath(path)
+    return not parts.is_absolute() and bool(parts.parts) and ".." not in parts.parts and str(parts) == path
+
+
+def _left_in(message: list[str]) -> list[str]:
+    """The files a landing's own commit names as left out, each read as data; refused where one is no file of the folder."""
+    left = []
+    for line in message:
+        if line.startswith(f"{_LEFT}: "):
+            try:
+                path = json.loads(line[len(_LEFT) + 2:])
+            except (ValueError, RecursionError):
+                path = None
+            if not _walked(path):
+                raise HistoryError(
+                    "refused the project's history: a landing names as left out what is no file of the folder", code=HISTORY_REFUSED,
+                )
+            left.append(path)
+    return left
 
 
 def _linked(top: Path) -> bool:

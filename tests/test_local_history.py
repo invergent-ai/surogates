@@ -197,6 +197,112 @@ def test_after_a_landing_the_copy_holds_the_newer_file_it_left_out_and_a_redo_la
     assert (folder / "Report.docx").read_bytes() == b"PK\x03\x04 A's report, with B's change"
 
 
+def test_a_file_no_landing_writes_stays_in_the_threads_copy_as_the_thread_left_it(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / ".vscode").mkdir()
+    (one.copy / ".vscode" / "tasks.json").write_text("{}\n")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report")
+    (one.copy / "notes.txt").unlink()
+    # As the app and the worker leave them out: a name that runs code, and a file the folder has under a second name.
+    step = up_to_its_record(one, "saga:1", A, (".vscode/tasks.json", "notes.txt"))
+    assert [change["path"] for change in step["applied"]] == ["Report.docx"]
+    landed = one.record(**step)
+    assert landed["set_aside"] is None
+    # Nobody else changed them, so the copy keeps each as its thread left it: the one it made, and the one it deleted.
+    assert (one.copy / ".vscode" / "tasks.json").read_text() == "{}\n" and not (one.copy / "notes.txt").exists()
+    assert sorted(p.name for p in folder.iterdir()) == ["Report.docx", "notes.txt"]
+    # The folder's history records neither as landed, and the landing's own commit names both as left out.
+    store = tmp_path / "store" / "history.git"
+    assert git(store, "ls-tree", "-r", "--name-only", landed["commit"]).split() == ["Report.docx", "notes.txt"]
+    assert git(store, "show", "-s", "--format=%(trailers:key=Surogate-Left,valueonly)", landed["commit"]).split() == [
+        '".vscode/tasks.json"', '"notes.txt"',
+    ]
+    # They are the thread's changes still, and nothing else is: its next turn lands them, where a landing then writes them.
+    assert one.changed() == {"paths": [".vscode/tasks.json", "notes.txt"]}
+    assert one.open() == {"copy": "kept"}
+    after = land(one, "saga:2")
+    assert [(c["path"], c["after"] is None) for c in after["changes"]] == [(".vscode/tasks.json", False), ("notes.txt", True)]
+    assert (folder / ".vscode" / "tasks.json").read_text() == "{}\n" and not (folder / "notes.txt").exists()
+    # A name is a path, never a pattern: one that names no file keeps none as the thread has it.
+    star = a_copy(tmp_path, folder, "t2")
+    (star.copy / "Report.docx").write_bytes(b"PK\x03\x04 B's report")
+    step = up_to_its_record(star, "saga:3", B, ("Report.docx",))
+    star.record(**{**step, "left": ["*.docx"]})
+    assert (star.copy / "Report.docx").read_bytes() == (folder / "Report.docx").read_bytes() == b"PK\x03\x04 A's report"
+
+
+def test_a_file_left_out_where_the_landing_holds_a_file_at_its_folders_name_stays_as_the_thread_left_it(tmp_path, folder):
+    (folder / ".vscode").write_text("a file of yours\n")
+    one = a_copy(tmp_path, folder)
+    # The thread put a folder where the file was, and a name that runs code in it: the two go together, and neither lands.
+    (one.copy / ".vscode").unlink()
+    (one.copy / ".vscode").mkdir()
+    (one.copy / ".vscode" / "tasks.json").write_text("{}\n")
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report")
+    step = up_to_its_record(one, "saga:1", A, (".vscode/tasks.json",))
+    assert [change["path"] for change in step["applied"]] == ["Report.docx"]
+    one.record(**step)
+    # The copy is made the landing's files but for it, and what it no longer has room for: the record is not stuck on it.
+    assert (one.copy / ".vscode" / "tasks.json").read_text() == "{}\n"
+    assert (folder / ".vscode").read_text() == "a file of yours\n"
+    assert one.changed() == {"paths": [".vscode", ".vscode/tasks.json"]}
+    assert git(one.repo, "rev-parse", "refs/landed/t1") == git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/main")
+
+
+@pytest.mark.parametrize("landed_since", [False, True])
+def test_a_file_left_out_that_was_written_again_after_its_turn_is_set_aside_only_where_the_copy_is_made_other_files(tmp_path, folder, landed_since):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    if landed_since:
+        (two.copy / "B.md").write_text("B's own\n")
+        land(two, "saga:2", B)
+    (one.copy / ".vscode").mkdir()
+    (one.copy / ".vscode" / "tasks.json").write_text("{}\n")
+    step = up_to_its_record(one, "saga:1", A, (".vscode/tasks.json",))
+    # A command still running writes it again after the turn was committed.
+    (one.copy / ".vscode" / "tasks.json").write_text('{"late": true}\n')
+    aside = one.record(**step)["set_aside"]
+    if landed_since:
+        # The copy is made the landing's files, another thread's among them: the late write is neither the turn's
+        # nor the landing's, and is set aside; the file is as the turn left it.
+        assert (one.copy / ".vscode" / "tasks.json").read_text() == "{}\n" and (one.copy / "B.md").is_file()
+        assert git(one.repo, "cat-file", "-p", f"{aside}:.vscode/tasks.json") == '{"late": true}'
+    else:
+        # The copy's files were the landing's but for it already: nothing is put back, and the late write is the thread's work.
+        assert aside is None and (one.copy / ".vscode" / "tasks.json").read_text() == '{"late": true}\n'
+    assert one.changed() == {"paths": [".vscode/tasks.json"]}
+
+
+@pytest.mark.parametrize("named", ['"../outside"', "7", "notes.txt", "[" * 100_000 + "]" * 100_000], ids=[
+    "a path out of the folder", "no path", "no json", "json nested past any bound",
+])
+def test_a_landing_whose_commit_names_as_left_out_what_is_no_path_of_the_folder_is_refused_and_nothing_is_read(tmp_path, folder, named):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    step = up_to_its_record(one, "saga:1", A)
+    # What no request writes: the cloud's half of a record, its trailers naming what is no file of the folder.
+    History.record(one, **{**step, "trailers": [*step["trailers"], ["Surogate-Left", named]]})
+    refs, held = git(one.repo, "for-each-ref"), files_of(one.copy)
+    for ask in (lambda h: h.open(), lambda h: h.changed(), lambda h: h.snapshot("before a step")):
+        with refused("history_refused", "refused the project's history: a landing names as left out what is no file of the folder"):
+            ask(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"))
+    assert (git(one.repo, "for-each-ref"), files_of(one.copy)) == (refs, held)
+
+
+@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "commit", "keep", "record"])
+def test_a_record_that_left_files_out_cut_after_its_push_leaves_them_as_the_thread_has_them_whichever_act_comes_next(tmp_path, first):
+    root = tmp_path / "whole"
+    ours, step, kept = a_landing_that_leaves_files_out(root)
+    stepped(root, OURS, "record", step, before="update-ref refs/heads/main")
+    again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+    {
+        "open": again.open, "changed": again.changed, "snapshot": lambda: again.snapshot("before a step"),
+        "commit": lambda: again.commit_turn(author=B, trailers=[["Surogate-Saga", "saga:next"]], pickup=None),
+        "keep": lambda: again.keep(author=B, trailers=[["Surogate-Kind", "turn"]], base=True),
+        "record": lambda: again.record(**step),
+    }[first]()
+    left_as_the_thread_has_them(root, kept, first)
+
+
 def test_the_files_a_turn_changed_are_named_before_anything_is_committed(tmp_path, folder):
     one = a_copy(tmp_path, folder)
     tip = git(one.repo, "rev-parse", "refs/heads/threads/t1")
@@ -1086,6 +1192,16 @@ def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, fo
     ({"action": "record", "args": {
         "turn": "0" * 40, "applied": [{"path": "a\0b", "before": None, "after": None}], "author": A, "trailers": [], "main": None,
     }}, "a file it applied has no path"),
+    # What a landing left out is named by its path in the folder, spelt as it is walked, and never a pattern's.
+    *(({"action": "record", "args": {
+        "turn": "0" * 40, "applied": [], "author": A, "trailers": [], "main": None, "left": left,
+    }}, "a file it left out has no path in the folder") for left in (
+        "notes.txt", None, [None], [7], ["../outside"], ["/etc/passwd"], [""], ["."], ["sub//x"], ["sub/./x"], ["x/"], ["a\0b"], ["\udc80"],
+    )),
+    # And by the history alone, in the landing's own commit.
+    ({"action": "record", "args": {
+        "turn": "0" * 40, "applied": [], "author": A, "trailers": [["Surogate-Left", '"notes.txt"']], "main": None,
+    }}, "a trailer it names is the history's own"),
 ])
 def test_a_request_that_names_no_thread_action_or_id_of_the_historys_is_refused(tmp_path, folder, tree, change, said):
     place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1", "action": "open", "args": {}}
@@ -2388,17 +2504,32 @@ def test_what_was_set_aside_whole_is_named_in_the_answer_the_agent_gives(tmp_pat
 
 #: One request, as its runner takes it, run to its end or killed at one of its steps: each git it
 #: runs, each file it writes or puts in its place, and each folder it renames; where it is asked
-#: to, each file and folder it removes too.  Killed, every process of it goes at once.
+#: to, each file and folder it removes too.  Killed, every process of it goes at once: before the
+#: step, or a while after its git started.
 STEPPED = """
-import json, os, pathlib, shutil, signal, subprocess, sys
-at, before, count = int(sys.argv[2]), sys.argv[3], [0]
+import json, os, pathlib, shutil, signal, subprocess, sys, time
+at, before, count, gits, inside = int(sys.argv[2]), sys.argv[3], [0], [], float(sys.argv[5] or 0)
 def stepped(real):
     def step(*args, **kwargs):
         count[0] += 1
+        if real is run:
+            gits.append(count[0])
+        if count[0] == at and inside and real is run:
+            git = subprocess.Popen(
+                args[0], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=kwargs.get("env"), cwd=kwargs.get("cwd"),
+            )
+            try:
+                git.stdin.write((kwargs.get("input") or "").encode("utf-8", "surrogateescape"))
+                git.stdin.close()
+            except OSError:
+                pass
+            time.sleep(inside)
+            os.killpg(0, signal.SIGKILL)
         if count[0] == at or before and args and (before in " ".join(args[0]) if isinstance(args[0], list) else str(args[0]).endswith(before)):
             os.killpg(0, signal.SIGKILL)
         return real(*args, **kwargs)
     return step
+run = subprocess.run
 subprocess.run, os.replace, os.rename = stepped(subprocess.run), stepped(os.replace), stepped(os.rename)
 pathlib.Path.write_bytes = stepped(pathlib.Path.write_bytes)
 if sys.argv[4]:
@@ -2408,20 +2539,23 @@ try:
     answer = local_history.run(json.loads(sys.argv[1]))
 except local_history.HistoryError as refusal:
     answer = {"error": refusal.code}
-print(json.dumps({"steps": count[0], "answer": answer}))
+print(json.dumps({"steps": count[0], "gits": gits, "answer": answer}))
 """
 OURS, THEIRS, NEW = THREAD, THREAD.replace("0b6c", "1b6c"), THREAD.replace("0b6c", "2b6c")
 SAGA = [["Surogate-Saga", "saga:ours"]]
 
 
-def stepped(root: Path, thread: str, action: str, args: dict, at: int = 0, before: str = "", removals: bool = False) -> dict | None:
+def stepped(
+    root: Path, thread: str, action: str, args: dict, at: int = 0, before: str = "", removals: bool = False, inside: float = 0,
+) -> dict | None:
     """*thread*'s request on the folder under *root*, killed at its step *at*, or right before the git that is
-    *before*, or the step on the path that ends as *before* does; its steps and answer when it ran to its
-    end.  With *removals*, each file and each folder it removes is a step too."""
+    *before*, or the step on the path that ends as *before* does; its steps, which of them are gits, and its
+    answer when it ran to its end.  With *removals*, each file and each folder it removes is a step too.
+    With *inside*, the git at *at* is killed with its request that many seconds after it started."""
     request = {"store": str(root / "store"), "folder": str(root / "Documents"), "thread": thread, "user": "u1", "action": action, "args": args}
     ran = subprocess.run(
-        [sys.executable, "-c", STEPPED, json.dumps(request), str(at), before, "removals" * removals], capture_output=True, text=True,
-        cwd=Path(__file__).parents[1], start_new_session=True, timeout=300,
+        [sys.executable, "-c", STEPPED, json.dumps(request), str(at), before, "removals" * removals, str(inside or "")],
+        capture_output=True, text=True, cwd=Path(__file__).parents[1], start_new_session=True, timeout=300,
     )
     if at or before:
         assert ran.returncode == -signal.SIGKILL, (at, ran.returncode, ran.stdout, ran.stderr)
@@ -2494,17 +2628,18 @@ def the_next_turn_lands_whole(root: Path, kept: dict, *, landed: bool, new: str 
     assert files_of(fresh.copy) == files_of(folder)
 
 
-def each_cut(tmp_path: Path, thread: str, action: str, args: dict, removals: bool = False):
-    """The folder under ``tmp_path/whole`` copied for each step of *thread*'s request, and the request killed at that step."""
+def each_cut(tmp_path: Path, thread: str, action: str, args: dict, removals: bool = False, inside: float = 0):
+    """The folder under ``tmp_path/whole`` copied for each step of *thread*'s request, and the request killed at that
+    step; with *inside*, at each of its gits, that many seconds after it started."""
     whole = tmp_path / "whole"
     shutil.copytree(whole, tmp_path / "counted", symlinks=True)
-    steps = stepped(tmp_path / "counted", thread, action, args, removals=removals)["steps"]
-    assert steps > 1
-    for at in range(1, steps + 1):
+    counted = stepped(tmp_path / "counted", thread, action, args, removals=removals)
+    assert counted["steps"] > 1
+    for at in counted["gits"] if inside else range(1, counted["steps"] + 1):
         root = tmp_path / f"cut-{at}"
         shutil.copytree(whole, root, symlinks=True)
         before = as_it_is(root / "Documents")
-        stepped(root, thread, action, args, at, removals=removals)
+        stepped(root, thread, action, args, at, removals=removals, inside=inside)
         # The history writes no file of the folder, at any step: every name, mode, time and byte is as it was.
         assert as_it_is(root / "Documents") == before, at
         yield at, root
@@ -2890,3 +3025,131 @@ def test_an_open_that_removes_what_holds_nothing_of_the_threads_own_killed_at_an
         assert set_aside_whole(place) == [], at
         assert files_of(again.copy) == files_of(cut / "Documents"), at
         assert sorted(p.name for p in (place / "threads").iterdir()) == [OURS] == sorted(p.name for p in (place / "clones").iterdir()), at
+
+
+#: What our thread's landing leaves out, which no landing writes: a name that runs code, which it made, and a
+#: file of the folder's with a second name, which it deleted.
+LEFT = (".vscode/tasks.json", "gone.txt")
+
+
+def a_landing_that_leaves_files_out(root: Path, many: int = 0) -> tuple[LocalHistory, dict, dict]:
+    """A folder under *root* with our thread's landing applied, its record next; the record's step, and what the
+    folder must hold whatever is cut.
+
+    Another thread has landed a change to the report, a new file and a change to each of *many* more, and you have
+    saved a file since.  Our thread changed the notes and made a file, which are applied; made a name that runs code
+    and deleted a file the folder has under a second name, which no landing writes; and a command of its turn still
+    running wrote a file after its turn was committed.
+    """
+    folder = root / "Documents"
+    (folder / "sub").mkdir(parents=True)
+    named = [("Report.docx", "report v1"), ("notes.txt", "v1 notes"), ("gone.txt", "linked v1"), ("sub/deep.txt", "deep")]
+    for name, text in [*named, *((f"sub/many-{n:04d}.txt", f"many {n}") for n in range(many))]:
+        (folder / name).write_text(f"{text}\n")
+        os.utime(folder / name, (time.time() - 60, time.time() - 60))
+    ours, theirs = a_copy(root, folder, OURS), a_copy(root, folder, THEIRS)
+    (theirs.copy / "Report.docx").write_text("their report\n")
+    (theirs.copy / "A-new.md").write_text("their new file\n")
+    for n in range(many):
+        (theirs.copy / f"sub/many-{n:04d}.txt").write_text(f"many {n}, by them\n")
+    land(theirs, "saga:theirs")
+    (folder / "yours.txt").write_text("saved by you since\n")
+    (ours.copy / "notes.txt").write_text("our notes\n")
+    (ours.copy / "B.md").write_text("our own\n")
+    (ours.copy / ".vscode").mkdir()
+    (ours.copy / ".vscode" / "tasks.json").write_text("{}\n")
+    (ours.copy / "gone.txt").unlink()
+    step = up_to_its_record(ours, "saga:ours", B, LEFT)
+    assert [c["path"] for c in step["applied"]] == ["B.md", "notes.txt"]
+    (ours.copy / "late.md").write_text("written after the turn was committed\n")
+    kept = {name: (folder / name).read_bytes() for name in ("Report.docx", "A-new.md", "yours.txt", "sub/deep.txt", "gone.txt", "B.md", "notes.txt")}
+    return ours, step, kept
+
+
+def left_as_the_thread_has_them(root: Path, kept: dict, at: object) -> None:
+    """After our thread's record that left files out is finished, by whichever act: the copy is the landing's files
+    but those, which are as the thread has them; the folder's history records nothing of them as landed; and the
+    thread's next turn lands them, where a landing then writes them, and the turn after lands its own file alone."""
+    folder, store = root / "Documents", root / "store" / "history.git"
+    ours = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+    # They are work the thread has not landed: its turn's open keeps the copy where it is.
+    assert ours.open()["copy"] == "kept", at
+    assert ours.changed() == {"paths": list(LEFT)}, at
+    held = {**dict(files_of(folder)), ".vscode/tasks.json": b"{}\n"}
+    del held["gone.txt"]
+    assert dict(files_of(ours.copy)) == held, at
+    assert {name: dict(files_of(folder)).get(name) for name in kept} == kept and not (folder / ".vscode").exists(), at
+    main = git(store, "rev-parse", "refs/heads/main")
+    assert git(store, "cat-file", "-p", f"{main}:gone.txt") == "linked v1", at
+    assert ".vscode/tasks.json" not in git(store, "ls-tree", "-r", "--name-only", main).split(), at
+    after = land(ours, "saga:next", B)
+    assert [(c["path"], c["after"] is None) for c in after["changes"]] == [(".vscode/tasks.json", False), ("gone.txt", True)], at
+    assert (folder / ".vscode" / "tasks.json").read_bytes() == b"{}\n" and not (folder / "gone.txt").exists(), at
+    (ours.copy / "after.md").write_text("the turn after\n")
+    assert [c["path"] for c in land(ours, "saga:after", B)["changes"]] == ["after.md"], at
+    assert git(store, "fsck", "--no-dangling") == "", at
+
+
+def never_recorded(root: Path, step: dict, kept: dict, at: object) -> None:
+    """After our thread's record was cut before its push and never asked again: the landing never counted, and what
+    it kept is not to be forgotten.  The thread's next turn lands the whole of its work, and nothing of anyone else's goes."""
+    folder = root / "Documents"
+    ours = LocalHistory.at(root / "store", folder, thread=OURS, user="u1")
+    with refused("landing_unsettled"):
+        ours.forget(saga="saga:ours", applied=step["applied"])
+    assert ours.open()["copy"] == "kept", at
+    after = land(ours, "saga:next", B)
+    assert {c["path"] for c in after["changes"]} <= {"B.md", "notes.txt", "late.md", *LEFT}, at
+    assert {name: dict(files_of(folder)).get(name) for name in kept if name != "gone.txt"} == {
+        name: text for name, text in kept.items() if name != "gone.txt"
+    }, at
+
+
+@pytest.mark.parametrize("asked_again", [False, True])
+def test_a_record_that_leaves_files_out_killed_at_any_step_leaves_them_as_the_thread_has_them_once_it_is_finished(tmp_path, asked_again):
+    _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole")
+    pushed = 0
+    for at, root in each_cut(tmp_path, OURS, "record", step):
+        store = root / "store" / "history.git"
+        recorded = "Surogate-Saga: saga:ours" in git(store, "log", "-1", "--format=%B", "refs/heads/main")
+        pushed += recorded
+        again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+        if asked_again:
+            answer = again.record(**step)
+            assert git(again.repo, "cat-file", "-p", f"{answer['set_aside']}:late.md") == "written after the turn was committed", at
+        if asked_again or recorded:
+            left_as_the_thread_has_them(root, kept, at)
+        else:
+            never_recorded(root, step, kept, at)
+    # The cuts fall on both sides of the push.
+    assert 0 < pushed < at
+
+
+def test_an_open_after_a_record_that_left_files_out_was_cut_after_its_push_killed_at_any_step_leaves_them_as_the_thread_has_them(tmp_path):
+    _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole")
+    stepped(tmp_path / "whole", OURS, "record", step, before="update-ref refs/heads/main")
+    for at, root in each_cut(tmp_path, OURS, "open", {}):
+        left_as_the_thread_has_them(root, kept, at)
+
+
+@pytest.mark.parametrize("inside", [0.003, 0.012])
+@pytest.mark.parametrize("asked_again", [False, True])
+def test_a_record_that_leaves_files_out_killed_inside_any_of_its_gits_leaves_them_as_the_thread_has_them_once_it_is_finished(tmp_path, asked_again, inside):
+    _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole", many=300)
+    for at, root in each_cut(tmp_path, OURS, "record", step, inside=inside):
+        store = root / "store" / "history.git"
+        recorded = "Surogate-Saga: saga:ours" in git(store, "log", "-1", "--format=%B", "refs/heads/main")
+        if asked_again:
+            LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1").record(**step)
+        if asked_again or recorded:
+            left_as_the_thread_has_them(root, kept, at)
+        else:
+            never_recorded(root, step, kept, at)
+
+
+@pytest.mark.parametrize("inside", [0.003, 0.012])
+def test_an_open_after_a_record_that_left_files_out_was_cut_after_its_push_killed_inside_any_of_its_gits_leaves_them_as_the_thread_has_them(tmp_path, inside):
+    _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole", many=300)
+    stepped(tmp_path / "whole", OURS, "record", step, before="update-ref refs/heads/main")
+    for at, root in each_cut(tmp_path, OURS, "open", {}, inside=inside):
+        left_as_the_thread_has_them(root, kept, at)
