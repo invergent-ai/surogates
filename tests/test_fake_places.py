@@ -21,7 +21,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.devices.binding import THREAD_ACTIONS
-from tests.fake_places import ACTIONS, NOT_A_THREAD, NOT_ITS_TURN, LandHelper, Places, landable
+from tests.fake_places import ACTIONS, BUSY, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, RECORDS_UNREAD, LandHelper, Places, landable
 
 DESKTOP = Path(__file__).resolve().parents[1] / "desktop"
 HELPER = DESKTOP / "dist" / "files" / "helper.js"
@@ -60,6 +60,85 @@ def test_the_tests_computer_refuses_a_threads_kind_as_the_apps_gate_does(tmp_pat
     assert places.run(frame(kind, "prune", own(kind, action))) == NOT_ITS_TURN
     # A chat bound to the folder itself has none of them.
     assert places.run(frame(kind, action, own(kind, action), root=str(uuid4()))) == NOT_A_THREAD
+
+
+def test_the_tests_computer_holds_the_folder_through_a_settles_forgetting_and_takes_nothing_for_a_hold_given_back_unheld(tmp_path):
+    # As the app's ToolHosts.land does: a turn holds the folder from its settle of a landing left running there to the end
+    # of its own landing, and a hold given back by a turn that holds nothing starts no landing's host.
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("v1 notes\n")
+    places = Places(tmp_path / "data", folder, "you")
+    other = str(uuid4())
+    places.threads.update({THREAD: THREAD, other: other})
+
+    def land(action: str, invocation: str, root: str = THREAD, **args: Any) -> dict[str, Any]:
+        return places.run({**frame("land", action, invocation, calling=root, root=root), "args": {"action": action, **args}})
+
+    # Nothing held: the hold given back takes nothing, and nothing is asked of the folder's history.
+    assert land("forget", "land:41:release:9", saga="hold:41", applied=[]) == {"ok": {}}
+    assert places.holder is None
+    assert not (tmp_path / "data" / "history").exists()
+    assert "ok" in land("recover", "land:41:hold")
+    # A landing another left running, settled by the turn and forgotten under the settle's name: still the turn's folder.
+    assert land("forget", "land:41:settle:saga:left-running", saga="saga:left-running", applied=[]) == {"ok": {}}
+    assert places.holder == THREAD
+    assert land("revisions", "land:3", root=other, paths=[]) == BUSY
+    # A hold given back by another while the turn holds the folder takes nothing from it.
+    assert land("forget", "land:3:release:1", root=other, saga="hold:3", applied=[]) == {"ok": {}}
+    assert places.holder == THREAD
+    # Its own landing forgotten, the folder is let go.
+    assert land("forget", "land:41", saga="saga:its-own", applied=[]) == {"ok": {}}
+    assert places.holder is None
+    assert "ok" in land("revisions", "land:3", root=other, paths=[])
+    assert places.holder == other
+
+
+def test_the_tests_computer_forgets_what_a_landing_kept_only_where_the_forgetting_names_every_step_its_helper_recorded(tmp_path):
+    # As the app's ToolHosts.land does: the history's word first, then the helper's records against the steps named.
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("v1 notes\n")
+    places = Places(tmp_path / "data", folder, "you")
+    places.threads[THREAD] = THREAD
+
+    def land(action: str, **args: Any) -> dict[str, Any]:
+        return places.run({**frame("land", action, "land:41"), "args": {"action": action, **args}})
+
+    assert places.run({**frame("history", "open", "open:41"), "args": {"action": "open"}})["ok"]["copy"] == "made"
+    (places.copy(THREAD) / "notes.txt").write_text("v2 notes\n")
+    revision = dict(land("revisions", paths=["notes.txt"])["ok"]["revisions"])["notes.txt"]
+    before, after = blob(b"v1 notes\n"), blob(b"v2 notes\n")
+    assert land("apply", saga="saga:1", step=0, path="notes.txt", before=before, after=after, expected=revision)["ok"]["path"] == "notes.txt"
+    kept = places.kept / "saga:1"
+    # A forgetting the app takes for none.
+    for applied in ([{"path": "notes.txt", "before": before, "after": after}], [{"step": 0, "path": "", "before": before, "after": after}], None):
+        assert land("forget", saga="saga:1", applied=applied) == NOT_A_FORGETTING_ASKED
+    # The history holds no landing of the saga and finds each file as named, but the step the helper recorded is left out,
+    # or named for another file: nothing goes.
+    for applied in ([], [{"step": 0, "path": "other.txt", "before": None, "after": after}]):
+        refused = land("forget", saga="saga:1", applied=applied)
+        assert refused == {"error": {"type": "conflict", "message": (
+            "Step 0 of this landing, of notes.txt, was applied on this computer, and the steps named to forget the landing leave it out, "
+            "so nothing the landing kept was forgotten"
+        )}}
+        assert sorted(path.name for path in kept.iterdir()) == ["0", "0.json"]
+    # Named as though what the landing wrote were what was there before: the history finds the file as named; the step
+    # still keeps the file it replaced.
+    assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": after, "after": after}]) == {"error": {"type": "conflict", "message": (
+        "Step 0 of this landing, of notes.txt, was neither recorded nor put back on this computer, and keeps the file it replaced, "
+        "so nothing the landing kept was forgotten"
+    )}}
+    # Records that cannot all be read forget nothing, however the steps are named.
+    (kept / "1.json").write_text("not a record")
+    assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": after, "after": after}]) == RECORDS_UNREAD
+    (kept / "1.json").unlink()
+    assert sorted(path.name for path in kept.iterdir()) == ["0", "0.json"]
+    # Put back, it keeps nothing, and the landing may go.
+    assert land("unapply", saga="saga:1", step=0, path="notes.txt") == {"ok": {"path": "notes.txt", "put_back": True}}
+    assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": before, "after": after}]) == {"ok": {}}
+    assert not kept.exists()
+    assert (folder / "notes.txt").read_text() == "v1 notes\n"
 
 
 # -- the land kind's rules, beside the app's own file helper ------------------------------------------------------

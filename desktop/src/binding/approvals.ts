@@ -13,6 +13,7 @@
 import { posix } from "node:path";
 
 import { chatPortOf, SANDBOX_PORTS } from "../browser/ports.js";
+import { THREAD_KINDS } from "../history/kinds.js";
 import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -280,6 +281,11 @@ export class Approvals {
   async admit(operation: Operation, signal: AbortSignal, download?: DownloadBy): Promise<Outcome | null> {
     if (operation.kind.startsWith(BROWSER)) return this.browse(operation, signal);
     if (UNASKED.has(operation.kind)) return null;
+    // A thread's snapshots, its history's steps and its landing (spec, Section 13, "Approvals") are none of its user's to
+    // allow: each change a landing applies was asked about when the thread made it in its copy, and a prompt for each
+    // landing would be the review the design rules out. Who may ask for them is the tools' to refuse, before this and
+    // again where they run (history/kinds.ts); a chat's own file helper does none of them.
+    if (THREAD_KINDS.has(operation.kind)) return null;
     const checked = this.asking(operation, download);
     if ("answer" in checked) return checked.answer;
     const root = operation.sessionId;
