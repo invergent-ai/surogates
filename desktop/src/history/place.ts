@@ -155,6 +155,25 @@ function recordedIn(text: string | null): Recorded | null {
   }
 }
 
+/**
+ * The folder whose landings keep what they replaced in <data>/landings/*name* (KEPT_NAME), as its place's record names
+ * it: its path, and its device's and its file's numbers when it was recorded. Null where that record is not there,
+ * cannot be read, or names a folder of another key. Nothing at the folder's path is looked at: whether the folder there
+ * is the one recorded, the host that would hold it says (hosts/start.ts).
+ */
+export function recordedFolder(dataDir: string, name: string): Folder | null {
+  const key = KEPT_NAME.exec(name)?.[1];
+  if (key === undefined) return null;
+  let data: string;
+  try {
+    data = realpathSync(dataDir);
+  } catch {
+    return null;
+  }
+  const recorded = recordedIn(textOf(join(data, "history", `${name}.json`)));
+  return recorded === null || keyOf(recorded.path) !== key ? null : recorded;
+}
+
 // Whole or not at all, and on disk before any history is made in the place.
 function write(record: string, recorded: { path: string; dev: string; ino: string; boot: string }): void {
   const temp = `${record}.${process.pid}`;

@@ -11,24 +11,29 @@
 // folder through a host of its own on it, which holds the folder from the landing's first step
 // until it is forgotten: only its helper's land kind writes there. What it kept goes only where the folder's history
 // says the landing may go, and the forgetting names every step the helper holds a record of. A thread deleted while
-// its landing has written the folder keeps that landing's host until it is forgotten.
+// its landing has written the folder keeps that landing's host until it is forgotten. What a landing cut short in a
+// folder, by a kill, a quit or the computer going down, a recovery's host on the folder puts back: as this computer's
+// tools start, and before the folder is read for a thread where no landing's host is on it.
 
+import { randomUUID } from "node:crypto";
+import { readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
 import { spawnClean } from "../clean-child.js";
-import { recordsOf } from "../files/land.js";
+import { type Recovered, recordsOf } from "../files/land.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Copy, Handle, Opened } from "../history/copies.js";
 import { forgettingOf, NOT_A_FORGETTING_ASKED, unrecorded } from "../history/kinds.js";
-import { keptOf } from "../history/place.js";
+import { KEPT_NAME, keptOf, keyOf, recordedFolder } from "../history/place.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { forgettable } from "../vm/history.js";
 import type { Folder, ProcessesChange } from "../vm/manager.js";
+import { LOCK_WAIT_MS } from "./folder-record.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
@@ -97,6 +102,29 @@ const STOPPED_STARTING = unavailable("its tool host stopped while it was startin
 export const folderBusy = (folder: string): Outcome => ({
   error: { type: "busy", message: `Another chat on this computer is working in ${folder}, so nothing of this landing was done. It can land once that one is done` },
 });
+/**
+ * A read of *folder* for a thread, refused: what a landing cut short there is not put back yet, as another held the
+ * folder for as long as the put-back waited for it. Nothing was done, and it can be asked again.
+ */
+export const notPutBackYet = (folder: string): Outcome => ({
+  error: {
+    type: "busy",
+    message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done`,
+  },
+});
+// What is said of what a landing cut short in *folder* where another held the folder for as long as the put-back waited.
+const heldElsewhere = (folder: string): string =>
+  `Another chat on this computer is working in ${folder}, so what a landing cut short there is not put back yet. It is put back once that one is done`;
+// What is said of what a folder's landings keep where the app's record of which folder that is cannot be read.
+const UNRECORDED = "The app's record of which folder a landing on this computer was cut short in cannot be read, so what that landing kept is left as it is";
+
+/**
+ * What putting back what landings cut short in one folder came to (files/land.ts, recover), for whoever shows it: the
+ * folder, as its place's record names it, or null where that record cannot be read; and the put-back under way, what it
+ * put back and what it could not, or why nothing was put back there, in words.
+ */
+export type Recovery = { folder: string | null } & ({ state: "begun" } | { state: "found"; found: Recovered } | { state: "left"; why: string });
+
 /** A landing asked of a chat that is no project's thread: its operations wrote *folder* themselves, and it has no copy to land from. */
 export const nothingToLand = (folder: string): Outcome => ({
   error: { type: "unsupported", message: `This chat works in ${folder} itself, so it has no copy of it to land from` },
@@ -233,6 +261,8 @@ export interface ToolHostsOptions {
   release?(root: string): Promise<void>;
   // Told each time a root's processes in the VM change, or a host goes: what liveRoots() names may have changed.
   changed?(): void;
+  // Told as what a landing cut short in a folder is being put back, and as that ends, with what it came to.
+  recovered?(recovery: Recovery): void;
 }
 
 export class ToolHosts implements Executor {
@@ -253,6 +283,14 @@ export class ToolHosts implements Executor {
   // How often each thread's root was told its copy is not vouched for: told while its copy was being opened, the copy
   // that open gives may be the one meant.
   private readonly told = new Map<string, number>();
+  // What landings cut short in a folder, being put back, by the name of what its landings keep: one at a time a folder.
+  private readonly recovering = new Map<string, Recovering>();
+  // What the last of them in each folder came to, by the same name, for whoever shows it.
+  private readonly found = new Map<string, Recovery>();
+  // The folders put back in since a landing's host there last went, by the same name: nothing of a landing was cut there
+  // since. And those whose put-back found another holding the folder, with the folder: asked again once a host there goes.
+  private readonly mended = new Set<string>();
+  private readonly waiting = new Map<string, string>();
   // Aborted at the app's quit: a copy's opening for a host that will not start is waited for no longer.
   private readonly halt = new AbortController();
   private stopping: Promise<void> | undefined;
@@ -381,6 +419,50 @@ export class ToolHosts implements Executor {
     await Promise.all([...going].map((host) => host.exited));
   }
 
+  /**
+   * As this computer's tools start: what landings cut short in its folders, as the app last ended or the computer went
+   * down, put back. For each folder whose landings keep anything (<data>/landings/<name>, KEPT_NAME), a recovery's host
+   * on the folder that folder's place's record names, by its identity then, asks its helper to put back what was cut
+   * short there. A folder that is not there, or is another than the one recorded, is said and left with what its landings
+   * keep; so is what is kept where no record says whose it is. Each is told as it begins and as it ends, and kept.
+   */
+  recoverLeft(): void {
+    const landings = this.landings();
+    let names: string[] = [];
+    try {
+      names = landings === null ? [] : readdirSync(landings);
+    } catch {
+      // Nothing was ever kept here.
+    }
+    for (const name of names) if (KEPT_NAME.test(name) && holdsAnything(join(landings!, name))) void this.recovery(name).done;
+  }
+
+  /**
+   * Before *bound*'s folder is read for its thread, as a turn's open and a pickup read it: what a landing cut short there
+   * is put back first, where the folder's landings keep anything and no landing's host is on the folder, whose helper puts
+   * it back in its own first step. Once a folder, until a landing's host there next goes. Null where the folder may be
+   * read; otherwise what that read is answered instead: another held the folder for as long as the put-back waited, or the
+   * put-back could not run. A folder that is not the one its place recorded is read all the same: what is kept is another's.
+   */
+  async recoverBefore(bound: BoundFolder, signal: AbortSignal): Promise<Outcome | null> {
+    const landings = this.landings();
+    if (landings === null) return null;
+    const name = keyOf(bound.folder);
+    const kept = join(landings, name);
+    let under = this.recovering.get(name);
+    if (!under) {
+      if (this.mended.has(name) || !holdsAnything(kept) || [...this.landers.values()].some((host) => host.kept === kept)) return null;
+      under = this.recovery(name);
+    }
+    if (await aborts(under.done, signal)) return CANCELLED;
+    return (await under.done).refusal;
+  }
+
+  /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
+  recoveries(): Recovery[] {
+    return [...this.found.values()];
+  }
+
   /** Whether a root bound to a thread's copy has one made to work in here. */
   keepsCopies(): boolean {
     return this.options.copies !== undefined;
@@ -457,7 +539,19 @@ export class ToolHosts implements Executor {
     if (!binding) return FOLDER_UNAVAILABLE;
     const known = this.hosts.get(root);
     if (known) return known;
-    if (binding.history === undefined) return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } });
+    if (binding.history === undefined) {
+      // What a landing cut short in the folder, being put back, holds it first: a chat's host waits for that as long as it
+      // waits for the folder, and no longer.
+      const recovering = this.recoveringIn(binding.folder);
+      if (recovering) {
+        const held = Promise.race([recovering.holds, new Promise<void>((resolve) => setTimeout(resolve, LOCK_WAIT_MS).unref())]);
+        if (await aborts(held, signal)) return CANCELLED;
+        if (this.stopping) return QUITTING;
+        const started = this.hosts.get(root);
+        if (started) return started;
+      }
+      return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } });
+    }
     const { copies } = this.options;
     if (!copies) return NO_COPIES;
     return this.once(this.starting, root, signal, (wanted) => this.onCopy(root, binding, copies, wanted));
@@ -635,7 +729,109 @@ export class ToolHosts implements Executor {
     void host.exited.then(() => {
       this.live.delete(host);
       this.options.changed?.();
+      this.wentFrom(host);
     });
+  }
+
+  // *host*, on a folder itself, has let it go. A landing's there may have been cut short in a step; and a put-back that
+  // found the folder held is asked again.
+  private wentFrom(host: Host): void {
+    if (host.recovers || host.works.at !== undefined) return;
+    if (host.kept !== undefined) this.mended.delete(basename(host.kept));
+    if (this.stopping) return;
+    for (const [name, folder] of this.waiting) {
+      if (folder !== host.works.folder.path) continue;
+      this.waiting.delete(name);
+      void this.recovery(name).done;
+    }
+  }
+
+  // Where the app keeps what every folder's landings replace, in its data by its real path; null where there is no data.
+  private landings(): string | null {
+    try {
+      return join(realpathSync(this.options.dataDir), "landings");
+    } catch {
+      return null;
+    }
+  }
+
+  // The put-back under way in *folder*: of what its landings keep, or of what a place of its set aside since kept.
+  private recoveringIn(folder: string): Recovering | undefined {
+    const key = keyOf(folder);
+    return [...this.recovering].find(([name]) => KEPT_NAME.exec(name)?.[1] === key)?.[1];
+  }
+
+  // What landings cut short in the folder whose landings keep what they replace under *name* left, put back by a host of
+  // its own: one at a time a folder, every caller meanwhile given the one under way.
+  private recovery(name: string): Recovering {
+    const known = this.recovering.get(name);
+    if (known) return known;
+    const held = Promise.withResolvers<void>();
+    const recovering: Recovering = {
+      holds: held.promise,
+      done: this.mend(name, () => held.resolve()).finally(() => {
+        held.resolve();
+        if (this.recovering.get(name) === recovering) this.recovering.delete(name);
+      }),
+    };
+    this.recovering.set(name, recovering);
+    return recovering;
+  }
+
+  // The put-back itself, told as it begins and as it ends: on the folder its place's record names, by its identity then.
+  // *holds* is told once its host holds the folder, or will not.
+  private async mend(name: string, holds: () => void): Promise<Mended> {
+    const landings = this.landings();
+    const folder = landings === null ? null : recordedFolder(this.options.dataDir, name);
+    const ended = (recovery: Recovery, refusal: Outcome | null = null): Mended => {
+      this.tell(name, recovery);
+      return { recovery, refusal };
+    };
+    if (this.stopping) return ended({ folder: folder?.path ?? null, state: "left", why: "the app is quitting" }, QUITTING);
+    if (landings === null || folder === null) return ended({ folder: null, state: "left", why: UNRECORDED });
+    const { path } = folder;
+    this.tell(name, { folder: path, state: "begun" });
+    let outcome: Outcome;
+    try {
+      const host = this.recoverer(folder, join(landings, name), name);
+      void host.started.then(holds);
+      outcome = await host.run({ id: randomUUID(), kind: "land", args: { action: "recover" } }, this.halt.signal);
+      host.finish();
+    } catch (error) {
+      outcome = unavailable(error instanceof Error ? error.message : String(error));
+    }
+    if ("ok" in outcome) {
+      this.mended.add(name);
+      this.waiting.delete(name);
+      return ended({ folder: path, state: "found", found: outcome.ok as Recovered });
+    }
+    const { type, message } = outcome.error;
+    // Not there, or another than the one recorded: what is kept is no folder's at that path to put back, and stays.
+    if (type === "folder_unavailable") return ended({ folder: path, state: "left", why: message });
+    if (type === "busy") {
+      this.waiting.set(name, path);
+      return ended({ folder: path, state: "left", why: heldElsewhere(path) }, notPutBackYet(path));
+    }
+    return ended({ folder: path, state: "left", why: message }, unavailable(`what a landing cut short in ${path} could not be put back, so it was not read: ${message}`));
+  }
+
+  // A recovery's host on *folder*, given what its landings keep in *kept*, with a working folder of its own by *name*. It
+  // waits for the folder as a landing's does, runs no command, and nothing of it is in the guest.
+  private recoverer(folder: Folder, kept: string, name: string): Host {
+    const works: Works = { folder };
+    const lockWaitMs = this.options.landWaitMs ?? LAND_WAIT_MS;
+    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${name}.recover`)), recovery: { kept }, lockWaitMs };
+    const host = new Host(
+      (this.options.spawnHost ?? forkHost)(), start, works, lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS), this.options.idleMs ?? IDLE_MS,
+      () => {}, () => Promise.resolve("deny"), () => Promise.resolve(),
+    );
+    this.keep(host);
+    return host;
+  }
+
+  private tell(name: string, recovery: Recovery): void {
+    this.found.set(name, recovery);
+    this.options.recovered?.(recovery);
   }
 }
 
@@ -649,6 +845,26 @@ function aborts(work: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
   });
 }
 
+// A put-back under way in a folder: settled once its host holds the folder, or will not; and once it has ended.
+interface Recovering {
+  holds: Promise<void>;
+  done: Promise<Mended>;
+}
+// What a put-back came to, and what a read of the folder for a thread is answered instead, where it may not be read.
+interface Mended {
+  recovery: Recovery;
+  refusal: Outcome | null;
+}
+
+// Whether the folder at *path* holds anything: one that is not there, or cannot be read, holds nothing to put back.
+function holdsAnything(path: string): boolean {
+  try {
+    return readdirSync(path).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 // A host being made for a root while its copy is opened: the host, or why there is none; how many of the root's
 // operations still wait for it; and whether the hosts were stopped meanwhile.
 interface Starting {
@@ -659,7 +875,8 @@ interface Starting {
 
 class Host {
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
-  private readonly started: Promise<Outcome | null>;
+  // Null once it has started; otherwise why nothing runs.
+  readonly started: Promise<Outcome | null>;
   readonly exited: Promise<void>;
   private readonly startTimer: NodeJS.Timeout;
   private settleStart: (failure: Outcome | null) => void = () => {};
@@ -679,10 +896,11 @@ class Host {
   private finished = false;
   // Told to stop: what it was sent ends, and nothing of a landing's is sent after.
   private closing = false;
-  // A landing's host: its helper writes the user's folder itself, and no stop of it cuts a step it was sent. Where it
-  // keeps the files the folder's landings replace.
+  // A landing's host, or a recovery's: its helper writes the user's folder itself, and no stop of it cuts a step it was
+  // sent. Where it keeps the files the folder's landings replace. Whether it is a recovery's, which lands nothing.
   private readonly lands: boolean;
   readonly kept: string | undefined;
+  readonly recovers: boolean;
   // A landing's host's steps its helper was sent and has not answered, by their ids: a cancelled one's too, which the
   // helper runs all the same. And who waits until there are none.
   private readonly unanswered = new Map<string, number>();
@@ -706,8 +924,9 @@ class Host {
     // commands run only after, or one could run in what that host held.
     private readonly before: Promise<void> = Promise.resolve(),
   ) {
-    this.lands = start.landing !== undefined;
-    this.kept = start.landing?.kept;
+    this.recovers = start.recovery !== undefined;
+    this.lands = start.landing !== undefined || this.recovers;
+    this.kept = start.landing?.kept ?? start.recovery?.kept;
     this.started = new Promise((resolve) => {
       this.settleStart = (failure) => {
         clearTimeout(this.startTimer);
@@ -732,7 +951,7 @@ class Host {
     this.send(start);
   }
 
-  run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+  run(operation: Pick<Operation, "id" | "kind" | "args">, signal: AbortSignal): Promise<Outcome> {
     return this.busy(async () => {
       const failure = await this.ready(signal);
       if (failure) return failure;
@@ -976,9 +1195,11 @@ class Host {
     } else if (message.type === "failed") {
       // A host that failed to start is exiting: the next operation starts a new one. One on a thread's copy says
       // in its own words, which name the folder, that the copy is not the one opened: its folder is not gone. A
-      // landing's that waited for its folder in vain began nothing of the landing.
+      // landing's that waited for its folder in vain began nothing of the landing. A recovery's says which folder is not
+      // there, or is not the one recorded, in its own words: nothing of a chat's is answered by it.
       this.onGone();
-      if (message.folder && this.works.at === undefined) this.settleStart(FOLDER_UNAVAILABLE);
+      if (message.folder && this.recovers) this.settleStart({ error: { type: "folder_unavailable", message: message.message } });
+      else if (message.folder && this.works.at === undefined) this.settleStart(FOLDER_UNAVAILABLE);
       else this.settleStart(message.busy && this.lands ? folderBusy(this.works.folder.path) : unavailable(message.message));
     } else {
       const answer = this.pending.get(message.id);

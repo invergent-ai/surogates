@@ -6,13 +6,14 @@
 // executor's copies have the guest make it, its file host holds it, and the guest shares
 // it at the folder's path. Its own kinds go where each is done (history/kinds.ts): a
 // checkpoint and a step of its history to git in the guest, for its copy; a landing's
-// steps to the landing's own host on the folder itself.
+// steps to the landing's own host on the folder itself. What a landing cut short in a
+// folder is put back as the executor starts, and before a thread's step reads the folder.
 
 import type { FolderGuards } from "../binding/folder.js";
 import { Copies, type Making } from "../history/copies.js";
 import { checkpointOf, NOT_A_CHECKPOINT, refusedOf, THREAD_KINDS } from "../history/kinds.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
-import { type BoundFolder, type Guard, ToolHosts, type ToolHostsOptions } from "../hosts/tool-hosts.js";
+import { type BoundFolder, type Guard, type Recovery, ToolHosts, type ToolHostsOptions } from "../hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import type { VmClient } from "./client.js";
@@ -52,6 +53,8 @@ export class VmExecutor implements Executor {
     // A destination off the package hosts that one of its chats' commands asked for: its approvals
     // decide, as long as something of the chat runs. Another device's chat is not its to answer.
     this.unasked = options.vm.onAsk((root, asked) => (options.bindingOf(root) ? this.files.ask(root, asked) : null));
+    // What landings cut short in this computer's folders, as the app last ended, is put back now.
+    this.files.recoverLeft();
   }
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -83,17 +86,27 @@ export class VmExecutor implements Executor {
   }
 
   // One of a thread's own kinds, where it is done. Refused again here: admit's answer is not this run's.
-  private thread(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+  private async thread(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     const binding = this.bound(operation);
     const refused = refusedOf(operation, binding);
-    if (refused || !binding) return Promise.resolve(refused ?? FOLDER_UNAVAILABLE);
+    if (refused || !binding) return refused ?? FOLDER_UNAVAILABLE;
     if (operation.kind === "land") return this.files.land(operation, signal);
     const root = operation.sessionId;
     const { action, ...args } = operation.args;
-    if (operation.kind === "history") return this.copies.ask(root, binding, String(action), args, signal);
+    if (operation.kind === "history") {
+      // A turn's open and a pickup read the folder, and would take a file a landing cut short beside its name for one its
+      // user deleted: what was cut short is put back first, or neither is asked.
+      const left = action === "open" || action === "pickup" ? await this.files.recoverBefore(binding, signal) : null;
+      return left ?? this.copies.ask(root, binding, String(action), args, signal);
+    }
     // The cloud's checkpoint by the history's own names: a take is its snapshot, and a restore's hash its commit.
     const asked = checkpointOf(operation.args);
-    return asked ? this.copies.ask(root, binding, asked.action, asked.args, signal) : Promise.resolve(NOT_A_CHECKPOINT);
+    return asked ? this.copies.ask(root, binding, asked.action, asked.args, signal) : NOT_A_CHECKPOINT;
+  }
+
+  /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
+  recoveries(): Recovery[] {
+    return this.files.recoveries();
   }
 
   // The binding of the root an operation of a thread's own is for: the journal's, or, for a step of its history or its

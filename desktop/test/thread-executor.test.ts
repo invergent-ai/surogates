@@ -18,11 +18,11 @@ import type { Making } from "../src/history/copies.js";
 import { NOT_A_CHECKPOINT, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, THREAD_KINDS } from "../src/history/kinds.js";
 import { keyOf } from "../src/history/place.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "../src/hosts/messages.js";
-import { type BoundFolder, CANCELLED, type HostProcess } from "../src/hosts/tool-hosts.js";
+import { type BoundFolder, CANCELLED, type HostProcess, type Recovery } from "../src/hosts/tool-hosts.js";
 import type { Binding } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
-import { PROCESS_KINDS, VmExecutor } from "../src/vm/executor.js";
+import { PROCESS_KINDS, VmExecutor, type VmExecutorOptions } from "../src/vm/executor.js";
 import type { HistoryRequest } from "../src/vm/history.js";
 import type { Place, VmOperation } from "../src/vm/manager.js";
 
@@ -60,6 +60,8 @@ let remakes: boolean;
 // The landing's steps a landing's helper holds its answer to, by their action, until the test lets them go.
 let holding: Set<string>;
 let unanswered: Array<() => void>;
+// What a host started to put back what a landing cut short says at its start in place of ready, where a test says.
+let recoveryStarts: Extract<FromHost, { type: "failed" }> | null;
 
 // A step's record, as a landing's helper writes it before the step changes anything (files/land.ts).
 const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0 });
@@ -98,8 +100,10 @@ function host(): HostProcess {
       if (message.type === "start") {
         starts.push(message);
         held = message.folder;
-        kept = message.landing?.kept ?? "";
-        heard.forEach((listener) => listener({ type: "ready", processes: [] }));
+        kept = message.landing?.kept ?? message.recovery?.kept ?? "";
+        const failing = message.recovery ? recoveryStarts : null;
+        heard.forEach((listener) => listener(failing ?? { type: "ready", processes: [] }));
+        if (failing) exits.splice(0).forEach((listener) => listener());
       } else if (message.type === "op") {
         ops.push({ held, kind: message.kind, args: message.args });
         const answer = () => say({ ok: message.kind === "land" && kept ? land(message.args) : (answers[message.kind] ?? (() => ({ did: message.kind })))(message.args) });
@@ -146,9 +150,15 @@ beforeEach(() => {
   holding = new Set();
   unanswered = [];
   bindings = new Map();
+  recoveryStarts = null;
   bind(THREAD, true);
   bind(CHAT, false);
-  executor = new VmExecutor({
+  executor = executorOf();
+});
+
+// The app's executor, on the stand-ins above, with *more* of its options.
+function executorOf(more: Partial<VmExecutorOptions> = {}): VmExecutor {
+  return new VmExecutor({
     bindingOf: (root) => bindings.get(root), dataDir, cacheDir: join(dir, "cache", "surogate"), env: { HOME: dir, LANG: "C.UTF-8" },
     user: USER, spawnHost: host, making: (event) => void made.push(event),
     vm: {
@@ -181,8 +191,9 @@ beforeEach(() => {
         return true;
       },
     },
+    ...more,
   });
-});
+}
 
 afterEach(async () => {
   await executor.stop();
@@ -652,5 +663,91 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     expect(await looking).toEqual({ ok: { revisions: [["a.txt", "absent"]] } });
     await until(() => stops.includes(folder));
     expect(await executor.run(land({ action: "recover" }), signal())).toEqual(FOLDER_UNAVAILABLE);
+  });
+});
+
+describe("what a landing cut short in a thread's folder, put back through the app's executor", { timeout: 10_000 }, () => {
+  const history = (action: string, invocationId = "land:turn-1"): Operation => ({ ...op("history", { action }), invocationId });
+  // What the folder's landings keep, holding a step's record as a landing's helper cut short leaves it.
+  const left = () => {
+    const kept = join(realpathSync(dataDir), "landings", keyOf(folder));
+    mkdirSync(join(kept, "saga-1"), { recursive: true });
+    writeFileSync(join(kept, "saga-1", "0.json"), record("a.txt"));
+    return kept;
+  };
+  const recoveries = () => starts.filter((start) => start.recovery !== undefined);
+  const actions = () => asked.map((request) => request.action);
+  const nothing = { restored: [], beside: [], lost: [], unread: [] };
+
+  it("put it back before a pickup or a turn's open is asked of the guest, where the folder's landings keep anything and no landing's host is on it, and once", async () => {
+    // The thread's first operation makes the folder's place in the app's data, and its record.
+    await executor.run(op("resolve", { path: "" }), signal());
+    const kept = left();
+    holding.add("recover");
+    const pickup = executor.run(history("pickup"), signal());
+    await until(() => ops.some((done) => done.kind === "land" && done.args.action === "recover"));
+    // On the folder its place's record names, with what its landings keep; the guest is asked nothing meanwhile.
+    expect(recoveries()).toEqual([expect.objectContaining({ folder, expect: identity(folder), recovery: { kept } })]);
+    expect(actions()).toEqual(["open"]);
+    holding.delete("recover");
+    for (const answer of unanswered.splice(0)) answer();
+    expect(await pickup).toEqual({ ok: {} });
+    expect(actions()).toEqual(["open", "pickup"]);
+    // Put back, and no landing's host on the folder since: a turn's open and the next pickup start none.
+    expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual({ ok: { copy: "made" } });
+    expect(await executor.run(history("pickup"), signal())).toEqual({ ok: {} });
+    expect(recoveries()).toHaveLength(1);
+    // A landing's host there since may have been cut: the next one does.
+    expect(await executor.run({ ...op("land", { action: "revisions", paths: [] }), invocationId: "land:turn-2" }, signal())).toMatchObject({ ok: {} });
+    expect(await executor.run({ ...op("land", { action: "forget", saga: "saga-2", applied: [] }), invocationId: "land:turn-2" }, signal())).toMatchObject({ ok: {} });
+    await until(() => stops.includes(folder));
+    expect(await executor.run(history("open", "open:turn-3"), signal())).toEqual({ ok: { copy: "made" } });
+    expect(recoveries()).toHaveLength(2);
+  });
+
+  it("put nothing back for them where a landing's host is on the folder: its helper's first step put back what was cut short", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    expect(await executor.run({ ...op("land", { action: "recover" }), invocationId: "land:turn-1:hold" }, signal())).toEqual({ ok: nothing });
+    expect(await executor.run(history("pickup"), signal())).toEqual({ ok: {} });
+    expect(recoveries()).toEqual([]);
+    // Nor where the folder's landings keep nothing.
+    rmSync(join(realpathSync(dataDir), "landings"), { recursive: true });
+    expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual({ ok: { copy: "made" } });
+    expect(recoveries()).toEqual([]);
+  });
+
+  it("answer a pickup and a turn's open busy, and ask the guest nothing, where another holds the folder for as long as the recovery waits for it", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    recoveryStarts = { type: "failed", message: "another chat on this computer is working in this folder; this one can use it once that one is done", busy: true };
+    const busy = {
+      error: { type: "busy", message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+    };
+    expect(await executor.run(history("pickup"), signal())).toEqual(busy);
+    expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual(busy);
+    expect([actions(), recoveries().length]).toEqual([["open"], 2]);
+  });
+
+  it("read the folder all the same where the folder its place's record names is not there or is another: what its landings keep is left, and said", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    left();
+    recoveryStarts = { type: "failed", message: `the folder ${folder} is not there`, folder: true };
+    expect(await executor.run(history("pickup"), signal())).toEqual({ ok: {} });
+    expect(actions()).toEqual(["open", "pickup"]);
+    expect(executor.recoveries()).toEqual([{ folder, state: "left", why: `the folder ${folder} is not there` }]);
+  });
+
+  it("put it back as this computer's tools start, in each folder whose landings keep anything, and say what it found", async () => {
+    await executor.run(op("resolve", { path: "" }), signal());
+    const kept = left();
+    await executor.stop();
+    starts = [];
+    const told: Recovery[] = [];
+    executor = executorOf({ recovered: (recovery) => void told.push(recovery) });
+    await until(() => told.length === 2);
+    expect(recoveries().map((start) => [start.folder, start.recovery])).toEqual([[folder, { kept }]]);
+    expect(told).toEqual([{ folder, state: "begun" }, { folder, state: "found", found: nothing }]);
+    expect(executor.recoveries()).toEqual([{ folder, state: "found", found: nothing }]);
   });
 });
