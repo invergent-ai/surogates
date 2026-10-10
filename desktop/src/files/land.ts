@@ -23,8 +23,9 @@
 // say it ended is put back by the first thing a landing's helper is next asked, before that
 // looks at the folder or writes it: the real file takes its name again, or, where the user has
 // put another there meanwhile, goes beside it under a name that says what it is. A put-back
-// that copies the file back from another filesystem than the folder's says in its record how
-// much of the copy is on disk, and one cut short goes on from there.
+// that copies the file back, as from a kept folder on another filesystem or another mount than
+// the folder's (the helper's sandbox mounts each apart), says in its record how much of the copy
+// is on disk, and one cut short goes on from there.
 //
 // A helper given what the folder's landings keep and no copy is a recovery's: it puts back what a
 // landing there cut short, and does nothing else.
@@ -62,7 +63,7 @@ const MAX_LAND_BYTES = 1024 * 1024 * 1024;
 // refused before it is touched, and lands once a landing before it was recorded or put back, which lets go of its own.
 const MAX_KEPT_BYTES = 4 * 1024 * 1024 * 1024;
 const LAND_EFBIG = new Failure({ type: "os", code: "EFBIG", message: `File too large to land in a local folder (over ${MAX_LAND_BYTES / 2 ** 30} GiB)` });
-// How much of a copy a put-back brings back from another filesystem is on disk before its record says so: a copy cut
+// How much of a copy a put-back brings back from another mount is on disk before its record says so: a copy cut
 // short goes on from there, and a file as large as all a folder's landings keep is never begun again from nothing.
 const COPIED_BYTES = 16 * 1024 * 1024;
 /** What a helper given no copy answers anything but a recovery: it puts back what a landing cut short, and nothing else. */
@@ -868,7 +869,7 @@ class Landing {
       }
       if (dir !== null && did.wrote !== null && same(now, did.wrote)) {
         if (did.was !== null && replaced === null) return "changed";
-        // What it replaced, where it is copied back from another filesystem, is copied beside the name first: the
+        // What it replaced, where it is copied back from another mount, is copied beside the name first: the
         // landing's file holds the name meanwhile, and leaves it only once the file it replaced can take it at once.
         if (did.was !== null && replaced === this.bytes(step) && !this.linkable(did, dir, replaced)) did = this.copiedBack(step, did, dir, replaced);
         // Its own file is there: moved out as the real one was, and looked at again before anything takes its place.

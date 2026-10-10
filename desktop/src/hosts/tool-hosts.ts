@@ -106,7 +106,7 @@ export const folderBusy = (folder: string): Outcome => ({
  * A read of *folder* for a thread, refused: what a landing cut short there is not put back yet, as another held the
  * folder for as long as the put-back waited for it. Nothing was done, and it can be asked again.
  */
-export const notPutBackYet = (folder: string): Outcome => ({
+export const stillCutShort = (folder: string): Outcome => ({
   error: {
     type: "busy",
     message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done`,
@@ -820,7 +820,7 @@ export class ToolHosts implements Executor {
     if (type === "folder_unavailable") return ended({ folder: path, state: "left", why: message });
     if (type === "busy") {
       this.waiting.set(name, path);
-      return ended({ folder: path, state: "left", why: heldElsewhere(path) }, notPutBackYet(path));
+      return ended({ folder: path, state: "left", why: heldElsewhere(path) }, stillCutShort(path));
     }
     return ended(
       { folder: path, state: "left", why: message },
