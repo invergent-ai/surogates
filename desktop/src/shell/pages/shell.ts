@@ -295,8 +295,9 @@ function versionRow(version: Version): HTMLElement {
 // The file whose History the pane showed when it was last drawn.
 let historyShown: string | null = null;
 
-// A file's History, in place of the Library's files. As it opens the keyboard goes to its way back,
-// and as it closes, back to the file's row, while the pane has the keyboard.
+// A file's History, in place of the Library's files. As it opens, the row that had the keyboard is
+// hidden and the redraw gives it to the History's way back; as it closes, the keyboard goes back to
+// the file's row, while the pane has it.
 function renderHistory(state: State): void {
   const history = state.history;
   byId("file-history").hidden = history === null;
@@ -307,14 +308,13 @@ function renderHistory(state: State): void {
     byId("history-failure").hidden = history.failure === null;
     byId("history-failure").textContent = history.failure ?? "";
     byId("versions").replaceChildren(...(history.versions ?? []).map(versionRow));
-    byId("no-versions").hidden = history.failure !== null || history.versions?.length !== 0;
+    byId("no-versions").hidden = history.versions?.length !== 0;
   }
   const was = historyShown;
   historyShown = history?.path ?? null;
   const inPane = document.activeElement === document.body || byId("panel").contains(document.activeElement);
-  if (historyShown === was || !inPane) return;
-  if (history) byId("history-back").focus();
-  else document.querySelector<HTMLElement>(`[data-file="${CSS.escape(was ?? "")}"]`)?.focus();
+  if (historyShown !== null || was === null || !inPane) return;
+  document.querySelector<HTMLElement>(`[data-file="${CSS.escape(was)}"]`)?.focus();
 }
 
 function renderOverview(state: State): void {

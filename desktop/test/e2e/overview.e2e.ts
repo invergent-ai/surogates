@@ -1206,7 +1206,15 @@ describe("a file's History in the Library", () => {
   });
 
   it("shows a name from the history as text, a thread as a thread whatever its title, and one it has no name for as a plain change", async () => {
+    const markup = '<img src=x onerror="document.title=1">\u202Egpj.md';
+    agent.projects!.library[REPORT]!.push({ path: markup, origin: "added", threadId: null, size: 1, updatedAt: null, place: { kind: "cloud" } });
     const { page, client } = await opened();
+    // A file's own name, over its History.
+    await page.click('[data-tab="library"]');
+    await page.click("#files li:last-child [data-file]");
+    await expect.poll(() => page.textContent("#history-path")).toBe('<img src=x onerror="document.title=1">U+202Egpj.md');
+    expect(await page.$$eval("#file-history img", (found) => found.length)).toBe(0);
+    await page.click("#history-back");
     await (await served(client)).evaluate((fake, [project, path]) => {
       const [first] = fake.data.history[project!]![path!]!;
       fake.data.history[project!]![path!] = [
@@ -1229,19 +1237,38 @@ describe("a file's History in the Library", () => {
   });
 
   it("opens from a waiting thread's row when a file of it did not merge, and reads the thread when none did", async () => {
+    // The file is one of the thread's, though the Library no longer lists it.
+    agent.projects!.library[REPORT] = agent.projects!.library[REPORT]!.filter((entry) => entry.path !== REVENUE);
+    // A thread on a computer that waits over its files: its History is on its computer.
+    Object.assign(agent.projects!.threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.computer)!, {
+      group: "waiting", reason: "files", files: [{ kind: "file", label: "notes.md", ref: "notes.md", threadId: FIXTURE_IDS.computer, landing: "not_merged" }],
+    });
     const { shell, page, client } = await opened();
+    // A row that waits for anything else reads its thread, whatever its files' marks; so does the one on a computer.
+    for (const thread of [QUESTION, FIXTURE_IDS.computer]) {
+      await page.click(`[data-thread="${thread}"]`);
+      await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(thread));
+      await page.click("#reading-back");
+      await expect.poll(() => pane(shell)).toBeNull();
+    }
     await (await served(client)).evaluate((fake, [project, thread]) => {
-      Object.assign(fake.data.threads[project!]!.find((found) => found.id === thread)!, {
+      const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
+      Object.assign(row, {
         reason: "files", statusLine: "Couldn't merge my changes to revenue.xlsx",
+        // Its first file that did not merge: an artifact is no file with a History.
+        files: [{ kind: "artifact", label: "Chart", ref: "art-1", threadId: thread!, landing: "not_merged" }, ...row.files],
       });
       fake.changed(project!, thread!);
     }, [REPORT, QUESTION]);
     await expect.poll(() => page.textContent(`[data-thread="${QUESTION}"] .status`)).toBe("Files · Couldn't merge my changes to revenue.xlsx");
-    await page.click(`[data-thread="${QUESTION}"]`);
+    await page.focus(`[data-thread="${QUESTION}"]`);
+    await page.keyboard.press("Enter");
     await page.waitForSelector("#versions .version");
     expect(await page.textContent("#history-path")).toBe(REVENUE);
     expect(await page.isVisible("#library")).toBe(true);
     expect(await pane(shell)).toBeNull();
+    // The row that had the keyboard is hidden: the History's way back has it.
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("history-back");
     // A thread that waits over files with none left unmerged (its landing escalated) is read, as any other row.
     await page.click("#history-back");
     await page.click('[data-tab="threads"]');
@@ -1250,7 +1277,7 @@ describe("a file's History in the Library", () => {
       row.files = row.files.map((file) => ({ ...file, landing: "landed" as const }));
       fake.changed(project!, thread!);
     }, [REPORT, QUESTION]);
-    await expect.poll(() => texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["revenue.xlsx"]);
+    await expect.poll(() => texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["Chart", "revenue.xlsx"]);
     await page.click(`[data-thread="${QUESTION}"]`);
     await expect.poll(async () => (await pane(shell))?.url).toBe(transcript(QUESTION));
   });
@@ -1278,12 +1305,16 @@ describe("a file's History in the Library", () => {
       path: "threads/tidy/notes.md", origin: "produced", threadId: FIXTURE_IDS.computer, size: null, updatedAt: null,
       place: { kind: "device", deviceId: "d", deviceName: "thinkpad", online: false },
     });
+    Object.assign(agent.projects!.threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.computer)!, {
+      files: [{ kind: "file", label: "local.md", ref: "threads/tidy/local.md", threadId: FIXTURE_IDS.computer, landing: "not_merged" }],
+    });
     const { page } = await opened();
     // A file on a computer has its History there: its row opens none.
     await page.click('[data-tab="library"]');
     expect(await page.$$eval("#files [data-file]", (found) => found.map((file) => (file as HTMLElement).dataset.file))).not.toContain("threads/tidy/notes.md");
     // Asked past the page's own rows, as a page gone wrong might: that file, and a path of no file.
-    for (const path of ["threads/tidy/notes.md", "../other/secret.docx"]) {
+    // Nor is a thread's artifact a file, though its row lists it.
+    for (const path of ["threads/tidy/notes.md", "threads/tidy/local.md", "art-1", "../other/secret.docx"]) {
       const refused = await page.evaluate((asked) => (window as unknown as { surogateShell: { history(path: string): Promise<void> } })
         .surogateShell.history(asked).then(() => null, (error: Error) => error.message), path);
       expect(refused).toContain("No such file in the open project");
