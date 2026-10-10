@@ -31,7 +31,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.db.models import Session as SessionRow
-from surogates.devices.binding import BIND, RETIRE, binding_of, copy_of, device_of, is_binding_root
+from surogates.devices.binding import (
+    BIND,
+    RETIRE,
+    THREAD_ACTIONS,
+    THREAD_KINDS,
+    binding_of,
+    copy_of,
+    device_of,
+    is_binding_root,
+)
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import (
@@ -42,6 +51,7 @@ from surogates.devices.workspace import (
     transfer_of,
 )
 from surogates.runtime.turn_slots import turn_detached, turn_waiting
+from surogates.workstreams import is_project_thread
 
 if TYPE_CHECKING:
     from surogates.devices.waits import DeviceWaitNotice
@@ -215,6 +225,8 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         copy = copy_of(root.config)
         if copy not in (None, root.id) or request.args.get("history") != (None if copy is None else {"thread": str(copy)}):
             raise ValueError("A root is bound with a copy only where the server made it a thread that works in one")
+    if request.kind in THREAD_KINDS and not _its_own_turn(request, root.config):
+        raise ValueError("Only a thread's own turn asks its computer for its snapshots, its history or its landing")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
     if is_retiring:
@@ -227,6 +239,24 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         # are still theirs to open.  A deleted chat's are not.
         return "archived" in (calling.status, root.status)
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
+
+
+def _its_own_turn(request: OperationRequest, root: dict[str, Any] | None) -> bool:
+    """Whether a thread's own kind is asked as its turn asks it, and as its computer's app takes it.
+
+    The root is a project's thread the server bound with a copy of its own.
+    A snapshot is asked under ``checkpoint:``, by any session of the
+    thread's; a step of its history or of its landing by the thread itself,
+    under ``land:``, and its turn's open also under ``open:``.  No tool call,
+    and no request of the user's own, carries one.
+    """
+    action = request.args.get("action")
+    if copy_of(root) != request.root_session_id or not is_project_thread(root) or action not in THREAD_ACTIONS[request.kind]:
+        return False
+    if request.kind == "checkpoint":
+        return request.invocation_id.startswith("checkpoint:")
+    opening = request.kind == "history" and action == "open" and request.invocation_id.startswith("open:")
+    return request.calling_session_id == request.root_session_id and (opening or request.invocation_id.startswith("land:"))
 
 
 class TooManyRequests(DeviceOperationError):

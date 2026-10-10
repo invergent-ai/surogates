@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from surogates.devices.binding import THREAD_KINDS
+from surogates.devices.binding import THREAD_ACTIONS, THREAD_KINDS
 from surogates.devices.history import (
     ACTIONS,
     HISTORY_CODES,
@@ -102,7 +102,8 @@ EXACT = {("history", "forget"), ("land", "forget")}
 
 
 def test_every_action_a_thread_asks_has_one_shape_of_answer_and_nothing_else_has_any():
-    assert set(ACTIONS) == THREAD_KINDS
+    # The journal's list of what a thread asks, and this one's of what it takes for an answer, are one.
+    assert ACTIONS == THREAD_ACTIONS and set(ACTIONS) == THREAD_KINDS
     assert {(kind, action) for kind, actions in ACTIONS.items() for action in actions} == set(HONEST)
     for kind, action in [("history", "prune"), ("history", "close"), ("history", "drop"), ("land", "open"), ("write", "open"), ("bind", "bind")]:
         with pytest.raises(NotAnAnswer):

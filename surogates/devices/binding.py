@@ -33,10 +33,15 @@ BIND = "bind"
 RETIRE = "retire"
 
 # The kinds only a project thread's own turn asks its computer for
-# (surogates.devices.history): a snapshot of its copy or the copy put back,
-# a step of its folder's history, a landing's look at the folder and its
-# writes into it.
-THREAD_KINDS = frozenset({"checkpoint", "history", "land"})
+# (surogates.devices.history), and the actions of each: a snapshot of its
+# copy or the copy put back; a step of its folder's history; a landing's
+# look at the folder, its writes into it, and its forgetting of what it kept.
+THREAD_ACTIONS: dict[str, frozenset[str]] = {
+    "checkpoint": frozenset({"take", "restore"}),
+    "history": frozenset({"open", "changed", "fetch", "pickup", "commit", "record", "keep", "forget"}),
+    "land": frozenset({"recover", "revisions", "apply", "unapply", "forget"}),
+}
+THREAD_KINDS = frozenset(THREAD_ACTIONS)
 
 # The sandbox keys of the session on the user's computer this task works for,
 # set by AgentHarness.wake (see surogates.devices.sandbox).  Here, not there,
