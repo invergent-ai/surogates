@@ -773,7 +773,7 @@ describe("a root's environment", () => {
       "PIP_USER=1",
       "",
     ].join("\n");
-    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toEqual({
+    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, false)).toEqual({
       PATH: "/home/ana/.npm-global/bin:/home/ana/.local/bin:/opt/venv/bin:/usr/bin:/bin",
       PYTHONUSERBASE: "/home/ana/.local",
       PIP_USER: "1",
@@ -797,7 +797,7 @@ describe("a root's environment", () => {
 
   it("gives git its stat check after the layout's own git config", () => {
     const layout = "GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0=*\n";
-    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
+    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, false)).toMatchObject({
       GIT_CONFIG_COUNT: "2",
       GIT_CONFIG_KEY_0: "safe.directory",
       GIT_CONFIG_VALUE_0: "*",
@@ -807,15 +807,24 @@ describe("a root's environment", () => {
   });
 
   it("keeps the runner's proxies whatever the layout says", () => {
-    expect(rootEnvironment("HTTPS_PROXY=http://elsewhere:8080\nNO_PROXY=*\n", { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" })).toMatchObject({
+    expect(rootEnvironment("HTTPS_PROXY=http://elsewhere:8080\nNO_PROXY=*\n", { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, false)).toMatchObject({
       HTTPS_PROXY: "http://127.0.0.1:3128", NO_PROXY: "localhost,127.0.0.1,::1,0.0.0.0,surogate",
     });
+  });
+
+  it("names the guest's system bundle for the common tools' own trust while the guest trusts the company's CA, whatever the layout says, and nothing of it otherwise", () => {
+    const ana = { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" };
+    const BUNDLE = "/etc/ssl/certs/ca-certificates.crt";
+    const variables = ["NODE_EXTRA_CA_CERTS", "PIP_CERT", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"];
+    const trusted = rootEnvironment("SSL_CERT_FILE=/home/sandbox/cert.pem\n", ana, true);
+    expect(Object.fromEntries(variables.map((name) => [name, trusted[name]]))).toEqual(Object.fromEntries(variables.map((name) => [name, BUNDLE])));
+    expect(Object.keys(rootEnvironment("", ana, false)).filter((name) => variables.includes(name))).toEqual([]);
   });
 
   it("takes the home as it is, and moves only the paths that start at the cloud's HOME", () => {
     const layout = "PATH=/home/sandbox/.local/bin:/opt/home/sandbox/bin:/home/sandboxes/bin\nPYTHONUSERBASE=/home/sandbox\n";
     const home = "/home/a$&b$$c$`d$'e";
-    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home })).toMatchObject({
+    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home }, false)).toMatchObject({
       PATH: `${home}/.local/bin:/opt/home/sandbox/bin:/home/sandboxes/bin`,
       PYTHONUSERBASE: home,
     });

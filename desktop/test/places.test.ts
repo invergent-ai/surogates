@@ -55,7 +55,7 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
   const control = new Control(
     (message) => void guest.write(`${JSON.stringify(message)}\n`),
     { uid: () => 10_000, setup: async (root, folder, share) => void asked.push(["setup", root, folder, share]), teardown: async () => {}, perform: async () => ({ ok: true }), ...roots },
-    { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill },
+    { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill, trust: async () => {} },
     {
       mount: async (key, history, real) => void asked.push(["mount", key, history, real]),
       unmount: async (key) => void asked.push(["unmount", key]),
