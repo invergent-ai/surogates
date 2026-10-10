@@ -34,6 +34,9 @@ export interface HostStart {
   // A landing's host alone, on the folder itself: the thread's copy its files come from, which
   // its helper reads, and the folder in the app's data where it keeps the files it replaces.
   landing?: { copy: string; kept: string };
+  // A recovery's host alone, on the folder itself: the folder in the app's data where its landings keep the files
+  // they replace, by whose records its helper puts back what a landing there cut short. It is given no copy.
+  recovery?: { kept: string };
   // How long it waits for another host to let its folder go; LOCK_WAIT_MS unless said.
   lockWaitMs?: number;
   tmp: string; // the file helper's working folder, which srt wraps it from
