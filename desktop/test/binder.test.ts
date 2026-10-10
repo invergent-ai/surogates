@@ -15,7 +15,7 @@ import {
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
-import { NO_COPY, NOT_BOUND, ToolHosts } from "../src/hosts/tool-hosts.js";
+import { NOT_BOUND, ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
@@ -459,7 +459,7 @@ describe("a chat's bind operation", () => {
     expect(journal.bindings.all().map((bound) => bound.history)).toEqual([ROOT, undefined]);
   });
 
-  it("works nowhere once it is bound to its copy: the tool hosts, on the journal's own binding, start none for it on the folder", async () => {
+  it("works nowhere once it is bound to its copy where the tool hosts make no copies: they start none for it on the folder", async () => {
     let started = 0;
     const tools = new ToolHosts({
       bindingOf: (root) => journal.bindings.get(root),
@@ -477,7 +477,9 @@ describe("a chat's bind operation", () => {
       const operation: Operation = { ...bindOp(ROOT, ready), id: `${kind}-1`, invocationId: "call", ordinal: 1, kind, args };
       // Free to work, so nobody is asked; and what it would work on is refused.
       expect(await chooser.admit(operation, never())).toBeNull();
-      expect(await chooser.run(operation, never())).toEqual(NO_COPY);
+      expect(await chooser.run(operation, never())).toEqual({
+        error: { type: "unavailable", message: "This computer could not open the folder's sandbox: it has none to make this thread's copy of its folder in" },
+      });
     }
     expect([started, readdirSync(notes)]).toEqual([0, []]);
     await tools.stop();

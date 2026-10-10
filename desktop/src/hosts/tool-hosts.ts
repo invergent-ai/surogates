@@ -3,6 +3,11 @@
 // the app's own record of the binding, never from the request. What the root runs in
 // the VM asks the chat's approvals about the hosts its connections reach past the
 // package hosts.
+//
+// A project thread's root is bound to a copy of its folder (spec, Section 13): its host is
+// started on the copy, which the copies have the guest make first, and is asked by the folder's
+// path; its commands share the copy in the guest at that path. Nothing of a thread's works in
+// the folder itself: without a copy it works nowhere.
 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,10 +16,11 @@ import { fileURLToPath } from "node:url";
 import type { FolderGuards } from "../binding/folder.js";
 import { spawnClean } from "../clean-child.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
+import type { Handle, Opened } from "../history/copies.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
-import type { ProcessesChange } from "../vm/manager.js";
+import type { Folder, ProcessesChange } from "../vm/manager.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
@@ -45,13 +51,13 @@ export const HOST_STOPPED: Outcome = {
   },
 };
 export const NOT_BOUND: Outcome = { error: { type: "binding", message: "This folder was not confirmed on this computer" } };
-// A root bound to a thread's copy of its folder (spec, Section 13): its work goes to the copy or
-// nowhere, never to the folder itself.
-export const NO_COPY: Outcome = { error: { type: "unsupported", message: "This computer cannot work in a thread's copy of a folder yet" } };
 
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
+// A root bound to a copy works in its copy or nowhere: with nothing to make copies, nowhere.
+const NO_COPIES = unavailable("it has none to make this thread's copy of its folder in");
+const QUITTING = unavailable("the app is quitting");
 
 // The hook guard around a process operation that runs in the VM: its refusal before it
 // and its look after it, its refusal alone, or neither.
@@ -60,6 +66,20 @@ export type Guard = "around" | "before" | null;
 // What a host needs of a root's binding: its folder, that folder's identity when it was bound,
 // and the thread whose copy of it the root works in, if it is a project's thread.
 export type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot" | "history">;
+
+// What a root's host holds, which its commands in the guest share: its chat's folder, or a thread's copy of one,
+// shared at the path of the folder it is a copy of.
+export interface Works {
+  folder: Folder;
+  at?: string;
+}
+
+// Who has a thread's copy made before its host starts on it, and lets it go once that host has gone
+// (history/copies.ts): each copy it gives comes with that host's hold on it, closed once.
+export interface ThreadCopies {
+  open(root: string, bound: BoundFolder, signal: AbortSignal): Promise<Opened>;
+  close(handle: Handle): void;
+}
 
 export interface HostProcess {
   send(message: ToHost): void;
@@ -148,6 +168,8 @@ export interface NetworkApprovals {
 
 export interface ToolHostsOptions {
   bindingOf(rootSessionId: string): BoundFolder | undefined;
+  // Without it, a root bound to a copy has nowhere to work, and every operation of it is refused.
+  copies?: ThreadCopies;
   network?: NetworkApprovals; // without it, every destination off the package hosts is refused
   dataDir: string;
   // The app's own cache folder, <cache home>/surogate, by the cache home the app itself uses: no
@@ -170,32 +192,48 @@ export class ToolHosts implements Executor {
   private readonly hosts = new Map<string, Host>();
   // Every host until it exits: one stopping because it had nothing to do is no longer in hosts.
   private readonly live = new Set<Host>();
+  // A thread's host while its copy is opened for it: the root's operations that come meanwhile wait for that one.
+  private readonly starting = new Map<string, Promise<Host | Outcome>>();
+  // The root of each host on a thread's copy, until it exits.
+  private readonly onCopies = new Map<Host, string>();
+  // Aborted at the app's quit: a copy's opening for a host that will not start is waited for no longer.
+  private readonly halt = new AbortController();
   private stopping: Promise<void> | undefined;
 
   constructor(private readonly options: ToolHostsOptions) {}
 
   async run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (operation.kind === "bind") return NOT_BOUND;
-    if (this.stopping) return unavailable("the app is quitting");
-    const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
-    if (!binding) return FOLDER_UNAVAILABLE;
-    if (binding.history !== undefined) return NO_COPY;
-    return this.hostFor(operation.sessionId, binding).run(operation, signal);
+    const host = await this.hostOf(operation.sessionId, signal);
+    return host instanceof Host ? host.run(operation, signal) : host;
   }
 
   /**
-   * *inner*, a process operation that runs in the VM, while the root's host
-   * holds the folder: its lock, and the hook guard as *guard* says (Host.guarded).
+   * *inner*, a process operation that runs in the VM, while the root's host holds what the root
+   * works in: its lock, and the hook guard as *guard* says (Host.guarded). *inner* is given what
+   * the guest shares for the root: its folder, or its copy at the folder's path.
    */
-  guarded(
+  async guarded(
     operation: Operation, signal: AbortSignal, guard: Guard,
-    inner: (binding: BoundFolder, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
+    inner: (works: Works, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
-    if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
-    const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
-    if (!binding) return Promise.resolve(FOLDER_UNAVAILABLE);
-    if (binding.history !== undefined) return Promise.resolve(NO_COPY);
-    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended) => inner(binding, aborted, ended));
+    const host = await this.hostOf(operation.sessionId, signal);
+    if (!(host instanceof Host)) return host;
+    return host.guarded(operation, signal, guard, (aborted, ended) => inner(host.works, aborted, ended));
+  }
+
+  /**
+   * The copy *root*'s hosts work in is its copy no more (history/copies.ts): the guest made it again,
+   * left it other than whole, or its place is being let go. Each of them goes, out of the list first, so
+   * the root's next operation starts a host on the copy the guest opens then.
+   */
+  replaced(root: string): void {
+    for (const [host, of] of this.onCopies) if (of === root) host.finish();
+  }
+
+  /** Whether a root bound to a thread's copy has one made to work in here. */
+  keepsCopies(): boolean {
+    return this.options.copies !== undefined;
   }
 
   /**
@@ -228,6 +266,7 @@ export class ToolHosts implements Executor {
   // The app's quit: each folder's other holders get as long to let it go as its host
   // gets to stop. What holds it next, the VM, is stopped after, whether or not they did.
   stop(): Promise<void> {
+    this.halt.abort();
     this.stopping ??= this.stopHosts(STOP_TIMEOUT_MS);
     return this.stopping;
   }
@@ -251,14 +290,59 @@ export class ToolHosts implements Executor {
     }));
   }
 
-  private hostFor(root: string, binding: BoundFolder): Host {
+  // The host of *root*, started if it has none: on its chat's folder, or, for a thread, on its copy,
+  // opened first. Or why it has none: a thread never works in its folder for want of its copy.
+  private async hostOf(root: string, signal: AbortSignal): Promise<Host | Outcome> {
+    if (this.stopping) return QUITTING;
+    const binding = SESSION_ID.test(root) ? this.options.bindingOf(root) : undefined;
+    if (!binding) return FOLDER_UNAVAILABLE;
     const known = this.hosts.get(root);
     if (known) return known;
+    if (binding.history === undefined) return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } });
+    const { copies } = this.options;
+    if (!copies) return NO_COPIES;
+    let start = this.starting.get(root);
+    if (!start) {
+      const begun = this.onCopy(root, binding, copies).catch((error: unknown) => unavailable(error instanceof Error ? error.message : String(error)));
+      start = begun;
+      this.starting.set(root, begun);
+      void begun.then(() => {
+        if (this.starting.get(root) === begun) this.starting.delete(root);
+      });
+    }
+    // A cancel is answered at once; the copy is opened, and its host started, for the root's next operation.
+    return until(signal, start);
+  }
+
+  // *root*'s host on its copy, once the copies have it opened, holding the copy from then until it has gone.
+  private async onCopy(root: string, binding: BoundFolder, copies: ThreadCopies): Promise<Host | Outcome> {
+    const opened = await copies.open(root, binding, this.halt.signal);
+    if (this.stopping) {
+      if ("handle" in opened) copies.close(opened.handle);
+      return QUITTING;
+    }
+    if ("failed" in opened) return opened.failed;
+    const { copy, handle } = opened;
+    // What the guest shared of the root's for a host on the copy before this one is let go first.
+    const before = Promise.all([...this.onCopies].filter(([, of]) => of === root).map(([host]) => host.letGo())).then(() => {});
+    const host = this.hostFor(root, { folder: copy.folder, at: copy.at }, before);
+    this.onCopies.set(host, root);
+    // Let go once the host has stopped, and what its root ran in the guest has ended with what the guest shared for it.
+    void host.exited.then(() => host.letGo()).then(() => {
+      this.onCopies.delete(host);
+      copies.close(handle);
+    });
+    return host;
+  }
+
+  private hostFor(root: string, works: Works, before?: Promise<void>): Host {
     const { dataDir, cacheDir, env, bwrapPath, network } = this.options;
+    const { path, dev, ino, boot } = works.folder;
     const start: HostStart = {
       type: "start",
-      folder: binding.folder,
-      expect: { dev: binding.dev, ino: binding.ino, boot: binding.boot },
+      folder: path,
+      expect: { dev, ino, boot: boot ?? "" },
+      ...(works.at === undefined ? {} : { at: works.at }),
       tmp: join(dataDir, "tmp", root),
       dataDir,
       cacheDir,
@@ -269,12 +353,13 @@ export class ToolHosts implements Executor {
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
       network ? network.askNetwork(root, asked, signal) : Promise.resolve("deny");
     const host = new Host(
-      (this.options.spawnHost ?? forkHost)(), start, this.options.startTimeoutMs ?? START_TIMEOUT_MS,
+      (this.options.spawnHost ?? forkHost)(), start, works, this.options.startTimeoutMs ?? START_TIMEOUT_MS,
       this.options.idleMs ?? IDLE_MS, () => {
         if (this.hosts.get(root) === host) this.hosts.delete(root);
       },
       ask,
       () => this.options.release?.(root) ?? Promise.resolve(),
+      before,
     );
     this.hosts.set(root, host);
     this.live.add(host);
@@ -284,6 +369,16 @@ export class ToolHosts implements Executor {
     });
     return host;
   }
+}
+
+// *work*'s answer, or CANCELLED at once when *signal* aborts first.
+function until<T>(signal: AbortSignal, work: Promise<T>): Promise<T | Outcome> {
+  if (signal.aborted) return Promise.resolve(CANCELLED);
+  return new Promise((resolve) => {
+    const cancel = () => resolve(CANCELLED);
+    signal.addEventListener("abort", cancel, { once: true });
+    void work.then(resolve).finally(() => signal.removeEventListener("abort", cancel));
+  });
 }
 
 class Host {
@@ -304,15 +399,22 @@ class Host {
   private handles: ProcessHandle[] = [];
   // Once its file host said ready: what came of its root's processes before is not its own.
   private readied = false;
+  // Told to go before it was idle, as a host on a copy that is its thread's no more.
+  private finished = false;
 
   constructor(
     private readonly process: HostProcess,
     start: HostStart,
+    // What it holds, which its root's commands in the guest share.
+    readonly works: Works,
     startTimeoutMs: number,
     private readonly idleMs: number,
     private readonly onGone: () => void,
     private readonly askUser: (asked: NetworkAsk, signal: AbortSignal) => Promise<NetworkAnswer>,
     private readonly release: () => Promise<void>,
+    // Settled once the guest has let go of what it shared of the root's for a host before this one: its root's
+    // commands run only after, or one could run in what that host held.
+    private readonly before: Promise<void> = Promise.resolve(),
   ) {
     this.started = new Promise((resolve) => {
       this.settleStart = (failure) => {
@@ -345,6 +447,16 @@ class Host {
     });
   }
 
+  // Its work is over before it has been idle: out of the list first, so the next operation starts a new host, then
+  // its folder's other holders let it go, and it stops. Once.
+  finish(): void {
+    if (this.finished) return;
+    this.finished = true;
+    clearTimeout(this.idleTimer);
+    this.onGone();
+    void this.letGo().then(() => this.stop());
+  }
+
   /**
    * *inner* while this host holds the folder, so the folder is not let go mid-way.
    * With *guard*: the hook guard's refusal first; "around" then, whatever the outcome,
@@ -360,6 +472,8 @@ class Host {
         const refused = await this.request({ type: "refusal", id: operation.id, run: guard === "around" }, signal);
         if (!("ok" in refused)) return refused;
       }
+      // Nothing to wait for but on a thread's copy that another host held before.
+      await this.before;
       const outcome = await inner(signal, this.handles);
       return guard === "around" ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
@@ -387,18 +501,28 @@ class Host {
     this.running += 1;
     clearTimeout(this.idleTimer);
     try {
-      return await work();
+      return this.answered(await work());
     } finally {
       this.running -= 1;
       this.idle();
     }
   }
 
+  // *outcome*, as the root is answered it. A host on a thread's copy, or the guest's share of it, that finds
+  // another folder at the copy's path has its copy made again under it: its sandbox holds the folder that was
+  // there, so it goes, and the next operation has the copy opened again. Said by the folder, not as a folder gone.
+  private answered(outcome: Outcome): Outcome {
+    const { at } = this.works;
+    if (at === undefined || !("error" in outcome) || outcome.error.type !== "folder_unavailable") return outcome;
+    this.finish();
+    return unavailable(`the copy of ${at} this thread works in was made again while this was asked, so it was not done. Ask again`);
+  }
+
   // With no operation running and no background process alive, the host keeps its
   // folder for idleMs. Out of the list first: the next operation for this root starts a new host.
   private idle(): void {
     clearTimeout(this.idleTimer);
-    if (this.running > 0 || this.live > 0 || this.gone) return;
+    if (this.running > 0 || this.live > 0 || this.gone || this.finished) return;
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
@@ -475,9 +599,10 @@ class Host {
       this.readied = true;
       this.settleStart(null);
     } else if (message.type === "failed") {
-      // A host that failed to start is exiting: the next operation starts a new one.
+      // A host that failed to start is exiting: the next operation starts a new one. One on a thread's copy says
+      // in its own words, which name the folder, that the copy is not the one opened: its folder is not gone.
       this.onGone();
-      this.settleStart(message.folder ? FOLDER_UNAVAILABLE : unavailable(message.message));
+      this.settleStart(message.folder && this.works.at === undefined ? FOLDER_UNAVAILABLE : unavailable(message.message));
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);

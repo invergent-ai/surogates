@@ -1,20 +1,25 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
-import { perform } from "../src/files/operations.js";
+import { downloadSaver } from "../src/browser/downloads.js";
+import { kinds, perform } from "../src/files/operations.js";
+import { type Copy, type Handle, historyOff, type Opened } from "../src/history/copies.js";
+import { keyOf } from "../src/history/place.js";
+import type { Binding } from "../src/journal/bindings.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
-  APP_DIRS, CANCELLED, forkHost, type Guard, HOST_STOPPED, type HostProcess, NO_COPY, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
+  APP_DIRS, CANCELLED, forkHost, type Guard, HOST_STOPPED, type HostProcess, NODE, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
   type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
-import { VmExecutor } from "../src/vm/executor.js";
-import type { VmOperation } from "../src/vm/manager.js";
 
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
 const ROOT_B = "22222222-2222-4222-8222-222222222222";
@@ -292,6 +297,12 @@ const readyOnly = (host: FakeHost, message: ToHost) => {
 const answering = (host: FakeHost, message: ToHost) => {
   readyOnly(host, message);
   if (message.type === "op") host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+};
+// Answers as well what the hook guard is asked around a command: nothing refused, and the command's outcome after it.
+const guarding = (host: FakeHost, message: ToHost) => {
+  answering(host, message);
+  if (message.type === "refusal") host.say({ type: "result", id: message.id, outcome: { ok: null } });
+  if (message.type === "after") host.say({ type: "result", id: message.id, outcome: message.outcome });
 };
 
 // Spike Q7's race (M8): a program of this computer's, outside every sandbox, flips a folder in the
@@ -825,76 +836,400 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   });
 });
 
+
+// A project's thread works in its copy of its folder (spec, Section 13): its host is started on the copy, once the
+// copies have it made, and is asked by the folder's path. Fakes stand for the hosts and for the copies: what a real
+// host does with its start is host-start.test.ts's, and the real hosts' own run is below.
 describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () => {
-  // Every kind an operation of a root's can have: the file helper's, a landing's and a history's among them, and
-  // one that is none; then those that run in the sandbox.
-  const FILE_KINDS = ["resolve", "check_write", "stat", "read", "read_lines", "write", "delete", "list_dir", "walk", "ripgrep", "land", "history", "checkpoint", "no-such-kind"];
-  const PROCESS_KINDS = ["run", "which", "start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"];
-  const refused = { error: { type: "unsupported", message: "This computer cannot work in a thread's copy of a folder yet" } };
-  let started: FakeHost[];
-  // ROOT_A is a project's thread, bound to its copy of the folder; ROOT_B a chat on the same folder itself.
-  const options = (): Partial<ToolHostsOptions> => ({
-    bindingOf: (root) => {
-      const folder = folders[ROOT_A]!;
-      return root === ROOT_A || root === ROOT_B ? { folder, ...identities.get(folder)!, ...(root === ROOT_A ? { history: ROOT_A } : {}) } : undefined;
-    },
-    spawnHost: () => {
-      const host = new FakeHost(answering);
-      started.push(host);
-      return host;
-    },
+  const KEY = "0123456789abcdef";
+  // Every kind a root's operation can have that runs no command: the file helper's, a thread's own, and one that is none.
+  const KINDS = [...kinds(), "history", "checkpoint", "no-such-kind"];
+  let fakes: FakeHost[];
+  // How many of them have exited.
+  let gone: number;
+  let opens: string[];
+  // Each hold on a copy as it was let go, with how many hosts had exited and which roots the guest had let go by then.
+  let closed: Array<{ handle: Handle; gone: number; released: string[] }>;
+  let released: string[];
+  // How often the guest made each root's copy again: each time it is another folder, of another inode.
+  let made: Map<string, number>;
+  let answer: (root: string) => Opened | Promise<Opened>;
+  const folder = () => folders[ROOT_A] ?? "";
+  const copyOf = (root: string): Copy => ({
+    place: { key: KEY, history: join(base, "data", "history", KEY), real: { path: folder(), ...identities.get(folder())! } },
+    folder: { path: join(base, "data", "history", KEY, "threads", root), dev: 7, ino: (root === ROOT_A ? 70 : 80) + (made.get(root) ?? 0), boot: BOOT_ID },
+    at: folder(),
   });
-  const args = () => ({ key: join(folders[ROOT_A]!, "a.txt"), path: "a.txt", data: "", command: "touch planted", workdir: null, timeout: 10 });
+  const handed = (root: string): Opened => ({ copy: copyOf(root), handle: Object.freeze({ root }) });
+  const spawnHost = (behave: (host: FakeHost, message: ToHost) => void = guarding) => () => {
+    const host = new FakeHost(behave);
+    host.onExit(() => void (gone += 1));
+    fakes.push(host);
+    return host;
+  };
+  // Both roots are threads on the first root's folder.
+  const threads = (overrides: Partial<ToolHostsOptions> = {}) => toolHosts({
+    bindingOf: (root) => (root === ROOT_A || root === ROOT_B ? { folder: folder(), ...identities.get(folder())!, history: root } : undefined),
+    copies: {
+      // As Copies answers: a cancel at once, whatever the copy's making does.
+      open: (root, _bound, aborted) => {
+        opens.push(root);
+        return Promise.race([
+          Promise.resolve(answer(root)),
+          new Promise<Opened>((resolve) => aborted.addEventListener("abort", () => resolve({ failed: CANCELLED }), { once: true })),
+        ]);
+      },
+      close: (handle) => void closed.push({ handle, gone, released: [...released] }),
+    },
+    release: async (root) => void released.push(root),
+    spawnHost: spawnHost(),
+    ...overrides,
+  });
+  const works = (root: string) => ({ folder: copyOf(root).folder, at: folder() });
 
   beforeEach(() => {
-    started = [];
+    fakes = [];
+    gone = 0;
+    opens = [];
+    closed = [];
+    released = [];
+    made = new Map();
+    answer = handed;
   });
 
-  it("runs nothing in the folder itself: until the copy is where its work goes, each of its operations is refused, and no host starts", async () => {
-    const executor = toolHosts(options());
-    for (const kind of FILE_KINDS) expect(await executor.run(op(kind, args()), signal()), kind).toEqual(refused);
-    expect(NO_COPY).toEqual(refused);
+  it("starts its host on its copy once that is made, named by the folder's path, and two threads on one folder each have their own", async () => {
+    const executor = threads();
+    const [a, b] = [op("resolve", { path: "" }), op("resolve", { path: "" }, ROOT_B)];
+    expect(await Promise.all([executor.run(a, signal()), executor.run(b, signal())])).toEqual([{ ok: a.id }, { ok: b.id }]);
+    expect(opens).toEqual([ROOT_A, ROOT_B]);
+    expect(fakes.map((host) => host.sent[0])).toEqual([ROOT_A, ROOT_B].map((root) => ({
+      type: "start", folder: copyOf(root).folder.path, expect: { dev: 7, ino: copyOf(root).folder.ino, boot: BOOT_ID }, at: folder(),
+      tmp: join(base, "data", "tmp", root), dataDir: join(base, "data"), cacheDir: join(base, "cache", "surogate"),
+      env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8" }, appDirs: [...APP_DIRS, join(base, "tools")],
+    })));
+  });
+
+  it("takes every kind of a thread's to the host on its copy, and gives what its commands run in the copy to share at the folder's path", async () => {
+    const executor = threads();
+    for (const kind of KINDS) expect(await executor.run(op(kind, { key: join(folder(), "a.txt") }), signal()), kind).toMatchObject({ ok: expect.any(String) });
+    const shared: unknown[] = [];
+    for (const guard of ["around", "before", null] as Guard[]) {
+      expect(await executor.guarded(op("run", { command: "touch planted" }), signal(), guard, async (given) => {
+        shared.push(given);
+        return { ok: null };
+      })).toEqual({ ok: null });
+    }
+    expect(shared).toEqual([works(ROOT_A), works(ROOT_A), works(ROOT_A)]);
+    // One host, on the copy: every operation went to it, and none to a host on the folder.
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0]?.sent[0]).toMatchObject({ type: "start", folder: copyOf(ROOT_A).folder.path, at: folder() });
+    expect(fakes[0]?.sent.filter((message) => message.type === "op").map((message) => message.type === "op" && message.kind)).toEqual(KINDS);
+  });
+
+  it.each([
+    ["the folder has no history", () => historyOff("cap", folder())],
+    ["the folder is not the one bound", () => FOLDER_UNAVAILABLE],
+    ["the copy could not be made", () => ({ error: { type: "unavailable", message: "This computer could not make this thread's copy of its folder: no KVM here" } })],
+  ])("runs nothing for a thread whose copy is not there to work in, as where %s, and starts no host", async (_, failure: () => Outcome) => {
+    answer = () => ({ failed: failure() });
+    const executor = threads();
+    for (const kind of KINDS) expect(await executor.run(op(kind, { key: join(folder(), "a.txt"), data: "" }), signal()), kind).toEqual(failure());
     let ran = 0;
     for (const guard of ["around", "before", null] as Guard[]) {
-      for (const kind of PROCESS_KINDS) {
-        const answer = await executor.guarded(op(kind, args()), signal(), guard, () => {
-          ran += 1;
-          return Promise.resolve({ ok: null });
-        });
-        expect(answer, kind).toEqual(refused);
-      }
+      expect(await executor.guarded(op("run", { command: "touch planted" }), signal(), guard, async () => {
+        ran += 1;
+        return { ok: null };
+      })).toEqual(failure());
     }
-    expect([ran, started.length]).toEqual([0, 0]);
-    // Nothing of the app's was made for it, and nothing in the folder.
-    expect([readdirSync(folders[ROOT_A]!), readdirSync(base).sort()]).toEqual([[], ["a", "b", "tools"]]);
-    // A chat on the same folder itself works in it as before: the refusal is the copy's alone.
-    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
-    expect(started.map((host) => host.sent[0])).toEqual([expect.objectContaining({ type: "start", folder: folders[ROOT_A] })]);
+    expect([ran, fakes.length, closed.length]).toEqual([0, 0, 0]);
   });
 
-  it("reaches neither a file host nor the sandbox through the executor the app runs its chats on", async () => {
-    const sent: VmOperation[] = [];
-    const executor = new VmExecutor({
-      ...(options() as Pick<ToolHostsOptions, "bindingOf" | "spawnHost">),
-      dataDir: join(base, "data"), cacheDir: join(base, "cache", "surogate"), env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8" },
-      vm: {
-        perform: (operation) => {
-          sent.push(operation);
-          return Promise.resolve({ ok: null });
-        },
-        teardown: () => Promise.resolve(),
-        onProcesses: () => () => {},
-        onAsk: () => () => {},
+  it("answers a thread's operations unavailable where nothing makes copies, and never starts a host on its folder, where a chat still works", async () => {
+    const executor = threads({
+      // The first root a thread, the second a chat on the same folder itself.
+      bindingOf: (root) => (root === ROOT_A || root === ROOT_B ? { folder: folder(), ...identities.get(folder())!, ...(root === ROOT_A ? { history: root } : {}) } : undefined),
+      copies: undefined,
+    });
+    const refused = { error: { type: "unavailable", message: "This computer could not open the folder's sandbox: it has none to make this thread's copy of its folder in" } };
+    let ran = 0;
+    expect(await executor.run(op("write", { key: join(folder(), "a.txt"), data: "" }), signal())).toEqual(refused);
+    expect(await executor.guarded(op("run", { command: "touch planted" }), signal(), "around", async () => {
+      ran += 1;
+      return { ok: null };
+    })).toEqual(refused);
+    expect([ran, fakes.length, executor.keepsCopies()]).toEqual([0, 0, false]);
+    // The chat on the folder works in it as ever: its host holds the folder, and its commands share it.
+    const shared: unknown[] = [];
+    expect(await executor.guarded(op("run", { command: "true" }, ROOT_B), signal(), null, async (given) => {
+      shared.push(given);
+      return { ok: null };
+    })).toEqual({ ok: null });
+    expect(shared).toEqual([{ folder: { path: folder(), ...identities.get(folder()) } }]);
+    expect(fakes[0]?.sent[0]).toMatchObject({ type: "start", folder: folder(), expect: identities.get(folder()) });
+    expect(fakes[0]?.sent[0]).not.toHaveProperty("at");
+    expect(threads().keepsCopies()).toBe(true);
+  });
+
+  it("starts one host for a root's operations that come together, asking for its copy once, and answers a cancel while the copy is made", async () => {
+    let make: (opened: Opened) => void = () => {};
+    answer = () => new Promise<Opened>((resolve) => {
+      make = resolve;
+    });
+    const executor = threads();
+    const cancel = new AbortController();
+    const [a, b] = [op("resolve", { path: "" }), op("resolve", { path: "" })];
+    const cancelled = executor.run(a, cancel.signal);
+    const waiting = executor.run(b, signal());
+    await until(() => opens.length === 1);
+    cancel.abort();
+    expect(await cancelled).toEqual(CANCELLED);
+    expect(fakes).toHaveLength(0);
+    make(handed(ROOT_A));
+    expect(await waiting).toEqual({ ok: b.id });
+    expect([opens, fakes.length]).toEqual([[ROOT_A], 1]);
+  });
+
+  it("lets its copy go once each host on it has stopped and its root's commands in the guest have ended, once a host", async () => {
+    const executor = threads({ idleMs: 30 });
+    await executor.run(op("resolve", { path: "" }), signal());
+    await until(() => closed.length === 1);
+    expect(closed).toEqual([{ handle: { root: ROOT_A }, gone: 1, released: [ROOT_A] }]);
+    // The next host has its copy opened again, with a hold of its own, which goes as it stops at the app's quit.
+    await executor.run(op("resolve", { path: "" }), signal());
+    expect(opens).toEqual([ROOT_A, ROOT_A]);
+    await executor.stop();
+    await until(() => closed.length === 2);
+    expect(closed[1]).toEqual({ handle: { root: ROOT_A }, gone: 2, released: [ROOT_A, ROOT_A] });
+    expect(closed[1]?.handle).not.toBe(closed[0]?.handle);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(closed).toHaveLength(2);
+  });
+
+  it("lets a copy go only once its root's commands in the guest have ended, though its host died before", async () => {
+    let tear = () => {};
+    const executor = threads({
+      release: (root) => new Promise<void>((resolve) => {
+        tear = () => {
+          released.push(root);
+          resolve();
+        };
+      }),
+    });
+    await executor.run(op("resolve", { path: "" }), signal());
+    fakes[0]?.exit();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect([gone, closed]).toEqual([1, []]);
+    tear();
+    await until(() => closed.length === 1);
+    expect(closed).toEqual([{ handle: { root: ROOT_A }, gone: 1, released: [ROOT_A] }]);
+  });
+
+  it("stops the hosts on a copy no longer vouched for before its root's next operation, which works in the copy opened then", async () => {
+    // The guest lets go of what it shared for the first host when the test says.
+    let tear = () => {};
+    let asked = 0;
+    const executor = threads({
+      release: (root) => {
+        asked += 1;
+        if (asked > 1) return Promise.resolve(void released.push(root));
+        return new Promise<void>((resolve) => {
+          tear = () => {
+            released.push(root);
+            resolve();
+          };
+        });
       },
     });
-    try {
-      for (const kind of [...FILE_KINDS, ...PROCESS_KINDS]) expect(await executor.run(op(kind, args()), signal()), kind).toEqual(refused);
-      expect([sent, started.length]).toEqual([[], 0]);
-      // The chat on the folder itself: what it asks of the sandbox goes there, on the folder.
-      expect(await executor.run(op("which", args(), ROOT_B), signal())).toEqual({ ok: null });
-      expect(sent.map((operation) => [operation.root, operation.folder.path, operation.at])).toEqual([[ROOT_B, folders[ROOT_A], undefined]]);
-    } finally {
-      await executor.stop();
-    }
+    expect(await executor.run(op("resolve", { path: "" }), signal())).toMatchObject({ ok: expect.any(String) });
+    // The guest made it again, or left it other than whole: the copy the host holds is no longer the thread's.
+    executor.replaced(ROOT_A);
+    made.set(ROOT_A, 1);
+    const shared: unknown[] = [];
+    const next = executor.guarded(op("run", { command: "ls" }), signal(), null, async (given) => {
+      shared.push(given);
+      return { ok: null };
+    });
+    // A host of its own on the copy the guest opened now; the one before has none of the root's operations.
+    await until(() => fakes.length === 2);
+    expect(fakes[1]?.sent[0]).toMatchObject({ type: "start", folder: copyOf(ROOT_A).folder.path, expect: { dev: 7, ino: 71, boot: BOOT_ID }, at: folder() });
+    expect(fakes[0]?.count("op")).toBe(1);
+    // What the root runs in the guest waits until the guest has let go of what it shared for the host before.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(shared).toEqual([]);
+    tear();
+    expect(await next).toEqual({ ok: null });
+    expect(shared).toEqual([works(ROOT_A)]);
+    await until(() => closed.length === 1);
+    expect([fakes[0]?.count("stop"), closed[0]?.gone, opens]).toEqual([1, 1, [ROOT_A, ROOT_A]]);
+  });
+
+  it("stops a host it is told to stop once, whatever it is told after and whatever of its own ends meanwhile", async () => {
+    let tear = () => {};
+    let asked = 0;
+    const executor = threads({
+      idleMs: 20,
+      // It answers its operations when the test says.
+      spawnHost: spawnHost(readyOnly),
+      release: (root) => {
+        asked += 1;
+        if (asked > 1) return Promise.resolve(void released.push(root));
+        return new Promise<void>((resolve) => {
+          tear = () => {
+            released.push(root);
+            resolve();
+          };
+        });
+      },
+    });
+    const running = executor.run(op("resolve", { path: "" }), signal());
+    await until(() => fakes[0]?.count("op") === 1);
+    executor.replaced(ROOT_A);
+    executor.replaced(ROOT_A);
+    // Its operation ends while the guest lets go, and the host is idle past its time.
+    const sent = fakes[0]?.sent.find((message) => message.type === "op");
+    fakes[0]?.say({ type: "result", id: sent?.type === "op" ? sent.id : "", outcome: { ok: "done" } });
+    expect(await running).toEqual({ ok: "done" });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    tear();
+    await until(() => closed.length === 1);
+    expect(fakes[0]?.count("stop")).toBe(1);
+  });
+
+  it("stops a host that finds another folder at its copy's path, and says so by the folder: the next operation has the copy opened again", async () => {
+    // As host.ts answers an operation once its copy's path leads to another folder than the one it holds.
+    const executor = threads({
+      spawnHost: spawnHost((host, message) => {
+        if (message.type === "op") host.say({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
+        else guarding(host, message);
+      }),
+    });
+    const again = {
+      error: {
+        type: "unavailable",
+        message: `This computer could not open the folder's sandbox: the copy of ${folder()} this thread works in was made again while this was asked, so it was not done. Ask again`,
+      },
+    };
+    expect(await executor.run(op("read", { key: join(folder(), "a.txt"), max_bytes: null }), signal())).toEqual(again);
+    await until(() => fakes[0]?.count("stop") === 1);
+    // The same where what shares the copy in the guest finds it another.
+    expect(await executor.guarded(op("run", { command: "ls" }), signal(), null, async () => FOLDER_UNAVAILABLE)).toEqual(again);
+    await until(() => fakes[1]?.count("stop") === 1);
+    expect([opens.length, fakes.length]).toEqual([2, 2]);
+  });
+
+  it("says by the folder, not as a folder gone, that a host found its copy made again as it started", async () => {
+    const said = `the copy of ${folder()} this thread works in was made again after the app looked at it`;
+    const executor = threads({
+      spawnHost: spawnHost((host, message) => {
+        if (message.type === "start") host.say({ type: "failed", message: said, folder: true });
+        onStop(host, message);
+      }),
+    });
+    expect(await executor.run(op("resolve", { path: "" }), signal())).toEqual({ error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${said}` } });
+  });
+
+  it("answers the app's quit while a thread's copy is made, and keeps no hold of what was made", async () => {
+    let make: (opened: Opened) => void = () => {};
+    const executor = threads({
+      // Copies that make the copy whatever is asked meanwhile.
+      copies: {
+        open: (root) => {
+          opens.push(root);
+          return new Promise<Opened>((resolve) => {
+            make = resolve;
+          });
+        },
+        close: (handle) => void closed.push({ handle, gone, released: [...released] }),
+      },
+    });
+    const running = executor.run(op("resolve", { path: "" }), signal());
+    await until(() => opens.length === 1);
+    const stopped = executor.stop();
+    make(handed(ROOT_A));
+    expect(await running).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } });
+    await stopped;
+    expect([fakes.length, closed]).toEqual([0, [{ handle: { root: ROOT_A }, gone: 0, released: [] }]]);
   });
 });
+
+// The same with the app's own hosts, in their sandbox: two threads' file tools, each in its copy. The copies are
+// made here as the guest's git leaves them, in the folder's place in the app's data.
+describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
+  const data64 = (text: string) => Buffer.from(text).toString("base64");
+  let copies: Record<string, string>;
+  const threads = () => {
+    const folder = folders[ROOT_A] ?? "";
+    const place = { key: keyOf(folder), history: join(base, "data", "history", keyOf(folder)), real: { path: folder, ...identities.get(folder)! } };
+    return toolHosts({
+      bindingOf: (root) => (root === ROOT_A || root === ROOT_B ? { folder, ...identities.get(folder)!, history: root } : undefined),
+      copies: {
+        open: async (root) => {
+          const path = copies[root] ?? "";
+          const { dev, ino } = statSync(path);
+          return { copy: { place, folder: { path, dev, ino, boot: BOOT_ID }, at: folder }, handle: Object.freeze({ root }) };
+        },
+        close: () => {},
+      },
+    });
+  };
+
+  beforeEach(() => {
+    const folder = folders[ROOT_A] ?? "";
+    writeFileSync(join(folder, "a.txt"), "the folder's\n");
+    copies = {};
+    for (const root of [ROOT_A, ROOT_B]) {
+      copies[root] = join(base, "data", "history", keyOf(folder), "threads", root);
+      mkdirSync(copies[root] ?? "", { recursive: true });
+      writeFileSync(join(copies[root] ?? "", "a.txt"), "the folder's\n");
+    }
+  });
+
+  it("gives two threads on one folder a copy each to work in at once, named by the folder's path, and leaves the folder as it was", async () => {
+    const executor = threads();
+    const folder = folders[ROOT_A] ?? "";
+    const before = looked(folder);
+    const key = join(folder, "a.txt");
+    expect(await Promise.all([executor.run(op("resolve", { path: "a.txt" }), signal()), executor.run(op("resolve", { path: "a.txt" }, ROOT_B), signal())])).toEqual([{ ok: key }, { ok: key }]);
+    expect(await executor.run(op("write", { key, data: data64("A's\n") }), signal())).toEqual({ ok: null });
+    expect(await executor.run(op("write", { key, data: data64("B's\n") }, ROOT_B), signal())).toEqual({ ok: null });
+    expect(await executor.run(op("read", { key, max_bytes: null }), signal())).toEqual({ ok: data64("A's\n") });
+    expect([ROOT_A, ROOT_B].map((root) => readFileSync(join(copies[root] ?? "", "a.txt"), "utf8"))).toEqual(["A's\n", "B's\n"]);
+    // A thread's helper reaches neither the folder, nor the other thread's copy, nor the folder's history.
+    const other = join(copies[ROOT_B] ?? "", "a.txt");
+    expect(await executor.run(op("read", { key: other, max_bytes: null }), signal())).toMatchObject({ error: { type: "sandbox" } });
+    symlinkSync(other, join(copies[ROOT_A] ?? "", "theirs.txt"));
+    symlinkSync(key, join(copies[ROOT_A] ?? "", "real.txt"));
+    for (const name of ["theirs.txt", "real.txt"]) {
+      expect(await executor.run(op("read", { key: join(folder, name), max_bytes: null }), signal()), name).toMatchObject({ error: { type: "sandbox" } });
+    }
+    const search = (await executor.run(op("ripgrep", { key: folder, mode: "files", pattern: "*.txt", glob: null, context: 0 }), signal())) as { ok: string };
+    expect(search.ok.split("\n").filter(Boolean)).toEqual([key]);
+    // A download its page started is saved in its copy, by the folder's names, as any write of the thread's.
+    const staged = join(base, "staged.txt");
+    writeFileSync(staged, "from a page\n");
+    const save = downloadSaver({ get: (root) => (root === ROOT_A ? ({ folder } as Binding) : undefined) }, {
+      admit: async () => null, run: (operation, aborted) => executor.run(operation, aborted),
+    });
+    expect(await save({ root: ROOT_A, session: ROOT_A, name: "page.txt", path: staged, user: false })).toBe(
+      "The page downloaded \"page.txt\". It is saved in the chat's folder as Downloads/page.txt.",
+    );
+    expect(readFileSync(join(copies[ROOT_A] ?? "", "Downloads", "page.txt"), "utf8")).toBe("from a page\n");
+    expect(looked(folder)).toEqual(before);
+  });
+});
+
+// A folder as it lies, to compare: each name under it with its kind, mode, size, times and bytes, no link followed.
+function looked(path: string): Record<string, unknown> {
+  const found: Record<string, unknown> = {};
+  const walk = (at: string, name: string) => {
+    const stat = lstatSync(at);
+    found[name] = {
+      mode: stat.mode, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs,
+      ...(stat.isFile() ? { bytes: createHash("sha256").update(readFileSync(at)).digest("hex") } : {}),
+      ...(stat.isSymbolicLink() ? { link: readlinkSync(at) } : {}),
+    };
+    if (stat.isDirectory()) for (const entry of readdirSync(at).sort()) walk(join(at, entry), join(name, entry));
+  };
+  walk(path, ".");
+  return found;
+}

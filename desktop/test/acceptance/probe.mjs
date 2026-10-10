@@ -35,8 +35,12 @@ app.whenReady().then(async () => {
   const options = {
     bindingOf: () => ({ folder, dev, ino, boot: BOOT_ID }), dataDir: join(homedir(), ".probe-data"), cacheDir: join(homedir(), ".cache", "surogate"),
     env: { HOME: homedir(), LANG: "C.UTF-8" },
-    // The probe runs no command: nothing of it reaches the VM.
-    vm: { perform: () => Promise.reject(new Error("the probe runs no command")), teardown: () => Promise.resolve(), onProcesses: () => () => {}, onAsk: () => () => {} },
+    // The probe runs no command, and its folder is no thread's: nothing of it reaches the VM.
+    vm: {
+      perform: () => Promise.reject(new Error("the probe runs no command")), teardown: () => Promise.resolve(), onProcesses: () => () => {}, onAsk: () => () => {},
+      history: () => Promise.reject(new Error("the probe has no thread")), unplace: () => Promise.resolve(false),
+    },
+    user: "probe",
   };
   const tools = process.env.PROBE_ON_PATH === "1" ? new VmExecutor(options) : appTools(options);
   const key = join(folder, "probe.txt");
