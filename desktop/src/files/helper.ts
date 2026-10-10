@@ -3,13 +3,17 @@
 // {id, kind, args} or {cancel: id}; one {id, outcome} per line on stdout, after a
 // first {ready: true}.
 
+import { lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 import { edgeRefused } from "./edge.js";
 import { recover } from "./land.js";
 import { type Context, perform } from "./operations.js";
 
-const { SUROGATE_FOLDER: folder, HOME: home, SUROGATE_AT: at, SUROGATE_COPY: copy, SUROGATE_KEPT: kept, ...rest } = process.env;
+const {
+  SUROGATE_FOLDER: folder, HOME: home, SUROGATE_AT: at, SUROGATE_COPY: copy, SUROGATE_KEPT: kept,
+  SUROGATE_FOLDER_IS: folderIs, SUROGATE_COPY_IS: copyIs, SUROGATE_KEPT_IS: keptIs, ...rest
+} = process.env;
 if (!folder || !home) {
   process.stderr.write("the file helper needs SUROGATE_FOLDER and HOME\n");
   process.exit(2);
@@ -23,6 +27,31 @@ if (at !== undefined) {
     : edgeRefused(folder, at);
   if (refused !== null) {
     process.stderr.write(`${refused}\n`);
+    process.exit(2);
+  }
+}
+// Its host checked each folder it is given, and then had the sandbox bind them by their paths: a path can come to
+// lead to another folder between the two, by a link put there or a folder moved in. In here the binds are up, and
+// what lies at each path is what was bound, for this helper's life: nothing in the sandbox can mount another, and
+// nothing outside reaches its mounts. So the helper is told which folder its host found at each, by device and
+// inode, and looks before anything else: one that is another ends it here, before a landing's put-back reads a
+// record or moves a file, and before it says it is ready. It says so by the folder's name, never by a copy's path.
+const found = (path: string | undefined): string | null => {
+  try {
+    const is = lstatSync(path ?? "");
+    return is.isDirectory() ? `${is.dev}:${is.ino}` : null;
+  } catch {
+    return null;
+  }
+};
+const checked: Array<[is: string | undefined, path: string | undefined, what: string]> = [
+  [folderIs, folder, at === undefined ? `the folder ${folder}` : `the copy of ${at} this thread works in`],
+  [copyIs, copy, `the thread's copy a landing in ${folder} lands from`],
+  [keptIs, kept, `the folder a landing in ${folder} keeps replaced files in`],
+];
+for (const [is, path, what] of checked) {
+  if (is !== undefined && found(path) !== is) {
+    process.stderr.write(`${what} is not the folder its host checked: another was at its path as its sandbox was made\n`);
     process.exit(2);
   }
 }
