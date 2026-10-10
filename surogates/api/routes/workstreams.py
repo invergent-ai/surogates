@@ -41,11 +41,12 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.bucket import BucketHistory, Busy, NotKept, Staged, said
+from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, Busy, NotKept, Staged, landable, said
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
 from surogates.workstreams.history import HISTORY_OFF, deleted_files, over_history_cap, version_of, versions
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
+from surogates.workstreams.undo import UNLANDED, Refused, restore
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +506,51 @@ async def version_file(
     except (HistoryError, OSError) as exc:
         raise _unread(exc) from exc
     return _VersionFile(staged, path)
+
+
+class RestoreRequest(BaseModel):
+    """A version of a file to restore: one its History lists, by the id it lists it by."""
+
+    version: Annotated[str, StringConstraints(max_length=64)]
+    path: FilePath
+
+
+@router.post("/{workstream_id}/history/restore")
+async def restore_version(
+    workstream_id: UUID, body: RestoreRequest, request: Request, ctx: AgentRuntime, tenant: Tenant,
+    _rate: None = Depends(rate_limit_dep),
+) -> dict[str, Any]:
+    """Restore: the file at *path* made its version *version* again, as a
+    landing by you, your edit to it recorded first: ``{applied, skipped,
+    picked_up}``.  The version is one the project's records name for that
+    file: neither *version* nor *path* reaches the storage, or git, but
+    as the record holds them.  A version that took the file away, or that
+    the history keeps no more, is nothing to restore; nor is a file no
+    landing writes.  What it waits for and what it refuses is said in words
+    (409): the project's files being saved just now, among them."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    master = await state.session_store.get_session(project.master_session_id)
+    if await over_history_cap(state.storage, master):
+        raise HTTPException(status.HTTP_409_CONFLICT, HISTORY_OFF)
+    entry = await version_of(state.session_factory, project.id, body.version, body.path)
+    if entry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such version.")
+    if entry["after"] is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This version deleted the file: there is nothing to restore.")
+    # Before the copy is asked anything of it.
+    if not landable(body.path):
+        raise HTTPException(status.HTTP_409_CONFLICT, UNLANDED)
+    try:
+        kept = await BucketHistory.of(state.storage, master, state.settings.history).held([entry["after"]])
+    except (HistoryError, OSError) as exc:
+        raise _unread(exc) from exc
+    if not kept:
+        raise HTTPException(status.HTTP_410_GONE, NOT_KEPT)
+    try:
+        return await restore(state, project, tenant.user_id, path=body.path, blob=entry["after"])
+    except Refused as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
 
 
 @router.get("/{workstream_id}/stream")

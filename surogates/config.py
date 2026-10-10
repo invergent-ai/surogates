@@ -739,16 +739,16 @@ class HistorySettings(BaseSettings):
     """What the api spends on its copies of projects' file histories.
 
     The api reads a project's history from its bucket into a copy on its own
-    disk to answer a file's History and to open a version of it.  It is one
-    process for every tenant, so each bound is refused in words, never met
-    with memory or disk it does not have.
+    disk to answer a file's History, to open a version of it and to restore
+    one.  It is one process for every tenant, so each bound is refused in
+    words, never met with memory or disk it does not have.
     """
 
     model_config = {"env_prefix": "SUROGATES_HISTORY_"}
 
     copies_path: str = ""  # where the copies are kept; empty: surogates-history in the temp folder
     packs_bound: int = 4 * 2**30  # the largest copy of one history: its packs, and the indexes the api makes of them
-    file_bound: int = 2**30  # the largest version of a file a copy writes out to be sent
+    file_bound: int = 2**30  # the largest version of a file a copy writes out, to be sent or restored, and the largest real file it reads
     copies_bound: int = 8 * 2**30  # the copies on the api's disk, every project's together
     copy_idle: int = 600  # seconds a copy stays unused before it is removed
 

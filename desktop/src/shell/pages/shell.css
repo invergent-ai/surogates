@@ -1629,6 +1629,12 @@ body.quick-page {
   font-size: 13px;
 }
 
+.history .told p {
+  margin: 4px 12px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
 .version {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

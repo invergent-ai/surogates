@@ -15,7 +15,7 @@ import type { AddressInfo } from "node:net";
 import type { ElectronApplication, Page } from "playwright-core";
 import { expect } from "vitest";
 
-import type { Project, ProjectFixtures, ProjectsSource, ThreadRow } from "../../../web/src/lib/projects.js";
+import type { Project, ProjectFixtures, ProjectsSource, ThreadRow, UndoResult } from "../../../web/src/lib/projects.js";
 import type { SignedInAccount } from "../../src/shell/session.js";
 import { FakeLinkServer } from "../fake-server.js";
 
@@ -380,10 +380,11 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // thread answers, whose unreachable, when set, makes the list and every call on a project fail as
 // the web client's fetch does with the agent out of reach, whose lag is how many ms a change of a
 // project takes to answer once it is made, as a slow agent's, and a version to be handed over to
-// save, whose asked keeps each version it was asked to open, whose unopened, when set, is why it
-// opens none, and whose register() registers the source, or with the methods it lacks the source of
-// an agent older than the app, which serves less. What it changes of a project it keeps at the
-// fake agent, so the next load serves it.
+// save, whose asked keeps each version it was asked to open or to restore, whose unopened, when set,
+// is why it opens none, whose unrestored, when set, is why it restores none, whose put, when set, is
+// what a Restore answers, and whose register() registers the source, or with the methods it lacks the
+// source of an agent older than the app, which serves less. What it changes of a project it keeps at
+// the fake agent, so the next load serves it.
 // The source's methods read it through this, as an object's own methods may.
 function serveProjects(data: ProjectFixtures, delay: number): void {
   const listeners = new Map<string, Set<(threadId: string | null) => void>>();
@@ -396,6 +397,8 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     lag: 0,
     asked: [] as string[][],
     unopened: null as string | null,
+    unrestored: null as string | null,
+    put: null as UndoResult | null,
     register: (_lacks?: string[]) => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
@@ -444,6 +447,31 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     },
     async deleted(id: string) {
       return this.served.deleted[this.one(id).id] ?? { files: [], more: false };
+    },
+    // A Restore lands as the agent's does: the file's newest version is the restore, by you, a deleted
+    // file is among the files again, and the project's stream says the project changed.
+    async restore(id: string, input: { versionId: string; path: string }) {
+      const project = this.one(id).id;
+      fake.asked.push(["restore", input.versionId, input.path]);
+      await new Promise((resolve) => setTimeout(resolve, fake.lag));
+      if (fake.unrestored) throw new Error(fake.unrestored);
+      const answer = fake.put ?? { applied: [input.path], skipped: [], pickedUp: [] };
+      if (answer.applied.includes(input.path)) {
+        const versions = (this.served.history[project] ??= {})[input.path] ??= [];
+        const made = String(100 + versions.length);
+        versions.unshift({
+          id: `${made}:f`, path: input.path, by: { kind: "you" }, at: new Date().toISOString(), change: "restored", merged: true,
+          available: true, landingId: made,
+        });
+        const gone = this.served.deleted[project];
+        if (gone) gone.files = gone.files.filter((version) => version.path !== input.path);
+        const files = (this.served.library[project] ??= []);
+        if (!files.some((entry) => entry.path === input.path)) {
+          files.push({ path: input.path, origin: "added", threadId: null, size: null, updatedAt: new Date().toISOString(), place: { kind: "cloud" } });
+        }
+        fake.changed(project, null);
+      }
+      return answer;
     },
     async create(input: { name: string; goal?: string; instructions?: string }) {
       if (fake.refusal) throw new Error(fake.refusal);
