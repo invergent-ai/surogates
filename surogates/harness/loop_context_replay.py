@@ -364,7 +364,10 @@ def worker_note(event_type: str, data: dict) -> dict:
                     else deleted if change == "deleted" else made
                 ).append(f)
             listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
-            if data.get("recovered"):
+            if data.get("stopped"):
+                # Its user stopped its turn, and the harness alone speaks: what the stop did not take back.
+                content = f"{named} was stopped]\n{data.get('result') or ''}"
+            elif data.get("recovered"):
                 # No turn of the thread ended: a later lock holder settled what its lost worker left, and
                 # the harness alone speaks.
                 content = (
