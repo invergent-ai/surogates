@@ -1018,6 +1018,34 @@ def test_pruning_keeps_ninety_days_when_they_are_small(tmp_path, project):
     assert git(durable, "rev-list", "--first-parent", "--count", "refs/heads/main") == "20"
 
 
+def test_a_pruning_stores_a_large_file_whole_and_a_small_ones_versions_as_changes(tmp_path, project):
+    # A large table and notes, uploaded; the first landing's pack carries them with its own change.
+    rows = [f"{n},{n * 7919 % 10_007},{n * 104_729 % 1_000_003}\n" for n in range(120_000)]
+    notes = [f"line {n} of the notes\n" for n in range(200)]
+    (project / "ledger.csv").write_text("".join(rows))
+    (project / "notes.txt").write_text("".join(notes))
+    history = a_pod(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"PK\x03\x04 report v2")
+    land(history)
+    # The next changes each a little: its pack holds their new versions alone.
+    history = a_pod(tmp_path, project)
+    (history.copy / "ledger.csv").write_text("".join(rows[:500] + ["500,changed,once\n"] + rows[501:]))
+    (history.copy / "notes.txt").write_text("".join(notes[:7] + ["line seven, changed\n"] + notes[8:]))
+    land(history, "saga:2")
+    durable = project / "_history"
+    assert os.path.getsize(project / "ledger.csv") > 2 * 2**20
+
+    assert a_pod(tmp_path, project).prune(keep=[], now=time.time(), spare=0)["pruned"] is True
+    [index] = (durable / "objects" / "pack").glob("pack-*.idx")
+    # Each blob of the one pack: one kept as a change of another names that one last.
+    packed = {line.split()[0]: line.split() for line in git(durable, "verify-pack", "-v", str(index)).splitlines() if " blob " in line}
+    versions = {name: [git(durable, "rev-parse", f"{at}:{name}") for at in ("main", "main~1")] for name in ("ledger.csv", "notes.txt")}
+    # The api's git reads a large file's version within its memory only whole, never with what it changes.
+    assert [len(packed[blob]) for blob in versions["ledger.csv"]] == [5, 5]
+    # Small files' versions are still kept as changes of each other.
+    assert sorted(len(packed[blob]) for blob in versions["notes.txt"]) == [5, 7]
+
+
 def test_a_pod_open_across_a_pruning_lands_and_the_history_stays_whole(tmp_path, project):
     durable = project / "_history"
     first = a_pod(tmp_path, project, "early")
