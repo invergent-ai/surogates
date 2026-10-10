@@ -68,7 +68,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
     executor = new VmExecutor({
       bindingOf: (root) => journal.bindings.get(root), dataDir: join(dir, "data"), cacheDir: join(dir, "cache", "surogate"),
       env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
-      network: { askNetwork: (root, asked, cancel) => approvals.askNetwork(root, asked, cancel) }, vm,
+      network: { askNetwork: (root, asked, cancel) => approvals.askNetwork(root, asked, cancel) }, vm, user: "u1",
     });
   });
 

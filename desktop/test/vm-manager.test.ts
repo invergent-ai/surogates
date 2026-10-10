@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -522,6 +522,50 @@ describe("a root torn down", () => {
     await manager.teardown("root-1");
     expect(asked).toEqual([["unshare", R1]]);
     expect(boots).toBe(1);
+    await manager.stop();
+  });
+
+  it("serves an operation from a share of the folder it names alone: another folder, as a thread's copy made again, has the share there go first", async () => {
+    const asked: unknown[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async (root, at, share) => void asked.push(["setup", root, at, share.tag]),
+      teardown: async (root, share) => void asked.push(["teardown", root, share.tag]),
+      perform: async () => ({ ok: true }),
+    };
+    let tags = 0;
+    const boot: BootVm = async (...args) => {
+      const vm = await fakeVm(roots)(...args);
+      return {
+        ...vm,
+        share: async (path) => {
+          tags += 1;
+          asked.push(["share", path]);
+          return { kind: "virtiofs", tag: `r${tags}` };
+        },
+        unshare: async (share) => void asked.push(["unshare", share.tag]),
+      };
+    };
+    const manager = new VmManager(options(), boot);
+    // A thread's copy, shared at the path of the folder it is a copy of; then made again at its own path, another folder.
+    const copy = join(dir, "copy");
+    const at = join(dir, "Reports");
+    mkdirSync(copy);
+    const on = (seen = at) => manager.perform({ id: `which-${Math.random()}`, root: "root-1", folder: { path: copy, ...statSync(copy) }, at: seen, kind: "which", args: {} }, new AbortController().signal);
+    expect(await on()).toEqual({ ok: true });
+    expect(await on()).toEqual({ ok: true });
+    renameSync(copy, `${copy}.aside`);
+    mkdirSync(copy);
+    // Two operations of the copy made again at once: the share of the one before goes once, and the new one is shared once.
+    expect(await Promise.all([on(), on()])).toEqual([{ ok: true }, { ok: true }]);
+    expect(await on()).toEqual({ ok: true });
+    // And one that names it seen at another path is not served where it is seen now.
+    expect(await on(join(dir, "Elsewhere"))).toEqual({ ok: true });
+    expect(asked).toEqual([
+      ["share", copy], ["setup", "root-1", at, "r1"],
+      ["teardown", "root-1", "r1"], ["unshare", "r1"], ["share", copy], ["setup", "root-1", at, "r2"],
+      ["teardown", "root-1", "r2"], ["unshare", "r2"], ["share", copy], ["setup", "root-1", join(dir, "Elsewhere"), "r3"],
+    ]);
     await manager.stop();
   });
 

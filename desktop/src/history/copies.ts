@@ -88,21 +88,21 @@ const CUTS = 2;
 // more files than one tracks, or a name in it that is not UTF-8.
 type Reason = "cap" | "names";
 const OFF: Record<Reason, string> = {
-  cap: "This folder holds more files than a project's history on this computer takes, so no thread of the project works in it. Choose a folder inside it that holds fewer",
+  cap: "holds more files than a project's history on this computer takes, so no thread of the project works in it. Choose a folder inside it that holds fewer",
   names:
-    "This folder holds a file whose name a project's history on this computer cannot record, as it is not UTF-8, so no thread of the project works in it. Choose a folder inside it that holds no such name, or rename the file",
+    "holds a file whose name a project's history on this computer cannot record, as it is not UTF-8, so no thread of the project works in it. Choose a folder inside it that holds no such name, or rename the file",
 };
 
-/** What every operation of a thread whose folder has no history is answered, but its turn's own open. */
-export const historyOff = (reason: Reason): Outcome => ({ error: { type: "history_off", message: OFF[reason] } });
+/** What every operation of a thread whose *folder* has no history is answered, but its turn's own open. */
+export const historyOff = (reason: Reason, folder: string): Outcome => ({ error: { type: "history_off", message: `The folder ${folder} ${OFF[reason]}` } });
 
-// What every operation of a thread is answered whose copy could not be made within the history's bound, twice.
-const TOO_LARGE: Outcome = {
+// What every operation of a thread is answered whose copy of *folder* could not be made within the history's bound, twice.
+const tooLarge = (folder: string): Outcome => ({
   error: {
     type: "history_off",
-    message: "This folder is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less",
+    message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less`,
   },
-};
+});
 
 // The history's code for a copy whose making was cut short, or whose repository it had to make again
 // (local_history.py, NO_WHOLE_COPY): no request works in such a copy, and its next open makes it whole.
@@ -314,7 +314,7 @@ export class Copies {
       if (outcome === STALE) continue;
       if (!("ok" in outcome)) return { failed: outcome };
       const reason = offOf(outcome);
-      if (reason) return { failed: historyOff(reason) };
+      if (reason) return { failed: historyOff(reason, bound.folder) };
       const made = known.copies.get(root);
       if (!made || this.known.get(place.key) !== known) continue;
       return this.made(root, copyIn(place, root, made, bound), known, take);
@@ -341,7 +341,7 @@ export class Copies {
         if (store === null || store === "other") return { failed: unavailable("its place in the app's data is not a folder of the app's own") };
         if ((this.lettings.get(key) ?? 0) !== lettings) continue;
         const known = this.known.get(key);
-        if (known && same(known.store, store)) return (known.cuts.get(root) ?? 0) >= CUTS ? { failed: TOO_LARGE } : { known, place };
+        if (known && same(known.store, store)) return (known.cuts.get(root) ?? 0) >= CUTS ? { failed: tooLarge(bound.folder) } : { known, place };
         if (known) {
           // Not the place the app knew, though nothing of the app's let that one go: it goes now.
           await this.letGo(known.place, known.store.ino);

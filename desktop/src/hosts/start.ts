@@ -16,9 +16,11 @@ import { lstatSync, mkdirSync, realpathSync, rmdirSync, type Stats } from "node:
 import { join, resolve } from "node:path";
 
 import { checkFolder, type FolderCheck, type FolderGuards } from "../binding/folder.js";
-import { edgeRefused, said } from "../files/edge.js";
+import { said, whole } from "../files/edge.js";
 import { inside, realpath } from "../files/paths.js";
 import { PLACE_KEY } from "../guest/protocol.js";
+// A thread's id, as the app names its copy by: the one spelling the folder's place has too (history/place.ts).
+import { THREAD } from "../vm/history.js";
 import type { HostStart } from "./messages.js";
 import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
@@ -33,8 +35,6 @@ const KEPT_BYTES = 4 * 1024 * 1024 * 1024; // files/land.ts, MAX_KEPT_BYTES
 const SLOW_DISK_BYTES_A_SECOND = 2 * 1024 * 1024; // a slow stick, or a share over a poor link
 export const LANDING_READY_MS = READY_MS + (KEPT_BYTES / SLOW_DISK_BYTES_A_SECOND) * 1000;
 
-// A thread's id, as the app names its copy by.
-const THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // The most bytes of a path this system takes, and of a name in one.
 const PATH_BYTES = 4095;
 const NAME_BYTES = 255;
@@ -172,25 +172,50 @@ function onFolder(message: HostStart, guards: FolderGuards): StartCheck {
   return held.ok ? { ...held, ...plain(), env: {}, replaced: replaced(message.folder), named: asSaid } : held;
 }
 
-// A thread's copy, named by the path of the folder it stands for. That path names the folder to the
-// helper and to the guest, byte for byte the path the guest mounts the copy at and the server sends
-// keys under, and is looked at by neither, nor here. So it is a whole path, as the helper takes one
-// (files/edge.ts), with no line break in it and no space after it, and one the system would take;
-// and no part of the app's own data or cache, as each is spelled and as it resolves.
+// Why no thread's copy can stand for a folder, by the folder's path alone: how the path is spelled, or a folder every
+// helper's sandbox reads, which holds it or lies in it.
+export type NoCopyAt = { spelled: string } | { given: string };
+
+/**
+ * Why no thread's copy can stand for the folder at *at*, by that path alone, or null. That path names the folder to
+ * the copy's helper and to the guest, byte for byte the path the guest mounts the copy at and the server sends keys
+ * under, and is looked at by neither, nor here. So it is a whole path, as the helper takes one (files/edge.ts), with
+ * no line break in it and no blank after it, and one the system would take; no part of the app's own data or
+ * cache, as each is spelled and as it resolves; and none of what every helper's sandbox reads holds it or lies in
+ * it, or a copy's sandbox would read the folder itself. A host's start on a copy refuses by it, and so does the
+ * binder, before a project's thread is bound to a copy of its folder.
+ */
+export function noCopyAt(at: string, guards: FolderGuards): NoCopyAt | null {
+  if (!whole(at)) return { spelled: "its path is not a whole one" };
+  if (LINE_BREAK.test(at)) return { spelled: "its path holds a line break" };
+  if (at.trimEnd() !== at) return { spelled: "its path ends in a space or a tab" };
+  if (Buffer.byteLength(at) > PATH_BYTES || at.split("/").some((name) => Buffer.byteLength(name) > NAME_BYTES)) {
+    return { spelled: "its path, or a name in it, is longer than this computer takes" };
+  }
+  const apps = [guards.dataDir, guards.cacheDir].flatMap((dir) => [resolve(dir), realpath(resolve(dir)).path]);
+  if (apps.some((dir) => inside(at, dir) || inside(dir, at))) return { spelled: "it holds the app's own data or cache, or lies in them" };
+  // The policy's own list, less the folder a helper holds and its working folder, which are each start's.
+  const read = (sandboxPolicy({ folder: "", tmp: "", appDirs: guards.appDirs }).filesystem.allowRead ?? []).filter((dir) => dir !== "");
+  const found = read.find((dir) => [dir, realpath(dir).path].some((spelled) => inside(spelled, at) || inside(at, spelled)));
+  return found === undefined ? null : { given: found };
+}
+
+const cannotStand = (at: string, through: string): string =>
+  `a thread's copy cannot stand for ${at}: its helper's sandbox would be given ${through}, and by it the folder itself or what the app keeps of it`;
+
+// A thread's copy, named by the path of the folder it stands for: a path the binder took by the same rule (noCopyAt).
 function onCopy(message: HostStart, guards: FolderGuards, uid: number): StartCheck {
   const { folder, at } = message;
   if (typeof at !== "string") return refused("a thread's copy stands for a folder by that folder's path");
-  const apps = [guards.dataDir, guards.cacheDir].flatMap((dir) => [resolve(dir), realpath(resolve(dir)).path]);
-  const whole = edgeRefused(folder, at) === null && !LINE_BREAK.test(at) && at.trimEnd() === at
-    && Buffer.byteLength(at) <= PATH_BYTES && at.split("/").every((name) => Buffer.byteLength(name) <= NAME_BYTES);
-  if (copyKey(folder, guards.dataDir) !== null && (!whole || apps.some((dir) => inside(at, dir) || inside(dir, at)))) {
-    return refused(`${shown(at)} is no path a thread's copy can stand for`);
+  const alone = noCopyAt(at, guards);
+  if (copyKey(folder, guards.dataDir) !== null && alone !== null) {
+    return refused("given" in alone ? cannotStand(at, alone.given) : `${shown(at)} is no path a thread's copy can stand for`);
   }
   const held = checkCopy(folder, guards.dataDir, at, uid);
   if (!held.ok) return held;
   // Its sandbox holds the copy and nothing else of the folder's: not the folder itself, nor any place or kept folder.
   const through = given(message, guards.appDirs, [at, ...keptApart(guards.dataDir)]);
-  if (through !== null) return refused(`a thread's copy cannot stand for ${at}: its helper's sandbox would be given ${through}, and by it the folder itself or what the app keeps of it`);
+  if (through !== null) return refused(cannotStand(at, through));
   return {
     ...held, ...plain(), env: { SUROGATE_AT: at },
     replaced: `the copy of ${at} this thread works in was made again after the app looked at it`,

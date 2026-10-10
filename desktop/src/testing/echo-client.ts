@@ -79,7 +79,8 @@ const network: NetworkApprovals = {
 const bindingOf = (root: string) => everyRoot ?? journal.bindings.get(root);
 const host = userInfo();
 const vm = values.folder || values.confirm ? new VmClient({ vm: vmOptions(dataDir, { uid: host.uid, gid: host.gid, name: host.username, home: env.HOME ?? host.homedir }) }) : null;
-const hosts = vm ? new VmExecutor({ bindingOf, dataDir, cacheDir: join(homedir(), ".cache", "surogate"), env, network, vm }) : null;
+// Its threads' histories are made in this computer's user's name: the echo client has no account's.
+const hosts = vm ? new VmExecutor({ bindingOf, dataDir, cacheDir: join(homedir(), ".cache", "surogate"), env, network, vm, user: host.username }) : null;
 const { confirm, ask } = values;
 let refusal: string | null = null;
 const binder = confirm && hosts
@@ -96,6 +97,7 @@ const binder = confirm && hosts
     guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
+    keepsCopies: hosts.keepsCopies(),
     approvalPrompts: {
       approve: (request) => {
         say({ event: "approval", ...request });

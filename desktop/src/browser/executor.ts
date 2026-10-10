@@ -384,6 +384,10 @@ export class Browsing implements ToolLayer {
     return this.options.tools.guards();
   }
 
+  keepsCopies(): boolean {
+    return this.options.tools.keepsCopies?.() === true;
+  }
+
   // A tab runs nothing of a chat's once its operation answers: what is alive is the tools'.
   live(): string[] {
     return this.options.tools.live();

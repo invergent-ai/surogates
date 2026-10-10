@@ -37,6 +37,8 @@ export interface ToolLayer extends Executor {
   refusal?(operation: Operation): Outcome | null;
   // A deleted chat's root: what the tools keep for it goes, such as its browser tabs.
   retired?(root: string): void;
+  // Whether a project's thread is given a copy of its folder to work in: without, the binder binds it to none.
+  keepsCopies?(): boolean;
   // The address of the page a calling session's next browser operation acts in, for its prompt; for an
   // upload, of the frame of the file input its page asked for, *of* being the upload's operation, by its id; or
   // why that upload can be given to nothing. *root*: the chat that asks, which is told of no other chat's session.
@@ -188,6 +190,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     guards: tools.guards(),
     agent: options.agent,
     hosts: counted,
+    keepsCopies: tools.keepsCopies?.() === true,
     refusal: (operation) => tools.refusal?.(operation) ?? null,
     retired: (root) => tools.retired?.(root),
     address: tools.address?.bind(tools),

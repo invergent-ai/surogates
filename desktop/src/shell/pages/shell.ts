@@ -72,6 +72,7 @@ interface State {
   links: string[]; // the user menu's links the app knows for this agent
   unreachable: string | null;
   notice: string | null;
+  copying: string | null; // while threads' copies of their folders are being made, what the sidebar says of them
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
@@ -526,6 +527,13 @@ function draw(state: State): void {
   device.classList.toggle("ended", ENDED.includes(state.device?.status ?? ""));
   byId("notice").hidden = state.notice === null;
   byId("notice").textContent = state.notice ?? "";
+  // A live region, written only when its words change, so that each is spoken once. Shown as text is: it names the user's folders.
+  const copying = byId("copying");
+  copying.hidden = state.copying === null;
+  if (copying.dataset.said !== (state.copying ?? "")) {
+    copying.dataset.said = state.copying ?? "";
+    showText(copying, state.copying ?? "");
+  }
   byId("device-action").hidden = state.deviceAction === null;
   byId("device-action-text").textContent = state.deviceAction?.text ?? "";
   byId("device-action-button").textContent = state.deviceAction?.button ?? "";
