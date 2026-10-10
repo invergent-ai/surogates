@@ -1232,6 +1232,38 @@ describe("a step whose own clean-up fails", () => {
     if (existsSync(join(folder, "sub"))) chmodSync(join(folder, "sub"), 0o755);
   });
 
+  it("forgets no landing while a step of it is still cut, in the helper that cut it: the file is put back first, or the forgetting is refused", { timeout: 60_000 }, async () => {
+    const helping = await stuck();
+    try {
+      // Still read-only: nothing can be put back, so nothing is forgotten.
+      expect(await helping.ask({ action: "forget", saga: SAGA })).toMatchObject({ error: { type: "os", code: "EACCES" } });
+      expect(readdirSync(join(kept, SAGA))).toContain("1.json");
+      chmodSync(join(folder, "sub"), 0o755);
+      expect(await helping.ask({ action: "forget", saga: SAGA })).toEqual({ ok: {} });
+      expect(readdirSync(join(folder, "sub"))).toEqual(["R.txt"]);
+      expect(readFileSync(join(folder, "sub", "R.txt"), "utf8")).toBe("the report, v1");
+      expect(await helping.ask({ action: "recover" })).toMatchObject({ ok: { restored: ["sub/R.txt"], beside: [], lost: [] } });
+      expect(readdirSync(kept)).toEqual([]);
+    } finally {
+      await helping.end();
+    }
+  });
+
+  it("writes no cut step down as ended by a put-back the user's new file refuses: the file moved aside goes beside it, and is said", { timeout: 60_000 }, async () => {
+    const helping = await stuck();
+    try {
+      chmodSync(join(folder, "sub"), 0o755);
+      writeFileSync(join(folder, "sub", "R.txt"), "made by you since");
+      expect(await helping.ask(unapply(1, "sub/R.txt"))).toEqual({ ok: { path: "sub/R.txt", put_back: false } });
+      expect(await helping.ask({ action: "recover" })).toMatchObject({ ok: { restored: [], beside: [["sub/R.txt", "sub/R (kept by Surogate).txt"]], lost: [] } });
+      expect(Object.fromEntries(readdirSync(join(folder, "sub")).map((name) => [name, readFileSync(join(folder, "sub", name), "utf8")])))
+        .toEqual({ "R.txt": "made by you since", "R (kept by Surogate).txt": "the report, v1" });
+      expect(readdirSync(kept)).toEqual([]);
+    } finally {
+      await helping.end();
+    }
+  });
+
   it("drops no record while a file of its own is still in the folder: what it could not remove is removed at the next start", { timeout: 60_000 }, async () => {
     mkdirSync(join(folder, "sub"));
     writeFileSync(join(folder, "sub", "R.txt"), "the report, v1");

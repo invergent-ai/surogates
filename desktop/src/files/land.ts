@@ -401,8 +401,10 @@ class Landing {
   private readonly copy: string;
   private readonly store: string;
   private readonly kept: string;
+  private readonly key: string;
 
   constructor(context: Context, saga: string) {
+    this.key = keyOf(context);
     this.folder = context.folder;
     this.copy = context.landing!.copy;
     this.store = context.landing!.kept;
@@ -757,9 +759,8 @@ class Landing {
         // Neither the step's file nor the one it found: someone else's change.
         return "changed";
       }
-      if (dir !== null) for (const one of [did.temp, did.aside, did.out, did.back]) if (one !== null) remove(dir.at(one));
+      this.release(step, did, dir, false);
       if (did.was === null) this.empty(did.made);
-      this.drop(step);
       if (dir !== null) syncDir(dir.at("."));
       return outcome;
     } finally {
@@ -767,39 +768,58 @@ class Landing {
     }
   }
 
-  // A step that did not end, put back: by a failure of its own, or found by a helper's start after a kill. Where the
-  // user has since put a file at the name, that one stays, and the one the step moved aside goes beside it.
+  // The one way a record lets go of its step: dropped, or written down as ended with what it kept. Never while a
+  // file the step moved aside is still under the step's name for it, nor any other file of the step's own: one that
+  // cannot be taken away is a failure raised here, and the record stays to name it.
+  private release(step: number, did: Step, dir: Held | null, ended: boolean): void {
+    if (dir !== null) {
+      for (const one of [did.temp, did.out, did.back]) if (one !== null) remove(dir.at(one));
+      const aside = did.aside === null ? null : look(dir.at(did.aside));
+      // Taken away only as the second name of a file that has its own again.
+      if (aside !== null && (aside.isDirectory() || aside.nlink < 2n)) throw osError("EEXIST", did.path, "A file moved aside has not taken its name back");
+      if (aside !== null) remove(dir.at(did.aside!));
+    }
+    if (ended) this.write(step, { ...did, temp: null, aside: null, out: null, back: null });
+    else this.drop(step);
+  }
+
+  // A step that did not end, put back: by a failure of its own, or found by a helper's start after a kill.
   private revert(step: number, did: Step, report: Recovered, held: Held | null = null): void {
-    const parts = did.path.split("/");
-    const name = parts.at(-1)!;
-    let dir = held;
+    let outcome: "back" | "restored" | "changed" = "changed";
     try {
-      const outcome = this.putBack(step, did, held);
-      if (outcome === "restored") report.restored.push(did.path);
-      if (outcome !== "changed") return;
-      dir ??= enter(this.root(did.path), parts.slice(0, -1), did.path).dir;
+      outcome = this.putBack(step, did, held);
     } catch (error) {
       // A link on its way now: nothing is followed to find what was moved aside there.
       if (!(error instanceof Failure && error.refusal.type === "sandbox")) throw error;
     }
+    if (outcome === "restored") report.restored.push(did.path);
+    if (outcome === "changed") this.end(step, report, held);
+  }
+
+  // A step that cannot be put back, ended: the name holds a file that is neither the step's nor the one it found,
+  // which stays. The file the step moved aside goes beside it, and is said; what the step kept stays kept, as a
+  // whole step's does, for whoever settles the landing.
+  private end(step: number, report: Recovered, held: Held | null = null): void {
+    const did = this.read(step);
+    if (did === null) return;
+    const parts = did.path.split("/");
+    let dir = held;
     try {
-      const again = this.read(step) ?? did;
-      if (dir !== null) {
-        for (const one of [again.temp, again.out, again.back]) if (one !== null) remove(dir.at(one));
-        if (again.aside !== null && look(dir.at(again.aside)) !== null) {
-          const beside = restore(dir, again.aside, name);
-          if (beside === null) report.restored.push(did.path);
-          else report.beside.push([did.path, [...parts.slice(0, -1), beside].join("/")]);
-        }
-      } else if (again.aside !== null && look(this.bytes(step)) === null) {
-        report.lost.push([did.path, again.aside]);
+      dir ??= enter(this.root(did.path), parts.slice(0, -1), did.path).dir;
+    } catch (error) {
+      if (!(error instanceof Failure && error.refusal.type === "sandbox")) throw error;
+    }
+    try {
+      if (dir !== null && did.aside !== null && look(dir.at(did.aside)) !== null) {
+        const beside = restore(dir, did.aside, parts.at(-1)!);
+        if (beside === null) report.restored.push(did.path);
+        else report.beside.push([did.path, [...parts.slice(0, -1), beside].join("/")]);
+      } else if (dir === null && did.aside !== null && look(this.bytes(step)) === null) {
+        report.lost.push([did.path, did.aside]);
       }
-      // What it kept stays kept, as a whole step's does, for whoever settles the landing.
-      if (look(this.bytes(step)) !== null) this.write(step, { ...again, temp: null, aside: null, out: null, back: null });
-      else {
-        if (again.was === null) this.empty(again.made);
-        this.drop(step);
-      }
+      const kept = look(this.bytes(step)) !== null;
+      this.release(step, did, dir, kept);
+      if (!kept && did.was === null) this.empty(did.made);
     } finally {
       if (dir !== held) dir?.close();
     }
@@ -812,7 +832,9 @@ class Landing {
     try {
       this.revert(step, did, report, held);
     } catch {
-      // Its record stays, and names what it left: the next start puts it back.
+      // Its record stays, and names what it left. This helper's look for steps cut short is no longer done: the
+      // next thing it is asked puts the step back first, or is refused as this was.
+      recovered.delete(this.key);
       return error;
     }
     const beside = report.beside[0]?.[1];
@@ -827,16 +849,27 @@ class Landing {
     if (did.path !== path) throw valueError(BAD);
     if (protectedInFolder(this.folder, join(this.folder, ...parts))) throw sandboxError(inFolderRefusal(path));
     if (this.putBack(step, did) === "changed") {
-      // The step stays as it was, and what it kept stays kept.
-      const again = this.read(step);
-      if (again !== null) this.write(step, { ...again, temp: null, aside: null, out: null, back: null });
-      throw new Failure({ type: "conflict", message: `${path} changed after the landing wrote it, so it was not put back` });
+      // The step ends as one cut short does, and what it kept stays kept.
+      const report: Recovered = { restored: [], beside: [], lost: [] };
+      this.end(step, report);
+      const beside = report.beside[0]?.[1];
+      throw new Failure({
+        type: "conflict",
+        message: `${path} changed after the landing wrote it, so it was not put back${beside === undefined ? "" : `; the file that was there before is beside it as '${beside}'`}`,
+      });
     }
     return { path, put_back: true };
   }
 
-  // Out of the sagas' names in one move, then removed: cut short, what is left is no landing's, and the next start removes it.
+  // Out of the sagas' names in one move, then removed: cut short, what is left is no landing's, and the next start
+  // removes it. Refused while a step of the saga has not ended: its record is all that names a file moved aside.
   forget(): unknown {
+    for (const step of this.steps()) {
+      const did = this.read(step);
+      if (did !== null && !settled(did)) {
+        throw new Failure({ type: "conflict", message: `${did.path} was left by a step cut short and is not put back yet, so its landing was not forgotten` });
+      }
+    }
     const gone = join(this.store, `${FORGOTTEN}${randomUUID()}`);
     try {
       renameSync(this.kept, gone);
@@ -847,6 +880,17 @@ class Landing {
     rmSync(gone, { recursive: true, force: true });
     keeping.delete(this.store);
     return {};
+  }
+
+  // The steps the saga has a record of.
+  private steps(): number[] {
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.kept);
+    } catch {
+      // It has written nothing yet.
+    }
+    return names.flatMap((name) => /^(0|[1-9][0-9]*)\.json$/.exec(name)?.[1] ?? []).map(Number);
   }
 
   // Every step of the saga whose record does not say it ended is put back, and a record's own half-written file
@@ -878,11 +922,12 @@ class Landing {
 // What each landing's helper found at its start, by the folder it lands in and where it keeps: one helper holds a
 // folder, so a step is only ever cut short by the helper's own end, and one look for such steps lasts a helper's life.
 const recovered = new Map<string, Recovered>();
+const keyOf = (context: Context): string => `${context.folder}\0${context.landing!.kept}`;
 
 /** What an earlier helper's landings left cut short in this folder, put back; once for a helper, and before it looks at the folder or writes it. */
 export function recover(context: Context): Recovered {
   const { kept } = context.landing!;
-  const key = `${context.folder}\0${kept}`;
+  const key = keyOf(context);
   const known = recovered.get(key);
   if (known) return known;
   const report: Recovered = { restored: [], beside: [], lost: [] };
