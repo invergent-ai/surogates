@@ -1126,6 +1126,66 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(await executor.run(op("resolve", { path: "" }), signal())).toEqual({ error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${said}` } });
   });
 
+  it("runs no command of a host told to go once its letting go has begun, though its hook guard answers as it stops", async () => {
+    // As host.ts answers a refusal it was asked before its stop: once the stop comes, and as it would have.
+    const held: string[] = [];
+    const executor = threads({
+      spawnHost: spawnHost((host, message) => {
+        if (message.type === "refusal") held.push(message.id);
+        else if (message.type === "stop") {
+          for (const id of held.splice(0)) host.say({ type: "result", id, outcome: { ok: null } });
+          host.exit();
+        } else guarding(host, message);
+      }),
+    });
+    let ran = 0;
+    const late = executor.guarded(op("run", { command: "touch late.txt" }), signal(), "around", async () => {
+      ran += 1;
+      return { ok: null };
+    });
+    await until(() => held.length === 1);
+    executor.replaced(ROOT_A);
+    expect(await late).toEqual({
+      error: {
+        type: "unavailable",
+        message: `This computer could not open the folder's sandbox: the copy of ${folder()} this thread works in was made again while this was asked, so it was not done. Ask again`,
+      },
+    });
+    expect([ran, released]).toEqual([0, [ROOT_A]]);
+  });
+
+  it("gives a replaced told in the moment between an open and its host to the host that open gave, which never starts on it", async () => {
+    // As a letting go for another folder at the path tells the thread once the copies have taken its copy for it.
+    let told = 0;
+    const executor = threads({
+      copies: {
+        open: async (root) => {
+          opens.push(root);
+          const opened = handed(root);
+          if (told === 0) {
+            told += 1;
+            queueMicrotask(() => executor.replaced(root));
+          }
+          return opened;
+        },
+        close: (handle) => void closed.push({ handle, gone, released: [...released] }),
+      },
+    });
+    expect(await executor.run(op("resolve", { path: "" }), signal())).toMatchObject({ ok: expect.any(String) });
+    // The copy the first open gave was let go at once, with no host on it; the host is on the copy opened after.
+    expect([opens, fakes.length, closed]).toEqual([[ROOT_A, ROOT_A], 1, [{ handle: { root: ROOT_A }, gone: 0, released: [] }]]);
+  });
+
+  it("lets go of the hold an open gave where its host could not be made, and says why", async () => {
+    const executor = threads({
+      spawnHost: () => {
+        throw new Error("spawn EMFILE");
+      },
+    });
+    expect(await executor.run(op("resolve", { path: "" }), signal())).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: spawn EMFILE" } });
+    expect(closed).toEqual([{ handle: { root: ROOT_A }, gone: 0, released: [] }]);
+  });
+
   it("answers the app's quit while a thread's copy is made, and keeps no hold of what was made", async () => {
     let make: (opened: Opened) => void = () => {};
     const executor = threads({

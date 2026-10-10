@@ -58,6 +58,10 @@ const unavailable = (why: string): Outcome => ({
 // A root bound to a copy works in its copy or nowhere: with nothing to make copies, nowhere.
 const NO_COPIES = unavailable("it has none to make this thread's copy of its folder in");
 const QUITTING = unavailable("the app is quitting");
+// How often a thread's copy is opened for one host, where it is told each time that the copy is not vouched for.
+const OPENINGS = 4;
+// What a thread's operation is answered that its host could not do, its copy made again while it was asked.
+const madeAgain = (at: string): Outcome => unavailable(`the copy of ${at} this thread works in was made again while this was asked, so it was not done. Ask again`);
 
 // The hook guard around a process operation that runs in the VM: its refusal before it
 // and its look after it, its refusal alone, or neither.
@@ -196,6 +200,9 @@ export class ToolHosts implements Executor {
   private readonly starting = new Map<string, Promise<Host | Outcome>>();
   // The root of each host on a thread's copy, until it exits.
   private readonly onCopies = new Map<Host, string>();
+  // How often each thread's root was told its copy is not vouched for: told while its copy was being opened, the copy
+  // that open gives may be the one meant.
+  private readonly told = new Map<string, number>();
   // Aborted at the app's quit: a copy's opening for a host that will not start is waited for no longer.
   private readonly halt = new AbortController();
   private stopping: Promise<void> | undefined;
@@ -228,6 +235,7 @@ export class ToolHosts implements Executor {
    * the root's next operation starts a host on the copy the guest opens then.
    */
   replaced(root: string): void {
+    this.told.set(root, (this.told.get(root) ?? 0) + 1);
     for (const [host, of] of this.onCopies) if (of === root) host.finish();
   }
 
@@ -314,25 +322,41 @@ export class ToolHosts implements Executor {
     return until(signal, start);
   }
 
-  // *root*'s host on its copy, once the copies have it opened, holding the copy from then until it has gone.
+  // *root*'s host on its copy, once the copies have it opened, holding the copy from then until it has gone. A copy
+  // the root was told is not vouched for while it was opened is let go, and opened again.
   private async onCopy(root: string, binding: BoundFolder, copies: ThreadCopies): Promise<Host | Outcome> {
-    const opened = await copies.open(root, binding, this.halt.signal);
-    if (this.stopping) {
-      if ("handle" in opened) copies.close(opened.handle);
-      return QUITTING;
+    for (let turn = 0; turn < OPENINGS; turn += 1) {
+      const told = this.told.get(root) ?? 0;
+      const opened = await copies.open(root, binding, this.halt.signal);
+      if (this.stopping) {
+        if ("handle" in opened) copies.close(opened.handle);
+        return QUITTING;
+      }
+      if ("failed" in opened) return opened.failed;
+      const { copy, handle } = opened;
+      if ((this.told.get(root) ?? 0) !== told) {
+        copies.close(handle);
+        continue;
+      }
+      let host: Host;
+      try {
+        // What the guest shared of the root's for a host on the copy before this one is let go first.
+        const before = Promise.all([...this.onCopies].filter(([, of]) => of === root).map(([earlier]) => earlier.letGo())).then(() => {});
+        host = this.hostFor(root, { folder: copy.folder, at: copy.at }, before);
+      } catch (error) {
+        // No host holds it: its hold goes now.
+        copies.close(handle);
+        throw error;
+      }
+      this.onCopies.set(host, root);
+      // Let go once the host has stopped, and what its root ran in the guest has ended with what the guest shared for it.
+      void host.exited.then(() => host.letGo()).then(() => {
+        this.onCopies.delete(host);
+        copies.close(handle);
+      });
+      return host;
     }
-    if ("failed" in opened) return opened.failed;
-    const { copy, handle } = opened;
-    // What the guest shared of the root's for a host on the copy before this one is let go first.
-    const before = Promise.all([...this.onCopies].filter(([, of]) => of === root).map(([host]) => host.letGo())).then(() => {});
-    const host = this.hostFor(root, { folder: copy.folder, at: copy.at }, before);
-    this.onCopies.set(host, root);
-    // Let go once the host has stopped, and what its root ran in the guest has ended with what the guest shared for it.
-    void host.exited.then(() => host.letGo()).then(() => {
-      this.onCopies.delete(host);
-      copies.close(handle);
-    });
-    return host;
+    return unavailable(`the copy of ${binding.folder} this thread works in was made again each time it was opened`);
   }
 
   private hostFor(root: string, works: Works, before?: Promise<void>): Host {
@@ -474,6 +498,9 @@ class Host {
       }
       // Nothing to wait for but on a thread's copy that another host held before.
       await this.before;
+      // Told to go, it is letting go of what the guest shares for it: a command sent now would have the guest share its
+      // copy again after that, and nothing would let that share go.
+      if (this.finished && this.works.at !== undefined) return madeAgain(this.works.at);
       const outcome = await inner(signal, this.handles);
       return guard === "around" ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
@@ -515,7 +542,7 @@ class Host {
     const { at } = this.works;
     if (at === undefined || !("error" in outcome) || outcome.error.type !== "folder_unavailable") return outcome;
     this.finish();
-    return unavailable(`the copy of ${at} this thread works in was made again while this was asked, so it was not done. Ask again`);
+    return madeAgain(at);
   }
 
   // With no operation running and no background process alive, the host keeps its
