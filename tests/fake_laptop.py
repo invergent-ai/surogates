@@ -17,6 +17,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -43,10 +44,12 @@ from surogates.devices.workspace import (
     is_well_formed,
     transfer_of,
 )
+from surogates.devices.binding import THREAD_KINDS
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import RevisionConflict, RipgrepError, WorkspaceIO
+from surogates.tools.workspace_io import LocalWorkspaceIO, RevisionConflict, RipgrepError, WorkspaceIO
 from surogates.tools.workspace_io.base import refuse_nul
 from surogates.tools.workspace_io.local import CODE_UNITS
+from tests.fake_places import FOLDER_UNAVAILABLE, Places, cannot
 
 # What the app asks its user about before it runs, in Ask every time (desktop/src/binding/approvals.ts).
 ASKED = {"run", "start", "write", "delete", "write_stdin"}
@@ -425,12 +428,25 @@ class FakeLaptop:
     server acknowledges it or does not want it.  A write whose data comes as a
     transfer runs once that data is whole; every chunk is acknowledged, and a
     new connection starts each one over.
+
+    With *data*, the app's data, it keeps a copy of the folder for a
+    project's thread whose bind names one (``tests.fake_places``): the
+    thread's operations work in its copy, and it has the thread's own kinds.
+    Without, it is an app older than copies: it binds every chat to the
+    folder itself, and has none of those kinds.
     """
 
-    def __init__(self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2) -> None:
+    def __init__(
+        self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2,
+        data: Path | None = None, user: str = "you",
+    ) -> None:
         self.url = url
         self.token = token
         self.folder = folder
+        # The folder's place in the app's data, its threads' copies, and what its landings keep.
+        self.places = Places(data, Path(folder.root), user) if data is not None else None
+        # Asked of each thread kind's outcome before it is sent: a computer that lies. (frame, outcome) -> outcome.
+        self.lie: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None
         self.ping_interval_s = ping_interval_s
         self.ran: list[str] = []
         self.received: list[str] = []
@@ -557,13 +573,23 @@ class FakeLaptop:
                 self._asked.pop(operation_id, None)
 
     def _bind(self, frame: dict[str, Any]) -> dict[str, Any]:
-        args = frame["args"]
+        args, root = frame["args"], frame["session_id"]
+        refused = {"error": {"type": "binding", "message": "This folder was not confirmed on this computer"}}
+        # As the app's binder: a copy is the chat's own root's, or the bind is refused, never bound to the folder itself.
+        # An app older than copies reads no history: it binds the folder itself.
+        copy = self.places is not None and "history" in args
+        if copy and args["history"] != {"thread": root}:
+            return refused
         # One use, like the app's preparation token.
         folder = self.prepared.pop(args["nonce"], None)
         if folder is None or folder != args["folder"]:
-            return {"error": {"type": "binding", "message": "This folder was not confirmed on this computer"}}
-        self.bindings[frame["session_id"]] = folder
-        return {"ok": None}
+            return refused
+        self.bindings[root] = folder
+        if not copy:
+            return {"ok": None}
+        self.places.threads[root] = root
+        # It says that it keeps the copy: the server binds the thread with one on that word alone.
+        return {"ok": {"history": {"thread": root}}}
 
     async def _handle(self, frame: dict[str, Any], ws: ClientConnection) -> None:
         operation_id = frame["id"]
@@ -631,6 +657,10 @@ class FakeLaptop:
                 outcome = {"ok": None}
             elif frame["kind"].startswith("browser."):
                 outcome = self._browse(frame["kind"], frame["args"])
+            elif frame["kind"] in THREAD_KINDS:
+                outcome = await self._thread_kind(frame)
+            elif self.places is not None and frame["session_id"] in self.places.threads:
+                outcome = await self._in_copy(frame)
             else:
                 outcome = await perform(self.folder, frame["kind"], frame["args"])
             self.outcomes[operation_id] = self._carried(operation_id, frame["kind"], outcome)
@@ -649,6 +679,25 @@ class FakeLaptop:
         elif transfer_of(result["outcome"]) is None:
             await ws.send(json.dumps(result))
         # A transfer whose data is gone was acknowledged: the server has its result.
+
+    async def _thread_kind(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """A thread's own kind, as the app's executor answers it: git off the event loop, as the guest runs it."""
+        if self.places is None:
+            outcome = cannot(frame["kind"])
+        elif frame["session_id"] not in self.bindings:
+            outcome = FOLDER_UNAVAILABLE
+        else:
+            outcome = await asyncio.to_thread(self.places.run, frame)
+        return outcome if self.lie is None else self.lie(frame, outcome)
+
+    async def _in_copy(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """A file or process operation of a root bound with a copy: in its copy, named by the folder's path."""
+        root = frame["session_id"]
+        where = await asyncio.to_thread(self.places.opened, root)
+        if isinstance(where, dict):
+            return where
+        outcome = await perform(LocalWorkspaceIO(str(where)), frame["kind"], self.places.into(root, frame["args"]))
+        return self.places.out_of(root, outcome)
 
     def _browse(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
         if self.browser is None:
