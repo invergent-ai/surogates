@@ -18,7 +18,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BrowserContext, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
+import type { BrowserContext, CDPSession, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
@@ -600,6 +600,13 @@ const requested = () => [...(host as unknown as { open: Map<{ url(): string }, u
 // Playwright's listener while the agent drives, or on lines of the host's own while its user holds the browser.
 const hears = (page: Page) => Math.min(1, (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser")
   + ((host as unknown as { hearing: Map<Page, { lines?: unknown }> }).hearing.get(page)?.lines ? 1 : 0));
+// The browser has taken the host's word that a page is let be, on each of the host's own *lines* to it, as the
+// host held them: hears() says the host's word, which goes out to the browser a moment later, and the test's
+// own calls of xwininfo, xprop and x-user.py hold this process's event loop meanwhile, so that a click of the
+// user's could reach the browser before it. The browser answers a line's questions in turn: so each line's
+// answer to one asked now, or its refusal, closed by then, comes after the browser took the host's word on it.
+// Asked as the host asks its own, which runs none of the page's code and gives it nothing.
+const taken = (lines: CDPSession[]) => Promise.all(lines.map((line) => line.send("Runtime.evaluate", { expression: "0" }).catch(() => {})));
 // How many of Playwright's own listeners *page* has for a file it asks for: each ask one of them hears is read as a gesture.
 const playwrightHears = (page: Page) => (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser");
 // The user's own hand on that display, as X events (x-user.py): the window given the keyboard, a click, keys typed.
@@ -5816,7 +5823,8 @@ await navigator.serviceWorker.ready;`);
     await new Promise((done) => setTimeout(done, 1_000));
     expect([made.map((which) => saying(which).length), ownChoosers()]).toEqual([[1, 1, 1, 1], []]);
     // Each that a process of its own draws has a line of the host's by now, with the page's and the frame's it had.
-    expect((host as unknown as { hearing: Map<Page, { lines?: unknown[] }> }).hearing.get(page)?.lines).toHaveLength(5);
+    const lines = (host as unknown as { hearing: Map<Page, { lines?: CDPSession[] }> }).hearing.get(page)!.lines!;
+    expect(lines).toHaveLength(5);
     // Their own click in the other site's frame, and in the frame of the page's site inside the other site's: each
     // has leave by it and asks. The page is not let be yet, and neither are its frames: no chooser opens.
     asUser("focus", xwindow()!.id);
@@ -5830,6 +5838,7 @@ await navigator.serviceWorker.ready;`);
     expect([hears(page), ownChoosers()]).toEqual([1, []]);
     // Let be, five seconds after the last of that: their click in a frame opens the browser's chooser, as in the page.
     await expect.poll(() => hears(page), { timeout: 20_000 }).toBe(0);
+    await taken(lines);
     expect(ownChoosers()).toEqual([]);
     asUser("click", ...screen(320, 270));
     await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);
