@@ -15,7 +15,7 @@ import {
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
-import { NOT_BOUND } from "../src/hosts/tool-hosts.js";
+import { NO_COPY, NOT_BOUND, ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
@@ -417,6 +417,70 @@ describe("a chat's bind operation", () => {
     expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce }), never())).toEqual({ ok: null });
     expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce: "y".repeat(32) }), never())).toEqual(ALREADY_BOUND);
     expect(await restarted.admit(bindOp(ROOT, { folder: join(base, "other"), nonce }), never())).toEqual(ALREADY_BOUND);
+  });
+
+  it("records the thread whose copy a project's thread works in, which is the chat's own and no other", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    const copy = (thread: unknown, root = ROOT) => bindOp(root, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: thread } });
+    // Another thread's copy, or a history that names none: refused, and the confirmation stays for the chat's own.
+    const none = [{ thread: OTHER }, { thread: "../other" }, { thread: ` ${ROOT}` }, { thread: `${ROOT}/..` }, { thread: 7 }, { thread: null }, {}, "copy", ROOT, null, [ROOT], [{ thread: ROOT }]];
+    for (const history of none) expect(await chooser.admit(copy(history), never()), JSON.stringify(history)).toEqual(NOT_BOUND);
+    // Nor is a root that is no thread's id given a copy by naming itself: a copy's folder is named by its thread.
+    for (const root of ["../../elsewhere", "ABCDEF01-2345-4678-89AB-CDEF01234567", `${ROOT}/../${OTHER}`, ""]) {
+      expect(await chooser.admit(copy({ thread: root }, root), never()), root).toEqual(NOT_BOUND);
+      expect(journal.bindings.get(root)).toBeUndefined();
+    }
+    expect(journal.bindings.all()).toEqual([]);
+    expect(await chooser.admit(copy({ thread: ROOT }), never())).toEqual({ ok: null });
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes, history: ROOT });
+    // A chat bound without one works in the folder itself.
+    const plain = await confirmed(user, chooser, join(base, "other"));
+    expect(await chooser.admit(bindOp(OTHER, plain), never())).toEqual({ ok: null });
+    expect(journal.bindings.get(OTHER)).toMatchObject({ folder: join(base, "other") });
+    expect(journal.bindings.get(OTHER)).not.toHaveProperty("history");
+  });
+
+  it("answers a bind that comes again only as it was bound: with its copy, or without", async () => {
+    const nonce = "n".repeat(32);
+    journal.bindings.add({ root: ROOT, nonce, folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1, history: ROOT });
+    journal.bindings.add({ root: OTHER, nonce, folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 2 });
+    const restarted = binder(new User());
+    const again = (root: string, history?: unknown) =>
+      restarted.admit(bindOp(root, { folder: notes, nonce }, { args: { folder: notes, nonce, ...(history === undefined ? {} : { history }) } }), never());
+    expect(await again(ROOT, { thread: ROOT })).toEqual({ ok: null });
+    // A thread bound to a copy is never answered as bound to the folder itself, nor the other way.
+    expect(await again(ROOT)).toEqual(ALREADY_BOUND);
+    expect(await again(OTHER)).toEqual({ ok: null });
+    expect(await again(OTHER, { thread: OTHER })).toEqual(ALREADY_BOUND);
+    // And one that names another's copy is no bind of this chat's at all.
+    expect(await again(ROOT, { thread: OTHER })).toEqual(NOT_BOUND);
+    expect(journal.bindings.all().map((bound) => bound.history)).toEqual([ROOT, undefined]);
+  });
+
+  it("works nowhere once it is bound to its copy: the tool hosts, on the journal's own binding, start none for it on the folder", async () => {
+    let started = 0;
+    const tools = new ToolHosts({
+      bindingOf: (root) => journal.bindings.get(root),
+      dataDir: join(base, "data"), cacheDir: join(base, "cache"), env: { HOME: join(base, "home") },
+      spawnHost: () => {
+        started += 1;
+        throw new Error("no host may start for it");
+      },
+    });
+    const user = new User();
+    const chooser = binder(user, { hosts: tools });
+    const ready = await confirmed(user, chooser);
+    expect(await chooser.admit(bindOp(ROOT, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: ROOT } } }), never())).toEqual({ ok: null });
+    for (const [kind, args] of [["write", { key: join(notes, "a.txt"), data: "" }], ["run", { command: "touch planted" }], ["land", { action: "forget", saga: "s" }]] as const) {
+      const operation: Operation = { ...bindOp(ROOT, ready), id: `${kind}-1`, invocationId: "call", ordinal: 1, kind, args };
+      // Free to work, so nobody is asked; and what it would work on is refused.
+      expect(await chooser.admit(operation, never())).toBeNull();
+      expect(await chooser.run(operation, never())).toEqual(NO_COPY);
+    }
+    expect([started, readdirSync(notes)]).toEqual([0, []]);
+    await tools.stop();
   });
 
   it("never answers with a message that ends in a full stop", () => {
