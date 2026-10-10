@@ -397,6 +397,52 @@ async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_work
         assert (await db.execute(text("SELECT count(*) FROM session_leases WHERE session_id = :id"), {"id": lost.id})).scalar() == 0
 
 
+def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") -> None:
+    """*thread*'s worker is lost just before it would ask *action* under *invocation*."""
+    ask = Steps.ask
+
+    async def asking(self, kind, asked, **arguments):
+        runner = self._runner
+        if (asked, runner._invocation_id, runner._calling_session_id) == (action, invocation, thread.id):
+            raise Lost
+        return await ask(self, kind, asked, **arguments)
+
+    monkeypatch.setattr(Steps, "ask", asking)
+
+
+@pytest.mark.parametrize("ended", ["recorded", "put back whole"])
+async def test_a_landing_whose_own_forgetting_never_ran_is_forgotten_by_the_next_landing_in_its_folder(api, here, monkeypatch, ended):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    if ended == "put back whole":
+        # You save the report after its turn was committed: its apply is refused, and the landing goes back whole.
+        lie_at(here, "commit", lambda frame, outcome: (here.folder / "Report.docx").write_bytes(b"PK report v2, by you") and None)
+    with monkeypatch.context() as first_run:
+        lost_before(first_run, lost, "forget")
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    here.app.lie = None
+    [row] = await records(api, lost)
+    assert row.saga_state == ("completed" if ended == "recorded" else "compensated") and row.steps[-1]["tool_name"] != "history.forget"
+    saga = saga_of_turn(lost)
+    assert kept(here) == ({f"{saga}/1": (0o600, b"PK report v1")} if ended == "recorded" else {})
+    landed = seen(here.folder)
+    await lands_next(api, monkeypatch, here, next_)
+    # The next landing in the folder asks it again, once it holds the folder, under a settle's name: what was kept goes.
+    assert asked_by(here, next_, f"{settles(lost)}:forget") == ["forget"] and kept(here) == {}
+    [row] = await records(api, lost)
+    assert (row.steps[-1]["tool_name"], row.steps[-1]["state"]) == ("history.forget", "committed")
+    applied = row.steps[-1]["arguments"]["applied"]
+    # Recorded, it names every apply; put back whole, it keeps nothing, and names none.
+    assert [a["path"] for a in applied] == (["Budget.xlsx", "Report.docx"] if ended == "recorded" else [])
+    assert but(seen(here.folder), "Y.md") == landed
+    [own] = await records(api, next_)
+    assert own.saga_state == "completed"
+    # Asked once: the landing after finds nothing owed.
+    asked = len(here.app.places.asked)
+    await woken(api, monkeypatch, next_, [calling(("write_file", {"path": "Z.md", "content": "z\n"})), _final_response("Done.")], said="More.")
+    assert "forget" not in [action for under, _, _, action in here.app.places.asked[asked:] if ":settle:" in under]
+
+
 # -- what a settle cannot finish -------------------------------------------------------------------------------------
 
 

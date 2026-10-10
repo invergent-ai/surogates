@@ -86,7 +86,7 @@ from surogates.harness.landing import (
 )
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.session.events import EventType
-from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing
+from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,8 @@ RELEASE_WAIT = 30.0
 #: How long the lease a settle takes on a lost landing's thread lasts, and how often it is renewed while the settle runs.
 SETTLE_LEASE = 60
 SETTLE_RENEW = 20.0
+#: How many landings ended in a folder whose forgetting never let go of what they kept a landing asks it again for.
+FORGET_AGAIN = 16
 #: A landing put back whole is tried once more, as a new saga: its look and its pickup see what the first ran into.
 #: What a turn taken up again did after its landing began lands after it, as a landing of its own (``land:<turn>:3``).
 TRIES = 2
@@ -936,7 +938,9 @@ async def settle_folder(
     A landing settled ``escalated`` is told to its thread's master, and its
     thread waits on you over it, once a landing.  Raises
     :class:`LandingUnsettled` where one recorded and its row could not say
-    so: nothing lands in the folder until it can.
+    so: nothing lands in the folder until it can.  Then each landing ended
+    there whose forgetting never let go of what it kept is forgotten
+    (:func:`_forget_owed`).
     """
     patience = time.monotonic() + BUSY_PATIENCE
     while True:
@@ -966,6 +970,7 @@ async def settle_folder(
                     waits=lambda thread, paths: waiting_on_you_here(thread, paths, escalated=True),
                 )
         if not waits:
+            await _forget_owed(store, session_factory, copy, session, turn, held)
             return
         if time.monotonic() >= patience:
             raise _Waited("a landing left running in the folder is its own worker's still")
@@ -973,6 +978,55 @@ async def settle_folder(
         await _given_back(hold, session, turn)
         await asyncio.sleep(BUSY_WAIT)
         await _held(copy, hold)
+
+
+async def _forget_owed(
+    store: Any, session_factory: Any, copy: ThreadCopy, session: Any, turn: int, held: tuple[UUID, str] | None,
+) -> None:
+    """Forget each landing ended in this folder whose forgetting never let go of what it kept, :data:`FORGET_AGAIN` at most.
+
+    A landing recorded, or put back whole, is forgotten at its end, which
+    lets go what the app kept of the files it replaced.  One whose
+    forgetting never ran, its worker lost or its computer away, or was
+    refused, is asked again by the next landing in its folder, once that
+    holds the folder and has settled what was left running.  Each under an
+    invocation of the settling's own, ``land:<turn>:settle:<saga>:forget``,
+    its thread's lease held as a settle holds it, and written into its row
+    as a step of its saga.  A landing put back whole keeps nothing, and its
+    forgetting names no apply.  One left ``escalated`` is not among them:
+    what it kept stays kept until a person settles it.  This turn's own are
+    its own.  As best it can: one not forgotten now is asked again by the
+    landing after.
+    """
+    try:
+        rows = await unforgotten_in(session_factory, copy.device_id, copy.folder, besides=_own(session, turn), most=FORGET_AGAIN)
+    except Exception:
+        logger.warning("The landings in %s that owe a forgetting were not read", copy.folder, exc_info=True)
+        return
+    for row in rows:
+        try:
+            if row.thread_id is None or row.thread_id == session.id:
+                await _forget_again(session_factory, copy, turn, row, held if row.thread_id is not None else None)
+                continue
+            async with _lease_of(store, row.thread_id, f"settle:{session.id}") as taken:
+                # Where a worker holds its thread's turn, that worker's to ask.
+                if taken is not None:
+                    await _forget_again(session_factory, copy, turn, row, (row.thread_id, taken))
+        except LeaseLost as lost:
+            if lost.session_id == session.id:
+                raise
+            logger.warning("The thread of landing %s is a worker's again: its forgetting is that worker's", row.saga_id)
+
+
+async def _forget_again(session_factory: Any, copy: ThreadCopy, turn: int, row: Any, held: tuple[UUID, str] | None) -> None:
+    """Ask the forgetting of the landing *row* records, which ended, once more; written into its row as a step of its saga."""
+    saga = saga_of(row)
+    orchestrator = _orchestrator(None)
+    orchestrator.adopt(saga)
+    # Put back whole, it keeps nothing: no apply is named, as none is kept.
+    nothing = {s.arguments["step"] for s in saga.steps if s.tool_name == "history.apply"} if row.saga_state == "compensated" else set()
+    steps = copy.steps(f"land:{turn}:settle:{row.saga_id}:forget")
+    await _forgotten(saga, orchestrator, steps, _Row(session_factory, row.id, saga, held=held), nothing, row.saga_state)
 
 
 async def settle(

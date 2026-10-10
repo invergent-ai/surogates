@@ -20,7 +20,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from itertools import islice
@@ -262,6 +262,30 @@ async def running_in(session_factory: Any, device_id: UUID, folder: str) -> list
                 WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state == "running",
             )
             .order_by(WorkstreamHistory.id)
+        )).scalars())
+
+
+async def unforgotten_in(
+    session_factory: Any, device_id: UUID, folder: str, *, besides: Collection[str] = (), most: int,
+) -> list[WorkstreamHistory]:
+    """The landings ended in *folder* on the computer *device_id* that no forgetting let go yet, oldest first; *most* of them.
+
+    Recorded or put back whole, and with no step ``history.forget`` that
+    was answered: what the app kept of the files each replaced is still
+    kept.  One left ``escalated`` keeps it until a person settles it, and is
+    not among them; nor the sagas *besides*.
+    """
+    forgot = [{"tool_name": "history.forget", "state": "committed"}]
+    async with session_factory() as db:
+        return list((await db.execute(
+            select(WorkstreamHistory)
+            .where(
+                WorkstreamHistory.device_id == device_id, WorkstreamHistory.folder == folder,
+                WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state.in_(("completed", "compensated")),
+                ~WorkstreamHistory.steps.contains(forgot), WorkstreamHistory.saga_id.not_in(list(besides)),
+            )
+            .order_by(WorkstreamHistory.id)
+            .limit(most)
         )).scalars())
 
 
