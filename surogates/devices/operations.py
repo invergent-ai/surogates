@@ -347,6 +347,13 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
 
 
+def _starts_work(request: OperationRequest) -> bool:
+    """Whether one of a thread's own kinds is new work of its turn: the turn's open, or the snapshot a step starts from."""
+    return request.invocation_id.startswith(OPEN_PREFIX) or (
+        request.kind == "checkpoint" and request.args.get("action") == "take"
+    )
+
+
 #: What a deleted thread still asks of a landing it had begun on its computer: the steps that put the landing back,
 #: record it or forget it, and the looks they need (the app's own list, ``FINISHING`` in desktop/src/history/kinds.ts).
 FINISHING: dict[str, frozenset[str]] = {
@@ -379,12 +386,6 @@ async def _ends_its_landing(db: AsyncSession, request: OperationRequest) -> bool
         ),
     ).limit(1))
     return found is not None
-
-def _starts_work(request: OperationRequest) -> bool:
-    """Whether one of a thread's own kinds is new work of its turn: the turn's open, or the snapshot a step starts from."""
-    return request.invocation_id.startswith(OPEN_PREFIX) or (
-        request.kind == "checkpoint" and request.args.get("action") == "take"
-    )
 
 
 def _its_own_turn(request: OperationRequest, root: dict[str, Any] | None) -> bool:
