@@ -29,7 +29,7 @@ from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
+from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk, WorkstreamHistory
 from surogates.db.models import Session as SessionRow
 from surogates.devices.binding import (
     BIND,
@@ -262,9 +262,49 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         # tool asks: a Stop pauses the thread before its turn hears of it,
         # and what the turn must still do on its computer comes after, a
         # snapshot put back or a landing finished.  A turn's open is new work,
-        # refused once the thread is stopped, so none outlives the Stop.
-        return "archived" in (calling.status, root.status)
+        # refused once the thread is stopped, so none outlives the Stop.  A
+        # deleted thread still ends a landing it had begun, and begins nothing.
+        return "archived" in (calling.status, root.status) and not await _ends_its_landing(db, request)
     return calling.status in _STOPPED_STATUSES or root.status == "archived"
+
+
+#: What a deleted thread still asks of a landing it had begun on its computer: the steps that put the landing back,
+#: record it or forget it, and the looks they need (the app's own list, ``FINISHING`` in desktop/src/history/kinds.ts).
+FINISHING: dict[str, frozenset[str]] = {
+    "history": frozenset({"fetch", "record", "forget"}),
+    "land": frozenset({"recover", "unapply", "forget"}),
+}
+
+
+async def _ends_its_landing(db: AsyncSession, request: OperationRequest) -> bool:
+    """Whether *request*, of a deleted session's, is a step that ends a landing the session had begun on its computer.
+
+    Asked under that landing's own name, whose saga is named after it
+    (``saga:<uuid5(thread, invocation)>``), while the landing is not over:
+    still ``running``, or ended and not yet forgotten.  So the worker of a
+    thread deleted while its landing had written a file puts that landing
+    back whole, or finishes it, and forgets it; and nothing new is begun.
+    Another kind of landing's row is read the same way, by its own name.
+    """
+    if request.args.get("action") not in FINISHING.get(request.kind, ()):
+        return False
+    last = WorkstreamHistory.steps[-1]
+    found = await db.scalar(select(WorkstreamHistory.id).where(
+        WorkstreamHistory.saga_id == f"saga:{uuid5(request.calling_session_id, request.invocation_id)}",
+        WorkstreamHistory.thread_id == request.calling_session_id,
+        WorkstreamHistory.device_id == request.device_id,
+        or_(
+            WorkstreamHistory.saga_state == "running",
+            and_(
+                WorkstreamHistory.saga_state.in_(("completed", "compensated")),
+                or_(
+                    last["tool_name"].astext.is_distinct_from("history.forget"),
+                    last["state"].astext.is_distinct_from("committed"),
+                ),
+            ),
+        ),
+    ).limit(1))
+    return found is not None
 
 
 def _its_own_turn(request: OperationRequest, root: dict[str, Any] | None) -> bool:
@@ -1170,13 +1210,19 @@ class DeviceOperations:
         await self._announce(operation_channel(operation_id), "completed")
         return "completed"
 
-    async def cancel(self, calling_session_ids: Collection[UUID], *, bindings: bool = False) -> int:
+    async def cancel(
+        self, calling_session_ids: Collection[UUID], *, bindings: bool = False, sparing: Collection[UUID] = (),
+    ) -> int:
         """Cancel the open operations of these sessions, and tell their computers.
 
         What a computer already reported keeps its outcome.  A binding and the
         user's own requests are cancelled only with *bindings*: deleting a chat
         ends its folder's set-up and the changes it waits on; pausing or failing
-        it stops only the agent's work.  Returns how many were cancelled.
+        it stops only the agent's work.  The landing of a thread *sparing*
+        names is left to its worker, which ends one that has written no file
+        and finishes, or puts back whole, one that has: its ``history`` and
+        ``land`` steps under ``land:`` are not cancelled.  Returns how many
+        were cancelled.
         """
         if not calling_session_ids:
             return 0
@@ -1184,6 +1230,12 @@ class DeviceOperations:
         if not bindings:
             conditions.append(DeviceOperation.kind != BIND)
             conditions.append(DeviceOperation.invocation_id.not_like(f"{REQUEST_PREFIX}%"))
+        if sparing:
+            conditions.append(~and_(
+                DeviceOperation.calling_session_id.in_(list(sparing)),
+                DeviceOperation.kind.in_(("history", "land")),
+                DeviceOperation.invocation_id.startswith("land:"),
+            ))
         return await self._cancel_where(*conditions)
 
     async def cancel_invocation(self, calling_session_id: UUID, invocation_id: str) -> int:

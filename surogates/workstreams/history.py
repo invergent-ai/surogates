@@ -265,6 +265,21 @@ async def running_in(session_factory: Any, device_id: UUID, folder: str) -> list
         )).scalars())
 
 
+async def landing_on_a_computer(session_factory: Any, thread_ids: list[UUID]) -> list[UUID]:
+    """Those of *thread_ids* with a landing still ``running`` in a folder on a computer."""
+    if not thread_ids:
+        return []
+    async with session_factory() as db:
+        return list((await db.execute(
+            select(WorkstreamHistory.thread_id)
+            .where(
+                WorkstreamHistory.thread_id.in_(thread_ids), WorkstreamHistory.device_id.is_not(None),
+                WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state == "running",
+            )
+            .distinct()
+        )).scalars())
+
+
 def saga_of(row: WorkstreamHistory) -> Saga:
     """The landing saga *row* records, rebuilt as it stood.
 
