@@ -171,9 +171,11 @@ describe("a file's History", () => {
     await files.read();
     expect(files.shown!.failure).toBe(refusal);
     unread = null;
-    // The next version opened takes it away, as it begins.
+    // The next version opened takes it away as it begins, not only once it is handed over.
     refusal = null;
-    await files.openVersion("12:p");
+    const next = files.openVersion("12:p");
+    expect(files.shown).toMatchObject({ failure: null, opening: "12:p" });
+    await next;
     expect(files.shown!.failure).toBeNull();
     // A read's own failure still goes when a read succeeds.
     unread = "History is off: this project has more than 50,000 files.";

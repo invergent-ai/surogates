@@ -315,7 +315,9 @@ describe("the projects the page serves", () => {
     const [version] = listed.files;
     const refusals: unknown[] = [
       listed.files,
-      { files: history[REPORT]![REVENUE], more: false },
+      // A version that took no file away, of one file or of several, is no deleted file.
+      { files: [history[REPORT]![REVENUE]![0]], more: false },
+      { files: [version, { ...version, path: "kept.md", change: "added" }], more: false },
       { files: [version, version], more: false },
       { files: [{ ...version, at: "2026-10-06T11:15:00" }], more: false },
       { files: Array.from({ length: 501 }, (_, n) => ({ ...version, path: `${n}.md` })), more: true },
