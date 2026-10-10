@@ -23,14 +23,18 @@ from surogates.devices.history import (
     MAX_PATH,
     MAX_WORDS,
     NO_COPY,
+    NOWHERE,
+    OPEN_TRIES,
     REFUSALS,
     ComputerRefused,
     NotAnAnswer,
+    NowhereToWork,
     Steps,
     ThreadCopy,
     answered,
     checked,
     code_of,
+    opens_its_copy,
     refused,
 )
 from surogates.devices.operations import DeviceOperations, OperationConflict
@@ -543,6 +547,162 @@ def test_a_step_asked_on_another_path_than_its_first_run_is_the_journals_refusal
 
     with pytest.raises(OperationConflict):
         asyncio.run(ThreadCopy(Conflicted({}), a_thread(), lease_token=None).steps("land:7").history("changed"))
+
+
+def a_project_thread() -> SimpleNamespace:
+    thread = a_thread()
+    thread.config["workstream_role"] = "thread"
+    return thread
+
+
+def test_only_a_threads_own_turn_opens_its_copy():
+    thread = a_project_thread()
+    assert opens_its_copy(thread)
+    # Its helper works in its copy, and opens none: the thread's own turn does.
+    helper = a_session(under=thread.id, history={"thread": str(thread.id)})
+    helper.config["under_thread"] = True
+    # A chat marked as working in a copy of its own, though no thread; and a thread on its folder itself, or in the cloud.
+    chat = a_thread()
+    plain = a_session()
+    plain.config["workstream_role"] = "thread"
+    cloud = SimpleNamespace(id=uuid4(), parent_id=None, config={"workstream_role": "thread"})
+    master = SimpleNamespace(id=uuid4(), parent_id=None, config={"workstream_role": "coordinator"})
+    # A thread whose mark names another thread's copy: none is its own to open.
+    stray = a_project_thread()
+    stray.config["execution"]["history"] = {"thread": str(uuid4())}
+    for session in (helper, chat, plain, cloud, master, stray):
+        assert not opens_its_copy(session), session.config
+
+
+class Opens(DeviceOperations):
+    """A journal of a turn's opens: each asking recorded once, by its name, answered the next of *outcomes*.
+
+    Asked again, an asking is answered as it was recorded, and its computer
+    hears nothing of it.
+    """
+
+    def __init__(self, *outcomes: Any) -> None:
+        self.outcomes = list(outcomes)
+        self.recorded: dict[str, Any] = {}
+        # Each asking its computer heard, by its name, in order.
+        self.heard: list[str] = []
+
+    async def opens(self, calling_session_id: UUID, turn: int) -> int:
+        return sum(name == f"open:{turn}" or name.startswith(f"open:{turn}:") for name in self.recorded)
+
+    async def run(self, request, *, keep_open: bool = False) -> Any:
+        name = request.invocation_id
+        if name not in self.recorded:
+            self.heard.append(name)
+            self.recorded[name] = None
+        if self.recorded[name] is None:
+            # Its computer answers it: now, or once it is back.
+            self.recorded[name] = self.outcomes.pop(0)
+        return self.recorded[name]
+
+
+def nowhere(its: ThreadCopy, turn: int = 7) -> NowhereToWork:
+    with pytest.raises(NowhereToWork) as caught:
+        asyncio.run(its.opened(turn))
+    return caught.value
+
+
+MOVED = {"ok": {"copy": "moved"}}
+#: What the next asking may pass: the history's for what its next open finishes or makes whole, its guest's for a
+#: request it gave up on, and the app's and the journal's for one that ended without its answer.
+PASSING = [
+    *({"type": "history", "code": code, "message": "no"} for code in ("no_whole_copy", "move_unfinished", "record_unfinished", "no_answer")),
+    *({"type": kind, "message": "no"} for kind in ("cancelled", "interrupted", "unavailable")),
+]
+
+
+def test_a_turns_open_is_heard_once_and_its_answer_is_every_later_steps():
+    journal = Opens(MOVED, {"ok": {"copy": "kept", "set_asides": [A]}})
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    for _ in range(3):
+        assert asyncio.run(its.opened(7)) == {"copy": "moved"}
+    # The next turn's is its own.
+    assert asyncio.run(its.opened(9)) == {"copy": "kept", "set_asides": [A]}
+    assert asyncio.run(its.opened(9)) == {"copy": "kept", "set_asides": [A]}
+    assert journal.heard == ["open:7", "open:9"]
+
+
+@pytest.mark.parametrize("error", PASSING)
+def test_a_refusal_the_next_asking_may_pass_is_asked_again_at_the_turns_next_step_under_its_next_name(error):
+    journal = Opens({"error": error}, {"error": error}, MOVED)
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    # Its step runs, in the copy as its computer's app keeps it: no refusal puts a thread in its folder.
+    assert asyncio.run(its.opened(7)) is None
+    assert asyncio.run(its.opened(7)) is None
+    assert asyncio.run(its.opened(7)) == {"copy": "moved"}
+    assert asyncio.run(its.opened(7)) == {"copy": "moved"}
+    assert journal.heard == ["open:7", "open:7:1", "open:7:2"]
+
+
+@pytest.mark.parametrize("error", PASSING)
+def test_a_turn_asks_its_open_a_bounded_number_of_times_and_a_refusal_at_the_last_leaves_it_nowhere_to_work(error):
+    journal = Opens(*[{"error": error}] * (OPEN_TRIES + 3))
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    for _ in range(OPEN_TRIES - 1):
+        assert asyncio.run(its.opened(7)) is None
+    # The last asking's refusal stands for the turn: asked again, it is not heard again.
+    for _ in range(3):
+        stood = nowhere(its)
+        assert (stood.why, stood.code, str(stood)) == ("refused", code_of(ComputerRefused(error["type"], "no", error.get("code"))), NOWHERE["refused"])
+    assert journal.heard == ["open:7", *(f"open:7:{n}" for n in range(1, OPEN_TRIES))]
+    assert OPEN_TRIES == 3
+
+
+@pytest.mark.parametrize(("outcome", "why"), [
+    ({"ok": {"history": "off", "reason": "cap"}}, "cap"),
+    ({"ok": {"history": "off", "reason": "names"}}, "names"),
+    # A name history cannot keep, found by a later open.
+    ({"error": {"type": "history", "code": "name_not_utf8", "message": "a file's name is not UTF-8"}}, "names"),
+    # Its computer's app keeps no copy of the folder for the thread: it bound it to the folder itself.
+    ({"error": {"type": "unsupported", "message": "This chat works in its folder itself"}}, NO_COPY),
+])
+def test_a_thread_whose_folder_has_no_history_or_whose_app_keeps_no_copy_for_it_has_nowhere_to_work(outcome, why):
+    journal = Opens(outcome)
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    for _ in range(2):
+        stood = nowhere(its)
+        assert (stood.why, str(stood)) == (why, NOWHERE[why])
+    assert journal.heard == ["open:7"]
+
+
+@pytest.mark.parametrize("outcome", [
+    *({"error": {"type": "history", "code": code, "message": "no"}} for code in sorted(
+        HISTORY_CODES - {"no_whole_copy", "move_unfinished", "record_unfinished", "no_answer", "name_not_utf8"},
+    )),
+    *({"error": {"type": kind, "message": "no"}} for kind in sorted(REFUSALS - {"history", NO_COPY, "cancelled", "interrupted", "unavailable"})),
+    # What is no refusal a computer's app gives, and what is no answer.
+    {"error": "no"}, {"error": {"type": "history", "code": "<b>", "message": "no"}},
+    {"ok": {"copy": "/etc", "session": "another"}}, {"ok": {"history": "off"}}, {"ok": None}, {"okay": 1},
+])
+def test_a_refusal_asking_again_would_not_pass_leaves_the_thread_nowhere_to_work_at_once(outcome):
+    journal = Opens(outcome)
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    for _ in range(2):
+        stood = nowhere(its)
+        assert (stood.why, str(stood)) == ("refused", NOWHERE["refused"])
+    assert journal.heard == ["open:7"]
+
+
+def test_an_asking_a_worker_left_unanswered_is_waited_for_and_is_not_asked_again():
+    journal = Opens(MOVED)
+    # Recorded by a worker cut off while it waited, and answered once its computer is back.
+    journal.recorded["open:7"] = None
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    assert asyncio.run(its.opened(7)) == {"copy": "moved"}
+    assert (list(journal.recorded), journal.heard) == (["open:7"], [])
+
+
+def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_what_to_do():
+    assert set(NOWHERE) == {"cap", "names", NO_COPY, "refused"}
+    for why, words in NOWHERE.items():
+        assert str(NowhereToWork(why)) == words and len(words) <= 200, why
+    assert "Choose a folder inside it." in NOWHERE["cap"] and "Choose a folder inside it." in NOWHERE["names"]
+    assert NOWHERE[NO_COPY].endswith("Update Surogate Desktop.")
 
 
 def test_the_bounds_of_an_answer_are_the_ones_said():

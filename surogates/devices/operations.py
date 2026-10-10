@@ -969,6 +969,23 @@ class DeviceOperations:
                 )
             )).scalar_one()
 
+    async def opens(self, calling_session_id: UUID, turn: int) -> int:
+        """How many times *calling_session_id*'s turn *turn* asked its computer to open its copy.
+
+        The first asking is recorded under ``open:<turn>``, and each after a
+        refusal under ``open:<turn>:<n>``, n counted from 1: so the count
+        names the turn's last asking, and its next (surogates.devices.history).
+        """
+        first = f"open:{turn}"
+        async with self._sf() as db:
+            return (await db.execute(
+                select(func.count()).select_from(DeviceOperation).where(
+                    DeviceOperation.calling_session_id == calling_session_id,
+                    DeviceOperation.kind == "history",
+                    or_(DeviceOperation.invocation_id == first, DeviceOperation.invocation_id.startswith(f"{first}:", autoescape=True)),
+                )
+            )).scalar_one()
+
     async def complete(
         self,
         device_id: UUID,

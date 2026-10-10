@@ -387,6 +387,18 @@ async def test_a_paused_or_failed_threads_own_kind_is_still_asked_and_a_deleted_
     assert len(await ops.pending(UUID(device["id"]), 1)) == 2
 
 
+async def test_a_turns_opens_are_counted_by_the_turns_own_names_and_from_the_thread_itself_alone(api):
+    device, _, thread = await bound_with_copy(api)
+    ops = journal(api)
+    assert await ops.opens(thread.id, 5) == 0
+    for invocation in ("open:5", "open:5:1", "open:5:2", "open:55", "open:6", "land:5"):
+        await recorded(api, asked(device, thread, "history", "open" if invocation.startswith("open:") else "changed", invocation=invocation))
+    assert [await ops.opens(thread.id, turn) for turn in (5, 55, 6, 0)] == [3, 1, 1, 0]
+    # Another thread's are its own.
+    _, _, other = await bound_with_copy(api)
+    assert await ops.opens(other.id, 5) == 0
+
+
 async def test_a_paused_threads_own_operations_of_the_files_and_commands_are_still_refused(api):
     device, _, thread = await bound_with_copy(api)
     await api.app.state.session_store.update_session_status(thread.id, "paused")
