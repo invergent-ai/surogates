@@ -58,8 +58,8 @@ const one = await shell.threads(project, idle.id);
 const resolved = await shell.resolve(project, idle.id);
 const reopened = await shell.reopen(project, idle.id);
 const renamed = await shell.update(project, { name: "Q3 report", threadTier: "pro" });
-// With a file: its History, and that of a file the project never held; its oldest version opened; and the
-// project's deleted files.
+// With a file: its History, and that of a file the project never held; its oldest version opened; the
+// project's deleted files; and its oldest version restored, with its History read again.
 const history = {};
 if (path) {
   history.versions = await shell.history(project, path, { kind: "cloud" });
@@ -67,5 +67,7 @@ if (path) {
   history.answered = await shell.openVersion(project, { versionId: history.versions.at(-1).id, path }) ?? null;
   history.opened = saved;
   history.deleted = await shell.deleted(project);
+  history.restored = await shell.restore(project, { versionId: history.versions.at(-1).id, path });
+  history.after = await shell.history(project, path, { kind: "cloud" });
 }
 console.log(JSON.stringify({ listed, opened, threads, one, library, routines, heard, resolved, reopened, renamed, history }));
