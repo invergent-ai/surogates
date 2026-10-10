@@ -142,36 +142,55 @@ def _effective_live_view_user(
     return None
 
 
-async def _require_session_agent(
+def _a_services(tenant: TenantContext) -> bool:
+    """Whether the caller holds a service's own token: no person's, and no one session's."""
+    return tenant.user_id is None and tenant.session_scope_id is None
+
+
+def reaches_its_browser(tenant: TenantContext, session: Any) -> bool:
+    """Whether the caller may act on *session*'s browser in the cloud: take it over, see it, tear it down.
+
+    A person reaches their own sessions' browsers, and a token for one session that session's
+    alone, as for a browser on their computer (``_its_own``): nobody else of the organisation, an
+    administrator included.  A service's own token, as the ops proxy's on ``/v1/api/*``, names the
+    user it acts for (``owner_user_id``) and is trusted across its org, as on a session's other
+    routes; one bound to an agent reaches that agent's sessions alone.
+
+    Checked against the session row's own user and agent, never a request-supplied one.
+    """
+    if _a_services(tenant):
+        bound = tenant.service_account_agent_id
+        return bound is None or not session.agent_id or session.agent_id == bound
+    return _its_own(tenant, session.org_id, session.user_id, session.id)
+
+
+async def _require_its_browser(
     app_state: Any, session_id: UUID, tenant: TenantContext,
 ) -> None:
-    """404 a browser session belonging to an agent this token is not bound to.
+    """404 a session's browser to a caller it is not reached by (``reaches_its_browser``).
 
-    These routes authorise on the session's ORG alone, so without this a
-    customer API key minted for one agent can take control of, screenshot and
-    tear down a SIBLING agent's live browser in the same org — the operator's
-    other agents driving their own logged-in sessions.
+    These routes would authorise on the session's ORG alone, so without this
+    one member's token could take control of, screenshot and tear down
+    another member's live browser in the same org, and a customer API key
+    minted for one agent a SIBLING agent's — the operator's other agents
+    driving their own logged-in sessions.
 
-    Checked against the session row's own ``agent_id``, never a
-    request-supplied one. 404 rather than 403, matching the resolver's
-    convention that a stranger cannot tell "exists but not yours" from
-    "does not exist". Org-scoped control-plane tokens are untouched.
+    404 rather than 403, matching the resolver's convention that a stranger
+    cannot tell "exists but not yours" from "does not exist".  A service's
+    token bound to no agent is not asked of a session at all: it reaches
+    every browser of its org.
 
     Takes app state rather than a ``Request`` so the live-view WebSocket
     handler — which has a ``WebSocket``, not a request — is covered by the
     same guard as the HTTP routes.
     """
-    bound = getattr(tenant, "service_account_agent_id", None)
-    if bound is None:
-        return
-    store = getattr(app_state, "session_store", None)
-    if store is None:
+    if _a_services(tenant) and tenant.service_account_agent_id is None:
         return
     try:
-        session = await store.get_session(session_id)
+        session = await app_state.session_store.get_session(session_id)
     except Exception:
         raise HTTPException(status_code=404, detail="No browser for session")
-    if session.agent_id and session.agent_id != bound:
+    if not reaches_its_browser(tenant, session):
         raise HTTPException(status_code=404, detail="No browser for session")
 
 
@@ -180,12 +199,12 @@ _COMPUTER_BROWSER = [EventType.BROWSER_PROVISIONED, EventType.BROWSER_DESTROYED,
 
 
 def _its_own(tenant: TenantContext, org_id: UUID, user_id: UUID | None, session_id: UUID) -> bool:
-    """Whether the caller is a local-folder chat's own user, or holds that session's own token.
+    """Whether the caller is a session's own user, or holds that session's own token.
 
-    The chat's browser is on its user's own computer.  Nobody else of the organisation takes it
-    over, hands it back or reads its state, an administrator and a service's token included: a
-    session's routes answer on the organisation, and these two say what a person does at their
-    own screen.  A token for one session, as a worker holds, answers for that session alone.
+    A local-folder chat's browser is on its user's own computer.  Nobody else of the organisation
+    takes it over, hands it back or reads its state, an administrator and a service's token
+    included: a session's routes answer on the organisation, and these two say what a person does
+    at their own screen.  A token for one session, as a worker holds, answers for that session alone.
     """
     if org_id != tenant.org_id:
         return False
@@ -410,7 +429,7 @@ async def get_browser_state(
     resolver = request.app.state.browser_resolver
     control = request.app.state.browser_control
 
-    await _require_session_agent(request.app.state, session_id, tenant)
+    await _require_its_browser(request.app.state, session_id, tenant)
     if await _on_computer(request.app.state, session_id, tenant) is not None:
         return await _computer_browser_state(request.app.state, session_id)
     resolved = await resolver.resolve(
@@ -454,7 +473,7 @@ async def post_browser_control(
             detail="Browser control dependencies are not available.",
         )
 
-    await _require_session_agent(request.app.state, session_id, tenant)
+    await _require_its_browser(request.app.state, session_id, tenant)
     # A local-folder chat's browser is on the user's computer, which holds its pause.
     computer = await _on_computer(request.app.state, session_id, tenant)
     if computer is None and await resolver.resolve(str(session_id), expected_org_id=str(tenant.org_id)) is None:
@@ -572,13 +591,14 @@ async def delete_session_browser(
     is deleted (see ``_destroy_deleted_session_browser`` in
     ``api.routes.sessions``).
 
-    Tenant scope is enforced by resolving the browser first: if a
-    registry entry exists, its ``org_id`` must match the caller's
-    tenant. A 404 is returned for sessions in a different org so the
-    endpoint never reveals foreign session ids.
+    A caller the session's browser is not reached by
+    (``reaches_its_browser``) gets 404, whether the session is another
+    org's, another member's or none at all, so the endpoint never
+    reveals foreign session ids.  A registry entry found must also be
+    of the caller's org.
     """
     resolver = request.app.state.browser_resolver
-    await _require_session_agent(request.app.state, session_id, tenant)
+    await _require_its_browser(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -637,7 +657,7 @@ async def get_browser_preview(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Response:
     resolver = request.app.state.browser_resolver
-    await _require_session_agent(request.app.state, session_id, tenant)
+    await _require_its_browser(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -709,10 +729,10 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
     resolver = websocket.app.state.browser_resolver
     control = websocket.app.state.browser_control
     try:
-        await _require_session_agent(websocket.app.state, session_id, tenant)
+        await _require_its_browser(websocket.app.state, session_id, tenant)
     except HTTPException:
         logger.warning(
-            "browser shell rejected: session %s is not this token's agent",
+            "browser shell rejected: session %s is not this caller's",
             session_id,
         )
         await websocket.close(code=4404, reason="no browser")
