@@ -21,6 +21,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
+from surogates.devices.history import ThreadCopy, thread_copy
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
@@ -278,6 +279,34 @@ async def _snapshot_copy(
         logger.warning("Snapshot %s failed for session %s", reason, session.id, exc_info=True)
         return None
     return taken.get("hash")
+
+
+async def _turn_now(store: Any, session: Any) -> int:
+    """The name of a thread's turn now running: as its loop named it, or by its last turn end where no loop did."""
+    named = session.config.get("turn_after")
+    if named is not None:
+        return named
+    from surogates.harness.landing import TURN_ENDS
+
+    ended = await store.last_event(session.id, *TURN_ENDS)
+    return ended.id if ended else 0
+
+
+async def _open_local_copy(
+    session: Any, store: Any, lease: Any, *, session_factory: Any, redis: Any,
+) -> tuple[ThreadCopy, int, dict[str, Any]]:
+    """A thread's copy on its user's computer, brought to the turn now running: the copy, the turn's name, and its open's answer.
+
+    Asked at the turn's start, before anything else of the turn reaches the
+    computer (``AgentHarness._opened_for_the_turn``), and answered from the
+    journal to every later asking of the turn's, a step's among them
+    (:meth:`ThreadCopy.opened`).  Raises ``NowhereToWork`` where the thread
+    has nowhere to work, the ``ComputerRefused`` of an open the turn's Stop
+    closed, and the journal's own refusals.
+    """
+    copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=str(lease.lease_token))
+    turn = await _turn_now(store, session)
+    return copy, turn, await copy.opened(turn)
 
 
 async def _apply_ssh_access(
