@@ -30,6 +30,9 @@ cp -r "$DESKTOP/dist/guest" "$DESKTOP/dist/files" "$tree/"
 cp "$DESKTOP/dist/link/protocol.js" "$tree/link/"
 find "$tree" -name '*.map' -delete
 cp "$DESKTOP/vm/init" "$DESKTOP/vm/enter-root" "$tree/"
+# A folder's history, which the agent runs as root for a project's threads (guest/places.ts): from
+# this script's own repository, whichever folder its init is taken from.
+"$(dirname "$(readlink -f "$0")")/history-tree.sh" "$tree/history"
 echo '{"type":"module"}' > "$tree/package.json"
 # Readable by every root's user, whatever umask built it; with no bit a folder
 # takes from the one it is made in; and each with the build's time, not the
