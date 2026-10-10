@@ -25,10 +25,10 @@ import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 // How long a file helper has to say it is ready.
 export const READY_MS = 15_000;
 // A landing's helper first puts back what a step cut short left (files/land.ts). Where the app's
-// data is on another filesystem than the folder that is a copy of the file the step replaced, as
-// large as all a folder's landings may keep, and a copy that is stopped starts again from nothing:
-// a helper given less time than the copy takes is stopped at every start, and the user's file is
-// never back at its name. So it has that copy's time on a slow disk beside a helper's own.
+// data is on another filesystem than the folder, it copies the file the step replaced, which may
+// be as large as all a folder's landings keep; and a copy that is stopped is begun again from
+// nothing. A helper given less time than that copy takes is stopped at every start, and the
+// user's file is never back at its name. So it has the copy's time on a slow disk, and a helper's own.
 const KEPT_BYTES = 4 * 1024 * 1024 * 1024; // files/land.ts, MAX_KEPT_BYTES
 const SLOW_DISK_BYTES_A_SECOND = 2 * 1024 * 1024; // a slow stick, or a share over a poor link
 export const LANDING_READY_MS = READY_MS + (KEPT_BYTES / SLOW_DISK_BYTES_A_SECOND) * 1000;
@@ -82,7 +82,7 @@ export interface Start {
 
 export type StartCheck = Start | Extract<FolderCheck, { ok: false }>;
 
-const refused = (message: string, missing = false): StartCheck => ({ ok: false, missing, message });
+const refused = (message: string): StartCheck => ({ ok: false, missing: false, message });
 
 // A folder of the app's own at *path*: this user's, not a link, and no link on its way.
 function own(path: string, uid: number): Stats | "missing" | null {

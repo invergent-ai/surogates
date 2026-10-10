@@ -16,7 +16,7 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { kinds } from "../src/files/operations.js";
 import { FINISHED_TTL_SECONDS } from "../src/guest/processes.js";
-import { lockFolder, readRecord, writeRecord } from "../src/hosts/folder-record.js";
+import { LOCK_WAIT_MS, lockFolder, readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
 import { READY_MS } from "../src/hosts/start.js";
@@ -1186,6 +1186,8 @@ describe("a tool host for a landing", { timeout: 60_000 }, () => {
     expect([readFileSync(join(reports, "a.txt"), "utf8"), readdirSync(kept)]).toEqual(["the user's own\n", []]);
     harness.send({ type: "stop" });
     expect(await harness.exited).toBe(0);
+    // The kept folder is the folder's own from its first landing's start: only a start that failed takes away the one it made.
+    expect(readdirSync(join(data, "landings"))).toEqual([KEY]);
   });
 
   it("never runs a program from the thread's copy, or from what it keeps, outside its sandbox: a command wrote the one, and its helper writes the other", async () => {
@@ -1436,19 +1438,23 @@ describe("the folder's lock, between a thread's hosts and a chat's", { timeout: 
     const chat = chatOn(reports, "chat");
     await ready(chat);
     const before = seen(base, hostsOwn());
-    const began = Date.now();
+    let began = Date.now();
     const landing = forLanding({ lockWaitMs: 700 });
     expect(await failed(landing)).toEqual({ type: "failed", message: BUSY, busy: true });
+    // As long as it was told, and no longer: not the time a chat's host waits.
     expect(Date.now() - began).toBeGreaterThanOrEqual(700);
+    expect(Date.now() - began).toBeLessThan(LOCK_WAIT_MS / 2);
     expect(await landing.exited).toBe(1);
     // Not the kept folder, which it makes only once the folder is its own.
     expect([seen(base, hostsOwn()), existsSync(join(data, "landings"))]).toEqual([before, false]);
-    // A landing that waits long enough has the folder once the chat's host lets it go.
-    const patient = forLanding({ lockWaitMs: 20_000 });
-    setTimeout(() => void chat.stop(), 500);
-    await ready(patient);
-    // And while it lands, a chat's host and a second landing's wait for it in their turn.
-    expect(await failed(chatOn(reports, "next"))).toEqual({ type: "failed", message: BUSY, busy: true });
+    // A landing told to wait longer than a chat's host does has the folder once the chat's lets it go, though that is later.
+    began = Date.now();
+    const patient = forLanding({ lockWaitMs: LOCK_WAIT_MS + 20_000 });
+    setTimeout(() => void chat.stop(), LOCK_WAIT_MS + 1_000);
+    expect(await patient.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 40_000)).toMatchObject({ type: "ready" });
+    expect(Date.now() - began).toBeGreaterThan(LOCK_WAIT_MS);
+    // And while it lands the folder is its own: a second landing's host waits for it in its turn, as a chat's would.
+    expect(await free(reports)).toBe(false);
     expect(await failed(forLanding({ lockWaitMs: 300, tmp: join(data, "tmp", "second") }))).toEqual({ type: "failed", message: BUSY, busy: true });
     expect(await patient.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: [], beside: [], lost: [], unread: [] } });
   });
