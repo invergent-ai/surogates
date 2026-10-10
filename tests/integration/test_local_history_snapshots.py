@@ -189,28 +189,50 @@ async def landed(api, thread, turn: int) -> None:
 # -- a snapshot before every step ---------------------------------------------------------------------------------
 
 
-async def test_every_step_of_a_local_thread_starts_from_a_snapshot_of_its_copy_and_the_folder_never_changes(api, computer, monkeypatch):
+async def test_every_step_of_a_local_thread_starts_from_a_snapshot_of_its_copy_and_neither_a_snapshot_nor_a_put_back_touches_its_folder(
+    api, computer, monkeypatch,
+):
     _, _, thread = await begun_with_copy(api, computer)
     copy, folder = computer.app.places.copy(str(thread.id)), picture(computer.folder)
+    both = ("Report.docx", "Budget.xlsx")
+    looked: dict = {}
+
+    async def puts_each_back(harness) -> None:
+        # Before the turn's end lands it: the copy put back to each snapshot in turn, the newest last, and read after each.
+        *_, (_, first), (_, second), (_, third) = await calls_of(api, thread)
+        looked["before"], back = as_it_stands(copy, rewritten=both), copy_of_thread(api, thread)
+        await back.restore(0, second)
+        looked["second"] = ((copy / "Report.docx").read_bytes(), (copy / "Budget.xlsx").read_text(), picture(computer.folder))
+        await back.restore(0, first)
+        looked["first"] = (as_it_stands(copy, rewritten=("Report.docx",)), picture(computer.folder))
+        await back.restore(0, third)
+        looked["third"] = (as_it_stands(copy, rewritten=both), picture(computer.folder))
+
     worker = a_worker(api, monkeypatch, thread, [
-        calling(("read_file", {"path": "Report.docx"})), WRITE, EDIT, _final_response("The totals are in Budget.xlsx."),
-    ])
+        calling(("read_file", {"path": "Report.docx"})), WRITE, EDIT, calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("The totals are in Budget.xlsx."),
+    ], during=puts_each_back)
     started = pictured_at_its_start(worker, copy, rewritten=("Report.docx",))
     await worker.wake(thread.id)
-    (read, none), (write, first), (terminal, second) = await calls_of(api, thread)
-    assert (read, none, write, terminal) == ("read_file", None, "write_file", "terminal")
-    assert ID.fullmatch(first) and ID.fullmatch(second) and first != second
+    (read, none), (write, first), (terminal, second), (memory, third) = await calls_of(api, thread)
+    assert (read, none, write, terminal, memory) == ("read_file", None, "write_file", "terminal", "memory")
+    assert all(ID.fullmatch(hash_) for hash_ in (first, second, third)) and len({first, second, third}) == 3
     # Each under an invocation of its own, outside its step's tool call: the turn, the step's number in its saga, the call.
-    assert asked(computer, "checkpoint") == [("checkpoint:0:0:call_0_write_file", "take"), ("checkpoint:0:1:call_0_terminal", "take")]
+    assert asked(computer, "checkpoint") == [
+        ("checkpoint:0:0:call_0_write_file", "take"), ("checkpoint:0:1:call_0_terminal", "take"), ("checkpoint:0:2:call_0_memory", "take"),
+        *((f"checkpoint:0:restore:{hash_}", "restore") for hash_ in (second, first, third)),
+    ]
     # A step of the turn's saga begins from its snapshot, which a Stop puts the copy back to.
-    assert list((await steps_of(api, thread)).values()) == [("write_file", first), ("terminal", second)]
-    # Each is the copy as it stood before its step.
-    back = copy_of_thread(api, thread)
-    await back.restore(0, second)
-    assert (copy / "Report.docx").read_bytes() == b"PK report v1" and (copy / "Budget.xlsx").read_text() == "Total,42\n"
-    await back.restore(0, first)
-    assert started and as_it_stands(copy, rewritten=("Report.docx",)) == started
-    assert picture(computer.folder) == folder
+    assert list((await steps_of(api, thread)).values()) == [("write_file", first), ("terminal", second), ("memory", third)]
+    # Each is the copy as it stood before its step, and neither a snapshot nor a put-back touched the folder.
+    assert looked["second"] == (b"PK report v1", "Total,42\n", folder)
+    assert started and looked["first"] == (started, folder)
+    assert looked["before"] and looked["third"] == (looked["before"], folder)
+    # The copy put back where the turn left it, its end landed the turn's two files; every other entry is as it was.
+    assert (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
+    assert (computer.folder / "Report.docx").read_bytes() == b"PK report v1 edited"
+    landed = picture(computer.folder)
+    assert {path: entry for path, entry in landed.items() if path not in both} == {path: entry for path, entry in folder.items() if path not in both}
 
 
 async def test_a_step_run_again_after_its_worker_was_lost_is_answered_the_snapshot_it_took_and_its_computer_hears_of_it_once(
