@@ -21,7 +21,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.devices.binding import THREAD_ACTIONS
-from tests.fake_places import ACTIONS, BUSY, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, LandHelper, Places, landable
+from tests.fake_places import ACTIONS, BUSY, NOT_A_FORGETTING_ASKED, NOT_A_THREAD, NOT_ITS_TURN, RECORDS_UNREAD, LandHelper, Places, landable
 
 DESKTOP = Path(__file__).resolve().parents[1] / "desktop"
 HELPER = DESKTOP / "dist" / "files" / "helper.js"
@@ -114,8 +114,8 @@ def test_the_tests_computer_forgets_what_a_landing_kept_only_where_the_forgettin
     # A forgetting the app takes for none.
     for applied in ([{"path": "notes.txt", "before": before, "after": after}], [{"step": 0, "path": "", "before": before, "after": after}], None):
         assert land("forget", saga="saga:1", applied=applied) == NOT_A_FORGETTING_ASKED
-    # Put back whole by the history's word, but the step the helper recorded left out, or named for another file: nothing goes.
-    (folder / "notes.txt").write_text("v1 notes\n")
+    # The history holds no landing of the saga and finds each file as named, but the step the helper recorded is left out,
+    # or named for another file: nothing goes.
     for applied in ([], [{"step": 0, "path": "other.txt", "before": None, "after": after}]):
         refused = land("forget", saga="saga:1", applied=applied)
         assert refused == {"error": {"type": "conflict", "message": (
@@ -123,8 +123,22 @@ def test_the_tests_computer_forgets_what_a_landing_kept_only_where_the_forgettin
             "so nothing the landing kept was forgotten"
         )}}
         assert sorted(path.name for path in kept.iterdir()) == ["0", "0.json"]
+    # Named as though what the landing wrote were what was there before: the history finds the file as named; the step
+    # still keeps the file it replaced.
+    assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": after, "after": after}]) == {"error": {"type": "conflict", "message": (
+        "Step 0 of this landing, of notes.txt, was neither recorded nor put back on this computer, and keeps the file it replaced, "
+        "so nothing the landing kept was forgotten"
+    )}}
+    # Records that cannot all be read forget nothing, however the steps are named.
+    (kept / "1.json").write_text("not a record")
+    assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": after, "after": after}]) == RECORDS_UNREAD
+    (kept / "1.json").unlink()
+    assert sorted(path.name for path in kept.iterdir()) == ["0", "0.json"]
+    # Put back, it keeps nothing, and the landing may go.
+    assert land("unapply", saga="saga:1", step=0, path="notes.txt") == {"ok": {"path": "notes.txt", "put_back": True}}
     assert land("forget", saga="saga:1", applied=[{"step": 0, "path": "notes.txt", "before": before, "after": after}]) == {"ok": {}}
     assert not kept.exists()
+    assert (folder / "notes.txt").read_text() == "v1 notes\n"
 
 
 # -- the land kind's rules, beside the app's own file helper ------------------------------------------------------

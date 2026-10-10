@@ -42,9 +42,12 @@ settles one otherwise changes this file with it.
   step, and is ``value`` where it names none as the app takes one: the app
   asks the history's ``forget`` first, and answers with its refusal where it
   refuses, and with ``value`` where its answer is no forgetting's; then
+  ``os``/``EIO`` where the helper's records of the saga cannot all be read
+  (one that is none, a link in a record's or a folder's stead), and
   ``conflict`` where the helper holds a record of a step ``applied`` leaves
-  out, or names for another file; only then is the helper's ``forget``
-  asked, and the folder let go.
+  out, or names for another file, or, where the history holds no landing of
+  the saga, a step still keeps the file it replaced; only then is the
+  helper's ``forget`` asked, and the folder let go.
 - A folder with no history: the app's open answers ``{history: "off",
   reason}``, and every other operation of a thread's, its file operations
   among them, ``history_off``.  The thread works nowhere.
@@ -90,6 +93,10 @@ BUSY = {"error": {"type": "busy", "message": "Another chat is working in this fo
 # As desktop/src/history/kinds.ts answers a landing's forgetting that names no saga or applies it takes.
 NOT_A_FORGETTING_ASKED = {"error": {
     "type": "value", "message": "A landing's forgetting names its saga, and each apply that was sent for it: its step, its file and that file's two versions",
+}}
+# As desktop/src/history/kinds.ts answers a forgetting whose records on the computer cannot all be read.
+RECORDS_UNREAD = {"error": {
+    "type": "os", "code": "EIO", "message": "This computer's records of this landing cannot all be read, so nothing the landing kept was forgotten",
 }}
 # As desktop/src/vm/history.ts answers an answer to a forgetting that is none.
 NOT_A_FORGETTING = {"error": {
@@ -264,7 +271,7 @@ class Places:
         ok = forgotten.get("ok")
         if not (isinstance(ok, dict) and ok.keys() == {"landing"} and (ok["landing"] is None or _id(ok["landing"]))):
             return NOT_A_FORGETTING
-        if (unrecorded := _unrecorded(_Landing(self._helper, args["saga"]), args["applied"])) is not None:
+        if (unrecorded := _unrecorded(_Landing(self._helper, args["saga"]), args["applied"], recorded=ok["landing"] is not None)) is not None:
             return unrecorded
         outcome = self._helper.land({"action": "forget", "saga": args.get("saga")})
         # The turn's own landing over, the folder is let go; not at the forgetting of one it only settled.
@@ -288,26 +295,45 @@ def _forgetting(args: dict[str, Any]) -> bool:
     )
 
 
-def _unrecorded(landing: _Landing, applied: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The app's refusal of a forgetting that leaves out a step the landing's helper holds a record of, or names it for another file."""
+def _unrecorded(landing: _Landing, applied: list[dict[str, Any]], *, recorded: bool) -> dict[str, Any] | None:
+    """The app's refusal of a forgetting by the helper's own records of the landing, as the app reads them.
+
+    Records that cannot all be read; a step it holds a record of that
+    *applied* leaves out or names for another file; and, for a landing the
+    history does not hold (*recorded* false), a step that still keeps the
+    file it replaced.
+    """
+    if any(path.is_symlink() or (path.exists() and not path.is_dir()) for path in (landing.store, landing.kept)):
+        return RECORDS_UNREAD
     named = {entry["step"]: entry["path"] for entry in applied}
-    for step in sorted(landing.steps()):
+    records: dict[int, str] = {}
+    try:
+        steps, names = landing.steps(), os.listdir(landing.kept) if landing.kept.is_dir() else []
+    except OSError:
+        return RECORDS_UNREAD
+    for step in sorted(steps):
+        if (landing.kept / f"{step}.json").is_symlink():
+            return RECORDS_UNREAD
         try:
             record = landing.read(step)
         except _Unreadable:
-            path = None
-        else:
-            if record is None:
-                continue
-            path = record["path"]
-        if step in named and (path is None or named[step] == path):
+            return RECORDS_UNREAD
+        if record is None:
             continue
-        of = "" if path is None else f", of {path},"
-        return {"error": {"type": "conflict", "message": (
-            f"Step {step} of this landing{of} was applied on this computer, and the steps named to forget the landing leave it out, "
-            "so nothing the landing kept was forgotten"
-        )}}
-    return None
+        records[step] = path = record["path"]
+        if named.get(step) != path:
+            return {"error": {"type": "conflict", "message": (
+                f"Step {step} of this landing, of {path}, was applied on this computer, and the steps named to forget the landing leave it out, "
+                "so nothing the landing kept was forgotten"
+            )}}
+    keeping = sorted(int(name) for name in names if _KEPT.fullmatch(name))
+    if recorded or not keeping:
+        return None
+    of = f", of {records[keeping[0]]}," if keeping[0] in records else ""
+    return {"error": {"type": "conflict", "message": (
+        f"Step {keeping[0]} of this landing{of} was neither recorded nor put back on this computer, "
+        "and keeps the file it replaced, so nothing the landing kept was forgotten"
+    )}}
 
 
 def _protected_held(answer: dict[str, Any]) -> dict[str, Any]:
@@ -368,6 +394,7 @@ _SAGA = re.compile(r"[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}")
 _REVISION = re.compile(r"[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+")
 _ID = re.compile(r"[0-9a-f]{40}")
 _STEP = re.compile(r"(0|[1-9][0-9]*)\.json")
+_KEPT = re.compile(r"0|[1-9][0-9]*")
 _MAX_LAND_BYTES = 1 << 30
 _MAX_KEPT_BYTES = 4 << 30
 _HOLD = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW
