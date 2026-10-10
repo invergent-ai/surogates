@@ -132,13 +132,19 @@ _RECORDS_READ = 16
 # What a session did on its computer that could change any file of its folder,
 # not one an operation of its names: a background process it ever started,
 # which may still run; a command it ran, or wrote to, since *since*, closed
-# or not; and a session made under it, which works in its copy.
+# or not; and a session made under it, which works in its copy.  Each part
+# a range of the journal's index by session, kind and close.
 _COULD_CHANGE_ANY = text("""
-    SELECT EXISTS (
-        SELECT 1 FROM device_operations
-         WHERE calling_session_id = :session
-           AND (kind = 'start' OR (kind IN ('run', 'write_stdin') AND (completed_at IS NULL OR completed_at > :since)))
-    ) OR EXISTS (SELECT 1 FROM sessions WHERE parent_id = :session)
+    SELECT EXISTS (SELECT 1 FROM device_operations WHERE calling_session_id = :session AND kind = 'start')
+        OR EXISTS (
+            SELECT 1 FROM device_operations
+             WHERE calling_session_id = :session AND kind IN ('run', 'write_stdin') AND completed_at IS NULL
+        )
+        OR EXISTS (
+            SELECT 1 FROM device_operations
+             WHERE calling_session_id = :session AND kind IN ('run', 'write_stdin') AND completed_at > :since
+        )
+        OR EXISTS (SELECT 1 FROM sessions WHERE parent_id = :session)
 """)
 # Each write and deletion of a session's since *since*, closed or not: the key
 # it carried, and the path of the resolve of its own call that answered that

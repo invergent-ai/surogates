@@ -1346,6 +1346,9 @@ class DeviceOperation(Base):
             "idx_device_operations_open", "device_id", "created_at",
             postgresql_where=text("completed_at IS NULL"),
         ),
+        # What a session asked of one kind, by when it closed: a landing reads a thread's commands, writes and records
+        # since its last landing (DeviceOperations.named) without the rest of the thread's history.
+        Index("idx_device_operations_session_kind", "calling_session_id", "kind", "completed_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
