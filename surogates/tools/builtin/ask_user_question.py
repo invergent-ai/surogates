@@ -312,12 +312,14 @@ async def _wait_for_response(
 
     A command is never a question's answer, and its user waits for it: it
     dismisses the question, and the harness runs it once the turn has
-    ended.  Any other message is the question's answer where its route
-    takes it for one, and waits for the turn otherwise.
+    ended.  Not where the same read finds the answer too: an answer is
+    never lost.  Any other message is the question's answer where its
+    route takes it for one, and waits for the turn otherwise.
 
     Only ``ASK_USER_QUESTION_RESPONSE`` events are read from the log --
     filtering by ``tool_call_id`` is enough because each id is unique
-    per LLM call -- and the messages written since the question.
+    per LLM call -- and the messages written since the question, both in
+    one read.
     Cancel detection uses the session's current status rather than an
     event-log scan so we never confuse a fresh pause with a historical one.
 
@@ -356,30 +358,27 @@ async def _wait_for_response(
                 next_renew = now + _LEASE_RENEW_INTERVAL_SECONDS
 
             # 1. Look for this tool call's response, and for a command its
-            #    user typed instead: whichever came first.
-            answer: tuple[int, dict[str, Any]] | None = None
+            #    user typed instead, in one read of the log.  An answer it
+            #    finds is taken, whichever came first: its route told its
+            #    user it was, and the command waits for the turn's end.
             events = await session_store.get_events(
                 session_id,
-                after=cursor,
-                types=[EventType.ASK_USER_QUESTION_RESPONSE],
+                after=min(cursor, said),
+                types=[EventType.ASK_USER_QUESTION_RESPONSE, EventType.USER_MESSAGE],
             )
+            commanded = False
             for event in events:
-                cursor = max(cursor, event.id)
                 data = event.data or {}
-                if data.get("tool_call_id") == tool_call_id:
+                if event.type == EventType.USER_MESSAGE.value:
+                    commanded = commanded or (event.id > said and _typed_a_command(event))
+                elif data.get("tool_call_id") == tool_call_id:
                     responses = data.get("responses")
                     if isinstance(responses, list):
-                        answer = event.id, {"responses": responses, "cancelled": False}
-                    else:
-                        answer = event.id, {"cancelled": True, "reason": "malformed_response"}
-                    break
-            messages = await session_store.get_events(session_id, after=said, types=[EventType.USER_MESSAGE])
-            said = max([said, *(event.id for event in messages)])
-            command = next((event.id for event in messages if _typed_a_command(event)), None)
-            if answer is not None and (command is None or answer[0] < command):
-                return answer[1]
-            if command is not None:
+                        return {"responses": responses, "cancelled": False}
+                    return {"cancelled": True, "reason": "malformed_response"}
+            if commanded:
                 return {"cancelled": True, "reason": DISMISSED}
+            cursor = said = max([cursor, said, *(event.id for event in events)])
 
             # 2. Has the session been stopped?  Status is the authoritative
             #    current state -- the pause endpoint both emits SESSION_PAUSE
