@@ -21,7 +21,8 @@ project's history, the moment a landing counts: a landing counts only once
 ``main`` in the history carries its saga, and one that does is never put
 back.  The next holder of the
 project's lock settles a landing a killed worker left running before it
-does anything else.
+does anything else, and moves no ``main`` while one that pushed has a row
+that does not say so.
 """
 
 from __future__ import annotations
@@ -594,9 +595,10 @@ async def prune_after(
     It is fenced as a landing is: the landings left running are settled
     first, through this pod.  One written within the fence lost the lock
     unseen, and may be writing a pack whose commits no ref names yet: it
-    is waited for, then settled.  One left ``escalated``, or settled here
+    is waited for, then settled.  One left ``escalated``, or put back here
     with a row that could still not be written, holds no pruning back.  A
-    settle that fails leaves the pruning to the next landing, the day not
+    settle that fails, as one does that found a landing pushed and could
+    not write its row, leaves the pruning to the next landing, the day not
     marked; so does a lock not had within ``_PRUNE_PATIENCE``.  And the pod
     leaves every pack younger than the fence, for a push no row tells of:
     a keep's or a hand-off's.  Which packs are older is asked of the
@@ -905,6 +907,9 @@ async def _settle(
     first, as a landing's applies do.  *at_issue* takes the files of a
     landing left ``escalated`` that a person has to check: those whose
     put-back failed, or, for one given up, each that may have been written.
+
+    A ``completed`` whose row could not be written is the caller's to tell
+    from one that was, by the row's own ``state``.
     """
     async def look(*, found: bool = False, **arguments: Any) -> dict:
         """A look at the history through the pod, tried as a step is, each try marking the row alive first.
@@ -967,6 +972,10 @@ async def _settle(
     return state, None
 
 
+class LandingUnsettled(Exception):
+    """A landing left running had pushed, and its row could not be written ``completed``."""
+
+
 class _Unseen(Exception):
     """A look did not see the commits it asked the history for."""
 
@@ -1026,7 +1035,8 @@ async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
     """Write a landing's row, or mark it alive, as best it can: an outcome already known stands without it.
 
     A write that fails is caught up by the next, or by the next lock
-    holder's settle, which puts the files back again: that is safe to repeat.
+    holder's settle, which puts the files back again, or finds the landing
+    pushed again: both are safe to repeat.
     """
     for _ in range(tries):
         try:
@@ -1057,6 +1067,12 @@ async def settle_running(
     thread, once the row says so and never before: a row whose write
     failed is told of by the holder that writes it.  The wait a landing
     left ``escalated`` puts on its thread reaches that stream over it too.
+
+    LandingUnsettled when that row could not be written: its landing is
+    in ``main`` and its row does not say so, and a holder that went on to
+    move ``main`` or the real files would do so past a landing no row
+    tells of.  So its caller moves neither, and the next holder settles
+    it again.
     """
     fence = _fence(saga_settings)
     settled: list[dict] = []
@@ -1081,7 +1097,9 @@ async def settle_running(
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
         if state == "escalated" and row.thread_id is not None:
             await _tell_escalated(session_factory, row.thread_id, saga, at_issue, redis=redis)
-        if state == "completed" and written.state == "completed" and row.thread_id is not None:
+        if state == "completed" and written.state != "completed":
+            raise LandingUnsettled(f"landing {row.saga_id} pushed, and its row could not be written")
+        if state == "completed" and row.thread_id is not None:
             await publish(redis, workstream_id, row.thread_id, LANDED)
         settled.append({"thread": row.thread_id, "state": state, "files": _row_files(saga, state)})
     return settled

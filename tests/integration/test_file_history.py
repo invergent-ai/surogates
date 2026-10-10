@@ -11,7 +11,6 @@ from sqlalchemy import text
 
 from surogates.harness import landing as landing_module
 from surogates.session.store import SessionStore
-from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.store import WorkstreamStore
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
@@ -29,7 +28,7 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     stored,
 )
 from .test_redo_loop import a_clash, a_routine_run, in_its_pod, pickups_of
-from .test_thread_copies import a_thread, git, open_pod, pods  # noqa: F401  (pods is a fixture)
+from .test_thread_copies import a_thread, git, open_pod, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_thread_helpers import a_coordinating_thread, helpers_of
 from .test_turn_sagas import a_turn, calling, stop
 from .test_workstream_overview import act_on
@@ -297,38 +296,87 @@ async def test_a_settled_landing_is_announced_once_and_only_after_its_row_says_i
     assert len(told) == 1
 
 
-async def test_a_pushed_landing_whose_row_could_not_be_written_is_put_back_once_landed_over_and_never_announced(
-    api, monkeypatch, tmp_path,
-):
-    """What holds today, not what should: the files of a landing that pushed are taken out of the
-    project again, by the settle after one whose two writes of its row were refused."""
-    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
-    told = announced(api, monkeypatch, second)
+def refusing(patch, thread) -> list[int]:
+    """The database refuses every write of *thread*'s landing's row as completed, while *patch* lasts: each it refused."""
     save = landing_module.save_landing
     refused: list[int] = []
 
     async def unwritten(session_factory, row, saga, **values):
-        if values.get("state") == "completed" and saga.session_id == second.id:
+        if values.get("state") == "completed" and saga.session_id == thread.id:
             refused.append(row)
             raise ConnectionError("the database went away")
         await save(session_factory, row, saga, **values)
 
-    monkeypatch.setattr(landing_module, "save_landing", unwritten)
-    await ends(api, pool, first)
-    # The settle found it pushed, and its row was never written so: nothing is announced that a
-    # reader would not find.  A's landing went over it, so the next settle, the pruning's, takes
-    # it for not pushed and puts it back.
+    patch.setattr(landing_module, "save_landing", unwritten)
+    return refused
+
+
+def main_of(pods, *more: str) -> str:
+    return git(pods.project / "_history", "rev-parse", "refs/heads/main" + "".join(more))
+
+
+async def test_a_pushed_landing_whose_row_could_not_be_written_is_landed_over_by_no_one_and_announced_once_it_is(
+    api, monkeypatch, tmp_path,
+):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    pods = pool._backend
+    told = announced(api, monkeypatch, second)
+    pushed = main_of(pods)
+    with monkeypatch.context() as patch:
+        refused = refusing(patch, second)
+        await ends(api, pool, first)
+    # The settle found it pushed, and both tries to write its row so were refused: nothing is
+    # announced that a reader would not find, and A's landing does not go over it.  A's turn is
+    # kept on its branch, as one whose landing could not start, and main is B's landing still.
     assert len(refused) == 2 and told == []
-    [killed] = await rows(api, second)
-    assert (killed.saga_state, killed.files, killed.commit) == ("compensated", [], None)
-    # B's file is gone from the project's files, while the history's main still holds B's landing
-    # under A's, and its tree the file.  B's row lists nothing, so its thread's row shows no file.
-    files = api.app.state.storage._resolve(first.config["storage_bucket"], boundary_workspace_prefix(first.config, first, first.id))
-    durable = files / "_history"
-    assert sorted(found.name for found in files.iterdir() if not found.name.startswith("_")) == ["Report.docx", "c.md", "notes.txt"]
-    assert "b.md" in git(durable, "ls-tree", "--name-only", "refs/heads/main").split()
-    assert f"Surogate-Saga: {killed.saga_id}" in git(durable, "log", "--format=%(trailers:only,unfold)", "refs/heads/main")
+    assert main_of(pods) == pushed and pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{first.id}:c.md") == "c"
+    assert await rows(api, first) == [] and [row.saga_state for row in await rows(api, second)] == ["running"]
+    [report] = await reports(api, await master_of(api, project))
+    assert (report["landing"], report["saved"]) == ("compensated", True)
     assert await marks_of(api, project, second) == []
+    # The database answers again: A's next turn settles B's landing, which is told with its files
+    # and its commit, and lands its own on it.  B's file was in the project's files throughout.
+    await ends(api, SandboxPool(pods), first)
+    [landed] = await rows(api, second)
+    assert (landed.saga_state, landed.commit, [f["path"] for f in landed.files]) == ("completed", pushed, ["b.md"])
+    assert told == [(str(second.id), "history.landed", ["completed: b.md"])]
+    assert main_of(pods, "^") == pushed and [row.saga_state for row in await rows(api, first)] == ["completed"]
+    assert pods.real_names() == ["Report.docx", "b.md", "c.md", "notes.txt"]
+    assert await marks_of(api, project, second) == [("b.md", "landed")]
+
+
+async def test_a_routines_pickup_records_nothing_past_a_pushed_landing_whose_row_could_not_be_written(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    pods, master = pool._backend, await master_of(api, project)
+    pushed = main_of(pods)
+    run, _ = await a_routine_run(api, master, "Tidy up")
+    await in_its_pod(api, pool, run, "true")
+    (pods.project / "notes.txt").write_text("tidied\n")  # as its call wrote it
+    with monkeypatch.context() as patch:
+        refused = refusing(patch, second)
+        await ends(api, pool, run)
+    # Nothing is pushed over B's landing, and the run's change stays in the project's files.
+    assert len(refused) == 2 and main_of(pods) == pushed and await pickups_of(api, master) == []
+    assert (pods.project / "notes.txt").read_text() == "tidied\n"
+    # The next landing settles B's, and picks the change up as yours.
+    await ends(api, pool, first)
+    assert [row.saga_state for row in await rows(api, second)] == ["completed"]
+    [landed] = await rows(api, first)
+    assert [f["path"] for f in landed.picked_up] == ["notes.txt"]
+
+
+async def test_a_failed_turns_keep_moves_no_main_past_a_pushed_landing_whose_row_could_not_be_written(api, monkeypatch, tmp_path):
+    project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
+    pods = pool._backend
+    pushed = main_of(pods)
+    with monkeypatch.context() as patch:
+        refused = refusing(patch, second)
+        await asyncio.wait_for(ends(api, pool, first, failed=True), 60)
+    # The keep writes A's own branch alone, once the settle that failed had waited out B's fence.
+    assert len(refused) == 2 and main_of(pods) == pushed and pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{first.id}:c.md") == "c"
+    assert [row.saga_state for row in await rows(api, second)] == ["running"]
 
 
 async def test_a_settled_landing_whose_thread_is_gone_names_no_thread_on_the_stream(api, monkeypatch, tmp_path):
