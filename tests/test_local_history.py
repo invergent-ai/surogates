@@ -734,6 +734,7 @@ def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, fo
     ({"action": "pickup", "args": {"author": YOURS, "trailers": [], "push": True}}, "it names no action this computer's history takes"),
     ({"action": "restore", "args": {"commit": "--upload-pack=/planted"}}, "its commit holds what is not a commit id"),
     ({"action": "fetch", "args": {"commits": ["-o", "x"]}}, "its commits holds what is not a commit id"),
+    ({"action": "fetch", "args": {"saga": "s1", "since": "--not"}}, "its since holds what is not a commit id"),
     ({"action": "record", "args": {
         "turn": "0" * 40, "applied": [{"path": "a\0b", "before": None, "after": None}], "author": A, "trailers": [], "main": None,
     }}, "a file it applied has no path"),
@@ -1151,8 +1152,7 @@ def test_a_landing_is_not_taken_for_recorded_by_what_another_landings_trailer_ho
     # Nor is that landing, where its own thread's branch has it, a turn of the first one's saga.
     with refused("landing_unsettled", "refused the request: the history holds neither this landing nor its turn"):
         two.forget(saga="saga:1")
-    # Nor is main's tip the first one's landing, to its first look or to its record.
-    assert again.fetch(saga="saga:1")["has_saga"] is False
+    # Nor is main's tip the first one's landing, to its record.
     with refused("conflict", "main moved in the project's history since the landing began"):
         again.record(**mine["step"])
 

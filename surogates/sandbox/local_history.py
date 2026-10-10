@@ -127,7 +127,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "changed": ("changed", frozenset()),
     "snapshot": ("snapshot", frozenset({"reason"})),
     "restore": ("restore", frozenset({"commit"})),
-    "fetch": ("fetch", frozenset({"commits", "saga"})),
+    "fetch": ("fetch", frozenset({"commits", "saga", "since"})),
     "pickup": ("pickup", frozenset({"author", "trailers"})),
     "commit": ("commit_turn", frozenset({"author", "trailers", "pickup"})),
     "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup"})),
@@ -748,7 +748,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     method, takes = _ACTIONS.get(action, (None, frozenset())) if isinstance(action, str) else (None, frozenset())
     if method is None or not isinstance(args, dict) or not args.keys() <= takes:
         raise HistoryError("refused the request: it names no action this computer's history takes", code=NOT_A_REQUEST)
-    for key in ("commit", "turn", "main", "pickup", "commits"):
+    for key in ("commit", "turn", "main", "pickup", "commits", "since"):
         _ids(args.get(key), f"its {key}")
     for change in args.get("applied", []):
         if not isinstance(change, dict) or not isinstance(change.get("path"), str) or "\0" in change["path"]:
