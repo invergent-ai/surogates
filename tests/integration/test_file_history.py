@@ -1,7 +1,8 @@
 """A project's files in its threads' rows: what each thread's landings changed, how each file
 stands, and the stream's word of a landing another lock holder finished.  And a file's History in
 the Library: its versions read from the project's records, each still kept or not; Open version,
-a version's bytes as data to save; and the files that are gone, listed so their History is reached."""
+a version's bytes as data to save; the files that are gone, listed so their History is reached;
+and Restore, a landing by you that the api runs, your edit recorded first, wherever it dies."""
 
 from __future__ import annotations
 
@@ -15,9 +16,11 @@ from urllib.parse import quote, unquote
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from surogates.api.routes import workstreams as routes_module
+from surogates.db.models import Workstream, WorkstreamHistory
+from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
 from surogates.sandbox.history import HistoryError
 from surogates.session.store import SessionStore
@@ -25,11 +28,14 @@ from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import bucket as bucket_module
 from surogates.workstreams import history as rows_module
 from surogates.workstreams import stream as project_stream
+from surogates.workstreams import undo as undo_module
 from surogates.workstreams.bucket import BucketHistory, Busy
 from surogates.workstreams.derive import SHELL_LIMITS, utc
 from surogates.workstreams.store import WorkstreamStore
+from surogates.workstreams.undo import restore
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
+from tests.test_bucket_history import blob_of
 from tests.test_durable_history import cut_history
 from tests.test_steer_loop import _final_response
 
@@ -39,6 +45,7 @@ from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     a_short_fence,
     edited,
     ends,
+    lose_the_lock,
     rows,
     rows_stand,
     stored,
@@ -1336,3 +1343,677 @@ async def test_the_deleted_files_are_those_the_clouds_landed_records_took_away_t
     monkeypatch.setattr(rows_module, "_GONE_AMONG", 7)
     listed = await deleted_of(api, project)
     assert ([v["path"] for v in listed["files"]], listed["more"]) == (["taken.md", "c.md", "a.md", "b.md", "notes.txt"], False)
+
+
+# ----------------------------------------------------------------------
+# Restore: a landing by you, run by the api over its copy of the history
+# ----------------------------------------------------------------------
+
+YOURS = b"PK\x03\x04 your edit, never landed"
+
+
+class TheApiWent(BaseException):
+    """The api went mid-act, killed: none of its handlers runs after this, as none runs after a kill."""
+
+
+async def restored(api, project: dict, version: dict, status: int = 200, token: str | None = None, path: str | None = None) -> dict:
+    response = await api.client.post(
+        f"/v1/workstreams/{project['id']}/history/restore",
+        json={"version": version["id"], "path": version["path"] if path is None else path}, headers=api.auth(token),
+    )
+    assert response.status_code == status, response.text
+    return response.json()
+
+
+async def two_changes(api, tmp_path):
+    """A project whose threads A, then B, each landed a change to its report; and A's version of it, as its History lists it."""
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    await ends(api, pool, second)
+    [_, by_a, _] = await history_of(api, project, "Report.docx")
+    return project, first, second, pods, pool, by_a
+
+
+async def the_project(api, project: dict) -> Workstream:
+    async with api.app.state.session_factory() as db:
+        return await db.get(Workstream, UUID(project["id"]))
+
+
+async def rows_of(api, project: dict) -> list[WorkstreamHistory]:
+    """Every record of the project, oldest first."""
+    async with api.app.state.session_factory() as db:
+        return list((await db.execute(
+            select(WorkstreamHistory).where(WorkstreamHistory.workstream_id == UUID(project["id"])).order_by(WorkstreamHistory.id)
+        )).scalars())
+
+
+def restores_on_main(pods) -> int:
+    """How many Restores ``main``'s own history holds."""
+    kinds = git(pods.project / "_history", "log", "--first-parent", "--format=%(trailers:key=Surogate-Kind,valueonly)", "refs/heads/main")
+    return kinds.split().count("restore")
+
+
+def aged(api):
+    """Each landing left running, made older than its fence: its worker or its api is long gone."""
+    async def age() -> None:
+        async with api.app.state.session_factory() as db:
+            await db.execute(text("UPDATE workstream_history SET updated_at = now() - interval '1 hour' WHERE saga_state = 'running'"))
+            await db.commit()
+    return age()
+
+
+async def test_a_restore_is_a_landing_by_you_that_records_your_edit_first_and_loses_nothing(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    assert await restored(api, project, by_a) == {"applied": ["Report.docx"], "skipped": [], "picked_up": ["Report.docx"]}
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A"
+    listed = await history_of(api, project, "Report.docx")
+    # Your edit was picked up first, so the version it replaced is in History; the restore is its newest version, by you.
+    assert [(v["by"], v["change"]) for v in listed] == [
+        ({"kind": "you"}, "restored"), ({"kind": "you"}, "changed"),
+        ({"kind": "thread", "thread_id": str(second.id), "title": "Draft B"}, "changed"),
+        ({"kind": "thread", "thread_id": str(first.id), "title": "Draft A"}, "changed"), ({"kind": "you"}, "added"),
+    ]
+    assert listed[0]["landing_id"] is not None and listed[1]["landing_id"] is None
+    assert (await opened(api, project, listed[1]["id"], "Report.docx")).content == YOURS
+    assert (await opened(api, project, listed[0]["id"], "Report.docx")).content == b"PK\x03\x04 report v1 by A"
+    # Two records, each of its own kind and by you, with no thread; and none left running.
+    *_, pickup, restore = await rows_of(api, project)
+    assert [(r.kind, r.saga_state, r.thread_id, r.user_id) for r in (pickup, restore)] == [
+        ("pickup", "completed", None, api.user_id), ("restore", "completed", None, api.user_id),
+    ]
+    assert restore.files == [{"path": "Report.docx", "before": blob_of(YOURS), "after": blob_of(b"PK\x03\x04 report v1 by A"), "merged": True}]
+    durable = pods.project / "_history"
+    assert git(durable, "log", "-2", "--format=%ae|%s|%(trailers:key=Surogate-Kind,valueonly,separator=)", "refs/heads/main").splitlines() == [
+        f"user:{api.user_id}@surogate|Restore|restore", f"user:{api.user_id}@surogate|Your changes|pickup",
+    ]
+    # A thread's next copy has the restored file, and its landing changes it no more.
+    await edited(pool, second, "echo b > b.md")
+    assert (pods.copies[str(second.id)] / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A"
+    await ends(api, pool, second)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A"
+
+
+async def test_a_restore_with_no_edit_to_pick_up_lands_alone_and_one_of_the_version_the_file_is_changes_nothing(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    before = await rows_of(api, project)
+    assert await restored(api, project, by_a) == {"applied": ["Report.docx"], "skipped": [], "picked_up": []}
+    assert [r.kind for r in await rows_of(api, project)][len(before):] == ["restore"]
+    # The file is that version already: nothing lands, and nothing is recorded.
+    assert await restored(api, project, by_a) == {"applied": [], "skipped": [], "picked_up": []}
+    assert len(await rows_of(api, project)) == len(before) + 1 and restores_on_main(pods) == 1
+
+
+async def test_a_restore_of_a_files_first_version_brings_your_upload_back_and_one_that_deleted_it_is_refused(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    upload = (await history_of(api, project, "Report.docx"))[-1]
+    assert await restored(api, project, upload) == {"applied": ["Report.docx"], "skipped": [], "picked_up": []}
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    # A version that took a file away is nothing to restore.
+    await edited(pool, first, "rm notes.txt")
+    await ends(api, pool, first)
+    [gone, before] = await history_of(api, project, "notes.txt")
+    assert (await restored(api, project, gone, status=404))["detail"] == "This version deleted the file: there is nothing to restore."
+    # The version before it brings the deleted file back: it is listed among the deleted files no more.
+    assert [f["path"] for f in (await deleted_of(api, project))["files"]] == ["notes.txt"]
+    assert (await restored(api, project, before))["applied"] == ["notes.txt"]
+    assert (pods.project / "notes.txt").read_text() == "v1 notes\n"
+    assert (await deleted_of(api, project))["files"] == []
+    assert [v["change"] for v in await history_of(api, project, "notes.txt")] == ["restored", "deleted", "added"]
+
+
+async def test_a_restore_of_a_version_no_longer_kept_is_refused_in_words_and_changes_nothing(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    cut_history(tmp_path, pods.project / "_history", kept=1)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    before = await rows_of(api, project)
+    refused = await restored(api, project, by_a, status=410)
+    assert refused["detail"] == "This version is no longer kept in the project's history."
+    assert (pods.project / "Report.docx").read_bytes() == YOURS and len(await rows_of(api, project)) == len(before)
+
+
+async def test_a_restore_whose_record_fails_puts_the_file_back_and_keeps_your_edit_recorded(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+
+    async def the_push_fails(self, **arguments):
+        raise HistoryError("the bucket refused the pack")
+
+    monkeypatch.setattr(BucketHistory, "record", the_push_fails)
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
+    # All or nothing: the file is as it was, the landing's row says it was put back, and your edit is a version.
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    *_, pickup, restore = await rows_of(api, project)
+    assert [(r.kind, r.saga_state, r.commit is None) for r in (pickup, restore)] == [("pickup", "completed", False), ("restore", "compensated", True)]
+    [yours, *_] = await history_of(api, project, "Report.docx")
+    assert (yours["by"], (await opened(api, project, yours["id"], "Report.docx")).content) == ({"kind": "you"}, YOURS)
+
+
+async def test_a_restore_whose_write_the_bucket_refuses_writes_nothing_and_says_so(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    storage, upload = api.app.state.storage, api.app.state.storage.upload
+
+    async def refused_for_the_report(bucket_name, key, source):
+        if key.endswith("/Report.docx"):
+            raise OSError("the bucket refused the object")
+        await upload(bucket_name, key, source)
+
+    monkeypatch.setattr(storage, "upload", refused_for_the_report)
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B" and restores_on_main(pods) == 0
+    assert [r.saga_state for r in await rows_of(api, project)][-1] == "compensated"
+
+
+async def test_a_save_between_a_restores_pickup_and_its_write_is_kept(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    pickup, saved = BucketHistory.pickup, b"PK\x03\x04 saved by you while the restore ran"
+
+    async def then_you_save(self, **arguments):
+        picked = await pickup(self, **arguments)
+        if (pods.project / "Report.docx").read_bytes() != saved:
+            (pods.project / "Report.docx").write_bytes(saved)  # your save, just after the pickup pushed
+        return picked
+
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    monkeypatch.setattr(BucketHistory, "pickup", then_you_save)
+    # The apply expects what the pickup recorded: the save fails its check, and nothing is written over it.
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
+    assert (pods.project / "Report.docx").read_bytes() == saved
+    # Tried again, the save is picked up first, and is a version of the file; so is the edit before it.
+    assert await restored(api, project, by_a) == {"applied": ["Report.docx"], "skipped": [], "picked_up": ["Report.docx"]}
+    [_, again, first_edit, *_] = await history_of(api, project, "Report.docx")
+    for version, held in ((again, saved), (first_edit, YOURS)):
+        assert (version["by"], (await opened(api, project, version["id"], "Report.docx")).content) == ({"kind": "you"}, held)
+
+
+async def test_a_save_between_a_restores_look_at_your_edit_and_its_pickup_is_never_written_over(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    edits, saved = BucketHistory.edits, b"PK\x03\x04 saved by you while the restore looked"
+
+    async def then_you_save(self, paths):
+        looked = await edits(self, paths)
+        (pods.project / "Report.docx").write_bytes(saved)
+        return looked
+
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    with monkeypatch.context() as patch:
+        patch.setattr(BucketHistory, "edits", then_you_save)
+        refused = await restored(api, project, by_a, status=409)
+    # What the pickup was to record is not what the file is: it pushes nothing, and nothing is written.
+    assert refused["detail"] == "Nothing was changed: the project's history could not be read just now. Try again in a moment."
+    assert (pods.project / "Report.docx").read_bytes() == saved and restores_on_main(pods) == 0
+    assert [(r.kind, r.saga_state) for r in await rows_of(api, project)][-1] == ("pickup", "compensated")
+    assert (await restored(api, project, by_a))["picked_up"] == ["Report.docx"]
+    assert (await opened(api, project, (await history_of(api, project, "Report.docx"))[1]["id"], "Report.docx")).content == saved
+
+
+async def test_a_version_a_pruning_took_while_the_restore_waited_for_the_lock_is_refused_in_words_and_nothing_is_written(
+    api, monkeypatch, tmp_path,
+):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    settle = undo_module.settle_running
+
+    async def a_pruning_went_first(*args, **more):
+        # The version was kept when the request asked; a pruning that held the lock before it took it.
+        cut_history(tmp_path, pods.project / "_history", kept=1)
+        return await settle(*args, **more)
+
+    monkeypatch.setattr(undo_module, "settle_running", a_pruning_went_first)
+    refused = await restored(api, project, by_a, status=410)
+    assert refused["detail"] == "This version is no longer kept in the project's history."
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B" and restores_on_main(pods) == 0
+    assert [r.kind for r in await rows_of(api, project)][-1] == "landing"
+
+
+async def test_a_restore_that_recorded_your_edit_tells_the_projects_stream_though_it_landed_nothing(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+
+    async def the_push_fails(self, **arguments):
+        raise HistoryError("the bucket refused the pack")
+
+    monkeypatch.setattr(BucketHistory, "record", the_push_fails)
+
+    async def act():
+        await restored(api, project, by_a, status=409)
+
+    # Your edit is a version now: the file's History changed, though the file did not.
+    assert await streamed(api, monkeypatch, project, 1, act) == [("ready", {}), ("change", {"thread_id": None, "type": "history.landed"})]
+
+
+async def test_a_restore_waits_for_no_landing_that_may_still_finish(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    saga = SagaOrchestrator().create_saga(first.id, kind="landing")
+    await rows_module.start_landing(
+        api.app.state.session_factory, saga, workstream_id=UUID(project["id"]), thread_id=second.id,
+        agent_id=str(second.agent_id), user_id=second.user_id, tool_saga_id=None, events=None,
+    )
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Your project's files are being saved right now. Try again in a moment."
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B"
+
+
+async def test_a_restore_is_refused_once_another_landing_held_the_lock_past_its_patience(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 1.0)
+    async with rows_module.project_lock(api.app.state.session_factory, project["id"]):
+        began = asyncio.get_running_loop().time()
+        refused = await restored(api, project, by_a, status=409)
+        waited = asyncio.get_running_loop().time() - began
+    assert refused["detail"] == "Your project's files are being saved right now. Try again in a moment."
+    assert 1.0 <= waited < 5
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B" and restores_on_main(pods) == 0
+    # Once the lock is let go, the same Restore lands.
+    assert (await restored(api, project, by_a))["applied"] == ["Report.docx"]
+
+
+async def test_a_restore_that_cannot_read_the_history_or_a_file_says_so_in_words(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+
+    async def the_bucket_is_away(self, paths):
+        raise HistoryError("the bucket did not answer")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(BucketHistory, "edits", the_bucket_is_away)
+        refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed: the project's history could not be read just now. Try again in a moment."
+    # A file larger than the api reads is refused before any file is written, and named.
+    (pods.project / "Report.docx").write_bytes(YOURS * 2)
+    monkeypatch.setattr(api.app.state.settings.history, "file_bound", len(YOURS))
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed. Report.docx is larger than Surogate can read here."
+    # So is a version larger than the api writes out.
+    (pods.project / "Report.docx").write_bytes(b"small")
+    monkeypatch.setattr(api.app.state.settings.history, "file_bound", len(b"PK\x03\x04 report v1 by A") - 1)
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed. This version is larger than Surogate can read here."
+    assert (pods.project / "Report.docx").read_bytes() == b"small" and restores_on_main(pods) == 0
+
+
+async def test_a_restore_in_a_project_over_the_file_cap_is_refused_as_its_history_is(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(rows_module, "HISTORY_CAP", 1)
+    monkeypatch.setattr(rows_module, "_COUNTED", {})
+    assert (await restored(api, project, by_a, status=409))["detail"] == "History is off: this project has more than 50,000 files."
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B"
+
+
+async def test_a_restore_answers_only_its_owner_and_only_a_version_its_projects_records_name_for_that_file(api, session_factory, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    acts = []
+    monkeypatch.setattr(undo_module, "_by_you", lambda *args, **more: acts.append(args))
+    _, their_token = await add_user(session_factory, api.org_id)
+    assert (await restored(api, project, by_a, status=404, token=their_token))["detail"] == "No such project."
+    # The owner, through another project of theirs: the version is none of that project's.
+    other = await create(api)
+    assert (await restored(api, other, by_a, status=404))["detail"] == "No such version."
+    # Nor is it a version of another file, nor is a commit or a blob the history holds, whatever the caller names.
+    assert (await restored(api, project, by_a, status=404, path="notes.txt"))["detail"] == "No such version."
+    main = git(pods.project / "_history", "rev-parse", "refs/heads/main")
+    for crafted in (main, blob_of(b"PK\x03\x04 report v1 by A"), f"{main}:Report.docx", "1:x", "", "-1:f", "1" * 19 + ":f"):
+        assert (await restored(api, project, {"id": crafted, "path": "Report.docx"}, status=404))["detail"] == "No such version."
+    # A path no file can have is refused before anything is read.
+    for path in ("a\x00b", "", "a" * 4097):
+        await restored(api, project, by_a, status=422, path=path)
+    assert acts == []
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B"
+    assert [v["change"] for v in await history_of(api, project, "Report.docx")] == ["changed", "changed", "added"]
+
+
+@pytest.mark.parametrize("path", ["_history/packed-refs", "_artifacts/report.html", "~$Report.docx", "drafts/../Report.docx"])
+async def test_a_version_of_a_file_no_landing_writes_is_refused_in_words_and_reaches_no_storage(api, monkeypatch, tmp_path, path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    [landing] = await rows(api, first)
+    made = await recorded(api, landing, saga="saga:hand", files=[{"path": path, "before": None, "after": blob_of(b"x"), "merged": True}])
+    reached = []
+    monkeypatch.setattr(undo_module, "_by_you", lambda *args, **more: reached.append(args))
+    refused = await restored(api, project, {"id": f"{made}:f", "path": path}, status=409)
+    assert refused["detail"] == "This file cannot be restored: the project's history keeps no file of its name."
+    assert reached == []
+
+
+async def test_a_version_of_a_file_where_the_real_files_have_a_folder_of_its_name_is_refused_in_words(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    await edited(pool, first, "rm notes.txt")
+    await ends(api, pool, first)
+    [_, before] = await history_of(api, project, "notes.txt")
+    (pods.project / "notes.txt").mkdir()
+    (pods.project / "notes.txt" / "q3.md").write_text("q3\n")
+    refused = await restored(api, project, before, status=409)
+    assert refused["detail"] == "This file cannot be restored here: a folder of its name is there, or a file where its folder would be."
+    assert (pods.project / "notes.txt" / "q3.md").read_text() == "q3\n" and restores_on_main(pods) == 0
+
+
+async def test_the_stream_announces_a_restore_and_no_session_hears_of_it(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    upload = (await history_of(api, project, "Report.docx"))[-1]
+    store = api.app.state.session_store
+    logs = [len(await store.get_events(s)) for s in (UUID(project["master_session_id"]), first.id, second.id)]
+
+    async def act():
+        await restored(api, project, upload)
+
+    sent = await streamed(api, monkeypatch, project, 1, act)
+    assert sent == [("ready", {}), ("change", {"thread_id": None, "type": "history.landed"})]
+    assert [len(await store.get_events(s)) for s in (UUID(project["master_session_id"]), first.id, second.id)] == logs
+
+
+async def test_a_threads_landing_the_api_settles_is_announced_as_that_threads(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    upload = (await history_of(api, project, "Report.docx"))[-1]
+    await edited(pool, second, "echo b > b.md")
+    # B's worker is killed once its landing is pushed: its row still says running, its files not yet its row's.
+    await a_landing_killed(api, monkeypatch, pool, second, after="record")
+    await aged(api)
+
+    async def act():
+        await restored(api, project, upload)
+
+    # The api, the next lock holder, completes it: the stream says B's files changed, then the Restore's.
+    sent = await streamed(api, monkeypatch, project, 2, act)
+    assert sent == [
+        ("ready", {}), ("change", {"thread_id": str(second.id), "type": "history.landed"}),
+        ("change", {"thread_id": None, "type": "history.landed"}),
+    ]
+    [row] = await rows(api, second)
+    assert (row.saga_state, [f["path"] for f in row.files]) == ("completed", ["b.md"])
+    assert pods.real_names() == ["Report.docx", "b.md", "notes.txt"]
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+async def test_a_restore_goes_on_to_its_end_when_who_asked_for_it_leaves(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    apply, writing, go = BucketHistory.apply, asyncio.Event(), asyncio.Event()
+
+    async def slow(self, path, before, after):
+        writing.set()
+        await go.wait()
+        return await apply(self, path, before, after)
+
+    monkeypatch.setattr(BucketHistory, "apply", slow)
+    asking = asyncio.create_task(restored(api, project, by_a))
+    await asyncio.wait_for(writing.wait(), 30)
+    # The page's two minutes ran out, or the app went: the request ends; the Restore it began does not.
+    asking.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asking
+    go.set()
+    async with asyncio.timeout(30):
+        while [r.saga_state for r in await rows_of(api, project)][-1] != "completed":
+            await asyncio.sleep(0.1)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A" and restores_on_main(pods) == 1
+
+
+# Where a Restore can die, killed, the bucket or the database refusing: each between two of its steps,
+# or inside one, and what the file holds then.  The ruling's two are between its pickup's row and the
+# pickup's push.
+KILLS = {
+    # After its look at your edit, before anything is written.
+    "the look": "yours",
+    # Its pickup's row written running, nothing pushed yet.
+    "the pickup's row": "yours",
+    # The pickup's pack in the bucket, packed-refs not yet.
+    "the pickup's pack": "yours",
+    # The pickup pushed, and its row not yet written so.
+    "the pickup's push": "yours",
+    # The pickup recorded; the restore's own row not yet written.
+    "the pickup recorded": "yours",
+    # The restore's row written running, its steps fixed, nothing applied.
+    "the restore's row": "yours",
+    # The version written into the real file, nothing recorded.
+    "the apply": "restored",
+    # Its row written with the record step, the record not yet tried.
+    "the record's row": "restored",
+    # The record's pack in the bucket, packed-refs not yet.
+    "the record's pack": "restored",
+    # The record pushed, and its row not yet written so.
+    "the record's push": "restored",
+}
+
+
+def the_api_goes(monkeypatch, api, at: str) -> None:
+    """The api killed at *at*: whatever ran there ends, and nothing of the api runs after it."""
+    storage, upload, start = api.app.state.storage, api.app.state.storage.upload, undo_module.start_landing
+    # A push is its pack, the index last, then packed-refs: the pickup's is the first push, the record's the second.
+    pushes, marks = {"pack": 0, "packed-refs": 0}, {
+        "the pickup's pack": ("pack", 1), "the pickup's push": ("packed-refs", 1),
+        "the record's pack": ("pack", 2), "the record's push": ("packed-refs", 2),
+    }
+
+    async def uploaded(bucket_name, key, source):
+        await upload(bucket_name, key, source)
+        kind = "packed-refs" if key.endswith("packed-refs") else "pack" if key.endswith(".idx") else None
+        if kind is not None:
+            pushes[kind] += 1
+            if marks.get(at) == (kind, pushes[kind]):
+                raise TheApiWent
+
+    async def started(session_factory, saga, **row):
+        if at == "the pickup recorded" and row["kind"] == "restore":
+            raise TheApiWent
+        made = await start(session_factory, saga, **row)
+        if (at, row["kind"]) in (("the pickup's row", "pickup"), ("the restore's row", "restore")):
+            raise TheApiWent
+        return made
+
+    def after(name: str) -> None:
+        method = getattr(BucketHistory, name)
+
+        async def then_went(self, *args, **arguments):
+            await method(self, *args, **arguments)
+            raise TheApiWent
+
+        monkeypatch.setattr(BucketHistory, name, then_went)
+
+    monkeypatch.setattr(storage, "upload", uploaded)
+    monkeypatch.setattr(undo_module, "start_landing", started)
+    if at == "the look":
+        after("edits")
+    elif at == "the apply":
+        after("apply")
+    elif at == "the record's row":
+        async def never_tried(self, **arguments):
+            raise TheApiWent
+
+        monkeypatch.setattr(BucketHistory, "record", never_tried)
+
+
+@pytest.mark.parametrize("next_act", ["another Restore", "a thread's landing"])
+@pytest.mark.parametrize("at", list(KILLS))
+async def test_a_restore_killed_anywhere_loses_no_edit_and_is_settled_by_the_next_act_once_and_whole(api, monkeypatch, tmp_path, at, next_act):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    owned = await the_project(api, project)
+    entry = await rows_module.version_of(api.app.state.session_factory, project["id"], by_a["id"], "Report.docx")
+    with monkeypatch.context() as patch:
+        the_api_goes(patch, api, at)
+        with pytest.raises(TheApiWent):
+            await restore(api.app.state, owned, api.user_id, path="Report.docx", blob=entry["after"])
+    # What the file holds where it died: your edit, or the version, never half of either.
+    held = YOURS if KILLS[at] == "yours" else b"PK\x03\x04 report v1 by A"
+    assert (pods.project / "Report.docx").read_bytes() == held
+    await aged(api)
+    if next_act == "another Restore":
+        await restored(api, project, by_a)
+    else:
+        # The next lock holder, a thread's landing in its pod, settles what was left first.
+        await edited(pool, first, "echo c > c.md")
+        await ends(api, pool, first)
+        assert (pods.project / "c.md").read_text() == "c\n"
+    # Nothing is left running, nothing was restored twice or half, and your edit is a version in the History.
+    assert [r.saga_state for r in await rows_of(api, project) if r.saga_state == "running"] == []
+    restored_now = next_act == "another Restore" or at == "the record's push"
+    assert restores_on_main(pods) == int(restored_now)
+    assert (pods.project / "Report.docx").read_bytes() == (b"PK\x03\x04 report v1 by A" if restored_now else YOURS)
+    listed = await history_of(api, project, "Report.docx")
+    assert [(v["by"]["kind"], v["change"]) for v in listed] == [
+        *([("you", "restored")] if restored_now else []), ("you", "changed"), ("thread", "changed"), ("thread", "changed"), ("you", "added"),
+    ]
+    yours = listed[1 if restored_now else 0]
+    assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
+
+
+@pytest.mark.parametrize("refused", ["the pickup's row", "the pickup recorded", "the restore's row", "the restore recorded"])
+async def test_a_restore_whose_rows_the_database_refuses_loses_no_edit_and_moves_nothing_past_an_unwritten_row(
+    api, monkeypatch, tmp_path, refused,
+):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    start, save = undo_module.start_landing, landing_module.save_landing
+
+    async def started(session_factory, saga, **row):
+        if (refused, row["kind"]) in (("the pickup's row", "pickup"), ("the restore's row", "restore")):
+            raise ConnectionError("the database went away")
+        return await start(session_factory, saga, **row)
+
+    async def saved(session_factory, row, saga, **values):
+        if values.get("state") == "completed" and (
+            (refused == "the pickup recorded" and saga.steps[0].tool_name == "history.pickup")
+            or (refused == "the restore recorded" and saga.steps[0].tool_name == "history.apply")
+        ):
+            raise ConnectionError("the database went away")
+        await save(session_factory, row, saga, **values)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(undo_module, "start_landing", started)
+        patch.setattr(landing_module, "save_landing", saved)
+        answer = await api.client.post(
+            f"/v1/workstreams/{project['id']}/history/restore", json={"version": by_a["id"], "path": "Report.docx"}, headers=api.auth(),
+        )
+    if refused == "the restore recorded":
+        # It landed: the file is the version and main says so; its row is the next lock holder's to write.
+        assert (answer.status_code, answer.json()["applied"]) == (200, ["Report.docx"])
+        assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A" and restores_on_main(pods) == 1
+    else:
+        # Nothing was changed, and said so; a pickup no row says was pushed is gone past by nothing.
+        assert (answer.status_code, answer.json()["detail"]) == (
+            409, "Nothing was changed: the project's history could not be read just now. Try again in a moment.",
+        )
+        assert (pods.project / "Report.docx").read_bytes() == YOURS and restores_on_main(pods) == 0
+    # The database answers again: the next Restore settles what was left, and your edit is a version.
+    await aged(api)
+    await restored(api, project, by_a)
+    assert [r.saga_state for r in await rows_of(api, project) if r.saga_state == "running"] == []
+    assert restores_on_main(pods) == 1 and (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A"
+    listed = await history_of(api, project, "Report.docx")
+    assert [(v["by"]["kind"], v["change"]) for v in listed][:2] == [("you", "restored"), ("you", "changed")]
+    assert (await opened(api, project, listed[1]["id"], "Report.docx")).content == YOURS
+
+
+async def test_a_restore_that_lost_the_projects_lock_stops_writes_over_nothing_and_the_next_holder_finishes_it(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    apply = BucketHistory.apply
+
+    async def then_the_lock_goes(self, path, before, after):
+        answer = await apply(self, path, before, after)
+        await lose_the_lock(api, first)  # a failover: the lock's connection ends unseen
+        return answer
+
+    monkeypatch.setattr(BucketHistory, "apply", then_the_lock_goes)
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == (
+        "This was cut short: the files are put back as they were when the project's files are next saved. Try again in a moment."
+    )
+    monkeypatch.undo()
+    # It recorded nothing; its file is the next lock holder's to put back.
+    assert restores_on_main(pods) == 0
+    await aged(api)
+    await edited(pool, first, "echo c > c.md")
+    await ends(api, pool, first)
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    assert [r.saga_state for r in await rows_of(api, project) if r.saga_state == "running"] == []
+    [yours, *_] = await history_of(api, project, "Report.docx")
+    assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
+
+
+async def test_a_restore_another_api_pushed_and_left_running_is_settled_and_told_to_the_projects_stream(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    owned = await the_project(api, project)
+    entry = await rows_module.version_of(api.app.state.session_factory, project["id"], by_a["id"], "Report.docx")
+    with monkeypatch.context() as patch:
+        the_api_goes(patch, api, "the record's push")
+        with pytest.raises(TheApiWent):
+            await restore(api.app.state, owned, api.user_id, path="Report.docx", blob=entry["after"])
+    await aged(api)
+
+    async def act():
+        # The file is that version already: this one lands nothing, and only the settle has news.
+        assert await restored(api, project, by_a) == {"applied": [], "skipped": [], "picked_up": []}
+
+    assert await streamed(api, monkeypatch, project, 1, act) == [("ready", {}), ("change", {"thread_id": None, "type": "history.landed"})]
+    assert [v["change"] for v in await history_of(api, project, "Report.docx")][0] == "restored"
+
+
+async def test_a_restore_that_lost_the_projects_lock_before_its_pickup_pushes_nothing(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    edits = BucketHistory.edits
+
+    async def then_the_lock_goes(self, paths):
+        looked = await edits(self, paths)
+        await lose_the_lock(api, first)
+        return looked
+
+    with monkeypatch.context() as patch:
+        patch.setattr(BucketHistory, "edits", then_the_lock_goes)
+        refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Nothing was changed: the project's history could not be read just now. Try again in a moment."
+    assert git(pods.project / "_history", "log", "-1", "--format=%(trailers:key=Surogate-Kind,valueonly,separator=)", "refs/heads/main") == "landing"
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    assert [(r.kind, r.saga_state) for r in await rows_of(api, project)][-1] == ("pickup", "compensated")
+
+
+async def test_a_restore_settles_a_restore_another_api_left_running_before_it_writes_anything(api, monkeypatch, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    owned = await the_project(api, project)
+    upload = (await history_of(api, project, "Report.docx"))[-1]
+    entry = await rows_module.version_of(api.app.state.session_factory, project["id"], upload["id"], "Report.docx")
+    with monkeypatch.context() as patch:
+        the_api_goes(patch, api, "the apply")
+        with pytest.raises(TheApiWent):
+            await restore(api.app.state, owned, api.user_id, path="Report.docx", blob=entry["after"])
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    # Within the fence it may yet be alive: a person is told to try again, and nothing is written.
+    refused = await restored(api, project, by_a, status=409)
+    assert refused["detail"] == "Your project's files are being saved right now. Try again in a moment."
+    await aged(api)
+    # Past it: the upload's restore is put back first, and A's version is restored over your edit, which stays a version.
+    assert (await restored(api, project, by_a))["picked_up"] == []
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A" and restores_on_main(pods) == 1
+    assert [(r.kind, r.saga_state) for r in await rows_of(api, project)][-3:] == [
+        ("pickup", "completed"), ("restore", "compensated"), ("restore", "completed"),
+    ]
+    [restored_now, yours, *_] = await history_of(api, project, "Report.docx")
+    assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
+
+
+async def test_a_deletion_a_restore_or_an_undo_recorded_is_by_whom_its_record_step_names(api, tmp_path):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    await restored(api, project, by_a)
+    *_, restore_row = await rows_of(api, project)
+    made = await recorded(api, restore_row, saga="saga:gone", files=[{"path": "gone.md", "before": blob_of(b"g"), "after": None, "merged": True}])
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "UPDATE workstream_history SET steps = (SELECT jsonb_agg(CASE WHEN s->>'tool_name' = 'history.record' "
+            "THEN jsonb_set(s, '{arguments,author}', '{\"name\": \"Draft Z\", \"email\": \"thread:t9@surogate\"}') ELSE s END) "
+            "FROM jsonb_array_elements(steps) s) WHERE id = :id"
+        ), {"id": made})
+        await db.commit()
+    [gone] = (await deleted_of(api, project))["files"]
+    [listed, _] = await history_of(api, project, "gone.md")
+    assert gone["by"] == listed["by"] == {"kind": "thread", "thread_id": "t9", "title": "Draft Z"}
+    assert listed["change"] == "deleted"

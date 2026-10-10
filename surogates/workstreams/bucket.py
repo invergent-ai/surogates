@@ -672,12 +672,8 @@ class BucketHistory:
 
     def _key(self, path: str) -> str:
         """*path*'s key among the real files; refused where it is none of the project's files, which no landing writes."""
-        try:
-            path.encode()
-        except UnicodeEncodeError:
-            raise HistoryError("a path that cannot be written is not one of the project's files") from None
-        if not path or "\0" in path or any(part in ("", ".", "..") for part in path.split("/")) or not tracked(path):
-            raise HistoryError(f"{path} is not one of the project's files")
+        if not landable(path):
+            raise HistoryError(f"{path!r} is not one of the project's files")
         return f"{self.prefix}{path}"
 
     def _changes(self, changes: list[dict], where: str) -> None:
@@ -1092,6 +1088,16 @@ async def _child(turns: ThreadPoolExecutor, seconds: float, command: list[str], 
             raise HistoryError(_FILE_TOO_LARGE)
         raise HistoryError(f"git {_named(command)} failed: {words}")
     return result.stdout or b""
+
+
+def landable(path: str) -> bool:
+    """Whether *path* names one of a project's files as a landing writes them: by its own name, in no folder of
+    the platform's, none the history leaves out, and neither climbing nor naming a folder."""
+    try:
+        path.encode()
+    except UnicodeEncodeError:
+        return False
+    return bool(path) and "\0" not in path and all(part not in ("", ".", "..") for part in path.split("/")) and tracked(path)
 
 
 def _saga_of(trailers: list[list[str]]) -> str:
