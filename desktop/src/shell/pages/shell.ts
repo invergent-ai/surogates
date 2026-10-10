@@ -468,7 +468,7 @@ function draw(state: State): void {
   device.classList.toggle("ended", ENDED.includes(state.device?.status ?? ""));
   byId("notice").hidden = state.notice === null;
   byId("notice").textContent = state.notice ?? "";
-  // A live region, written only when its words change, so that it speaks once a making. Shown as text is: it names the user's folders.
+  // A live region, written only when its words change, so that each is spoken once. Shown as text is: it names the user's folders.
   const copying = byId("copying");
   copying.hidden = state.copying === null;
   if (copying.dataset.said !== (state.copying ?? "")) {
