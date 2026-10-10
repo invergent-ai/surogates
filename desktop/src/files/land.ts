@@ -87,6 +87,7 @@ interface Step {
 export interface Recovered {
   restored: string[]; // the files that took their names again
   beside: Array<[string, string]>; // a file whose name the user gave another since: its path, and the path it is at now
+  unread: Array<[string, number, string | null]>; // a record that cannot be read: its landing, its step, and the file it names if it still says; nothing is done for it
   lost: Array<[string, string]>; // a file whose folder is gone, or a link now: its path, and the name it has wherever that folder went
 }
 
@@ -396,6 +397,13 @@ function keptBytes(store: string): number {
   return bytes;
 }
 
+// A record that is there and cannot be acted on.
+class Unreadable extends Failure {
+  constructor(readonly saga: string, readonly step: number, readonly path: string | null) {
+    super({ type: "os", code: "EIO", message: `The record of step ${step} of landing ${saga} cannot be read, so nothing is done over it` });
+  }
+}
+
 class Landing {
   private readonly folder: string;
   private readonly copy: string;
@@ -403,7 +411,7 @@ class Landing {
   private readonly kept: string;
   private readonly key: string;
 
-  constructor(context: Context, saga: string) {
+  constructor(context: Context, private readonly saga: string) {
     this.key = keyOf(context);
     this.folder = context.folder;
     this.copy = context.landing!.copy;
@@ -436,12 +444,27 @@ class Landing {
     if (sync) syncDir(this.kept);
   }
 
+  // The step's record, or null where it has none. One that is there and is not a record as this module writes it
+  // is a failure raised to whoever asked: it may be all that names a file
+  // moved aside, so nothing is done over it, and nothing by it.
   private read(step: number): Step | null {
+    let text: string;
     try {
-      return stepOf(JSON.parse(readFileSync(this.record(step), "utf8")));
-    } catch {
-      return null;
+      text = readFileSync(this.record(step), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new Unreadable(this.saga, step, null);
     }
+    let value: unknown = null;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      // Not even JSON.
+    }
+    const did = stepOf(value);
+    if (did !== null) return did;
+    const named = (value as { path?: unknown } | null)?.path;
+    throw new Unreadable(this.saga, step, typeof named === "string" && landable(named) ? named : null);
   }
 
   // What a step kept goes: its record, and the file it replaced; and the saga's folder with its last step's.
@@ -473,7 +496,12 @@ class Landing {
     }
     for (const name of found === null ? [] : names) {
       const step = /^(0|[1-9][0-9]*)\.json$/.exec(name)?.[1];
-      const did = step === undefined ? null : this.read(Number(step));
+      let did: Step | null = null;
+      try {
+        did = step === undefined ? null : this.read(Number(step));
+      } catch {
+        // A record that cannot be read names no file this one could be.
+      }
       if (did !== null && did.path !== path && did.wrote !== null && same(found, did.wrote)) {
         return new Failure({
           type: "os", code: "EEXIST",
@@ -828,7 +856,7 @@ class Landing {
   // A step that failed leaves nothing of itself. The failure it is answered with, which says so where the real
   // file could not take its own name back.
   private undone(step: number, did: Step, error: unknown, held: Held | null): unknown {
-    const report: Recovered = { restored: [], beside: [], lost: [] };
+    const report: Recovered = { restored: [], beside: [], lost: [], unread: [] };
     try {
       this.revert(step, did, report, held);
     } catch {
@@ -850,7 +878,7 @@ class Landing {
     if (protectedInFolder(this.folder, join(this.folder, ...parts))) throw sandboxError(inFolderRefusal(path));
     if (this.putBack(step, did) === "changed") {
       // The step ends as one cut short does, and what it kept stays kept.
-      const report: Recovered = { restored: [], beside: [], lost: [] };
+      const report: Recovered = { restored: [], beside: [], lost: [], unread: [] };
       this.end(step, report);
       const beside = report.beside[0]?.[1];
       throw new Failure({
@@ -894,25 +922,23 @@ class Landing {
   }
 
   // Every step of the saga whose record does not say it ended is put back, and a record's own half-written file
-  // goes. One that cannot be put back does not keep the others waiting: its failure is raised after them.
+  // goes. A record that cannot be read is said and left. One step that cannot be put back does not keep the others
+  // waiting: its failure is raised after them.
   mend(report: Recovered): void {
-    let names: string[];
-    try {
-      names = readdirSync(this.kept);
-    } catch {
-      return;
-    }
     const failures: unknown[] = [];
-    for (const name of names) {
-      if (name.endsWith(".json.new")) remove(join(this.kept, name));
-      const step = /^(0|[1-9][0-9]*)\.json$/.exec(name)?.[1];
-      const did = step === undefined ? null : this.read(Number(step));
-      if (did === null || settled(did)) continue;
+    for (const step of this.steps()) {
       try {
-        this.revert(Number(step), did, report);
+        const did = this.read(step);
+        if (did !== null && !settled(did)) this.revert(step, did, report);
       } catch (error) {
-        failures.push(error);
+        if (error instanceof Unreadable) report.unread.push([error.saga, error.step, error.path]);
+        else failures.push(error);
       }
+    }
+    try {
+      for (const name of readdirSync(this.kept)) if (name.endsWith(".json.new")) remove(join(this.kept, name));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error);
     }
     this.rmdir(this.kept);
     if (failures.length > 0) throw failures[0];
@@ -930,7 +956,7 @@ export function recover(context: Context): Recovered {
   const key = keyOf(context);
   const known = recovered.get(key);
   if (known) return known;
-  const report: Recovered = { restored: [], beside: [], lost: [] };
+  const report: Recovered = { restored: [], beside: [], lost: [], unread: [] };
   let sagas: string[] = [];
   try {
     sagas = readdirSync(kept);
@@ -949,6 +975,7 @@ export function recover(context: Context): Recovered {
   }
   // Not taken for done: nothing lands in a folder that still holds a step cut short, and the next ask tries again.
   if (failures.length > 0) throw failures[0];
+  report.unread.sort(([saga, step], [other, next]) => (saga === other ? step - next : saga < other ? -1 : 1));
   recovered.set(key, report);
   return report;
 }
