@@ -485,7 +485,9 @@ class LocalHistory(History):
         ``_ASIDE_WHOLE`` times one was set aside, each time one count, and
         a place the last ``_ASIDE_WHOLE_IN_ALL`` of all its threads': the
         oldest goes for one more, whoever's it is, and never a thread's
-        newest.  One that goes is first renamed ``<name>.gone``, from when
+        newest.  The thread's own beyond what it keeps go first, and
+        another's only where the place then still keeps more than it may.
+        One that goes is first renamed ``<name>.gone``, from when
         it is no longer kept, and then emptied: cut anywhere, the next open
         finishes it, and none is said to be kept with part of it gone.  The
         empty folder stays for its name: ``set_aside_gone`` are those of
@@ -502,7 +504,8 @@ class LocalHistory(History):
             times = list(dict.fromkeys(nth for nth, _, _ in kept))
             mine = list(dict.fromkeys(nth for nth, thread, _ in kept if thread == self.thread))
             newest = {thread: nth for nth, thread, _ in kept}.values()
-            going = {*mine[:-_ASIDE_WHOLE], *(nth for nth in times[:-_ASIDE_WHOLE_IN_ALL] if nth not in newest)}
+            going = set(mine[:-_ASIDE_WHOLE])
+            going |= {nth for nth in [nth for nth in times if nth not in going][:-_ASIDE_WHOLE_IN_ALL] if nth not in newest}
             for name in [name for nth, _, name in kept if nth in going]:
                 try:
                     os.rename(name, f"{name}.gone", src_dir_fd=folder, dst_dir_fd=folder)

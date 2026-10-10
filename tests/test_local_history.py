@@ -1889,6 +1889,20 @@ def test_a_thread_keeps_the_last_four_times_it_was_set_aside_whole_and_a_place_s
     assert again("t1") == {"copy": "moved", "set_aside_folders": [kept[3]], "set_aside_gone": [*first, kept[2]]}
 
 
+def test_a_thread_whose_own_oldest_goes_lets_no_other_threads_go_where_the_place_then_keeps_no_more_than_it_may(tmp_path, folder, monkeypatch):
+    monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 2)
+    monkeypatch.setattr(local_history, "_ASIDE_WHOLE_IN_ALL", 4)
+    place = tmp_path / "store"
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    # The place keeps as many as it may, each thread as many as it may: the other thread's are the oldest.
+    theirs = [set_aside_once_more(two, f"two's, {count}\n")["set_aside_folders"][-1] for count in (1, 2)]
+    ours = [set_aside_once_more(one, f"one's, {count}\n")["set_aside_folders"][-1] for count in (3, 4, 5)]
+    # The thread's own oldest went for its third, and that was enough: the place keeps four again.
+    assert [name for name in set_aside_whole(place) if not name.endswith(".gone")] == [*theirs, *ours[1:]]
+    assert [(place / "set-aside" / name / "unlanded.md").read_text() for name in theirs] == ["two's, 1\n", "two's, 2\n"]
+    assert LocalHistory.at(place, folder, thread="t2", user="u1").open() == {"copy": "moved", "set_aside_folders": theirs}
+
+
 def test_what_cannot_be_renamed_to_go_at_the_bound_is_kept_whole_and_the_open_goes_on(tmp_path, folder, monkeypatch, caplog):
     monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 1)
     one = a_copy(tmp_path, folder)
