@@ -65,7 +65,9 @@ export class VmExecutor implements Executor {
 
   /** What is refused before its user is asked anything: one of a thread's own kinds that is not its turn's to ask. */
   refusal(operation: Operation): Outcome | null {
-    return THREAD_KINDS.has(operation.kind) ? refusedOf(operation, this.bound(operation)) : null;
+    if (!THREAD_KINDS.has(operation.kind)) return null;
+    const { binding, deleted } = this.bound(operation);
+    return refusedOf(operation, binding, deleted);
   }
 
   /**
@@ -84,8 +86,8 @@ export class VmExecutor implements Executor {
 
   // One of a thread's own kinds, where it is done. Refused again here: admit's answer is not this run's.
   private thread(operation: Operation, signal: AbortSignal): Promise<Outcome> {
-    const binding = this.bound(operation);
-    const refused = refusedOf(operation, binding);
+    const { binding, deleted } = this.bound(operation);
+    const refused = refusedOf(operation, binding, deleted);
     if (refused || !binding) return Promise.resolve(refused ?? FOLDER_UNAVAILABLE);
     if (operation.kind === "land") return this.files.land(operation, signal);
     const root = operation.sessionId;
@@ -97,9 +99,12 @@ export class VmExecutor implements Executor {
   }
 
   // The binding of the root an operation of a thread's own is for: the journal's, or, for a step of its history or its
-  // landing, a deleted thread's whose landing's host was kept.
-  private bound({ sessionId, kind }: Operation): BoundFolder | undefined {
-    return this.options.bindingOf(sessionId) ?? (kind === "checkpoint" ? undefined : this.files.deletedLanding(sessionId));
+  // landing, a deleted thread's whose landing's host was kept, which takes only what finishes that landing.
+  private bound({ sessionId, kind }: Operation): { binding: BoundFolder | undefined; deleted: boolean } {
+    const binding = this.options.bindingOf(sessionId);
+    if (binding || kind === "checkpoint") return { binding, deleted: false };
+    const left = this.files.deletedLanding(sessionId);
+    return { binding: left, deleted: left !== undefined };
   }
 
   guards(): FolderGuards {

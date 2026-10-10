@@ -42,8 +42,11 @@ const ID = /^[0-9a-f]{40}$/;
 // A saga's id, as a folder's name in the app's data; and a step's record, by its number, in its saga's folder there.
 export const SAGA = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
 const RECORD = /^(0|[1-9][0-9]*)\.json$/;
-// A record is a step's few names and numbers: one larger is none.
-const RECORD_BYTES = 64 * 1024;
+// The largest record a step writes: a path of 4,096 characters, the most a history's answer names, has at most 2,048
+// folders above it, each named in full, each character six bytes at most as JSON spells it. One larger is none.
+const RECORD_BYTES = 32 * 1024 * 1024;
+// What a step kept of the file it replaced, by the step's number, beside its record.
+const KEPT = /^(0|[1-9][0-9]*)$/;
 // A file's revision, as the look answers it (operations.ts, revisionOf).
 const REVISION = /^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+$/;
 // A folder held, not read: O_PATH, which Node does not name. One this user may pass through but not list is entered all the same.
@@ -967,21 +970,31 @@ class Landing {
   }
 }
 
+// The names in the landing *saga*'s folder in *kept*: none where either is not there, as where nothing was kept. Throws
+// where either is there and is anything but a folder, a link in its stead among them, or cannot be read.
+function sagaNames(kept: string, saga: string): string[] {
+  if (!SAGA.test(saga)) throw valueError(BAD);
+  const folder = join(kept, saga);
+  for (const at of [kept, folder]) {
+    try {
+      if (!lstatSync(at).isDirectory()) throw sandboxError("What this folder's landings keep is not in a folder of the app's own");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }
+  return readdirSync(folder);
+}
+
 /**
  * The steps of the landing *saga* that a landing's helper holds a record of in *kept*, where its folder's landings keep
  * what they replace, each with the file its record names: null for a record that cannot be read. The app reads them
  * before it has a landing forgotten (hosts/tool-hosts.ts): a record is all that names a file a step moved aside, so no
- * step its caller leaves out has what it kept forgotten. Throws where the saga's folder is there and cannot be read.
+ * step its caller leaves out has what it kept forgotten. Throws where they cannot all be looked at (sagaNames).
  */
 export function recordsOf(kept: string, saga: string): Map<number, string | null> {
-  if (!SAGA.test(saga)) throw valueError(BAD);
   const folder = join(kept, saga);
-  let names: string[] = [];
-  try {
-    names = readdirSync(folder);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  const names = sagaNames(kept, saga);
   const records = new Map<number, string | null>();
   for (const name of names) {
     const step = RECORD.exec(name)?.[1];
@@ -998,6 +1011,14 @@ export function recordsOf(kept: string, saga: string): Map<number, string | null
     records.set(Number(step), did?.path ?? null);
   }
   return records;
+}
+
+/**
+ * The steps of the landing *saga* that still keep, in *kept*, the file they replaced: a step put back, or refused
+ * before it changed anything, keeps none. Throws as recordsOf does.
+ */
+export function keepingOf(kept: string, saga: string): number[] {
+  return sagaNames(kept, saga).flatMap((name) => (KEPT.test(name) ? [Number(name)] : [])).sort((a, b) => a - b);
 }
 
 // What each landing's helper found at its start, by the folder it lands in and where it keeps: one helper holds a

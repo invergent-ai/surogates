@@ -19,10 +19,10 @@ import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
 import { spawnClean } from "../clean-child.js";
-import { recordsOf } from "../files/land.js";
+import { keepingOf, recordsOf } from "../files/land.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Copy, Handle, Opened } from "../history/copies.js";
-import { forgettingOf, NOT_A_FORGETTING_ASKED, unrecorded } from "../history/kinds.js";
+import { forgettingOf, NOT_A_FORGETTING_ASKED, notPutBack, RECORDS_UNREAD, unrecorded } from "../history/kinds.js";
 import { keptOf } from "../history/place.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -312,11 +312,21 @@ export class ToolHosts implements Executor {
     if (!forgetting) return host.run(operation, signal);
     // What a landing kept goes only by the folder's history's word, the landing recorded or each file it applied as it was
     // before; and only where the forgetting names every step the helper holds a record of. Its helper's records are the
-    // proof of what was applied; the steps named, the server's word. Asked with no step of the landing's running, from
-    // the history's answer to the forgetting.
+    // proof of what was applied; the steps named, the server's word. A landing the history does not hold was put back by
+    // the versions it is told the files had before, also the server's word: only where no step of it still keeps a file
+    // it replaced. Records that cannot all be read forget nothing. Asked with no step of the landing's running, from the
+    // history's answer to the forgetting.
     const gate = async (aborted: AbortSignal) => {
-      const leave = forgettable(await copies.ask(root, binding, "forget", { saga: forgetting.saga, applied: forgetting.applied }, aborted));
-      return leave ?? unrecorded(recordsOf(host.kept!, forgetting.saga), forgetting.applied);
+      const answer = await copies.ask(root, binding, "forget", { saga: forgetting.saga, applied: forgetting.applied }, aborted);
+      const leave = forgettable(answer);
+      if (leave) return leave;
+      const recorded = (answer as { ok: { landing: string | null } }).ok.landing !== null;
+      try {
+        const records = recordsOf(host.kept!, forgetting.saga);
+        return unrecorded(records, forgetting.applied) ?? (recorded ? null : notPutBack(keepingOf(host.kept!, forgetting.saga), records));
+      } catch {
+        return RECORDS_UNREAD;
+      }
     };
     // Forgotten, the landing is over: the folder is let go at once, for the next landing or a chat. Not at the forgetting
     // of a landing the turn only settled, one another left running in the folder: the turn holds the folder from its
