@@ -1,6 +1,7 @@
 """A project's files in its threads' rows: what each thread's landings changed, how each file
 stands, and the stream's word of a landing another lock holder finished.  And a file's History in
-the Library: its versions read from the project's records, each still kept or not."""
+the Library: its versions read from the project's records, each still kept or not; Open version,
+a version's bytes as data to save; and the files that are gone, listed so their History is reached."""
 
 from __future__ import annotations
 
@@ -8,12 +9,15 @@ import asyncio
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
+from urllib.parse import quote, unquote
 from uuid import UUID
 
 import pytest
 from sqlalchemy import text
 
+from surogates.api.routes import workstreams as routes_module
 from surogates.harness import landing as landing_module
 from surogates.sandbox.history import HistoryError
 from surogates.session.store import SessionStore
@@ -21,8 +25,8 @@ from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import bucket as bucket_module
 from surogates.workstreams import history as rows_module
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.bucket import BucketHistory
-from surogates.workstreams.derive import utc
+from surogates.workstreams.bucket import BucketHistory, Busy
+from surogates.workstreams.derive import SHELL_LIMITS, utc
 from surogates.workstreams.store import WorkstreamStore
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 from surogates.session.events import EventType
@@ -66,6 +70,47 @@ async def history_of(api, project: dict, path: str, token: str | None = None, st
     )
     assert response.status_code == status, response.text
     return response.json()
+
+
+async def opened(api, project: dict, version: str, path: str | None, token: str | None = None):
+    """Open version: the response to asking for *path* as *version* left it."""
+    return await api.client.get(
+        f"/v1/workstreams/{project['id']}/history/{quote(version, safe='')}/file",
+        params={} if path is None else {"path": path}, headers=api.auth(token),
+    )
+
+
+async def deleted_of(api, project: dict, token: str | None = None, status: int = 200):
+    response = await api.client.get(f"/v1/workstreams/{project['id']}/history/deleted", headers=api.auth(token))
+    assert response.status_code == status, response.text
+    return response.json()
+
+
+async def copy_of(api, project: dict) -> BucketHistory:
+    """The api's copy of *project*'s history."""
+    return BucketHistory.of(api.app.state.storage, await master_of(api, project), api.app.state.settings.history)
+
+
+def written_out(place: BucketHistory) -> list[Path]:
+    """The versions the copy holds on their way to who asked for them."""
+    return sorted((place.clone / "out").glob("*"))
+
+
+async def recorded(api, like, *, saga: str, files: list[dict] | None = None, picked_up: list[dict] | None = None, **columns: str) -> int:
+    """A record made by hand as the landing *like* was recorded, with these *files*, pickup and *columns*; its id.
+
+    A column is given as SQL: ``saga_state="'running'"``, ``device_id="gen_random_uuid()"``.
+    """
+    given = {"saga_state": "'completed'", "device_id": "NULL", "workstream_id": "workstream_id", **columns}
+    async with api.app.state.session_factory() as db:
+        made = (await db.execute(text(
+            "INSERT INTO workstream_history "
+            "(workstream_id, device_id, kind, saga_id, saga_state, thread_id, agent_id, steps, files, picked_up) "
+            f"SELECT {given['workstream_id']}, {given['device_id']}, kind, :saga, {given['saga_state']}, thread_id, agent_id, steps, "
+            "cast(:files AS jsonb), cast(:picked_up AS jsonb) FROM workstream_history WHERE id = :id RETURNING id"
+        ), {"saga": f"{saga}:{like.id}", "id": like.id, "files": json.dumps(files or []), "picked_up": json.dumps(picked_up or [])})).scalar_one()
+        await db.commit()
+    return made
 
 
 async def two_threads(api, tmp_path):
@@ -940,3 +985,329 @@ async def test_a_file_with_more_versions_than_the_shell_takes_answers_its_newest
     assert len(listed) == 500
     assert [listed[0]["id"], listed[-1]["id"]] == [f"{newest}:f", f"{newest - 499}:f"]
     assert all(v["available"] for v in listed)
+
+
+async def test_open_version_answers_the_file_as_that_version_left_it_as_data_to_save(api, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    # Your save after B's copy was made: B's version does not land, and the landing picks yours up first.
+    (pods.project / "Report.docx").write_bytes(b"PK\x03\x04 report v1 by A, then by you")
+    await ends(api, pool, second)
+    [by_b, yours, by_a, upload] = await history_of(api, project, "Report.docx")
+    response = await opened(api, project, by_a["id"], "Report.docx")
+    assert (response.status_code, response.content) == (200, b"PK\x03\x04 report v1 by A")
+    # Data to save under the file's own name, whatever it holds: never a page to show.
+    said = ("content-type", "content-length", "x-content-type-options", "content-disposition")
+    assert [response.headers[name] for name in said] == [
+        "application/octet-stream", "19", "nosniff", "attachment; filename*=UTF-8''Report.docx",
+    ]
+    # Every version the History lists opens as it was: a thread's that did not land, your own edit, and your upload.
+    assert [(await opened(api, project, v["id"], "Report.docx")).content for v in (by_b, yours, upload)] == [
+        b"PK\x03\x04 report v1 by A by B", b"PK\x03\x04 report v1 by A, then by you", b"PK\x03\x04 report v1",
+    ]
+    # What went to the client is gone from the api's copy.
+    assert written_out(await copy_of(api, project)) == []
+
+
+async def test_a_version_opens_only_for_its_owner_as_a_version_the_projects_records_name_for_that_file_and_nothing_else_reaches_git(
+    api, session_factory, monkeypatch, tmp_path,
+):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    await edited(pool, first, "echo a > a.md")
+    await ends(api, pool, first)
+    [by_a, upload] = await history_of(api, project, "Report.docx")
+    [made] = await history_of(api, project, "a.md")
+    [row, later] = await rows(api, first)
+    report = row.files[0]["after"]
+    reached, version = [], BucketHistory.version
+
+    async def spied(self, blob):
+        reached.append(blob)
+        return await version(self, blob)
+
+    monkeypatch.setattr(BucketHistory, "version", spied)
+    # Another user of the organisation: the project is none of theirs, whatever of it they name.
+    _, their_token = await add_user(session_factory, api.org_id)
+    for refused in (await opened(api, project, by_a["id"], "Report.docx", their_token), await opened(api, project, "0:f", "x", their_token)):
+        assert (refused.status_code, refused.json()) == (404, {"detail": "No such project."})
+    assert await deleted_of(api, project, their_token, status=404) == {"detail": "No such project."}
+    # The owner, through another project of theirs; and records of this file that are no versions of the project's
+    # cloud files: one still running, one put back, one that could not be, and one of a folder on a computer.
+    other = await create(api)
+    entry = [{"path": "Report.docx", "before": row.files[0]["before"], "after": report, "merged": True}]
+    odd = [
+        await recorded(api, row, saga=saga, files=entry, **columns) for saga, columns in (
+            ("saga:running", {"saga_state": "'running'"}), ("saga:back", {"saga_state": "'compensated'"}),
+            ("saga:stuck", {"saga_state": "'escalated'"}), ("saga:computer", {"device_id": "gen_random_uuid()"}),
+        )
+    ]
+    elsewhere = await recorded(api, row, saga="saga:elsewhere", files=entry, workstream_id=f"'{other['id']}'")
+    none_of_these = [
+        (other, by_a["id"], "Report.docx"),  # a version of another project
+        (project, f"{elsewhere}:f", "Report.docx"),  # another project's record, named through this one
+        (project, made["id"], "Report.docx"),  # another file's version
+        (project, by_a["id"], "a.md"),  # this version, as another file's
+        (project, by_a["id"], "./Report.docx"),
+        (project, by_a["id"], "Report.docx/"),
+        (project, f"{row.id}:p", "Report.docx"),  # nothing of it was picked up
+        (project, f"{later.id}:b", "a.md"),  # a file a thread made has no version from before it
+        *((project, f"{record}:{side}", "Report.docx") for record in odd for side in "fb"),
+        # What the copy holds, named as itself: a commit, and the version's own bytes.  A version is named by its record.
+        (project, row.commit, "Report.docx"),
+        (project, report, "Report.docx"),
+        (project, f"{row.commit}:Report.docx", "Report.docx"),
+    ]
+    for of, named, path in none_of_these:
+        refused = await opened(api, of, named, path)
+        assert (refused.status_code, refused.json()) == (404, {"detail": "No such version."}), (named, path)
+    assert reached == []
+    assert (await opened(api, project, by_a["id"], "Report.docx")).content == b"PK\x03\x04 report v1 by A"
+    assert reached == [report]
+
+
+async def test_a_version_that_names_no_record_is_no_version(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    assert (await opened(api, project, f"{row.id}:f", "Report.docx")).status_code == 200
+    for named in (
+        "²:f", "１:f", "9" * 18 + ":f", "9" * 19 + ":f", "9" * 5000 + ":f", ":f", str(row.id), f"{row.id}:", f"{row.id}:x",
+        f"{row.id}:F", f"{row.id}:f:f", f"{row.id}:fb", f" {row.id}:f", f"{row.id}:f ", f"{row.id}\n:f", f"+{row.id}:f", f"-{row.id}:f",
+        f"{row.id}.0:f", f"0x{row.id:x}:f",
+    ):
+        refused = await opened(api, project, named, "Report.docx")
+        assert (refused.status_code, refused.json()) == (404, {"detail": "No such version."}), named
+    # One that would be more than a part of the address is no address of a version at all.
+    assert (await opened(api, project, f"{row.id}:f/../{row.id}:f", "Report.docx")).status_code == 404
+    # A path no file can have is refused before any record is read.
+    for path in ("a\x00b", "", "a" * 4097, None):
+        assert (await opened(api, project, f"{row.id}:f", path)).status_code == 422, path
+
+
+async def test_a_pruned_version_answers_that_it_is_no_longer_kept(api, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    await ends(api, pool, second)
+    cut_history(tmp_path, pods.project / "_history", kept=1)
+    listed = await history_of(api, project, "Report.docx")
+    assert [v["available"] for v in listed] == [True, False, False]
+    for gone in listed[1:]:
+        response = await opened(api, project, gone["id"], "Report.docx")
+        assert (response.status_code, response.json()) == (410, {"detail": "This version is no longer kept in the project's history."})
+    assert (await opened(api, project, listed[0]["id"], "Report.docx")).content == b"PK\x03\x04 report v1 by A by B"
+    assert written_out(await copy_of(api, project)) == []
+
+
+async def test_a_version_of_a_page_or_a_drawing_is_data_and_its_name_is_only_a_name(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(
+        api, tmp_path, "printf '<script>alert(1)</script>' > page.html && printf '<svg onload=\"alert(1)\"/>' > drawing.svg",
+    )
+    blobs = {f["path"]: f["after"] for f in row.files}
+    for name, held in (("page.html", b"<script>alert(1)</script>"), ("drawing.svg", b'<svg onload="alert(1)"/>')):
+        response = await opened(api, project, f"{row.id}:f", name)
+        assert (response.status_code, response.content) == (200, held)
+        assert (response.headers["content-type"], response.headers["x-content-type-options"]) == ("application/octet-stream", "nosniff")
+        assert response.headers["content-disposition"] == f"attachment; filename*=UTF-8''{name}"
+    # A file's path is data a thread's command chose.  What is saved is named by its last part alone, with no
+    # character that ends a header or steers a terminal, and no longer than a file's name may be.
+    names = {
+        "reports/2026/Raport final – ș.docx": "Raport final – ș.docx",
+        'evil"; filename="x.html': 'evil"; filename="x.html',
+        "line\r\nSet-Cookie: session=theirs\r\n\r\n<script>.html": "lineSet-Cookie: session=theirs<script>.html",
+        "..\\..\\AppData\\run.bat": ".._.._AppData_run.bat",
+        "tab\there\x7f\x1b[2J.txt": "tabhere[2J.txt",
+        "é" * 200 + ".docx": "é" * 125 + ".docx",
+        "a" * 300: "a" * 255,
+        "x." + "y" * 300: ("x." + "y" * 300)[:255],
+        "folder/..": "file", "folder/.": "file", "folder/": "file", "...": "file", "\x01\x02": "file",
+    }
+    made = await recorded(api, row, saga="saga:names", files=[
+        {"path": path, "before": None, "after": blobs["page.html"], "merged": True} for path in names
+    ])
+    for path, name in names.items():
+        response = await opened(api, project, f"{made}:f", path)
+        assert (response.status_code, response.content) == (200, b"<script>alert(1)</script>"), path
+        disposition = response.headers["content-disposition"]
+        assert re.fullmatch(r"attachment; filename\*=UTF-8''[A-Za-z0-9._~%-]+", disposition), disposition
+        assert unquote(disposition.partition("''")[2]) == name
+        assert len(name.encode()) <= 255 and response.headers["content-type"] == "application/octet-stream"
+        assert "set-cookie" not in response.headers
+    assert written_out(await copy_of(api, project)) == []
+
+
+async def test_a_version_is_sent_a_piece_at_a_time_and_is_gone_from_the_copy_however_its_sending_ends(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "head -c 2621440 /dev/urandom > video.mp4")
+    data, place = (pods.project / "video.mp4").read_bytes(), await copy_of(api, project)
+    scope = {"type": "http", "method": "GET"}
+
+    async def sending(send) -> None:
+        staged = await place.version(row.files[0]["after"])
+        assert len(written_out(place)) == 1
+        await routes_module._VersionFile(staged, "video.mp4")(scope, None, send)
+
+    said = []
+
+    async def kept(message) -> None:
+        said.append(message)
+
+    await sending(kept)
+    start, *pieces, last = said
+    assert (start["type"], start["status"], dict(start["headers"])[b"content-length"]) == ("http.response.start", 200, b"2621440")
+    # The response's body is the version, no piece larger than is read at once, and its end is said.
+    assert [(len(piece["body"]), piece["more_body"]) for piece in pieces] == [(2**20, True), (2**20, True), (2**19, True)]
+    assert (b"".join(piece["body"] for piece in pieces), last) == (data, {"type": "http.response.body", "body": b""})
+    assert written_out(place) == []
+
+    # A client that left: its connection closed under the response, or its request ended by the server.
+    async def closed(message) -> None:
+        if message["type"] == "http.response.body":
+            raise OSError("the client closed its connection")
+
+    with pytest.raises(OSError, match="closed its connection"):
+        await sending(closed)
+    assert written_out(place) == []
+
+    async def stalled(message) -> None:
+        if message["type"] == "http.response.body":
+            await asyncio.sleep(30)
+
+    leaving = asyncio.create_task(sending(stalled))
+    for _ in range(100):
+        if written_out(place):
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
+    leaving.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leaving
+    assert written_out(place) == []
+
+    async def refused(message) -> None:
+        raise OSError("the client closed its connection")
+
+    # Even one that left before a word of the response was said.
+    with pytest.raises(OSError):
+        await sending(refused)
+    assert (written_out(place), place.clone in bucket_module._USING) == ([], False)
+    assert (await opened(api, project, f"{row.id}:f", "video.mp4")).content == data
+
+
+async def test_a_version_the_api_cannot_write_out_is_said_in_words(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    named = f"{row.id}:f"
+    assert (await opened(api, project, named, "Report.docx")).status_code == 200
+    place = await copy_of(api, project)
+    # Larger than a version may be: refused as the bounds are, with nothing written.
+    with monkeypatch.context() as patched:
+        patched.setattr(api.app.state.settings.history, "file_bound", 18)
+        response = await opened(api, project, named, "Report.docx")
+    assert (response.status_code, response.json()) == (409, {"detail": "This version is larger than Surogate can read here."})
+    # A history larger than the api copies.
+    with monkeypatch.context() as patched:
+        patched.setattr(api.app.state.settings.history, "copies_path", str(tmp_path / "other-copies"))
+        patched.setattr(api.app.state.settings.history, "packs_bound", 16)
+        response = await opened(api, project, named, "Report.docx")
+        assert (response.status_code, response.json()) == (409, {"detail": "This project's history is larger than Surogate can read here."})
+    # The copy another request has, past what this one waits: told to try again, and when.
+    with monkeypatch.context() as patched:
+        patched.setattr(bucket_module, "_PATIENCE", 0.3)
+        held = os.open(bucket_module._lock_of(place.clone), os.O_RDWR)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            response = await opened(api, project, named, "Report.docx")
+        finally:
+            os.close(held)
+    assert (response.status_code, response.headers["retry-after"]) == (503, "5")
+    assert response.json() == {"detail": "This project's history is being read just now. Try again in a moment."}
+
+    # Git's own words, and a disk's, stay in the log.
+    for failure in (HistoryError("git cat-file failed: fatal: packfile /srv/copies/ab12 is gone"), OSError(28, "No space left on device")):
+        async def failed(self, blob, failure=failure):
+            raise failure
+
+        with monkeypatch.context() as patched:
+            patched.setattr(BucketHistory, "version", failed)
+            response = await opened(api, project, named, "Report.docx")
+        assert (response.status_code, response.json()) == (503, {"detail": "The project's history could not be read just now. Try again in a moment."})
+    assert written_out(place) == []
+    assert (await opened(api, project, named, "Report.docx")).status_code == 200
+
+
+async def test_a_project_over_the_file_cap_opens_no_version_and_lists_no_deleted_file(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "rm notes.txt && echo a > a.md")
+    assert [v["path"] for v in (await deleted_of(api, project))["files"]] == ["notes.txt"]
+    monkeypatch.setattr(rows_module, "HISTORY_CAP", 1)  # its two files are over it
+    monkeypatch.setattr(rows_module, "_COUNTED", {})
+    response = await opened(api, project, f"{row.id}:b", "notes.txt")
+    assert (response.status_code, response.json()) == (409, {"detail": "History is off: this project has more than 50,000 files."})
+    # Nor does it list a deleted file, whose History it could not show.
+    assert await deleted_of(api, project) == {"files": [], "more": False}
+    assert not list((Path(api.app.state.settings.history.copies_path)).glob("*/objects/pack/*.pack"))
+
+
+async def test_a_deleted_file_is_listed_so_that_its_history_can_be_reached(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "rm notes.txt && printf ' by A' >> Report.docx")
+    listed = await deleted_of(api, project)
+    assert listed == {"files": [{
+        "id": f"{row.id}:f", "path": "notes.txt", "by": {"kind": "thread", "thread_id": str(thread.id), "title": "Draft A"},
+        "at": utc(row.updated_at), "change": "deleted", "merged": True, "landing_id": str(row.id), "available": True,
+    }], "more": False}
+    # Its History opens as any file's: the deletion, with nothing to open, and the version it took away.
+    [gone, upload] = await history_of(api, project, "notes.txt")
+    assert (gone, upload["change"], upload["id"]) == (listed["files"][0], "added", f"{row.id}:b")
+    nothing = await opened(api, project, gone["id"], "notes.txt")
+    assert (nothing.status_code, nothing.json()) == (404, {"detail": "This version deleted the file: there is nothing to open."})
+    assert (await opened(api, project, upload["id"], "notes.txt")).content == b"v1 notes\n"
+    # A file you deleted is yours to find too, once a landing picks the deletion up; one made again is no longer gone.
+    (pods.project / "Report.docx").unlink()
+    await edited(pool, thread, "echo again > notes.txt")
+    await ends(api, pool, thread)
+    [_, picked] = await rows(api, thread)
+    assert [(v["id"], v["path"], v["by"], v["change"], v["landing_id"]) for v in (await deleted_of(api, project))["files"]] == [
+        (f"{picked.id}:p", "Report.docx", {"kind": "you"}, "deleted", None),
+    ]
+    # Made again by you, it is gone no more once that is picked up.
+    (pods.project / "Report.docx").write_bytes(b"PK\x03\x04 report, uploaded again")
+    await edited(pool, thread, "echo more >> notes.txt")
+    await ends(api, pool, thread)
+    assert await deleted_of(api, project) == {"files": [], "more": False}
+
+
+async def test_the_deleted_files_are_those_the_clouds_landed_records_took_away_the_newest_first_and_said_to_be_more_than_are_listed(
+    api, monkeypatch, tmp_path,
+):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "rm notes.txt")
+    other = await create(api)
+    kept = row.files[0]["before"]
+
+    def gone(*paths: str, merged: bool = True) -> list[dict]:
+        return [{"path": path, "before": kept, "after": None, "merged": merged} for path in paths]
+
+    # Deletions that took no file of the project's cloud files away: one still running, one put back, one that could
+    # not be, one of another project, one of a folder on a computer; and a thread's deletion that did not land.
+    for saga, columns in (
+        ("saga:running", {"saga_state": "'running'"}), ("saga:back", {"saga_state": "'compensated'"}),
+        ("saga:stuck", {"saga_state": "'escalated'"}), ("saga:computer", {"device_id": "gen_random_uuid()"}),
+        ("saga:elsewhere", {"workstream_id": f"'{other['id']}'"}),
+    ):
+        await recorded(api, row, saga=saga, files=gone(f"{saga}.md"), **columns)
+    await recorded(api, row, saga="saga:unlanded", files=gone("unlanded.md", merged=False))
+    assert [v["path"] for v in (await deleted_of(api, project))["files"]] == ["notes.txt"]
+    assert [v["path"] for v in (await deleted_of(api, other))["files"]] == ["saga:elsewhere.md"]
+    # More files gone since, two of them picked up as your own deletions: the newest first, a record's in their names' order.
+    first = await recorded(api, row, saga="saga:more-1", files=gone("b.md", "a.md"), picked_up=gone("yours.md"))
+    second = await recorded(api, row, saga="saga:more-2", picked_up=gone("c.md"))
+    listed = await deleted_of(api, project)
+    assert [(v["id"], v["path"], v["by"]["kind"], v["landing_id"]) for v in listed["files"]] == [
+        (f"{second}:p", "c.md", "you", None), (f"{first}:f", "a.md", "thread", str(first)), (f"{first}:f", "b.md", "thread", str(first)),
+        (f"{first}:p", "yours.md", "you", None), (f"{row.id}:f", "notes.txt", "thread", str(row.id)),
+    ]
+    assert listed["more"] is False
+    # No more of them than the shell takes: the newest, and that there are others is said.
+    monkeypatch.setitem(SHELL_LIMITS, "deleted", 3)
+    listed = await deleted_of(api, project)
+    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["c.md", "a.md", "b.md"], True)
+    monkeypatch.setitem(SHELL_LIMITS, "deleted", 5)
+    assert (await deleted_of(api, project))["more"] is False
+    # A file whose path is longer than the shell takes is left out, as the Library leaves it out.
+    await recorded(api, row, saga="saga:long", files=gone("d/" * 2048 + "e.md"))
+    listed = await deleted_of(api, project)
+    assert ([v["path"] for v in listed["files"]], listed["more"]) == (["c.md", "a.md", "b.md", "yours.md"], True)
