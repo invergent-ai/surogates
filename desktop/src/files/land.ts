@@ -148,7 +148,9 @@ function partsOf(path: unknown): string[] {
 /** Whether a landing may write the file git names *path*: a path inside the folder, and no name whose change runs code on this computer. */
 export function landable(path: string): boolean {
   try {
-    return !protectedInFolder("/folder", join("/folder", ...partsOf(path)));
+    // Parts that are each a name join to the path as it is.
+    partsOf(path);
+    return !protectedInFolder("/folder", `/folder/${path}`);
   } catch {
     return false;
   }

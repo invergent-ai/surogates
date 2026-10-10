@@ -128,5 +128,17 @@ export function agentDiskWith(dir: string, init: string): string {
   return agentDisk(desktop, join(desktop, "vm", "agent-disk.sh"));
 }
 
+// *image*, an agent disk, with *main* in place of the history's way in (vm/history.py): what the
+// guest's agent then runs, as its own user, for each request to a folder's history.
+export function withHistory(image: string, main: string): string {
+  const script = join(dirname(image), "history-main.py");
+  writeFileSync(script, main);
+  for (const command of ["rm /history/main.py", `write ${script} /history/main.py`]) {
+    const done = spawnSync("debugfs", ["-w", image, "-R", command], { encoding: "utf8" });
+    if (done.status !== 0) throw new Error(`debugfs failed: ${done.error?.message ?? done.stderr}`);
+  }
+  return image;
+}
+
 const host = userInfo();
 export const USER: HostUser = { uid: host.uid, gid: host.gid, name: host.username, home: host.homedir };
