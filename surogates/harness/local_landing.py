@@ -81,7 +81,7 @@ _PER_FILE = 256
 #: What a look's answer says of one file beside its name: a revision at its longest.
 _PER_LOOK = 128
 #: Why a landing put back is not tried again at once: the next try would meet the same.
-_ONCE = frozenset({"stale", "too_large"})
+_ONCE = frozenset({"stale", "too_large", "yours_too_large"})
 #: A put-back its computer did not finish, though it answered: it may be asked again, and was not refused.
 _UNFINISHED = frozenset({"cancelled", "interrupted", "unavailable", "busy"})
 
@@ -100,6 +100,10 @@ class _Stale(Exception):
 
 class _TooLarge(Exception):
     """A turn changed more files than one landing carries."""
+
+
+class _YoursTooLarge(Exception):
+    """You changed more files in the folder since its last landing than one landing's pickup records."""
 
 
 def carries(paths: list[str]) -> bool:
@@ -162,9 +166,12 @@ async def land_local_turn(
     its row says).  A landing that did not land says why, ``reason``: the
     folder changed while it landed (``changed``), the copy was still being
     written (``stale``), the turn changed more than one landing carries
-    (``too_large``), its row could not be written (``unwritten``), another
-    chat held the folder (``busy``), its computer did not answer
-    (``unanswered``), or refused it (``refused``, with its word, ``code``).
+    (``too_large``), you changed more files in the folder since its last
+    landing than one landing records (``yours_too_large``, told apart by
+    its computer's answer to the pickup), its row could not be written
+    (``unwritten``), another chat held the folder (``busy``), its computer
+    did not answer (``unanswered``), or refused it (``refused``, with its
+    word, ``code``).
     ``recovery`` is what the folder's helper found there, left by a landing
     cut short, where it found any.
 
@@ -456,7 +463,7 @@ async def _land(
         turned: dict[str, Any] = {"commit": None, "changes": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": []}
         if paths:
             pickup = step("pickup", author=you, trailers=[*audit, ["Surogate-Kind", "pickup"]])
-            picked = await execute(pickup, partial(steps.history, "pickup", **pickup.arguments))
+            picked = await _your_edits(execute, pickup, steps)
             outcome["packs"] = picked["packs"]
             commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
             # The one answer the saga keeps: each apply's step is its file's place among its changes.
@@ -502,6 +509,13 @@ async def _land(
         logger.warning("The landing of thread %s on its computer carries no turn so large: %s", session.id, large)
         outcome.update(state="compensated", reason="too_large", saved=False)
         await _written(row.write, tries=2, state="compensated")
+    except _YoursTooLarge:
+        logger.warning("The landing of thread %s on its computer cannot record your edits there in one go", session.id, exc_info=True)
+        # Nothing of it was done: no ref moved, no file was written, and no row is left of it.
+        outcome.update(state="compensated", reason="yours_too_large", saved=False)
+        await _written(row.drop)
+        outcome["forgot"] = await _forgotten(saga, orchestrator, steps, None, nothing, "compensated")
+        return outcome
     except Exception as failed:
         logger.warning("The landing of thread %s on its computer did not finish", session.id, exc_info=True)
         outcome.update(saved=False, **_why(failed))
@@ -536,6 +550,24 @@ async def _land(
         for path in sorted({c["path"] for c in changes} | set(reasons))
     ]
     return outcome
+
+
+async def _your_edits(execute: Any, pickup: SagaStep, steps: Steps) -> dict:
+    """Your edits in the folder since its last landing, committed on ``main`` for the landing's record to push: the pickup's answer.
+
+    Read here alone.  It names every file you changed there since, which
+    no bound of the turn's limits: one too many for one answer of the link
+    is answered ``too_large`` by its computer once it ran.  On a computer a
+    pickup moves no ref, so nothing of it is left, and the landing goes no
+    further (:class:`_YoursTooLarge`).  Your edits stay as they are in the
+    folder, and are asked for again by the next landing there.
+    """
+    try:
+        return await execute(pickup, partial(steps.history, "pickup", **pickup.arguments))
+    except ComputerRefused as refused:
+        if refused.kind == "too_large":
+            raise _YoursTooLarge("your edits in the folder do not fit one answer of its computer's") from refused
+        raise
 
 
 async def _applied(steps: Steps, **asked: Any) -> dict:

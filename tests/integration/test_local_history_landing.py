@@ -569,6 +569,60 @@ async def test_a_commit_whose_answer_does_not_fit_the_link_is_asked_once_and_the
     assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "too_large")
 
 
+#: One frame of the link, made small: the answers of a scene's computer are bounded by it, as the app bounds them.
+SMALL_FRAME = 6_000
+
+
+async def test_more_changes_of_yours_than_one_landing_records_are_told_as_yours_and_leave_nothing_of_the_landing(api, here, monkeypatch):
+    here.app.frame_chars = SMALL_FRAME
+    _, master, thread = await begun_with_copy(api, here)
+    photos = here.folder / "Photos" / "2026"
+    yours: dict = {}
+
+    async def you_add_photos(harness) -> None:
+        # While the thread works, you add more photos to the folder than one landing's answer can carry.
+        photos.mkdir(parents=True)
+        for n in range(80):
+            (photos / f"IMG_{n:06d}.jpg").write_bytes(b"\xff\xd8 photo %d" % n)
+        yours.update(seen(here.folder))
+
+    await woken(api, monkeypatch, thread, [
+        calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})),
+        calling(("memory", {"action": "add", "content": "Done."})), _final_response("Done."),
+    ], during=you_add_photos)
+    # Its computer answered the pickup too large: nothing more was asked but the forgetting that lets the folder go,
+    # and no row is left of it.  Your photos and every other entry are as you left them; the budget is in the copy alone.
+    assert ran(here, "land:0") == ["changed", "revisions", "pickup", "forget"] and ran(here, "land:0:2") == []
+    assert await records(api, thread) == [] and kept(here) == {} and here.app.places.holder is None
+    assert seen(here.folder) == yours and not (here.folder / "Budget.xlsx").exists()
+    assert (here.app.places.copy(str(thread.id)) / "Budget.xlsx").read_text() == "Total,42\n"
+    # Said as yours, with what can be done now; never as the thread's files.
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "yours_too_large")
+    words = said(report)
+    assert "the user changed more files in its folder since the folder's last landing than one landing can record" in words
+    assert "move some of the files they added to it out of it, or start a thread on a folder inside it" in words
+    assert "of its files" not in words
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    assert end.data["saved"] is False
+
+
+async def test_more_files_of_the_threads_own_than_one_answer_carries_are_told_as_its_own(api, here, monkeypatch):
+    here.app.frame_chars = SMALL_FRAME
+    _, master, thread = await begun_with_copy(api, here)
+    folder = seen(here.folder)
+    await woken(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "mkdir Notes && for n in $(seq 1 60); do echo note > Notes/note-$n.md; done"})),
+        _final_response("Done."),
+    ])
+    # Its computer answered the commit too large, the turn's own files: asked once, nothing applied.
+    assert ran(here, "land:0") == ["changed", "revisions", "pickup", "commit", "forget"] and ran(here, "land:0:2") == []
+    assert seen(here.folder) == folder and kept(here) == {} and here.app.places.holder is None
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "too_large")
+    assert "more of its files changed than one landing on a computer carries" in said(report)
+
+
 # -- the folder held -----------------------------------------------------------------------------------------------
 
 

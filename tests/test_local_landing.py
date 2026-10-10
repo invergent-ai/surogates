@@ -121,6 +121,10 @@ def test_a_report_says_a_turn_too_large_to_land_stays_in_its_copy_and_a_landing_
     large = report(landing="compensated", landing_reason="too_large")
     assert "(more of its files changed than one landing on a computer carries)" in large
     assert "The thread's work is in its copy on its computer, and lands once fewer of its files are changed" in large
+    yours = report(landing="compensated", landing_reason="yours_too_large")
+    assert "(the user changed more files in its folder since the folder's last landing than one landing can record): Budget.xlsx" in yours
+    assert "Nothing lands in that folder until the user's own changes there can be recorded" in yours
+    assert "of its files" not in yours and "lands with its next turn" not in yours
     left = report(landing="unsettled", landing_reason="unanswered")
     assert "Not finished landing, and finished or put back before anything else lands in its folder (its computer did not answer)" in left
     assert "lands with its next turn" not in left
