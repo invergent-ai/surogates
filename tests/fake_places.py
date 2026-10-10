@@ -621,9 +621,8 @@ class _Unreadable(_Refused):
         self.path = path
 
 
-# A step's record as these rules write one; and as the app's helper writes one, which says more of where the step got.
+# A step's record as these rules write one. The app's helper's says more of where the step got, and the app reads it by what it knows of it.
 _RECORD = {"path", "was", "wrote", "mode", "made", "above"}
-_APPS_RECORD = _RECORD | {"temp", "aside", "moved", "out", "back"}
 
 
 class _Landing:
@@ -650,7 +649,7 @@ class _Landing:
             record = json.loads(text)
         except ValueError:
             record = None
-        if isinstance(record, dict) and (record.keys() == _RECORD or as_the_app and record.keys() == _APPS_RECORD) and landable(record["path"]):
+        if isinstance(record, dict) and (record.keys() == _RECORD or as_the_app and record.keys() > _RECORD) and landable(record["path"]):
             return record
         named = record.get("path") if isinstance(record, dict) else None
         raise _Unreadable(self.saga, step, named if isinstance(named, str) and landable(named) else None)

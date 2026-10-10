@@ -46,11 +46,16 @@ vi.mock("node:fs", async (original) => {
   return { ...real, default: { ...real, readSync, lstatSync }, readSync, lstatSync };
 });
 
-// Node's default CAs, as the app's Node 24 keeps them and the tests' Node 22 cannot: what they were set to last.
-const node = vi.hoisted(() => ({ trusted: undefined as string[] | undefined }));
+// Node's default CAs, as the app's Node 24 keeps them and the tests' Node 22 cannot: what they were set to last,
+// and why Node refuses them, when it does.
+const node = vi.hoisted(() => ({ trusted: undefined as string[] | undefined, refuses: undefined as string | undefined }));
 vi.mock("node:tls", async (original) => {
   const real = await original<typeof import("node:tls")>();
-  return { ...real, default: real, getCACertificates: () => ["a public root"], setDefaultCACertificates: (all: string[]) => void (node.trusted = all) };
+  const setDefaultCACertificates = (all: string[]) => {
+    if (node.refuses) throw new Error(node.refuses);
+    node.trusted = all;
+  };
+  return { ...real, default: real, getCACertificates: () => ["a public root"], setDefaultCACertificates };
 });
 
 const CERTUTIL = "/usr/bin/certutil";
@@ -370,7 +375,7 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       added(own(), another, "IT Root", "CT,C,C");
       writeFileSync(file(), pem(company));
       node.trusted = undefined;
-      expect(trustCompanyCa(file(), false, home, data())).toBeNull();
+      expect(trustCompanyCa(file(), false, home, data())).toEqual({ certificates: [pem(company).trim()], untrusted: null });
       expect(node.trusted).toEqual(["a public root", pem(company).trim()]);
       expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
       node.trusted = undefined;
@@ -391,8 +396,8 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       trusted();
       spoil(file());
       expect(trustCompanyCa(file(), false, home, data())).toEqual({
-        message: NOT_TRUSTED,
-        detail: `${file()} ${why}. Your company's certificate authority is not trusted until the file is mended. ${ASK}`,
+        certificates: [],
+        untrusted: { message: NOT_TRUSTED, detail: `${file()} ${why}. Your company's certificate authority is not trusted until the file is mended. ${ASK}` },
       });
       expect(entries(own())).toEqual(["IT Root CT,C,C"]);
       expect(node.trusted).toBeUndefined();
@@ -402,8 +407,11 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       if (process.getuid?.() === 0) return;
       trusted();
       expect(trustCompanyCa(file(), true, home, data())).toEqual({
-        message: NOT_TRUSTED,
-        detail: `${file()} is not the install script's: only root may write it. Your company's certificate authority is not trusted until the file is mended. ${ASK}`,
+        certificates: [],
+        untrusted: {
+          message: NOT_TRUSTED,
+          detail: `${file()} is not the install script's: only root may write it. Your company's certificate authority is not trusted until the file is mended. ${ASK}`,
+        },
       });
       expect(entries(own())).toEqual(["IT Root CT,C,C"]);
     });
@@ -415,7 +423,8 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       for (const name of ["cert9.db", "key4.db"]) chmodSync(join(own(), name), 0o400);
       chmodSync(own(), 0o500);
       try {
-        const said = trustCompanyCa(file(), false, home, data());
+        const { certificates, untrusted: said } = trustCompanyCa(file(), false, home, data());
+        expect(certificates).toEqual([]);
         expect(said?.message).toBe(NOT_TRUSTED);
         expect(said?.detail).toMatch(new RegExp(`^${file()} holds no certificate\\. Surogate could not take the certificate authority it trusted before out of your browser's trust: certutil could not change ${own()}: .*SEC_ERROR_READ_ONLY[^\\n]*\\. Ask your administrator`));
       } finally {
@@ -428,25 +437,52 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       rmSync(file());
       const gone = join(home, "no-certutil");
       expect(trustCompanyCa(file(), false, home, data(), gone)).toEqual({
-        message: NOT_REMOVED,
-        detail: "Your company's certificate authority could not be removed from your browser's trust: certutil is not installed. Ask your administrator to install the libnss3-tools package.",
+        certificates: [],
+        untrusted: {
+          message: NOT_REMOVED,
+          detail: "Your company's certificate authority could not be removed from your browser's trust: certutil is not installed. Ask your administrator to install the libnss3-tools package.",
+        },
       });
       expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
       // With certutil it goes, and then nothing is left to say without it: the user's own entries are not the app's.
-      expect(trustCompanyCa(file(), false, home, data())).toBeNull();
+      expect(trustCompanyCa(file(), false, home, data())).toEqual({ certificates: [], untrusted: null });
       added(own(), company, `${NICKNAME} of our old proxy`, "CT,C,C");
-      expect(trustCompanyCa(file(), false, home, data(), gone)).toBeNull();
+      expect(trustCompanyCa(file(), false, home, data(), gone)).toEqual({ certificates: [], untrusted: null });
     });
 
     it("says what keeps a CA untrusted as before: the database's own refusal alone, and a missing certutil as the administrator's", () => {
       writeFileSync(file(), pem(company));
-      expect(trustCompanyCa(file(), false, home, data(), join(home, "no-certutil"))).toEqual({ message: NOT_TRUSTED, detail: `certutil is not installed. ${ASK}` });
+      // Either way the app's own connections trust it, and so do its guest's commands.
+      expect(trustCompanyCa(file(), false, home, data(), join(home, "no-certutil"))).toEqual({
+        certificates: [pem(company).trim()], untrusted: { message: NOT_TRUSTED, detail: `certutil is not installed. ${ASK}` },
+      });
       mkdirSync(own(), { recursive: true, mode: 0o700 });
       writeFileSync(join(home, "password"), "secret\n");
       expect(spawnSync(CERTUTIL, ["-N", "-d", `sql:${own()}`, "-f", join(home, "password")]).status).toBe(0);
-      const said = trustCompanyCa(file(), false, home, data());
+      const { certificates, untrusted: said } = trustCompanyCa(file(), false, home, data());
+      expect(certificates).toEqual([pem(company).trim()]);
       expect(said?.message).toBe(NOT_TRUSTED);
       expect(said?.detail).toMatch(new RegExp(`^certutil could not change ${own()}: .*SEC_ERROR_TOKEN_NOT_LOGGED_IN[^\\n]*$`));
     });
+  });
+});
+
+// Node refuses before certutil is ever started: this needs none.
+describe("the company's CA a start gives its guest", () => {
+  it("is none that Node did not take, whatever the file holds", () => {
+    const file = join(home, "ca.pem");
+    writeFileSync(file, pem(company));
+    node.refuses = "Node cannot take this certificate";
+    try {
+      expect(trustCompanyCa(file, false, home, data(), join(home, "no-certutil"))).toEqual({
+        certificates: [],
+        untrusted: {
+          message: "Surogate could not trust your company's certificate authority",
+          detail: "Node cannot take this certificate. Ask your administrator to run Surogate's install script again with --ca-cert.",
+        },
+      });
+    } finally {
+      node.refuses = undefined;
+    }
   });
 });

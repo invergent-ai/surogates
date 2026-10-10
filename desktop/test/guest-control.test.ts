@@ -148,6 +148,40 @@ describe("the agent's control port", () => {
     expect(calls).toEqual([["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER, []]]);
   });
 
+  it("puts the company's CA of hello's answer in the guest's trust store before it sets up any root, and takes a CA not in its shape as none", async () => {
+    const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+    const machine = (told: unknown[], done: Promise<void>) => ({
+      setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: async () => {},
+      trust: (certificates: string[]) => {
+        told.push(certificates);
+        return done;
+      },
+    });
+    const setup = { type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: [] };
+    const told: unknown[] = [];
+    let trusted = () => {};
+    const sent: FromAgent[] = [];
+    const { roots, calls } = fakeRoots();
+    const agent = new Control((message) => sent.push(message), roots, machine(told, new Promise((resolve) => {
+      trusted = resolve;
+    })));
+    agent.receive(JSON.stringify({ type: "done", id: 0, user: USER, ca: [PEM] }));
+    agent.receive(JSON.stringify(setup));
+    // Told once: a second answer to hello is not taken.
+    agent.receive(JSON.stringify({ type: "done", id: 0, user: USER, ca: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect([told, calls, sent]).toEqual([[[PEM]], [], []]);
+    trusted();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual([["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER, []]]);
+    expect(sent).toEqual([{ type: "done", id: 1 }]);
+    for (const ca of [undefined, PEM, [PEM, 7], { 0: PEM }]) {
+      const each: unknown[] = [];
+      new Control(() => {}, roots, machine(each, Promise.resolve())).receive(JSON.stringify({ type: "done", id: 0, user: USER, ca }));
+      expect(each).toEqual([[]]);
+    }
+  });
+
   it("answers an operation whose id is still running, and keeps the first one cancellable", async () => {
     const { sent, tell, settle } = control();
     tell({ type: "op", id: 1, root: "root-1", kind: "run", args: { command: "sleep 30" } });
@@ -192,7 +226,7 @@ describe("the agent's control port", () => {
   it("powers the guest off at the host's shutdown, and answers nothing: the VM's exit is the answer", async () => {
     const sent: FromAgent[] = [];
     let powered = 0;
-    const agent = new Control((message) => sent.push(message), fakeRoots().roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: async () => void (powered += 1) });
+    const agent = new Control((message) => sent.push(message), fakeRoots().roots, { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: async () => void (powered += 1), trust: async () => {} });
     agent.receive(JSON.stringify({ type: "shutdown", id: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect([powered, sent]).toEqual([1, []]);
@@ -203,7 +237,7 @@ describe("the agent's control port", () => {
     const set: number[] = [];
     const slept: number[] = [];
     let heard = 0;
-    const machine = { setClock: async (now: number) => void set.push(now), woke: (ms: number) => void slept.push(ms), heard: () => void (heard += 1), powerOff: async () => {} };
+    const machine = { setClock: async (now: number) => void set.push(now), woke: (ms: number) => void slept.push(ms), heard: () => void (heard += 1), powerOff: async () => {}, trust: async () => {} };
     const agent = new Control((message) => sent.push(message), fakeRoots().roots, machine);
     const times = [[1, 1_791_000_000_000, 90_000], [2, "soon", 0], [3, -1, 0], [4, 1_791_000_000_000, -5], [5, 1_791_000_000_000, "long"]] as const;
     for (const [id, now, asleep] of times) agent.receive(JSON.stringify({ type: "time", id, now, slept: asleep }));
