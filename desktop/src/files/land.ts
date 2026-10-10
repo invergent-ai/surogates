@@ -445,8 +445,8 @@ class Landing {
     if (sync) syncDir(this.kept);
   }
 
-  // The step's record, or null where it has none. One that is there and is not a record as this module writes it
-  // is a failure raised to whoever asked: it may be all that names a file
+  // The step's record, or null where it has none. One that is there and is not a record as this module writes it,
+  // or names a file no landing may write, is a failure raised to whoever asked: it may be all that names a file
   // moved aside, so nothing is done over it, and nothing by it.
   private read(step: number): Step | null {
     let text: string;
@@ -463,7 +463,7 @@ class Landing {
       // Not even JSON.
     }
     const did = stepOf(value);
-    if (did !== null) return did;
+    if (did !== null && !protectedInFolder(this.folder, join(this.folder, ...did.path.split("/")))) return did;
     const named = (value as { path?: unknown } | null)?.path;
     throw new Unreadable(this.saga, step, typeof named === "string" && landable(named) ? named : null);
   }
@@ -727,7 +727,7 @@ class Landing {
     remove(staged);
     try {
       copyFileSync(held, staged, constants.COPYFILE_EXCL);
-      const fd = openSync(staged, "r");
+      const fd = openSync(staged, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
         if (did.mode !== null) fchmodSync(fd, did.mode);
         dated(fd, held);

@@ -666,17 +666,22 @@ describe("a landing cut short by a kill", () => {
     writeFileSync(join(kept, other, "2.json"), JSON.stringify({ ...written, path: "../Documents/Budget.xlsx" }));
     writeFileSync(join(kept, other, "3.json"), "{ not a record");
     writeFileSync(join(kept, other, "3"), "what a step kept");
+    // Nor on one that names a file no landing may write, though a file of the landing's shape lies ready beside it.
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(folder, ".git", "hooks", written.aside as string), "#!/bin/sh\n");
+    writeFileSync(join(kept, other, "4.json"), JSON.stringify({ ...written, path: ".git/hooks/pre-commit" }));
     // Nor on a folder that is no saga's, whatever is in it.
     mkdirSync(join(kept, "not a saga"));
     writeFileSync(join(kept, "not a saga", "1.json"), JSON.stringify(written));
     expect(await restart()).toEqual({
-      ok: { restored: ["Report.docx"], beside: [], lost: [], unread: [[other, 1, "Report.docx"], [other, 2, null], [other, 3, null]] },
+      ok: { restored: ["Report.docx"], beside: [], lost: [], unread: [[other, 1, "Report.docx"], [other, 2, null], [other, 3, null], [other, 4, null]] },
     });
     expect(readFileSync(join(folder, "Budget.xlsx"), "utf8")).toBe("yours");
     expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe(V1);
-    expect(readdirSync(folder).sort()).toEqual(["Budget.xlsx", "Report.docx"]);
+    expect(readdirSync(folder).sort()).toEqual([".git", "Budget.xlsx", "Report.docx"]);
+    expect(readdirSync(join(folder, ".git", "hooks"))).toEqual([written.aside]);
     // What it cannot read it does not remove: the file beside such a record may be all that is left of a user's.
-    expect(readdirSync(join(kept, other)).sort()).toEqual(["1.json", "2.json", "3", "3.json"]);
+    expect(readdirSync(join(kept, other)).sort()).toEqual(["1.json", "2.json", "3", "3.json", "4.json"]);
     expect(readdirSync(join(kept, "not a saga"))).toEqual(["1.json"]);
   });
 
