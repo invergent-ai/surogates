@@ -4,7 +4,7 @@
 // Projects and their threads (desktop design, Section 12): the wire types, and fixtures
 // with a thread in every group and with every reason, for fakes of a ProjectsSource.
 
-import type { FileVersion, LibraryEntry, ProducedFile, Project, Routine, ThreadRow } from "./projects-contract.js";
+import type { DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, Routine, ThreadRow } from "./projects-contract.js";
 
 export type * from "./projects-contract.js";
 
@@ -14,6 +14,7 @@ export interface ProjectFixtures {
   library: Record<string, LibraryEntry[]>;
   routines: Record<string, Routine[]>;
   history: Record<string, Record<string, FileVersion[]>>; // by project, then by file
+  deleted: Record<string, DeletedFiles>; // by project: its files that are gone, each the version that deleted it
 }
 
 export const FIXTURE_IDS = {
@@ -99,8 +100,21 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
             at: ago(120), change: "changed", merged: true, available: true, landingId: "9" },
           { id: "3:p", path: "threads/revenue/revenue.xlsx", by: { kind: "routine", name: "Nightly import" }, at: ago(140_000), change: "added", merged: true, available: false, landingId: null },
         ],
+        // A forecast a thread made and you deleted: gone from the files, with its History still.
+        "old-forecast.xlsx": [
+          { id: "14:p", path: "old-forecast.xlsx", by: { kind: "you" }, at: ago(45), change: "deleted", merged: true, available: true, landingId: null },
+          { id: "5:f", path: "old-forecast.xlsx", by: { kind: "thread", threadId: ids.idle, title: "Collect the sales data" },
+            at: ago(4_000), change: "added", merged: true, available: true, landingId: "5" },
+        ],
       },
       [ids.budget]: {},
+    },
+    deleted: {
+      [ids.report]: {
+        files: [{ id: "14:p", path: "old-forecast.xlsx", by: { kind: "you" }, at: ago(45), change: "deleted", merged: true, available: true, landingId: null }],
+        more: false,
+      },
+      [ids.budget]: { files: [], more: false },
     },
     routines: {
       [ids.report]: [],

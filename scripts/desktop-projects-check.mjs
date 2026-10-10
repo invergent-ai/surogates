@@ -20,7 +20,11 @@ const signedIn = (input, init = {}) => {
   headers.set("Authorization", `Bearer ${token}`);
   return fetch(new URL(String(input), origin), { ...init, headers });
 };
-const source = workstreamRoutes(signedIn, (url, fetchFn) => new FetchSseEventStream(url, { fetchFn }));
+// A version opened is handed here to save: what the check prints of it is its name, what it is saved as, and its size.
+const saved = [];
+const source = workstreamRoutes(signedIn, (url, fetchFn) => new FetchSseEventStream(url, { fetchFn }), (data, name) => {
+  saved.push({ name, type: data.type, size: data.size });
+});
 
 // The page's preload, in this process: what the shell sends, the source answers.
 const subscriptions = new Map();
@@ -54,6 +58,14 @@ const one = await shell.threads(project, idle.id);
 const resolved = await shell.resolve(project, idle.id);
 const reopened = await shell.reopen(project, idle.id);
 const renamed = await shell.update(project, { name: "Q3 report", threadTier: "pro" });
-// With a file: its History, and that of a file the project never held.
-const history = path ? { versions: await shell.history(project, path, { kind: "cloud" }), none: await shell.history(project, `no-${path}`, { kind: "cloud" }) } : {};
+// With a file: its History, and that of a file the project never held; its oldest version opened; and the
+// project's deleted files.
+const history = {};
+if (path) {
+  history.versions = await shell.history(project, path, { kind: "cloud" });
+  history.none = await shell.history(project, `no-${path}`, { kind: "cloud" });
+  history.answered = await shell.openVersion(project, { versionId: history.versions.at(-1).id, path }) ?? null;
+  history.opened = saved;
+  history.deleted = await shell.deleted(project);
+}
 console.log(JSON.stringify({ listed, opened, threads, one, library, routines, heard, resolved, reopened, renamed, history }));

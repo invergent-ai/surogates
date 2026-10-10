@@ -5,7 +5,9 @@
 // master, and in Surogate Desktop the projects this page serves.
 
 import { FetchSseEventStream } from "@invergent/agent-chat-react";
+import { saveFile } from "../lib/save-file";
 import { authFetch } from "./auth";
 import { workstreamRoutes } from "./workstream-routes";
 
-export const workstreams = workstreamRoutes(authFetch, (url, fetchFn) => new FetchSseEventStream(url, { fetchFn }));
+// A version opened is a download this page starts: the browser, or Surogate Desktop, asks where to save it.
+export const workstreams = workstreamRoutes(authFetch, (url, fetchFn) => new FetchSseEventStream(url, { fetchFn }), saveFile);
