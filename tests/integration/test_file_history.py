@@ -905,9 +905,10 @@ async def test_only_the_clouds_completed_records_are_a_files_versions(api, tmp_p
             text("SELECT device_id, id FROM workstream_history WHERE saga_id = :saga"), {"saga": f"saga:computer:{row.id}"},
         )).one()
     assert await history_of(api, project, "Report.docx") == [landed, upload]
-    # A computer's folder has records of its own, and its computer holds its versions: the api's copy is not asked.
+    # A computer's folder has records of its own, and its computer holds its versions: the api's copy is not asked,
+    # and none of them can be had from here.
     [theirs, before] = await history_of(api, project, "Report.docx", device_id=str(computer.device_id))
-    assert (theirs["id"], before["id"], theirs["available"]) == (f"{computer.id}:f", f"{computer.id}:b", True)
+    assert (theirs["id"], before["id"], theirs["available"], before["available"]) == (f"{computer.id}:f", f"{computer.id}:b", False, False)
     assert await history_of(api, project, "Report.docx", device_id="00000000-0000-4000-8000-000000000000") == []
 
 
