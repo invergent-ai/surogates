@@ -92,7 +92,11 @@ function vmExecutor(idleMs?: number, network?: NetworkApprovals): VmExecutor {
           asker = null;
         };
       },
+      // No root here is a thread's: nothing asks for a history.
+      history: async () => ({ error: { type: "unavailable", message: "no history here" } }),
+      unplace: async () => false,
     },
+    user: "u1",
   });
   return executor;
 }

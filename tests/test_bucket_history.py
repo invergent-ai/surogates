@@ -1724,14 +1724,39 @@ async def test_a_pickup_pushes_nothing_where_a_file_was_saved_again_since_it_was
     assert git(durable, "rev-parse", MAIN) == two
 
 
+async def test_the_files_main_records_are_read_in_one_look_of_the_copy_however_many(tmp_path, storage, project, monkeypatch):
+    files = {f"part-{n:03}.csv": f"{n}\n".encode() for n in range(150)}
+    one = landed(tmp_path, project, "saga:1", files)
+    history = bucket(tmp_path, storage)
+    await history.sync()
+    looks, asked = [], []
+    current, git_run = BucketHistory._current, BucketHistory._git
+
+    async def looked(self, wanted):
+        looks.append(wanted)
+        return await current(self, wanted)
+
+    async def ran(self, turns, seconds, *args, **more):
+        asked.append(args[0])
+        return await git_run(self, turns, seconds, *args, **more)
+
+    monkeypatch.setattr(BucketHistory, "_current", looked)
+    monkeypatch.setattr(BucketHistory, "_git", ran)
+    answered = await history.recorded(one, [*files, "no-such.md", "part-000.csv"])
+    assert answered == {**{path: blob_of(data) for path, data in files.items()}, "no-such.md": None}
+    # One look of the copy, and the files asked of git as many at a time as one question names.
+    assert (len(looks), asked.count("ls-tree")) == (1, 3)
+    assert await history.recorded(None, ["Report.docx"]) == {"Report.docx": None} and await history.recorded(one, []) == {}
+
+
 async def test_an_apply_and_its_record_land_on_main_and_the_next_pod_has_them(tmp_path, storage, project):
     one = landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
     v1 = git(project / "_history", "rev-parse", f"{one}^1:Report.docx")
     history = bucket(tmp_path, storage)
     main = (await history.fetch())["main"]
     now = await history.real("Report.docx")
-    assert (now, await history.recorded(main, "Report.docx"), await history.recorded(main, "no-such.md")) == (
-        blob_of(b"PK\x03\x04 report v2"), now, None,
+    assert (now, await history.recorded(main, ["Report.docx", "no-such.md"])) == (
+        blob_of(b"PK\x03\x04 report v2"), {"Report.docx": now, "no-such.md": None},
     )
     applied = await history.apply("Report.docx", now, v1)
     assert applied == {"path": "Report.docx", "before": now, "after": v1, "made": []}
@@ -1751,6 +1776,50 @@ async def test_an_apply_and_its_record_land_on_main_and_the_next_pod_has_them(tm
     assert left_in(history) == []
     # A thread's next pod opens on it.
     assert (a_pod(tmp_path, project).copy / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+
+
+async def test_held_steady_the_copy_asks_the_bucket_of_the_history_once_and_what_moves_main_still_asks_afresh(
+    tmp_path, storage, project, monkeypatch,
+):
+    files = {f"part-{n}.md": f"{n} landed\n".encode() for n in range(3)}
+    landed(tmp_path, project, "saga:1", files)
+    landed(tmp_path, project, "saga:2", {"part-0.md": b"0 landed again\n"})
+    history = bucket(tmp_path, storage)
+    listed, asked, list_entries, exists = [], [], storage.list_entries, storage.exists
+
+    async def listing(bucket_name, prefix, **more):
+        listed.append(prefix.split("_history/")[-1] if "_history/" in prefix else "a file's folder")
+        return await list_entries(bucket_name, prefix, **more)
+
+    async def there(bucket_name, key):
+        asked.append(key)
+        return await exists(bucket_name, key)
+
+    monkeypatch.setattr(storage, "list_entries", listing)
+    monkeypatch.setattr(storage, "exists", there)
+    main = (await history.fetch())["main"]
+    # Not held steady, each step asks: as a request or another holder's settle does.
+    for path in files:
+        await history.recorded(main, [path])
+    assert listed.count("objects/pack/") == 1 + len(files)
+    listed.clear()
+    with history.steady():
+        now = await history.recorded(main, list(files))
+        # The first written back as it was, the others taken away.
+        applies = [await history.apply(path, now[path], blob_of(files[path]) if path == "part-0.md" else None) for path in files]
+        assert await history.held([now["part-1.md"], blob_of(b"never kept\n")]) == {now["part-1.md"]}
+        # Asked once in the block, by its first step; a file expected there is no question of folders.
+        assert (listed.count("objects/pack/"), listed.count("a file's folder")) == (1, 0)
+        # A file the real files are to take is asked of once, whatever asks.
+        assert await history.takes("new/deep.md") and await history.takes("new/deep.md")
+        assert (listed.count("a file's folder"), [key for key in asked if key.endswith("/new")]) == (1, [f"{PREFIX}new"])
+        await history.record(applied=applies, author=YOU, trailers=by_saga("saga:r", "restore"), main=main)
+        # The record moves main: it asks afresh.
+        assert listed.count("objects/pack/") == 2
+    # And once the block is left, every step asks again.
+    listed.clear()
+    await history.recorded(main, ["part-0.md"])
+    assert listed.count("objects/pack/") == 1
 
 
 async def test_a_version_the_history_already_holds_is_not_sent_to_the_bucket_again(tmp_path, storage, project):
@@ -2018,7 +2087,7 @@ async def test_a_deletion_the_storage_did_not_make_fails_its_apply(tmp_path, sto
     (project / "b.md").write_bytes(b"b\n")
     assert (await history.apply("b.md", blob_of(b"b\n"), None))["after"] is None and not (project / "b.md").exists()
 
-    async def swallowed(bucket_name, key):
+    async def swallowed(bucket_name, key, **condition):
         return None  # as S3Backend.delete does on any error
 
     monkeypatch.setattr(storage, "delete", swallowed)
@@ -2042,7 +2111,7 @@ async def test_a_path_that_is_none_of_the_projects_files_reaches_neither_the_sto
     monkeypatch.setattr(module, "_child", lambda *args, **more: reached.append(("git", args)))
     v2 = blob_of(b"PK\x03\x04 report v2")
     for act in (
-        lambda: history.real(path), lambda: history.edits(["Report.docx", path]), lambda: history.recorded(one, path),
+        lambda: history.real(path), lambda: history.edits(["Report.docx", path]), lambda: history.recorded(one, ["Report.docx", path]),
         lambda: history.apply(path, None, v2), lambda: history.unapply(path, None, v2),
         lambda: history.pickup(main=one, picked_up=[{"path": path, "before": None, "after": v2}], author=YOU, trailers=by_saga("s", "pickup")),
         lambda: history.record(applied=[{"path": path, "before": None, "after": v2}], author=YOU, trailers=by_saga("s", "restore"), main=one),
@@ -2064,7 +2133,7 @@ async def test_a_version_that_is_no_id_reaches_neither_the_storage_nor_git(tmp_p
     for crafted in ("--output=/tmp/ran", "HEAD", f"{one}:Report.docx", v2.upper(), v2[:39], f"{v2}\n", ""):
         for act in (
             lambda: history.apply("Report.docx", v2, crafted), lambda: history.apply("Report.docx", crafted, v2),
-            lambda: history.unapply("Report.docx", crafted, v2), lambda: history.recorded(crafted, "Report.docx"),
+            lambda: history.unapply("Report.docx", crafted, v2), lambda: history.recorded(crafted, ["Report.docx"]),
             lambda: history.pickup(main=crafted, picked_up=[], author=YOU, trailers=by_saga("s", "pickup")),
             lambda: history.pickup(main=one, picked_up=[{"path": "a.md", "before": None, "after": crafted}], author=YOU, trailers=by_saga("s", "pickup")),
             lambda: history.record(applied=[{"path": "a.md", "before": None, "after": crafted}], author=YOU, trailers=by_saga("s", "restore"), main=one),

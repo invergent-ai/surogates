@@ -16,7 +16,7 @@ from surogates.scheduled.store import ScheduledSessionStore
 
 from .test_desktop_link_client import built_client  # noqa: F401  (a fixture)
 from .test_devices import api, link_url  # noqa: F401  (fixtures)
-from .test_durable_landings import edited, ends, stored
+from .test_durable_landings import edited, ends, rows, stored
 from .test_file_history import copies  # noqa: F401  (a fixture: the api's copies in the test's own folder)
 from .test_local_threads import answered_by_the_journal
 from .test_thread_copies import a_thread
@@ -121,4 +121,12 @@ async def test_the_desktop_takes_every_answer_of_a_files_history(built_client, a
     assert [(v["by"], v["change"]) for v in seen["after"]][:2] == [
         ({"kind": "you"}, "restored"), ({"kind": "thread", "threadId": str(thread.id), "title": "Draft A"}, "changed"),
     ]
-    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
+    # That Restore undone, by the landing its version came with; then all the thread's changes, newest first, as far as before its first.
+    assert seen["undone"] == {"applied": ["Report.docx"], "skipped": [], "pickedUp": []}
+    assert seen["thread"] == {"applied": ["Report.docx", "notes.txt"], "skipped": [], "pickedUp": []}
+    # Its row named its newest landing for its card's Undo; once all are undone, none, its file marked undone.
+    [_, newest] = await rows(api, thread)
+    assert [row["landingId"] for row in seen["threads"]] == [str(newest.id)]
+    assert [(f["ref"], f["landing"]) for f in seen["rows"][0]["files"]] == [("Report.docx", "undone")]
+    assert seen["rows"][0]["landingId"] is None
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and (pods.project / "notes.txt").read_text() == "v1 notes\n"

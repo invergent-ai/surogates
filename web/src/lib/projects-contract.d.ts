@@ -47,6 +47,9 @@ export interface ThreadRow {
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: ProducedFile[];
+  // The thread's newest landing with a file still as it landed: what its card's Undo undoes; null when it has
+  // none. Optional, as a file's landing is: a page built before file history serves none.
+  landingId?: string | null;
   place: ThreadPlace;
   createdAt: string;
   updatedAt: string;
@@ -81,12 +84,12 @@ export interface FileVersion {
   landingId: string | null; // the landing it came with
 }
 
-// What a Restore did: the files it made that version again; each it left as it was, and who changed it
-// since (null: no one this client has a name for); and each whose edit it recorded first, as a version in
-// its History, before it was written over.
+// What a Restore or an Undo did: the files it made a version again, or put back; each it left as it was, and
+// who changed it since (null: no one this client has a name for), or that its version from before is no longer
+// kept (pruned); and each whose edit it recorded first, as a version in its History, before it was written over.
 export interface UndoResult {
   applied: string[];
-  skipped: { path: string; by: ChangedBy | null }[];
+  skipped: { path: string; by: ChangedBy | null; pruned: boolean }[];
   pickedUp: string[];
 }
 
@@ -125,6 +128,9 @@ export interface ProjectsSource {
   openVersion(projectId: string, input: { versionId: string; path: string }): Promise<void>;
   // Restore: the file made that version again, as a landing by you, your edit to it recorded first.
   restore(projectId: string, input: { versionId: string; path: string }): Promise<UndoResult>;
+  // Undo: what a landing changed, or all of a thread's landings, put back as a landing by you, a file changed
+  // since left as it is.
+  undo(projectId: string, target: { landingId: string } | { threadId: string }): Promise<UndoResult>;
   // The Library lists the deleted files under its files, so that a deleted file's History is reached.
   deleted(projectId: string): Promise<DeletedFiles>;
   // threadId null: something project-wide changed; refetch the list

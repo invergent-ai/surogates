@@ -38,6 +38,7 @@ interface Version {
   change: "added" | "changed" | "deleted" | "restored" | "undone";
   merged: boolean;
   available: boolean;
+  landingId: string | null; // the landing it came with, whose Undo this change undoes
 }
 
 interface State {
@@ -58,17 +59,20 @@ interface State {
   } | null;
   reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
   // A file's History, shown in the Library in place of its files: its versions, null until they are
-  // read, why what was last asked of it did not happen, the version on its way to be saved, the version
-  // on its way back as the file, and what the last Restore did.
+  // read, why what was last asked of it did not happen, the version on its way to be saved, the Restore
+  // or the Undo under way, and what the last of them did.
   history: {
-    path: string; versions: Version[] | null; failure: string | null; opening: string | null; restoring: string | null;
-    result: { applied: string[]; skipped: Array<{ path: string; by: Version["by"] }>; pickedUp: string[] } | null;
+    path: string; versions: Version[] | null; failure: string | null; opening: string | null; changing: string | null;
+    result: {
+      how: "restore" | "undo"; applied: string[]; skipped: Array<{ path: string; by: Version["by"]; pruned: boolean }>; pickedUp: string[];
+    } | null;
   } | null;
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
   unreachable: string | null;
   notice: string | null;
+  copying: string | null; // while threads' copies of their folders are being made, what the sidebar says of them
   signIn: { needed: boolean; pending: boolean; failure: string | null }; // the app's own sign-in, in the system browser
   deviceAction: { text: string; button: string; action: "sign-in" | "restore" } | null; // what the user can do about this computer
   quitting: number | null; // while a quit waits for the threads working on this computer: how many
@@ -94,6 +98,7 @@ interface Shell {
   closeHistory(): Promise<void>;
   openVersion(id: string): Promise<void>;
   restoreVersion(id: string): Promise<void>;
+  undoChange(landingId: string): Promise<void>;
   back(): Promise<void>;
   forward(): Promise<void>;
   reload(): Promise<void>;
@@ -295,45 +300,68 @@ function historyRow(path: string, item: HTMLElement, list: "file" | "deleted" = 
 
 // A version of the file whose History is shown: how it came to be and by whom, when, and whether
 // it landed and is still kept. One still kept that left a file is opened, to be saved, and restored:
-// none that is no longer kept, and no deletion, which left nothing to open or to bring back. While one
-// is on its way no other is opened, and while one is restored no other is: their buttons wait,
-// without their use, so that the keyboard stays where it is.
-function versionRow(version: Version, opening: boolean, restoring: boolean): HTMLElement {
+// none that is no longer kept, and no deletion, which left nothing to open or to bring back. One still
+// kept that came with a landing has that landing's Undo, a deletion's among them, which brings its file
+// back. While one is on its way no other is opened, and while a Restore or an Undo lands neither is
+// asked again: their buttons wait, without their use, so that the keyboard stays where it is.
+function versionRow(version: Version, opening: boolean, changing: boolean): HTMLElement {
   const item = element("li", "version");
   item.dataset.version = version.id;
   const tags = [...(version.merged ? [] : ["Not merged"]), ...(version.available ? [] : ["No longer kept"])];
   const acts = element("span", "acts");
+  // One the History no longer shows, or shows as no longer kept, is refused there: the pane is drawn again with it.
+  const act = (name: "open" | "restore" | "undo", text: string, waiting: boolean, ask: () => Promise<void>) => {
+    const made = button("act", text, () => {
+      if (!waiting) void ask().catch(() => {});
+    });
+    made.dataset.act = name;
+    made.dataset.focus = `version:${version.id}:${name}`;
+    if (waiting) made.setAttribute("aria-disabled", "true");
+    return made;
+  };
   if (version.available && version.change !== "deleted") {
-    // One the History no longer shows, or shows as no longer kept, is refused there: the pane is drawn again with it.
-    const act = (name: "open" | "restore", text: string, waiting: boolean, ask: (id: string) => Promise<void>) => {
-      const made = button("act", text, () => {
-        if (!waiting) void ask(version.id).catch(() => {});
-      });
-      made.dataset.act = name;
-      made.dataset.focus = `version:${version.id}:${name}`;
-      if (waiting) made.setAttribute("aria-disabled", "true");
-      return made;
-    };
     acts.append(
-      act("open", "Open version", opening, (id) => shell.openVersion(id)), act("restore", "Restore", restoring, (id) => shell.restoreVersion(id)),
+      act("open", "Open version", opening, () => shell.openVersion(version.id)),
+      act("restore", "Restore", changing, () => shell.restoreVersion(version.id)),
     );
   }
+  const landing = version.landingId;
+  if (version.available && landing !== null) acts.append(act("undo", "Undo this change", changing, () => shell.undoChange(landing)));
   item.append(element("span", "what", what(version)), aged(element("span", "age"), version.at), element("span", "from", tags.join(" · ")), acts);
   return item;
 }
 
-// What the last Restore did, in a line a file: what it restored, whose edit it recorded first, and
-// each it left as it was, with who changed it since where the agent names them. Each name is data.
+// Up to three names, the rest counted: "a, b and 4 more files".
+function named(paths: string[]): string {
+  const names = paths.slice(0, 3).map((path) => asShown(path));
+  if (paths.length > 3) names.push(`${paths.length - 3} more files`);
+  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+// What the last Restore or Undo did, in a line a file: what it restored or put back, whose edit it recorded
+// first, and each it left as it was, with who changed it since where the agent names them, or that its
+// version from before is no longer kept. The files an Undo put back, and whose edit it recorded, are one
+// line each, their names counted past three. Each name is data.
 function told(result: NonNullable<State["history"]>["result"]): string[] {
   if (result === null) return [];
-  const lines = result.applied.map((path) => `Restored ${asShown(path)}.`);
-  lines.push(...result.pickedUp.map((path) => `Your changes to ${asShown(path)} were recorded first: they are a version in this History.`));
-  for (const { path, by } of result.skipped) {
-    lines.push(by === null
-      ? `${asShown(path)} was left as it is.`
-      : `${asShown(path)} was changed after this, by ${who(by)}. It was left as it is. Restore an earlier version from its History.`);
+  const undo = result.how === "undo";
+  const lines = undo
+    ? (result.applied.length > 0 ? [`Put back ${named(result.applied)}.`] : [])
+    : result.applied.map((path) => `Restored ${asShown(path)}.`);
+  if (undo && result.pickedUp.length > 0) {
+    lines.push(`Your changes to ${named(result.pickedUp)} were recorded first: each is a version in its History.`);
+  } else if (!undo) {
+    lines.push(...result.pickedUp.map((path) => `Your changes to ${asShown(path)} were recorded first: they are a version in this History.`));
   }
-  return lines.length === 0 ? ["The file is already this version."] : lines;
+  for (const { path, by, pruned } of result.skipped) {
+    lines.push(pruned
+      ? `${asShown(path)} could not be put back: its version from before is no longer kept.`
+      : by === null
+        ? `${asShown(path)} was left as it is.`
+        : `${asShown(path)} was changed after this, by ${who(by)}. It was left as it is. Restore an earlier version from its History.`);
+  }
+  if (lines.length > 0) return lines;
+  return [undo ? "Nothing to put back: the files are as they were." : "The file is already this version."];
 }
 
 // The file whose History the pane showed when it was last drawn.
@@ -352,9 +380,10 @@ function renderHistory(state: State): void {
     showText(byId("history-path"), history.path);
     byId("history-told").replaceChildren(...told(history.result).map((line) => element("p", "", line)));
     byId("history-failure").hidden = history.failure === null;
-    byId("history-failure").textContent = history.failure ?? "";
+    // The agent's words may name a file: shown as the app shows a name.
+    showText(byId("history-failure"), history.failure ?? "");
     byId("versions").replaceChildren(
-      ...(history.versions ?? []).map((version) => versionRow(version, history.opening !== null, history.restoring !== null)),
+      ...(history.versions ?? []).map((version) => versionRow(version, history.opening !== null, history.changing !== null)),
     );
     byId("no-versions").hidden = history.versions?.length !== 0;
   }
@@ -498,6 +527,13 @@ function draw(state: State): void {
   device.classList.toggle("ended", ENDED.includes(state.device?.status ?? ""));
   byId("notice").hidden = state.notice === null;
   byId("notice").textContent = state.notice ?? "";
+  // A live region, written only when its words change, so that each is spoken once. Shown as text is: it names the user's folders.
+  const copying = byId("copying");
+  copying.hidden = state.copying === null;
+  if (copying.dataset.said !== (state.copying ?? "")) {
+    copying.dataset.said = state.copying ?? "";
+    showText(copying, state.copying ?? "");
+  }
   byId("device-action").hidden = state.deviceAction === null;
   byId("device-action-text").textContent = state.deviceAction?.text ?? "";
   byId("device-action-button").textContent = state.deviceAction?.button ?? "";

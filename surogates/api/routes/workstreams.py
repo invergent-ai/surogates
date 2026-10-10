@@ -43,10 +43,10 @@ from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, Busy, NotKept, Staged, landable, said
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
-from surogates.workstreams.history import HISTORY_OFF, deleted_files, over_history_cap, version_of, versions
+from surogates.workstreams.history import HISTORY_OFF, deleted_files, over_history_cap, row_id, version_of, versions
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
-from surogates.workstreams.undo import UNLANDED, Refused, restore
+from surogates.workstreams.undo import NO_CHANGE, UNLANDED, Refused, restore, undo
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +552,50 @@ async def restore_version(
         raise HTTPException(status.HTTP_410_GONE, NOT_KEPT)
     try:
         return await restore(state, project, tenant.user_id, path=body.path, blob=entry["after"])
+    except Refused as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+class UndoRequest(BaseModel):
+    """A landing to undo, by the id its History or its thread's row names it by; or every landing of a thread."""
+
+    landing: Annotated[str, StringConstraints(max_length=40)] | None = None
+    thread: UUID | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> UndoRequest:
+        if (self.landing is None) == (self.thread is None):
+            raise ValueError("Name a landing or a thread, not both.")
+        return self
+
+
+@router.post("/{workstream_id}/history/undo")
+async def undo_change(
+    workstream_id: UUID, body: UndoRequest, request: Request, ctx: AgentRuntime, tenant: Tenant,
+    _rate: None = Depends(rate_limit_dep),
+) -> dict[str, Any]:
+    """Undo: a landing's files, or every landing of a thread, put back as
+    they were, as a landing by you, your edits to them recorded first:
+    ``{applied, skipped, picked_up}``.  The landing is one of the
+    project's own records of its cloud files, and the thread one of its
+    live threads: any other is none, whatever its id.  A file changed since
+    is left as it is, and named with who changed it.  What it refuses is
+    said in words (409): while the thread whose changes these are is
+    working, for a change undone already, and the project's files being
+    saved just now among them."""
+    project = await _project(request, workstream_id, tenant, ctx)
+    state = request.app.state
+    if await over_history_cap(state.storage, await state.session_store.get_session(project.master_session_id)):
+        raise HTTPException(status.HTTP_409_CONFLICT, HISTORY_OFF)
+    landing = None
+    if body.thread is not None:
+        await _thread(request, project, body.thread)
+    elif (landing := row_id(body.landing)) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NO_CHANGE)
+    try:
+        return await undo(state, project, tenant.user_id, landing=landing, thread=body.thread)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except Refused as exc:
         raise HTTPException(exc.status, str(exc)) from exc
 

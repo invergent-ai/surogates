@@ -67,6 +67,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     history: "This agent cannot show a file's History yet",
     openVersion: "This agent cannot open a version yet",
     restore: "This agent cannot restore a version yet",
+    undo: "This agent cannot undo a change yet",
     deleted: "This agent cannot list deleted files yet",
   };
   const called = (source: ProjectsSource, message: Extract<ToPage, { type: "call" }>) => {

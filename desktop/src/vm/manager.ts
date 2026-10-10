@@ -197,6 +197,9 @@ export const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve)
 interface Root {
   share: Promise<Share>; // how the agent mounts its folder, once added
   setup: Promise<Outcome | null> | null; // null once set up, or why not
+  folder: Folder; // what it shares, by its identity
+  at: string; // where the root's commands see it
+  down?: Promise<void>; // its teardown, once one is asked: asked again, the same
 }
 
 // A place's two shares, once the agent has mounted them, and the folder its history's share serves.
@@ -212,6 +215,10 @@ const within = (path: string, other: string) => path === other || path.startsWit
 // Whether two places are one folder's, with one history. The folder's device is left out: a
 // restart of this computer between two threads' binds may have renumbered it.
 const samePlace = (a: Place, b: Place) => a.history === b.history && a.real.path === b.real.path && a.real.ino === b.real.ino;
+// One folder, by its path and its identity: a copy made again at its path is another.
+const sameFolder = (a: Folder, b: Folder) => a.path === b.path && a.dev === b.dev && a.ino === b.ino;
+// How often one operation has a root's share of another folder let go before it is answered that it could not be set up.
+const SHARINGS = 4;
 
 // What a look at a folder found: its identity, and its real path.
 interface Looked {
@@ -389,10 +396,26 @@ export class Guest {
    * Null once *root* is set up, its folder added and its processes' *ended* handles
    * given; otherwise the answer that says why not, and the next asks again.
    */
-  ready(root: string, folder: Folder, ended: ProcessHandle[] = [], at = folder.path): Promise<Outcome | null> {
-    let known = this.roots.get(root);
+  async ready(root: string, folder: Folder, ended: ProcessHandle[] = [], at = folder.path): Promise<Outcome | null> {
+    for (let turn = 0; turn < SHARINGS; turn += 1) {
+      const known = this.roots.get(root);
+      // Another folder is shared for the root than this operation names, as a thread's copy made again leaves it:
+      // that share goes first, with what runs in it, and the named folder is shared in its place. A chat's folder
+      // is never another.
+      if (known && !(sameFolder(known.folder, folder) && known.at === at)) {
+        await this.teardown(root);
+        if (this.left) return SANDBOX_STOPPED;
+        continue;
+      }
+      return this.setUp(root, folder, ended, at, known);
+    }
+    return unavailable("could not set up this chat: another folder was shared for it each time the one it names was to be");
+  }
+
+  // *root* set up on *folder*, shared for it first where it has no share.
+  private setUp(root: string, folder: Folder, ended: ProcessHandle[], at: string, known: Root | undefined): Promise<Outcome | null> {
     if (!known) {
-      const entry: Root = { share: this.share(root, folder), setup: null };
+      const entry: Root = { share: this.share(root, folder), setup: null, folder, at };
       // A share that could not be added is tried again by the next operation.
       entry.share.catch(() => {
         if (this.roots.get(root) === entry) this.roots.delete(root);
@@ -568,9 +591,15 @@ export class Guest {
    * shares the folder and sets it up again. A guest that does not answer, or does not let
    * the folder go, is lost, the root's processes with it.
    */
-  async teardown(root: string): Promise<void> {
+  teardown(root: string): Promise<void> {
     const entry = this.roots.get(root);
-    if (!entry) return;
+    if (!entry) return Promise.resolve();
+    // Asked again while it is let go, as by an operation that names another folder: the same teardown.
+    entry.down ??= this.takeDown(root, entry);
+    return entry.down;
+  }
+
+  private async takeDown(root: string, entry: Root): Promise<void> {
     // A setup under way lands first: the teardown then ends what it set up. One that
     // does not land within setupMs loses the guest, the root's processes with it.
     if ((await Promise.race([entry.setup, late(this.setupMs)])) === "late") return this.lose();
