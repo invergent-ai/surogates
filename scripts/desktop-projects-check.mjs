@@ -9,8 +9,10 @@ import { PageProjects } from "../desktop/dist/shell/projects.js";
 import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
 import { workstreamRoutes } from "../web/src/api/workstream-routes.ts";
 
-const { values } = parseArgs({ options: { origin: { type: "string" }, token: { type: "string" }, project: { type: "string" } } });
-const { origin, token, project } = values;
+const { values } = parseArgs({
+  options: { origin: { type: "string" }, token: { type: "string" }, project: { type: "string" }, path: { type: "string" } },
+});
+const { origin, token, project, path } = values;
 
 // The page's own fetch, signed in: its paths are the agent's.
 const signedIn = (input, init = {}) => {
@@ -52,4 +54,6 @@ const one = await shell.threads(project, idle.id);
 const resolved = await shell.resolve(project, idle.id);
 const reopened = await shell.reopen(project, idle.id);
 const renamed = await shell.update(project, { name: "Q3 report", threadTier: "pro" });
-console.log(JSON.stringify({ listed, opened, threads, one, library, routines, heard, resolved, reopened, renamed }));
+// With a file: its History, and that of a file the project never held.
+const history = path ? { versions: await shell.history(project, path, { kind: "cloud" }), none: await shell.history(project, `no-${path}`, { kind: "cloud" }) } : {};
+console.log(JSON.stringify({ listed, opened, threads, one, library, routines, heard, resolved, reopened, renamed, history }));

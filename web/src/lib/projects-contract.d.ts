@@ -62,6 +62,25 @@ export interface LibraryEntry {
   place: ThreadPlace; // a local thread's files are on its computer
 }
 
+// Who changed a file: the signed-in user, a thread by its title, or a routine by its name.
+export type ChangedBy =
+  | { kind: "you" }
+  | { kind: "thread"; threadId: string; title: string }
+  | { kind: "routine"; name: string };
+
+// One version of a file in its History, newest first.
+export interface FileVersion {
+  id: string; // opaque, never shown
+  path: string;
+  by: ChangedBy | null; // null: someone this client has no name for, as a later agent may send
+  at: string; // UTC, ISO 8601 with Z
+  // How it came to be. A way this client does not know is taken as "changed".
+  change: "added" | "changed" | "deleted" | "restored" | "undone";
+  merged: boolean; // false: a thread's version that did not land, kept in history
+  available: boolean; // false once pruned: listed, as no longer kept
+  landingId: string | null; // the landing it came with
+}
+
 export interface Routine {
   id: string;
   name: string;
@@ -85,6 +104,8 @@ export interface ProjectsSource {
   reopen(projectId: string, threadId: string): Promise<ThreadRow>;
   library(projectId: string): Promise<LibraryEntry[]>;
   routines(projectId: string): Promise<Routine[]>;
+  // A file's History, newest first: the file is the cloud's, or a folder's on a computer.
+  history(projectId: string, path: string, place: ThreadPlace): Promise<FileVersion[]>;
   // threadId null: something project-wide changed; refetch the list
   subscribe(projectId: string, onChange: (threadId: string | null) => void): () => void;
 }

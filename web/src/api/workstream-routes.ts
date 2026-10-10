@@ -8,6 +8,7 @@
 
 import type { ProjectsSource, ThreadRow } from "../lib/projects-contract";
 import {
+  fileVersionOf,
   libraryEntryOf,
   projectChangeOf,
   projectOf,
@@ -87,6 +88,7 @@ const ROW = one(["id", "title", "group", "created_at", "updated_at"], threadRowO
 const MADE = one(["thread_id"], (body: { thread_id: string }) => body.thread_id);
 const ENTRY = one(["path", "origin"], libraryEntryOf);
 const ROUTINE = one(["id", "schedule_display", "status"], routineOf);
+const VERSION = one(["id", "path", "at"], fileVersionOf);
 const ROUTINES = (body: unknown) => many(ROUTINE)((body as { items?: unknown } | null)?.items);
 
 export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): WorkstreamRoutes {
@@ -125,6 +127,10 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents): Workst
       const { masterSessionId } = await routes.get(projectId);
       const query = new URLSearchParams({ created_from_session_id: masterSessionId, status: "all", limit: "200" });
       return read(`/api/v1/scheduled-work?${query}`, undefined, "Failed to fetch the project's routines", ROUTINES);
+    },
+    history: async (projectId, path, place) => {
+      const query = new URLSearchParams({ path, ...(place.kind === "device" ? { device_id: place.deviceId } : {}) });
+      return asked(`${project(projectId)}/history?${query}`, undefined, "Failed to fetch the file's History", many(VERSION));
     },
     start: async (projectId, proposalId, key) =>
       row(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
