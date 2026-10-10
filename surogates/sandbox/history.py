@@ -697,23 +697,52 @@ class History:
             self._keep_index(landing)
         return {"commit": landing}
 
-    def fetch(self, commits: Iterable[str] = (), saga: str | None = None) -> dict:
+    def fetch(self, commits: Iterable[str] = (), saga: str | None = None, since: str | None = None) -> dict:
         """``main`` in the durable history now, fetched with *commits*: a landing's first look, under the project's lock.
 
-        ``has_saga`` says whether ``main`` is the landing of *saga*: the only
-        proof that a landing pushed.  ``missing`` are those of *commits* the
-        history does not have now, which no fetch can bring: a landing whose
-        base stays among them can be put back by no one.  A master's pod,
-        which opens nothing, may make its repository here.
+        ``landing`` is the landing of *saga* in ``main``'s history, or None:
+        the only proof that a landing pushed, however many landings went
+        over it since.  It is looked for back to *since*, ``main`` as that
+        landing began on it (None: there was none yet).  ``hidden`` says
+        that it was not found and the look met a pruning's cut before it
+        met *since*: whether it pushed is then not known.  ``missing`` are
+        those of *commits* the history does not have now, which no fetch
+        can bring: a landing whose base stays among them can be put back by
+        no one.  A master's pod, which opens nothing, may make its
+        repository here.
         """
         self._init()
         main = self._take().get(MAIN)
         wanted = [_checked_id(c, "a fetch") for c in commits]
         missing = [c for c in wanted if not self._has(c) and not self._in_durable(c)]
         self._fetch(main, *(c for c in wanted if c not in missing))
-        has_saga = main is not None and saga is not None and f"Surogate-Saga: {saga}" in self._message(main)
+        landing, hidden = self._landing_of(saga, main, since) if main is not None and saga is not None else (None, False)
         packs = sum(p.stat().st_size for p in (self._taken / "objects" / "pack").glob("*.pack"))
-        return {"main": main, "has_saga": has_saga, "packs": packs, "missing": missing}
+        return {"main": main, "landing": landing, "hidden": hidden, "packs": packs, "missing": missing}
+
+    def _landing_of(self, saga: str, main: str, since: str | None) -> tuple[str | None, bool]:
+        """The landing of *saga* among ``main``'s own commits back to *since*, and whether a cut hid where it would be.
+
+        In the durable history as last taken, by first parents alone: a
+        landing is ``main``'s own commit, the newest that carries its saga,
+        its pickup and its turn being under it; and *since* is met only as
+        one of those, never through a turn that started from it.  Not
+        found, it did not push where the look met *since*, or the first
+        commit ``main`` ever had.  Where it ended at a pruning's cut
+        instead, the landing may be behind it.
+        """
+        # Each of main's own commits, newest first, with the saga it carries: the name whole, as its trailer has it.
+        own = [line.partition(" ")[::2] for line in self._in(
+            self._taken, "log", "--first-parent", "--format=%H %(trailers:key=Surogate-Saga,valueonly,separator=%x2C)",
+            "--end-of-options", main,
+        ).splitlines()]
+        for commit, carried in own:
+            if carried == saga:
+                return commit, False
+            if commit == since:
+                return None, False
+        cut = self._taken / "shallow"
+        return None, cut.is_file() and own[-1][0] in cut.read_text().split()
 
     def keep(self, *, author: dict[str, str], trailers: list[list[str]], base: bool) -> dict:
         """Commit the copy on the thread's branch and push the branch; its base too when *base*, or when the history has none.

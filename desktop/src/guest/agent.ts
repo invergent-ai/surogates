@@ -11,6 +11,7 @@ import { createInterface } from "node:readline";
 import { Control } from "./control.js";
 import { Inbound } from "./inbound.js";
 import { Network } from "./network.js";
+import { Places } from "./places.js";
 import { findPort, openPort } from "./port.js";
 import { type FromAgent, INBOUND_PORT } from "./protocol.js";
 import { BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
@@ -59,6 +60,6 @@ const roots = new Roots({
   hostSilenceMs: 25_000,
 });
 new Inbound(await openPort(await findPort(INBOUND_PORT)), (root, to, first) => roots.reach(root, to, first));
-const control = new Control(say, roots, { setClock, powerOff, woke: (ms) => roots.woke(ms), heard: () => roots.heard() });
+const control = new Control(say, roots, { setClock, powerOff, woke: (ms) => roots.woke(ms), heard: () => roots.heard() }, new Places());
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();

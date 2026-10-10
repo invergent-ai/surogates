@@ -5,14 +5,25 @@
 
 import { createInterface } from "node:readline";
 
+import { recover } from "./land.js";
 import { type Context, perform } from "./operations.js";
 
-const { SUROGATE_FOLDER: folder, HOME: home, ...rest } = process.env;
+const { SUROGATE_FOLDER: folder, HOME: home, SUROGATE_COPY: copy, SUROGATE_KEPT: kept, ...rest } = process.env;
 if (!folder || !home) {
   process.stderr.write("the file helper needs SUROGATE_FOLDER and HOME\n");
   process.exit(2);
 }
-const context: Context = { folder, home, env: { ...rest, HOME: home } };
+// A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing.
+const context: Context = { folder, home, env: { ...rest, HOME: home }, ...(copy && kept ? { landing: { copy, kept } } : {}) };
+// Before it says it is ready: what an earlier helper's landing left cut short is put back while nothing else looks at
+// the folder. A failure here is answered by the first `land` asked, which tries again.
+if (context.landing) {
+  try {
+    recover(context);
+  } catch {
+    // Said when it is asked.
+  }
+}
 const running = new Map<string, AbortController>();
 const say = (line: unknown) => process.stdout.write(`${JSON.stringify(line)}\n`);
 

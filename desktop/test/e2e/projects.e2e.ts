@@ -327,8 +327,10 @@ describe("the Projects page", () => {
       return own!.left < drawn!.right && drawn!.left < own!.right && own!.top < drawn!.bottom && drawn!.top < own!.bottom;
     })).toBe(true);
     // A ring of 2 px in its row's colour parts it from the mark, whatever the mark's hue: the dot's
-    // ring, and the row's colour as it is seen, over the sidebar's.
-    const ringed = () => page.$eval(dot, (found) => {
+    // ring, and the row's colour as it is seen, over the sidebar's. Found and read in one evaluation:
+    // the sidebar is drawn again when its projects arrive, and a dot found before that is in no page.
+    const ringed = () => page.evaluate((selector) => {
+      const found = document.querySelector(selector)!;
       const numbers = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
       const [shadow, sidebar, row] = [found, document.getElementById("sidebar")!, found.closest(".item")!]
         .map((each, at) => numbers(at === 0 ? getComputedStyle(each).boxShadow : getComputedStyle(each).backgroundColor));
@@ -338,7 +340,7 @@ describe("the Projects page", () => {
         spread: shadow!.slice(3),
         row: sidebar!.slice(0, 3).map((under, channel) => Math.round(row![channel]! * alpha + under * (1 - alpha))),
       };
-    });
+    }, dot);
     const ringIsItsRows = async () => {
       const { ring, spread, row: seen } = await ringed();
       expect(spread).toEqual([0, 0, 0, 2]);
