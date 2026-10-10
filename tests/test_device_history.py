@@ -1097,18 +1097,23 @@ def test_a_file_is_named_from_its_folders_top_however_a_tool_wrote_its_path():
     assert as_named("Résumé.DOCX") == as_named("Résumé.docx") != as_named("Resume.docx")
 
 
-def test_a_write_names_its_file_by_the_path_it_was_asked_for_and_by_the_key_its_computer_answered():
+def test_a_write_names_its_file_only_where_its_computer_wrote_the_file_its_path_names():
     folder = "/home/u/Reports"
-    # Its key cut where its computer keeps the folder, which a path from the folder's top shows: a link the path went
-    # through names the file it led to.
+    # The key its computer answered is the file its path names, from the folder's top, however the path was spelt.
     assert _named_by([
-        ("Budget.xlsx", "/data/u/Reports/Budget.xlsx"), ("Link/a.md", "/data/u/Reports/notes/a.md"), (f"{folder}/B.md", f"{folder}/B.md"),
-    ], folder) == {"budget.xlsx", "link/a.md", "notes/a.md", "b.md"}
-    # A path the server cannot place, whose key its computer answered inside the folder, names the file written there.
-    assert _named_by([("/elsewhere/c.md", f"{folder}/c.md")], folder) == {"c.md"}
-    # One placed by neither, or whose key no resolve of its call answered, could be any file: no list.
-    assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), ("/elsewhere/c.md", "/elsewhere/c.md")], folder) is None
-    assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), (None, f"{folder}/d.md")], folder) is None
-    assert _named_by([("Budget.xlsx", f"{folder}/{'../' * 3}etc/passwd")], folder) == {"budget.xlsx"}
+        ("Budget.xlsx", f"{folder}/Budget.xlsx"), ("./notes/../notes/a.md", f"{folder}/notes/a.md"), (f"{folder}/B.md", f"{folder}/B.md"),
+    ], folder) == {"budget.xlsx", "notes/a.md", "b.md"}
+    # Its computer followed a link: the user's, or one the guest made in the copy, which the server cannot tell apart.
+    # A link whose path ends its target's path is one too.  So the write could be of any file: no list.
+    for path, key in (
+        ("README.md", f"{folder}/docs/README.md"), ("Notes.md", f"{folder}/Budget.csv"), ("docs/a.md", f"{folder}/site/docs/a.md"),
+    ):
+        assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), (path, key)], folder) is None, path
+    # A path or a key outside the folder, a key that is no whole path, and a write no resolve of its call answered: none.
+    for path, key in (
+        ("/elsewhere/c.md", f"{folder}/c.md"), ("c.md", "/elsewhere/c.md"), ("c.md", f"{folder}/{'../' * 3}etc/passwd"),
+        ("c.md", "c.md"), ("c.md", None), (None, f"{folder}/c.md"), ("~/Reports/c.md", f"{folder}/c.md"),
+    ):
+        assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), (path, key)], folder) is None, (path, key)
     assert _named_by([], folder) == frozenset()
 

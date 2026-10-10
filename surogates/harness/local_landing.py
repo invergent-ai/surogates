@@ -14,9 +14,9 @@ pickup, and each apply carries what the look saw, so a save of yours after
 the look is picked up, or found by its apply, and never written over.
 Nothing on the computer checks that order: it is kept here.  And it applies
 only what its thread did: where the thread ran no command, started no
-process and has no helper, the files its own operations named, as the
-journal has them (``DeviceOperations.named``), so a copy that lacks a file of
-yours, or holds one cut short, changes none of them.
+process, has no helper and wrote through no link, the files its own
+operations named, as the journal has them (``DeviceOperations.named``), so a
+copy that lacks a file of yours, or holds one cut short, changes none of them.
 
 What differs from the cloud is who holds what.  No lock of the server's is
 held: a computer may be away for a day in the middle of a landing, and its
@@ -802,14 +802,15 @@ async def _land(
         written = [(number, c) for number, c in enumerate(changes) if c["before"] != c["after"]]
         if any(c["path"] not in revisions for _, c in written):
             raise _Stale("the turn names a file the landing's look did not see")
-        # Where the thread ran no command, started no process and has no
-        # helper, only its own file operations changed its copy, and the
-        # journal names each file they wrote or deleted.  A file the copy
-        # changed that none of them names was changed by nothing the thread
-        # did, whatever its computer says of the copy: one the copy lacks, or
-        # holds cut short.  It stays as the folder has it, and the landing's
-        # record gives the copy the folder's file again, a link's place too:
-        # none of it is the thread's to leave in its copy.
+        # Where the thread ran no command, started no process, has no
+        # helper and wrote through no link, only its own file operations
+        # changed its copy, and the journal names each file they wrote or
+        # deleted.  A file the copy changed that none of them names was
+        # changed by nothing the thread did, whatever its computer says of
+        # the copy: one the copy lacks, or holds cut short.  It stays as the
+        # folder has it, and the landing's record gives the copy the folder's
+        # file again, a link's place too: none of it is the thread's to
+        # leave in its copy.
         named = await copy.operations.named(session.id, copy.folder, besides=invocation) if written else None
         unnamed = set() if named is None else {c["path"] for _, c in written if as_named(c["path"]) not in named}
         if unnamed:

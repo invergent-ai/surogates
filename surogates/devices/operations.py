@@ -180,28 +180,19 @@ def _named_by(writes: Iterable[tuple[str | None, str | None]], folder: str) -> f
     Each write is a pair: the path its call asked its computer to resolve,
     as its tool gave it, and the key that computer answered, which the write
     carried; the path None where no resolve of its call answered that key.
-    A file is named twice: by the path, from the folder's top, and by the key
-    cut where that computer keeps the folder, which is the folder's own path
-    or what a key ends a path from the folder's top with.  So a path that
-    went through a link names the file the link led to too.  A write placed
-    by neither, or by no resolve, could be any file.
+    Its computer answers a key under the folder's own path, every link on
+    the way followed.  So a write names its file where its key is the file
+    its path names from the folder's top.  One whose key is another went
+    through a link: the user's, or one a guest made in the copy, which the
+    server cannot tell apart.  That one, and one placed nowhere in the
+    folder or by no resolve, could be any file.
     """
-    tops = {folder.rstrip("/")}
-    placed = []
-    for path, key in writes:
-        if path is None:
-            return None
-        inside = _in_folder(path, folder)
-        key = key if isinstance(key, str) and key.startswith("/") else None
-        if inside is not None and key is not None and key.endswith(f"/{inside}"):
-            tops.add(key[: -len(inside) - 1])
-        placed.append((inside, key))
     names: set[str] = set()
-    for inside, key in placed:
-        by_key = next((found for top in tops if (found := _in_folder(key, top)) is not None), None) if key is not None else None
-        if inside is None and by_key is None:
+    for path, key in writes:
+        inside = None if path is None else _in_folder(path, folder)
+        if inside is None or not isinstance(key, str) or not key.startswith("/") or _in_folder(key, folder) != inside:
             return None
-        names.update(as_named(name) for name in (inside, by_key) if name is not None)
+        names.add(as_named(inside))
     return frozenset(names)
 
 
@@ -1375,7 +1366,8 @@ class DeviceOperations:
         Else each write and deletion names its file, as :func:`_named_by`
         reads it; and so does each file that landing left in the copy, no
         landing writing it, which is the thread's own still.  One written
-        where the server cannot say which file counts as a command does.
+        where the server cannot say which file, through a link among them,
+        counts as a command does.
 
         The last recorded landing is the newest of the session's whose
         record its computer answered, checked as an answer given now, but

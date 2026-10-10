@@ -12,6 +12,7 @@ did could have, and the journal names every file it wrote or deleted.
 from __future__ import annotations
 
 import base64
+import os
 from uuid import UUID, uuid5
 
 import pytest
@@ -27,7 +28,7 @@ from tests.test_steer_loop import _final_response
 from .test_devices import FOLDER, api, link_url  # noqa: F401  (api and link_url are fixtures)
 from .test_local_history_landing import files_of, here, kept, lie_at, ran, records, said, seen, told  # noqa: F401  (here is a fixture)
 from .test_local_history_open import begun_with_copy, turn_end, woken
-from .test_local_history_threads import computer, connected_thread, tool  # noqa: F401  (computer is a fixture)
+from .test_local_history_threads import blob, computer, connected_thread, tool  # noqa: F401  (computer is a fixture)
 from .test_local_threads import journal
 from .test_turn_sagas import calling
 from .test_workstream_threads import events_of
@@ -133,6 +134,65 @@ async def test_a_file_nothing_the_thread_did_names_is_none_of_its_own_though_the
     ], said="And the other one.")
     _, report = await told(api, master)
     assert files_of(report) == [("Other.md", "landed", None)] and (here.folder / "Twin.txt").read_text() == "one\n"
+
+
+# -- a link -------------------------------------------------------------------------------------------------------
+
+
+async def test_a_write_through_a_link_in_the_folder_lands_what_the_copy_holds_whichever_worker_lands_it(api, here, monkeypatch):
+    (here.folder / "docs").mkdir()
+    (here.folder / "docs" / "README.md").write_text("one\n")
+    (here.folder / "README.md").symlink_to("docs/README.md")
+    _, master, thread = await begun_with_copy(api, here)
+    copy = here.app.places.copy(str(thread.id))
+    # Its computer follows the link, and writes docs/README.md: a link the server cannot tell from one a guest made,
+    # so this write names no file, as a command does, and the landing lands what the copy holds.
+    await woken(api, monkeypatch, thread, [
+        calling(("patch", {"mode": "replace", "path": "README.md", "old_string": "one", "new_string": "one, and two"})),
+        _final_response("Done."),
+    ])
+    [report] = await told(api, master)
+    assert files_of(report) == [("docs/README.md", "landed", None)]
+    for where in (here.folder, copy):
+        assert (where / "docs" / "README.md").read_text() == "one, and two\n", where
+        assert os.readlink(where / "README.md") == "docs/README.md", where
+    assert await journal(api).named(thread.id, FOLDER, besides="land:0") is None
+    assert await events_of(api, thread.id, EventType.HISTORY_REDO, EventType.INBOX_ACTION_REQUIRED) == []
+
+
+async def test_a_link_a_guest_makes_in_the_copy_has_the_landing_land_what_the_copy_holds_as_a_commands_does(api, here, monkeypatch):
+    (here.folder / "Budget.csv").write_text("your budget, all of it\n")
+    (here.folder / "Notes.md").write_text("notes v1\n")
+    _, master, thread = await begun_with_copy(api, here)
+    copy = here.app.places.copy(str(thread.id))
+
+    async def a_link(harness) -> None:
+        # Once the turn's copy is open: a guest that is not ours makes the copy's Notes.md a link to Budget.csv.
+        (copy / "Notes.md").unlink()
+        (copy / "Notes.md").symlink_to("Budget.csv")
+
+    def put_back(frame, outcome):
+        # And puts Notes.md back as the folder has it once the landing has asked what changed.
+        (copy / "Notes.md").unlink()
+        (copy / "Notes.md").write_text("notes v1\n")
+
+    lie_at(here, "changed", put_back)
+    await woken(api, monkeypatch, thread, [
+        calling(("memory", {"action": "add", "content": "Noted."})),
+        calling(("read_file", {"path": "Notes.md"})),
+        calling(("write_file", {"path": "Notes.md", "content": "the thread's notes\n"})),
+        _final_response("Done."),
+    ], during=a_link)
+    # The thread's write went through the link, and its computer said so: the server cannot tell this link from yours,
+    # so the write names no file, and the landing lands what the copy holds.  Budget.csv is never landed as a file
+    # the thread named; it lands as a command's work would, its version from before a version in the folder's history.
+    [report] = await told(api, master)
+    assert files_of(report) == [("Budget.csv", "landed", None)]
+    assert (here.folder / "Budget.csv").read_text() == "the thread's notes\n" and (here.folder / "Notes.md").read_text() == "notes v1\n"
+    assert (copy / "Budget.csv").read_text() == "the thread's notes\n" and (copy / "Notes.md").read_text() == "notes v1\n"
+    [row] = await records(api, thread)
+    assert [(f["path"], f["before"], f["merged"]) for f in row.files] == [("Budget.csv", blob(b"your budget, all of it\n"), True)]
+    assert await journal(api).named(thread.id, FOLDER, besides="land:0") is None
 
 
 # -- what names a file, and what names none ------------------------------------------------------------------------
@@ -269,7 +329,7 @@ async def test_a_thread_that_could_have_changed_a_file_no_operation_of_its_names
         return
     # A write whose key no resolve of its own call answered: the server cannot say which file it wrote.
     runner = JournalRunner(ops, **asked, invocation_id="request:odd")
-    await runner.run("write", {"key": f"{computer.folder}/Odd.md", "data": base64.b64encode(b"odd\n").decode()})
+    await runner.run("write", {"key": f"{FOLDER}/Odd.md", "data": base64.b64encode(b"odd\n").decode()})
     assert await ops.named(thread.id, FOLDER) is None
 
 
