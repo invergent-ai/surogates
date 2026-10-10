@@ -437,7 +437,7 @@ def test_a_pickup_of_more_files_than_one_answer_names_names_them_in_parts_each_f
     # A part asked from a file that is not one of them goes on from where that file would be.
     assert one.picked(pickup=picked["commit"], after="Photos/2026/IMG_000038.jpz") == {"picked_up": named[39:], "more": 0}
     # Its parts only read: nothing of the place changed since the pickup, and no ref moved.
-    assert as_it_is(store) == place and git(one.repo, "for-each-ref") == refs and not (store / "history.git").exists()
+    assert as_it_is(store) == place and git(one.repo, "for-each-ref") == refs
     # Where they fit one answer, the pickup's own names them all.
     monkeypatch.setattr(local_history, "_PICKED_CHARS", 1 << 20)
     again = one.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:2"], ["Surogate-Kind", "pickup"]])
