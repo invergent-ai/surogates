@@ -309,8 +309,10 @@ release into `/opt/surogate`, and is each version's root helper for updates (`--
 
 A company whose network inspects TLS, or whose server has a certificate authority of its own, gives
 the script that CA as a PEM file. Every user's app then trusts it beside the public roots, and so do
-the user's Chrome, Edge and Brave, in the NSS database Chromium reads. The person's own curl must
-reach the script first (here with `--cacert`); `sudo rm /etc/surogate/ca.pem` stops trusting it:
+the user's Chrome, Edge and Brave, in the NSS database Chromium reads, and the commands the agent
+runs in the app's sandbox: its system store holds it, and Node, pip, requests, OpenSSL, curl and git
+are pointed at that store. The person's own curl must reach the script first (here with
+`--cacert`); `sudo rm /etc/surogate/ca.pem` stops trusting it, from the app's next start:
 
     curl --cacert company-ca.pem -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --ca-cert company-ca.pem
 

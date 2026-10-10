@@ -53,15 +53,16 @@ class _FakeStore:
         raise KeyError("profile not found")
 
 
-def _app(store, *, user_id=None, sa_id=None):
+def _app(store, *, user_id=None, sa_id=None, org_id=None):
     sa_id = sa_id or uuid.uuid4()
+    org_id = org_id or uuid.uuid4()
     app = FastAPI()
     app.include_router(bp.router)
     app.state.browser_profile_store = store
 
     async def _tenant():
         return TenantContext(
-            org_id=uuid.uuid4(),
+            org_id=org_id,
             user_id=user_id,
             org_config={},
             user_preferences={},
@@ -299,3 +300,113 @@ def test_capture_saves_storage_state(monkeypatch):
     # (which owns the pool) releases the browser.
     assert teardown["status"] == "completed"
     assert teardown["waked"] == str(sid)
+
+
+def test_a_setup_browser_is_captured_by_its_own_user_and_by_no_other_member(monkeypatch):
+    org, yours, theirs = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    store = _FakeStore()
+    row = _seed_profile(store)
+    sid = uuid.uuid4()
+    read: list[str] = []
+    torn_down: list[str] = []
+
+    class _SessionStore:
+        async def get_session(self, _sid):
+            # The setup session its user made, whose browser they took over to log in.
+            return type("S", (), {
+                "id": sid, "org_id": org, "user_id": yours, "agent_id": "browser-setup",
+                "channel": "browser_setup", "config": {"browser": {"profile_id": str(row.id)}},
+            })()
+
+        async def update_session_status(self, _sid, status):
+            torn_down.append(status)
+
+    class _Control:
+        async def held_by(self, _sid):
+            return str(yours)
+
+    class _Resolver:
+        async def resolve(self, _sid, expected_org_id=None):
+            from surogates.browser.base import BrowserEndpoint
+            from surogates.browser.resolver import ResolvedBrowser
+
+            return ResolvedBrowser(session_id=str(sid), endpoint=BrowserEndpoint("http://browser", "ws://cdp", "ws://live"))
+
+    class _Client:
+        def __init__(self, rest_url):
+            pass
+
+        async def storage_state(self):
+            read.append(str(sid))
+            return {"cookies": [{"name": "SID", "domain": ".google.com"}], "origins": []}
+
+        async def close(self):
+            pass
+
+    async def _wake(_sid):
+        pass
+
+    monkeypatch.setattr(bp, "KernelBrowserClient", _Client)
+
+    def capture(user_id):
+        app = _app(store, user_id=user_id, org_id=org)
+        app.state.session_store = _SessionStore()
+        app.state.browser_control = _Control()
+        app.state.browser_resolver = _Resolver()
+        app.state.session_wake = _wake
+        # Naming the user who holds the browser, as the service path does.
+        return TestClient(app).post(
+            f"/browser-profiles/{row.id}/capture", params={"session_id": str(sid)}, json={"owner_user_id": str(yours)},
+        )
+
+    # Another member of the organisation: as for no session, and nothing of the browser is read or torn down.
+    refused = capture(theirs)
+    assert (refused.status_code, refused.json()) == (404, {"detail": "Session not found"})
+    assert (read, torn_down) == ([], [])
+
+    assert capture(yours).status_code == 200
+    assert (read, torn_down) == ([str(sid)], ["completed"])
+
+
+def test_a_key_of_another_organisation_bound_to_an_agent_of_that_name_captures_nothing(monkeypatch):
+    org, elsewhere, holder = uuid.uuid4(), uuid.uuid4(), str(uuid.uuid4())
+    store = _FakeStore()
+    row = _seed_profile(store)
+    sid = uuid.uuid4()
+    asked: list[str] = []
+
+    class _SessionStore:
+        async def get_session(self, _sid):
+            return type("S", (), {
+                "id": sid, "org_id": org, "user_id": None, "agent_id": "browser-setup",
+                "channel": "browser_setup", "config": {"browser": {"profile_id": str(row.id)}},
+            })()
+
+    class _Control:
+        async def held_by(self, _sid):
+            return holder
+
+    class _Resolver:
+        async def resolve(self, _sid, expected_org_id=None):
+            # The browser is the session's org's: one of another org is none.
+            asked.append(expected_org_id)
+            return None
+
+    def _never(_rest_url):
+        raise AssertionError("the browser was reached")
+
+    monkeypatch.setattr(bp, "KernelBrowserClient", _never)
+    app = _app(store, org_id=elsewhere)
+    app.dependency_overrides[bp.get_current_tenant] = lambda: TenantContext(
+        org_id=elsewhere, user_id=None, org_config={}, user_preferences={}, permissions=frozenset(), asset_root="/tmp",
+        service_account_id=uuid.uuid4(), service_account_agent_id="browser-setup",
+    )
+    app.state.session_store = _SessionStore()
+    app.state.browser_control = _Control()
+    app.state.browser_resolver = _Resolver()
+
+    refused = TestClient(app).post(
+        f"/browser-profiles/{row.id}/capture", params={"session_id": str(sid)}, json={"owner_user_id": holder},
+    )
+    # Stopped at the session, as for no session: its browser is not even looked for.
+    assert (refused.status_code, refused.json(), asked) == (404, {"detail": "Session not found"}, [])

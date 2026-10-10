@@ -49,10 +49,12 @@ export const MAX_INBOUND = 160;
 export type Share = { kind: "virtiofs"; tag: string };
 
 // The control port, ai.surogate.control (spec, Section 11, Transport). The agent
-// says hello first, and the host answers it with its user; from then on the host
-// asks. Every request carries an id of its sender's, and its answer the same id.
+// says hello first, and the host answers it with its user and the company's CA; from
+// then on the host asks. Every request carries an id of its sender's, and its answer the same id.
 export type ToAgent =
-  | { type: "done"; id: number; user: HostUser } // the answer to hello
+  // The answer to hello. *ca*: the certificates of the company's CA, PEM, that the app trusts at this
+  // start, which the guest's trust store holds for the boot (trust.ts); none where it trusts none.
+  | { type: "done"; id: number; user: HostUser; ca: string[] }
   | { type: "ping"; id: number }
   // A root's guest uid, asked before its share is made, so its virtiofsd maps the host user to it.
   | { type: "uid"; id: number; root: string }

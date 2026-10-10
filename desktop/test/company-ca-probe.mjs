@@ -14,7 +14,7 @@ import { app, net } from "electron";
 import { companyCaFile, trustCompanyCa } from "../dist/shell/company-ca.js";
 
 const companyCa = process.env.PROBE_BROWSER ? undefined : companyCaFile(app.isPackaged, process.env);
-const untrusted = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : null;
+const { untrusted } = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : { untrusted: null };
 
 const serve = (name) => new Promise((resolve) => {
   const tls = { cert: readFileSync(`${process.env.PROBE_SITES}/${name}.pem`), key: readFileSync(`${process.env.PROBE_SITES}/${name}.key`) };

@@ -18,7 +18,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BrowserContext, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
+import type { BrowserContext, CDPSession, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
@@ -600,6 +600,13 @@ const requested = () => [...(host as unknown as { open: Map<{ url(): string }, u
 // Playwright's listener while the agent drives, or on lines of the host's own while its user holds the browser.
 const hears = (page: Page) => Math.min(1, (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser")
   + ((host as unknown as { hearing: Map<Page, { lines?: unknown }> }).hearing.get(page)?.lines ? 1 : 0));
+// The browser has taken the host's word that a page is let be, on each of the host's own *lines* to it, as the
+// host held them: hears() says the host's word, which goes out to the browser a moment later, and the test's
+// own calls of xwininfo, xprop and x-user.py hold this process's event loop meanwhile, so that a click of the
+// user's could reach the browser before it. The browser answers a line's questions in turn: so each line's
+// answer to one asked now, or its refusal, closed by then, comes after the browser took the host's word on it.
+// Asked as the host asks its own, which runs none of the page's code and gives it nothing.
+const taken = (lines: CDPSession[]) => Promise.all(lines.map((line) => line.send("Runtime.evaluate", { expression: "0" }).catch(() => {})));
 // How many of Playwright's own listeners *page* has for a file it asks for: each ask one of them hears is read as a gesture.
 const playwrightHears = (page: Page) => (page as unknown as { listenerCount(event: string): number }).listenerCount("filechooser");
 // The user's own hand on that display, as X events (x-user.py): the window given the keyboard, a click, keys typed.
@@ -700,12 +707,42 @@ describe("the processes on a profile", () => {
       // This test's own process stands for one blocked in its read: its command line never comes.
       const stuck = `/proc/${process.pid}/cmdline`;
       const asked: string[] = [];
-      const read = (path: string) => (asked.push(path), path === stuck ? new Promise<string>(() => {}) : readFile(path, "utf8"));
-      const started = performance.now();
+      // When the last of the others came: how long the reads take is the computer's, and its load's.
+      let answered = 0;
+      const read = (path: string) => {
+        asked.push(path);
+        if (path === stuck) return new Promise<string>(() => {});
+        return readFile(path, "utf8").finally(() => (answered = performance.now()));
+      };
       expect(await holding(join(folder, "profile"), read)).toEqual([on.pid]);
-      expect(performance.now() - started).toBeLessThan(3_000);
+      // It waits on the silent one a second past the others' last answer, and no longer: three seconds spare a busy computer's late timer.
+      expect(performance.now() - answered).toBeLessThan(3_000);
       expect(await holding(join(folder, "profile"), read)).toEqual([on.pid]);
       expect(asked.filter((path) => path === stuck)).toHaveLength(1);
+    } finally {
+      on.kill("SIGKILL");
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("finds them on a computer too busy to answer its reads at once: each comes in its turn, the last long after a second, and none is taken for one that does not come", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "sb-holding-"));
+    const on = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(folder, "profile", "x")], { stdio: "ignore" });
+    try {
+      await new Promise((done) => on.once("spawn", done));
+      const mine = `/proc/${on.pid}/cmdline`;
+      // Every read answers in its turn, one after another over a second and a half, as reads queued on libuv's
+      // four threads do on a busy computer; the one of the process on the profile last of all.
+      const count = readdirSync("/proc").filter((pid) => /^\d+$/.test(pid)).length;
+      const gap = 1_500 / count;
+      const busy = () => {
+        const began = performance.now();
+        let turns = 0;
+        const turn = (at: number) => new Promise<void>((done) => setTimeout(done, began + at - performance.now()));
+        return (path: string) => (path === mine ? turn(1_500 + gap).then(() => readFile(path, "utf8")) : turn(gap * (turns += 1)).then(() => ""));
+      };
+      expect(await holding(join(folder, "profile"), busy())).toEqual([on.pid]);
+      expect(await holding(join(folder, "profile"), busy())).toEqual([on.pid]);
     } finally {
       on.kill("SIGKILL");
       rmSync(folder, { recursive: true, force: true });
@@ -4469,7 +4506,9 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     // What the agent's next answers carry, once the download a test waits for has ended: the page's own hears it too.
     const hears = async (starts: () => Promise<unknown>) => {
       const [download] = await Promise.all([page.waitForEvent("download", { timeout: 10_000 }), starts()]);
-      await download.failure();
+      // Ended. The host may have removed it already, which it does only once it has ended: Playwright then
+      // refuses any question of the download's, as of one closed, and a short download is removed at once.
+      await download.failure().catch(() => {});
       // Removed by the host once it had looked at it: by then it has said what it says.
       await expect.poll(() => download.path().then((path) => existsSync(path), () => false), { timeout: 5_000 }).toBe(false);
       return (await op(a, "browser.mouse", { action: "move", x: 1, y: 1 }, "chat-1")) as { ok?: { notices: string[] }; error?: unknown };
@@ -5959,7 +5998,8 @@ await navigator.serviceWorker.ready;`);
     await new Promise((done) => setTimeout(done, 1_000));
     expect([made.map((which) => saying(which).length), ownChoosers()]).toEqual([[1, 1, 1, 1], []]);
     // Each that a process of its own draws has a line of the host's by now, with the page's and the frame's it had.
-    expect((host as unknown as { hearing: Map<Page, { lines?: unknown[] }> }).hearing.get(page)?.lines).toHaveLength(5);
+    const lines = (host as unknown as { hearing: Map<Page, { lines?: CDPSession[] }> }).hearing.get(page)!.lines!;
+    expect(lines).toHaveLength(5);
     // Their own click in the other site's frame, and in the frame of the page's site inside the other site's: each
     // has leave by it and asks. The page is not let be yet, and neither are its frames: no chooser opens.
     asUser("focus", xwindow()!.id);
@@ -5973,6 +6013,7 @@ await navigator.serviceWorker.ready;`);
     expect([hears(page), ownChoosers()]).toEqual([1, []]);
     // Let be, five seconds after the last of that: their click in a frame opens the browser's chooser, as in the page.
     await expect.poll(() => hears(page), { timeout: 20_000 }).toBe(0);
+    await taken(lines);
     expect(ownChoosers()).toEqual([]);
     asUser("click", ...screen(320, 270));
     await expect.poll(() => ownChoosers().length, { timeout: 10_000 }).toBe(1);

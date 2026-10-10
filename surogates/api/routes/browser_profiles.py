@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
+from surogates.api.routes.browser import reaches_its_browser
 from surogates.browser.base import BrowserCreditsExhaustedError
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.profiles import BrowserProfileRow
@@ -249,6 +250,9 @@ async def capture_profile(
         session = await request.app.state.session_store.get_session(session_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+    # Its browser is its own user's: another member of the org is answered as for no session.
+    if not reaches_its_browser(tenant, session):
+        raise HTTPException(status_code=404, detail="Session not found")
     # Capture is restricted to the dedicated setup session bound to this
     # profile — it cannot export an arbitrary agent session even if the caller
     # transiently holds its control lease.
