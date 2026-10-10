@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { trust } from "../src/guest/trust.js";
-import { certificate } from "./certificates.js";
+import { certificate, versionOne } from "./certificates.js";
 
 let certs: string;
 let dir: string;
@@ -37,6 +37,7 @@ beforeAll(() => {
   certificate(certs, "another");
   certificate(certs, "site", "company");
   certificate(certs, "other", "another");
+  versionOne(certs, "v1root", "v1site");
 });
 
 afterAll(() => {
@@ -89,11 +90,19 @@ describe("the guest's trust store", () => {
     expect(existsSync(store)).toBe(false);
   });
 
-  it.each<[kind: string, given: () => string[], why: string]>([
-    ["a site's certificate", () => [pem(join(certs, "company.pem")), pem(join(certs, "site.pem"))], "a certificate that is not a certificate authority's: CN=site"],
-    ["what is no certificate", () => [pem(join(certs, "company.pem")), "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----"], "a certificate it cannot read"],
-  ])("takes none of the certificates when one is %s, and leaves no store", async (_kind, given, why) => {
-    await expect(trust(given(), places())).rejects.toThrow(why);
+  it("holds a version-1 root the app trusts, which this Node does not call a certificate authority's, and openssl verifies its site against it", async () => {
+    const root = pem(join(certs, "v1root.pem"));
+    // The app's Electron, on BoringSSL, calls it one; Node on OpenSSL, as the guest's is, does not. The app's word stands.
+    expect(new X509Certificate(root).ca).toBe(false);
+    expect(await trust([pem(join(certs, "company.pem")), root], places())).toBe(true);
+    for (const by of ["folder", "bundle"] as const) {
+      for (const leaf of ["v1site", "site"]) expect(verify(join(certs, `${leaf}.pem`), by)).toBe(`${join(certs, `${leaf}.pem`)}: OK`);
+    }
+  });
+
+  it("takes none of the certificates when one is no certificate, and leaves no store", async () => {
+    const given = [pem(join(certs, "company.pem")), "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----"];
+    await expect(trust(given, places())).rejects.toThrow("the host gave a certificate it cannot read");
     expect(readdirSync(dir)).toEqual(["system"]);
   });
 

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { VmManager, type VmOptions } from "../../src/vm/manager.js";
-import { certificate } from "../certificates.js";
+import { certificate, versionOne } from "../certificates.js";
 import { agentDisk, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
@@ -38,6 +38,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the company's CA in the 
   let folder: string;
   let options: VmOptions;
   let company: string;
+  let v1root: string;
   const run = async (manager: VmManager, command: string) => {
     const outcome = await manager.perform({ id: `run-${Math.random()}`, root: ROOT, folder: folderOf(folder), kind: "run", args: { command, workdir: null, timeout: 90 } }, signal());
     return (outcome as { ok: { output: string } }).ok.output;
@@ -53,7 +54,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the company's CA in the 
     certificate(certs, "site", "company");
     certificate(certs, "it");
     certificate(certs, "itsite", "it");
-    for (const name of ["site.pem", "site.key", "itsite.pem"]) copyFileSync(join(certs, name), join(folder, name));
+    // A version-1 root beside it, which the app's Electron takes as a CA's and the guest's Node would not.
+    v1root = readFileSync(versionOne(certs, "v1root", "v1site"), "utf8");
+    for (const name of ["site.pem", "site.key", "itsite.pem", "v1site.pem"]) copyFileSync(join(certs, name), join(folder, name));
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
@@ -66,11 +69,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the company's CA in the 
   });
 
   it("trusts the CA the app gives a boot, in the system's store and through each tool's own variable, and the next boot told none trusts it no more", async () => {
-    const trusted = new VmManager({ ...options, ca: [company] });
+    const trusted = new VmManager({ ...options, ca: [company, v1root] });
     try {
       // OpenSSL's own defaults, the store's hashed folder alone, and its bundle alone; a CA the app was not given is trusted nowhere.
-      expect(await run(trusted, "openssl verify site.pem; openssl verify -no-CAfile -no-CAstore -CApath /etc/ssl/certs site.pem; openssl verify -no-CApath -no-CAstore -CAfile /etc/ssl/certs/ca-certificates.crt site.pem; openssl verify itsite.pem 2>&1 | tail -1")).toBe(
-        "site.pem: OK\nsite.pem: OK\nsite.pem: OK\nerror itsite.pem: verification failed\n",
+      expect(await run(trusted, "openssl verify site.pem; openssl verify -no-CAfile -no-CAstore -CApath /etc/ssl/certs site.pem; openssl verify -no-CApath -no-CAstore -CAfile /etc/ssl/certs/ca-certificates.crt site.pem; openssl verify v1site.pem; openssl verify itsite.pem 2>&1 | tail -1")).toBe(
+        "site.pem: OK\nsite.pem: OK\nsite.pem: OK\nv1site.pem: OK\nerror itsite.pem: verification failed\n",
       );
       expect(await run(trusted, `printenv ${VARIABLES.join(" ")}`)).toBe(VARIABLES.map(() => "/etc/ssl/certs/ca-certificates.crt\n").join(""));
       // Certificates alone, which no command changes or runs.

@@ -33,22 +33,21 @@ export interface TrustPlaces {
 
 /**
  * The guest's trust store, at *places.store*, holding *certificates* beside *places.system*'s own:
- * true once it does, false where there is none to hold, and no store is made. Every certificate
- * must be a CA's, as the app's file must: one that is not, or not a certificate at all, and none is
- * taken, with why. A store that could not be finished goes, and is none. The guest's roots are set
- * up only once this has settled (Control), so none sees a store half made.
+ * true once it does, false where there is none to hold, and no store is made. Which certificates is
+ * the app's word: it took each as a CA's, by its own library's rule, which this Node's need not
+ * share (a version-1 root is one to BoringSSL and none to OpenSSL), and the guest's openssl judges
+ * every chain by its own rules as it verifies it. Only what is a certificate is kept: given one that
+ * is not, none is taken, with why. A store that could not be finished goes, and is none. The guest's
+ * roots are set up only once this has settled (Control), so none sees a store half made.
  */
 export async function trust(certificates: readonly string[], places: TrustPlaces = { system: SYSTEM, store: STORE, openssl: OPENSSL }): Promise<boolean> {
   if (certificates.length === 0) return false;
   const parsed = certificates.map((pem) => {
-    let certificate: X509Certificate;
     try {
-      certificate = new X509Certificate(pem);
+      return new X509Certificate(pem);
     } catch {
       throw new Error("the host gave a certificate it cannot read");
     }
-    if (!certificate.ca) throw new Error(`the host gave a certificate that is not a certificate authority's: ${certificate.subject}`);
-    return certificate;
   });
   const { store } = places;
   try {
