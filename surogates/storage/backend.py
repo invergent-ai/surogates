@@ -24,6 +24,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from botocore.exceptions import ClientError
+
 logger = logging.getLogger(__name__)
 
 #: How much of an object a streamed read holds at once, and the size of each part of a streamed write.
@@ -479,13 +481,11 @@ class S3Backend:
         async with self._client() as s3:
             try:
                 resp = await s3.get_object(Bucket=bucket, Key=key)
-                return await resp["Body"].read()
-            except s3.exceptions.NoSuchKey:
-                raise KeyError(f"{bucket}/{key}")
-            except Exception as exc:
-                if "NoSuchKey" in str(exc) or "404" in str(exc):
+            except ClientError as exc:
+                if _absent(exc):
                     raise KeyError(f"{bucket}/{key}") from exc
                 raise
+            return await resp["Body"].read()
 
     async def read_text(self, bucket: str, key: str, encoding: str = "utf-8") -> str:
         data = await self.read(bucket, key)
@@ -510,10 +510,8 @@ class S3Backend:
         async with self._client() as s3:
             try:
                 resp = await s3.get_object(Bucket=bucket, Key=key)
-            except s3.exceptions.NoSuchKey:
-                raise KeyError(f"{bucket}/{key}")
-            except Exception as exc:
-                if "NoSuchKey" in str(exc) or "404" in str(exc):
+            except ClientError as exc:
+                if _absent(exc):
                     raise KeyError(f"{bucket}/{key}") from exc
                 raise
             written, body = 0, resp["Body"]
@@ -623,16 +621,16 @@ class S3Backend:
         async with self._client() as s3:
             try:
                 resp = await s3.head_object(Bucket=bucket, Key=key)
-                return {
-                    "size": resp.get("ContentLength", 0),
-                    "modified": resp.get("LastModified"),
-                    # What the store names the object's contents by: two writes in one second differ by it.
-                    "etag": resp.get("ETag"),
-                }
-            except Exception as exc:
-                if "404" in str(exc) or "NoSuchKey" in str(exc):
+            except ClientError as exc:
+                if _absent(exc):
                     raise KeyError(f"{bucket}/{key}") from exc
                 raise
+            return {
+                "size": resp.get("ContentLength", 0),
+                "modified": resp.get("LastModified"),
+                # What the store names the object's contents by: two writes in one second differ by it.
+                "etag": resp.get("ETag"),
+            }
 
     async def list_buckets(self, prefix: str = "") -> list[str]:
         async with self._client() as s3:
@@ -775,19 +773,24 @@ async def _upload_if(s3: Any, bucket: str, key: str, source: Path, tag: str | No
 
 async def _still(s3: Any, bucket: str, key: str, tag: str | None) -> None:
     """:class:`Changed` unless the object *key* is still of the ETag *tag*, or still none for None, as the store answers now."""
-    from botocore.exceptions import ClientError
-
     try:
         now = (await s3.head_object(Bucket=bucket, Key=key)).get("ETag")
     except ClientError as exc:
-        # Only the store's answer that there is none, by its code, or its status where it gives none.  Never
-        # by the words: a client's own error names the request's address, and a key may hold "404".
-        answer = exc.response
-        if (answer.get("Error", {}).get("Code") or str(answer.get("ResponseMetadata", {}).get("HTTPStatusCode"))) not in _ABSENT:
+        if not _absent(exc):
             raise
         now = None
     if now != tag:
         raise Changed(f"{bucket}/{key}")
+
+
+def _absent(exc: ClientError) -> bool:
+    """Whether *exc* is the store's answer that there is no such object.
+
+    By its code, or its status where it gives none.  Never by the words: a
+    client's own error names the request's address, and a key may hold "404".
+    """
+    answer = exc.response
+    return (answer.get("Error", {}).get("Code") or str(answer.get("ResponseMetadata", {}).get("HTTPStatusCode"))) in _ABSENT
 
 
 def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent: bool = False) -> None:
