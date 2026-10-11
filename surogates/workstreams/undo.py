@@ -213,7 +213,8 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
             working = False
         if working:
             raise Refused(WORKING)
-    plan = _plan(landed, await undone_of(state.session_factory, project.id))
+    rows = [row.id for row in landed]
+    plan = _plan(landed, await undone_of(state.session_factory, project.id, rows))
     if not plan:
         # Nothing of it is left to put back: no landing is made, and the project's files are not waited for.
         if landing is not None:
@@ -228,7 +229,7 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
 
     async def decide(place: BucketHistory, main: str | None) -> tuple[list[dict], list[dict], dict[str, list[Any]]]:
         # Under the project's lock: what an Undo since put back is not undone twice.
-        fresh = _plan(landed, await undone_of(state.session_factory, project.id))
+        fresh = _plan(landed, await undone_of(state.session_factory, project.id, rows))
         backs = [fresh[path] for path in plan if path in fresh]
         if landing is not None and not backs:
             # Another lock holder's settle, or another Undo, put it back while this one waited.

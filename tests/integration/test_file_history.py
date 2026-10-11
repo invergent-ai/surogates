@@ -204,6 +204,20 @@ async def test_a_file_the_projects_undo_put_back_is_undone_and_the_card_undoes_n
     assert (bare.landings, bare.undone) == ((), frozenset())
 
 
+async def test_the_undos_read_for_some_rows_are_those_that_name_them_and_the_undos_of_those_alone(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && echo a > a.md")
+    other = await recorded(api, row, saga="saga:other", files=[{"path": "b.md", "before": None, "after": blob_of(b"b"), "merged": True}])
+    first = await an_undo_recorded(api, row, undoes=[row.id], paths=["Report.docx"])
+    await an_undo_recorded(api, row, undoes=[other], paths=["b.md"])
+    again = await an_undo_recorded(api, row, undoes=[first], paths=["Report.docx"])
+    await an_undo_recorded(api, row, undoes=[again], paths=["Report.docx"])
+    session_factory = api.app.state.session_factory
+    # The rows' own Undos, and the Undos of those however far: never another row's, whatever the project holds.
+    assert await rows_module.undone_of(session_factory, project["id"], [row.id]) == {(row.id, "Report.docx"), (again, "Report.docx")}
+    assert await rows_module.undone_of(session_factory, project["id"], [other]) == {(other, "b.md")}
+    assert await rows_module.undone_of(session_factory, project["id"], []) == frozenset()
+
+
 async def test_a_file_your_edit_clashed_with_is_being_redone_until_the_redo_lands_it(api, monkeypatch, pods):
     project = await create(api)
     thread = await a_thread(api, "Draft A", await master_of(api, project))
@@ -2275,6 +2289,27 @@ async def test_undo_leaves_a_file_a_routine_changed_since_and_names_the_routine(
         "applied": ["a.md"], "skipped": [{"path": "Report.docx", "by": {"kind": "routine", "name": "Tidy up"}}], "picked_up": [],
     }
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A, tidied"
+
+
+async def test_undo_leaves_a_file_a_landing_left_half_put_back_wrote_since_and_names_its_thread(api, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    [by_a] = await rows(api, first)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    await ends(api, pool, second)
+    # B's landing as one whose put-back failed: escalated, the report left as B's apply wrote it, which its row no longer lists.
+    [by_b] = await rows(api, second)
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "UPDATE workstream_history SET saga_state = 'escalated', files = '[]', commit = NULL, steps = ("
+            "SELECT jsonb_agg(CASE WHEN s->>'tool_name' = 'history.apply' THEN jsonb_set(s, '{state}', '\"compensation_failed\"') ELSE s END) "
+            "FROM jsonb_array_elements(steps) s) WHERE id = :id"
+        ), {"id": by_b.id})
+        await db.commit()
+    assert await undone(api, project, landing=str(by_a.id)) == {
+        "applied": [], "skipped": [{"path": "Report.docx", "by": {"kind": "thread", "thread_id": str(second.id), "title": "Draft B"}}],
+        "picked_up": [],
+    }
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B" and undos_on_main(pods) == 0
 
 
 def you_save_after_the_look_at_main(monkeypatch, pods, *saves: tuple[str, bytes]) -> None:
