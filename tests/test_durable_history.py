@@ -195,8 +195,8 @@ def a_messy_project(project: Path) -> None:
     for n in range(80):
         (project / "uploads" / f"scan {n:02}.pdf").write_bytes(b"%PDF " + bytes([n]) * 100)
     for file in project.rglob("*"):
-        if "vendor" not in file.parts and not file.is_symlink():
-            os.utime(file, (time.time() - 60, time.time() - 60))
+        if "vendor" not in file.parts:
+            os.utime(file, (time.time() - 60, time.time() - 60), follow_symlinks=False)
 
 
 def changed_since(project: Path) -> None:
@@ -912,6 +912,33 @@ def test_a_save_in_the_second_a_pod_read_the_file_reaches_the_next_copy(tmp_path
     (pod.copy / "B.md").write_text("by B")
     time.sleep(1.1)  # the landing comes later
     land(pod, "saga:b")
+    assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
+
+
+def test_a_save_in_the_second_a_landings_pickup_read_the_file_reaches_the_next_copy_however_late_the_bucket_dates_the_index(
+    tmp_path, project, monkeypatch,
+):
+    pod = a_pod(tmp_path, project)
+    (pod.copy / "A.md").write_text("by A")
+    time.sleep(1.1)
+    time.sleep(1 - time.time() % 1)  # the start of a second
+    second = int(time.time())
+    (project / "notes.txt").write_text("v2 notes\n")  # your save, which the landing's pickup reads in that second
+    os.utime(project / "notes.txt", (second, second))  # geesefs shows whole seconds
+    put = History._put_durable
+
+    def saved_again_as_the_index_goes_up(self, name, source):
+        if name == "index":
+            (project / "notes.txt").write_text("v9 notes\n")  # saved again in that second, the same size
+            os.utime(project / "notes.txt", (second, second))
+            time.sleep(1.1)  # a large index goes up through geesefs: the bucket dates it seconds later
+        put(self, name, source)
+
+    monkeypatch.setattr(History, "_put_durable", saved_again_as_the_index_goes_up)
+    land(pod, "saga:a")
+    monkeypatch.undo()
+    assert (project / "notes.txt").read_text() == "v9 notes\n"
+    # The kept index came seconds after the second notes.txt was read in: by its date alone it would vouch for notes.txt.
     assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
 
 

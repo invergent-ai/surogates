@@ -1729,17 +1729,25 @@ class History:
         """main's index of the real files, made the landing's, into the durable history.
 
         The next pod reads only the real files whose size or time changed
-        since; an entry the landing changed has neither, so it is read.
+        since; an entry the landing changed has neither, so it is read.  So
+        is one saved in the second the pod's read began or since, which may
+        have been saved again unseen at the same size: the bucket dates the
+        kept index by its own clock as it goes up, seconds later for a large
+        one, and by that date alone it would vouch for such a file.
         """
         kept = self.repo / "kept.index"
         # With its time: the second the pod's read of the real files began, at its open or its landing's pickup.
         shutil.copy2(self.repo / "index", kept)
+        read = int(kept.stat().st_mtime)
         try:
             self._git(
                 ["read-tree", "-m", "-i", landing],
                 env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(kept)},
                 cwd=self.project,
             )
+            if (entries := _entries(kept)) is None:
+                raise HistoryError("the index is not one whose entries this marks to be read again")
+            _replace(kept, _index({path: _read_again(entry, read) for path, entry in entries.items()}))
             self._put_durable("index", kept)
         finally:
             kept.unlink(missing_ok=True)
@@ -2150,6 +2158,17 @@ def _known(entry: bytes, seen: os.stat_result, written: int) -> bool:
     if size == 0 and entry[40:60] != _EMPTY:
         return False
     return size == seen.st_size & 0xFFFFFFFF and saved == int(seen.st_mtime) & 0xFFFFFFFF and saved < written
+
+
+def _read_again(entry: bytes, written: int) -> bytes:
+    """*entry*, marked as git marks one it cannot vouch for where its file was saved in the second *written* or since: with no size.
+
+    Whoever reads the index then reads that file again, as :func:`_known`
+    and git both do with an entry with no size whose file is not the empty one.
+    """
+    if int.from_bytes(entry[8:12], "big") < written & 0xFFFFFFFF:
+        return entry
+    return entry[:36] + bytes(4) + entry[40:]
 
 
 def _environ(env: dict[str, str]) -> dict[str, str]:
