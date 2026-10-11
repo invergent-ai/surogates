@@ -136,6 +136,9 @@ function alike(st: BigIntStats | null, id: Identity | null): boolean {
   return String(st.size) === id.size && st.mtimeNs / 1000n === BigInt(id.mtimeNs) / 1000n;
 }
 const plain = (st: BigIntStats): boolean => st.isFile() && st.nlink === 1n;
+// The very file *id* names, by its device and its inode, whatever its size or time now.
+const sameInode = (st: BigIntStats | null, id: Identity | null): boolean =>
+  st !== null && id !== null && String(BigInt.asUintN(64, st.dev)) === id.dev && String(BigInt.asUintN(64, st.ino)) === id.ino;
 // A revision as an identity: its change time is left out, which a move changes.
 function expectedIdentity(revision: string): Identity {
   const [dev = "", ino = "", size = "", mtimeNs = ""] = revision.split(":");
@@ -427,7 +430,8 @@ function stage(from: number, temp: string, path: string, after: string, mode: nu
 // A record as this module writes one, or null: nothing else in it is acted on.
 function stepOf(value: unknown): Step | null {
   if (typeof value !== "object" || value === null) return null;
-  const { path, was, wrote, mode, made, above, temp, aside, moved, out, back, copied, kept, left } = value as Record<string, unknown>;
+  // A record an earlier build wrote names nothing a step kept or left: none.
+  const { path, was, wrote, mode, made, above, temp, aside, moved, out, back, copied, kept = null, left = null } = value as Record<string, unknown>;
   const numbered = (keys: string[]) => (id: unknown): boolean =>
     id === null || (typeof id === "object" && keys.every((key) => /^-?[0-9]+$/.test(String((id as Record<string, unknown>)[key]))));
   const identity = numbered(["dev", "ino", "size", "mtimeNs"]) as (id: unknown) => id is Identity | null;
@@ -698,6 +702,8 @@ class Landing {
           this.write(step, did);
         }
         this.still(dir, folders, path);
+        // The real file once moved aside, as the look after the move saw it: what is written into it from then shows.
+        let movedAs: BigIntStats | null = null;
         if (did.aside !== null) {
           const [real, aside] = [dir.at(name), dir.at(did.aside)];
           // Before the real file leaves its name: the folder gives a file a second name, which is how the real one
@@ -727,6 +733,7 @@ class Landing {
           // Moved aside, no save by its name reaches it: it is the file the look saw, or it goes back.
           const moved = look(aside);
           if (moved === null || !plain(moved) || !same(moved, expectedIdentity(expected))) throw conflict(path);
+          movedAs = moved;
         }
         if (did.temp !== null) {
           try {
@@ -737,7 +744,7 @@ class Landing {
           }
           remove(dir.at(did.temp));
         }
-        const keeps = did.aside === null ? null : this.keep(dir.at(did.aside), step);
+        const keeps = did.aside === null ? null : this.keep(dir.at(did.aside), step, movedAs!);
         this.write(step, {
           ...did, temp: null, aside: null, moved: false, out: null, back: null, copied: 0, kept: keeps?.kept ?? null, left: keeps?.left ? did.aside : null,
         });
@@ -766,16 +773,17 @@ class Landing {
 
   // *from*, the real file moved aside, kept in the app's data: moved, or copied where that is another filesystem or
   // mount. A copy leaves *from* where it is, under the step's own name beside its name, until the landing is forgotten:
-  // a program that holds the file open writes into it there. The file as it is kept, and whether it was left so.
-  private keep(from: string, step: number): { kept: Kept; left: boolean } {
+  // a program that holds the file open writes into it there. *moved* is the file as the step last looked at it. The file
+  // as it is kept, and whether it was left so.
+  private keep(from: string, step: number, moved: BigIntStats): { kept: Kept; left: boolean } {
     const to = this.bytes(step);
-    // The file itself, where it is copied: as it was before the copy, so what is written into it from then shows.
+    // The file itself, where it is copied: as the step last looked at it, so what is written into it from then shows.
     let left: BigIntStats | null = null;
     try {
       renameSync(from, to);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw fromNode(error, from);
-      left = lstatSync(from, { bigint: true });
+      left = moved;
       // Under another name until it is whole: a kept file that has its name is the user's file, all of it.
       const part = `${to}.part`;
       copyFileSync(from, part);
@@ -923,8 +931,10 @@ class Landing {
   // "changed" where the name holds a file that is neither the step's nor the one it found: that file stays, and so
   // does what the step kept.
   // *restored* is told before the step lets go of its record, once the real file has its name again.
-  private putBack(step: number, record: Step, held: Held | null = null, restored?: () => void): "back" | "restored" | "changed" {
+  // "lost" where what the step left beside its name is in a folder no longer at its path: nothing is done.
+  private putBack(step: number, record: Step, held: Held | null = null, restored?: () => void): "back" | "restored" | "changed" | "lost" {
     let did = record;
+    if (held === null && this.leftLost(did)) return "lost";
     const parts = did.path.split("/");
     const name = parts.at(-1)!;
     const folders = parts.slice(0, -1);
@@ -981,8 +991,9 @@ class Landing {
         if (placed === null) return "changed";
         did = placed;
         outcome = "restored";
-      } else if (!alike(now, did.was)) {
-        // Neither the step's file nor the one it found: someone else's change.
+      } else if (!alike(now, did.was) && !sameInode(now, did.was)) {
+        // Neither the step's file nor the one it found: someone else's change. The very file it found, whatever a program
+        // wrote into it since, has its name back, as a put-back cut once it had it leaves it.
         return "changed";
       }
       if (outcome === "restored") restored?.();
@@ -1026,14 +1037,35 @@ class Landing {
 
   // A step that did not end, put back: by a failure of its own, or found by a helper's start after a kill.
   private revert(step: number, did: Step, report: Recovered, held: Held | null = null): void {
-    let outcome: "back" | "restored" | "changed" = "changed";
+    let outcome: "back" | "restored" | "changed" | "lost" = "changed";
     try {
       outcome = this.putBack(step, did, held, () => this.tell(report, { restored: [did.path] }));
     } catch (error) {
       // A link on its way now: nothing is followed to find what was moved aside there.
       if (!(error instanceof Failure && error.refusal.type === "sandbox")) throw error;
     }
+    // Its record is all that names where the file it left beside its name went: it stays, and says so at every start.
+    if (outcome === "lost") report.lost.push([did.path, did.left!]);
     if (outcome === "changed") this.end(step, report, held);
+  }
+
+  // Whether what step *did* left beside its name is in a folder that is not at its path any more: none there, or a link
+  // in its stead.
+  private leftLost(did: Step): boolean {
+    if (did.left === null) return false;
+    try {
+      const dir = enter(this.root(did.path), did.path.split("/").slice(0, -1), did.path).dir;
+      dir?.close();
+      return dir === null;
+    } catch (error) {
+      if (error instanceof Failure && error.refusal.type === "sandbox") return true;
+      throw error;
+    }
+  }
+
+  // Why step *did* was not done where what it left beside its name is lost (leftLost), and how its person finds it.
+  private lostWords(did: Step, then: string): string {
+    return `${did.path}'s folder is not where it was, and the file this landing replaced is in it, wherever it went, as '${did.left}'. Put the folder back, or make an empty one where it was, and ask again: ${then}`;
   }
 
   // A step that cannot be put back, ended: the name holds a file that is neither the step's nor the one it found,
@@ -1090,7 +1122,9 @@ class Landing {
     if (did === null) return { path, put_back: false };
     if (did.path !== path) throw valueError(BAD);
     if (protectedInFolder(this.folder, join(this.folder, ...parts))) throw sandboxError(inFolderRefusal(path));
-    if (this.putBack(step, did) === "changed") {
+    const outcome = this.putBack(step, did);
+    if (outcome === "lost") throw new Failure({ type: "conflict", message: this.lostWords(did, "it was not put back") });
+    if (outcome === "changed") {
       // The step ends as one cut short does, and what it kept stays kept.
       const report: Recovered = { restored: [], beside: [], lost: [], unread: [] };
       this.end(step, report);
@@ -1111,6 +1145,7 @@ class Landing {
       if (did !== null && !settled(did)) {
         throw new Failure({ type: "conflict", message: `${did.path} was left by a step cut short and is not put back yet, so its landing was not forgotten` });
       }
+      if (did !== null && this.leftLost(did)) throw new Failure({ type: "conflict", message: this.lostWords(did, "the landing was not forgotten") });
     }
     // A file a step replaced that a program held open and wrote into since it was kept holds the user's bytes: it goes
     // beside its name in the folder, as a file that could not take its name back does, and is told. One left beside its
@@ -1118,7 +1153,7 @@ class Landing {
     for (const step of this.steps()) {
       const did = this.read(step);
       if (did === null) continue;
-      this.letGoLeft(did);
+      this.letGoLeft(step, did);
       if (!this.changedSince(look(this.bytes(step)), did)) continue;
       const parts = did.path.split("/");
       const dir = enter(this.root(did.path), parts.slice(0, -1), did.path, true).dir!;
@@ -1152,7 +1187,7 @@ class Landing {
   // What step *did* left beside its name, as its landing is forgotten: beside its name where a program wrote into it
   // since, and gone otherwise, with the folders a deletion emptied. Nothing is followed to it through a link on its way
   // now, and one whose folder went went with it.
-  private letGoLeft(did: Step): void {
+  private letGoLeft(step: number, did: Step): void {
     if (did.left === null) return;
     const folders = did.path.split("/").slice(0, -1);
     let dir: Held | null = null;
@@ -1165,13 +1200,31 @@ class Landing {
     try {
       const at = dir.at(did.left);
       const there = look(at);
-      if (there === null || !there.isFile()) return;
-      if (this.changedSince(there, did)) this.besideIt(did, dir, at, null);
-      remove(at);
+      if (there !== null && there.isFile()) {
+        // Only its change time moved, as a sync client's or a backup's touch moves it: written only where its bytes are
+        // no longer the ones kept.
+        const touched = did.kept !== null && String(there.size) === did.kept.size && String(there.mtimeNs) === did.kept.mtimeNs;
+        if (this.changedSince(there, did) && !(touched && this.holdsKept(at, step))) this.besideIt(did, dir, at, null);
+        remove(at);
+      }
     } finally {
       dir.close();
     }
     if (did.wrote === null) this.empty(folders.map((_, index) => folders.slice(0, folders.length - index).join("/")));
+  }
+
+  // Whether the file at *at* holds the very bytes step *step* kept a copy of.
+  private holdsKept(at: string, step: number): boolean {
+    const open: number[] = [];
+    try {
+      open.push(openSync(at, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), openSync(this.bytes(step), constants.O_RDONLY | constants.O_NOFOLLOW));
+      const size = fstatSync(open[0]!).size;
+      return size === fstatSync(open[1]!).size && sameBytes(open[0]!, open[1]!, size);
+    } catch {
+      return false;
+    } finally {
+      for (const fd of open) closeSync(fd);
+    }
   }
 
   // The file at *from*, what step *did* replaced, given a name beside its own in its folder *dir*, with *mode* again where
@@ -1223,6 +1276,7 @@ class Landing {
       try {
         const did = this.read(step);
         if (did !== null && !settled(did)) this.revert(step, did, report);
+        else if (did !== null && this.leftLost(did)) report.lost.push([did.path, did.left!]);
       } catch (error) {
         if (error instanceof Unreadable) report.unread.push([error.saga, error.step, error.path]);
         else failures.push(error);
