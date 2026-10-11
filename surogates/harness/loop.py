@@ -3580,6 +3580,28 @@ class AgentHarness(
                         "Session %s: mission has in-flight tasks; deferring completion",
                         session.id,
                     )
+                    # The turn is over all the same: the cursor moves past its
+                    # answer, so a wake with nothing new asks the model nothing.
+                    # Not past what this request did not read: a report or a
+                    # redo that came while the model answered has its own turn.
+                    try:
+                        since = await self._store.get_events(
+                            session.id, after=request_id, exclude_types=[EventType.LLM_DELTA],
+                        )
+                        unread = _first_unread(
+                            since, goal_in_flight=False,
+                            is_plain_message=lambda event: self._is_plain_message(session, event),
+                        )
+                        await self._store.advance_harness_cursor(
+                            session.id,
+                            through_event_id=event_id if unread is None else min(event_id, unread - 1),
+                            lease_token=lease.lease_token,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to advance cursor past the turn of %s, whose mission is in flight",
+                            session.id,
+                        )
                     return
 
                 # One-shot deep-research orphan-completion guard.  The
