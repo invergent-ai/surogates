@@ -22,6 +22,26 @@ vi.mock("node:fs/promises", async (original) => {
   };
   return { ...real, rm, default: { ...real, rm } };
 });
+// A disk with no room left, where a test says: each file opened under a name that matches is made, and nothing can be
+// written in it.
+const full = vi.hoisted(() => ({ at: null as RegExp | null, opened: new Set<number>() }));
+vi.mock("node:fs", async (original) => {
+  const real = await original<typeof import("node:fs")>();
+  const openSync = (...args: Parameters<typeof real.openSync>) => {
+    const fd = real.openSync(...args);
+    if (full.at?.test(String(args[0]))) full.opened.add(fd);
+    return fd;
+  };
+  const writeFileSync = (...args: Parameters<typeof real.writeFileSync>) => {
+    if (typeof args[0] === "number" && full.opened.has(args[0])) throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    return real.writeFileSync(...args);
+  };
+  const closeSync = (fd: number) => {
+    full.opened.delete(fd);
+    return real.closeSync(fd);
+  };
+  return { ...real, openSync, writeFileSync, closeSync, default: { ...real, openSync, writeFileSync, closeSync } };
+});
 
 import { BOOT_ID, checkFolder } from "../src/binding/folder.js";
 import { ASIDE_BYTES, copyOf, FolderReplaced, keptOf, keyOf, type Looked, placeOf, type PlaceOptions, placesGone } from "../src/history/place.js";
@@ -90,6 +110,7 @@ beforeEach(() => {
   for (const dir of [data, folder, join(base, "home")]) mkdirSync(dir);
   removals.failing = null;
   removals.held = null;
+  full.at = null;
   letGo = [];
   sandbox = {
     letGo: (place) => {
@@ -859,6 +880,18 @@ describe("the places set aside under a folder's path", () => {
     expect(placesGone(under)).toEqual([`${key}.was-1`]);
     writeFileSync(join(data, "history", `${key}.gone.json`), "{");
     expect(placesGone(under)).toEqual([]);
+  });
+
+  it("go though the disk is too full to name them, and leave no part of their names written", async () => {
+    await filled(2);
+    await filled(2);
+    const [oldest] = stamps();
+    const key = keyOf(folder);
+    full.at = /\.gone\.json\.[0-9]+$/;
+    // Past the bound on a full disk: the oldest goes all the same, named nowhere, and the place is made.
+    expect(await ask()).toHaveProperty("place");
+    expect([stamps().includes(oldest!), asides().filter((name) => name.endsWith(".gone"))]).toEqual([false, []]);
+    expect([histories().filter((name) => name.startsWith(`${key}.gone.json`)), placesGone({ key, history: join(data, "history", key) })]).toEqual([[], []]);
   });
 
   it("are bounded behind the ask that set one aside, which is answered first, and one run of the bound at a time for a folder's path", async () => {

@@ -32,7 +32,7 @@
 // named, so that every turn's open of a thread on the folder says it is gone (history/copies.ts).
 
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 
@@ -198,17 +198,27 @@ export function recordedFolder(dataDir: string, name: string): Folder | null {
   return recorded === null || keyOf(recorded.path) !== key ? null : recorded;
 }
 
-// Whole or not at all, and on disk before any history is made in the place.
+// Whole or not at all, and on disk before any history is made in the place. What could not be written, as on a full
+// disk, leaves no part of it.
 function write(record: string, recorded: unknown): void {
   const temp = `${record}.${process.pid}`;
-  const fd = openSync(temp, "w", 0o600);
   try {
-    writeFileSync(fd, JSON.stringify(recorded));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
+    const fd = openSync(temp, "w", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(recorded));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temp, record);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Never made.
+    }
+    throw error;
   }
-  renameSync(temp, record);
 }
 
 // Each folder's look while it waits, so one that never answers holds one of libuv's threads, however often it is asked.
@@ -306,7 +316,8 @@ async function changeable(path: string): Promise<void> {
  * goes in the order they were set aside in (stamped). Each is renamed to go first, where it lies (<name>.gone), its
  * record removed, then named as gone (placesGone), and then it is removed, its folders made its owner's to change
  * first: cut anywhere, none is kept with part of it gone, none is named gone that is kept, and the next set-aside names
- * and removes what is left. None of it is the sandbox's: a place is set aside only once the
+ * and removes what is left. On a disk too full to name them, they are removed unnamed: the bound frees the disk first.
+ * None of it is the sandbox's: a place is set aside only once the
  * sandbox has let it go, and none of it is anybody's but the app's.
  */
 async function keptWithin(data: string, key: string, most: number): Promise<void> {
@@ -341,7 +352,11 @@ async function keptWithin(data: string, key: string, most: number): Promise<void
   // Each place going named as gone before any of it is removed: one a cut left going is named by the next run, and none
   // is named that is kept. What landings alone kept, with no history beside it, is no place a thread was told of.
   const went = going.filter((path) => dirname(path) === join(data, "history")).map((path) => basename(path).replace(/\.gone$/, ""));
-  if (went.length > 0) write(join(data, "history", `${key}.gone.json`), [...new Set([...placesGone({ key, history: join(data, "history", key) }), ...went])].slice(-GONE_NAMED));
+  try {
+    if (went.length > 0) write(join(data, "history", `${key}.gone.json`), [...new Set([...placesGone({ key, history: join(data, "history", key) }), ...went])].slice(-GONE_NAMED));
+  } catch {
+    // A disk too full to name them: they go unnamed, rather than stay on it.
+  }
   // Each on its own: one that cannot be removed whole now keeps none after it, and is tried again at the next set-aside.
   for (const path of going) {
     await changeable(path).catch(() => {});
