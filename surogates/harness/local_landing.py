@@ -59,6 +59,14 @@ deleted while its landing has written a file has that landing put back whole
 by its worker, within a bound; past it, the landing is left for the next one
 in its folder.  A step whose computer does not answer within its bound ends
 a landing that wrote no file, with nothing of it left for anyone.
+
+A failed turn does not land, since its files may be half made, and nor does
+one whose landing a Stop ended.  The copy outlives either on its computer,
+and lands with the thread's next turn; meanwhile the turn is kept on the
+thread's branch in the folder's history, its base and all, so its work is
+in the history and not in the copy alone.  A keep touches nothing of the
+folder, asks the app for no hold, and is recorded in no History: nothing of
+it landed.
 """
 
 from __future__ import annotations
@@ -93,6 +101,7 @@ from surogates.governance.saga.orchestrator import SagaTimeoutError
 from surogates.harness.landing import (
     _PUT_BACK_BOUND,
     LandingUnsettled,
+    _kept_as,
     _orchestrator,
     _Row,
     _tell,
@@ -363,11 +372,13 @@ async def land_local_turn(
     landing while it has written no file, its holding of the folder and
     its settle of another's landing among it: what it waits in is closed,
     and the folder given back where its computer answers within
-    :data:`STOP_FORGET`.  From its first apply on, the landing finishes or
-    is put back whole, as it would with no Stop, and is not tried again;
-    but where the thread was deleted, heard so or read so where the journal
-    refused a step, it is put back whole within ``landing._PUT_BACK_BOUND``,
-    or left for the next landing in its folder.
+    :data:`STOP_FORGET`; then the turn is kept on its branch, as a failed
+    turn is, within as long, its files each not merged.  From its first
+    apply on, the landing finishes or is put back whole, as it would with
+    no Stop, and is not tried again; but where the thread was deleted,
+    heard so or read so where the journal refused a step, it is put back
+    whole within ``landing._PUT_BACK_BOUND``, or left for the next landing
+    in its folder.
 
     Raises :class:`LeaseLost` where another worker took the thread's turn:
     this one stands down, and has written nothing more.
@@ -399,6 +410,8 @@ async def land_local_turn(
             outcome["reason"] = "deleted"
         if outcome["reason"] in ("refused", "settling", "stopped"):
             await _release(copy, session, turn, wait=STOP_FORGET if outcome["reason"] == "stopped" else None)
+        if outcome["reason"] == "stopped":
+            await _kept_at_a_stop(copy, session, turn, outcome)
         return _heard(outcome, ending)
     land = partial(
         _land, copy, session, turn, session_factory=session_factory, saga_settings=saga_settings, tool_saga_id=tool_saga_id,
@@ -418,6 +431,8 @@ async def land_local_turn(
         outcome = _both(outcome, await land(TRIES + 1, calls=since))
     if not outcome.pop("forgot") and outcome["state"] != "unsettled" and outcome.get("reason") != "unanswered":
         await _release(copy, session, turn, wait=STOP_FORGET if outcome.get("reason") == "stopped" else None)
+    if outcome.get("reason") == "stopped":
+        await _kept_at_a_stop(copy, session, turn, outcome)
     if recovery:
         outcome["recovery"] = recovery
     _tell(outcome, redoing)
@@ -436,6 +451,71 @@ def _heard(outcome: dict, ending: _Ending) -> dict:
     if ending.heard():
         outcome["stop_heard"] = True
     return outcome
+
+
+async def keep_local_turn(*, store: Any, session_factory: Any, redis: Any, session: Any, lease_token: str | None) -> list[str]:
+    """Keep *session*'s failed turn on its branch in its folder's history on its user's computer: the files kept.
+
+    Nothing where the copy holds nothing to keep: no turn since its last
+    landing could have changed it, or nothing differs from its base.  A
+    failed turn does not land, since its files may be half made; its copy
+    outlives it on its computer, and lands with the thread's next turn,
+    whatever that turn does (:func:`lands`).  Kept meanwhile, its work is in
+    the folder's history and not in the copy alone.  Its end waits for its
+    computer :data:`RELEASE_WAIT` at most: a keep not answered by then is
+    closed, and what it would have kept lands with the next turn all the same.
+
+    Raises :class:`LeaseLost` where another worker took the thread's turn:
+    this one stands down, and has asked nothing more.
+    """
+    turn = await _turn_now(store, session)
+    calls = await store.get_events(session.id, after=turn, types=[EventType.TOOL_CALL])
+    if not await lands(store, session, turn, calls):
+        return []
+    copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=lease_token)
+    return await _kept(copy, session, turn, wait=RELEASE_WAIT)
+
+
+async def _kept(copy: ThreadCopy, session: Any, turn: int, *, wait: float) -> list[str]:
+    """The turn *turn*'s copy committed on its thread's branch, its base and all, within *wait*: the files kept.
+
+    Asked under ``land:<turn>:keep``, a turn's end taken up again answered
+    from the journal: the files the copy changed since its base, which a
+    turn's report names, then the keep.  A copy that changed none keeps
+    nothing, and its branch stays where it is.
+    """
+    steps = copy.steps(f"land:{turn}:keep")
+
+    async def keeping() -> list[str]:
+        paths = (await steps.history("changed"))["paths"]
+        if paths:
+            await steps.history("keep", **_kept_as(session), base=True)
+        return paths
+
+    return await asyncio.wait_for(keeping(), wait)
+
+
+async def _kept_at_a_stop(copy: ThreadCopy, session: Any, turn: int, outcome: dict) -> None:
+    """Keep a turn whose landing a Stop ended on its branch, as a failed turn is kept; its *outcome* names each file kept, not merged.
+
+    Within :data:`STOP_FORGET`, as its folder is given back: as best it
+    can, and what is not kept lands with the thread's next turn all the
+    same.  A landing that ended before it named the turn's files names
+    them so.
+    """
+    try:
+        kept = await _kept(copy, session, turn, wait=STOP_FORGET)
+    except LeaseLost:
+        raise
+    except TimeoutError:
+        logger.warning("The turn of thread %s was not kept on its branch: its computer did not answer in time", session.id)
+        return
+    except Exception:
+        logger.warning("The turn of thread %s, whose landing a Stop ended, was not kept on its branch", session.id, exc_info=True)
+        return
+    named = {f["ref"] for f in outcome["files"]}
+    more = [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in kept if path not in named]
+    outcome["files"] = sorted([*outcome["files"], *more], key=lambda f: f["ref"])
 
 
 def waiting_on_you_here(session: Any, paths: list[str], *, escalated: bool) -> dict:
