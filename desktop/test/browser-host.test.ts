@@ -3039,6 +3039,33 @@ new Image().src = "http://" + own("image") + "/";
       expect(folders.flatMap(holding)).toEqual([]);
     }, 240_000 + IDLE_MS);
 
+    it("takes a launch's sign-in no more once the launch is refused or its browser has gone, before any launch after", async () => {
+      // What the proxy answers a request for a name only it answers, made with *secret*'s sign-in: 204 while it is taken.
+      const signedAs = (made: string) => new Promise<number>((answered, fail) => {
+        const headers = { host: "gone.proxy-check.invalid", "proxy-authorization": `Basic ${Buffer.from(`surogate:${made}`).toString("base64")}` };
+        httpRequest({ host: "127.0.0.1", port: at, path: "http://gone.proxy-check.invalid/", headers }, (answer) => answered(answer.resume().statusCode ?? 0)).on("error", fail).end();
+      });
+      // Each host here is given the test's proxy, and lets it be at its close.
+      const withProxy = async (options: BrowserHostOptions = {}) => {
+        Object.assign(host, { proxy: null });
+        await host.close();
+        host = new BrowserHost(options);
+        Object.assign(host, { proxy: { server: proxy, port: at } });
+      };
+      // A launch whose check fails: its browser takes its proxy settings from elsewhere, as a policy can make it.
+      await withProxy({ args: ["--no-proxy-server"] });
+      expect(await op(session(), "browser.evaluate", { code: "return 1;" })).toEqual({ error: { type: "browser", message: PROXY_BYPASSED } });
+      expect(await signedAs(secret)).toBe(407);
+      // A launch that ran, and its browser closed by its user: its sign-in opens nothing from then on, with no browser launched since.
+      await withProxy();
+      expect((await op(session(), "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(true);
+      expect(await signedAs(secret)).toBe(204);
+      for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+      await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+      await expect.poll(() => (host as unknown as { running: unknown }).running, { timeout: 10_000 }).toBeNull();
+      expect(await signedAs(secret)).toBe(407);
+    }, 60_000);
+
     it("stays signed in whatever a site answers: a site's own 407, to an image or to a navigation, with a challenge or with none, is never the proxy's to its browser", async () => {
       const a = session();
       expected("first");

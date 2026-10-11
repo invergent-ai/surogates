@@ -306,6 +306,21 @@ describe("the browser's proxy", () => {
     }
   });
 
+  it("takes its launch's sign-in no more once signed out, as at a launch refused or a browser gone, until the next launch makes one", async () => {
+    proxy.signOut();
+    proxy.expect("0123abcd");
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid")).status).toBe(407);
+    expect((await connect("localhost:3000")).status).toBe(407);
+    expect(proxy.checked("0123abcd")).toBe(false);
+    // The next launch's own is taken, and the one before it still not.
+    const before = signed;
+    signed = signIn(proxy.signIn());
+    proxy.expect("0123abcd");
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid", before)).status).toBe(407);
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid")).status).toBe(204);
+    expect([proxy.checked("0123abcd"), dialed]).toEqual([true, []]);
+  });
+
   it("keeps a launch's secret nowhere: what it holds of it tells nobody the sign-in", () => {
     const { password } = proxy.signIn();
     expect(password).toMatch(/^[A-Za-z0-9_-]{43}$/);

@@ -215,6 +215,11 @@ export class BrowserProxy {
     return { username: SIGN_IN_AS, password };
   }
 
+  /** The launch's sign-in is taken no more: its browser was refused, or has gone. Nobody is signed in until the next launch's. */
+  signOut(): void {
+    this.signed = null;
+  }
+
   // Whether a request or a tunnel carries the launch's sign-in, once: digests compared, so in constant time.
   private own(request: IncomingMessage): boolean {
     const said = request.headersDistinct["proxy-authorization"];

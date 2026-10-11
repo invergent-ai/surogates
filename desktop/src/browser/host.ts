@@ -2107,7 +2107,9 @@ export class BrowserHost {
   }
 
   // *context*'s browser has closed: none of its requests is answered now, and the next browser starts with none.
+  // Its launch's sign-in opens nothing from now on: a launch begins only once the browser before it has closed.
   private closed(context: BrowserContext): void {
+    this.proxy?.server.signOut();
     this.open.clear();
     this.retire(context);
   }
@@ -2281,6 +2283,7 @@ export class BrowserHost {
     await page.goto(`http://${token}${CHECK_DOMAIN}/`, { timeout: CHECK_MS }).catch(() => {});
     await line.send("Fetch.disable").catch(() => {});
     await line.detach().catch(() => {});
+    // A check that fails closes its browser at once (launch), and its sign-in with it.
     if (!proxy.checked(token)) throw new Error(PROXY_BYPASSED);
     await page.goto("about:blank").catch(() => {});
     return page;
