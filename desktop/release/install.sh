@@ -925,7 +925,8 @@ settled() {
 # virtiofsd, and uidmap's newuidmap and newgidmap for the VM; zstd for its image; pkexec, which its
 # updates run the root helper with; and what this script runs itself.
 packages() {
-  local said updated=1 certutil=""
+  local said updated=1 certutil="" line base untrusted=""
+  local -a universe
   local cause="ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include"
   say "installing the packages it needs"
   export DEBIAN_FRONTEND=noninteractive
@@ -935,9 +936,18 @@ packages() {
   [ -n "$updated" ] || say "apt-get update failed for a package source of this computer's: installing from what apt knows already"
   # Where apt did not trust the certificate that an https source answered with, as behind a proxy
   # that inspects https, that is why an install fails, certutil's too, and not the sources'
-  # components. Its update says so, and ends 0: "Certificate verification failed" on 24.04,
-  # "certificate verify failed" on 26.04.
-  if [[ "${said,,}" == *"certificate verif"* ]]; then
+  # components: where that source is one of Ubuntu's universe, which holds ripgrep and virtiofsd,
+  # and not another's, as a vendor's, which holds none of what is installed. Its update says so on
+  # the line that names what it fetched there, and ends 0: "Certificate verification failed" on
+  # 24.04, "certificate verify failed" on 26.04.
+  mapfile -t universe < <(apt-get indextargets --no-release-info --format '$(BASE_URI)' 'Component: universe' 2>/dev/null)
+  while IFS= read -r line; do
+    [[ "${line,,}" == *"certificate verif"* ]] || continue
+    for base in "${universe[@]}"; do
+      if [ -n "$base" ] && [[ "$line" == *"$base"* ]]; then untrusted=1; fi
+    done
+  done <<<"$said"
+  if [ -n "$untrusted" ]; then
     cause="apt does not trust the certificate that this computer's https package sources answer with, as behind a proxy that inspects https, and the CA of --ca-cert is Surogate's alone. "
     cause+="Have the system trust the network's CA (its certificate as a .crt file in /usr/local/share/ca-certificates, then update-ca-certificates), or name http package sources, and run this again"
     certutil=": $cause"

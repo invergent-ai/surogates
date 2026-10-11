@@ -3710,6 +3710,9 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
 
   it("says that apt does not trust what its https package sources answer with, where that is why it cannot install what it needs, certutil among it: and the sources' components where it fails otherwise", () => {
     const sources = "/etc/apt/sources.list.d/ubuntu.sources";
+    // A package source of another's, which holds none of what the app needs.
+    const vendor = "/etc/apt/sources.list.d/vendor.sources";
+    const universe = "Surogate Desktop: could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include";
     // This computer's package sources at *address*: the base, as a proxy that inspects https answers
     // for them, with a certificate that the company's CA signed and the system does not trust.
     const at = (address: string) => expect(root(`sed -i -E 's#^URIs: .*#URIs: ${address}/ubuntu/#' ${sources}`).status).toBe(0);
@@ -3725,7 +3728,14 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       at("http://127.0.0.1:9");
       const unreached = alone("packages");
       expect(unreached.status).toBe(1);
-      expect(last(unreached)).toBe("Surogate Desktop: could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include");
+      expect(last(unreached)).toBe(universe);
+      // The other's source at the base, whose certificate the system does not trust either: that is not why it fails.
+      expect(root(`printf 'Types: deb\\nURIs: ${base}/vendor/\\nSuites: stable\\nComponents: main\\n' > ${vendor}`).status).toBe(0);
+      const elsewhere = alone("packages");
+      expect(elsewhere.status).toBe(1);
+      expect(elsewhere.stderr).toMatch(new RegExp(`Failed to fetch ${base}/vendor/dists/stable/InRelease .*certificate verif`, "i"));
+      expect(last(elsewhere)).toBe(universe);
+      expect(root(`rm ${vendor}`).status).toBe(0);
       // All it needs but certutil, which a CA brings: that alone is downloaded, and fails as the rest would.
       expect(root(`cp /root/ubuntu.sources ${sources} && apt-get update -qq && apt-get install -y -qq socat >/dev/null`).status).toBe(0);
       at(base);
@@ -3733,7 +3743,7 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
       expect(certutil.status).toBe(1);
       expect(last(certutil)).toBe(`Surogate Desktop: could not install libnss3-tools, which holds certutil: ${UNTRUSTED_SOURCES}`);
     } finally {
-      expect(root(`cp /root/ubuntu.sources ${sources} && apt-get update -qq && apt-get install -y -qq socat libnss3-tools >/dev/null`).status).toBe(0);
+      expect(root(`rm -f ${vendor} && cp /root/ubuntu.sources ${sources} && apt-get update -qq && apt-get install -y -qq socat libnss3-tools >/dev/null`).status).toBe(0);
     }
   });
 
