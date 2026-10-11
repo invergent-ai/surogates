@@ -112,8 +112,9 @@ class StorageBackend(Protocol):
         *if_absent*, the write is for the object its writer saw: one
         changed since, made or gone, raises :class:`Changed` and is left as
         it is, where the store can tell.  ``LocalBackend`` tells, up to the
-        moment it puts the new file in place; ``S3Backend`` writes as asked
-        whatever the object is now.
+        moment it puts the new file in place; ``S3Backend`` asks for the
+        object once every part is sent, right before it puts them together,
+        so one changed in that call itself is written over all the same.
         """
         ...
 
@@ -532,11 +533,12 @@ class S3Backend:
     async def upload(
         self, bucket: str, key: str, source: Path, *, if_tag: str | None = None, if_absent: bool = False,
     ) -> None:
-        # Unconditional: the client's upload of parts passes no condition on, and whether a store honours
-        # one on a write, Garage among them, is not known here.
         from boto3.s3.transfer import TransferConfig
 
         async with self._client() as s3:
+            if if_tag is not None or if_absent:
+                await _upload_if(s3, bucket, key, source, if_tag)
+                return
             # In parts, each read from the file as the last are sent: two on their way and two waiting, at most.
             parts = TransferConfig(multipart_chunksize=_PART, max_concurrency=2, max_io_queue=2)
             await s3.upload_file(str(source), bucket, key, Config=parts)
@@ -732,6 +734,54 @@ def _unlink_if(path: Path, tag: str) -> None:
     if now != tag:
         raise Changed(str(path))
     path.unlink()
+
+
+async def _upload_if(s3: Any, bucket: str, key: str, source: Path, tag: str | None) -> None:
+    """Write the object *key* from the file *source*, where it is still of the ETag *tag* (None: still no object).
+
+    The object is asked for right before the call that makes it the new
+    one.  A file of one part is written whole after the ask.  A larger one
+    goes up in parts, one at a time, and is asked for once they are sent:
+    the parts are the write's whole time, and none of them is the object
+    until they are put together.  So a save while they go up is seen, the
+    parts let go and :class:`Changed` raised, and the window left is the
+    call that writes or puts together.  The client's own upload passes no
+    condition on, and whether a store honours one, Garage among them, is
+    not known here: one that refused it would refuse every write.
+    """
+    with open(source, "rb") as file:
+        body = await asyncio.to_thread(file.read, _PART)
+        if len(body) < _PART:
+            await _still(s3, bucket, key, tag)
+            await s3.put_object(Bucket=bucket, Key=key, Body=body)
+            return
+        upload = (await s3.create_multipart_upload(Bucket=bucket, Key=key))["UploadId"]
+        try:
+            parts: list[dict[str, Any]] = []
+            while body:
+                number = len(parts) + 1
+                sent = await s3.upload_part(Bucket=bucket, Key=key, UploadId=upload, PartNumber=number, Body=body)
+                parts.append({"PartNumber": number, "ETag": sent["ETag"]})
+                body = await asyncio.to_thread(file.read, _PART)
+            await _still(s3, bucket, key, tag)
+            await s3.complete_multipart_upload(Bucket=bucket, Key=key, UploadId=upload, MultipartUpload={"Parts": parts})
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload)
+            raise
+
+
+async def _still(s3: Any, bucket: str, key: str, tag: str | None) -> None:
+    """:class:`Changed` unless the object *key* is still of the ETag *tag*, or still none for None, as the store answers now."""
+    try:
+        now = (await s3.head_object(Bucket=bucket, Key=key)).get("ETag")
+    except Exception as exc:
+        # Only an answer that there is none: a store that did not answer says nothing of the object.
+        if "404" not in str(exc) and "NoSuchKey" not in str(exc):
+            raise
+        now = None
+    if now != tag:
+        raise Changed(f"{bucket}/{key}")
 
 
 def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent: bool = False) -> None:
