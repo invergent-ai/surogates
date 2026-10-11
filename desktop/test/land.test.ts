@@ -1473,6 +1473,59 @@ describe("a folder that tells names apart less than the thread's copy does", () 
   });
 });
 
+// A disk of 64 KiB, which a file the thread made fills: tmpfs, mounted in a user namespace of the test's own. *run* is a
+// shell line given the mount's path as $1.
+function small(at: string, run: string, ...more: string[]) {
+  return spawnSync("bwrap", [
+    "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "ALL", "--bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--",
+    "sh", "-c", `mount -t tmpfs -o size=64k none "$1" && mkdir "$1/Documents" && ${run}`, "sh", at, ...more,
+  ], { encoding: "utf8", timeout: 30_000 });
+}
+const smallProbe = mkdtempSync(join(tmpdir(), "land-small-"));
+const probedSmall = small(smallProbe, '! head -c 131072 /dev/zero > "$1/Documents/x" 2>/dev/null');
+rmSync(smallProbe, { recursive: true, force: true });
+const noSmall = probedSmall.status === 0 ? null : `no small disk can be mounted here: ${(probedSmall.stderr || probedSmall.error?.message || `bwrap exited ${probedSmall.status}`).trim().split("\n")[0]}`;
+
+describe("a folder on a disk that is full", () => {
+  it("replaces nothing and leaves nothing of the landing's where the thread's file does not fit, says so by the disk, and lands one that does", (context) => {
+    context.skip(noSmall !== null, noSmall ?? "");
+    const mount = join(base, "mount");
+    mkdirSync(mount);
+    const [large, little] = ["x".repeat(128 * 1024), "a short note\n"];
+    const data = { "Report.docx": large, "big.bin": large, "note.txt": little };
+    for (const [name, text] of Object.entries(data)) turn(name, text);
+    // The landing runs where the mount is, and says what it was answered and what the folder then holds.
+    const script = `
+      import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      const { perform } = await import(${JSON.stringify(new URL("../dist/files/operations.js", import.meta.url).href)});
+      const folder = join(process.argv[1], "Documents");
+      const context = { folder, home: "/nowhere", env: {}, landing: { copy: ${JSON.stringify(copy)}, kept: ${JSON.stringify(kept)} } };
+      const land = (args) => perform("land", args, context, new AbortController().signal);
+      writeFileSync(join(folder, "Report.docx"), "the report, v1");
+      const looked = await land({ action: "revisions", paths: ["Report.docx"] });
+      const steps = [
+        ["Report.docx", ${JSON.stringify(blob("the report, v1"))}, ${JSON.stringify(blob(large))}, looked.ok.revisions[0][1]],
+        ["big.bin", null, ${JSON.stringify(blob(large))}, "absent"], ["note.txt", null, ${JSON.stringify(blob(little))}, "absent"],
+      ];
+      const out = { applied: [] };
+      for (const [step, [path, before, after, expected]] of steps.entries()) {
+        out.applied.push(await land({ action: "apply", saga: ${JSON.stringify(SAGA)}, step, path, before, after, expected }));
+      }
+      out.holds = Object.fromEntries(readdirSync(folder).map((name) => [name, readFileSync(join(folder, name), "utf8")]));
+      console.log(JSON.stringify(out));
+    `;
+    const ran = small(mount, '"$2" --input-type=module -e "$3" "$1"', process.execPath, script);
+    expect(ran.stderr).toBe("");
+    const out = JSON.parse(ran.stdout) as { applied: unknown[]; holds: Record<string, string> };
+    const full = (path: string) => ({ error: { type: "os", code: "ENOSPC", message: `No space left on device: '${path}'` } });
+    expect(out.applied).toEqual([full("Report.docx"), full("big.bin"), { ok: { path: "note.txt", before: null, after: blob(little), made: [] } }]);
+    expect(out.holds).toEqual({ "Report.docx": "the report, v1", "note.txt": little });
+    // What it kept of the replaced file, and its records, it let go with the step each failed.
+    expect(readdirSync(join(kept, SAGA))).toEqual(["2.json"]);
+  });
+});
+
 // A user's own attribute on a file, set and read by Python: Node has no call for either. Null where this computer's
 // filesystem keeps none.
 const attribute = (path: string, value?: string): string | null => {
