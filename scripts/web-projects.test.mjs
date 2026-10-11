@@ -223,6 +223,7 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     id: "t-1", title: "Tidy the shared folder", group: "working", reason: "computer",
     statusLine: "Waiting for thinkpad", progress: { done: 1, total: 2 },
     files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1", landing: "redoing" }],
+    moreFiles: 0,
     landingId: "41",
     setAside: null,
     place: { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false },
@@ -254,6 +255,17 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }).landingId;
   assert.deepEqual([7, "", { id: "41" }, "41"].map(landed), [null, null, null, "41"]);
+});
+
+test("a row says how many more files it has than it lists", () => {
+  const moreOf = (more_files, files = []) => threadRowOf({
+    id: "t-7", title: "Scaffold", group: "idle", reason: null, status_line: null, progress: null, files, more_files,
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).moreFiles;
+  const listed = { kind: "file", label: "a.md", ref: "a.md", thread_id: "t-7", landing: "landed" };
+  assert.deepEqual([1800, 0].map((more) => moreOf(more)), [1800, 0]);
+  // A count that is none, as a server from before rows counted their files sends, is none more.
+  assert.deepEqual([undefined, null, -2, 1.5, "7", Number.MAX_SAFE_INTEGER + 1].map((more) => moreOf(more, [listed])), [0, 0, 0, 0, 0, 0]);
 });
 
 test("what a thread's computer set aside maps to the row's, each entry taken only where the page knows it", () => {
@@ -367,7 +379,7 @@ test("a row of a later server whose reason, group, file kind, mark and place are
     ],
   }), {
     id: "t-1", title: "Draft A", group: null, reason: null, statusLine: "Drafted the memo.", progress: null,
-    files: [{ kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx", threadId: "t-1", landing: null }],
+    files: [{ kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx", threadId: "t-1", landing: null }], moreFiles: 0,
     landingId: null, setAside: null, place: null,
     createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z", resolvedAt: null,
   });
@@ -778,6 +790,27 @@ test("an Undo the agent refuses says why in the agent's words, and an answer tha
   for (const body of [null, { applied: "a.md", skipped: [], picked_up: [] }, { applied: [], skipped: [{ by: null }], picked_up: [] }]) {
     const odd = routesOver(() => Response.json(body));
     await assert.rejects(odd.routes.undo("p-1", { landingId: "3" }), { message: "The change could not be undone." }, JSON.stringify(body));
+  }
+});
+
+test("an Undo whose answer the network or a gateway cut off says it may still finish, as the agent goes on with it", async () => {
+  const mayStillFinish = "The connection was lost before the agent answered: the undo may still finish.";
+  for (const [why, answer] of [
+    // As authFetch says it, and as fetch itself does.
+    ["unreachable", () => Promise.reject(new Error("API server is not reachable."))],
+    ["a fetch that failed", () => Promise.reject(new TypeError("Failed to fetch"))],
+    ["its answer cut on its way", () => new Response(new ReadableStream({ start: (stream) => stream.error(new TypeError("network error")) }))],
+    ["a gateway's timeout", () => new Response("<html>Gateway Timeout</html>", { status: 504 })],
+    ["a gateway that lost the agent", () => new Response("<html>Bad gateway</html>", { status: 502 })],
+  ]) {
+    const { routes } = routesOver(answer);
+    await assert.rejects(routes.undo("p-1", { landingId: "12" }), { message: mayStillFinish }, why);
+  }
+  // Answered, it is the agent's word, or the route's own failure: neither is one that may still finish.
+  const refused = routesOver(() => Response.json({ detail: "This change was undone already." }, { status: 504 }));
+  await assert.rejects(refused.routes.undo("p-1", { landingId: "12" }), { message: "This change was undone already." });
+  for (const answer of [() => new Response("<html>Service Unavailable</html>", { status: 503 }), () => new Response("{not json")]) {
+    await assert.rejects(routesOver(answer).routes.undo("p-1", { threadId: "t-1" }), { message: "The change could not be undone." });
   }
 });
 

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, any_, bindparam, func, or_, select, text, update
+from sqlalchemy import and_, any_, bindparam, func, not_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -55,6 +55,44 @@ def _half_landed(*of: Any) -> Any:
         *of, WorkstreamHistory.kind == "landing", WorkstreamHistory.device_id.is_not(None),
         WorkstreamHistory.saga_state == "running", WorkstreamHistory.thread_id.is_not(None), ~held,
     )
+
+
+async def _redoing(db: AsyncSession, statuses: dict[UUID, str]) -> dict[UUID, frozenset[str]]:
+    """The files each thread of *statuses*, by its ``sessions.status``, is being redone, read in one statement.
+
+    By the landing's own rule (``landing.redo_files``): those of its last
+    ``history.redo`` while no turn that read it has ended, which its next
+    turn is told to redo.  And while that turn is under way or to come: a
+    turn that ended before it asked the model anything, refused by its
+    user's limit, read no redo, so its next turn will, but until the
+    thread is sent on it rests, and nothing redoes the file.
+    """
+    from surogates.harness.landing import TURN_ENDS
+
+    if not statuses:
+        return {}
+    redo = (
+        select(Event.session_id, Event.id, Event.data["files"].label("files"))
+        .distinct(Event.session_id)
+        .where(Event.session_id == _any(statuses), Event.type == EventType.HISTORY_REDO.value)
+        .order_by(Event.session_id, Event.id.desc())
+        .subquery("redo")
+    )
+    # Its last turn end (``landing.last_turn_end``): a command's end is none.
+    ended = select(func.max(Event.id)).where(
+        Event.session_id == redo.c.session_id, Event.type.in_([t.value for t in TURN_ENDS]), ~Event.data.has_key("answers"),
+    ).scalar_subquery()
+    ends = select(redo.c.session_id, redo.c.id, redo.c.files, ended.label("ended")).subquery("ends")
+    asked = select(Event.id).where(
+        Event.session_id == ends.c.session_id, Event.type == EventType.LLM_REQUEST.value,
+        Event.id > ends.c.id, Event.id < ends.c.ended,
+    ).exists()
+    found = await db.execute(select(ends.c.session_id, ends.c.files, ends.c.ended > ends.c.id, asked))
+    return {
+        thread_id: frozenset(f["path"] for f in files or [])
+        for thread_id, files, since, read in found
+        if not since or (not read and statuses[thread_id] == "active")
+    }
 
 
 class WorkstreamStore:
@@ -141,12 +179,28 @@ class WorkstreamStore:
             await db.commit()
 
     async def resolve_thread(self, session_id: UUID) -> None:
-        """Move the thread to Resolved; one already there keeps the moment it got there."""
+        """Move the thread to Resolved; one already there keeps the moment it got there.
+
+        Its waits on you over a clash of its files are over with it:
+        expired, never answered.  One it is given since is ended by the
+        inbox's sweep (``jobs.inbox_expire``).  One over a landing a settle
+        left half-done in the folder is your only notice of it, and stays,
+        before the resolve or after it, until you answer or dismiss it.
+        """
         async with self._sf() as db:
             await db.execute(
                 update(WorkstreamThread)
                 .where(WorkstreamThread.session_id == session_id, WorkstreamThread.resolved_at.is_(None))
                 .values(resolved_at=func.now())
+            )
+            await db.execute(
+                update(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id, InboxItem.kind == "action_required",
+                    InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files"}),
+                    not_(InboxItem.payload.contains({"escalated": True})),
+                )
+                .values(status="expired", updated_at=func.now())
             )
             await db.commit()
 
@@ -236,9 +290,14 @@ class WorkstreamStore:
                 events_of[event.session_id].append(event)
             for landed_by, row_id, files, device_id in landings:
                 landings_of[landed_by].append({"id": row_id, "files": files, "on_computer": device_id is not None})
+            # Asked only of a thread not resolved with a file a landing left out: no other has one to mark.
+            redoing = await _redoing(db, {
+                thread.session_id: status for thread, status, _, _ in threads
+                if thread.resolved_at is None
+                and any(not f["merged"] for landing in landings_of[thread.session_id] for f in landing["files"])
+            })
         # The Undos that mark those landings' files: an Undo is of the cloud's files.
         undone = await undone_of(self._sf, workstream_id, [row_id for _, row_id, _, device_id in landings if device_id is None])
-        redoing = await self._redoing(landings_of)
         return [
             ThreadFacts(
                 id=thread.session_id, title=thread.title, status=status,
@@ -250,22 +309,6 @@ class WorkstreamStore:
             )
             for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]
-
-    async def _redoing(self, landings_of: dict[UUID, list[dict[str, Any]]]) -> dict[UUID, frozenset[str]]:
-        """The files each thread's next turn is told to redo, by the landing's
-        own rule (``landing.redo_files``), so that a row says a file is being
-        redone exactly while that turn would redo it.  Asked only of a thread
-        with a file a landing left out: no other has one to mark.
-        """
-        from surogates.harness.landing import redo_files
-        from surogates.session.store import SessionStore
-
-        sessions = SessionStore(self._sf)
-        return {
-            thread_id: frozenset(await redo_files(sessions, thread_id))
-            for thread_id, landings in landings_of.items()
-            if any(not f["merged"] for landing in landings for f in landing["files"])
-        }
 
     async def thread_counts(self, workstream_ids: list[UUID]) -> dict[UUID, tuple[datetime, int, int]]:
         """Each project's latest thread activity, and its threads waiting on

@@ -117,11 +117,13 @@ const REASONS = ["question", "approval", "failed", "computer", "files"] as const
 const ORIGINS = ["added", "produced"] as const;
 
 // A row of an agent older than this app names no landing for its card's Undo, and nothing set aside: that is none;
-// and a row that lists no files has none. A group or a reason the app does not know, as a later agent's page may
-// serve, is none, never a row refused: the Overview lists its thread all the same.
+// a row that lists no files has none, and one that counts none past them has none more. A group or a reason the app
+// does not know, as a later agent's page may serve, is none, never a row refused: the Overview lists its thread all
+// the same.
 function threadOf(value: unknown): ThreadRow {
   const {
-    id, title, group, reason, statusLine, progress, files = [], landingId = null, setAside = null, place, createdAt, updatedAt, resolvedAt,
+    id, title, group, reason, statusLine, progress, files = [], moreFiles, landingId = null, setAside = null, place, createdAt, updatedAt,
+    resolvedAt,
   } = fields(value);
   const { done, total } = fields(progress);
   need(named(id) && text(title, 500) && (statusLine === null || text(statusLine, 2_000))
@@ -130,6 +132,7 @@ function threadOf(value: unknown): ThreadRow {
   return {
     id, title, group: one(group, GROUPS) ? group : null, reason: one(reason, REASONS) ? reason : null, statusLine,
     progress: progress === null ? null : { done, total }, files: listOf(files, 200, fileOf).flat(),
+    ...(count(moreFiles) && moreFiles > 0 ? { moreFiles } : {}),
     landingId, setAside: setAsideOf(setAside), place: placeOf(place), createdAt, updatedAt, resolvedAt,
   } as ThreadRow;
 }
