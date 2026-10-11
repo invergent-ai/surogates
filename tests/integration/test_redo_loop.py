@@ -247,6 +247,115 @@ async def test_your_edit_then_a_landing_tells_the_thread_to_redo_and_the_redo_la
     assert unread_reports(await store.get_events(thread.id)) == []
 
 
+async def test_a_redo_turn_you_stop_leaves_your_file_as_you_saved_it_puts_no_wait_on_you_and_its_next_turn_is_no_redo(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, YOURS)
+    # Stopped once it has redone the edit in its copy.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx"})),
+        calling(("memory", {"action": "add", "content": "Redid it."})),
+        _final_response("Redid the edit."),
+    ], pool=pool, during=stop)
+    ended = await landing_module.last_turn_end(store, thread.id)
+    [redo] = await store.get_events(thread.id, types=[EventType.HISTORY_REDO])
+    assert (ended.type, ended.id > redo.id) == (EventType.SESSION_PAUSE.value, True)
+    # Your report stays as you saved it, and nothing waits on you: the stop was yours.
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    assert await waits_of(api, thread) == []
+    # The redo's turn is over: its file is not merged, and the next turn is an ordinary one, told nothing again.
+    assert [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]] == [
+        ("Report.docx", "not_merged"), ("a.md", "landed"),
+    ]
+    assert await landing_module.redo_files(store, thread.id) == set()
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO])) == 1
+    assert unread_reports(await store.get_events(thread.id)) == []
+
+
+async def test_a_redo_turn_whose_landing_lost_the_lock_is_not_tried_again_over_it_and_lands_with_the_next_turn(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, YOURS)
+    call, lost = landing_module._call, []
+
+    async def the_lock_goes_at_the_apply(sandbox_pool, owner, action, **arguments):
+        if owner == str(thread.id) and action == "apply" and not lost:
+            lost.append(arguments["path"])
+            await lose_the_lock(api, thread)
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_lock_goes_at_the_apply)
+        await a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Redid the edit."),
+        ], pool=pool)
+    # The landing that lost its lock stopped, and no try ran again over the lock it no longer held.
+    assert lost == ["Report.docx"]
+    # Put back whole, and its turn's copy kept, to land with the thread's next turn: your report stays as you saved it.
+    assert [r.saga_state for r in await rows(api, thread)] == ["completed", "compensated"]
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    # Its turn read the redo, which is over: the file is not merged, and nothing waits on you.
+    assert [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]] == [
+        ("Report.docx", "not_merged"), ("a.md", "landed"),
+    ]
+    assert await waits_of(api, thread) == []
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Add a closing line too."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo end >> notes.txt"})), _final_response("Added it."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == YOURS + b" by A"
+    assert [r.saga_state for r in await rows(api, thread)] == ["completed", "compensated", "completed"]
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO])) == 1
+    assert [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]] == [
+        ("Report.docx", "landed"), ("notes.txt", "landed"), ("a.md", "landed"),
+    ]
+
+
+async def test_two_threads_that_each_change_the_report_over_the_others_change_each_redo_once_and_both_changes_land(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await open_pod(pool, second)  # B's copy is made before A lands
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Edited the report."),
+    ], pool=pool)
+    await a_turn(api, monkeypatch, second, [
+        calling(("terminal", {"command": "printf ' by B' >> Report.docx"})), _final_response("Edited the report."),
+    ], pool=pool)
+    # A's next turn starts before B's redo lands, and changes the report again.
+    await store.emit_event(first.id, EventType.USER_MESSAGE, {"content": "Add another line."})
+    await open_pod(pool, first)
+    await a_turn(api, monkeypatch, second, [
+        calling(("terminal", {"command": "printf ' by B' >> Report.docx"})), _final_response("Redid the edit."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B"
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' again by A' >> Report.docx"})), _final_response("Edited it again."),
+    ], pool=pool)
+    # Each is told once, of the other's change; A's redo is under way while B's has landed.
+    [b_redo], [a_redo] = [await store.get_events(t.id, types=[EventType.HISTORY_REDO]) for t in (second, first)]
+    assert [f["by"] for f in b_redo.data["files"]] == [{"kind": "thread", "id": str(first.id), "title": "Draft A"}]
+    assert [f["by"] for f in a_redo.data["files"]] == [{"kind": "thread", "id": str(second.id), "title": "Draft B"}]
+    assert [(await row_of(api, project, t))["files"][0]["landing"] for t in (first, second)] == ["redoing", "landed"]
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' again by A' >> Report.docx"})), _final_response("Redid the edit."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B again by A"
+    assert [(await row_of(api, project, t))["files"][0]["landing"] for t in (first, second)] == ["landed", "landed"]
+    assert [len(await store.get_events(t.id, types=[EventType.HISTORY_REDO])) for t in (first, second)] == [1, 1]
+    for thread in (first, second):
+        assert await waits_of(api, thread) == []
+
+
 async def test_a_redo_wakes_its_finished_thread(api, monkeypatch, pods):
     thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
     store, pool = api.app.state.session_store, SandboxPool(pods)
