@@ -150,13 +150,22 @@ _STAYS_IN_COPY = (
 )
 STOP_LEFT_IN_COPY = f"Stopped, but not all of this turn could be taken back. {_STAYS_IN_COPY}"
 STOP_LEFT_LANDED = "Stopped, but part of this turn had already landed in your folder, so it was not taken back."
-#: What its person reads where a Stop's undo was left for the thread's next turn (``UndoOwed``); where a step no
-#: undo can take back is among the rest, also that what those changed stays in the copy.
+#: What its person reads where a Stop's undo was left for the thread's next turn (``UndoOwed``).  Where a step no
+#: undo can take back is among the rest, the take-back is promised to the steps owed alone, and the others' said:
+#: they stay in the copy, or had already landed.
 STOP_NOT_YET = (
     "Stopped, but this turn is not taken back yet. It is taken back before the thread's next turn starts, once your "
     "computer answers."
 )
-STOP_NOT_YET_LEFT_IN_COPY = f"{STOP_NOT_YET} {_STAYS_IN_COPY}"
+_OWED_ALONE = (
+    "Stopped, but this turn is not all taken back yet. The steps below not taken back yet are taken back before the "
+    "thread's next turn starts, once your computer answers."
+)
+STOP_NOT_YET_LEFT_IN_COPY = (
+    f"{_OWED_ALONE} What the others changed stays in this thread's copy, and lands in your folder with the thread's "
+    "next turn."
+)
+STOP_NOT_YET_LANDED = f"{_OWED_ALONE} The others had already landed in your folder."
 #: What its master hears where the thread's next turn took all of a turn back that its Stop left not taken back yet.
 STOP_TAKEN_BACK = "Stopped, and all of this turn is taken back now."
 #: Why a step was not taken back, as its person reads it.
@@ -282,8 +291,9 @@ def stop_left(left: list[dict]) -> dict:
     named = [f"{entry['tool']} ({entry['path']})" if "path" in entry else entry["tool"] for entry in left]
     lines = [f"{step}: {WHY_NOT_TAKEN_BACK[entry['why']]}" for step, entry in zip(named, left)]
     owed = [entry["why"] == "owed" for entry in left]
+    in_copy = any(entry["why"] not in ("owed", "landed") for entry in left)
     title = (
-        (STOP_NOT_YET if all(owed) else STOP_NOT_YET_LEFT_IN_COPY) if any(owed)
+        (STOP_NOT_YET if all(owed) else STOP_NOT_YET_LEFT_IN_COPY if in_copy else STOP_NOT_YET_LANDED) if any(owed)
         else STOP_LEFT_IN_COPY if staying else STOP_LEFT_LANDED
     )
     return {

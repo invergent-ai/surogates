@@ -532,3 +532,25 @@ class TestSagaRecord:
         rebuilt = SagaOrchestrator()
         rebuilt.reconstruct_from_events([SimpleNamespace(type="saga.start", data={"saga_id": "s1", "session_id": str(uuid4())})])
         assert rebuilt.get_saga("s1").kind == "tools"
+
+
+class TestStopLeft:
+
+    def test_a_stop_left_owed_promises_the_take_back_only_of_the_steps_owed_and_says_what_the_others_do(self):
+        from surogates.governance.saga.compensator import (
+            STOP_NOT_YET, STOP_NOT_YET_LANDED, STOP_NOT_YET_LEFT_IN_COPY, stop_left,
+        )
+
+        owed = {"step_id": "s2", "tool": "write_file", "why": "owed", "path": "b.md"}
+        staying = {"step_id": "s1", "tool": "terminal", "why": "no_snapshot"}
+        landed = {"step_id": "s0", "tool": "write_file", "why": "landed", "path": "a.md"}
+        assert stop_left([owed])["error_title"] == STOP_NOT_YET
+        assert stop_left([staying, owed])["error_title"] == STOP_NOT_YET_LEFT_IN_COPY
+        assert stop_left([landed, staying, owed])["error_title"] == STOP_NOT_YET_LEFT_IN_COPY
+        # Steps already landed are not said to stay in the copy.
+        assert stop_left([landed, owed])["error_title"] == STOP_NOT_YET_LANDED
+        # Where a step is not owed, the take-back is promised to the steps owed alone, and the others' fate said.
+        for title in (STOP_NOT_YET_LEFT_IN_COPY, STOP_NOT_YET_LANDED):
+            assert "this turn is taken back" not in title and "not taken back yet are taken back" in title
+        assert "What the others changed stays in this thread's copy" in STOP_NOT_YET_LEFT_IN_COPY
+        assert "The others had already landed in your folder." in STOP_NOT_YET_LANDED
