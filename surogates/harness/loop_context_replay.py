@@ -218,8 +218,15 @@ _NOT_LANDED_HERE = {
 _STOPPED_UNDER_WAY = {
     "compensated": "was put back whole", "escalated": "could not be put back whole", "unsettled": "is not finished yet",
 }
-#: Where the work of a thread on a computer is when its landing was put back: in its copy there, as its turn left it.
+#: Where the work of a thread on a computer is when its landing was put back, or failed: in its copy there, as its turn left it.
 _IN_ITS_COPY = "The thread's work is in its copy on its computer, and lands with its next turn"
+#: Where it is when a Stop ended its landing: there too, and the thread stays stopped, its copy holding what no landing writes.
+_STOPPED_IN_ITS_COPY = (
+    "The thread was stopped: its work is in its copy on its computer, and lands with its next turn once it is sent on again, "
+    "but for any file a landing never writes"
+)
+#: Why a landing on a computer leaves out a file no landing writes: no landing of the thread's ever lands it.
+_NEVER_LANDS = ("protected", "linked")
 _NOT_IN_ONE_LANDING = {
     "too_large": "The thread's work is in its copy on its computer, and lands once fewer of its files are changed",
     # The cause is the user's, and so is what can be done now: nothing in the folder lands until then.
@@ -238,7 +245,7 @@ _RECOVERED = {
 }
 #: What a report adds of a landing left running whose versions from before the history had lost.
 _NONE_PUT_BACK = "The project's history no longer has their versions from before the landing, so none could be put back"
-#: A landing that failed with the turn's work kept all the same.
+#: A landing that failed with the turn's work kept all the same: on its branch, or in its copy on its computer.
 _FAILED_KEPT = "Not landed, because the landing failed"
 #: What a report adds when the work that did not land is in the history, on the thread's branch.
 WORK_KEPT = "The thread's work is kept, and lands with its next turn"
@@ -287,10 +294,15 @@ def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
         # Not finished: the thread is redoing its change on the newer file, and reports again.
         lines += f"\nBeing redone: {_listed(redoing)}"
     if data.get("landing") in _NOT_LANDED:
+        # A file no landing writes is not the thread's work that did not land: said apart, as a landing that landed says it.
+        never = [f for f in kept if f.get("reason") in _NEVER_LANDS]
+        kept = [f for f in kept if f.get("reason") not in _NEVER_LANDS]
         # Said even when no file is known: the master must hear the turn did not land.
-        named = _listed(kept) if kept else "the turn's files could not be read"
+        named = _listed(kept) if kept else "none" if never else "the turn's files could not be read"
         saved = data.get("saved") is True and data["landing"] != "escalated"
-        words = _FAILED_KEPT if saved and data["landing"] == "failed" else _NOT_LANDED[data["landing"]]
+        # On a computer a landing that failed leaves the turn's work in the thread's copy, which outlives it.
+        failed_here = data["landing"] == "failed" and data.get("landing_reason") == "failed"
+        words = _FAILED_KEPT if failed_here or (saved and data["landing"] == "failed") else _NOT_LANDED[data["landing"]]
         here = data.get("landing_reason") if data.get("landing_reason") in _NOT_LANDED_HERE else None
         if here is not None:
             # On a computer, why; a refusal by a word of the server's own list, kept to a word.
@@ -298,9 +310,15 @@ def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
             words += f" ({_NOT_LANDED_HERE[here].format(code=code or 'other')})"
         # And that nothing is lost for it, when the turn is on the thread's branch.
         lines += f"\n{words}: {named}" + (f"\n{WORK_KEPT}" if saved else "")
+        if failed_here:
+            lines += f"\n{_IN_ITS_COPY}"
         # A deleted thread has no next turn to land its work with.
-        if here is not None and data["landing"] == "compensated" and here != "deleted":
-            lines += f"\n{_NOT_IN_ONE_LANDING.get(here, _IN_ITS_COPY)}"
+        elif here is not None and data["landing"] == "compensated" and here != "deleted":
+            lines += f"\n{_STOPPED_IN_ITS_COPY if here == 'stopped' else _NOT_IN_ONE_LANDING.get(here, _IN_ITS_COPY)}"
+        lines += "".join(
+            f"\n{_NOT_MERGED[reason]}: {_listed(alike)}" for reason in _NEVER_LANDS
+            if (alike := [f for f in never if f["reason"] == reason])
+        )
     elif kept:
         # A report from before reasons were given says the file changed.
         why: dict[str, list] = {reason: [] for reason in _NOT_MERGED}

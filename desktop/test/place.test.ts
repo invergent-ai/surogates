@@ -27,10 +27,12 @@ import { BOOT_ID, checkFolder } from "../src/binding/folder.js";
 import { ASIDE_BYTES, copyOf, FolderReplaced, keptOf, keyOf, type Looked, placeOf, type PlaceOptions } from "../src/history/place.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { Place } from "../src/vm/manager.js";
+import { built } from "./built.js";
 
 const THREAD = "44444444-4444-4444-8444-444444444444";
 const NOT_THE_APPS = "This folder's history is not a folder of the app's own";
-// The module as the app runs it (npm run build first), for a process of its own that is killed in it.
+// The module as the app runs it (npm run build first), for a process of its own that is killed in it: built() says where
+// that build is older than the sources.
 const BUILT = fileURLToPath(new URL("../dist/history/place.js", import.meta.url));
 // Loaded into that process before the module: it ends the process as a kill does, before the nth making of a
 // folder or giving of a name whose path matches. Nothing after that call runs.
@@ -277,7 +279,7 @@ describe("an ask for a folder's place, cut short by a kill", () => {
     const asked = spawnSync(process.execPath, ["--import", CUT, "--input-type=module", "-e", `
       const { placeOf } = await import(process.argv[1]);
       await placeOf(process.argv[2], JSON.parse(process.argv[3]), { letGo: () => Promise.resolve(true) });
-    `, BUILT, data, JSON.stringify(bound())], { env: { PATH: process.env.PATH, PLACE_CUT: JSON.stringify(cut) } });
+    `, built(BUILT), data, JSON.stringify(bound())], { env: { PATH: process.env.PATH, PLACE_CUT: JSON.stringify(cut) } });
     expect(asked.signal).toBe("SIGKILL");
   };
   const asides = () => tree(data).filter((name) => /\.was-[0-9]+(\.json)?$/.test(name));
@@ -420,7 +422,7 @@ describe("one ask for a folder's place", () => {
       const answer = await placeOf(process.argv[2], JSON.parse(process.argv[3]), { letGo: () => Promise.resolve(letGo += 1) })
         .then((placed) => ({ placed }), (error) => ({ rejected: error.message }));
       console.log(JSON.stringify({ ...answer, letGo }));
-    `, BUILT, data, JSON.stringify(bound())], { env: { PATH: process.env.PATH }, encoding: "utf8" });
+    `, built(BUILT), data, JSON.stringify(bound())], { env: { PATH: process.env.PATH }, encoding: "utf8" });
     expect([asked.status, asked.signal], asked.stderr).toEqual([0, null]);
     return JSON.parse(asked.stdout) as { placed?: unknown; rejected?: string; letGo: number };
   };
@@ -665,6 +667,25 @@ describe("another folder at the path of one that has a place", () => {
     // Not answering says neither that the folder is this thread's nor that it is not.
     for (const one of asked) expect(one.status === "rejected" && one.reason).not.toBeInstanceOf(FolderReplaced);
     expect([looks, histories(), readdirSync(first.history), letGo]).toEqual([1, [first.key, `${first.key}.json`], ["history.git"], []]);
+  });
+
+  it("is not set aside while the folder cannot be read, and that is said in its own words, not as a folder replaced", async () => {
+    // A folder whose way is shut to this user: it may be the one bound, or not, and that cannot be told.
+    const shut = join(base, "Shut");
+    const inside = join(shut, "Documents");
+    mkdirSync(inside, { recursive: true });
+    const binding = bound(inside);
+    chmodSync(shut, 0o000);
+    try {
+      const refused = await placeOf(data, binding, sandbox).catch((error: unknown) => error);
+      expect(refused).not.toBeInstanceOf(FolderReplaced);
+      expect(String(refused)).toBe(`Error: The folder ${inside} could not be read (Permission denied), so whether it is the one this thread was bound to cannot be told. Once it can be read, ask again`);
+    } finally {
+      chmodSync(shut, 0o700);
+    }
+    expect([histories().filter((name) => name.startsWith(keyOf(inside))), letGo]).toEqual([[], []]);
+    // Readable again, it has its place.
+    expect(await placed(binding)).toMatchObject({ key: keyOf(inside), real: { path: inside } });
   });
 });
 

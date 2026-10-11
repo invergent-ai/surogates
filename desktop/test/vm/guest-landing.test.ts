@@ -23,11 +23,14 @@ import { copyOf, FolderReplaced, keptOf, placeOf, type PlaceOptions } from "../.
 import type { Outcome } from "../../src/link/protocol.js";
 import { forgettable } from "../../src/vm/history.js";
 import { type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
+import { built } from "../built.js";
 import { agentDisk, alive, folderOf, IMAGE, KVM, needsKvm, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
+// The land helper as the app starts it, and the guest's agent as its agent disk carries it (npm run build first).
 const HELPER = fileURLToPath(new URL("../../dist/files/helper.js", import.meta.url));
+const AGENT = fileURLToPath(new URL("../../dist/guest/agent.js", import.meta.url));
 const ONE = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 const TWO = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 const YOU = { name: "u1", email: "user:u1@surogate" };
@@ -210,14 +213,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
    *
    * *notes* is what the saga's journal keeps of each step's answer: a landing asked again after the app died is
    * answered from it, and a step it has no answer for is asked again. A saga's id names one landing, ever.
-   * *between* runs once the files to apply are fixed, before the first apply. *dies* names the step the app is
-   * killed before, and the step whose answer it had not kept by then.
+   * *between* runs once the files to apply are fixed, before the first apply; *ahead* runs, by a step's name, just
+   * before that step is asked. *dies* names the step the app is killed before, and the step whose answer it had not
+   * kept by then.
    *
    * Around each step the folder is compared with what the step may have changed, and nothing else has.
    */
   const landing = async (
     thread: string, saga: string,
-    { notes = new Map<string, Outcome>(), between = () => {}, dies }: { notes?: Map<string, Outcome>; between?: () => void; dies?: { before: string; unkept?: string } } = {},
+    { notes = new Map<string, Outcome>(), between = () => {}, ahead = {}, dies }: {
+      notes?: Map<string, Outcome>; between?: () => void; ahead?: Record<string, () => unknown>; dies?: { before: string; unkept?: string };
+    } = {},
   ) => {
     expect(begun.get(saga) ?? notes, `${saga} names another landing already`).toBe(notes);
     begun.set(saga, notes);
@@ -239,6 +245,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
         await die(helper);
         throw new Died(name);
       }
+      await ahead[name]?.();
       const before = picture(folder);
       const outcome = await ask();
       const after = picture(folder);
@@ -332,6 +339,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
   };
 
   beforeAll(async () => {
+    for (const module of [HELPER, AGENT]) built(module);
     dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-landing-")));
     data = join(dir, "data");
     folder = join(dir, "Documents");
@@ -504,6 +512,89 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
     expect(await run(ONE, "cat Budget.csv B2.md")).toMatchObject({ output: "item,cost\nrent,42\npower,6\nwater,3\nmore notes of B\n" });
     // And of the whole folder, one file was never anyone's to change: it is the file it was at the start.
     expect(killed["notes/keep.txt"]).toMatchObject({ mode: 0o640, sha: sha("kept as it is\n"), links: 1 });
+  });
+
+  it("keeps what a landing replaced, and forgets nothing, when its record is not answered, and the same landing asked again is recorded", async () => {
+    await run(ONE, "echo 'Totals checked twice.' >> Report.md");
+    const before = picture(folder);
+    const notes = new Map<string, Outcome>();
+    // The sandbox stops as the record is to be asked: nothing answers it, though the app goes on.
+    const cut = await landing(ONE, "saga-a3", { notes, ahead: { record: () => manager.stop() } });
+    expect([cut.state, cut.refusal, cut.putBack, cut.forgotten]).toEqual(["unsettled", { error: { type: "unavailable", message: "This computer's sandbox is stopping" } }, [], null]);
+    expect(notes.has("record")).toBe(false);
+    // As landed, and the file it replaced kept: it may have been recorded all the same.
+    const landed = picture(folder);
+    expect(differing(before, landed)).toEqual([".", "Report.md"]);
+    expect([readdirSync(kept("saga-a3")).sort(), sha(readFileSync(kept("saga-a3", "0")))]).toEqual([["0", "0.json"], before["Report.md"]!.sha]);
+    rmSync(options.run, { recursive: true, force: true });
+    options = { ...options, run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")) };
+    manager = new VmManager(options);
+    expect(await history(ONE, "fetch", { saga: "saga-a3" })).toMatchObject({ landing: null, hidden: false });
+    // The same landing again: its record is asked again, and only then is what it kept forgotten.
+    const finished = await landing(ONE, "saga-a3", { notes });
+    expect([finished.state, finished.recovered, finished.refusal]).toEqual(["completed", NOTHING_CUT, null]);
+    expect(differing(landed, picture(folder))).toEqual([]);
+    expect(await history(ONE, "fetch", { saga: "saga-a3" })).toMatchObject({ landing: finished.landing!.commit });
+    expect(existsSync(kept("saga-a3"))).toBe(false);
+  });
+
+  it("lands nothing of a turn its history refuses before any file is written, says why, and lands it once the copy can be recorded", async () => {
+    const odd = Buffer.concat([Buffer.from(`${copyOf(place, ONE)}/odd-`), Buffer.from([0xff, 0xfe])]);
+    await run(ONE, "echo 'One line more.' >> Report.md");
+    writeFileSync(odd, "x");
+    const before = picture(folder);
+    const refused = await landing(ONE, "saga-a4").catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(Refused);
+    expect(refused).toMatchObject({ step: "changed", refusal: { type: "history", code: "name_not_utf8" } });
+    // Nothing of the folder was written, and the helper keeps nothing of it.
+    expect([differing(before, picture(folder)), existsSync(kept("saga-a4"))]).toEqual([[], false]);
+    // Its file renamed, the turn lands, as a landing of its own.
+    renameSync(odd, join(copyOf(place, ONE), "odd.txt"));
+    const landed = await landing(ONE, "saga-a5");
+    expect([landed.state, landed.changes.map((change) => change.path)]).toEqual(["completed", ["Report.md", "odd.txt"]]);
+    expect([real("odd.txt"), existsSync(kept("saga-a5"))]).toEqual(["x", false]);
+  });
+
+  it("keeps what a landing replaced when the app is killed between the history's leave and the helper's forgetting, and the landing asked again forgets it", async () => {
+    await run(ONE, "echo 'The last line.' >> Report.md");
+    const before = picture(folder);
+    const notes = new Map<string, Outcome>();
+    await expect(landing(ONE, "saga-a6", { notes, dies: { before: "forget" } })).rejects.toBeInstanceOf(Died);
+    expect([...notes.keys()]).toEqual(["recover", "changed", "look", "pickup", "commit", "apply:0", "record", "forgetting"]);
+    // Recorded, and its leave given: what it kept stays until the helper itself forgets it.
+    const killed = picture(folder);
+    expect(differing(before, killed)).toEqual([".", "Report.md"]);
+    const { commit } = ok(notes.get("record")!) as { commit: string };
+    expect(notes.get("forgetting")).toEqual({ ok: { landing: commit } });
+    expect(sha(readFileSync(kept("saga-a6", "0")))).toBe(before["Report.md"]!.sha);
+    // The landing again, by the app's next start: every step is answered from its notes, and the helper forgets.
+    const finished = await landing(ONE, "saga-a6", { notes });
+    expect([finished.state, finished.recovered, finished.refusal, finished.landing]).toEqual(["completed", NOTHING_CUT, null, { commit, set_aside: null }]);
+    expect(differing(killed, picture(folder))).toEqual([]);
+    expect(existsSync(kept("saga-a6"))).toBe(false);
+  });
+
+  it("puts back what it can of a landing whose apply failed, and where a file it wrote was changed since, keeps what that replaced and forgets nothing", async () => {
+    expect(await history(TWO, "open")).toMatchObject({ copy: "moved" });
+    await run(TWO, "sed -i 's/water,3/water,4/' Budget.csv; echo 'B checked the totals.' >> Report.md");
+    const [before, report] = [picture(folder), real("Report.md")];
+    // You save the report before the landing writes it, and the budget once the landing has.
+    const save = () => writeFileSync(join(folder, "Report.md"), `${real("Report.md")}Saved by you.\n`);
+    const edit = () => writeFileSync(join(folder, "Budget.csv"), `${real("Budget.csv")}gas,2\n`);
+    const cut = await landing(TWO, "saga-b5", { ahead: { "apply:1": save, "unapply:0": edit } });
+    expect(cut).toMatchObject({
+      state: "compensated", failed: { type: "conflict", message: "Report.md changed in the folder while this landing ran, so it was not replaced" },
+      refusal: { error: { type: "history", code: "landing_unsettled" } },
+    });
+    // The report's apply wrote nothing to put back; the budget's put-back found your edit, and left it.
+    expect(cut.putBack).toEqual([
+      ["Report.md", false], ["Budget.csv", { type: "conflict", message: "Budget.csv changed after the landing wrote it, so it was not put back" }],
+    ]);
+    expect([real("Report.md"), real("Budget.csv")]).toEqual([`${report}Saved by you.\n`, "item,cost\nrent,42\npower,6\nwater,4\ngas,2\n"]);
+    // Nothing of it landed, and the budget it replaced is still kept: the history gave no leave to forget it.
+    expect(cut.forgotten).toEqual([cut.changes[0]]);
+    expect([readdirSync(kept("saga-b5")).sort(), sha(readFileSync(kept("saga-b5", "0")))]).toEqual([["0", "0.json"], before["Budget.csv"]!.sha]);
+    expect(await history(TWO, "fetch", { saga: "saga-b5" })).toMatchObject({ landing: null, hidden: false });
   });
 
   it("gives another folder at the same path a place of its own once the sandbox has let the old one go, and the thread of the folder that was there reaches neither", async () => {

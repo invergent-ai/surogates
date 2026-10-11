@@ -1040,7 +1040,10 @@ async def _settle(
             f"lacks {', '.join(gone)}" if gone else "is cut above where it began",
         )
         for it in saga.steps:
-            if it.tool_name == "history.apply" and it.state is not StepState.COMPENSATED:
+            # Each apply that may have written its file: its own landing's still pending never began, a recovered
+            # one's may have, its row behind it.
+            began = it.state is not StepState.PENDING or recovered
+            if it.tool_name == "history.apply" and it.state is not StepState.COMPENSATED and began:
                 it.state, it.error = StepState.COMPENSATION_FAILED, _GONE
                 if at_issue is not None:
                     at_issue.append(it.arguments["path"])
@@ -1287,6 +1290,8 @@ async def _put_back(
                 await asyncio.wait_for(compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds)
             except Exception:
                 logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
+                # Its row says so: the file may be as that apply wrote it.
+                it.state = StepState.COMPENSATION_FAILED
                 failed.append(it)
 
     async def compensate(it: SagaStep) -> Any:

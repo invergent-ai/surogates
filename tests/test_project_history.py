@@ -13,6 +13,7 @@ import pytest
 from surogates.sandbox import history as history_module
 from surogates.sandbox.history import History, HistoryConflict, HistoryError
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
+from tests.test_local_history import held_open
 
 
 def opened(tmp_path: Path, project: Path, thread: str = "t1") -> History:
@@ -72,6 +73,23 @@ def test_a_copy_is_the_real_files_less_the_excludes(tmp_path, project):
     assert git(history, "log", "-1", "--format=%an <%ae>", main) == "u1 <user:u1@surogate>"
     assert git(history, "rev-parse", "refs/heads/threads/t1") == main
     assert git(history, "rev-parse", "refs/bases/t1") == main
+
+
+def test_a_gitignore_in_the_real_files_that_takes_back_what_history_leaves_out_brings_none_of_it_in(tmp_path, project):
+    # The project's own ignores, as a repository's may be: each line takes back what history leaves out.
+    (project / ".gitignore").write_text("!node_modules/\n!~$*\n!.threads/\n!.env\n!*.tmp\n")
+    (project / ".env").write_text("SECRET=1\n")
+    history = opened(tmp_path, project)
+    copied = sorted(str(p.relative_to(history.copy)) for p in history.copy.rglob("*") if p.is_file())
+    assert copied == [".gitignore", "Report.docx", "server.log", "uploads/brief.pdf"]
+    assert git(history, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == copied
+    # A turn's write there is no file of history's either, and is said to be unsaved.
+    (history.copy / ".env").write_text("SECRET=2\n")
+    (history.copy / "notes.tmp").write_text("scratch")
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    assert [c["path"] for c in turn["changes"]] == ["Report.docx"] and turn["excluded"] == [".env", "notes.tmp"]
+    assert git(history, "ls-tree", "-r", "--name-only", turn["commit"]).splitlines() == copied
 
 
 def test_a_snapshot_is_the_branchs_tip_and_a_restore_brings_it_back_whole(tmp_path, project):
@@ -225,6 +243,19 @@ def test_an_apply_checks_the_real_file_and_its_undo_checks_it_again(tmp_path, pr
     with pytest.raises(HistoryConflict):
         history.unapply(new["path"], new["before"], new["after"])
     assert (project / "new.md").read_text() == "changed after the landing wrote it"
+
+
+def test_a_real_file_a_folder_took_the_place_of_since_the_landings_look_is_changed_and_left_open_nowhere(tmp_path, project):
+    history = opened(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    [change] = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))["changes"]
+    (project / "Report.docx").unlink()
+    (project / "Report.docx").mkdir()
+    (project / "Report.docx" / "inside.txt").write_text("yours")
+    with pytest.raises(HistoryConflict):
+        history.apply(change["path"], change["before"], change["after"])
+    assert held_open(project / "Report.docx") == []
+    assert (project / "Report.docx" / "inside.txt").read_text() == "yours"
 
 
 def test_an_apply_whose_reply_was_lost_runs_again_as_a_no_op(tmp_path, project):

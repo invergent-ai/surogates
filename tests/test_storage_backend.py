@@ -362,9 +362,16 @@ class TestS3BackendDelete:
         assert gone.asked == [("head", "key.bin"), ("delete", {"Bucket": "bucket", "Key": "key.bin"})]
 
 
-#: A look at an object, and a read of it whole or to a file: each tells an object absent by a KeyError.
+async def _there(backend: S3Backend) -> None:
+    """Whether the object exists, as a look tells it: KeyError where it does not."""
+    if not await backend.exists("bucket", "photos/IMG_4040.jpg"):
+        raise KeyError("photos/IMG_4040.jpg")
+
+
+#: A look at an object, whether it exists, and a read of it whole or to a file: each tells an object absent by a KeyError.
 _LOOKS = {
     "stat": lambda backend, tmp_path: backend.stat("bucket", "photos/IMG_4040.jpg"),
+    "exists": lambda backend, tmp_path: _there(backend),
     "read": lambda backend, tmp_path: backend.read("bucket", "photos/IMG_4040.jpg"),
     "download": lambda backend, tmp_path: backend.download("bucket", "photos/IMG_4040.jpg", tmp_path / "out.bin"),
 }

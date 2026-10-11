@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { pyRepr } from "../src/files/answers.js";
 import { searched } from "../src/files/edge.js";
 import { type Context, kinds, perform } from "../src/files/operations.js";
 import { fileToolsMissing } from "../src/hosts/policy.js";
@@ -515,6 +516,15 @@ describe("every kind the file helper has, on a thread's copy", () => {
     writeFileSync(join(copy, "spare.txt"), "to be deleted\n");
     mkdirSync(join(copy, "shut"));
     chmodSync(join(copy, "shut"), 0);
+    // A name that is no text: rg names its file by its bytes, in base64.
+    writeFileSync(Buffer.concat([Buffer.from(`${copy}/sub/caf`), Buffer.from([0xe9]), Buffer.from(".txt")]), "beta, in a file named in another alphabet\n");
+    // Where the copy lies, as an answer could spell it: as it is, as JSON writes it, as Python's repr does in an OSError's
+    // words, and in base64 from each of the three places in a group of three bytes its first byte can take.
+    const lies = join(base, "data");
+    const spellings = [
+      lies, JSON.stringify(lies).slice(1, -1), pyRepr(lies).slice(1, -1),
+      ...[0, 1, 2].map((offset) => Buffer.from(`${"\0".repeat(offset)}${lies}`).toString("base64").slice(4, -4)),
+    ];
     const asks = asked();
     // The helper's own table: every kind in it is asked, and none is asked that it lacks.
     expect(Object.keys(asks).sort(), "a kind the helper has is not asked about a copy here, or one that is asked is gone").toEqual([...kinds()].sort());
@@ -527,8 +537,8 @@ describe("every kind the file helper has, on a thread's copy", () => {
           const said = `${kind} ${JSON.stringify(args)} answered ${told}`;
           worked.push("ok" in answer ? "ok" : answer.error.type);
           expect(worked.at(-1), said).toBe(answered);
-          // Nothing of the app's data, where the copy lies, is in the answer; and the file it is about is the folder's.
-          expect(told, said).not.toContain(join(base, "data"));
+          // Nothing of the app's data, where the copy lies, is in the answer, however it is spelled; and the file it is about is the folder's.
+          for (const spelled of spellings) expect(told, said).not.toContain(spelled);
           if (names !== undefined) expect(told, said).toContain(names);
         }
         if (kind !== "land") expect(worked, `${kind} never worked on the copy`).toContain("ok");
@@ -645,11 +655,14 @@ function folding(mount: string, run: string, ...more: string[]) {
   ], { encoding: "utf8", timeout: 30_000 });
 }
 const probe = mkdtempSync(join(tmpdir(), "edge-folding-"));
-const folds = folding(probe, 'touch "$1/disk/A" && test -e "$1/disk/a"').status === 0;
+const probed = folding(probe, 'touch "$1/disk/A" && test -e "$1/disk/a"');
 rmSync(probe, { recursive: true, force: true });
+// Why no such disk is here, said beside the test it skips, which the run's summary counts: or null.
+const noFolding = probed.status === 0 ? null : `no disk that folds names can be mounted here: ${(probed.stderr || probed.error?.message || `bwrap exited ${probed.status}`).trim().split("\n")[0]}`;
 
 describe("a folder and a copy on a disk that tells names apart less than their bytes do", () => {
-  it.skipIf(!folds)("takes the folder's path by its own bytes alone: another case or composition of it names nothing, and reaches neither the folder nor the copy", () => {
+  it("takes the folder's path by its own bytes alone: another case or composition of it names nothing, and reaches neither the folder nor the copy", (context) => {
+    context.skip(noFolding !== null, noFolding ?? "");
     const mount = join(base, "mount");
     mkdirSync(mount);
     // The helper's kinds run where the mount is, and say what they were answered and what the folder then holds.
@@ -732,9 +745,10 @@ describe("a folder and a copy on a disk that tells names apart less than their b
 });
 
 describe("a helper on a thread's copy, in the file helper's sandbox", () => {
-  const sandboxed = fileToolsMissing(undefined, process.env.PATH ?? "").length === 0;
+  const missing = fileToolsMissing(undefined, process.env.PATH ?? "");
 
-  it.skipIf(!sandboxed)("reaches the copy, and neither the folder it is named by, the copy beside it nor the folder's place", { timeout: 60_000 }, async () => {
+  it("reaches the copy, and neither the folder it is named by, the copy beside it nor the folder's place", { timeout: 60_000 }, async (context) => {
+    context.skip(missing.length > 0, `the file helper's sandbox needs ${missing.join(", ")}, which this computer's PATH lacks`);
     const other = join(place, "threads", OTHER);
     mkdirSync(join(other, "sub"), { recursive: true });
     writeFileSync(join(other, "a.txt"), "another thread's alpha\n");

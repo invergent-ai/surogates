@@ -544,12 +544,12 @@ class S3Backend:
             await s3.upload_file(str(source), bucket, key, Config=parts)
 
     async def exists(self, bucket: str, key: str) -> bool:
-        async with self._client() as s3:
-            try:
-                await s3.head_object(Bucket=bucket, Key=key)
-                return True
-            except Exception:
-                return False
+        # Absent only where the store answered so: any other error is no answer, and is raised.
+        try:
+            await self.stat(bucket, key)
+        except KeyError:
+            return False
+        return True
 
     async def delete(self, bucket: str, key: str, *, if_tag: str | None = None) -> None:
         async with self._client() as s3:

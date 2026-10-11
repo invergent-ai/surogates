@@ -35,7 +35,9 @@ A Restore or an Undo runs to its end, though who asked for it leaves: a
 landing is never left half made for a request's sake, and the api's
 shutdown waits for it, as long as one is planned to take.  Each action
 on the api's copy of the history ends with the try of the step it is,
-as the fence another lock holder waits out takes it to.
+as the fence another lock holder waits out takes it to, once a write it
+had begun has ended: its put-back never reads a file a write it cut
+lands on after.
 """
 
 from __future__ import annotations
@@ -85,8 +87,8 @@ HALF = "Some files could not be put back as they were. Open a file's History to 
 WORKING = "Stop the thread to undo its changes."
 UNDONE = "This change was undone already."
 NO_CHANGE = "No such change."
-#: How long an Undo may hold the project's lock, in ms: a person waits on it, and the page gives a landing two
-#: minutes, the wait for the lock among them; what is left is room for the files' bytes.
+#: How long a Restore or an Undo may hold the project's lock, in ms: a person waits on it, and the page gives a
+#: landing two minutes, the wait for the lock among them; what is left is room for the files' bytes.
 LOCK_BUDGET_MS = 60_000
 #: A call of the cloud's store at its slowest that an Undo is planned for, and what else each file costs it under
 #: the lock (its version written out by git, its row marked alive), as measured on node1; in ms.
@@ -99,10 +101,10 @@ CALLS_AN_ACT = 30
 CALLS_A_FILE = 7
 #: The most files one Undo puts back: all it does under the lock, at that call, within its time.
 UNDO_MOST = (LOCK_BUDGET_MS - CALLS_AN_ACT * CALL_MS) // (CALLS_A_FILE * CALL_MS + FILE_MS)
-#: The bytes a second the cloud's store moves at its slowest that an Undo is planned for.  Under the lock each
-#: file is read twice, by the look and by the check, as the version it is to be found as, and written once, as
-#: the version it goes back to: an Undo whose files' bytes would pass its time with its calls puts back none.
-STORE_RATE = 16 * 2**20
+#: Under the lock each file is read twice, by the look and by the check, as the version it is to be found as, and
+#: written once, as the version it goes back to, at the store's rate its settings name (``HistorySettings.store_rate``):
+#: a Restore or an Undo whose files' bytes would pass its time with its calls writes none of them.
+TOO_LARGE_TO_RESTORE = "This version is too large to restore here."
 #: The most files a refusal names: the rest it counts.
 _NAMED_MOST = 3
 CUT_SHORT = "This was cut short: the files are put back as they were when the project's files are next saved. Try again in a moment."
@@ -111,15 +113,16 @@ UNTAKEN = "This file cannot be restored here: a folder of its name is there, or 
 #: The landings by you under way, each kept until done: none is cut short with the request that began it.
 _ACTS: set[asyncio.Future] = set()
 #: The landings by you this process runs at once: each holds one of the api's pooled connections, its project's
-#: lock's, for its whole run, of the ten the api keeps by default.  One past them waits as for its project's lock,
-#: within the same patience, then is told to try again.
+#: lock's, for its whole run, of the ten the api keeps by default.  So a turn is held with the lock alone: one past
+#: them waits as for its project's lock, within the same patience, then is told to try again.
 ACTS_AT_ONCE = 4
 CROWDED = "Other changes are being restored or undone right now. Try again in a moment."
 #: The landings by you that have one of those turns now.
 _TURNS: set[object] = set()
 #: How long the api's shutdown waits for the landings by you under way: the most one is planned to take, its wait
 #: for the lock and its time under it.  One still under way past that is cut as a kill cuts it, and the next lock
-#: holder settles what it left.
+#: holder settles what it left.  The api's deployment bounds the wait too: its pod is killed at the end of its grace,
+#: Kubernetes' 30 seconds where it names none, and uvicorn's wait for the requests in flight counts against it.
 ENDING_PATIENCE = LOCK_PATIENCE + LOCK_BUDGET_MS / 1000
 
 #: What a landing by you lands, once your edits are picked up: given the copy and ``main`` as the pickup
@@ -141,8 +144,9 @@ async def restore(state: Any, project: Any, user_id: UUID, *, path: str, blob: s
 
     It replaces whatever the file is now, which your edits' pickup records
     first (``picked_up``).  A file the version already is lands nothing.
-    Refused in words for a version the history keeps no more, and a file
-    the real files cannot take where a folder holds its name.  *path* is
+    Refused in words for a version the history keeps no more, a file the
+    real files cannot take where a folder holds its name, and one whose
+    bytes would pass a landing's time under the lock, as an Undo's would.  *path* is
     one a landing writes: the copy refuses any other before it reaches the
     storage, and the route says so first (:data:`UNLANDED`).
     """
@@ -152,10 +156,13 @@ async def restore(state: Any, project: Any, user_id: UUID, *, path: str, blob: s
         recorded = (await place.recorded(main, [path]))[path]
         if recorded == blob:
             return [], [], {}
-        if not await place.held([blob]):
+        kept = await place.sizes([blob, recorded])
+        if blob not in kept:
             raise Refused(NOT_KEPT, status=410)
         if recorded is None and not await place.takes(path):
             raise Refused(UNTAKEN)
+        if _planned_ms(1, 2 * kept.get(recorded, 0) + kept[blob], state.settings.history.store_rate) > LOCK_BUDGET_MS:
+            raise Refused(TOO_LARGE_TO_RESTORE)
         return [{"path": path, "before": recorded, "after": blob}], [], {}
 
     return await _by_you(state, project, user_id, kind="restore", paths=[path], decide=decide, announce=project.master_session_id)
@@ -281,7 +288,7 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
                 applies.append({"path": back.path, "before": back.expected, "after": back.to})
                 undoes[back.path] = [by_id[row] for row in back.rows]
         moved = sum(2 * kept.get(a["before"], 0) + kept.get(a["after"], 0) for a in applies)
-        if _planned_ms(len(applies), moved) > LOCK_BUDGET_MS:
+        if _planned_ms(len(applies), moved, state.settings.history.store_rate) > LOCK_BUDGET_MS:
             raise Refused(
                 "This change's files are too large to put back in one Undo. Restore each file from its History."
                 if landing is not None else
@@ -294,9 +301,10 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
     return await _by_you(state, project, user_id, kind="undo", paths=list(plan), decide=decide, announce=announce)
 
 
-def _planned_ms(files: int, moved: int) -> float:
-    """What an Undo of *files* files, with *moved* bytes of them read and written, holds the lock for at most, in ms."""
-    return CALLS_AN_ACT * CALL_MS + files * (CALLS_A_FILE * CALL_MS + FILE_MS) + moved * 1000 / STORE_RATE
+def _planned_ms(files: int, moved: int, rate: int) -> float:
+    """What a landing by you of *files* files, *moved* bytes of them read and written at *rate* bytes a second,
+    holds the lock for at most, in ms."""
+    return CALLS_AN_ACT * CALL_MS + files * (CALLS_A_FILE * CALL_MS + FILE_MS) + moved * 1000 / rate
 
 
 async def _undoable(session_factory: Any, project: Any, *, landing: int | None, thread: UUID | None) -> list[_Landed]:
@@ -383,6 +391,29 @@ async def _turn(until: float) -> AsyncIterator[None]:
         _TURNS.discard(turn)
 
 
+@contextlib.asynccontextmanager
+async def _locked(session_factory: Any, project_id: UUID, until: float) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+    """The project's lock, held in one of this process's turns, both waited for until *until*: a check that it is still held.
+
+    A turn is taken to try the lock, and kept only with it: an act that
+    waits for its project's lock holds none of the turns between its
+    tries, as it holds no pooled connection.  :class:`ProjectBusy` once
+    the lock was not had by *until*, :class:`Refused` once no turn was.
+    """
+    while True:
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(_turn(until))
+            try:
+                held = await stack.enter_async_context(project_lock(session_factory, project_id, patience=0))
+            except ProjectBusy:
+                if time.monotonic() >= until:
+                    raise
+            else:
+                yield held
+                return
+        await asyncio.sleep(LOCK_POLL)
+
+
 async def _act(
     state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide, announce: UUID,
 ) -> dict:
@@ -400,7 +431,7 @@ async def _act(
     # A turn of this process's, then the project's lock, both within one patience: a person waits on them.
     until = time.monotonic() + LOCK_PATIENCE
     try:
-        async with _turn(until), project_lock(session_factory, project.id, patience=max(0.0, until - time.monotonic())) as held:
+        async with _locked(session_factory, project.id, until) as held:
             # The lock's holder alone moves the history: the copy is brought to it once, not once a file.
             with place.steady():
                 try:

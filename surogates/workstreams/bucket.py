@@ -447,7 +447,7 @@ class BucketHistory:
             main, _ = await self._current([])
             missing = await self._lacked(wanted) if wanted and main is not None else wanted
             landing, hidden = await self._landing_of(saga, main, since) if main is not None and saga else (None, False)
-            packs = await asyncio.to_thread(_packs, self.clone)
+            packs = await _off(_packs, self.clone)
             return {"main": main, "landing": landing, "hidden": hidden, "packs": packs, "missing": missing}
 
         return await self._held(look, patient=True)
@@ -510,7 +510,7 @@ class BucketHistory:
                             raise HistoryConflict(f"{change['path']} changed while it was picked up")
                     commit = await self._commit(main, picked_up, author, "Your changes", trailers, scratch, new)
                     await self._push(commit, expect=main, scratch=scratch, new=new)
-            return {"main": main, "commit": commit, "picked_up": picked_up, "packs": await asyncio.to_thread(_packs, self.clone)}
+            return {"main": main, "commit": commit, "picked_up": picked_up, "packs": await _off(_packs, self.clone)}
 
         return await self._held(push, patient=True)
 
@@ -665,11 +665,11 @@ class BucketHistory:
         entries = await self.storage.list_entries(self.bucket, f"{self._durable}objects/pack/", limit=_PACKS_MOST + 1)
         if len(entries) > _PACKS_MOST:
             raise HistoryError(TOO_LARGE)
-        room = await asyncio.to_thread(_reckoned, self.clone, entries, self.bounds)
+        room = await _off(_reckoned, self.clone, entries, self.bounds)
         for stem, size, need in room.new:
             await self._take(stem, size, need, room)
         if room.stale:
-            await asyncio.to_thread(_cleared, self.clone / "objects" / "pack", room.stale)
+            await _off(_cleared, self.clone / "objects" / "pack", room.stale)
         # Asked while the copy is this request's: one project runs one git at a time.
         self._brought_in = True
         return main, (await self._asked(wanted) if wanted else {})
@@ -694,7 +694,7 @@ class BucketHistory:
 
     async def _written_out(self, blob: str, size: int) -> Staged:
         """The version *blob*, of *size* bytes, written out by git to a file of the copy's, which is this request's alone."""
-        staged = Staged(*await asyncio.to_thread(_room_for, self.clone, size, self.bounds), size, self.clone)
+        staged = Staged(*await _off(_room_for, self.clone, size, self.bounds), size, self.clone)
         try:
             await self._git(_BRINGING, _seconds(size), "cat-file", "blob", blob, into=staged._held)
             if os.fstat(staged._held).st_size != size:
@@ -719,7 +719,12 @@ class BucketHistory:
         whoever has the copy next finds what it wrote.  But never past the
         copy's *within* from when it was asked for: a landing's next try,
         or the lock holder after it, takes a try to have ended there.  Past
-        it, it is stopped, as a kill stops it, and said to have been.
+        it, it is stopped at the wait it is in, and said to have been.  What
+        it began there and cannot stop, a write of the store's, a thread's
+        work or git's, is waited for first (:func:`_whole`), within the
+        store's own time and git's: the copy is let go, and a put-back reads
+        the real files, only once none of it runs.  A read is stopped where
+        it is: it writes none of the project's files.
         """
         until = None if self.within is None else asyncio.get_running_loop().time() + self.within
         hold = _alone(self.clone, patient=patient)
@@ -906,7 +911,7 @@ class BucketHistory:
     async def _make_room(self, room: _Room, need: int) -> None:
         """Remove other copies, the least recently used first, while the copies with *need* more of this one pass their bound."""
         if room.held + need + sum(size for _, _, size in room.others) > self.bounds.copies:
-            await asyncio.to_thread(_make_room, room.others, room.held + need, self.bounds)
+            await _off(_make_room, room.others, room.held + need, self.bounds)
 
     async def _asked(self, wanted: list[str]) -> dict[str, int]:
         """Those of the versions *wanted* the copy holds, each with the bytes it holds of it."""
@@ -946,7 +951,7 @@ class BucketHistory:
                 return None, False
         if len(own) > _LOOKED_MOST:
             return None, True
-        return None, await asyncio.to_thread(_cut_at, self.clone / "shallow", own[-1][0])
+        return None, await _off(_cut_at, self.clone / "shallow", own[-1][0])
 
     async def _entries(self, commit: str, paths: list[str]) -> dict[str, tuple[str, str]]:
         """Each of *paths* that is a file in *commit*'s files: its mode there, and its blob.
@@ -983,7 +988,7 @@ class BucketHistory:
     @contextlib.asynccontextmanager
     async def _on_its_way(self, size: int, *, beside: int = 0, too_large: str = VERSION_TOO_LARGE) -> AsyncIterator[Staged]:
         """A file of the copy's for *size* bytes on their way to or from the real files; gone with the block, however it ends."""
-        made = await asyncio.to_thread(functools.partial(_room_for, self.clone, size, self.bounds, beside=beside, too_large=too_large))
+        made = await _off(functools.partial(_room_for, self.clone, size, self.bounds, beside=beside, too_large=too_large))
         staged = Staged(*made, size, self.clone)
         try:
             yield staged
@@ -1020,7 +1025,7 @@ class BucketHistory:
             except TooLarge as exc:
                 raise HistoryConflict(f"{path} changed while it was read") from exc
             if new is None:
-                return await asyncio.to_thread(_blob_id, staged._path), tag
+                return await _off(_blob_id, staged._path), tag
             try:
                 return await self._git(
                     _BRINGING, _kept_seconds(size), "hash-object", "-w", "--no-filters", "--", str(staged._path), new=new,
@@ -1051,7 +1056,7 @@ class BucketHistory:
 
             async def taken_away(real: str | None, tag: str | None) -> None:
                 # Only the file the check saw: a save since is left, as a write leaves one.
-                await self.storage.delete(self.bucket, key, if_tag=tag)
+                await _whole(self.storage.delete(self.bucket, key, if_tag=tag))
                 # A store may swallow a delete's failure: the landing must not record what did not happen.
                 if await self.storage.exists(self.bucket, key):
                     raise HistoryError(f"{path} could not be deleted")
@@ -1074,7 +1079,7 @@ class BucketHistory:
                 # A file is written where one is there already, or where the real files can take one.
                 if real is None and not (fits if fits is not None else await self._fits(key)):
                     raise HistoryConflict(f"{path} cannot be written: a folder is there, or a file where its folder would be")
-                await self.storage.upload(self.bucket, key, staged._path, if_tag=tag, if_absent=real is None)
+                await _whole(self.storage.upload(self.bucket, key, staged._path, if_tag=tag, if_absent=real is None))
 
             yield written
         finally:
@@ -1143,9 +1148,9 @@ class BucketHistory:
         none of its own over them.  The rewrite of ``packed-refs`` is the
         moment a push counts.
         """
-        size = await asyncio.to_thread(_size, new)
+        size = await _off(_size, new)
         # Counted before it is made: the pack is the copy's once it is the bucket's.
-        await asyncio.to_thread(_room, self.clone, size, self.bounds, TOO_LARGE)
+        await _off(_room, self.clone, size, self.bounds, TOO_LARGE)
         outgoing = scratch / "outgoing"
         outgoing.mkdir()
         name = await self._git(
@@ -1156,15 +1161,15 @@ class BucketHistory:
             raise HistoryError("git pack-objects named no pack")
         pack = self.clone / "objects" / "pack"
         for kind in ("pack", "idx"):  # the index last: a pod reads a pack only through it
-            await self.storage.upload(self.bucket, f"{self._durable}objects/pack/pack-{name}.{kind}", outgoing / f"pack-{name}.{kind}")
+            await _whole(self.storage.upload(self.bucket, f"{self._durable}objects/pack/pack-{name}.{kind}", outgoing / f"pack-{name}.{kind}"))
         for kind in ("pack", "idx"):
             os.replace(outgoing / f"pack-{name}.{kind}", pack / f"pack-{name}.{kind}")
         (pack / f"pack-{name}.bucket").touch()
         if await self._seen() != _noted(self.clone / _SEEN).get("seen"):
             raise HistoryConflict("the project's history moved while it was pushed")
         refs = scratch / "packed-refs"
-        await asyncio.to_thread(_moved, self.clone / "packed-refs", refs, commit)
-        await self.storage.upload(self.bucket, f"{self._durable}packed-refs", refs)
+        await _off(_moved, self.clone / "packed-refs", refs, commit)
+        await _whole(self.storage.upload(self.bucket, f"{self._durable}packed-refs", refs))
 
     async def _git(
         self, turns: ThreadPoolExecutor, seconds: float, *args: str,
@@ -1190,14 +1195,43 @@ class BucketHistory:
 
 
 async def _turn(turns: ThreadPoolExecutor, run: Callable[[], T]) -> T:
-    """Run *run* in one of *turns*; its answer.  Told to try again when its turn has not come within a request's patience."""
+    """Run *run* in one of *turns*; its answer.  Told to try again when its turn has not come within a request's patience.
+
+    One not yet begun is taken back: it never runs.  One that began is
+    waited for to its end, though what waits for it is stopped meanwhile:
+    git within its seconds, the refs within theirs.
+    """
     turn = turns.submit(run)
     answer = asyncio.wrap_future(turn)
-    await asyncio.wait({answer}, timeout=_PATIENCE)
-    # One not yet begun is taken back: it never runs.  One that began is waited for.
+    try:
+        await asyncio.wait({answer}, timeout=_PATIENCE)
+    except asyncio.CancelledError:
+        if not turn.cancel():
+            await asyncio.wait({answer})
+        raise
     if turn.cancel():
         raise Busy(BUSY)
-    return await answer
+    return await _whole(answer)
+
+
+async def _whole(begun: Awaitable[T]) -> T:
+    """*begun* awaited to its end, though what awaits it is stopped meanwhile: then stopped once it ended.
+
+    For what an action on the copy begins that does not stop with it: a
+    write of the store's, which may land once it is sent, and the work of
+    a thread.  None of it runs on beside whoever has the copy next.
+    """
+    running = asyncio.ensure_future(begun)
+    try:
+        return await asyncio.shield(running)
+    except asyncio.CancelledError:
+        await asyncio.wait({running})
+        raise
+
+
+async def _off(run: Callable[..., T], *args: Any) -> T:
+    """*run* with *args* in a thread of the loop's, waited for to its end however what waits for it ends (:func:`_whole`)."""
+    return await _whole(asyncio.to_thread(run, *args))
 
 
 async def _child(turns: ThreadPoolExecutor, seconds: float, command: list[str], **how: Any) -> bytes:

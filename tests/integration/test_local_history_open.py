@@ -740,7 +740,7 @@ async def test_a_thread_the_routes_make_on_a_folder_with_no_history_is_refused_t
     assert await operations_of(api, thread) == [("bind", "bind"), ("history", "open:0")]
     failed = await failure(api, thread)
     assert (failed["why"], failed["error_title"], failed["retryable"]) == ("cap", NOWHERE["cap"], False)
-    assert NOWHERE["cap"].endswith("Choose a folder inside it.") and NOWHERE["names"].endswith("Choose a folder inside it.")
+    assert NOWHERE["cap"].endswith("Choose a folder inside it.") and NOWHERE["names"].endswith("Choose a folder inside it, or rename the file.")
     # Its row says so where the person reads the project's threads.
     [row] = await rows(api, project)
     assert (row["group"], row["reason"], row["status_line"]) == ("waiting", "failed", NOWHERE["cap"])

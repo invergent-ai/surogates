@@ -127,6 +127,66 @@ async def resolve_loop_result_parent(store: Any, session: Any) -> Any | None:
     return parent
 
 
+async def announce_result(store: Any, session: Any, *, outcome: str, summary: str) -> int | None:
+    """Say that *session*'s turn ended where its user reads its result, as
+    ``announce_failure`` says that it failed: a scheduled run's
+    ``loop.result`` on its direct-UI parent, holding its last answer, else
+    a ``task_complete`` item for a scheduled run or an inbox-announced
+    root, *summary* its words.  The item's event id; None where none was
+    written.
+
+    A model's turn and a command's both end here, so a run reports the same
+    way whichever ended it.
+    """
+    parent = None
+    try:
+        parent = await resolve_loop_result_parent(store, session)
+    except Exception:
+        logger.debug(
+            "Failed to resolve loop.result parent for %s", session.id, exc_info=True,
+        )
+    if parent is not None:
+        try:
+            content = extract_final_response(await store.get_events(session.id), fallback="").strip()
+            if content:
+                await store.emit_event(
+                    parent.id,
+                    EventType.LOOP_RESULT,
+                    {
+                        "run_session_id": str(session.id),
+                        "scheduled_session_id": str(
+                            (session.config or {}).get("scheduled_session_id") or ""
+                        ),
+                        "content": content,
+                        "outcome": outcome,
+                        "duration_seconds": _seconds_since(session.created_at),
+                        "run_completed_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+        except Exception:
+            logger.warning(
+                "Failed to emit loop.result on parent %s for run %s",
+                parent.id, session.id, exc_info=True,
+            )
+        return None
+    # A scheduled run keeps announcing itself whatever its channel: it
+    # is unwatched work by construction, and the branch above already
+    # took the web/api parents that receive the result inline instead.
+    if not (_is_scheduled_run(session) or raises_completion_inbox_item(session)):
+        return None
+    return await store.emit_event(
+        session.id,
+        EventType.INBOX_TASK_COMPLETE,
+        {
+            "outcome": outcome,
+            "summary": summary,
+            "duration_seconds": _seconds_since(session.created_at),
+            "session_title": session.title or "Task complete",
+            "error": None,
+        },
+    )
+
+
 async def announce_failure(store: Any, session: Any, *, error: str, summary: str = "") -> None:
     """Say that *session* failed where its user reads its result: a
     scheduled run's ``loop.result`` on its direct-UI parent, else a failed
@@ -1112,7 +1172,8 @@ class ArtifactCompletionMixin:
                 raise asyncio.CancelledError("another worker runs this session now") from None
             except Exception:
                 logger.exception("Landing failed for %s on its computer", session.id)
-                landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
+                # Its copy there outlives it: the report says the work is in it, and lands with the thread's next turn.
+                landing = {"state": "failed", "reason": "failed", "files": [], "excluded": [], "repositories": []}
         elif is_project_thread(session.config) and device_of(session.config) is None and self._sandbox_pool is not None:
             # A thread on its user's computer with no copy there, made before threads had them, lands nothing anywhere.
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
@@ -1239,8 +1300,10 @@ class ArtifactCompletionMixin:
         if landing is not None:
             # A thread's files are its landing's; artifacts still come from its summary.
             landed = landing["files"]
-            if not landed and landing["state"] != "completed":
-                # A landing that never knew its files: the turn's own list names them, none landed.
+            if not landed and landing["state"] != "completed" and not opens_its_copy(session):
+                # A landing that never knew its files: the turn's own list names them, none landed.  On a computer
+                # it names none: the turn's open may have brought your edits into its copy, which only its landing's
+                # ``changed`` tells apart.
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
         elif is_project_thread(session.config) and (alone := await redo_files(self._store, session.id)):
@@ -1294,65 +1357,14 @@ class ArtifactCompletionMixin:
             if reason in {"stop", "done", "complete", "completed"}
             else reason
         )
-
-        loop_result_parent = None
+        inbox_event_id = await announce_result(
+            self._store, session, outcome=outcome, summary=_last_assistant_message_excerpt(messages),
+        )
         try:
-            loop_result_parent = await resolve_loop_result_parent(self._store, session)
-        except Exception:
-            logger.debug(
-                "Failed to resolve loop.result parent for %s",
-                session.id,
-                exc_info=True,
-            )
-
-        if loop_result_parent is not None:
-            try:
-                child_events = await self._store.get_events(session.id)
-                content = extract_final_response(child_events, fallback="").strip()
-                if content:
-                    await self._store.emit_event(
-                        loop_result_parent.id,
-                        EventType.LOOP_RESULT,
-                        {
-                            "run_session_id": str(session.id),
-                            "scheduled_session_id": str(
-                                (session.config or {}).get("scheduled_session_id") or ""
-                            ),
-                            "content": content,
-                            "outcome": outcome,
-                            "duration_seconds": _seconds_since(session.created_at),
-                            "run_completed_at": datetime.now(timezone.utc).isoformat(),
-                        },
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to emit loop.result on parent %s for run %s",
-                    loop_result_parent.id,
-                    session.id,
-                    exc_info=True,
-                )
-
-        inbox_event_id: int | None = None
-        # A scheduled run keeps announcing itself whatever its channel: it
-        # is unwatched work by construction, and the branch above already
-        # took the web/api parents that receive the result inline instead.
-        if loop_result_parent is None and (
-            _is_scheduled_run(session) or raises_completion_inbox_item(session)
-        ):
-            inbox_event_id = await self._store.emit_event(
-                session.id,
-                EventType.INBOX_TASK_COMPLETE,
-                {
-                    "outcome": outcome,
-                    "summary": _last_assistant_message_excerpt(messages),
-                    "duration_seconds": _seconds_since(session.created_at),
-                    "session_title": session.title or "Task complete",
-                    "error": None,
-                },
-            )
-        try:
-            # A thread stopped while it landed stays as the Stop left it.
-            if not (landing is not None and landing.get("stop_heard")):
+            # A thread stopped while it landed stays as the Stop left it; so does one on its computer stopped at an end
+            # with nothing to land.
+            stopped = landing.get("stop_heard") if landing is not None else opens_its_copy(session) and self._check_interrupt()
+            if not stopped:
                 await self._store.update_session_status(session.id, "completed")
         except Exception:
             logger.warning(
@@ -1670,6 +1682,9 @@ class ArtifactCompletionMixin:
         elif saved and is_project_thread(session.config):
             # Said as a landing that did not finish says it: nothing of the turn is lost.
             error += ". Its work is kept, and lands with the thread's next turn"
+        elif saved is False and opens_its_copy(session):
+            # Not kept, its computer away or its keep refused: its copy there holds the work all the same.
+            error += ". Its work is in its copy on its computer, and the thread's next turn lands it, but for any file a landing never writes"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )

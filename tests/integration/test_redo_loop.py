@@ -582,10 +582,11 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
 
             during.setattr(AgentHarness, "maybe_harvest_research", the_user_types_meanwhile)
         await workers.wake(thread.id, SlashCommandConfig())
+    # What the turn's last request came after and did not read is read by the turn, which goes on for it.
     assert (len(workers.requests), await workers.status(thread.id)) == (
-        2 if news == "a helper's report during a tool call" else 1, "active",
+        2 if news in ("a helper's report during a tool call", "a message typed as the turn's request is made ready") else 1,
+        "active",
     )
-    workers.requests.clear()
     if news == "a helper's report":
         await a_helper_reports()
     elif news == "a redo":
@@ -594,16 +595,16 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
         })
     for _ in range(3):
         await workers.wake(thread.id, SlashCommandConfig())
-    # Once for what no request of the turn read, and never again: a wake with nothing new asks nothing.
     told = [{"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} for helper in helpers]
     if news == "a redo":
         told = [{"role": "user", "content": REDO_OF_THE_REPORT}]
     elif news == "a message typed as the turn's request is made ready":
         told = [{"role": "user", "content": "And Q1?"}]
-    assert [[message in request for message in told] for request in workers.requests] == [[True]] * len(told)
-    if news in ("a helper's report", "a helper's report as the model answers", "a redo"):
-        # What came after the turn's last request is the next request's last word.
-        assert [request[-1] for request in workers.requests] == told
+    # Once, by one request beyond the turn's first, and never again: a wake with nothing new asks nothing.
+    assert len(workers.requests) == 1 + len(told)
+    # Read as that request's last word, never ahead of the coordinator's own last answer.
+    reading = [request for request in workers.requests if told and told[0] in request]
+    assert [request[-1] for request in reading[:1]] == told
     assert await workers.status(thread.id) == "active"
 
 

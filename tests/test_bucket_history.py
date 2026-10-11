@@ -436,9 +436,10 @@ async def test_an_action_on_the_copy_goes_on_past_its_try_to_its_bound_and_no_fu
             cut.append(True)
             raise
 
-    monkeypatch.setattr(storage, "upload", never_answers)
+    monkeypatch.setattr(storage, "stat", never_answers)
     request = json.dumps({"action": "apply", "path": "notes.txt", "before": blob_of(b"v2 notes\n"), "after": blob_of(b"v1 notes\n")})
-    # Its try ends at its timeout, as a saga's step's does: the action goes on, shielded, to its bound and is stopped there.
+    # Its try ends at its timeout, as a saga's step's does: the action goes on, shielded, to its bound, and a read of
+    # the store's it waits in there is stopped.
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(history.execute("api", "_history", request), 0.1)
     async with asyncio.timeout(3), module._alone(history.clone, patient=True):
@@ -453,6 +454,66 @@ async def test_an_action_on_the_copy_goes_on_past_its_try_to_its_bound_and_no_fu
 
     monkeypatch.setattr(storage, "stat", times_out)
     assert json.loads(await history.execute("api", "_history", request)) == {"error": "the store did not answer"}
+
+
+async def test_an_action_stopped_at_its_bound_lets_the_copy_go_only_once_the_git_it_began_has_ended(tmp_path, storage):
+    history = BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / "clone", within=0.3)
+    history.clone.mkdir(parents=True)
+    ended = tmp_path / "ended"
+
+    async def work() -> None:
+        await module._child(module._BRINGING, 10.0, ["sh", "-c", f"sleep 1.5 && touch {ended}"])
+
+    began = time.monotonic()
+    with pytest.raises(Slow):
+        await history._held(work)
+    # Stopped at its bound, it waited for its child: the next holder of the copy never has it beside that git.
+    async with module._alone(history.clone, patient=True):
+        assert ended.exists() and time.monotonic() - began >= 1.4
+
+
+async def test_a_threads_work_on_the_copy_is_waited_for_to_its_end_though_what_waits_for_it_is_stopped():
+    ended: list[float] = []
+
+    def work() -> None:
+        time.sleep(0.5)
+        ended.append(time.monotonic())
+
+    waiting = asyncio.ensure_future(module._off(work))
+    await asyncio.sleep(0.1)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    # Stopped only once the thread was done with the copy.
+    assert ended
+
+
+async def test_a_write_its_bound_stopped_lands_before_the_put_back_runs_and_the_put_back_has_the_last_word(
+    tmp_path, storage, project, monkeypatch,
+):
+    from surogates.storage import backend as backend_module
+
+    landed(tmp_path, project, "saga:1", {"notes.txt": b"v2 notes\n"})
+    history = BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / "clone", within=1.0)
+    copy, slow = backend_module.shutil.copyfileobj, []
+
+    def slow_once(source, target, *more):
+        if not slow:
+            # The version is open, and written for two seconds, as a large one is.
+            slow.append(True)
+            time.sleep(2.0)
+        return copy(source, target, *more)
+
+    monkeypatch.setattr(backend_module.shutil, "copyfileobj", slow_once)
+    v1, v2 = blob_of(b"v1 notes\n"), blob_of(b"v2 notes\n")
+    cut = json.loads(await history.execute("api", "_history", json.dumps({"action": "apply", "path": "notes.txt", "before": v2, "after": v1})))
+    assert "error" in cut and slow
+    # Its put-back, as a saga runs one for an apply that failed: it may have written its file.
+    put_back = {"action": "unapply", "path": "notes.txt", "before": v2, "after": v1, "ran": False}
+    assert "error" not in json.loads(await history.execute("api", "_history", json.dumps(put_back)))
+    await asyncio.sleep(2.5)
+    # Nothing the stopped apply began lands after the put-back answered: the file is as it was.
+    assert (project / "notes.txt").read_bytes() == b"v2 notes\n"
 
 
 async def test_a_copy_asked_again_was_used_just_now_however_long_ago_it_was_made(tmp_path, storage, project):

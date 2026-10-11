@@ -728,8 +728,9 @@ async def undone_of(
     Of the records *rows*, and of the Undos of them.  Read from the
     project's completed Undos of its cloud files, or of a folder on the
     computer *device_id*: only those that name one of *rows*, and the
-    Undos of those, so what a read costs is bounded by what it asks of,
-    whatever the project's age.
+    Undos of those, each found through the index of the records an Undo
+    undoes.  So what a read costs is what it asks of, and the Undos of
+    those, whatever the project's age.
     """
     if not rows:
         return frozenset()
