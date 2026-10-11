@@ -1667,7 +1667,7 @@ async def test_an_amendment_whose_write_failed_after_its_record_is_applied_by_th
 
 
 async def a_task_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID:
-    """A task of the chat's mission whose helper is at work: the helper's session."""
+    """A task of the chat's mission whose helper is at work, a worker holding its session: the helper's session."""
     helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
     async with workers.api.app.state.session_factory() as db:
         db.add(Task(
@@ -1675,6 +1675,7 @@ async def a_task_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID
             mission_id=mission_id, current_session_id=helper.id, attempt_count=1,
         ))
         await db.commit()
+    assert await workers.store.try_acquire_lease(helper.id, "the helper's worker", ttl_seconds=60) is not None
     return helper.id
 
 

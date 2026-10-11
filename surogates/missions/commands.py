@@ -871,21 +871,25 @@ async def _cascade_cancel_workers(
     not leave a window in which the dispatcher could re-claim a ready
     task while we are still iterating.
 
-    A task already ``cancelled`` has its session interrupted too: a cascade
-    cut off after its UPDATE marked it never told it, and the run that
-    takes the cascade again is the one that does.  A session no turn runs
-    for hears nothing.
+    A task already ``cancelled`` has its session interrupted too while a
+    worker still holds it: a cascade cut off after its UPDATE marked it
+    never told it, and the run that takes the cascade again is the one that
+    does.  One whose session is at rest, cancelled long since, is not told
+    again.
     """
-    from sqlalchemy import func as _func, select as _sel, update as _upd
+    from sqlalchemy import and_ as _and, exists as _exists, func as _func, or_ as _or, select as _sel, update as _upd
 
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.db.models import Task
+    from surogates.db.models import SessionLease, Task
 
+    held = _exists().where(
+        SessionLease.session_id == Task.current_session_id, SessionLease.expires_at > _func.now(),
+    )
     async with session_factory() as db:
         running_session_ids = (await db.execute(
             _sel(Task.current_session_id).where(
                 Task.mission_id == mission_id,
-                Task.status.in_(("running", "cancelled")),
+                _or(Task.status == "running", _and(Task.status == "cancelled", held)),
                 Task.current_session_id.isnot(None),
             )
         )).scalars().all()
