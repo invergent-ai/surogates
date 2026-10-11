@@ -1803,15 +1803,19 @@ class SessionStore:
 
     async def last_event(
         self, session_id: UUID, *types: EventType,
-        containing: dict[str, Any] | None = None, with_key: str | None = None, before: int | None = None,
+        containing: dict[str, Any] | None = None, with_key: str | None = None, without_key: str | None = None,
+        before: int | None = None,
     ) -> Event | None:
-        """The session's latest event of one of *types* whose data holds *containing* and has the
-        key *with_key*, of those before event *before* when given; None when it has none."""
+        """The session's latest event of one of *types* whose data holds *containing*, has the
+        key *with_key* and not the key *without_key*, of those before event *before* when given;
+        None when it has none."""
         stmt = select(EventRow).where(EventRow.session_id == session_id, EventRow.type.in_([t.value for t in types]))
         if containing:
             stmt = stmt.where(EventRow.data.contains(containing))
         if with_key is not None:
             stmt = stmt.where(EventRow.data.has_key(with_key))
+        if without_key is not None:
+            stmt = stmt.where(not_(EventRow.data.has_key(without_key)))
         if before is not None:
             stmt = stmt.where(EventRow.id < before)
         stmt = stmt.order_by(EventRow.id.desc()).limit(1)
@@ -2508,14 +2512,21 @@ class SessionStore:
         through_event_id: int,
         lease_token: UUID,
         *,
-        at_rest: bool = False,
+        rests_with: dict | None = None,
     ) -> None:
         """Advance the durable cursor.  Only succeeds if the caller holds the lease.
 
-        With *at_rest*, a session still active comes to rest (``completed``)
-        in the same write: the end of a turn is recorded whole or not at
-        all, and a session its user stopped meanwhile stays stopped.
+        With *rests_with*, a session still active comes to rest (``completed``)
+        in the same write, and a ``session.complete`` whose data is
+        *rests_with* says so: the end of a turn is recorded whole or not at
+        all, and once.  A session its user stopped meanwhile stays stopped,
+        and its stop is its turn's end.  The ``session.complete`` lies past
+        the cursor, which stays before whatever was said meanwhile.
         """
+        ending = (
+            await self._ready_event(session_id, EventType.SESSION_COMPLETE, rests_with)
+            if rests_with is not None else None
+        )
         async with self._sf() as db:
             # Verify lease ownership (SELECT FOR UPDATE).
             lease_row = (
@@ -2546,13 +2557,19 @@ class SessionStore:
                 ),
                 {"sid": session_id, "cursor": through_event_id},
             )
-            if at_rest:
-                await db.execute(
+            if ending is not None:
+                rested = (await db.execute(
                     update(SessionRow)
                     .where(SessionRow.id == session_id, SessionRow.status == "active")
                     .values(status="completed", updated_at=func.now())
-                )
+                )).rowcount == 1
+                if rested:
+                    await self._write_event(db, ending)
+                else:
+                    ending = None
             await db.commit()
+        if ending is not None:
+            await self._announce_event(ending)
 
     async def get_pending_events(self, session_id: UUID) -> list[Event]:
         """Return events the harness has not yet processed."""

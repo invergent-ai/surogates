@@ -12,7 +12,11 @@ saw, the record on ``main``, and the forgetting of what the landing kept of
 the files it replaced, which lets the folder go.  The look comes before the
 pickup, and each apply carries what the look saw, so a save of yours after
 the look is picked up, or found by its apply, and never written over.
-Nothing on the computer checks that order: it is kept here.
+Nothing on the computer checks that order: it is kept here.  And it applies
+only what its thread did: where the thread ran no command, started no
+process, has no helper and wrote through no link, the files its own
+operations named, as the journal has them (``DeviceOperations.named``), so a
+copy that lacks a file of yours, or holds one cut short, changes none of them.
 
 What differs from the cloud is who holds what.  No lock of the server's is
 held: a computer may be away for a day in the middle of a landing, and its
@@ -82,19 +86,19 @@ from surogates.devices.history import (
     code_of,
     thread_copy,
 )
-from surogates.devices.operations import LeaseLost, OperationConflict
+from surogates.devices.operations import LeaseLost, OperationConflict, as_named
 from surogates.devices.workspace import MAX_MESSAGE_CHARS, DeviceOperationError
 from surogates.governance.saga import Saga, SagaState, SagaStep, StepState
 from surogates.governance.saga.orchestrator import SagaTimeoutError
 from surogates.harness.landing import (
     _PUT_BACK_BOUND,
-    TURN_ENDS,
     LandingUnsettled,
     _orchestrator,
     _Row,
     _tell,
     _tell_escalated,
     _written,
+    last_turn_end,
     redo_files,
 )
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
@@ -133,6 +137,10 @@ TRIES = 2
 #: Why a landing leaves out a file that no landing will ever write: a name that runs code, and a link or a file with a
 #: second name.  The thread's version stays in its copy, and is no work a turn's end failed to save.
 NEVER_LANDS = ("protected", "linked")
+#: Why a landing leaves out a file its thread's copy changed that nothing the thread did names: one the copy lacks,
+#: and one it holds otherwise.  Neither is the thread's work: each stays as the folder has it, and is the folder's in
+#: the copy again once the landing is recorded.
+NOT_ITS_OWN = ("gone", "unnamed")
 #: How much one landing carries, in characters of its files' names and of what is said of each: one answer of its
 #: computer's, and each request of the server's that names its files, is one frame of the link, which this leaves
 #: room in.  A turn that changed more lands none of it, and says so, before anything is committed.
@@ -306,7 +314,7 @@ async def lands(store: Any, session: Any, turn: int, calls: list) -> bool:
     """
     if any((call.data or {}).get("name") not in SAGA_EXCLUDED_TOOLS for call in calls):
         return True
-    ended = await store.last_event(session.id, *TURN_ENDS)
+    ended = await last_turn_end(store, session.id)
     if ended is not None and not (ended.type == EventType.SESSION_COMPLETE.value and ended.data.get("saved", True)):
         return True
     for report in (EventType.WORKER_COMPLETE, EventType.WORKER_FAILED):
@@ -414,8 +422,8 @@ async def land_local_turn(
         outcome["recovery"] = recovery
     _tell(outcome, redoing)
     if outcome["state"] == "completed":
-        # A file no landing writes is not work this turn's end failed to save.
-        left = {o["path"] for o in outcome["overlapped"] if o["reason"] not in NEVER_LANDS}
+        # A file no landing writes is not work this turn's end failed to save, nor one nothing the thread did changed.
+        left = {o["path"] for o in outcome["overlapped"] if o["reason"] not in (*NEVER_LANDS, *NOT_ITS_OWN)}
         outcome["saved"] = left <= {redo["path"] for redo in outcome["redo"]}
     if ending.heard() and ending.wrote and outcome.get("reason") not in ("stopped", "deleted") and not await ending.deleted():
         # Stopped once its landing had written a file: it was not interrupted, and whoever stopped it is told so.
@@ -589,18 +597,23 @@ def _of_row(row: Any) -> dict:
     """The outcome of a landing whose row says it ended, as its own run gave it: what it landed, what it left out, and why.
 
     Read from its steps, as :func:`_row_files` is: the commit's one answer,
-    the files no landing writes that its record left in the copy, and the
-    files its record landed.  So a turn's end taken up again after its
-    first run was lost before telling tells the same, the files to redo
-    among it.
+    the files no landing writes that its record left in the copy, the files
+    its record landed, and of the commit's changes those its record did
+    neither with, which nothing the thread did named.  So a turn's end
+    taken up again after its first run was lost before telling tells the
+    same, the files to redo among it.
     """
     saga = saga_of(row)
     commit = next((s.execute_result for s in saga.steps if s.tool_name == "history.commit" and s.execute_result), None) or {}
     record = next((s for s in saga.steps if s.tool_name == "history.record"), None)
     left = set(record.arguments.get("left", [])) if record is not None else set()
+    applied = {c["path"] for c in record.arguments["applied"]} if record is not None else None
     changes = commit.get("changes", [])
     held = {o["path"] for o in commit.get("overlapped", [])}
-    overlapped = [*commit.get("overlapped", []), *({**c, "reason": "linked"} for c in changes if c["path"] in left and c["path"] not in held)]
+    overlapped = [
+        *commit.get("overlapped", []), *({**c, "reason": "linked"} for c in changes if c["path"] in left and c["path"] not in held),
+        *(_not_its_own(c) for c in changes if applied is not None and c["path"] not in applied | left),
+    ]
     landed = record.arguments["applied"] if record is not None and row.saga_state == "completed" else []
     return {
         "saga": row.saga_id, "state": row.saga_state, "commit": row.commit, "landed": landed, "overlapped": overlapped,
@@ -644,16 +657,27 @@ def _row_files(saga: Saga) -> list[dict]:
     Read from its steps alone, so whoever completes it from its row writes
     the same: its record names what it landed, a file already as the turn
     left it among them, and its commit what it left out, with what no
-    landing writes that its look found a link or a file with a second name.
+    landing writes that its look found a link or a file with a second name,
+    which its record left in the copy.  A file the copy changed that nothing
+    the thread did named is none of the thread's files.
     """
     commit = next(s.execute_result for s in saga.steps if s.tool_name == "history.commit")
-    landed = next(s for s in saga.steps if s.tool_name == "history.record").arguments["applied"]
+    record = next(s for s in saga.steps if s.tool_name == "history.record")
+    landed, left = record.arguments["applied"], set(record.arguments.get("left", []))
     paths = {c["path"] for c in landed}
     return [
         *({"path": c["path"], "before": c["before"], "after": c["after"], "merged": True} for c in landed),
         *({"path": o["path"], "before": o["before"], "after": o["after"], "merged": False} for o in commit["overlapped"]),
-        *({"path": c["path"], "before": c["before"], "after": c["after"], "merged": False} for c in commit["changes"] if c["path"] not in paths),
+        *(
+            {"path": c["path"], "before": c["before"], "after": c["after"], "merged": False}
+            for c in commit["changes"] if c["path"] not in paths and c["path"] in left
+        ),
     ]
+
+
+def _not_its_own(change: dict) -> dict:
+    """*change*, a file the copy changed that nothing its thread did named, left out: one the copy lacks, or holds otherwise."""
+    return {**change, "reason": "gone" if change["after"] is None else "unnamed"}
 
 
 async def _land(
@@ -788,9 +812,26 @@ async def _land(
         written = [(number, c) for number, c in enumerate(changes) if c["before"] != c["after"]]
         if any(c["path"] not in revisions for _, c in written):
             raise _Stale("the turn names a file the landing's look did not see")
+        # Where the thread ran no command, started no process, has no
+        # helper and wrote through no link, only its own file operations
+        # changed its copy, and the journal names each file they wrote or
+        # deleted.  A file the copy changed that none of them names was
+        # changed by nothing the thread did, whatever its computer says of
+        # the copy: one the copy lacks, or holds cut short.  It stays as the
+        # folder has it, and the landing's record gives the copy the folder's
+        # file again, a link's place too: none of it is the thread's to
+        # leave in its copy.
+        named = await copy.operations.named(session.id, copy.folder, besides=invocation) if written else None
+        unnamed = set() if named is None else {c["path"] for _, c in written if as_named(c["path"]) not in named}
+        if unnamed:
+            logger.warning("The copy of thread %s changed %d files that nothing the thread did names", session.id, len(unnamed))
         # A link, or a file with a second name, is never replaced: the thread's version stays in its copy.
-        linked = {c["path"] for _, c in written if revisions[c["path"]] == "other"}
-        overlapped = [*turned["overlapped"], *({**c, "reason": "linked"} for c in changes if c["path"] in linked)]
+        linked = {c["path"] for _, c in written if c["path"] not in unnamed and revisions[c["path"]] == "other"}
+        held = linked | unnamed
+        overlapped = [
+            *turned["overlapped"], *({**c, "reason": "linked"} for c in changes if c["path"] in linked),
+            *(_not_its_own(c) for c in changes if c["path"] in unnamed),
+        ]
         outcome.update(
             overlapped=overlapped, excluded=turned["excluded"], repositories=turned["repositories"], not_taken=turned["not_taken"],
         )
@@ -801,7 +842,7 @@ async def _land(
             return outcome
         applies = [
             step("apply", saga=saga_id, step=number, **c, expected=revisions[c["path"]])
-            for number, c in written if c["path"] not in linked
+            for number, c in written if c["path"] not in held
         ]
         # The steps, fixed: all a put-back by whoever settles this landing needs.
         await fixed()
@@ -815,10 +856,14 @@ async def _land(
             await execute(it, partial(_applied, steps, **it.arguments), wrote=True)
         if await ending.deleted():
             raise _Deleted("its thread was deleted while its landing was under way")
-        landed = [c for c in changes if c["path"] not in linked]
+        landed = [c for c in changes if c["path"] not in held]
         record = step(
             "record", turn=turned["commit"], applied=landed, author=thread, main=picked["main"], pickup=picked["commit"],
-            trailers=[*audit, ["Surogate-Kind", "landing"], *(["Surogate-Not-Merged", o["path"]] for o in overlapped)],
+            # What it left out of the thread's: never a file nothing the thread did named, which is none of its.
+            trailers=[
+                *audit, ["Surogate-Kind", "landing"],
+                *(["Surogate-Not-Merged", o["path"]] for o in overlapped if o["reason"] not in NOT_ITS_OWN),
+            ],
             # What no landing writes stays in the copy as the thread left it: the commit's own changes, and none else.
             left=sorted(o["path"] for o in overlapped if o["reason"] in NEVER_LANDS),
         )

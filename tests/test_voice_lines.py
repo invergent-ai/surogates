@@ -1,9 +1,13 @@
 """A voice line's fixed lines and language: the owner's own over the language's defaults."""
 from dataclasses import fields
 
-from surogates.voice.agent import CallConfig
-from surogates.voice.lines import DEFAULTS, Lines, default_lines, language_name, lines_from_routing
-from surogates.voice.sessions import question_text
+import pytest
+
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+from surogates.voice.agent import CallConfig  # noqa: E402
+from surogates.voice.lines import DEFAULTS, Lines, default_lines, language_name, lines_from_routing  # noqa: E402
+from surogates.voice.sessions import question_text  # noqa: E402
 
 
 def test_every_language_has_every_line_and_choices_keep_their_slot():

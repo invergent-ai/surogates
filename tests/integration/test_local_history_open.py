@@ -22,7 +22,7 @@ from surogates.devices.binding import THREAD_KINDS
 from surogates.devices.history import NO_COPY, NOWHERE, OPEN_TRIES, thread_copy
 from surogates.devices.operations import OperationRequest
 from surogates.devices.workspace import DeviceOperationError
-from surogates.harness.landing import TURN_ENDS
+from surogates.harness.landing import last_turn_end
 from surogates.harness.tool_exec import _open_local_copy
 from surogates.runtime import SlashCommandConfig
 from surogates.session.events import EventType
@@ -174,7 +174,7 @@ def sent_after_the_open(operations: list[tuple]) -> list[str]:
 
 async def turn_end(api, session) -> int:
     """The id of *session*'s last turn end: the next turn's name."""
-    return (await api.app.state.session_store.last_event(session.id, *TURN_ENDS)).id
+    return (await last_turn_end(api.app.state.session_store, session.id)).id
 
 
 async def failure(api, session) -> dict:

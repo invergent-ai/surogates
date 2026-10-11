@@ -509,12 +509,12 @@ async def test_a_thread_bound_with_a_copy_has_its_file_tools_work_in_the_copy_an
     assert sorted(str(path.relative_to(copy)) for path in copy.rglob("*")) == ["Budget.xlsx", "Plans", "Plans/Q3.md", "notes.txt"]
     assert (copy / "Plans" / "Q3.md").read_text() == "Q3 plan, by the thread\n"
     assert (copy / "notes.txt").read_text() == "noted\n"
-    # Its files are named by the folder's path, as the app names a copy's: the copy's own place is the app's.
+    # Its files are named by the path the folder was bound by, as the app names a copy's: the copy's own place is the app's.
     async with api.app.state.session_factory() as db:
         keys = (await db.execute(text(
             "SELECT outcome->>'ok' FROM device_operations WHERE calling_session_id = :id AND kind = 'resolve'"
         ), {"id": thread.id})).scalars().all()
-    assert keys and all(key == str(computer.folder) or key.startswith(f"{computer.folder}/") for key in keys), keys
+    assert keys and all(key == FOLDER or key.startswith(f"{FOLDER}/") for key in keys), keys
 
 
 async def test_a_threads_own_kinds_reach_its_folders_history_and_the_land_kind_and_its_answers_are_taken_as_data(api, computer):

@@ -26,10 +26,12 @@ settles one otherwise changes this file with it.
   step by the thread itself under ``land:``, and an ``open`` also under
   ``open:``.  It reads no other argument.
 - A thread's file and process operations work in its copy, named by the
-  folder's path as a helper on a copy names them; a command's text has the
-  folder's path read as the copy's, where the guest runs it in the copy
-  mounted at that path.  The app opens the copy itself before the first of
-  them, and on master's history that open moves a clean copy to ``main``.
+  bound folder's path as a helper on a copy names them (the copy's ``at``,
+  desktop/src/history/copies.ts): each key a resolve answers is under it; a
+  command's text has the folder's path read as the copy's, where the guest
+  runs it in the copy mounted at that path.  The app opens the copy itself
+  before the first of them, and on master's history that open moves a clean
+  copy to ``main``.
 - The hold: any ``land`` operation takes the folder, and another root's is
   answered ``busy`` at once, where the app waits up to 150 s first; it lapses
   after two idle minutes, and a landing's helper is started anew with each
@@ -143,6 +145,8 @@ class Places:
         self.kept = data / "landings" / key
         # Root session id -> the thread whose copy it works in: a bind's history.
         self.threads: dict[str, str] = {}
+        # Root session id -> the folder it was bound to, by the path the bind named: what its copy's keys are under.
+        self.bound: dict[str, str] = {}
         # The thread kinds asked past the gate, as (invocation, calling session, kind, action), in order.
         self.asked: list[tuple[str, str, str, str]] = []
         # Why this folder has no history, as the app found it, or None.
@@ -179,20 +183,25 @@ class Places:
         return self.copy(thread)
 
     def into(self, root: str, args: dict[str, Any]) -> dict[str, Any]:
-        """An operation's arguments, its folder's path read as its copy's, as a helper on a copy reads them (edge.ts)."""
-        folder, copy = str(self.real), str(self.copy(self.threads[root]))
+        """An operation's arguments, its folder's path read as its copy's, as a helper on a copy reads them (edge.ts).
+
+        By the folder's own path here, which a scene's command may name, and by the path the bind named: in that
+        order, as the copy's own path here starts with the folder's.
+        """
+        copy = str(self.copy(self.threads[root]))
         moved = dict(args)
-        for name in ("key", "workdir", "path"):
-            value = moved.get(name)
-            if isinstance(value, str) and (value == folder or value.startswith(f"{folder}/")):
-                moved[name] = copy + value[len(folder):]
-        if isinstance(moved.get("command"), str):
-            moved["command"] = moved["command"].replace(folder, copy)
+        for folder in (str(self.real), self.bound[root]):
+            for name in ("key", "workdir", "path"):
+                value = moved.get(name)
+                if isinstance(value, str) and (value == folder or value.startswith(f"{folder}/")):
+                    moved[name] = copy + value[len(folder):]
+            if isinstance(moved.get("command"), str):
+                moved["command"] = moved["command"].replace(folder, copy)
         return moved
 
     def out_of(self, root: str, outcome: Any) -> Any:
-        """An operation's outcome, each path in it named by the folder's, as a helper on a copy answers."""
-        folder, copy = str(self.real), str(self.copy(self.threads[root]))
+        """An operation's outcome, each path in it named by the bound folder's, as a helper on a copy answers."""
+        folder, copy = self.bound[root], str(self.copy(self.threads[root]))
         if isinstance(outcome, str):
             return outcome.replace(copy, folder)
         if isinstance(outcome, dict):

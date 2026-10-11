@@ -61,6 +61,9 @@ export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
   console: string; // the guest's console log
   user: HostUser; // whom the roots run for: the name and home they see
+  // The company's CA certificates, PEM, that the app's own connections trust from its start: each
+  // boot's guest trusts them for its commands' TLS, given as data in hello's answer. None without.
+  ca?: string[];
   kvm?: string; // the device KVM is opened from: /dev/kvm
   cpus?: number;
   pingMs?: number;
@@ -355,7 +358,7 @@ export class Guest {
     if (signal?.aborted) halt();
     try {
       const deadline = launched + WAITS[vm.emulated ? "emulated" : "kvm"].helloMs;
-      const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited);
+      const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited, options.ca);
       return new Guest(options, vm, control, launched, performance.now() - launched, told, egress, forwarded);
     } catch (error) {
       await vm.kill();

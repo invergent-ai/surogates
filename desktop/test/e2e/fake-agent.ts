@@ -382,7 +382,8 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // project takes to answer once it is made, as a slow agent's, and a version to be handed over to
 // save, whose asked keeps each version it was asked to open or to restore and each change to undo, whose
 // unopened, when set, is why it opens none, whose unrestored and notUndone, when set, are why it restores
-// or undoes none, whose put, when set, is what a Restore or an Undo answers, and whose register()
+// or undoes none, whose put, when set, is what a Restore or an Undo answers, whose gotten names each project
+// it was asked for, whose held, when set, is what an answer to such a question waits for, and whose register()
 // registers the source, or with the methods it lacks the
 // source of an agent older than the app, which serves less. What it changes of a project it keeps at
 // the fake agent, so the next load serves it.
@@ -401,6 +402,8 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     unrestored: null as string | null,
     notUndone: null as string | null,
     put: null as UndoResult | null,
+    gotten: [] as string[],
+    held: null as Promise<void> | null,
     register: (_lacks?: string[]) => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
@@ -425,6 +428,8 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
         ({ id, name, icon, createdAt, updatedAt, waiting, working }));
     },
     async get(id: string) {
+      fake.gotten.push(id);
+      await fake.held;
       return this.one(id);
     },
     async threads(id: string, threadId?: string) {

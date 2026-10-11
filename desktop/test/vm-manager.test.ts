@@ -67,6 +67,8 @@ let agentNet: Duplex | undefined;
 // What the latest fake VM's agent answers the host's streams on its inbound port with: a connection, or why none.
 // Unset, its agent takes no stream there.
 let reach: ((root: string, port: number, first: 4 | 6) => Promise<Socket | string>) | undefined;
+// The company's CA certificates each fake VM's agent was told to trust, a list a boot.
+let trusted: string[][] = [];
 
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
@@ -91,7 +93,7 @@ const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null =
     gone("");
   };
   if (roots) {
-    const machine = powers ? { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill } : undefined;
+    const machine = powers ? { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill, trust: async (certificates: string[]) => void trusted.push(certificates) } : undefined;
     const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots, machine);
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
     control.hello();
@@ -1276,6 +1278,18 @@ describe("a guest's stop", () => {
 });
 
 describe("a guest's boot", () => {
+  it("tells the guest's agent the company's CA certificates the app trusts, and none where it trusts none", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const ca = ["-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"];
+    trusted = [];
+    for (const given of [{ ca }, {}]) {
+      const guest = await Guest.boot(fakeVm(roots), { ...options(), ...given });
+      await until(() => trusted.length === (given.ca ? 1 : 2));
+      await guest.stop();
+    }
+    expect(trusted).toEqual([ca, []]);
+  });
+
   it("ends a VM whose boot is stopped just as its backend returns it", async () => {
     const stop = new AbortController();
     const boot: BootVm = async (...args) => {

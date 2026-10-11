@@ -40,7 +40,7 @@ from surogates.devices.history import (
     opens_its_copy,
     refused,
 )
-from surogates.devices.operations import DeviceOperations, OperationConflict
+from surogates.devices.operations import DeviceOperations, OperationConflict, _in_folder, _named_by, as_named
 from surogates.devices.workspace import RESULT_TRANSFERS, DeviceOperationError
 from surogates.sandbox import history as sandbox_history
 from surogates.sandbox import local_history
@@ -1126,4 +1126,40 @@ def test_every_refusal_the_app_has_of_its_own_for_a_threads_kinds_is_read_by_its
     # The tests' computer stands in for the app with the app's own words.
     for name in ("NOT_A_THREAD", "NOT_ITS_TURN", "NOT_A_FORGETTING_ASKED", "RECORDS_UNREAD", "FOLDER_UNAVAILABLE"):
         assert getattr(fake_places, name) == said[name], name
+
+
+# -- what a thread's own operations name -------------------------------------------------------------------------
+
+
+def test_a_file_is_named_from_its_folders_top_however_a_tool_wrote_its_path():
+    folder = "/home/u/Reports"
+    assert _in_folder("Budget.xlsx", folder) == "Budget.xlsx"
+    assert _in_folder("./notes/../notes//a.md", folder) == "notes/a.md"
+    assert _in_folder("/home/u/Reports/deep/Abs.md", f"{folder}/") == "deep/Abs.md"
+    # A path that names nothing inside the folder names no file of it.
+    for outside in ("/home/u/Reports-old/a.md", "/etc/passwd", "../outside.md", "notes/../..", "", ".", folder):
+        assert _in_folder(outside, folder) is None, outside
+    # Two names of one file compare as one: a folder that keeps no case, and a letter written two ways.
+    assert as_named("Résumé.DOCX") == as_named("Résumé.docx") != as_named("Resume.docx")
+
+
+def test_a_write_names_its_file_only_where_its_computer_wrote_the_file_its_path_names():
+    folder = "/home/u/Reports"
+    # The key its computer answered is the file its path names, from the folder's top, however the path was spelt.
+    assert _named_by([
+        ("Budget.xlsx", f"{folder}/Budget.xlsx"), ("./notes/../notes/a.md", f"{folder}/notes/a.md"), (f"{folder}/B.md", f"{folder}/B.md"),
+    ], folder) == {"budget.xlsx", "notes/a.md", "b.md"}
+    # Its computer followed a link: the user's, or one the guest made in the copy, which the server cannot tell apart.
+    # A link whose path ends its target's path is one too.  So the write could be of any file: no list.
+    for path, key in (
+        ("README.md", f"{folder}/docs/README.md"), ("Notes.md", f"{folder}/Budget.csv"), ("docs/a.md", f"{folder}/site/docs/a.md"),
+    ):
+        assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), (path, key)], folder) is None, path
+    # A path or a key outside the folder, a key that is no whole path, and a write no resolve of its call answered: none.
+    for path, key in (
+        ("/elsewhere/c.md", f"{folder}/c.md"), ("c.md", "/elsewhere/c.md"), ("c.md", f"{folder}/{'../' * 3}etc/passwd"),
+        ("c.md", "c.md"), ("c.md", None), (None, f"{folder}/c.md"), ("~/Reports/c.md", f"{folder}/c.md"),
+    ):
+        assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), (path, key)], folder) is None, (path, key)
+    assert _named_by([], folder) == frozenset()
 

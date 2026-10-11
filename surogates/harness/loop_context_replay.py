@@ -250,6 +250,14 @@ _NOT_MERGED = {
     "left": "Not merged, because the thread left the newer file as it is",
     "protected": "Not merged, because a change to them could run code on the user's computer, which a landing never writes",
     "linked": "Not merged, because the folder has a link there, or a file with a second name, which a landing never replaces",
+    "gone": (
+        "Not deleted, because the thread's copy lacks them, and none of the thread's file tools deleted them and it ran "
+        "no command (they are in its copy again)"
+    ),
+    "unnamed": (
+        "Not merged, because none of the thread's file tools wrote them and it ran no command "
+        "(its copy differed there, and has the folder's file again)"
+    ),
 }
 
 

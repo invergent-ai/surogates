@@ -387,7 +387,17 @@ def turn_ended(session: Any) -> None:
 
 
 #: The events that end a thread's turn: a landing or its failure, a failed turn, a stop.
-TURN_ENDS = (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED)
+_TURN_ENDS = (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED)
+
+
+async def last_turn_end(store: Any, session_id: Any) -> Any | None:
+    """The thread's last turn end: its last landing or a landing's failure, failed turn or stop; None when it has none.
+
+    A command's end is none (its ``session.complete`` names the command's
+    message): a command lands nothing, and the thread's next turn goes on
+    from the end before it.
+    """
+    return await store.last_event(session_id, *_TURN_ENDS, without_key="answers")
 
 
 async def name_turn(store: Any, session: Any) -> None:
@@ -405,7 +415,7 @@ async def name_turn(store: Any, session: Any) -> None:
     A read that fails fails the turn's start: no pod is made under a
     name that is not known.
     """
-    ended = await store.last_event(session.id, *TURN_ENDS)
+    ended = await last_turn_end(store, session.id)
     session.config["turn_after"] = ended.id if ended else 0
 
 
@@ -1289,7 +1299,7 @@ async def redo_files(store: Any, session_id: Any) -> set[str]:
     redo = await store.last_event(session_id, EventType.HISTORY_REDO)
     if redo is None:
         return set()
-    ended = await store.last_event(session_id, *TURN_ENDS)
+    ended = await last_turn_end(store, session_id)
     if ended is not None and ended.id > redo.id and await store.has_event(
         session_id, EventType.LLM_REQUEST, after=redo.id, before=ended.id,
     ):

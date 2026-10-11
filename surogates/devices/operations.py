@@ -14,9 +14,11 @@ import contextlib
 import hashlib
 import json
 import logging
-from collections.abc import Awaitable, Callable, Collection
+import posixpath
+import unicodedata
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID, uuid5
 
@@ -123,6 +125,81 @@ _CLAIMED: dict[str, Any] = {"ok": None}
 # write's goes at the first pass after the write closes, whatever its age.
 RETAIN_CONSUMED = timedelta(hours=24)
 ORPHAN_AFTER = timedelta(days=7)
+
+# How many of a thread's latest records DeviceOperations.named reads for the
+# last one its computer answered: one refused, or no answer, is no landing.
+_RECORDS_READ = 16
+# What a session did on its computer that could change any file of its folder,
+# not one an operation of its names: a background process it ever started,
+# which may still run; a command it ran, or wrote to, since *since*, closed
+# or not; and a session made under it, which works in its copy.  Each part
+# a range of the journal's index by session, kind and close.
+_COULD_CHANGE_ANY = text("""
+    SELECT EXISTS (SELECT 1 FROM device_operations WHERE calling_session_id = :session AND kind = 'start')
+        OR EXISTS (
+            SELECT 1 FROM device_operations
+             WHERE calling_session_id = :session AND kind IN ('run', 'write_stdin') AND completed_at IS NULL
+        )
+        OR EXISTS (
+            SELECT 1 FROM device_operations
+             WHERE calling_session_id = :session AND kind IN ('run', 'write_stdin') AND completed_at > :since
+        )
+        OR EXISTS (SELECT 1 FROM sessions WHERE parent_id = :session)
+""")
+# Each write and deletion of a session's since *since*, closed or not: the key
+# it carried, and the path of the resolve of its own call that answered that
+# key, which its tool gave; no path where none did.
+_WRITES = text("""
+    SELECT w.args->>'key' AS key, (
+        SELECT r.args->>'path' FROM device_operations r
+         WHERE r.calling_session_id = w.calling_session_id AND r.invocation_id = w.invocation_id
+           AND r.ordinal < w.ordinal AND r.kind = 'resolve' AND r.outcome->>'ok' = w.args->>'key'
+         ORDER BY r.ordinal DESC LIMIT 1
+    ) AS path
+      FROM device_operations w
+     WHERE w.calling_session_id = :session AND w.kind IN ('write', 'delete')
+       AND (w.completed_at IS NULL OR w.completed_at > :since)
+""")
+# Before every operation of the journal's: a session that has recorded no landing yet.
+_EVER = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def as_named(path: str) -> str:
+    """A file's path as two names of it compare: a folder that keeps no case, or writes a letter two ways, has one file under both."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _in_folder(path: str, folder: str) -> str | None:
+    """*path*, as a tool gave it or a computer answered it, from the top of *folder*; None where it names nothing inside."""
+    top = folder.rstrip("/")
+    if path.startswith("/"):
+        if not path.startswith(f"{top}/"):
+            return None
+        path = path[len(top) + 1:]
+    inside = posixpath.normpath(path)
+    return None if inside in (".", "..") or inside.startswith("../") else inside
+
+
+def _named_by(writes: Iterable[tuple[str | None, str | None]], folder: str) -> frozenset[str] | None:
+    """The files *writes* named in *folder*, each as :func:`as_named` has it; None where one could be any file.
+
+    Each write is a pair: the path its call asked its computer to resolve,
+    as its tool gave it, and the key that computer answered, which the write
+    carried; the path None where no resolve of its call answered that key.
+    Its computer answers a key under the folder's own path, every link on
+    the way followed.  So a write names its file where its key is the file
+    its path names from the folder's top.  One whose key is another went
+    through a link: the user's, or one a guest made in the copy, which the
+    server cannot tell apart.  That one, and one placed nowhere in the
+    folder or by no resolve, could be any file.
+    """
+    names: set[str] = set()
+    for path, key in writes:
+        inside = None if path is None else _in_folder(path, folder)
+        if inside is None or not isinstance(key, str) or not key.startswith("/") or _in_folder(key, folder) != inside:
+            return None
+        names.add(as_named(inside))
+    return frozenset(names)
 
 
 def operation_channel(operation_id: UUID) -> str:
@@ -1291,6 +1368,56 @@ class DeviceOperations:
                     DeviceOperation.invocation_id.endswith(f":settle:{saga_id}", autoescape=True),
                 ).limit(1)
             )).first() is not None
+
+    async def named(self, session_id: UUID, folder: str, *, besides: str | None = None) -> frozenset[str] | None:
+        """The files of *folder* that *session_id*'s own operations named since its last recorded landing; None where it could have changed any.
+
+        Read from the journal, which the server writes, and from nothing its
+        computer says of the copy.  A thread's copy changes by an operation
+        that names a file (``write``, ``delete``), by a command (``run``,
+        ``write_stdin``, or a background process once ``start``ed, which may
+        still run), or by a session made under the thread, which works in
+        its copy.  With a command or such a session there is no list: None.
+        Else each write and deletion names its file, as :func:`_named_by`
+        reads it; and so does each file that landing left in the copy, no
+        landing writing it, which is the thread's own still.  One written
+        where the server cannot say which file, through a link among them,
+        counts as a command does.
+
+        The last recorded landing is the newest of the session's whose
+        record its computer answered, checked as an answer given now, but
+        the landing *besides* names, its invocation: a landing taken up again
+        after its record names its files as its first run did.  What was
+        done from that landing's first step on is counted; with none, all.
+        """
+        # Imported here: that module imports this one.
+        from surogates.devices.history import answered
+
+        mine = (DeviceOperation.calling_session_id == session_id, DeviceOperation.kind == "history")
+        async with self._sf() as db:
+            records = (await db.execute(
+                select(DeviceOperation.invocation_id, DeviceOperation.outcome, DeviceOperation.args["left"].label("left"))
+                .where(
+                    *mine, DeviceOperation.invocation_id.startswith("land:"), DeviceOperation.invocation_id != (besides or ""),
+                    DeviceOperation.args["action"].as_string() == "record", DeviceOperation.outcome["ok"].is_not(None),
+                )
+                .order_by(DeviceOperation.created_at.desc()).limit(_RECORDS_READ)
+            )).all()
+            landed = next((record for record in records if answered("history", "record", record.outcome) is not None), None)
+            since, left = _EVER, []
+            if landed is not None:
+                since = (await db.execute(
+                    select(func.min(DeviceOperation.created_at))
+                    .where(DeviceOperation.calling_session_id == session_id, DeviceOperation.invocation_id == landed.invocation_id)
+                )).scalar_one()
+                # The server's own request, not its computer's word: the paths it asked to be left as the thread left them.
+                left = [path for path in landed.left if isinstance(path, str)] if isinstance(landed.left, list) else []
+            window = {"session": session_id, "since": since}
+            if (await db.execute(_COULD_CHANGE_ANY, window)).scalar_one():
+                return None
+            writes = (await db.execute(_WRITES, window)).all()
+        named = _named_by(((path, key) for key, path in writes), folder)
+        return None if named is None else named | {as_named(path) for path in left}
 
     async def closed_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
         """Which of these operations of the device the server has closed.
