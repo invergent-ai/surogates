@@ -269,6 +269,27 @@ They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` nam
 
     SUROGATE_TEST_BROWSER=/opt/microsoft/msedge/msedge npm run test:browser -- test/browser-host.test.ts
 
+## What this release does not do
+
+- **A chat that works freely is not asked about downloads or uploads.** A page's download is
+  saved under `Downloads` in the chat's folder, and a file the agent uploads to a page is given
+  to it, without a prompt. A chat that asks every time asks about both.
+- **Another site can open a chat's allowed port in a tab.** A link or a redirect from another
+  site's page opens it with one GET, as any site can send a tab anywhere, and that GET carries
+  the cookies the port's own pages set. Nothing else of another site's reaches the port: no
+  fetch, frame, form or beacon.
+- **The device link takes no proxy that the computer must name.** Where the only way out is
+  the desktop's proxy settings, a PAC file or `HTTPS_PROXY`, the window goes through it and the
+  device link does not, so the computer is not linked there.
+- **Java in the sandbox does not trust the company's CA.** The guest's system store holds the
+  CA that the install script was given, and every program that reads that store trusts it.
+  Java's own keystore, which only its own tool rewrites, keeps the image's roots alone.
+- **A project's thread does not get what the folder's history leaves out.** A thread works in a
+  copy of the folder without `.env` files, `node_modules/`, `dist/`, `build/`, `.venv/` and
+  `venv/`, `__pycache__/` and the tools' caches, `.git/`, and Office's and editors' temporary
+  files. None of them lands from the thread either. Work that needs them, such as the
+  project's own install or tests that read its `.env`, is for a chat on the folder.
+
 ## The acceptance VMs
 
 `test/acceptance.test.ts` installs the release this package builds on Ubuntu 24.04 and 26.04,
