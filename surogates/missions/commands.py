@@ -730,6 +730,7 @@ async def handle_mission_accept(
     session_id: UUID,
     session_store: Any,
     mission_store: MissionStore,
+    typed_at: int | None = None,
 ) -> MissionHandlerResult:
     """Apply the judge's proposed rubric. This is the authority act.
 
@@ -742,40 +743,49 @@ async def handle_mission_accept(
     The continuation is returned as ``kickoff_content`` rather than emitted
     here: the slash dispatcher advances the harness cursor past its own
     reply, so an inline emit would be skipped on the next wake.
+
+    The amendment is recorded before it is applied: a rubric amended and
+    not recorded is one a second run of the command could not tell for its
+    own.  *typed_at* is the id of the event the command was typed in, where
+    a command is what calls this.  An amendment recorded since then is the
+    one a run of this very command made before its worker died: it is
+    applied again, which changes nothing applied already, and answered, its
+    continuation with it, as that run would have.
     """
     active = await mission_store.get_active_for_session(session_id)
-    if active is None or active.paused_reason != "awaiting_refinement":
-        return MissionHandlerResult(
-            ok=False,
-            error="No rubric refinement is awaiting your decision.",
-        )
-    proposal = await session_store.latest_mission_proposal(session_id, active.id)
-    new_rubric = str((proposal or {}).get("proposed_rubric") or "").strip()
-    if not new_rubric:
-        return MissionHandlerResult(
-            ok=False, mission_id=active.id,
-            error=(
-                "The recorded proposal is missing or empty; use "
-                "/mission reject or /mission cancel."
-            ),
-        )
-
-    old_rubric = active.rubric
-    await mission_store.amend_rubric(active.id, new_rubric=new_rubric)
-    await session_store.emit_event(
-        session_id, EventType.MISSION_AMENDED,
-        {
+    recorded = await session_store.get_events(
+        session_id, after=typed_at, types=[EventType.MISSION_AMENDED],
+    ) if active is not None and typed_at is not None else []
+    amended = recorded[-1].data if recorded else None
+    if amended is None:
+        if active is None or active.paused_reason != "awaiting_refinement":
+            return MissionHandlerResult(
+                ok=False,
+                error="No rubric refinement is awaiting your decision.",
+            )
+        proposal = await session_store.latest_mission_proposal(session_id, active.id)
+        new_rubric = str((proposal or {}).get("proposed_rubric") or "").strip()
+        if not new_rubric:
+            return MissionHandlerResult(
+                ok=False, mission_id=active.id,
+                error=(
+                    "The recorded proposal is missing or empty; use "
+                    "/mission reject or /mission cancel."
+                ),
+            )
+        amended = {
             "mission_id": str(active.id),
-            "old_rubric": old_rubric,
+            "old_rubric": active.rubric,
             "new_rubric": new_rubric,
             "evidence": str((proposal or {}).get("evidence") or ""),
-        },
-    )
+        }
+        await session_store.emit_event(session_id, EventType.MISSION_AMENDED, amended)
+    await mission_store.amend_rubric(active.id, new_rubric=amended["new_rubric"])
     return MissionHandlerResult(
         ok=True, mission_id=active.id,
         message="Rubric amended; mission resumed.",
         kickoff_content=_AMENDED_CONTINUATION_TEMPLATE.format(
-            old_rubric=old_rubric, new_rubric=new_rubric,
+            old_rubric=amended["old_rubric"], new_rubric=amended["new_rubric"],
         ),
         kickoff_synthetic="mission_amended",
     )

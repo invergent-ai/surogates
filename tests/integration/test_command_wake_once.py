@@ -32,6 +32,8 @@ from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
+from surogates.missions.evaluator import apply_verdict
+from surogates.missions.store import MissionStore
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.scheduled.materialize import materialize_scheduled_run
@@ -1539,6 +1541,72 @@ async def test_a_mission_command_that_took_effect_as_its_worker_died_is_answered
     assert (await workers.said(chat))[-1] == answer
     assert (await workers.log(chat)).count(done.value) == 1
     assert workers.ran == ["_handle_mission_command"] * 2
+
+
+#: The judge's verdict on a mission whose rubric asks for what the work cannot show, with a rubric in its place.
+PROPOSAL = {
+    "result": "blocked", "explanation": "the rubric asks for every figure; the report gives only the totals", "feedback": "",
+    "proposed_rubric": "- every quarterly total is sourced", "refinement_evidence": "the report holds four totals and no other figure",
+}
+
+
+async def a_proposal_waits(workers: Workers, chat: UUID) -> None:
+    """The judge proposes a new rubric: the chat's mission waits, paused, for its user's word."""
+    [mission] = await workers.missions(chat)
+    await apply_verdict(
+        mission_id=mission.id, verdict=dict(PROPOSAL), coordinator_session_id=chat, session_store=workers.store,
+        mission_store=MissionStore(workers.api.app.state.session_factory), trigger="completion_claim",
+    )
+
+
+#: Where the worker that runs ``/mission accept`` dies, by the event it writes; None: once the rubric is amended.
+ACCEPT_DIES = {
+    "as it records the amendment": lambda kind, data: kind == EventType.MISSION_AMENDED,
+    "once it has amended the rubric": None,
+    "as it writes the mission's next message": lambda kind, data: data.get("synthetic") == "mission_amended",
+    "as it answers": lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" in data,
+}
+
+
+@pytest.mark.parametrize("dies", list(ACCEPT_DIES))
+async def test_a_mission_accept_whose_worker_died_is_finished_by_the_wake_that_runs_it_again(workers, monkeypatch, dies):
+    chat = await a_coordinator(workers)
+    await a_proposal_waits(workers, chat)
+    [mission] = await workers.missions(chat)
+    await workers.says(chat, "/mission accept")
+    typed = await workers.typed(chat)
+    with monkeypatch.context() as dying, pytest.raises(asyncio.CancelledError):
+        if ACCEPT_DIES[dies] is None:
+            amend = MissionStore.amend_rubric
+
+            async def then_the_worker_dies(self, *args, **kwargs):
+                await amend(self, *args, **kwargs)
+                raise asyncio.CancelledError
+
+            dying.setattr(MissionStore, "amend_rubric", then_the_worker_dies)
+            await workers.wake(chat)
+        else:
+            await workers.worker(store=DiesWriting(workers.store, ACCEPT_DIES[dies])).wake(chat)
+
+    await workers.wake(chat)
+
+    # Run again, it finishes what its first run began: the rubric amended and recorded once, the mission told
+    # once to go on from it, and the command answered as done.
+    events = await workers.store.get_events(chat, after=typed)
+    answers = [e.data["message"]["content"] for e in events if e.type == EventType.LLM_RESPONSE.value and e.data.get("answers") == typed]
+    told = [e for e in events if e.type == EventType.USER_MESSAGE.value and e.data.get("synthetic") == "mission_amended"]
+    assert (answers, len(told), [e.type for e in events].count(EventType.MISSION_AMENDED.value)) == (
+        ["Rubric amended; mission resumed."], 1, 1,
+    )
+    [mission] = await workers.missions(chat, mission.id)
+    assert (mission.rubric, mission.status, mission.paused_reason) == (PROPOSAL["proposed_rubric"], "active", None)
+    assert workers.ran == ["_handle_mission_command"] * 2
+    # And the coordinator's next turn goes on from the new rubric.
+    await workers.wake(chat)
+    assert workers.requests[-1][-1] == {"role": "user", "content": told[0].data["content"]}
+    # The command typed again is another: nothing awaits its user's decision now.
+    assert await workers.types(chat, "/mission accept") == "No rubric refinement is awaiting your decision."
+    assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
 
 
 async def its_worker_dies():

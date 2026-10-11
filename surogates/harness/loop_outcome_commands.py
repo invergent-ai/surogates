@@ -339,6 +339,7 @@ class OutcomeCommandMixin:
                             session_id=session.id,
                             session_store=self._store,
                             mission_store=mission_store,
+                            typed_at=getattr(self, "_answering", None),
                         )
                         message = result.message or result.error
                 elif command.action == "reject":
