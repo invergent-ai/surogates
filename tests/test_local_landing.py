@@ -225,6 +225,11 @@ def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went
         f"\n{WHERE}"
     )
     assert report(set_aside={"kept": [A_PLACE], "snapshots": 0, "gone": []}).endswith(f"copies as they were at 2026-10-09 08:00 UTC\n{WHERE}")
+    # And one gone at its app's bound, as what else went.
+    assert report(set_aside={"kept": [], "snapshots": 0, "gone": [A_COPY, A_PLACE]}).endswith(
+        "its copy set aside at 2026-10-10 10:15 UTC, the earlier history at its folder's path, with its threads' copies set aside at "
+        "2026-10-09 08:00 UTC"
+    )
 
 
 def test_a_report_says_nothing_set_aside_where_its_payload_names_nothing_that_is_one():
@@ -306,6 +311,24 @@ async def test_a_place_its_computers_app_set_aside_is_recorded_from_the_one_open
     many = [f"{KEY}.was-{n}" for n in range(local_landing.MAX_ASIDE)]
     kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_places": many}, told=kept)
     assert (kept["places"], len(new["kept"])) == (many, local_landing.MAX_ASIDE)
+
+
+async def test_a_place_gone_at_its_apps_bound_is_kept_no_more_and_told_once_as_gone_to_the_thread_it_was_told_to(monkeypatch):
+    told = {"copies": [COPY], "snapshots": [], "gone": [], "places": [PLACE]}
+    later = f"{KEY}.was-1791627300000"
+    # Every open names what went under the folder's path: of this thread's, it is no longer kept, and is told once more.
+    went = {"copy": "kept", "set_aside_folders": [COPY], "set_aside_places_gone": [later, PLACE]}
+    kept, new = await told_at_its_end(monkeypatch, went, told=told)
+    assert (kept, new) == ({"copies": [COPY], "snapshots": [], "gone": [PLACE]}, {"kept": [], "snapshots": 0, "gone": [A_PLACE]})
+    # Named again, nothing is new; with what went of the thread's own beside it.
+    again = {**went, "set_aside_gone": [COPY], "set_aside_folders": []}
+    assert await told_at_its_end(monkeypatch, again, told=kept) == (
+        {"copies": [], "snapshots": [], "gone": [COPY, PLACE]}, {"kept": [], "snapshots": 0, "gone": [A_COPY]},
+    )
+    # Another thread on the folder, which was never told of it, is told nothing of its going.
+    assert await told_at_its_end(monkeypatch, went, told={"copies": [COPY], "snapshots": [], "gone": []}) == (
+        {"copies": [COPY], "snapshots": [], "gone": []}, None,
+    )
 
 
 async def test_the_snapshots_counted_are_those_its_computer_names_whichever_repository_of_the_threads_holds_them(monkeypatch):

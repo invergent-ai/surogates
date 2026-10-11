@@ -373,7 +373,7 @@ def _set_aside_lines(data: dict) -> str:
         entries = told[key] if isinstance(told.get(key), list) else []
         return [found for found in (when(entry, how, kinds) for entry in entries) if found]
 
-    copies, gone = said("kept", "as it was at"), said("gone", "set aside at")
+    copies, gone = said("kept", "as it was at"), said("gone", "set aside at", ("copy", "repository", "place"))
     places = said("kept", "as they were at", ("place",))
     snapshots = told["snapshots"] if type(told.get("snapshots")) is int and told["snapshots"] > 0 else 0
     lines = ""

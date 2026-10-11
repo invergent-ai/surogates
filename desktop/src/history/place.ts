@@ -9,6 +9,8 @@
 //                                  and its file's numbers as digits
 //   <data>/history/<key>.too-large.json  a folder whose first copy the history's bound cut, and how
 //                                  many of its files history took then (history/too-large.ts)
+//   <data>/history/<key>.gone.json  the places set aside under the key that went at its bound, by
+//                                  their names, the latest GONE_NAMED
 //   <data>/landings/<key>/         what a landing keeps of the files it replaces, until it is recorded
 //
 // <key> is the checkpoint manager's (surogates/tools/utils/checkpoint_manager.py,
@@ -26,12 +28,13 @@
 // is at the path now, and only once the sandbox has let the place go: a thread bound to a folder
 // that is no longer the one at its path sets nothing aside, has no place made for it, and is given
 // none but the one that is its own folder's history. What is set aside under a key takes 10 GiB of
-// the disk at most: past that the oldest goes, and never the newest.
+// the disk at most: past that the oldest goes, and never the newest, and each place that went is
+// named, so that every turn's open of a thread on the folder says it is gone (history/copies.ts).
 
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 
 import { confirmedFolder } from "../binding/folder.js";
 import { strerror } from "../files/answers.js";
@@ -52,6 +55,8 @@ const TURNS = 8;
 export const ASIDE_BYTES = 10 * 1024 ** 3;
 // A name of what was set aside under a key: its history, its record, or what its landings kept; or one that is going.
 const ASIDE = /^([0-9a-f]{16})\.was-([0-9]+)(\.json|\.gone)?$/;
+// How many of the places that went under a key are named, the latest: as many as one open names (history/copies.ts, ASIDES).
+const GONE_NAMED = 64;
 
 // The folder is not the one its thread was bound to: another folder, a link, or nothing is at its path now.
 export class FolderReplaced extends Error {}
@@ -194,7 +199,7 @@ export function recordedFolder(dataDir: string, name: string): Folder | null {
 }
 
 // Whole or not at all, and on disk before any history is made in the place.
-function write(record: string, recorded: { path: string; dev: string; ino: string; boot: string }): void {
+function write(record: string, recorded: unknown): void {
   const temp = `${record}.${process.pid}`;
   const fd = openSync(temp, "w", 0o600);
   try {
@@ -299,8 +304,9 @@ async function changeable(path: string): Promise<void> {
  * keep the only copy of a file of the user's it replaced, which no recovery could put back once it went. It counts,
  * and is passed over; where none other can go, none does. The oldest is the one set aside first, by its stamp, which
  * goes in the order they were set aside in (stamped). Each is renamed to go first, where it lies (<name>.gone), its
- * record removed, and then it is, its folders made its owner's to change first: cut anywhere, none is kept with part of
- * it gone, and the next set-aside removes what is left. None of it is the sandbox's: a place is set aside only once the
+ * record removed, then named as gone (placesGone), and then it is removed, its folders made its owner's to change
+ * first: cut anywhere, none is kept with part of it gone, none is named gone that is kept, and the next set-aside names
+ * and removes what is left. None of it is the sandbox's: a place is set aside only once the
  * sandbox has let it go, and none of it is anybody's but the app's.
  */
 async function keptWithin(data: string, key: string, most: number): Promise<void> {
@@ -332,11 +338,32 @@ async function keptWithin(data: string, key: string, most: number): Promise<void
     for (const path of records) await rm(path, { force: true });
     held -= taken.get(time)!;
   }
+  // Each place going named as gone before any of it is removed: one a cut left going is named by the next run, and none
+  // is named that is kept. What landings alone kept, with no history beside it, is no place a thread was told of.
+  const went = going.filter((path) => dirname(path) === join(data, "history")).map((path) => basename(path).replace(/\.gone$/, ""));
+  if (went.length > 0) write(join(data, "history", `${key}.gone.json`), [...new Set([...placesGone({ key, history: join(data, "history", key) }), ...went])].slice(-GONE_NAMED));
   // Each on its own: one that cannot be removed whole now keeps none after it, and is tried again at the next set-aside.
   for (const path of going) {
     await changeable(path).catch(() => {});
     await rm(path, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * The places set aside under *place*'s key that went at the bound on what is kept under it, by their names, the oldest
+ * first: the latest GONE_NAMED, as the bound wrote them. Read as data: an entry that names no place set aside under the key is none, and what
+ * cannot be read names none.
+ */
+export function placesGone(place: Pick<Place, "key" | "history">): string[] {
+  let names: unknown;
+  try {
+    names = JSON.parse(readFileSync(`${place.history}.gone.json`, "utf8"));
+  } catch {
+    return [];
+  }
+  return (Array.isArray(names) ? names : []).filter(
+    (name): name is string => typeof name === "string" && ASIDE.exec(name)?.[1] === place.key && !/\.(json|gone)$/.test(name),
+  );
 }
 
 // Each key's bound on what is set aside under it, one run after another, behind the asks that set places aside.

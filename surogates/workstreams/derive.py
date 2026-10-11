@@ -274,9 +274,9 @@ def set_aside_said(told: Any) -> dict[str, Any] | None:
 
     *told* is a turn end's record of it (``local_landing.set_aside_of``),
     which names each by the computer's names for it.  Here each copy or
-    repository of the thread's kept whole is ``{kind, at}``, as is each that
-    went, and each place of its folder's the app set aside, ``place``: those
-    kept oldest first, by when, and those gone as they went.  The snapshots
+    repository of the thread's kept whole is ``{kind, at}``, and each place
+    of its folder's the app set aside, ``place``, as is each of them that
+    went: those kept oldest first, by when, and those gone as they went.  The snapshots
     of what its copy held of its own are counted.  A name that is none is
     left out.
     """
@@ -286,8 +286,9 @@ def set_aside_said(told: Any) -> dict[str, Any] | None:
     def listed(key: str) -> list[Any]:
         return told[key] if isinstance(told.get(key), list) else []
 
-    copies, gone = ([found for found in map(set_aside_name, listed(key)) if found is not None] for key in ("copies", "gone"))
+    copies = [found for found in map(set_aside_name, listed("copies")) if found is not None]
     places = [found for found in map(set_aside_place, listed("places")) if found is not None]
+    gone = [found for found in (set_aside_name(name) or set_aside_place(name) for name in listed("gone")) if found is not None]
     kept = sorted([*copies, *places], key=lambda whole: whole["at"])
     snapshots = sum(isinstance(aside, str) for aside in listed("snapshots"))
     return {"kept": kept, "snapshots": snapshots, "gone": gone} if kept or snapshots or gone else None

@@ -36,7 +36,7 @@ import type { Outcome } from "../link/protocol.js";
 import type { VmClient } from "../vm/client.js";
 import type { HistoryCode } from "../vm/history.js";
 import { type Folder, late, type Place } from "../vm/manager.js";
-import { copyOf, FolderReplaced, keyOf, placeOf } from "./place.js";
+import { copyOf, FolderReplaced, keyOf, placeOf, placesGone } from "./place.js";
 import { forgetTooLarge, rememberTooLarge, tooLargeFor } from "./too-large.js";
 
 // A thread's copy as the guest left it: the folder's place, the copy's folder with its identity, and
@@ -343,17 +343,22 @@ export class Copies {
       if (await this.refusedMaking(found.place, root)) return tooLarge(bound.folder);
       if (signal.aborted) return CANCELLED;
       const outcome = await this.opened(found.known, found.place, root, args, signal);
-      if (outcome !== STALE) return this.named(root, outcome);
+      if (outcome !== STALE) return this.named(root, found.place, outcome);
     }
     return unavailable(bound.folder, CHANGED);
   }
 
-  // A turn's open *outcome* for *root*, with the places its operations set aside since it was last answered: once each.
-  private named(root: string, outcome: Outcome): Outcome {
+  // A turn's open *outcome* for *root* in *place*, with the places its operations set aside since it was last answered,
+  // once each; and, at every one, those set aside under the folder's path that went at the bound (history/place.ts).
+  private named(root: string, place: Place, outcome: Outcome): Outcome {
+    if (!("ok" in outcome)) return outcome;
     const names = this.asides.get(root);
-    if (names === undefined || !("ok" in outcome)) return outcome;
     this.asides.delete(root);
-    return { ok: { ...(outcome.ok as Record<string, unknown>), set_aside_places: names } };
+    const gone = placesGone(place);
+    if (names === undefined && gone.length === 0) return outcome;
+    return {
+      ok: { ...(outcome.ok as Record<string, unknown>), ...(names ? { set_aside_places: names } : {}), ...(gone.length > 0 ? { set_aside_places_gone: gone } : {}) },
+    };
   }
 
   private async step(root: string, bound: BoundFolder, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {

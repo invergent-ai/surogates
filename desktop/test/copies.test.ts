@@ -1646,6 +1646,27 @@ describe("a place another folder at the path takes", () => {
     expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places: names.slice(-64) } });
   });
 
+  it("is named as gone at every turn's open of each thread on its folder, once the bound on what is set aside under its path let it go", async () => {
+    let refusing = false;
+    const one = copies((request) => (request.action === "open" && refusing ? QUICK : undefined));
+    await one.open(ROOT, bound(), signal());
+    const key = keyOf(folder);
+    const went = [`${key}.was-1791532800000`, `${key}.was-1791532800001`];
+    writeFileSync(join(dataDir, "history", `${key}.gone.json`), JSON.stringify(went));
+    for (const copied of ["made", "kept"]) {
+      expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places_gone: went } });
+      expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual({ ok: { copy: copied, set_aside_places_gone: went } });
+    }
+    // A refusal names nothing; nor does another folder's open, nor any other request.
+    refusing = true;
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(QUICK);
+    refusing = false;
+    const elsewhere = join(dir, "Elsewhere");
+    mkdirSync(elsewhere);
+    expect(await one.ask(THIRD, bound(THIRD, elsewhere), "open", {}, signal())).toEqual({ ok: { copy: "made" } });
+    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(HASH);
+  });
+
   it("is let go, and what the app knew of its copies with it, once the place's folder is not the one it knew", async () => {
     const one = copies();
     const first = await one.open(ROOT, bound(), signal());

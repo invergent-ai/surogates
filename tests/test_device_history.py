@@ -70,8 +70,9 @@ HONEST: dict[tuple[str, str], list[dict[str, Any]]] = {
         {"copy": "moved", "set_asides": [A, B]},
         {"copy": "kept", "set_asides": [A], **WHOLE_ASIDE},
         {"copy": "made", "set_aside_places": [PLACE, f"{KEY}.was-7"]},
+        {"copy": "kept", "set_aside_places_gone": [f"{KEY}.was-7"]},
         {"history": "off", "reason": "cap"},
-        {"history": "off", "reason": "names", **WHOLE_ASIDE, "set_aside_places": [PLACE]},
+        {"history": "off", "reason": "names", **WHOLE_ASIDE, "set_aside_places": [PLACE], "set_aside_places_gone": [f"{KEY}.was-7"]},
     ],
     ("history", "changed"): [{"paths": []}, {"paths": ["a.txt", "Reports/Q3.docx", "-rf", "a b/c\nd", "é/…", "$(id)"]}],
     ("history", "fetch"): [
@@ -280,8 +281,8 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("history", "open", {"copy": "kept", "set_aside_gone": [f"../{ASIDE}.copy"]}),
     ("history", "open", {"copy": "kept", "set_aside_folders": [f"{ASIDE}.history"]}),
     ("history", "open", {"history": "off", "reason": "cap", "set_aside_gone": ["everything"]}),
-    # A place set aside by no name the app gives one.
-    *(("history", "open", {"copy": "kept", "set_aside_places": places}) for places in (
+    # A place set aside, or gone, by no name the app gives one.
+    *(("history", "open", {"copy": "kept", named: places}) for named in ("set_aside_places", "set_aside_places_gone") for places in (
         PLACE, [f"{PLACE}.json"], [f"../{PLACE}"], [PLACE.upper()], [f"{KEY}.was-"], [f"{KEY[:15]}.was-1"],
         [f"{KEY}.was-{'1' * 17}"], [f"{ASIDE}.copy"], [7], [PLACE] * (MAX_ASIDE + 1),
         # Another folder's.
@@ -320,7 +321,7 @@ def test_what_was_set_aside_is_named_only_to_a_check_that_knows_whose_copy_was_a
 
 
 def test_a_place_set_aside_is_named_only_to_a_check_that_knows_whose_folder_was_asked_about():
-    told = {"copy": "kept", "set_aside_places": [PLACE]}
+    told = {"copy": "kept", "set_aside_places": [PLACE], "set_aside_places_gone": [f"{KEY}.was-7"]}
     assert checked("history", "open", told, folder=FOLDER) == told
     for unknown in (None, "/home/u/Reports/", "/home/u/reports", "/home/u/Reports/Q3", "\ud800"):
         with pytest.raises(NotAnAnswer):
@@ -851,7 +852,10 @@ def test_the_bounds_of_an_answer_are_the_ones_said():
     assert len(checked("history", "changed", {"paths": ["a"] * MAX_LISTED})["paths"]) == MAX_LISTED
     assert checked("history", "changed", {"paths": ["x" * MAX_PATH]}) == {"paths": ["x" * MAX_PATH]}
     assert len(checked("land", "revisions", {"revisions": [["a", "absent"]] * MAX_LOOKED})["revisions"]) == MAX_LOOKED
-    whole = {"copy": "kept", "set_aside_gone": [f"{ASIDE}.copy"] * MAX_ASIDE, "set_aside_places": [PLACE] * MAX_ASIDE}
+    whole = {
+        "copy": "kept", "set_aside_gone": [f"{ASIDE}.copy"] * MAX_ASIDE, "set_aside_places": [PLACE] * MAX_ASIDE,
+        "set_aside_places_gone": [PLACE] * MAX_ASIDE,
+    }
     assert checked("history", "open", whole, thread=THREAD, folder=FOLDER) == whole
     by = {"kind": "thread", "id": THREAD, "title": "x" * MAX_PATH}
     held = {**HONEST["history", "commit"][0], "overlapped": [{**VERSION, "reason": "changed", "by": by}]}

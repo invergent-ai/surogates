@@ -528,8 +528,9 @@ async def set_aside_of(
     (*landing*'s ``set_aside``); one whose answer was lost, or a turn's end
     taken up again, has the next open name it.  A place of the folder's
     its app set aside, its history and every thread's copy in it, is named
-    by one open alone, the thread's that set it aside, and stays recorded:
-    the latest as many as an open names.
+    by one open alone, the thread's that set it aside, and stays recorded,
+    the latest as many as an open names, until it goes at the app's bound:
+    every open names those, and the thread's own are recorded as gone.
 
     A turn's end records all of it by the computer's names,
     ``{copies, snapshots, gone}`` and ``places`` where it has any, and its
@@ -556,6 +557,10 @@ async def set_aside_of(
         # Named by one open alone: what it names is added to what was told before.
         places = [name for name in dict.fromkeys(opened.get("set_aside_places", [])) if name not in told["places"]]
         now["places"] = [*told["places"], *places][-MAX_ASIDE:]
+        # Gone at the app's bound, which every open names of the folder's: of the thread's own, kept no more, and gone.
+        went = set(opened.get("set_aside_places_gone", []))
+        now["gone"] = [*now["gone"], *(name for name in dict.fromkeys([*told["gone"], *now["places"]]) if name in went)]
+        now["places"] = [name for name in now["places"] if name not in went]
     recorded = [aside for aside in (landing or {}).get("set_aside", []) if aside not in now["snapshots"]]
     # A word of more than its computer keeps is kept to the latest it may.
     now["snapshots"] = [*now["snapshots"], *recorded][-SNAPSHOTS_KEPT:]
