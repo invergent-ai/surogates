@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 #: How much of an object a streamed read holds at once, and the size of each part of a streamed write.
 _CHUNK = 1 << 20
 _PART = 8 << 20
+#: What an S3 store's answer to a head is coded when there is no such object.
+_ABSENT = ("404", "NoSuchKey", "NotFound")
 
 
 class TooLarge(ValueError):
@@ -773,11 +775,15 @@ async def _upload_if(s3: Any, bucket: str, key: str, source: Path, tag: str | No
 
 async def _still(s3: Any, bucket: str, key: str, tag: str | None) -> None:
     """:class:`Changed` unless the object *key* is still of the ETag *tag*, or still none for None, as the store answers now."""
+    from botocore.exceptions import ClientError
+
     try:
         now = (await s3.head_object(Bucket=bucket, Key=key)).get("ETag")
-    except Exception as exc:
-        # Only an answer that there is none: a store that did not answer says nothing of the object.
-        if "404" not in str(exc) and "NoSuchKey" not in str(exc):
+    except ClientError as exc:
+        # Only the store's answer that there is none, by its code, or its status where it gives none.  Never
+        # by the words: a client's own error names the request's address, and a key may hold "404".
+        answer = exc.response
+        if (answer.get("Error", {}).get("Code") or str(answer.get("ResponseMetadata", {}).get("HTTPStatusCode"))) not in _ABSENT:
             raise
         now = None
     if now != tag:
