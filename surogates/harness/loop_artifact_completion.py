@@ -52,7 +52,8 @@ from surogates.harness.landing import (
     turn_ended,
     waiting_on_you,
 )
-from surogates.harness.local_landing import land_local_turn, waiting_on_you_here
+from surogates.harness.local_landing import keep_local_turn, land_local_turn, set_aside_of, waiting_on_you_here
+from surogates.harness.loop_context_replay import _listed
 from surogates.runtime.turn_slots import detach_turn
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
@@ -180,6 +181,11 @@ async def announce_failure(store: Any, session: Any, *, error: str, summary: str
 # folder's own filesystem, so its clock is the one that stamps the turn's
 # files, a network share's or a FAT stick's included.
 _TURN_MARK = f"{WORKSPACE_STORAGE_DIR}/.turn"
+
+# Why a thread's turn on its user's computer failed before it ran: its
+# user's allowance refused it at its wake, or it had nowhere to work.  Such
+# a turn did nothing, and its end asks that computer for no keep.
+_NEVER_RAN = frozenset({"usage_limit", "nowhere_to_work"})
 
 
 class ArtifactCompletionMixin:
@@ -1124,6 +1130,9 @@ class ArtifactCompletionMixin:
                 # The master hears it: the report names the turn's files as not saved.
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
 
+        # What its computer keeps set aside of the thread's work: recorded at its end, and what is new told in its report.
+        set_aside, newly_aside = await self._set_aside(session, landing)
+
         not_kept: list[str] = []
         # What a hand-back that failed leaves: its completion's mark, and the files kept apart.
         unkept: dict[str, Any] = {}
@@ -1264,6 +1273,8 @@ class ArtifactCompletionMixin:
         if landing is not None and landing.get("stopped"):
             # Stopped once its landing had written a file: the landing was not interrupted.
             complete_data["stopped"] = "landing"
+        if set_aside is not None:
+            complete_data["set_aside"] = set_aside
 
         # Two independent best-effort settlements (neither raises); run
         # them concurrently to halve the session-complete round trip when
@@ -1368,6 +1379,7 @@ class ArtifactCompletionMixin:
                     files=files,
                     landing=landing,
                     unkept=unkept,
+                    set_aside=newly_aside,
                 )
             except Exception:
                 logger.warning(
@@ -1458,6 +1470,24 @@ class ArtifactCompletionMixin:
         left = apart.get("left", []) if apart else []
         return {"kept": False, "left": left} if left else {}
 
+    async def _set_aside(self, session: Any, landing: dict[str, Any] | None) -> tuple[dict | None, dict | None]:
+        """What a thread's computer keeps set aside of its work, for its turn's end to record, and what is new, for its report.
+
+        Only a thread that works in a copy of its own on its user's
+        computer has any (``local_landing.set_aside_of``).  As best it can:
+        a turn's end that cannot read it records nothing of it, and the next
+        end tells what this one did not.
+        """
+        if not opens_its_copy(session):
+            return None, None
+        try:
+            return await set_aside_of(
+                store=self._store, session_factory=self._session_factory, redis=self._redis, session=session, landing=landing,
+            )
+        except Exception:
+            logger.warning("Could not read what the computer of thread %s keeps set aside of its work", session.id, exc_info=True)
+            return None, None
+
     async def _open_copy_to_land(self, session: Session) -> None:
         """Give a cloud thread's turn that never used its pod one, when its end lands all the same."""
         owner = sandbox_session_key(session)
@@ -1542,10 +1572,31 @@ class ArtifactCompletionMixin:
         left: list[str] = []
         # The helpers' files the turn's take-ups left as its copy had them: named here, as a landing names them.
         not_taken: list[str] = []
+        # A thread's files kept on its branch on its user's computer: named here, as no History lists them.
+        kept_there: list[str] = []
         owner = sandbox_session_key(session)
         # The turn is over, kept or not: what it handed on is no later Stop's to drop.
         turn_ended(session)
-        if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
+        if opens_its_copy(session) and reason not in _NEVER_RAN:
+            # Its copy stays on its computer, and only its branch in the folder's history moves.
+            try:
+                kept_there = await keep_local_turn(
+                    store=self._store, session_factory=self._session_factory, redis=self._redis, session=session,
+                    lease_token=str(lease.lease_token),
+                )
+                saved = True if kept_there else None
+            except LeaseLost:
+                # Another worker runs this thread now: this one stands down, and ends nothing.
+                detach_turn()
+                raise asyncio.CancelledError("another worker runs this session now") from None
+            except TimeoutError:
+                # Its computer is away: what was not kept is in its copy there, and lands with the next turn all the same.
+                logger.warning("The turn of thread %s was not kept on its branch: its computer did not answer in time", session.id)
+                saved = False
+            except Exception:
+                logger.exception("Could not keep the copy of %s on its computer", session.id)
+                saved = False
+        elif self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
             helper = bool(session.config.get("history_thread"))
             try:
                 kept = await keep_copy(
@@ -1569,6 +1620,8 @@ class ArtifactCompletionMixin:
                     self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
                 )
 
+        # What its computer keeps set aside of the thread's work, as a completed turn's end records and tells it.
+        set_aside, newly_aside = await self._set_aside(session, None)
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,
             # Whether the keep saved the turn's work, as a completed turn's landing does.
@@ -1576,6 +1629,7 @@ class ArtifactCompletionMixin:
             # A failed helper's changes, kept apart in the history: never in its thread's copy.
             **({"left": left} if left else {}),
             **({"not_taken": not_taken} if not_taken else {}),
+            **({"set_aside": set_aside} if set_aside is not None else {}),
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
@@ -1594,6 +1648,14 @@ class ArtifactCompletionMixin:
         error = f"{reason}: {data}" if data else reason
         if left:
             error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
+        elif kept_there:
+            # Each name on the master's one line, as a report names a thread's files: the computer's names are data.
+            named = _listed([{"label": path} for path in kept_there])
+            # Its copy can hold files no landing writes, a name that runs code or a link: the next landing says which.
+            error += (
+                f". Its copy, with its changes to {named}, is kept on its computer on the thread's branch, and the thread's "
+                "next turn lands them, but for any file a landing never writes"
+            )
         elif saved and is_project_thread(session.config):
             # Said as a landing that did not finish says it: nothing of the turn is lost.
             error += ". Its work is kept, and lands with the thread's next turn"
@@ -1623,6 +1685,7 @@ class ArtifactCompletionMixin:
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
                     not_taken=not_taken,
+                    set_aside=newly_aside,
                 )
             except Exception:
                 logger.warning(

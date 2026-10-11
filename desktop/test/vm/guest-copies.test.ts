@@ -32,6 +32,7 @@ import { Copies, type Handle } from "../../src/history/copies.js";
 import { keyOf } from "../../src/history/place.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { BoundFolder } from "../../src/hosts/tool-hosts.js";
+import type { Outcome } from "../../src/link/protocol.js";
 import { forkManager, type ManagerProcess, VmClient } from "../../src/vm/client.js";
 import type { HistoryRequest } from "../../src/vm/history.js";
 import type { Place } from "../../src/vm/manager.js";
@@ -53,8 +54,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's copy of its f
   let client: VmClient;
   let copies: Copies;
   const managers: ManagerProcess[] = [];
-  // What the guest was asked, and each place it was asked to let go with what it answered.
+  // What the guest was asked, what it answered each thread's copy's letting go, and each place it was asked to let go
+  // with what it answered.
   const asked: HistoryRequest[] = [];
+  const closed: Array<[string, Outcome]> = [];
   const unplaced: Array<{ place: Place; gone: boolean }> = [];
   // The roots told that the copy their host works in is theirs no more; each such host lets it go.
   const replaced: string[] = [];
@@ -99,9 +102,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's copy of its f
       },
     });
     const vm = {
-      history: (request: HistoryRequest, stop: AbortSignal) => {
+      history: async (request: HistoryRequest, stop: AbortSignal) => {
         asked.push(request);
-        return client.history(request, stop);
+        const outcome = await client.history(request, stop);
+        if (request.action === "close") closed.push([request.thread, outcome]);
+        return outcome;
       },
       unplace: async (place: Place) => {
         const gone = await client.unplace(place);
@@ -203,6 +208,38 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's copy of its f
     // The copy it works in now is the one the guest made again.
     expect((await opened(ONE)).folder).toMatchObject(identity(copyOf(ONE)));
     closeAll(ONE);
+  });
+
+  it("lets a copy go once the last host on it has, where its branch holds all of it, and makes it again from there; one that holds more stays", async () => {
+    const place = join(dataDir, "history", keyOf(folder));
+    const one = await opened(ONE);
+    const two = await opened(TWO);
+    // The harness keeps its results in the first thread's copy; the second's holds work no snapshot has.
+    mkdirSync(join(one.folder.path, ".surogates-results"));
+    writeFileSync(join(one.folder.path, ".surogates-results", "call-1.txt"), "a long result\n");
+    writeFileSync(join(two.folder.path, "Unsaved.md"), "in no snapshot\n");
+    const answered = closed.length;
+    closeAll(ONE);
+    closeAll(TWO);
+    await until(() => closed.length === answered + 2, 60_000);
+    expect(Object.fromEntries(closed.slice(answered))).toEqual({ [ONE]: { ok: { copy: "removed" } }, [TWO]: { ok: { copy: "kept" } } });
+    // The first goes, and what the harness kept in it waits beside the copies; its repository stays.
+    expect(existsSync(copyOf(ONE))).toBe(false);
+    expect(readFileSync(join(place, "waiting", ONE, ".surogates-results", "call-1.txt"), "utf8")).toBe("a long result\n");
+    expect(readdirSync(join(place, "clones")).sort()).toEqual([ONE, TWO].sort());
+    expect(readFileSync(join(copyOf(TWO), "Unsaved.md"), "utf8")).toBe("in no snapshot\n");
+    // Its root's next host has the guest make it again from its branch, with what waited back in it.
+    const again = await opened(ONE);
+    expect(asked.at(-1)).toMatchObject({ thread: ONE, action: "open", args: { moves: false } });
+    expect(files(again.folder.path)).toEqual([".surogates-results/call-1.txt", ...files(folder)].sort());
+    expect(existsSync(join(place, "waiting", ONE))).toBe(false);
+    // The other's is worked in again with no request.
+    const before = asked.length;
+    expect(await opened(TWO)).toEqual(two);
+    expect(asked).toHaveLength(before);
+    closeAll(ONE);
+    rmSync(join(copyOf(TWO), "Unsaved.md"));
+    closeAll(TWO);
   });
 
   it("lets the folder's place go, and waits for it, before another folder at the path takes its key", async () => {

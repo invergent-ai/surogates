@@ -13,6 +13,31 @@ export function ago(when: string, now = Date.now(), form: "short" | "long" = "sh
   return form === "short" ? `${count}${unit[0]}` : RELATIVE.format(-count, unit);
 }
 
+/** When a thread's work was set aside on its computer, in the app's words and this computer's time: "10 Oct, 10:15". */
+export function setAsideWhen(at: string, timeZone?: string): string {
+  const parts = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone })
+    .formatToParts(new Date(at));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((found) => found.type === type)?.value ?? "";
+  return `${part("day")} ${part("month")}, ${part("hour")}:${part("minute")}`;
+}
+
+/**
+ * What a thread's computer keeps set aside of its work, out of its copy there, and what of that it no longer keeps, in
+ * the app's words: "Kept on its computer: its copy from 10 Oct, 10:15 · 2 snapshots" and "No longer kept: its copy from
+ * 9 Oct, 08:00", each where it has any. Built from kinds, times and a count alone.
+ */
+export function setAsideLines(
+  aside: { kept: Array<{ kind: string; at: string }>; snapshots: number; gone: Array<{ kind: string; at: string }> },
+  timeZone?: string,
+): string[] {
+  const each = (entry: { kind: string; at: string }) => `its ${entry.kind} from ${setAsideWhen(entry.at, timeZone)}`;
+  const kept = [...aside.kept.map(each), ...(aside.snapshots > 0 ? [`${aside.snapshots} snapshot${aside.snapshots > 1 ? "s" : ""}`] : [])];
+  return [
+    ...(kept.length > 0 ? [`Kept on its computer: ${kept.join(" · ")}`] : []),
+    ...(aside.gone.length > 0 ? [`No longer kept: ${aside.gone.map(each).join(" · ")}`] : []),
+  ];
+}
+
 // What a prompt shows as its code point rather than as itself: controls and format characters (the
 // bidi controls among them), private-use, unassigned and lone surrogate code points, line and
 // paragraph separators, what draws nothing (the blank symbols among it), and every space but U+0020.

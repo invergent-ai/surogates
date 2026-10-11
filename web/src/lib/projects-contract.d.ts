@@ -50,10 +50,27 @@ export interface ThreadRow {
   // The thread's newest landing with a file still as it landed: what its card's Undo undoes; null when it has
   // none. Optional, as a file's landing is: a page built before file history serves none.
   landingId?: string | null;
+  // What its computer set aside of a thread's work there, out of its copy; null when it set none aside, and for a
+  // thread in the cloud. Optional: a page built before set-asides were told serves none.
+  setAside?: SetAside | null;
   place: ThreadPlace;
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
+}
+
+// A copy or a repository of a thread's that its computer kept whole when it made it again, and when that was.
+export interface SetAsideWhole {
+  kind: "copy" | "repository";
+  at: string; // UTC, ISO 8601 with Z
+}
+
+// What a thread's computer keeps set aside of its work, and what of that it no longer keeps: on that computer
+// alone, in Surogate Desktop's data. Nothing brings one back yet.
+export interface SetAside {
+  kept: SetAsideWhole[]; // oldest first
+  snapshots: number; // snapshots of what its copy held of its own when the copy was made other files
+  gone: SetAsideWhole[]; // gone at the computer's bound, which keeps only the latest; oldest first
 }
 
 export interface LibraryEntry {

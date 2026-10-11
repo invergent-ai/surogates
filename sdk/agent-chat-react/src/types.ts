@@ -145,6 +145,15 @@ export interface AgentChatThreadRow {
   files: { kind: "file" | "artifact"; label: string; ref: string; landing?: "landed" | "redoing" | "not_merged" | "undone" | null }[];
   /** The thread's newest landing with a file still as it landed: what its card's Undo undoes. Another adapter's rows carry none. */
   landingId?: string | null;
+  /**
+   * What its computer set aside of a thread's work there, out of its copy, and what of that it no longer keeps: each
+   * copy or repository kept whole by what it is and when (UTC), and the snapshots counted. None for a thread in the cloud.
+   */
+  setAside?: {
+    kept: { kind: "copy" | "repository"; at: string }[];
+    snapshots: number;
+    gone: { kind: "copy" | "repository"; at: string }[];
+  } | null;
 }
 
 /** Who changed a project's file (`ChangedBy`, `web/src/lib/projects-contract.d.ts`). */
