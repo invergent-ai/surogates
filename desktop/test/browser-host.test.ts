@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import type { BrowserContext, CDPSession, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer as createVite } from "vite";
 import { WebSocketServer } from "ws";
 
 import { ADDRESS_MS } from "../src/binding/approvals.js";
@@ -3204,6 +3205,8 @@ new Image().src = "http://" + own("image") + "/";
     let second: number;
     // Whose server the chat's answers say they are from: a port's next chat is served by its own.
     let serving: string;
+    // Where the door carries a knock it opens: the chat's server, unless a test runs another there.
+    let server: number;
     const doorPath = () => join(folder, "browser.sock");
     const NOT_ALLOWED = () => ({
       error: { type: "browser", message: `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${at})` },
@@ -3282,7 +3285,7 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
         });
       });
       await new Promise<void>((done) => chat.listen(0, "127.0.0.1", () => done()));
-      const chatPort = (chat.address() as { port: number }).port;
+      server = (chat.address() as { port: number }).port;
       folder = mkdtempSync(join(tmpdir(), "sb-door-"));
       door = createTcp((socket) => {
         socket.on("error", () => {});
@@ -3290,7 +3293,7 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
           const line = chunk.toString().trimEnd();
           knocks.push(line);
           if (![at, second].some((port) => port !== 0 && (line === `${KEY} ${port}` || line === `${KEY} ${port} 6`))) return void socket.end(`${closed}\n`);
-          const upstream = connectTcp({ host: "127.0.0.1", port: chatPort });
+          const upstream = connectTcp({ host: "127.0.0.1", port: server });
           behind.add(upstream.once("close", () => behind.delete(upstream)));
           upstream.on("error", () => socket.destroy());
           upstream.once("connect", () => {
@@ -3464,6 +3467,33 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
       await live().toEqual([0, 0]);
       expect(await script(b, LIVE())).toBe("no socket");
       expect(hits).toEqual([]);
+    }, 60_000);
+
+    it("carries a real Vite dev server's page and its live socket through the chat's port: a change to its module reaches the page in place, with no reload", async () => {
+      const root = mkdtempSync(join(tmpdir(), "sb-vite-"));
+      const MAIN = (word: string) => `document.title = "Vite ${word}";\nimport.meta.hot.accept();\n`;
+      writeFileSync(join(root, "index.html"), `<!doctype html><title>Vite</title><script type="module" src="/main.js"></script>`);
+      writeFileSync(join(root, "main.js"), MAIN("first"));
+      const vite = await createVite({
+        root, configFile: false, envFile: false, logLevel: "silent", clearScreen: false, cacheDir: join(root, ".vite"), server: { host: "127.0.0.1", port: 0 },
+      });
+      try {
+        await vite.listen();
+        server = (vite.httpServer!.address() as { port: number }).port;
+        host.forwards([at], doorPath(), KEY, []);
+        const a = session();
+        expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` })).ok?.title).toBe("Vite first");
+        // Its client's live socket, to the port the page came from: through the proxy and the door, as the page's own requests.
+        await expect.poll(() => vite.ws.clients.size, { timeout: 10_000 }).toBe(1);
+        const loaded = await script(a, "return performance.timeOrigin;");
+        writeFileSync(join(root, "main.js"), MAIN("changed"));
+        await expect.poll(() => script(a, "return document.title;"), { timeout: 15_000 }).toBe("Vite changed");
+        expect(await script(a, "return performance.timeOrigin;")).toBe(loaded);
+        expect(hits).toEqual([]);
+      } finally {
+        await vite.close();
+        rmSync(root, { recursive: true, force: true });
+      }
     }, 60_000);
 
     it("lets no service worker of a chat's page stand between another page and the port", async () => {
