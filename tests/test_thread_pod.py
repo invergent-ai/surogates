@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from surogates.governance.saga.compensator import compensate_history
-from surogates.governance.saga.state_machine import SagaStep
+from surogates.governance.saga.state_machine import SagaStep, StepState
 from surogates.harness import landing
 from surogates.sandbox import executor_server
 from surogates.sandbox.base import SandboxSpec
@@ -366,6 +366,53 @@ async def test_a_put_back_the_pod_did_not_finish_is_never_read_as_done(answer):
     # Read as done, its landing's row would say the files are as they were.
     with pytest.raises(landing.LandingStepError):
         await compensate_history(step, Answers(NO_RESULT[answer]), "t1")
+
+
+class _Row:
+    """A landing's row as a settle writes it: what it was told, in order."""
+
+    def __init__(self) -> None:
+        self.written: list[dict] = []
+
+    async def write(self, **values) -> None:
+        self.written.append(values)
+
+    async def alive(self) -> None:
+        return None
+
+
+def a_landing_by_you(*states: StepState):
+    """A landing by you of a file an apply, each apply in its state, then its record: the orchestrator and the saga."""
+    from surogates.governance.saga import SagaOrchestrator
+
+    orchestrator = SagaOrchestrator(default_step_timeout=5, default_max_retries=0, retry_delay=0.0)
+    saga = orchestrator.create_saga("s1", kind="landing")
+    for n, state in enumerate(states):
+        orchestrator.add_step(saga.saga_id, tool_name="history.apply", tool_call_id="", arguments={
+            "path": f"{n}.md", "before": None, "after": f"{n}" * 40,
+        }).state = state
+    orchestrator.add_step(saga.saga_id, tool_name="history.record", tool_call_id="", arguments={"main": "m" * 40})
+    return orchestrator, saga
+
+
+async def test_an_apply_that_may_have_written_and_could_not_be_put_back_is_marked_so():
+    orchestrator, saga = a_landing_by_you(StepState.FAILED)
+    failed = await landing._put_back(saga, orchestrator, Answers(json.dumps({"error": "the bucket refused the object"})), "t1", _Row())
+    # Its row says the file may be as that apply wrote it: who changed it since is that landing's author.
+    assert [(it.arguments["path"], it.state) for it in failed] == [("0.md", StepState.COMPENSATION_FAILED)]
+
+
+@pytest.mark.parametrize("recovered", [False, True], ids=["its own", "recovered"])
+async def test_a_landing_given_up_marks_only_the_applies_that_may_have_written(recovered):
+    orchestrator, saga = a_landing_by_you(StepState.COMMITTED, StepState.PENDING)
+    hidden = {"main": "n" * 40, "landing": None, "hidden": True, "packs": 0, "missing": []}
+    at_issue: list[str] = []
+    state, _ = await landing._settle(saga, orchestrator, Answers(json.dumps(hidden)), "t1", _Row(), recovered=recovered, at_issue=at_issue)
+    applies = [(it.arguments["path"], it.state) for it in saga.steps if it.tool_name == "history.apply"]
+    # Its own landing's apply still pending never ran; a recovered one's may have, its row behind it.
+    second = StepState.COMPENSATION_FAILED if recovered else StepState.PENDING
+    assert (state, applies) == ("escalated", [("0.md", StepState.COMPENSATION_FAILED), ("1.md", second)])
+    assert at_issue == (["0.md", "1.md"] if recovered else ["0.md"])
 
 
 @pytest.mark.parametrize("answer", list(NO_RESULT))
