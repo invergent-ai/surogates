@@ -192,7 +192,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
     expect(await ran(...chats[5]!)).toEqual({
       error: {
         type: "unavailable",
-        message: "This computer's sandbox could not add this chat's folder: it holds as many folders as it has room for, 8: the folders of 6 chats, and 2 for the histories of project folders, which take two each",
+        message: "This computer's sandbox could not add this chat's folder: it holds as many folders as it has room for, 8: the folders of 5 chats, the copy of 1 thread, and 2 for the histories of project folders, which take two each",
       },
     });
     for (const [root] of chats) await manager.teardown(root);

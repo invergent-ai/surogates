@@ -113,9 +113,10 @@ export interface VmBackend {
    * *deadline* (performance.now()). A share whose server goes takes the VM with it,
    * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
    * *uid* 0 is the guest's root, for the agent's own git on a folder's place; with *readonly*,
-   * for it alone, no write of the guest's reaches the folder, whatever the guest mounts.
+   * for it alone, no write of the guest's reaches the folder, whatever the guest mounts. With
+   * *copy*, the folder is a project thread's copy, and is counted as one where no more fit.
    */
-  share(folder: string, uid: number, deadline: number, readonly?: boolean): Promise<Share>;
+  share(folder: string, uid: number, deadline: number, as?: { readonly?: boolean; copy?: boolean }): Promise<Share>;
   /**
    * *share*, as share gave it, out of the running guest once the guest has let it go, and
    * its folder served no more: its place takes the next share. Rejects with why not by
@@ -420,7 +421,8 @@ export class Guest {
   // *root* set up on *folder*, shared for it first where it has no share.
   private setUp(root: string, folder: Folder, ended: ProcessHandle[], at: string, known: Root | undefined): Promise<Outcome | null> {
     if (!known) {
-      const entry: Root = { share: this.share(root, folder), setup: null, folder, at };
+      // A thread's copy is seen at the path of the folder it is a copy of; a chat's folder at its own.
+      const entry: Root = { share: this.share(root, folder, at !== folder.path), setup: null, folder, at };
       // A share that could not be added is tried again by the next operation.
       entry.share.catch(() => {
         if (this.roots.get(root) === entry) this.roots.delete(root);
@@ -461,8 +463,9 @@ export class Guest {
    * and the agent has given the root's guest uid. Resolves with how the agent mounts
    * it. A uid not given within shareMs stops the guest, as a setup with no answer
    * does; the backend ends a VM that cannot share any more, and the guest goes with it.
+   * *copy*: the folder is a project thread's copy, not a chat's folder.
    */
-  async share(root: string, folder: Folder): Promise<Share> {
+  async share(root: string, folder: Folder, copy = false): Promise<Share> {
     const deadline = performance.now() + this.shareMs;
     // On a mount that does not answer, as a dead network or FUSE one, the look never
     // returns, and Node cannot cancel it: it is given up on at the deadline, in a thread of its own.
@@ -480,7 +483,7 @@ export class Guest {
     if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
-    return this.vm.share(folder.path, uid, deadline);
+    return this.vm.share(folder.path, uid, deadline, { copy });
   }
 
   /**
@@ -539,7 +542,7 @@ export class Guest {
     const history = await this.vm.share(place.history, 0, deadline);
     const shares = [history];
     try {
-      const folder = await this.vm.share(place.real.path, 0, deadline, true);
+      const folder = await this.vm.share(place.real.path, 0, deadline, { readonly: true });
       shares.push(folder);
       const answer = await this.request({ type: "place", key: place.key, history, real: folder }, this.setupMs);
       if (answer?.type === "done") return { history, real: folder, store: store.found };

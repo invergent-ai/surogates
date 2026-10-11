@@ -288,10 +288,10 @@ class LinuxVm implements VmBackend {
   private readonly daemons: ChildProcess[] = [];
   // Each share in the guest, by its tag.
   private readonly shares = new Map<string, Shared>();
-  // The root ports a share is on, each with the guest uid its folder is mapped to: 0 for one of a folder's place, which
-  // takes two. A share's number, in its tag, ids, socket and pidfile, is never used again in this VM, so nothing of a
-  // share removed is taken for the next's.
-  private readonly taken = new Map<number, number>();
+  // The root ports a share is on, each with what it holds: a chat's folder, a project thread's copy, or half of a
+  // folder's place, which takes two. A share's number, in its tag, ids, socket and pidfile, is never used again in this
+  // VM, so nothing of a share removed is taken for the next's.
+  private readonly taken = new Map<number, "chat" | "copy" | "place">();
   private made = 0;
   private killed: Promise<void> | null = null;
 
@@ -315,9 +315,10 @@ class LinuxVm implements VmBackend {
    * serves it from bwrap's namespaces, where it is read-only on this computer, as it was mounted
    * when the share began, so no write of the guest's reaches it, through a remount of the guest's
    * read-only mount (guest/places.ts) neither; and it refuses every write itself too, where it has
-   * the option. Where it cannot be told whether it has, the folder is not shared.
+   * the option. Where it cannot be told whether it has, the folder is not shared. *copy*: a project
+   * thread's copy, for a root's share.
    */
-  async share(folder: string, uid: number, deadline: number, readonly = false): Promise<Share> {
+  async share(folder: string, uid: number, deadline: number, { readonly = false, copy = false } = {}): Promise<Share> {
     const program = this.options.virtiofsd ?? VIRTIOFSD;
     const bwrap = readonly ? bwrapOf(this.options) : null;
     if (readonly && bwrap === null) throw new Error("the folder could not be shared read-only: bubblewrap is not on the PATH");
@@ -325,7 +326,7 @@ class LinuxVm implements VmBackend {
     if (this.killed) throw new Error("the VM has gone");
     const port = Array.from({ length: ROOT_PORTS }, (_, n) => n + 1).find((free) => !this.taken.has(free));
     if (port === undefined) throw new Error(this.full());
-    this.taken.set(port, uid);
+    this.taken.set(port, uid === 0 ? "place" : copy ? "copy" : "chat");
     const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
     const pidfile = join(this.options.run, `vfs-${n}.pid`);
@@ -410,15 +411,17 @@ class LinuxVm implements VmBackend {
     this.taken.delete(shared.port);
   }
 
-  // Why no other folder is shared: what holds each root port, a chat's folder or half a folder's place.
+  // Why no other folder is shared: what holds each root port, a chat's folder, a thread's copy or half a folder's place.
   private full(): string {
-    const chats = [...this.taken.values()].filter((uid) => uid !== 0).length;
-    const places = this.taken.size - chats;
+    const count = (what: string) => [...this.taken.values()].filter((held) => held === what).length;
+    const [chats, copies, places] = [count("chat"), count("copy"), count("place")];
     const held = [
       ...(chats > 0 ? [`the folders of ${chats} ${chats === 1 ? "chat" : "chats"}`] : []),
+      ...(copies > 0 ? [copies === 1 ? "the copy of 1 thread" : `the copies of ${copies} threads`] : []),
       ...(places > 0 ? [`${places} for the histories of project folders, which take two each`] : []),
     ];
-    return `it holds as many folders as it has room for, ${ROOT_PORTS}: ${held.join(", and ")}`;
+    const last = held.pop();
+    return `it holds as many folders as it has room for, ${ROOT_PORTS}: ${held.length > 0 ? `${held.join(", ")}, and ${last}` : last}`;
   }
 
   // A power cut: only the sessions disk is written, and it is journaled and checked at the next boot.
