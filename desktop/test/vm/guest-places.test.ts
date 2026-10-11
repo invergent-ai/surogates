@@ -3,13 +3,17 @@
 // by images/guest/build.sh, the agent disk from this package (npm run build first). Behind
 // SUROGATE_VM_TESTS=1.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { findOnPath } from "../../src/files/operations.js";
+import { readonlyFlag } from "../../src/vm/linux.js";
 import { type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
+import { VIRTIOFSD } from "../../src/vm/qemu.js";
 import { agentDisk, agentDiskWith, altered, DAEMON, folderOf, IMAGE, KVM, needsKvm, OTHER, ROOT, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
@@ -81,9 +85,14 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
     expect(await manager.place(place, signal())).toBeNull();
     const started = daemons();
     expect(Object.keys(started).sort()).toEqual([join(dir, "Documents"), join(dir, "store")]);
-    // Both for the guest's root: the history by its daemon's map, the folder from bwrap's namespaces, bound read-only there.
+    // Both for the guest's root: the history by its daemon's map; the folder from bwrap's namespaces, bound read-only there,
+    // in a mount namespace of its own past them, and refused every write by its daemon too where this computer's has the option.
+    const folder = join(dir, "Documents");
+    const refuses = readonlyFlag(spawnSync(process.env.SUROGATE_VM_VIRTIOFSD ?? VIRTIOFSD, ["--help"], { encoding: "utf8" }).stdout);
     expect(started[join(dir, "store")]).toContain(`--uid-map=:0:${USER.uid}:1:`);
-    expect(started[join(dir, "Documents")]!.join(" ")).toContain(`--uid 0 --gid 0 --cap-add ALL --bind / / --dev-bind /dev /dev --ro-bind ${join(dir, "Documents")} ${join(dir, "Documents")}`);
+    expect(started[join(dir, "store")]).not.toContain("--readonly");
+    expect(started[folder]!.join(" ")).toContain(`--ro-bind ${folder} ${folder} --die-with-parent -- /usr/bin/unshare --mount --propagation private --`);
+    expect(started[folder]!.includes("--readonly")).toBe(refuses);
   });
 
   it("binds a thread's copy at its folder's path, where its commands see no other thread's copy, the history or the real files", async () => {
@@ -151,6 +160,24 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
     expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);
     expect(readFileSync(join(dir, "Documents", "Report.docx"), "utf8")).toBe("the real report\n");
   });
+
+  it("shares no folder read-only where no bubblewrap is to be found, and lets its history's share go", async () => {
+    for (const name of ["Letters", "letters-store"]) mkdirSync(join(dir, name));
+    // A PATH with virtiofsd's id-map tools on it and no bwrap; the app's own copy is named to no development build.
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    for (const name of ["newuidmap", "newgidmap"]) symlinkSync(findOnPath(name, process.env.PATH, "/")!, join(bin, name));
+    const path = process.env.PATH;
+    process.env.PATH = bin;
+    try {
+      expect(await manager.place({ key: "fedcba9876543210", history: join(dir, "letters-store"), real: folderOf(join(dir, "Letters")) }, signal())).toEqual({
+        error: { type: "unavailable", message: expect.stringContaining("the folder could not be shared read-only: bubblewrap is not on the PATH") },
+      });
+    } finally {
+      process.env.PATH = path;
+    }
+    expect(Object.keys(daemons()).filter((folder) => [join(dir, "Letters"), join(dir, "letters-store")].includes(folder))).toEqual([]);
+  });
 });
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the guest's own root", { timeout: 60_000 }, () => {
@@ -195,5 +222,66 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the
     expect(statSync(found).uid).toBe(USER.uid);
     expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);
     expect(readFileSync(join(dir, "Documents", "Report.docx"), "utf8")).toBe("the real report\n");
+  });
+});
+
+// The guest's own root again, once this computer says it has mounted something in the folder after the
+// share began (go, in the history): what it tries there, past a remount, a mount made before the share too.
+const AS_ROOT_ON_MOUNTS = `(
+  until mountpoint -q ${AT}/real && [ -e ${AT}/history/go ]; do sleep 0.1; done
+  tried() { "$@" 2>/dev/null && echo done || echo refused; }
+  {
+    mount -o remount,rw ${AT}/real && echo remounted
+    echo "top: $(tried cp /dev/null ${AT}/real/made)"
+    echo "before: $(tried cp /dev/null ${AT}/real/before/made)"
+    echo "after: $(tried cp /dev/null ${AT}/real/after/made)"
+  } > ${AT}/history/found.partial 2>&1
+  mv ${AT}/history/found.partial ${AT}/history/found
+) &
+`;
+
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the guest's own root, with drives mounted in the folder", { timeout: 60_000 }, () => {
+  let dir: string;
+  let options: VmOptions;
+  let manager: VmManager;
+  const mounted: string[] = [];
+  // A FUSE mount at *at* in the folder, as a drive, a NAS's share or an sshfs folder would be: its own files, writable.
+  const mountAt = (at: string) => {
+    const fuse = mkdtempSync(join(dir, "fuse-"));
+    for (const name of ["lower", "upper", "work"]) mkdirSync(join(fuse, name));
+    mkdirSync(at);
+    const made = spawnSync("fuse-overlayfs", ["-o", `lowerdir=${fuse}/lower,upperdir=${fuse}/upper,workdir=${fuse}/work`, at], { encoding: "utf8" });
+    if (made.status !== 0) throw new Error(`fuse-overlayfs: ${made.stderr}`);
+    mounted.push(at);
+  };
+
+  beforeAll(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-places-")));
+    for (const name of ["Documents", "store"]) mkdirSync(join(dir, name));
+    options = {
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDiskWith(dir, altered([AGENT, `${AS_ROOT_ON_MOUNTS}${AGENT}`])),
+      sessions: join(dir, "sessions.img"), run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"),
+      user: USER, kvm: KVM, ...DAEMON,
+    };
+    manager = new VmManager(options);
+  });
+
+  afterAll(async () => {
+    await manager.stop();
+    for (const at of mounted) spawnSync("fusermount3", ["-u", "-z", at]);
+    rmSync(options.run, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses the guest's root a write past a remount, on a drive mounted in the folder before its share began or after", async () => {
+    const folder = join(dir, "Documents");
+    mountAt(join(folder, "before"));
+    expect(await manager.place({ key: KEY, history: join(dir, "store"), real: folderOf(folder) }, signal())).toBeNull();
+    mountAt(join(folder, "after"));
+    writeFileSync(join(dir, "store", "go"), "");
+    const found = join(dir, "store", "found");
+    await until(() => existsSync(found));
+    expect(readFileSync(found, "utf8").split("\n")).toEqual(["remounted", "top: refused", "before: refused", "after: refused", ""]);
+    expect([readdirSync(folder).sort(), readdirSync(join(folder, "before")), readdirSync(join(folder, "after"))]).toEqual([["after", "before"], [], []]);
   });
 });

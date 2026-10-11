@@ -2,7 +2,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 
 // A FUSE mount that comes or goes while bwrap binds / fails that sandbox's start (its remount,
 // EINVAL), and srt's file hosts bind / whole: the files that mount one run alone, after the rest.
-const MOUNTING = ["test/vm-stalled-folder.test.ts"];
+const MOUNTING = ["test/vm-stalled-folder.test.ts", "test/vm/guest-places.test.ts"];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it
 // never signs with the user's key or reaches their gpg-agent, and commits as the tests.

@@ -140,6 +140,33 @@ export async function missingTools(
   ];
 }
 
+/** Whether a virtiofsd whose --help says *help* refuses a guest's writes itself (--readonly: 1.11 and later). */
+export const readonlyFlag = (help: string) => /^\s*--readonly(\s|$)/m.test(help);
+
+// What each virtiofsd's --help said of --readonly, once it was read.
+const helps = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether *program*, a virtiofsd, refuses a guest's writes itself, by its --help, read within *ms*.
+ * Only a help that was read is an answer, and is kept: one that could not be read rejects, so the
+ * folder is not shared without the option on a computer whose virtiofsd has it, and the next share asks again.
+ */
+export function refusesWrites(program = VIRTIOFSD, ms = 5_000): Promise<boolean> {
+  const known = helps.get(program);
+  if (known) return known;
+  const asked = new Promise<boolean>((resolve, reject) => {
+    execFile(...cleanly(program, ["--help"]), { timeout: ms, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => {
+      if (error) reject(new Error("the folder could not be shared read-only: virtiofsd did not say whether it refuses a guest's writes"));
+      else resolve(readonlyFlag(stdout));
+    });
+  });
+  helps.set(program, asked);
+  asked.catch(() => {
+    if (helps.get(program) === asked) helps.delete(program);
+  });
+  return asked;
+}
+
 const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
 
 const exited = (child: ChildProcess) => new Promise<void>((resolve) => {
@@ -284,13 +311,16 @@ class LinuxVm implements VmBackend {
    * *folder* on a free root port, by *deadline*: its virtiofsd, which maps the host user
    * to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
    * A share not added gives its port back. *readonly*, for the guest's root (*uid* 0): its virtiofsd
-   * serves it from bwrap's namespaces, where it is read-only on this computer, so no write of the
-   * guest's reaches it, through a remount of the guest's read-only mount (guest/places.ts) neither.
+   * serves it from bwrap's namespaces, where it is read-only on this computer, as it was mounted
+   * when the share began, so no write of the guest's reaches it, through a remount of the guest's
+   * read-only mount (guest/places.ts) neither; and it refuses every write itself too, where it has
+   * the option. Where it cannot be told whether it has, the folder is not shared.
    */
   async share(folder: string, uid: number, deadline: number, readonly = false): Promise<Share> {
     const program = this.options.virtiofsd ?? VIRTIOFSD;
     const bwrap = readonly ? bwrapOf(this.options) : null;
     if (readonly && bwrap === null) throw new Error("the folder could not be shared read-only: bubblewrap is not on the PATH");
+    const refusing = readonly && (await refusesWrites(program));
     if (this.killed) throw new Error("the VM has gone");
     const port = Math.min(...this.free);
     if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);
@@ -298,7 +328,7 @@ class LinuxVm implements VmBackend {
     const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
     const pidfile = join(this.options.run, `vfs-${n}.pid`);
-    const { child: daemon, said } = launch(readonly ? readOnlyDaemon(bwrap!, program, folder, socket) : [program, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
+    const { child: daemon, said } = launch(readonly ? readOnlyDaemon(bwrap!, program, folder, socket, refusing) : [program, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
     this.daemons.push(daemon);
     writeFileSync(pidfile, String(daemon.pid ?? ""));
     try {
