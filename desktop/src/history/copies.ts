@@ -28,6 +28,7 @@ import { lstat, realpath, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { BOOT_ID } from "../binding/folder.js";
+import { strerror } from "../files/answers.js";
 import { CANCELLED } from "../guest/command.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
@@ -140,12 +141,20 @@ const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "close"
 // What the guest says of a copy it was asked to let go that is not there any more: removed by it, or gone before.
 const letGone = (outcome: Outcome): boolean => "ok" in outcome && ["removed", "gone"].includes(String((outcome.ok as { copy?: unknown } | null)?.copy));
 
-const unavailable = (why: string): Outcome => ({
-  error: { type: "unavailable", message: `This computer could not make this thread's copy of its folder: ${why}` },
+// Why the thread on *folder* has no copy to work in, in words that end with what its person can do.
+const unavailable = (folder: string, why: string): Outcome => ({
+  error: { type: "unavailable", message: `This computer could not make this thread's copy of ${folder}: ${why}` },
 });
-const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
-const NOT_OWN = "what its sandbox left at its path is not a folder of the app's own";
-const CHANGED = "the folder's history was let go each time this thread's copy was asked for";
+// The words of what went wrong; a call of Node's that failed, as in the app's data, by the system's words alone, since the
+// path it names is the app's own.
+function describe(error: unknown): string {
+  const { code, syscall } = error as NodeJS.ErrnoException;
+  if (typeof code === "string" && typeof syscall === "string") return `the app's data could not be read or written (${strerror(code) ?? code}). Once it can, ask again`;
+  return error instanceof Error ? error.message : String(error);
+}
+const AGAIN = "Ask again; if this goes on, start a new thread on the folder";
+const NOT_OWN = `what its sandbox left at the copy's path is not a folder of the app's own. ${AGAIN}`;
+const CHANGED = "the folder's history was let go each time this thread's copy was asked for. Ask again";
 
 // Why the guest's answer to an open says the folder has no history, or null for any other answer.
 function offOf(outcome: Outcome): Reason | null {
@@ -240,7 +249,7 @@ export class Copies {
     const work = this.inTurn(root, async (): Promise<Opened> => {
       const made = await this.ensured(root, bound, true);
       return "failed" in made ? made : { copy: made.copy, handle: made.handle! };
-    }).catch((error: unknown): Opened => ({ failed: unavailable(describe(error)) }));
+    }).catch((error: unknown): Opened => ({ failed: unavailable(bound.folder, describe(error)) }));
     const opened = await this.until(signal, work);
     if (opened !== "cancelled") return opened;
     // Whoever asked has gone, and nothing would let its copy go: it is let go once it is made.
@@ -267,7 +276,7 @@ export class Copies {
       if (action !== "open") return this.step(root, bound, action, args, signal);
       const { retried, ...asked } = args;
       return retried === true ? this.turnOpen(root, bound, asked, true, signal) : this.turnOpen(root, bound, args, false, signal);
-    }).catch((error: unknown) => unavailable(describe(error))));
+    }).catch((error: unknown) => unavailable(bound.folder, describe(error))));
     return outcome === "cancelled" ? CANCELLED : outcome;
   }
 
@@ -325,7 +334,7 @@ export class Copies {
       const outcome = await this.opened(found.known, found.place, root, args, signal);
       if (outcome !== STALE) return this.named(root, outcome);
     }
-    return unavailable(CHANGED);
+    return unavailable(bound.folder, CHANGED);
   }
 
   // A turn's open *outcome* for *root*, with the places its operations set aside since it was last answered: once each.
@@ -346,18 +355,19 @@ export class Copies {
       if (answer === STALE) continue;
       if (!notWhole(answer) || !("error" in answer)) return answer;
       if (again) {
+        // The open between may have kept the copy as it was: it is told as opened, not as made again.
         const { message } = answer.error;
         return {
           error: {
             ...answer.error,
-            message: `This computer made this thread's copy of its folder again, and its history still found it not whole, so this was not done: ${message}`,
+            message: `This computer opened this thread's copy of ${bound.folder} again, and its history still found it not whole, so this was not done. ${AGAIN}. The history said: ${message}`,
           },
         };
       }
       // As the history says: its next open makes the copy whole, here without moving it.
       again = true;
     }
-    return unavailable(CHANGED);
+    return unavailable(bound.folder, CHANGED);
   }
 
   // *root*'s copy: the folder the guest left at its last open, if that is still there, else opened by the
@@ -386,7 +396,7 @@ export class Copies {
       if (!made || this.known.get(place.key) !== known) continue;
       return this.made(root, copyIn(place, root, made, bound), known, take);
     }
-    return { failed: unavailable(CHANGED) };
+    return { failed: unavailable(bound.folder, CHANGED) };
   }
 
   // Whether an open of *root*'s copy in *place* would make it, there being no folder of the app's own at its path or its
@@ -407,7 +417,7 @@ export class Copies {
   // and found again. A letting go under way is not waited for here: a request waits for it.
   private async found(root: string, bound: BoundFolder): Promise<{ known: Known; place: Place } | { failed: Outcome }> {
     // A binding names its thread's copy, which is the root's own (binding/binder.ts).
-    if (bound.history !== root) return { failed: unavailable("this chat is bound to another thread's copy") };
+    if (bound.history !== root) return { failed: unavailable(bound.folder, "this chat is bound to another thread's copy") };
     const key = keyOf(bound.folder);
     for (let turn = 0; turn < TURNS; turn += 1) {
       const lettings = this.lettings.get(key) ?? 0;
@@ -415,7 +425,7 @@ export class Copies {
         const { place, aside } = await placeOf(this.options.dataDir, bound, { letGo: (was, store) => this.letGo(was, store) });
         if (aside) this.asides.set(root, [...(this.asides.get(root) ?? []), basename(aside.history)].slice(-ASIDES));
         const store = await look(place.history);
-        if (store === null || store === "other") return { failed: unavailable("its place in the app's data is not a folder of the app's own") };
+        if (store === null || store === "other") return { failed: unavailable(bound.folder, "its place in the app's data is not a folder of the app's own. Ask again") };
         if ((this.lettings.get(key) ?? 0) !== lettings) continue;
         const known = this.known.get(key);
         if (known && same(known.store, store)) return { known, place };
@@ -428,10 +438,10 @@ export class Copies {
         this.known.set(key, fresh);
         return { known: fresh, place };
       } catch (error) {
-        return { failed: error instanceof FolderReplaced ? FOLDER_UNAVAILABLE : unavailable(describe(error)) };
+        return { failed: error instanceof FolderReplaced ? FOLDER_UNAVAILABLE : unavailable(bound.folder, describe(error)) };
       }
     }
-    return { failed: unavailable(CHANGED) };
+    return { failed: unavailable(bound.folder, CHANGED) };
   }
 
   // The guest's answer to an open of *root*'s copy, taken with what it left: the folder now at the copy's
@@ -468,7 +478,7 @@ export class Copies {
     const copy = typeof found === "object" && found !== null && ![...known.copies.values()].some((other) => same(other, found)) ? found : null;
     const worked = this.opens.get(root)?.copy.folder;
     if (worked && (copy === null || !same(worked, copy))) this.options.replaced?.(root);
-    if (copy === null) return unavailable(typeof found === "string" && found !== "other" ? found : NOT_OWN);
+    if (copy === null) return unavailable(place.real.path, typeof found === "string" && found !== "other" ? found : NOT_OWN);
     known.copies.set(root, copy);
     return outcome;
   }
@@ -495,7 +505,7 @@ export class Copies {
       sent?.();
       outcome = await this.options.vm.history({ place, thread: root, user: this.options.user, action, args }, signal);
     } catch (error) {
-      outcome = unavailable(describe(error));
+      outcome = unavailable(place.real.path, describe(error));
     } finally {
       this.release(held);
     }
@@ -564,7 +574,7 @@ export class Copies {
         // Let go as they were told.
         if (this.holding(key).length === 0) break;
         const left = until - performance.now();
-        if (left <= 0) throw new Error(`a thread still works in the history of the folder that was at this path, and did not let it go within ${ms / 1000} s`);
+        if (left <= 0) throw new Error(`a thread still works in the history of the folder that was at this path, and did not let it go within ${ms / 1000} s. Ask again once that thread has stopped`);
         await this.change(left);
       }
       // In the moment the last host has let go: from here on no copy of the place is taken, nor any request sent.

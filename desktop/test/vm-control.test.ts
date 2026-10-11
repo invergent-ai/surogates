@@ -49,6 +49,7 @@ const places: ControlPlaces = {
     if (args.wait) signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
     else resolve(args.say as Outcome);
   }),
+  stop: async () => {},
 };
 
 async function agent(speak = true): Promise<void> {

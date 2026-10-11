@@ -178,6 +178,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
     }
     expect(Object.keys(daemons()).filter((folder) => [join(dir, "Letters"), join(dir, "letters-store")].includes(folder))).toEqual([]);
   });
+
+  it("says what holds each of its folders where it takes no more: a place takes two", async () => {
+    // The place and one thread's copy are in; five chats more fill it, and a sixth finds no room.
+    expect(Object.keys(daemons()).sort()).toEqual([join(dir, "Documents"), join(dir, "store"), copyOf("one")].sort());
+    const chats = Array.from({ length: 6 }, (_, n) => {
+      const path = join(dir, `chat-${n}`);
+      mkdirSync(path);
+      return [`chat-${n}`, path] as const;
+    });
+    const ran = (root: string, path: string) => manager.perform({ id: `run-${root}`, root, folder: folderOf(path), kind: "run", args: { command: "true", workdir: null, timeout: 20 } }, signal());
+    for (const [root, path] of chats.slice(0, 5)) expect(await ran(root, path)).toMatchObject({ ok: { returncode: 0 } });
+    expect(await ran(...chats[5]!)).toEqual({
+      error: {
+        type: "unavailable",
+        message: "This computer's sandbox could not add this chat's folder: it holds as many folders as it has room for, 8: the folders of 6 chats, and 2 for the histories of project folders, which take two each",
+      },
+    });
+    for (const [root] of chats) await manager.teardown(root);
+  });
 });
 
 describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the guest's own root", { timeout: 60_000 }, () => {

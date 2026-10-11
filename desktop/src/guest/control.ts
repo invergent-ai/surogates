@@ -25,6 +25,8 @@ export interface ControlPlaces {
   unmount(key: string): Promise<void>;
   // Never rejects: whatever goes wrong is an outcome.
   history(key: string, request: { thread: string; user: string; action: string; args: Record<string, unknown> }, signal: AbortSignal): Promise<Outcome>;
+  // The guest's stop: every request ends, and none starts after. Settles once what they ran has gone, or past its bound.
+  stop(): Promise<void>;
 }
 
 // What the control asks of the guest itself (root.ts, trust.ts): its clock, its runs' backstops, its trust store, and its power.
@@ -38,8 +40,9 @@ export interface ControlMachine {
   // The guest's trust store holds *certificates*, the company's CA the host gave, for every root set up after.
   // Settles once it does, or once it could not, which it says itself: never rejects.
   trust(certificates: string[]): Promise<void>;
-  // Every root's processes end, the sessions disk is written out and let go, and the guest powers off.
-  powerOff(): Promise<void>;
+  // Every root's processes end, and *ending* with them, what else of the agent's is being ended; the sessions disk is
+  // written out and let go, and the guest powers off.
+  powerOff(ending?: Promise<unknown>): Promise<void>;
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -169,8 +172,9 @@ export class Control {
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
     } else if (message.type === "shutdown") {
-      // No answer: the guest powers off, which the host sees as the VM's exit.
-      void this.machine?.powerOff().catch(() => {});
+      // No answer: the guest powers off, which the host sees as the VM's exit. What a folder's history runs ends with
+      // what the roots run: nothing of either writes on while it goes.
+      void this.machine?.powerOff(this.places?.stop()).catch(() => {});
     } else if (message.type === "cancel") {
       this.running.get(id)?.abort();
     } else {

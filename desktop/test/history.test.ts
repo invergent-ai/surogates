@@ -1,4 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -12,8 +15,8 @@ import { type Asked, askHistory, Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
 import { boundsFor } from "../src/guest/root.js";
 import type { Outcome } from "../src/link/protocol.js";
-import { checked, forgettable, type HistoryRequest, named } from "../src/vm/history.js";
-import { type BootVm, type Place, VmManager, type VmOptions, WAITS } from "../src/vm/manager.js";
+import { checked, forgettable, type HistoryRequest, named, NOT_A_REQUEST } from "../src/vm/history.js";
+import { type BootVm, Guest, type Place, VmManager, type VmOptions, WAITS } from "../src/vm/manager.js";
 
 const KEY = "0123456789abcdef";
 const OTHER_KEY = "fedcba9876543210";
@@ -294,6 +297,15 @@ if (args.then === "look") {
   process.stdout.write(JSON.stringify({ asked, argv: readFileSync("/proc/self/cmdline", "utf8").split("\0").slice(2, -1), env: process.env, cwd: process.cwd() }));
 } else if (args.then === "flood") {
   process.stdout.write("x".repeat(7 * 1024 ** 2), wait);
+} else if (args.then === "outlive") {
+  // It ends well at once, and leaves behind, in a group of its own, what writes an answer past its size once it has
+  // gone: all that comes before the answer's size is one that could be read.
+  spawn(process.execPath, ["-e", \`
+    const gone = () => { try { process.kill(\${process.pid}, 0); return false; } catch { return true; } };
+    const write = () => (gone() ? process.stdout.write("{}" + " ".repeat(7 * 1024 ** 2)) : setTimeout(write, 10));
+    write();
+  \`], { detached: true, stdio: ["ignore", "inherit", "ignore"] }).unref();
+  process.exit(0);
 } else {
   const writer = spawn("/bin/sh", ["-c", "while [ -d " + store + " ]; do echo beat >> " + store + "/beat; sleep 0.02; done"], { stdio: "ignore" });
   writeFileSync(store + "/writer.pid", String(writer.pid));
@@ -400,6 +412,8 @@ describe("a request to a folder's history, as the agent runs it", () => {
 
   it("answers that the history did not, for an answer past its size and a history that cannot be run", async () => {
     expect(await mounted.history(KEY, request("flood"), signal())).toEqual(NO_ANSWER);
+    // Past its size, whatever came before that, though the history itself ended well.
+    expect(await mounted.history(KEY, request("outlive"), signal())).toEqual(NO_ANSWER);
     const none = new Places({
       folder: join(dir, "places"), mount: async () => {}, unmount: async () => {},
       ask: (asked, stop) => askHistory(asked, stop, [join(dir, "no-python"), "-I", join(dir, "history.mjs")]),
@@ -407,6 +421,26 @@ describe("a request to a folder's history, as the agent runs it", () => {
     await none.mount(KEY, R1, R2);
     expect(await none.history(KEY, request("say"), signal())).toEqual(NO_ANSWER);
     expect(await none.history(KEY, request("say"), signal())).toEqual(NO_ANSWER);
+  });
+
+  it("answers that the history did not where the agent has no file descriptor left to start it with, and goes on", async () => {
+    // This process's own bound on open files, lowered to what it has open and a few more, and every one of those
+    // few taken: Node then gives a child with no stdio, and says why only after.
+    const limit = Number(/^Max open files\s+(\d+)/m.exec(readFileSync("/proc/self/limits", "utf8"))![1]);
+    const bound = (soft: number) => execFileSync("/usr/bin/prlimit", ["--pid", String(process.pid), `--nofile=${soft}:`]);
+    bound(readdirSync("/proc/self/fd").length + 16);
+    const taken: number[] = [];
+    let asked: Promise<string>;
+    try {
+      for (;;) taken.push(openSync("/dev/null", "r"));
+    } catch {
+      asked = askHistory({ store, folder: join(dir, "places", KEY, "real"), ...request("answer") }, signal(), [process.execPath, join(dir, "history.mjs")]);
+    } finally {
+      for (const fd of taken) closeSync(fd);
+      bound(limit);
+    }
+    await expect(asked!).rejects.toThrow("the history ended without an answer");
+    expect(await mounted.history(KEY, request("answer"), signal())).toEqual({ ok: {} });
   });
 });
 
@@ -417,7 +451,7 @@ describe("the agent's control port, asked for a history", () => {
       (message) => sent.push(message),
       { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) },
       undefined,
-      history && { mount: async () => {}, unmount: async () => {}, history },
+      history && { mount: async () => {}, unmount: async () => {}, history, stop: async () => {} },
     );
     const tell = async (message: unknown) => {
       agent.receive(JSON.stringify(message));
@@ -460,6 +494,44 @@ describe("the agent's control port, asked for a history", () => {
     const none = control();
     await none.tell({ ...whole, id: 1 });
     expect(none.sent).toEqual([{ type: "result", id: 1, outcome: { error: { type: "unavailable", message: "The agent keeps no folder's history" } } }]);
+  });
+
+  it("ends what a folder's history runs at the host's shutdown, and the guest powers off once that has gone, as around the roots' own", async () => {
+    const order: string[] = [];
+    // A history whose request runs until it is ended, and whose processes take a moment to go.
+    const places = new Places({
+      folder: join(dir, "places"), mount: async () => {}, unmount: async () => {},
+      ask: (_asked, stop) => new Promise<string>((_resolve, reject) => {
+        order.push("asked");
+        stop.addEventListener("abort", () => setTimeout(() => {
+          order.push("ended");
+          reject(new Error("ended"));
+        }, 20), { once: true });
+      }),
+    });
+    await places.mount(KEY, R1, R2);
+    const sent: FromAgent[] = [];
+    const agent = new Control(
+      (message) => sent.push(message),
+      { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) },
+      {
+        setClock: async () => {}, woke: () => {}, heard: () => {}, trust: async () => {},
+        powerOff: async (ending) => {
+          order.push("powering off");
+          await ending;
+          order.push("powered off");
+        },
+      },
+      places,
+    );
+    agent.receive(JSON.stringify({ type: "history", id: 1, key: KEY, thread: THREAD, user: "u1", action: "open", args: {} }));
+    await until(() => order.length === 1);
+    agent.receive(JSON.stringify({ type: "shutdown", id: 2 }));
+    await until(() => order.length === 4, 2_000);
+    expect(order).toEqual(["asked", "powering off", "ended", "powered off"]);
+    expect(sent).toEqual([{ type: "result", id: 1, outcome: SANDBOX_STOPPED }]);
+    // And none starts after.
+    expect(await places.history(KEY, { thread: THREAD, user: "u1", action: "open", args: {} }, signal())).toEqual(SANDBOX_STOPPED);
   });
 });
 
@@ -951,7 +1023,7 @@ describe("the VM manager, asked for a folder's history", () => {
       {
         mount: async (key, store, real) => void asked.push(["mount", key, store.tag, real.tag]),
         unmount: async (key) => void asked.push(["unmount", key]),
-        history, ...places,
+        history, stop: async () => {}, ...places,
       },
     );
     createInterface({ input: agent }).on("line", (line) => control.receive(line));
@@ -1007,6 +1079,14 @@ describe("the VM manager, asked for a folder's history", () => {
     setTimeout(() => cancel.abort(), 50);
     expect(await waiting).toEqual(CANCELLED);
     await manager.stop();
+    // Nor does a guest asked itself: it adds no place for such a request, and asks its agent nothing.
+    const told: unknown[] = [];
+    const booted = await Guest.boot(guest(told, async () => ({ ok: {} })), options());
+    for (const change of [{ thread: "../x" }, { user: "u1\n" }, { action: 7 }, { args: [] }]) {
+      expect(await booted.history({ ...ask("open"), ...change } as unknown as HistoryRequest, signal())).toEqual(NOT_A_REQUEST);
+    }
+    expect(told).toEqual([]);
+    await booted.stop();
   });
 
   // A history whose requests are answered when the test says: what was asked, and each one's answer let go.
