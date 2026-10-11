@@ -990,7 +990,7 @@ async def test_a_threads_waits_over_files_end_when_it_is_resolved_by_you_or_its_
     assert await pending_in_the_inbox(api) == {str(yours.id)}
 
 
-async def test_a_wait_over_files_of_a_deleted_thread_or_one_given_a_resolved_thread_ends_at_the_inboxs_sweep(api):
+async def test_a_clash_wait_of_a_deleted_thread_or_one_given_a_resolved_thread_ends_at_the_inboxs_sweep_and_one_over_a_half_done_landing_stays(api):
     project = await create(api)
     master = await master_of(api, project)
     store = api.app.state.session_store
@@ -998,14 +998,17 @@ async def test_a_wait_over_files_of_a_deleted_thread_or_one_given_a_resolved_thr
     await store.emit_event(deleted.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
     assert (await api.client.delete(f"/v1/sessions/{deleted.id}", headers=api.auth())).status_code == 204
     assert (await act_on(api, project, resolved, "resolve")).status_code == 200
-    # As another lock holder's settle tells a resolved thread of its landing left escalated.
-    for thread in (resolved, live):
+    # A redo's clash waits on you after the resolve, and so does another lock holder's settle, telling of a landing left escalated.
+    await store.emit_event(resolved.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    for thread in (deleted, resolved, live):
         await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["a.md"], escalated=True))
     await expire_inbox_items(store)
-    assert [[w.status for w in await waits_of(api, thread)] for thread in (deleted, resolved, live)] == [
-        ["expired"], ["expired"], ["pending"],
+    # A clash is over with its thread.  A landing left half-done in your folder is not: its wait is your only notice of it,
+    # and stays until you answer or dismiss it.
+    assert [sorted((w.payload["escalated"], w.status) for w in await waits_of(api, thread)) for thread in (deleted, resolved, live)] == [
+        [(False, "expired"), (True, "pending")], [(False, "expired"), (True, "pending")], [(True, "pending")],
     ]
-    assert await pending_in_the_inbox(api) == {str(live.id)}
+    assert await pending_in_the_inbox(api) == {str(deleted.id), str(resolved.id), str(live.id)}
 
 
 async def test_a_wait_over_a_second_clash_names_the_stuck_file_and_none_the_redo_turn_landed(api, monkeypatch, pods):

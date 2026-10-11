@@ -68,10 +68,13 @@ async def expire_inbox_items(session_store) -> int:
                         not_(files),
                     ),
                     # Until there is no thread to send one to: it was
-                    # deleted, or resolved, and the wait was raised after,
-                    # as a settle of its landing raises one.
+                    # deleted, or resolved, and the wait was raised after.
+                    # Only a clash's: one over a landing a settle left
+                    # half-done in the folder is the person's only notice
+                    # of it, and stays until they answer or dismiss it.
                     and_(
                         files,
+                        not_(InboxItem.payload.contains({"escalated": True})),
                         or_(
                             owner.status == "archived",
                             select(WorkstreamThread.session_id)

@@ -182,8 +182,9 @@ class WorkstreamStore:
         """Move the thread to Resolved; one already there keeps the moment it got there.
 
         Its waits on you over its files are over with it: expired, never
-        answered.  One it is given since, by a settle of its landing, the
-        inbox's sweep ends (``jobs.inbox_expire``).
+        answered.  One over a clash it is given since is ended by the
+        inbox's sweep (``jobs.inbox_expire``); one over a landing a settle
+        left half-done stays until you answer or dismiss it.
         """
         async with self._sf() as db:
             await db.execute(
