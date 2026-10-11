@@ -121,7 +121,8 @@ CROWDED = "Other changes are being restored or undone right now. Try again in a 
 _TURNS: set[object] = set()
 #: How long the api's shutdown waits for the landings by you under way: the most one is planned to take, its wait
 #: for the lock and its time under it.  One still under way past that is cut as a kill cuts it, and the next lock
-#: holder settles what it left.
+#: holder settles what it left.  The api's deployment bounds the wait too: its pod is killed at the end of its grace,
+#: Kubernetes' 30 seconds where it names none, and uvicorn's wait for the requests in flight counts against it.
 ENDING_PATIENCE = LOCK_PATIENCE + LOCK_BUDGET_MS / 1000
 
 #: What a landing by you lands, once your edits are picked up: given the copy and ``main`` as the pickup
