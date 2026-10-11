@@ -31,6 +31,9 @@ export class FileHistory {
   private reads = 0;
   // The failure said is a read's own: the next read that succeeds takes it away.
   private unread = false;
+  // The read the project's changes asked for, while it runs, and whether another change came meanwhile.
+  private following: Promise<void> | null = null;
+  private again = false;
 
   constructor(private readonly projects: Source, private readonly changed: () => void) {}
 
@@ -71,6 +74,24 @@ export class FileHistory {
       }
     }
     this.changed();
+  }
+
+  /**
+   * Read the History shown again as its project changed, and wait for none of it: one such read at a time,
+   * and one more once it ends for what changed while it ran, so that a slow agent is not asked a read at
+   * each change.
+   */
+  reread(): void {
+    if (this.following) {
+      this.again = true;
+      return;
+    }
+    this.following = this.read().finally(() => {
+      this.following = null;
+      if (!this.again) return;
+      this.again = false;
+      this.reread();
+    });
   }
 
   /**

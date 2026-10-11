@@ -61,6 +61,10 @@ export const KEY_LISTS: KeyList[] = [
   ["with a key whose last letter holds bits of no byte", (script) => rewritten(script, (list) => list.replace(/[A-Za-z0-9+/]=\n/, (last) => `${"BFJNRVZdhlptx159"["AEIMQUYcgkosw048".indexOf(last[0]!)]}=\n`)), 0],
   ["with a key of another kind", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMVBDfASKJhXoSCBb3+OSw5Y0F8KE\nRgLG5k0I+l4L3V8F/GVHjRRK6EVyBPqRVisczBpTXU5figSz6i6CZA3E3w==\n")), 0],
   ["with a key a letter short", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/]{4})([A-Za-z0-9+/=]+)\n/, "\n$2\n")), 0],
+  // An X25519 key is one line of that length too, its last letter as an Ed25519 key's: its first twelve bytes say which.
+  ["with a key of another kind in one line of an Ed25519 key's length", (script) => rewritten(script, (list) => list.replace(/\n[A-Za-z0-9+/=]+\n/, "\nMCowBQYDK2VuAyEAMU+bsgHwEKKwGLzEPMgHdVGDd1W972g47XLAtJACEhs=\n")), 0],
+  ["with a letter behind a key's line", (script) => rewritten(script, (list) => list.replace(/=\n-----END/, "=x\n-----END")), 0],
+  ["with a key's line given twice", (script) => rewritten(script, (list) => list.replace(/\n([A-Za-z0-9+/=]+)\n/, "\n$1\n$1\n")), 0],
   // The list in its form, and its first key another to bash: set by its place, on a line that
   // does not begin as one that sets the list. The readers read the list's two, and the release
   // job, which asks bash key for key, refuses the script.

@@ -1002,6 +1002,22 @@ exit 0
     expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
   });
 
+  it("starts the asking user's reader with neither of its locks open: nothing that runs as that user can hold up this update or a later one", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    expect(root("rm -f /tmp/fds.*").status).toBe(0);
+    // dd, which the reader copies the user's files with: it writes what it holds, then reads as dd does. Asked by
+    // tester, as pkexec names the user.
+    const listing = '#!/bin/sh\nls -l /proc/$$/fd >"/tmp/fds.$$" 2>/dev/null\nexec /opt/hold/dd "$@"\n';
+    expect(swapped("dd", listing, [`PKEXEC_UID=$(id -u tester) /opt/surogate-test/install.sh --apply ${files()}`]))
+      .toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    // What the user's reader held, at each of the three it copied.
+    const read = root('for file in /tmp/fds.*; do [ "$(stat -c %U "$file")" = tester ] && { echo copy; cat "$file"; }; done; rm -f /tmp/fds.*').stdout;
+    expect(read.split("\n").filter((line) => line === "copy")).toHaveLength(3);
+    expect(read).not.toContain("/run/surogate-desktop");
+  });
+
   it("runs the system's own tools, and no script that its caller's environment names", () => {
     const tarball = releaseOf("1.0.0");
     manifestOf("1.0.0", tarball, {}, other.privateKey);

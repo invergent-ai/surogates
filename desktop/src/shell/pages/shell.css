@@ -1471,14 +1471,21 @@ body.prompt-page {
   color: var(--centre);
 }
 
-/* Read by a screen reader, and drawn nowhere: the prompt's size is its content's. */
-.prompt .unseen {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
+/* Why a press answered nothing, beside the buttons, or over them where the row has no room for it:
+   seen, and read by a screen reader by itself. Empty, it takes none, and the buttons stay where they are. */
+.prompt-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 12px;
+}
+
+.prompt .refused {
+  flex: 1 1 auto;
+  margin: 0;
+  color: var(--dim);
+  font-size: 12.5px;
 }
 
 .prompt .actions[data-armed="false"] .btn {
@@ -1543,7 +1550,8 @@ body.about-page {
   overflow-wrap: anywhere;
 }
 
-/* Empty, the waiting quit's line and the update's take no room, and stay live regions. */
+/* Empty, the waiting quit's line, the update's and the copies' take no room, and stay live regions. */
+#copying:empty,
 #quitting:has(#quitting-text:empty),
 #update:has(#update-text:empty) {
   margin: 0;
