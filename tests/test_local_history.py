@@ -4058,18 +4058,53 @@ def test_a_copys_letting_go_follows_no_link_an_earlier_guest_left(tmp_path, fold
     assert (elsewhere / THREAD / "theirs.docx").read_text() == "another folder's file\n"
 
 
-def test_a_copys_letting_go_is_one_the_agent_runs_and_a_threads_dropping_is_none_yet(tmp_path, folder, tree):
+def test_a_copys_letting_go_and_a_deleted_threads_dropping_are_ones_the_agent_runs(tmp_path, folder, tree):
     place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
     assert ask(tree, {**place, "action": "open", "args": {"moves": False}}) == {"copy": "made"}
     assert ask(tree, {**place, "action": "close", "args": {}}) == {"copy": "removed"}
     assert ask(tree, {**place, "action": "close", "args": {}}) == {"copy": "gone"}
     assert ask(tree, {**place, "action": "open", "args": {"moves": False}}) == {"copy": "kept"}
-    # A deleted thread's copy and repository stay until a person can be shown what was set aside of it.
-    for refused_ in ({"action": "close", "args": {"force": True}}, {"action": "drop", "args": {}}):
-        assert ask(tree, {**place, **refused_}) == {"error": {
-            "code": "not_a_request", "message": "refused the request: it names no action this computer's history takes",
-        }}
-    assert sorted(p.name for p in (tmp_path / "store").iterdir()) == ["clones", "history.git", "threads"]
+    assert ask(tree, {**place, "action": "close", "args": {"force": True}}) == {"error": {
+        "code": "not_a_request", "message": "refused the request: it names no action this computer's history takes",
+    }}
+    # A deleted thread's copy and repository go, and the folder's history stays.
+    assert ask(tree, {**place, "action": "drop", "args": {}}) == {"thread": "dropped"}
+    assert ask(tree, {**place, "action": "drop", "args": {}}) == {"thread": "gone"}
+    assert [(p.name, sorted(q.name for q in p.iterdir())) for p in sorted((tmp_path / "store").iterdir()) if p.name != "history.git"] == [
+        ("clones", []), ("threads", []),
+    ]
+
+
+def test_a_deleted_threads_dropping_takes_its_copy_what_waits_beside_it_and_its_repository_and_nothing_set_aside_or_another_threads(tmp_path, folder):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    place = tmp_path / "store"
+    # What the thread kept: a snapshot set aside by a record, a copy set aside whole, the platform's folders waiting
+    # for its copy, in its copy a file no branch holds, and the mark of a making an open cut.
+    recorded_aside(two, one, 0)
+    set_aside_once_more(one, "one's\n")
+    (place / "waiting" / "t1" / "_whiteboard").mkdir(parents=True)
+    (place / "waiting" / "t1" / "_whiteboard" / "canvas.json").write_text("{}")
+    (one.copy / "unlanded.md").write_text("the thread's, in no snapshot\n")
+    (place / "threads" / "t1.making").write_bytes(b"")
+    kept = [as_it_is(at) for at in (place / "set-aside", place / "history.git", two.copy, two.repo, folder)]
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "dropped"}
+    assert [sorted(p.name for p in (place / at).iterdir()) for at in ("threads", "clones", "waiting")] == [["t2"], ["t2"], []]
+    assert [as_it_is(at) for at in (place / "set-aside", place / "history.git", two.copy, two.repo, folder)] == kept
+    # What a dropping cut part way left under the name it went by goes with the next, and there is nothing more.
+    for at in ("threads/t1.going", "clones/t1.going", "waiting/t1.going"):
+        (place / at / "left").mkdir(parents=True)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "gone"}
+    assert [sorted(p.name for p in (place / at).iterdir()) for at in ("threads", "clones", "waiting")] == [["t2"], ["t2"], []]
+    assert [as_it_is(at) for at in (place / "set-aside", place / "history.git", two.copy, two.repo, folder)] == kept
+    # Through no link an earlier guest left where the place keeps what waits.
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "t1").mkdir(parents=True)
+    (elsewhere / "t1" / "theirs.txt").write_text("another's\n")
+    theirs = as_it_is(elsewhere)
+    (place / "waiting").rmdir()
+    (place / "waiting").symlink_to(elsewhere)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "gone"}
+    assert as_it_is(elsewhere) == theirs and not os.path.lexists(place / "waiting")
 
 
 #: One request, as its runner takes it, run to its end or killed at one of its steps: each git it
@@ -4671,6 +4706,32 @@ def test_an_open_that_removes_what_holds_nothing_of_the_threads_own_killed_at_an
         assert set_aside_whole(place) == [], at
         assert files_of(again.copy) == files_of(cut / "Documents"), at
         assert sorted(p.name for p in (place / "threads").iterdir()) == [OURS] == sorted(p.name for p in (place / "clones").iterdir()), at
+
+
+def test_a_threads_dropping_killed_at_any_step_leaves_each_of_its_folders_whole_or_gone_and_the_next_finishes_it(tmp_path):
+    root = tmp_path / "whole"
+    folder = root / "Documents"
+    folder.mkdir(parents=True)
+    for name in ("Report.docx", "notes.txt"):
+        (folder / name).write_text(f"{name} v1\n")
+        os.utime(folder / name, (time.time() - 60, time.time() - 60))
+    ours, theirs = a_copy(root, folder, OURS), a_copy(root, folder, THEIRS)
+    (ours.copy / "unlanded.md").write_text("ours, in no snapshot\n")
+    (root / "store" / "waiting" / OURS / "_whiteboard").mkdir(parents=True)
+    (root / "store" / "waiting" / OURS / "_whiteboard" / "canvas.json").write_text("{}")
+    copy, waiting = as_it_is(ours.copy), as_it_is(root / "store" / "waiting" / OURS)
+    for at, cut in each_cut(tmp_path, OURS, "drop", {}, removals=True):
+        place = cut / "store"
+        # Each of what a cut left is whole at its name, the copy only beside its repository; what was half gone is under a
+        # name no thread has.
+        assert as_it_is(place / "threads" / OURS) in ([], copy), at
+        assert as_it_is(place / "waiting" / OURS) in ([], waiting), at
+        assert not os.path.lexists(place / "threads" / OURS) or (place / "clones" / OURS / "made").is_file(), at
+        # The next finishes it, and nothing of another thread's goes.
+        assert LocalHistory.at(place, cut / "Documents", thread=OURS, user="u1").drop()["thread"] in ("dropped", "gone"), at
+        assert [sorted(p.name for p in (place / name).iterdir()) for name in ("threads", "clones")] == [[THEIRS], [THEIRS]], at
+        assert not any((place / "waiting").iterdir()), at
+        assert files_of(place / "threads" / THEIRS) == files_of(cut / "Documents"), at
 
 
 #: What our thread's landing leaves out, which no landing writes: a name that runs code, which it made, and a

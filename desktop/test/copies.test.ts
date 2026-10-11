@@ -687,31 +687,56 @@ describe("a copy its root let go", () => {
   });
 });
 
+// As the guest's history drops a deleted thread: its copy and its repository go.
+const dropping = (request: HistoryRequest): Outcome | undefined => {
+  if (request.action !== "drop") return undefined;
+  for (const at of ["threads", "clones"]) rmSync(join(request.place.history, at, request.thread), { recursive: true, force: true });
+  return { ok: { thread: "dropped" } };
+};
+
 describe("a deleted thread", () => {
-  it("has its copy let go as an idle one is where no host holds it, though no host of the app's run worked in it", async () => {
+  it("is dropped by the guest where no host holds its copy, with what the app kept for its hosts, though no host of the app's run worked in it", async () => {
     // As a run before left it, which quit with a host on the copy.
-    await copies().open(ROOT, bound(), signal());
-    const one = copies(removing);
+    const opened = await copies().open(ROOT, bound(), signal());
+    if (!("copy" in opened)) throw new Error("no copy");
+    const left = keptFor(opened.copy);
+    const one = copies(dropping);
     await one.copies.drop(ROOT, bound());
-    expect(asked.slice(1).map((request) => [request.thread, request.action, request.args])).toEqual([[ROOT, "close", {}]]);
-    expect(existsSync(copy())).toBe(false);
-    // The folder itself is never touched, and the thread's place stays: its repository and what it set aside are the guest's.
+    expect(asked.slice(1).map((request) => [request.thread, request.action, request.args])).toEqual([[ROOT, "drop", {}]]);
+    expect([existsSync(copy()), left()]).toEqual([false, []]);
+    // The folder itself is never touched, and the folder's place stays: its history and what it set aside are the guest's.
     expect(existsSync(folder) && existsSync(place())).toBe(true);
   });
 
-  it("has its copy let go by the hosts on it as they go, and the guest is asked nothing more for it", async () => {
-    const one = copies(removing);
+  it("is dropped once the last host on its copy has gone, and the guest is asked nothing more for it", async () => {
+    const one = copies(dropping);
+    await one.open(ROOT, bound(), signal());
     await one.open(ROOT, bound(), signal());
     await one.copies.drop(ROOT, bound());
+    one.close(ROOT);
+    await pause(40);
     expect(asked.map((request) => request.action)).toEqual(["open"]);
     one.close(ROOT);
-    await vi.waitFor(() => expect(asked.map((request) => request.action)).toEqual(["open", "close"]));
+    await vi.waitFor(() => expect(asked.map((request) => request.action)).toEqual(["open", "drop"]));
     expect(existsSync(copy())).toBe(false);
   });
 
-  it("asks the guest nothing, and makes no place, for a thread that has no copy here", async () => {
+  it("is dropped where only its repository is here, its copy let go before", async () => {
+    const one = copies(dropping);
+    await one.open(ROOT, bound(), signal());
+    one.close(ROOT);
+    await vi.waitFor(() => expect(asked.at(-1)?.action).toBe("close"));
+    // As the guest lets a copy go: the copy is removed, and its repository stays.
+    rmSync(copy(), { recursive: true });
+    mkdirSync(join(place(), "clones", ROOT), { recursive: true });
+    await one.copies.drop(ROOT, bound());
+    expect(asked.map((request) => request.action)).toEqual(["open", "close", "drop"]);
+    expect(existsSync(join(place(), "clones", ROOT))).toBe(false);
+  });
+
+  it("asks the guest nothing, and makes no place, for a thread that has neither a copy nor a repository here", async () => {
     mkdirSync(dataDir);
-    const one = copies(removing);
+    const one = copies(dropping);
     await one.copies.drop(OTHER, bound(OTHER));
     // Nor where the app's data was never made.
     rmSync(dataDir, { recursive: true });
@@ -1153,13 +1178,13 @@ describe("a folder too large to copy in time", () => {
     expect(readdirSync(join(dataDir, "history")).filter((name) => name.includes(".too-large.json."))).toEqual([]);
   });
 
-  it("lets a deleted thread's copy go all the same", async () => {
+  it("drops a deleted thread all the same", async () => {
     // As a run before left it, which quit with a host on the copy.
     await copies().open(ROOT, bound(), signal());
-    const one = copies(async (request, aborted) => (request.action === "close" ? removing(request) : cutting(() => true)(request, aborted)), { cutMs: 60 });
+    const one = copies(async (request, aborted) => (request.action === "drop" ? dropping(request) : cutting(() => true)(request, aborted)), { cutMs: 60 });
     expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
     await one.copies.drop(ROOT, bound());
-    expect(asked.slice(1).map((request) => [request.thread, request.action])).toEqual([[OTHER, "open"], [ROOT, "close"]]);
+    expect(asked.slice(1).map((request) => [request.thread, request.action])).toEqual([[OTHER, "open"], [ROOT, "drop"]]);
     expect(existsSync(copy())).toBe(false);
   });
 });

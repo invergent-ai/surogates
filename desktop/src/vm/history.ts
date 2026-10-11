@@ -200,6 +200,8 @@ function opened(thread: string | undefined): Parse<unknown> {
 const ANSWERS: Record<string, Parse<unknown>> = {
   // What became of a copy its root let go: removed, its branch holding all of it; kept as it is; or there was none.
   close: fields({ copy: oneOf("removed", "kept", "gone") }),
+  // A deleted thread's copy, what waited beside it and its repository: dropped, or none of it was there.
+  drop: fields({ thread: oneOf("dropped", "gone") }),
   changed: fields({ paths: list(path) }),
   snapshot: fields({ hash: id }),
   restore: fields({}),

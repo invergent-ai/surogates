@@ -77,8 +77,8 @@ export class VmExecutor implements Executor {
 
   /**
    * A deleted chat's root, told before its binding is forgotten (binding/binder.ts). A thread's hosts go, but for a
-   * landing that has written in its folder, and its copy is let go as an idle one is, once no host holds it: the guest
-   * removes it where its branch holds all of it. Its repository, and what was set aside of it, stay. Answered at once.
+   * landing that has written in its folder, and once no host holds its copy the guest drops the copy and its
+   * repository. What its folder's place set aside whole stays. Answered at once.
    */
   retired(root: string): void {
     let binding: BoundFolder | undefined;

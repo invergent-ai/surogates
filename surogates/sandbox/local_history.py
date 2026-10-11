@@ -226,6 +226,7 @@ _USER = re.compile(r"[A-Za-z0-9_.@-]{1,128}")
 _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "open": ("open", frozenset({"moves"})),
     "close": ("close", frozenset()),
+    "drop": ("drop", frozenset()),
     "changed": ("changed", frozenset()),
     "snapshot": ("snapshot", frozenset({"reason"})),
     "restore": ("restore", frozenset({"commit"})),
@@ -639,6 +640,30 @@ class LocalHistory(History):
         shutil.rmtree(self._admin, ignore_errors=True)
         _removed(going)
         return {"copy": "removed"}
+
+    def drop(self) -> dict:
+        """Remove what the place keeps of a deleted thread: its copy, what waits beside it, and its repository with the snapshots on its refs.
+
+        The thread's chat was deleted, and its app asks once nothing more of
+        the thread runs on this computer.  Its work in its copy goes with it:
+        its person deleted it.  Each goes as what holds nothing of a
+        thread's goes, renamed first (:func:`_let_go`): cut anywhere, each
+        is whole under its name or not there, and the next drop finishes
+        it.  The copy goes before its repository: cut between, the
+        repository is whole beside no copy, as one whose copy was let go.
+        What the place set aside whole stays, under the place's bound, and
+        so does the folder's history.  ``dropped``; ``gone`` where none of
+        it was there.
+        """
+        self._pin()
+        found = False
+        for at in (self.copy, self.making, self.waiting, self.repo):
+            if os.path.lexists(going := at.with_name(f"{at.name}{_GOING}")):
+                _removed(going)
+            if os.path.lexists(at):
+                _let_go(at)
+                found = True
+        return {"thread": "dropped" if found else "gone"}
 
     def _holds_git(self) -> bool:
         """Whether the copy holds a name ``.git`` anywhere, which git never lists and passes over without a word.

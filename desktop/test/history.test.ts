@@ -567,6 +567,7 @@ describe("what the guest answered, checked on this computer", () => {
   const answers: Record<string, unknown[]> = {
     open: [{ copy: "made" }, { copy: "moved" }, { copy: "kept" }, { copy: "kept", set_asides: [BLOB, ID] }],
     close: [{ copy: "removed" }, { copy: "kept" }, { copy: "gone" }],
+    drop: [{ thread: "dropped" }, { thread: "gone" }],
     changed: [{ paths: ["Report.docx", "new folder/a b.md"] }, { paths: [] }],
     snapshot: [{ hash: ID }],
     restore: [{}],
@@ -623,6 +624,13 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("close", { ok: { copy: "removed", set_aside_folders: [ID], planted: "x" } }, THREAD)).toEqual({ ok: { copy: "removed" } });
     for (const answer of [{ copy: "made" }, { copy: "moved" }, { copy: "REMOVED" }, { copy: null }, {}, { removed: true }, null, "removed"]) {
       expect(checked("close", { ok: answer }), JSON.stringify(answer)).toEqual(NOT_AN_ANSWER);
+    }
+  });
+
+  it("takes what became of a deleted thread's copy and repository, and nothing else for it", () => {
+    expect(checked("drop", { ok: { thread: "dropped", copy: "removed", set_aside_folders: [ID] } }, THREAD)).toEqual({ ok: { thread: "dropped" } });
+    for (const answer of [{ thread: "kept" }, { copy: "removed" }, { thread: "DROPPED" }, { thread: null }, {}, null, "dropped"]) {
+      expect(checked("drop", { ok: answer }), JSON.stringify(answer)).toEqual(NOT_AN_ANSWER);
     }
   });
 
