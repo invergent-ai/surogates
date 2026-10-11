@@ -2534,7 +2534,7 @@ class SessionStore:
         lease_token: UUID,
         *,
         rests_with: dict | None = None,
-    ) -> None:
+    ) -> bool:
         """Advance the durable cursor.  Only succeeds if the caller holds the lease.
 
         With *rests_with*, a session still active comes to rest (``completed``)
@@ -2543,6 +2543,8 @@ class SessionStore:
         all, and once.  A session its user stopped meanwhile stays stopped,
         and its stop is its turn's end.  The ``session.complete`` lies past
         the cursor, which stays before whatever was said meanwhile.
+
+        Whether this write brought the session to rest: its ``session.complete`` is this write's.
         """
         ending = (
             await self._ready_event(session_id, EventType.SESSION_COMPLETE, rests_with)
@@ -2591,6 +2593,7 @@ class SessionStore:
             await db.commit()
         if ending is not None:
             await self._announce_event(ending)
+        return ending is not None
 
     async def get_pending_events(self, session_id: UUID) -> list[Event]:
         """Return events the harness has not yet processed."""
