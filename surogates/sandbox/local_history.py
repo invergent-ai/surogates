@@ -706,7 +706,11 @@ class LocalHistory(History):
         repository first, and no git runs in either.  A copy with no
         repository beside it is none a request reads, so a cut between the
         two leaves nothing taken for whole, and the open after it sets the
-        copy aside under a name of its own.
+        copy aside as the same time as the repository, where the thread's
+        newest time there is that repository alone (:meth:`_set_aside_alone`):
+        so it is after a cut between the two, and after a request that set
+        the repository aside for a link in it (:meth:`_pin`) and set no copy
+        aside after it.
 
         The copy was whole once: one whose making did not end has gone by
         now, by its mark.  It is the thread's own unless it is, file for
@@ -723,6 +727,8 @@ class LocalHistory(History):
                 own[self.repo] = self._names_its_own(refs)
             if os.path.lexists(self.copy):
                 own[self.copy] = self._holds_its_own(refs)
+        if own.get(self.copy) and self.repo not in own and not self.stem:
+            self.stem.extend(self._set_aside_alone())
         self._out_of_the_way(own)
 
     def _make_way_in_its_repository(self) -> None:
@@ -909,11 +915,13 @@ class LocalHistory(History):
         of the two it is.  What one request sets aside of the thread is one
         time, under one stem: the copy set aside after its repository takes
         the repository's, however the request came to each, and a request
-        sets each of the two aside once at most.  ``<nth>`` is one more than
-        any name there has, whatever that name is of, so nothing is at the
-        name before: a rename replaces no folder that holds anything, and
-        goes through no link.  The folder is opened as a folder, never
-        through a link, and the rename goes by its handle.
+        sets each of the two aside once at most.  So does a copy whose
+        repository an earlier request set aside alone (:meth:`_make_way`).
+        ``<nth>`` is otherwise one more than any name there has, whatever
+        that name is of, so nothing is at the name before: a rename
+        replaces no folder that holds anything, and goes through no link.
+        The folder is opened as a folder, never through a link, and the
+        rename goes by its handle.
 
         A repository is kept borrowing the folder's history by the one line,
         which names the history from the set-aside folder as from the
@@ -947,6 +955,25 @@ class LocalHistory(History):
         finally:
             os.close(folder)
         logger.warning("Set aside whole as %s, to be made again: %s", name, left)
+
+    def _set_aside_alone(self) -> list[str]:
+        """The stem of the thread's newest time in the place's set-aside folder where that is its repository alone; none otherwise.
+
+        Every name of the thread's under that count is read, whatever it is:
+        one that is anything but the repository's, gone or kept, keeps the
+        copy from that time, and nothing is at the copy's name there.  Its
+        newest alone: a repository set aside before a later time of the
+        thread's was never beside the copy it has now.
+        """
+        folder = _opened_folder(str(self.aside_whole), None, False)
+        if folder is None:
+            return []
+        try:
+            found = sorted((named[1], name) for name in os.listdir(folder) if (named := _WHOLE.fullmatch(name)) and named[2] == self.thread)
+        finally:
+            os.close(folder)
+        newest = [name for nth, name in found if nth == found[-1][0]] if found else []
+        return [newest[0].removesuffix(".repository")] if len(newest) == 1 and newest[0].endswith(".repository") else []
 
     def _make_room(self, folder: int, left: Path, nth: str) -> None:
         """Let go of the oldest the set-aside folder open as *folder* keeps, until with *left* it holds ``_ASIDE_BYTES`` of the disk at most.

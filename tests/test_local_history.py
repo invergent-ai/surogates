@@ -3699,6 +3699,73 @@ def test_a_repository_and_its_copy_set_aside_by_one_request_are_one_time_and_go_
     assert opened == {"copy": "moved", "set_aside_folders": [second, opened["set_aside_folders"][-1]], "set_aside_gone": first}
 
 
+def cut_once_its_repository_went(history: LocalHistory, monkeypatch, *, work: bool = True) -> str:
+    """*history*'s open cut once its first step set the thread's repository aside whole, for a link an earlier guest
+    left in it, before the open set the copy beside it aside; with *work*, the copy holds the thread's.  The
+    repository's name in the place's set-aside folder."""
+    if work:
+        (history.copy / "notes.txt").write_text("the thread's notes\n")
+    (history.repo / "refs" / "elsewhere").symlink_to(history.project)
+
+    def cut(self):
+        raise OSError("cut")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(LocalHistory, "_make_way", cut)
+        with pytest.raises(OSError, match="cut"):
+            LocalHistory.at(history.store.parent, history.project, thread=history.thread, user="u1").open()
+    return [name for name in set_aside_whole(history.store.parent) if name.endswith(f"-{history.thread}.repository")][-1]
+
+
+def test_a_copy_whose_repository_a_cut_request_set_aside_is_set_aside_with_it_as_one_time_and_kept_meanwhile(tmp_path, folder, monkeypatch):
+    monkeypatch.setattr(local_history, "_ASIDE_WHOLE_IN_ALL", 1)
+    place = tmp_path / "store"
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    repository = cut_once_its_repository_went(one, monkeypatch)
+    # Another thread sets aside twice meanwhile, past the place's one: the thread's repository stays, its newest, for
+    # the copy is there.
+    theirs = [set_aside_once_more(two, f"two's, {n}\n")["set_aside_folders"][-1] for n in (1, 2)]
+    assert [name for name in set_aside_whole(place) if not name.endswith(".gone")] == [repository, theirs[1]]
+    # The thread's next open sets its copy aside under the repository's count, one time with it, and keeps both, though
+    # the thread had neither until it made them again.
+    copy = f"{repository.removesuffix('.repository')}.copy"
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {"copy": "made", "set_aside_folders": [copy, repository]}
+    assert (place / "set-aside" / copy / "notes.txt").read_text() == "the thread's notes\n"
+
+
+def test_a_copy_is_set_aside_under_a_count_of_its_own_where_the_threads_newest_is_no_repository_alone_that_was_beside_it(tmp_path, folder, monkeypatch):
+    place = tmp_path / "store"
+    one = a_copy(tmp_path, folder)
+    # Its repository set aside alone, the copy beside it holding nothing of the thread's: the copy was let go, and both
+    # were made again.
+    alone = cut_once_its_repository_went(one, monkeypatch, work=False)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {"copy": "made", "set_aside_folders": [alone]}
+
+    def set_aside(why) -> list[str]:
+        (one.copy / "unlanded.md").write_text(f"one's, {why}\n")
+        why(one)
+        return LocalHistory.at(place, folder, thread="t1", user="u1").open()["set_aside_folders"]
+
+    # A copy beside a repository whose first open did not end, which holds nothing of the thread's and goes.
+    first = set_aside(lambda one: (one.repo / "made").unlink())
+    # A copy beside no repository, one that went holding nothing of the thread's, the thread's newest a copy alone.
+    second = set_aside(lambda one: shutil.rmtree(one.repo))
+    assert first[:-1] == [alone] and second[:-1] == [alone, first[-1]]
+    assert len({name[:8] for name in second}) == 3 and all(name.endswith(".copy") for name in second[1:])
+
+
+def test_a_copy_whose_repository_a_cut_request_set_aside_is_set_aside_under_a_count_of_its_own_where_anything_else_is_under_that_count(tmp_path, folder, monkeypatch):
+    place = tmp_path / "store"
+    one = a_copy(tmp_path, folder)
+    repository = cut_once_its_repository_went(one, monkeypatch)
+    # An earlier guest left a file where the copy would go.
+    (place / "set-aside" / f"{repository.removesuffix('.repository')}.copy").write_text("an earlier guest's\n")
+    opened = LocalHistory.at(place, folder, thread="t1", user="u1").open()
+    assert opened["copy"] == "made" and opened["set_aside_folders"][0] == repository
+    [copy] = opened["set_aside_folders"][1:]
+    assert copy[:8] != repository[:8] and (place / "set-aside" / copy / "notes.txt").read_text() == "the thread's notes\n"
+
+
 def test_what_a_place_keeps_set_aside_whole_takes_ten_gibibytes_of_its_disk_at_most_the_oldest_going_first_and_never_a_threads_newest(tmp_path, folder, monkeypatch):
     assert local_history._ASIDE_BYTES == 10 << 30
     # A place of a few mebibytes, with copies of one or two each.
@@ -4631,6 +4698,8 @@ def test_an_open_that_sets_a_copy_aside_killed_at_any_step_leaves_it_whole_under
         # and the repository where that was made again too.
         opened = LocalHistory.at(place, root / "Documents", thread=OURS, user="u1").open()
         assert opened.get("set_aside_folders") == set_aside_whole(place), at
+        # One time, whichever request set each aside.
+        assert len({name.rpartition(".")[0] for name in opened["set_aside_folders"]}) == 1, at
         assert [as_it_is(aside / name) for name in opened["set_aside_folders"] if name.endswith(".copy")] == [copy], at
         assert [held_in(aside / name) for name in opened["set_aside_folders"] if name.endswith(".repository")] == (
             [repository] if with_repository else []
