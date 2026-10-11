@@ -2222,6 +2222,10 @@ class WorkstreamHistory(Base):
         ),
         # The lock holder's first look: the project's landings still running.
         Index("idx_workstream_history_running", "workstream_id", postgresql_where=text("saga_state = 'running'")),
+        # The Undos that name some records, and the Undos of those, by the records each undoes (``history.undone_of``).
+        Index(
+            "idx_workstream_history_undoes", "undoes", postgresql_using="gin", postgresql_where=text("kind = 'undo'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
