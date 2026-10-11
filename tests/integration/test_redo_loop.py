@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.history as rows_module
+from surogates.api.routes._commerce_turn import AllowanceReserveError
 from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import InboxItem, WorkstreamHistory
@@ -394,7 +395,20 @@ async def test_a_redo_the_users_limit_holds_back_waits_for_the_next_message(api,
     assert await store.get_events(thread.id, types=[EventType.SESSION_FAIL]) == []
 
 
-async def test_a_file_whose_redo_the_users_limit_holds_back_is_not_being_redone_until_its_thread_is_sent_on(api, monkeypatch, pods):
+async def _refused(session, content):
+    return "You have used this month's allowance."
+
+
+async def _unreachable(session, content):
+    raise AllowanceReserveError("ops is unreachable")
+
+
+#: How a redo's wake is held back at its admission: its user's limit refuses the turn, or ops cannot be reached to hold it.
+HELD_BACK = {"by the user's limit": _refused, "while ops cannot be reached": _unreachable}
+
+
+@pytest.mark.parametrize("held", sorted(HELD_BACK))
+async def test_a_file_whose_redo_its_wake_holds_back_is_not_being_redone_until_its_thread_is_sent_on(api, monkeypatch, pods, held):
     project = await create(api)
     thread = await a_thread(api, "Draft A", await master_of(api, project))
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -410,13 +424,10 @@ async def test_a_file_whose_redo_the_users_limit_holds_back_is_not_being_redone_
     async def the_redo_turn(session, *_, **__):
         seen.append(await marks())
 
-    async def refused(session, content):
-        return "You have used this month's allowance."
-
     # Held back, and again: the thread rests, and nothing redoes the file meanwhile, though its next turn will.
     for _ in range(2):
         harness = a_waking_thread_harness(api, monkeypatch, pool, the_redo_turn)
-        harness._admit_turn = refused
+        harness._admit_turn = HELD_BACK[held]
         await harness.wake(thread.id)
     assert seen == [] and (await store.get_session(thread.id)).status == "completed"
     assert await marks() == [("Report.docx", "not_merged"), ("a.md", "landed")]

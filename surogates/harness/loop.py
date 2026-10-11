@@ -1039,9 +1039,10 @@ class AgentHarness(
         return _redo_unread(events)
 
     async def _hold_redo(self, session_id: UUID) -> None:
-        """Say that the user's limit held back the wake of the thread's last redo, once a redo.
+        """Say that the wake of the thread's last redo was held back at its admission, once a redo.
 
-        Nothing else of the wake is written, so without it the thread's row
+        Its user's limit refused the turn, or ops could not be reached to
+        hold it.  Nothing else of the wake is written, so without it the thread's row
         could not tell a redo that rests from one whose wake is to come: it
         says the redo's files are not being redone until the thread is sent
         on (``workstreams.derive``).  The redo is still its next turn's.
@@ -1821,6 +1822,8 @@ class AgentHarness(
                         # Closed without a crash: no turn ran, and the next
                         # report or message wakes the session again.
                         logger.warning("Session %s: %s waits while ops is unreachable", session_id, revived_by, exc_info=True)
+                        if revived_by == "history_redo":
+                            await self._hold_redo(session_id)
                         return
                     if refused is not None:
                         logger.info("Session %s: the user's limit holds back %s", session_id, revived_by)

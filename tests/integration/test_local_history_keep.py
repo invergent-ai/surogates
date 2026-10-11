@@ -160,6 +160,32 @@ async def test_a_failed_turns_keep_its_computer_does_not_answer_in_time_ends_the
     assert landed_both(here)
 
 
+#: A keep its computer refused, and whether the thread's next turn may land what it did not keep: a refusal its next
+#: asking may pass, or one that comes again then.
+KEEPS_REFUSED = {
+    "its history failed": ({"type": "history", "code": "failed", "message": "The folder's history failed"}, True),
+    "a name its history cannot keep": ({"type": "history", "code": "name_not_utf8", "message": "A name is not UTF-8"}, False),
+    "its folder gone": ({"type": "folder_unavailable", "message": "The folder is gone"}, False),
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(KEEPS_REFUSED))
+async def test_a_failed_turns_refused_keep_says_its_next_turn_lands_its_work_only_where_that_turn_may_pass_the_refusal(
+    api, computer, monkeypatch, refusal,
+):
+    _, master, thread = await begun_with_copy(api, computer)
+    error, passes = KEEPS_REFUSED[refusal]
+    computer.app.lie = lambda frame, outcome: (
+        {"error": error} if (frame["invocation_id"], frame["args"].get("action")) == ("land:0:keep", "keep") else outcome
+    )
+    await woken(api, monkeypatch, thread, [EDITS, *FAILS])
+    assert ran(computer, "land:0:keep") == ["changed", "keep"] and (await failure(api, thread))["saved"] is False
+    # Its master hears that its work is in its copy there, and that its next turn lands it only where that turn may.
+    [report] = await events_of(api, master.id, EventType.WORKER_FAILED)
+    landed_next = ", and the thread's next turn lands it, but for any file a landing never writes" if passes else ""
+    assert "kept" not in report.data["error"] and report.data["error"].endswith(f". Its work is in its copy on its computer{landed_next}")
+
+
 async def test_a_failed_turns_kept_files_are_named_on_one_line_of_its_masters_note_whatever_their_names(api, computer, monkeypatch):
     _, master, thread = await begun_with_copy(api, computer)
     # A command of the thread's makes a file whose name holds a line break, and what would read as the harness's after it.

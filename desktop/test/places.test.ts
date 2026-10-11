@@ -69,9 +69,9 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
   let made = 0;
   return {
     control: host, net, inbound, exited, emulated: null, kill,
-    share: async (folder, uid, _deadline, readonly) => {
+    share: async (folder, uid, _deadline, as) => {
       made += 1;
-      asked.push(["share", folder, uid, readonly === true]);
+      asked.push(["share", folder, uid, as?.readonly === true]);
       return { kind: "virtiofs", tag: `r${made}` };
     },
     unshare: async (share) => void asked.push(["unshare", share]),
@@ -406,7 +406,7 @@ describe("the VM manager, asked for a folder's place", () => {
     const boot = recording(asked);
     const refusing: BootVm = async (...args) => {
       const vm = await boot(...args);
-      return { ...vm, share: (folder, uid, deadline, readonly) => (readonly ? Promise.reject(new Error("it holds 8 folders already")) : vm.share(folder, uid, deadline, readonly)) };
+      return { ...vm, share: (folder, uid, deadline, as) => (as?.readonly ? Promise.reject(new Error("it holds 8 folders already")) : vm.share(folder, uid, deadline, as)) };
     };
     const other = new VmManager(options(), refusing);
     expect(await other.place(place(), signal())).toEqual({
