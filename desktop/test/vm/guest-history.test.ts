@@ -641,6 +641,18 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     expect(await code(ONE, "prune")).toBe("not_a_request");
   });
 
+  it("drops a deleted thread's copy and repository, and leaves the other thread's, the folder and its history as they are", async () => {
+    const before = await said(TWO, "changed");
+    expect(await said(ONE, "drop")).toEqual({ thread: "dropped" });
+    expect([existsSync(copyOf(ONE)), existsSync(join(dir, "store", "clones", ONE)), existsSync(join(dir, "store", "history.git", "HEAD"))]).toEqual([
+      false, false, true,
+    ]);
+    expect(await said(ONE, "drop")).toEqual({ thread: "gone" });
+    expect(await said(TWO, "changed")).toEqual(before);
+    // It is asked with nothing: anything more is no request of the history's.
+    expect(await code(ONE, "drop", { force: true })).toBe("not_a_request");
+  });
+
   it("was asked every action a folder's history takes, and refused with each code a test can bring about", () => {
     const actions = /^_ACTIONS[^]*?^\}/m.exec(readFileSync(new URL("../../../surogates/sandbox/local_history.py", import.meta.url), "utf8"))![0];
     expect([...answered.keys()].sort()).toEqual([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort());

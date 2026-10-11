@@ -486,7 +486,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
     // As the binder retires a root: the tools are told while its binding is still there.
     executor.retired(ONE);
     journal.bindings.retire(ONE);
-    await until(() => !existsSync(copyOf(ONE)) && !existsSync(join(place, "clones", ONE)), 60_000);
+    // Once the drop has ended: each goes by a name of its own first, and then it is removed.
+    await until(() => !existsSync(copyOf(ONE)) && readdirSync(join(place, "clones")).length === 1, 60_000);
     expect([readdirSync(join(place, "clones")), existsSync(join(place, "waiting", ONE)), existsSync(join(place, "history.git", "HEAD"))]).toEqual([
       [TWO], false, true,
     ]);
