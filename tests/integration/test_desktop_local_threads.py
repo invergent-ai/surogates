@@ -290,9 +290,12 @@ async def test_a_place_the_app_set_aside_for_another_folder_at_the_path_reaches_
         assert (first.data["set_aside"], second.data.get("set_aside")) == ({"kept": [place], "snapshots": 0, "gone": []}, None)
         assert (
             "\nSet aside on its computer, as what it kept at its folder's path was another folder's history or could not be read: "
-            f"its folder's earlier history and copies as they were at {at:%Y-%m-%d %H:%M} UTC\n"
+            f"the earlier history at its folder's path, with its threads' copies as they were at {at:%Y-%m-%d %H:%M} UTC\n"
         ) in said(first)
         assert "set aside" not in said(second).lower()
+        # Its first copy was said to be made while it was, and only then: the open that named the place says it has one.
+        waits = await events_of(api, two.id, EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED)
+        assert [(e.type, e.data.get("reason")) for e in waits] == [(EventType.DEVICE_WAITING.value, "copying"), (EventType.DEVICE_RESUMED.value, None)]
         # Its row says what is kept, and the first thread's says nothing of it.
         found = {row["id"]: row["set_aside"] for row in await rows(api, project)}
         assert (found[str(two.id)], found[str(one.id)]) == ({"kept": [place], "snapshots": 0, "gone": []}, None)

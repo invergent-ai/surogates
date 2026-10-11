@@ -413,8 +413,9 @@ _OPENS_READ = 20
 # What the computer :device answered the latest opens of the project's threads with, newest first: each outcome as
 # it was recorded, with the thread whose copy it was asked about.
 _FOLDER_OPENS = text("""
-    SELECT o.outcome, o.calling_session_id FROM device_operations o
+    SELECT o.outcome, o.calling_session_id, s.config->>'workspace_path' FROM device_operations o
       JOIN workstream_threads t ON t.session_id = o.calling_session_id
+      JOIN sessions s ON s.id = o.calling_session_id
      WHERE t.workstream_id = :project AND o.device_id = :device AND o.kind = 'history'
        AND o.args->>'action' = 'open' AND o.outcome->'ok' IS NOT NULL
      ORDER BY o.created_at DESC
@@ -533,8 +534,8 @@ async def folder_history_off(session_factory: Any, workstream_id: UUID | str, de
 
     async with session_factory() as db:
         outcomes = (await db.execute(_FOLDER_OPENS, {"project": workstream_id, "device": device_id, "most": _OPENS_READ})).all()
-    for outcome, thread in outcomes:
-        last = answered("history", "open", outcome, thread=str(thread))
+    for outcome, thread, folder in outcomes:
+        last = answered("history", "open", outcome, thread=str(thread), folder=folder)
         if last is not None:
             return FOLDER_HISTORY_OFF[last["reason"]] if last.get("history") == "off" else None
     return None

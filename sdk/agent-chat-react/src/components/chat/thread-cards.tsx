@@ -72,7 +72,9 @@ function undoLines(result: AgentChatUndoResult): string[] {
 }
 
 // What each kind of what a thread's computer set aside is, as its card names it.
-const ASIDE_WHAT: Record<string, string> = { copy: "its copy", repository: "its repository", place: "its folder's earlier history" };
+const ASIDE_WHAT: Record<string, string> = {
+  copy: "its copy", repository: "its repository", place: "the earlier history at its folder's path, with its threads' copies",
+};
 
 // When a thread's work was set aside on its computer, in this computer's time: "10 Oct, 10:15".
 function setAsideWhen(at: number): string {

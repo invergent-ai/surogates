@@ -539,7 +539,7 @@ async def test_a_folder_too_large_to_copy_in_time_fails_its_threads_turns_with_a
     too_large = {"error": {
         "type": "history_off",
         "message": "This folder is too large for a thread of the project to have a copy of its own on this computer: its copy could "
-                   "not be made within the time a copy may take. Choose a folder inside it that holds less, or try again",
+                   "not be made within the time a copy may take. Choose a folder inside it that holds less",
     }}
     opens: list[dict] = []
 

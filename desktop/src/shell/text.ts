@@ -22,7 +22,9 @@ export function setAsideWhen(at: string, timeZone?: string): string {
 }
 
 // What each kind of what a thread's computer set aside is, as a row names it.
-const ASIDE_WHAT: Record<string, string> = { copy: "its copy", repository: "its repository", place: "its folder's earlier history" };
+const ASIDE_WHAT: Record<string, string> = {
+  copy: "its copy", repository: "its repository", place: "the earlier history at its folder's path, with its threads' copies",
+};
 
 /**
  * What a thread's computer keeps set aside of its work, out of its copy there, and what of that it no longer keeps, in

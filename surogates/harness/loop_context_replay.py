@@ -346,7 +346,9 @@ _SET_ASIDE = {
 #: Where what is set aside is, and that nothing here brings it back.
 _SET_ASIDE_WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
 #: What each kind of what was set aside is, as a report names it.
-_SET_ASIDE_KINDS = {"copy": "its copy", "repository": "its repository", "place": "its folder's earlier history and copies"}
+_SET_ASIDE_KINDS = {
+    "copy": "its copy", "repository": "its repository", "place": "the earlier history at its folder's path, with its threads' copies",
+}
 
 
 def _set_aside_lines(data: dict) -> str:

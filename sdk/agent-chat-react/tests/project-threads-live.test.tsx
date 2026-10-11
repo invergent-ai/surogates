@@ -281,7 +281,7 @@ describe("a thread's card, live", () => {
       stream.emit("ready");
       await settle();
       expect(said()).toEqual([
-        "Kept on its computer: its folder's earlier history from 8 Oct, 07:30 · its copy from 10 Oct, 10:15 · 2 snapshots",
+        "Kept on its computer: the earlier history at its folder's path, with its threads' copies from 8 Oct, 07:30 · its copy from 10 Oct, 10:15 · 2 snapshots",
         "No longer kept: its repository from 9 Oct, 08:00",
       ]);
       expect(container!.querySelector('[data-testid="worker-card-set-aside"] button')).toBeNull();

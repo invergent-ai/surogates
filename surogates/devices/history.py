@@ -27,7 +27,8 @@ and by whoever reads an outcome out of the journal later.
   answer may say.  A count is a whole number from 0 to 2**53 - 1.  A list
   holds at most 50,000 entries; a look at most 2,000 files; an open at most
   64 names of each of what was set aside: a copy or a repository, each the
-  asking thread's own, and a place of the folder's, by its key and when.
+  asking thread's own, and a place, by its folder's key, as the app keys a
+  place by the folder's path, and when.
   Who changed a file is one of three shapes, each word text of a path's
   length.  So an answer holds nothing that names a session, a project, a
   computer or a folder: those are the session's own, which the server
@@ -53,6 +54,7 @@ words of :data:`NOWHERE`.
 from __future__ import annotations
 
 import errno
+import hashlib
 import re
 from collections.abc import Callable
 from typing import Any
@@ -349,20 +351,25 @@ def _aside(value: Any, thread: str | None) -> str:
     return value
 
 
-def _place_aside(value: Any) -> str:
-    """A place of the folder's its computer's app set aside, by its name there: the folder's own, and no thread's."""
-    _need(isinstance(value, str) and _PLACE_ASIDE.fullmatch(value) is not None)
+def _place_aside(value: Any, folder: str | None) -> str:
+    """A place its computer's app set aside, by its name there: the asking thread's folder's, by its key, or none.
+
+    The app keys a place by the first 16 hex digits of the SHA-256 of the
+    folder's path (``desktop/src/history/place.ts``, ``keyOf``).
+    """
+    _need(isinstance(value, str) and _PLACE_ASIDE.fullmatch(value) is not None and folder is not None and _well_formed(folder))
+    _need(value[:16] == hashlib.sha256(folder.encode()).hexdigest()[:16])
     return value
 
 
-def _opened(answer: dict[str, Any], thread: str | None) -> dict[str, Any]:
+def _opened(answer: dict[str, Any], thread: str | None, folder: str | None) -> dict[str, Any]:
     """A turn's open: the thread's copy, made, moved to the folder as it is or kept as it was; or why the folder has no history.
 
     On either, what the place keeps set aside whole of the thread's own,
     and what of it went at the place's bound; and the places of the
     folder's the app set aside, which one open names, the first since the
-    thread's operation that set it aside.  The first form that holds, as
-    the app takes them.
+    thread's operation that set it aside, each its folder's, *folder*.  The
+    first form that holds, as the app takes them.
     """
     for form in (_with_copy, _with_no_history):
         try:
@@ -371,7 +378,7 @@ def _opened(answer: dict[str, Any], thread: str | None) -> dict[str, Any]:
                 if names in answer:
                     opened[names] = _listed(answer[names], lambda name: _aside(name, thread), MAX_ASIDE)
             if "set_aside_places" in answer:
-                opened["set_aside_places"] = _listed(answer["set_aside_places"], _place_aside, MAX_ASIDE)
+                opened["set_aside_places"] = _listed(answer["set_aside_places"], lambda name: _place_aside(name, folder), MAX_ASIDE)
             return opened
         except _No:
             continue
@@ -516,24 +523,25 @@ _ANSWERS: dict[str, dict[str, Callable[..., dict[str, Any]]]] = {
 ACTIONS = {kind: frozenset(actions) for kind, actions in _ANSWERS.items()}
 
 
-def checked(kind: str, action: str, answer: Any, *, thread: str | None = None) -> dict[str, Any]:
+def checked(kind: str, action: str, answer: Any, *, thread: str | None = None, folder: str | None = None) -> dict[str, Any]:
     """*answer* to *action* of *kind*, built again from its own fields; :class:`NotAnAnswer` when it is none.
 
-    *thread* is the thread whose copy was asked about, where the caller
-    knows it: what an open names as set aside is taken only as that
-    thread's own.
+    *thread* is the thread whose copy was asked about, and *folder* the
+    folder it works in as the session holds it, where the caller knows
+    them: what an open names as set aside is taken only as that thread's
+    own, and a place only as that folder's.
     """
     shape = _ANSWERS.get(kind, {}).get(action)
     if shape is None:
         raise NotAnAnswer(f"This computer was asked nothing called '{action}'")
     try:
         _need(isinstance(answer, dict))
-        return _opened(answer, None if thread is None else str(thread)) if shape is _opened else shape(answer)
+        return _opened(answer, None if thread is None else str(thread), folder) if shape is _opened else shape(answer)
     except _No:
         raise NotAnAnswer(f"This computer's answer to '{action}' was not one") from None
 
 
-def answered(kind: str, action: str, outcome: Any, *, thread: str | None = None) -> dict[str, Any] | None:
+def answered(kind: str, action: str, outcome: Any, *, thread: str | None = None, folder: str | None = None) -> dict[str, Any] | None:
     """What the journal holds as a computer's answer to *action*, checked as one given now; None for a refusal, or for no answer.
 
     Whatever reads an outcome out of the journal, and not as the step that
@@ -543,7 +551,7 @@ def answered(kind: str, action: str, outcome: Any, *, thread: str | None = None)
     if not isinstance(outcome, dict) or "error" in outcome or "ok" not in outcome:
         return None
     try:
-        return checked(kind, action, outcome["ok"], thread=thread)
+        return checked(kind, action, outcome["ok"], thread=thread, folder=folder)
     except NotAnAnswer:
         return None
 
@@ -580,9 +588,10 @@ class Steps:
     :class:`NotAnAnswer`.
     """
 
-    def __init__(self, runner: OperationRunner, *, thread: UUID | None = None) -> None:
+    def __init__(self, runner: OperationRunner, *, thread: UUID | None = None, folder: str | None = None) -> None:
         self._runner = runner
         self._thread = None if thread is None else str(thread)
+        self._folder = folder
 
     async def ask(self, kind: str, action: str, **arguments: Any) -> dict[str, Any]:
         outcome = await self._runner.run(kind, {"action": action, **arguments})
@@ -590,7 +599,7 @@ class Steps:
             raise _refusal(outcome["error"])
         if not isinstance(outcome, dict) or "ok" not in outcome:
             raise NotAnAnswer(f"This computer's answer to '{action}' was not one")
-        return checked(kind, action, outcome["ok"], thread=self._thread)
+        return checked(kind, action, outcome["ok"], thread=self._thread, folder=self._folder)
 
     async def history(self, action: str, **arguments: Any) -> dict[str, Any]:
         return await self.ask("history", action, **arguments)
@@ -622,7 +631,7 @@ class ThreadCopy:
         return Steps(JournalRunner(
             self.operations, device_id=self.device_id, root_session_id=self.thread,
             calling_session_id=self._session.id, invocation_id=invocation, lease_token=self._lease_token,
-        ), thread=self.thread)
+        ), thread=self.thread, folder=self.folder)
 
     async def open(self, turn: int, *, again: int = 0, retried: bool = False) -> dict[str, Any]:
         """Bring the copy to the turn *turn*: ``{copy, …}``, or ``{history: "off", reason, …}`` for a folder with no history.
@@ -671,7 +680,8 @@ class ThreadCopy:
         """
         number = max(await self.operations.opens(self._session.id, turn) - 1, 0)
         making = telling and self._notice is not None and "copy" not in (
-            answered("history", "open", await self.operations.last_opened(self._session.id), thread=str(self.thread)) or {}
+            answered("history", "open", await self.operations.last_opened(self._session.id), thread=str(self.thread), folder=self.folder)
+            or {}
         )
         if making:
             await self._notice.copying(self._session.id, self.device_id, self.folder)

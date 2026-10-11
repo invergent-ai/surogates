@@ -507,7 +507,10 @@ async def set_aside_of(
     """
     before = await store.last_event(session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="set_aside")
     told = _set_aside_told(before.data["set_aside"] if before is not None else None)
-    opened = answered("history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id), thread=str(session.id))
+    opened = answered(
+        "history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id),
+        thread=str(session.id), folder=session.config.get("workspace_path"),
+    )
     now = dict(told)
     if opened is not None:
         now.update(copies=opened.get("set_aside_folders", []), gone=opened.get("set_aside_gone", []))

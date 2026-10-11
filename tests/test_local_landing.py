@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from types import SimpleNamespace
@@ -193,8 +194,11 @@ REPOSITORY = f"00000002-20261011T090000Z-{THREAD}.repository"
 #: Each as a person is told it: what it is, and when.
 A_COPY = {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
 A_REPOSITORY = {"kind": "repository", "at": "2026-10-11T09:00:00Z"}
-#: A place of the thread's folder its computer's app set aside, by its name there, and as a person is told it.
-PLACE = "fcb59ee0818a927a.was-1791532800000"
+#: The thread's folder on its computer, and a place of it its computer's app set aside, by its name there, and as a
+#: person is told it.
+FOLDER = "/home/u/Reports"
+KEY = hashlib.sha256(FOLDER.encode()).hexdigest()[:16]
+PLACE = f"{KEY}.was-1791532800000"
 A_PLACE = {"kind": "place", "at": "2026-10-09T08:00:00Z"}
 WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
 
@@ -217,7 +221,7 @@ def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went
     assert report(set_aside={"kept": [A_PLACE, A_COPY], "snapshots": 0, "gone": []}).endswith(
         "\nSet aside whole on its computer, as its copy there had to be made again: its copy as it was at 2026-10-10 10:15 UTC"
         "\nSet aside on its computer, as what it kept at its folder's path was another folder's history or could not be read: "
-        "its folder's earlier history and copies as they were at 2026-10-09 08:00 UTC"
+        "the earlier history at its folder's path, with its threads' copies as they were at 2026-10-09 08:00 UTC"
         f"\n{WHERE}"
     )
     assert report(set_aside={"kept": [A_PLACE], "snapshots": 0, "gone": []}).endswith(f"copies as they were at 2026-10-09 08:00 UTC\n{WHERE}")
@@ -249,7 +253,7 @@ async def told_at_its_end(monkeypatch, opened: dict | None, told: dict | None = 
         return None if opened is None else {"ok": opened}
 
     monkeypatch.setattr(local_landing.DeviceOperations, "last_opened", last_opened)
-    session = SimpleNamespace(id=THREAD)
+    session = SimpleNamespace(id=THREAD, config={"workspace_path": FOLDER})
     return await local_landing.set_aside_of(store=Ends(told), session_factory=None, redis=None, session=session, landing=landing)
 
 
@@ -287,15 +291,17 @@ async def test_a_place_its_computers_app_set_aside_is_recorded_from_the_one_open
     assert (kept, new) == ({"copies": [], "snapshots": [], "gone": [], "places": [PLACE]}, {"kept": [A_PLACE], "snapshots": 0, "gone": []})
     # The opens after it name it no more: it stays recorded, told no more, beside what is set aside later.
     assert await told_at_its_end(monkeypatch, {"copy": "kept"}, told=kept) == (kept, None)
-    later = "0123456789abcdef.was-1791627300000"
+    later = f"{KEY}.was-1791627300000"
     off = {"history": "off", "reason": "cap", "set_aside_folders": [COPY], "set_aside_places": [later, PLACE, later]}
     assert await told_at_its_end(monkeypatch, off, told=kept) == (
         {"copies": [COPY], "snapshots": [], "gone": [], "places": [PLACE, later]},
         {"kept": [A_COPY, {"kind": "place", "at": "2026-10-10T10:15:00Z"}], "snapshots": 0, "gone": []},
     )
-    # An open answered with what is no answer says nothing; and a record keeps as many as an open names at most.
-    assert await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_places": ["../x"]}, told=kept) == (kept, None)
-    many = [f"{n:016x}.was-{n}" for n in range(local_landing.MAX_ASIDE)]
+    # An open answered with what is no answer says nothing, a place another folder's among it; and a record keeps as many
+    # as an open names at most.
+    for none in (["../x"], ["0123456789abcdef.was-1791627300000"]):
+        assert await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_places": none}, told=kept) == (kept, None)
+    many = [f"{KEY}.was-{n}" for n in range(local_landing.MAX_ASIDE)]
     kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_places": many}, told=kept)
     assert (kept["places"], len(new["kept"])) == (many, local_landing.MAX_ASIDE)
 

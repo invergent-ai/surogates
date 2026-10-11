@@ -28,7 +28,7 @@ describe("what a thread's computer set aside", () => {
     expect(setAsideLines({ kept: [], snapshots: 1, gone: [] }, "UTC")).toEqual(["Kept on its computer: 1 snapshot"]);
     // A place of its folder's set aside, among the rest by when.
     expect(setAsideLines({ kept: [{ kind: "place", at: "2026-10-09T08:00:00Z" }, copy], snapshots: 0, gone: [] }, "UTC")).toEqual([
-      "Kept on its computer: its folder's earlier history from 9 Oct, 08:00 · its copy from 10 Oct, 10:15",
+      "Kept on its computer: the earlier history at its folder's path, with its threads' copies from 9 Oct, 08:00 · its copy from 10 Oct, 10:15",
     ]);
     expect(setAsideLines({ kept: [], snapshots: 0, gone: [] }, "UTC")).toEqual([]);
   });

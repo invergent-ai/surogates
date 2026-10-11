@@ -54,8 +54,11 @@ OWN = ".surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp"
 VERSION = {"path": "Reports/Q3.docx", "before": A, "after": B}
 REVISION = "2049:17:5:1700000000000000000:-1"
 WHOLE_ASIDE = {"set_aside_folders": [f"{ASIDE}.copy", f"{ASIDE}.repository"], "set_aside_gone": [f"{ASIDE}.copy"]}
+#: The folder a thread works in on its computer, as a session holds it, and its key as the app names its place by it.
+FOLDER = "/home/u/Reports"
+KEY = hashlib.sha256(FOLDER.encode()).hexdigest()[:16]
 #: A place of the folder's its computer's app set aside, by its name in the app's data: the folder's key, and when.
-PLACE = "fcb59ee0818a927a.was-1791532800000"
+PLACE = f"{KEY}.was-1791532800000"
 
 #: What an honest computer answers each action, in every shape it has: a check gives each back as it came.
 HONEST: dict[tuple[str, str], list[dict[str, Any]]] = {
@@ -65,7 +68,7 @@ HONEST: dict[tuple[str, str], list[dict[str, Any]]] = {
         {"copy": "made"},
         {"copy": "moved", "set_asides": [A, B]},
         {"copy": "kept", "set_asides": [A], **WHOLE_ASIDE},
-        {"copy": "made", "set_aside_places": [PLACE, "0123456789abcdef.was-7"]},
+        {"copy": "made", "set_aside_places": [PLACE, f"{KEY}.was-7"]},
         {"history": "off", "reason": "cap"},
         {"history": "off", "reason": "names", **WHOLE_ASIDE, "set_aside_places": [PLACE]},
     ],
@@ -135,7 +138,7 @@ def test_every_action_a_thread_asks_has_one_shape_of_answer_and_nothing_else_has
 
 @pytest.mark.parametrize(("kind", "action", "answer"), EACH)
 def test_an_honest_answer_is_taken_as_it_came(kind, action, answer):
-    assert checked(kind, action, answer, thread=THREAD) == answer
+    assert checked(kind, action, answer, thread=THREAD, folder=FOLDER) == answer
 
 
 def noisy(value: Any) -> Any:
@@ -150,7 +153,7 @@ def noisy(value: Any) -> Any:
 
 @pytest.mark.parametrize(("kind", "action", "answer"), [each for each in EACH if each[:2] not in EXACT])
 def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_kept(kind, action, answer):
-    assert checked(kind, action, noisy(answer), thread=THREAD) == answer
+    assert checked(kind, action, noisy(answer), thread=THREAD, folder=FOLDER) == answer
 
 
 @pytest.mark.parametrize(("kind", "action", "answer"), [
@@ -267,8 +270,10 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("history", "open", {"history": "off", "reason": "cap", "set_aside_gone": ["everything"]}),
     # A place set aside by no name the app gives one.
     *(("history", "open", {"copy": "kept", "set_aside_places": places}) for places in (
-        PLACE, [f"{PLACE}.json"], [f"../{PLACE}"], [PLACE.upper()], ["fcb59ee0818a927a.was-"], ["fcb59ee0818a927.was-1"],
-        [f"fcb59ee0818a927a.was-{'1' * 17}"], [f"{ASIDE}.copy"], [7], [PLACE] * (MAX_ASIDE + 1),
+        PLACE, [f"{PLACE}.json"], [f"../{PLACE}"], [PLACE.upper()], [f"{KEY}.was-"], [f"{KEY[:15]}.was-1"],
+        [f"{KEY}.was-{'1' * 17}"], [f"{ASIDE}.copy"], [7], [PLACE] * (MAX_ASIDE + 1),
+        # Another folder's.
+        ["0123456789abcdef.was-7"], [PLACE, f"{hashlib.sha256(b'/home/u/Reports/').hexdigest()[:16]}.was-7"],
     )),
     # Another action's answer.
     ("history", "forget", HONEST["history", "fetch"][1]),
@@ -283,14 +288,14 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
 ])
 def test_what_is_no_answer_is_refused(kind, action, answer):
     with pytest.raises(NotAnAnswer) as refusal:
-        checked(kind, action, answer, thread=THREAD)
+        checked(kind, action, answer, thread=THREAD, folder=FOLDER)
     # Its own words, and none of the computer's.
     assert str(refusal.value) == f"This computer's answer to '{action}' was not one"
 
 
 def test_what_was_set_aside_is_named_only_to_a_check_that_knows_whose_copy_was_asked_about():
     told = {"copy": "kept", **WHOLE_ASIDE}
-    assert checked("history", "open", told, thread=THREAD) == told
+    assert checked("history", "open", told, thread=THREAD, folder=FOLDER) == told
     for unknown in (None, "another", str(uuid4()), THREAD.upper(), f"{THREAD}|.*"):
         with pytest.raises(NotAnAnswer):
             checked("history", "open", told, thread=unknown)
@@ -298,9 +303,18 @@ def test_what_was_set_aside_is_named_only_to_a_check_that_knows_whose_copy_was_a
     for no_thread in ("", "../x", "x"):
         with pytest.raises(NotAnAnswer):
             checked("history", "open", {"copy": "kept", "set_aside_gone": [f"00000003-20261010T101500Z-{no_thread}.copy"]}, thread=no_thread)
-    # Nothing set aside, nothing to tell whose; nor a place of the folder's, which is no thread's.
+    # Nothing set aside, nothing to tell whose.
     assert checked("history", "open", {"copy": "kept", "set_asides": [A]}) == {"copy": "kept", "set_asides": [A]}
-    assert checked("history", "open", {"copy": "kept", "set_aside_places": [PLACE]}) == {"copy": "kept", "set_aside_places": [PLACE]}
+
+
+def test_a_place_set_aside_is_named_only_to_a_check_that_knows_whose_folder_was_asked_about():
+    told = {"copy": "kept", "set_aside_places": [PLACE]}
+    assert checked("history", "open", told, folder=FOLDER) == told
+    for unknown in (None, "/home/u/Reports/", "/home/u/reports", "/home/u/Reports/Q3", "\ud800"):
+        with pytest.raises(NotAnAnswer):
+            checked("history", "open", told, folder=unknown)
+    assert answered("history", "open", {"ok": told}, folder=FOLDER) == told
+    assert answered("history", "open", {"ok": told}) is None
 
 
 def test_an_open_is_taken_in_the_first_of_its_two_forms_that_holds_as_the_app_takes_it():
@@ -354,11 +368,11 @@ def data(value: Any) -> None:
 def test_whatever_a_computer_puts_in_an_answers_place_is_refused_or_taken_as_data_and_nothing_else_happens(kind, action, answer):
     for mutant in mutations(answer):
         try:
-            taken = checked(kind, action, mutant, thread=THREAD)
+            taken = checked(kind, action, mutant, thread=THREAD, folder=FOLDER)
         except NotAnAnswer:
             continue
         # What is taken is an answer still: checked again it is itself, and it holds nothing but data.
-        assert checked(kind, action, copy.deepcopy(taken), thread=THREAD) == taken, mutant
+        assert checked(kind, action, copy.deepcopy(taken), thread=THREAD, folder=FOLDER) == taken, mutant
         assert set(taken) <= {key for honest in HONEST[kind, action] for key in honest}, mutant
         data(taken)
 
@@ -369,7 +383,7 @@ def test_an_answer_read_from_the_journal_is_checked_as_one_given_now():
     assert answered("history", "record", {"ok": {"commit": "refs/heads/main; anything the computer likes", "set_aside": None}}) is None
     assert answered("history", "record", {"error": {"type": "history", "code": "failed", "message": "no"}}) is None
     assert answered("history", "open", {"ok": {"history": "off", "reason": "because"}}) is None
-    assert answered("history", "open", {"ok": {"copy": "kept", **WHOLE_ASIDE}}, thread=THREAD) == {"copy": "kept", **WHOLE_ASIDE}
+    assert answered("history", "open", {"ok": {"copy": "kept", **WHOLE_ASIDE}}, thread=THREAD, folder=FOLDER) == {"copy": "kept", **WHOLE_ASIDE}
     assert answered("history", "open", {"ok": {"copy": "kept", **WHOLE_ASIDE}}) is None
     for none in (None, "ok", [], {}, {"ok": None}, {"okay": {"commit": A}}, {"ok": {"commit": A, "set_aside": None}, "error": {}}):
         assert answered("history", "record", none) is None, none
@@ -556,6 +570,13 @@ def test_what_was_set_aside_of_a_threads_copy_is_told_only_as_that_threads_own()
     other = ThreadCopy(Journal({"ok": {"copy": "kept", "set_aside_folders": [f"{ASIDE}.copy"]}}), thread, lease_token=None)
     with pytest.raises(NotAnAnswer):
         asyncio.run(other.open(0))
+    # And a place set aside only as its own folder's: the folder the session works in.
+    placed = ThreadCopy(Journal({"ok": {"copy": "kept", "set_aside_places": [PLACE]}}), thread, lease_token=None)
+    assert asyncio.run(placed.open(0)) == {"copy": "kept", "set_aside_places": [PLACE]}
+    elsewhere = a_thread()
+    elsewhere.config["workspace_path"] = "/home/u/Elsewhere"
+    with pytest.raises(NotAnAnswer):
+        asyncio.run(ThreadCopy(Journal({"ok": {"copy": "kept", "set_aside_places": [PLACE]}}), elsewhere, lease_token=None).open(0))
 
 
 def test_a_session_under_a_thread_asks_as_itself_about_the_threads_copy():
@@ -813,7 +834,7 @@ def test_the_bounds_of_an_answer_are_the_ones_said():
     assert checked("history", "changed", {"paths": ["x" * MAX_PATH]}) == {"paths": ["x" * MAX_PATH]}
     assert len(checked("land", "revisions", {"revisions": [["a", "absent"]] * MAX_LOOKED})["revisions"]) == MAX_LOOKED
     whole = {"copy": "kept", "set_aside_gone": [f"{ASIDE}.copy"] * MAX_ASIDE, "set_aside_places": [PLACE] * MAX_ASIDE}
-    assert checked("history", "open", whole, thread=THREAD) == whole
+    assert checked("history", "open", whole, thread=THREAD, folder=FOLDER) == whole
     by = {"kind": "thread", "id": THREAD, "title": "x" * MAX_PATH}
     held = {**HONEST["history", "commit"][0], "overlapped": [{**VERSION, "reason": "changed", "by": by}]}
     assert checked("history", "commit", held) == held
