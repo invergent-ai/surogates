@@ -1354,8 +1354,10 @@ class ArtifactCompletionMixin:
                 },
             )
         try:
-            # A thread stopped while it landed stays as the Stop left it.
-            if not (landing is not None and landing.get("stop_heard")):
+            # A thread stopped while it landed stays as the Stop left it; so does one on its computer stopped at an end
+            # with nothing to land.
+            stopped = landing.get("stop_heard") if landing is not None else opens_its_copy(session) and self._check_interrupt()
+            if not stopped:
                 await self._store.update_session_status(session.id, "completed")
         except Exception:
             logger.warning(
