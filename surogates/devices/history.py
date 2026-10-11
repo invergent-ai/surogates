@@ -143,7 +143,10 @@ _NOWHERE_BY = {
 #: threads worked in copies.  Said as its turn's failure, in these words alone.
 NOWHERE: dict[str, str] = {
     "cap": "This folder has more files than its history can keep, so this thread cannot work there. Choose a folder inside it.",
-    "names": "A file in this folder has a name its history cannot keep, so this thread cannot work there. Choose a folder inside it.",
+    "names": (
+        "A file in this folder has a name its history cannot keep, so this thread cannot work there. "
+        "Choose a folder inside it, or rename the file."
+    ),
     "unreadable": (
         "A file in this folder cannot be read on this computer, so this thread cannot work there. "
         "Let it be read, as by chmod a+r, or move it out of the folder."
