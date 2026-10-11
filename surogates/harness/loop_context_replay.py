@@ -641,6 +641,12 @@ class ContextReplayMixin:
         so an open tool-calling iteration is closed by tracking the
         ``tool_calls[*].id`` set from its ``llm.response`` until every id
         has a matching result.
+
+        A call can also end before its ``llm.response`` is written: the
+        streaming executor starts it while the response still streams.  Its
+        ``tool.result`` is held, and stands right after the response that
+        made the call, as the live turn asked it; one whose call no response
+        made is no part of the conversation.
         """
         # Exact inverse of ``_sanitize_paths``, which replaces
         # ``workspace_path.rstrip("/")``.
@@ -649,6 +655,9 @@ class ContextReplayMixin:
         messages: list[dict] = []
         iteration_open = False
         awaiting_tool_ids: set[str] = set()
+        # Each call a response has made, and the results written before the response that made their call.
+        made_calls: set[str] = set()
+        early_results: dict[str, dict] = {}
         deferred_users: list[dict] = []
         deferred_advisors: list[dict] = []
         # Worker reports wait for the next model request, which is where the
@@ -676,6 +685,7 @@ class ContextReplayMixin:
                 held_reports = []
                 iteration_open = True
                 awaiting_tool_ids = set()
+                early_results = {}
 
             elif etype in MESSAGE_TYPES:
                 # A coordinator's follow-up is read as a typed message is: its marked content.
@@ -697,6 +707,10 @@ class ContextReplayMixin:
                     messages.append(stored_message)
                 tool_calls = (stored_message or {}).get("tool_calls") or []
                 ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
+                made_calls |= ids
+                for call_id in [call_id for call_id in early_results if call_id in ids]:
+                    messages.append(early_results.pop(call_id))
+                    ids.discard(call_id)
                 if ids:
                     awaiting_tool_ids = ids
                 else:
@@ -708,16 +722,20 @@ class ContextReplayMixin:
                 content = event.data.get("content", "")
                 if workspace_root and _WORKSPACE_TOKEN in content:
                     content = content.replace(_WORKSPACE_TOKEN, workspace_root)
-                messages.append({
+                result = {
                     "role": "tool",
                     "tool_call_id": event.data.get("tool_call_id", ""),
                     "content": content,
-                })
-                if awaiting_tool_ids:
-                    awaiting_tool_ids.discard(event.data.get("tool_call_id"))
-                    if not awaiting_tool_ids:
-                        iteration_open = False
-                        _flush_deferred()
+                }
+                if iteration_open and result["tool_call_id"] not in made_calls:
+                    early_results[result["tool_call_id"]] = result
+                else:
+                    messages.append(result)
+                    if awaiting_tool_ids:
+                        awaiting_tool_ids.discard(event.data.get("tool_call_id"))
+                        if not awaiting_tool_ids:
+                            iteration_open = False
+                            _flush_deferred()
 
             elif (
                 etype == EventType.BOARD_UPDATE.value
