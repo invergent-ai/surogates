@@ -172,6 +172,9 @@ YOURS_MOST = 2 * HISTORY_CAP
 #: The most answers one landing hears your edits in, the pickup's own among them: an answer but the last is at least
 #: a part's worth of names, so your edits in all are at most this many parts of them, however long the names.
 PARTS_MOST = 16
+#: The most snapshots a turn's end records its computer keeping of a thread's: the latest sixteen in the thread's repository
+#: and in each of the four it keeps set aside whole at most (``surogates.sandbox.local_history``), all an open names.
+SNAPSHOTS_KEPT = 16 * (1 + 4)
 #: Why a landing put back is not tried again at once: the next try would meet the same, or its thread was stopped or
 #: deleted, or its computer did not answer a step for as long as a step waits.
 _ONCE = frozenset({"stale", "too_large", "yours_too_large", "stopped", "deleted", "unanswered"})
@@ -518,9 +521,10 @@ async def set_aside_of(
     repositories of the thread's it kept whole where it made them again, and
     those of them that went at its bound, each by its folder's name there;
     and, where the open found a copy, the snapshots of what the copy held of
-    the thread's own when it was made other files; those of them a
-    repository set aside whole took with it no open names, and are kept
-    while it is.  A landing's record names its own snapshot at once
+    the thread's own when it was made other files, in the thread's
+    repository and in each it keeps set aside whole: one that went, at the
+    thread's bound or with the repository that held it, is named no more,
+    and counted no more.  A landing's record names its own snapshot at once
     (*landing*'s ``set_aside``); one whose answer was lost, or a turn's end
     taken up again, has the next open name it.  A place of the folder's
     its app set aside, its history and every thread's copy in it, is named
@@ -547,17 +551,14 @@ async def set_aside_of(
     if opened is not None:
         now.update(copies=opened.get("set_aside_folders", []), gone=opened.get("set_aside_gone", []))
         if "copy" in opened:
-            # An open that found the folder's history off says nothing of the snapshots in the thread's repository.
-            named = opened.get("set_asides", [])
-            # A repository set aside whole holds those told before: no open names them, and they are kept with it.
-            held = any(name.endswith(".repository") for name in now["copies"])
-            now["snapshots"] = [*(aside for aside in told["snapshots"] if held and aside not in named), *named]
+            # An open that found the folder's history off says nothing of the snapshots in the thread's repositories.
+            now["snapshots"] = opened.get("set_asides", [])
         # Named by one open alone: what it names is added to what was told before.
         places = [name for name in dict.fromkeys(opened.get("set_aside_places", [])) if name not in told["places"]]
         now["places"] = [*told["places"], *places][-MAX_ASIDE:]
     recorded = [aside for aside in (landing or {}).get("set_aside", []) if aside not in now["snapshots"]]
-    # Its computer keeps the latest sixteen: a word of more is kept to as many as an open names of what is set aside whole.
-    now["snapshots"] = [*now["snapshots"], *recorded][-MAX_ASIDE:]
+    # A word of more than its computer keeps is kept to the latest it may.
+    now["snapshots"] = [*now["snapshots"], *recorded][-SNAPSHOTS_KEPT:]
     new = {key: [name for name in now[key] if name not in told[key]] for key in ("copies", "snapshots", "gone", "places")}
     kept = {key: names for key, names in now.items() if key != "places" or names} if before is not None or any(now.values()) else None
     return kept, set_aside_said(new)

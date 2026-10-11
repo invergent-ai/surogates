@@ -2316,28 +2316,68 @@ def test_a_landing_that_left_nothing_out_leaves_the_copy_and_what_was_written_si
     assert [c["path"] for c in land(one, "saga:2")["changes"]] == ["late.md"]
 
 
+def recorded_aside(one: LocalHistory, two: LocalHistory, n: int) -> str:
+    """A record of *two*'s, after a landing of *one*'s, that sets aside what *two*'s copy held beyond its turn: what it set aside."""
+    (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report %d" % n)
+    (two.copy / "Report.docx").write_bytes(b"PK\x03\x04 B's report %d" % n)
+    land(one, f"saga:a{n}")
+    saga = [["Surogate-Saga", f"saga:b{n}"]]
+    picked = two.pickup(author=YOURS, trailers=saga)
+    turn = two.commit_turn(author=B, trailers=saga, pickup=picked["commit"])
+    (two.copy / "late.md").write_text(f"late {n}\n")
+    aside = two.record(
+        turn=turn["commit"], applied=turn["changes"], author=B, trailers=saga, main=picked["main"], pickup=picked["commit"],
+    )["set_aside"]
+    assert aside is not None and one.open()["copy"] == "moved"
+    return aside
+
+
 def test_a_thread_keeps_what_its_last_sixteen_records_set_aside(tmp_path, folder, monkeypatch):
     monkeypatch.setattr(local_history, "_ASIDE", 4)
     one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
     assert local_history.LocalHistory is LocalHistory
-    kept = []
-    for n in range(5):
-        (one.copy / "Report.docx").write_bytes(b"PK\x03\x04 A's report %d" % n)
-        (two.copy / "Report.docx").write_bytes(b"PK\x03\x04 B's report %d" % n)
-        land(one, f"saga:a{n}")
-        saga = [["Surogate-Saga", f"saga:b{n}"]]
-        picked = two.pickup(author=YOURS, trailers=saga)
-        turn = two.commit_turn(author=B, trailers=saga, pickup=picked["commit"])
-        (two.copy / "late.md").write_text(f"late {n}\n")
-        kept.append(two.record(
-            turn=turn["commit"], applied=turn["changes"], author=B, trailers=saga, main=picked["main"], pickup=picked["commit"],
-        )["set_aside"])
-        assert one.open() == {"copy": "moved"}
+    kept = [recorded_aside(one, two, n) for n in range(5)]
     # The oldest goes for one more, by the count in each one's name.
     left = dict(line.split(" refs/set-aside/t2/") for line in git(two.repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/set-aside/").splitlines())
     assert (list(left), [name[:9] for name in left.values()]) == (kept[1:], ["00000002-", "00000003-", "00000004-", "00000005-"])
-    # And an open names them as they were set aside, the oldest first.
+    # And an open names them as they were set aside, the oldest first, and the one that went no more: nor once the
+    # repository that held them is set aside whole.
     assert two.open() == {"copy": "moved", "set_asides": kept[1:]}
+    (two.repo / "made").unlink()
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()
+    assert (opened["copy"], opened["set_asides"], opened["set_aside_folders"][-1][-11:]) == ("made", kept[1:], ".repository")
+    # Of a repository set aside, as many as the thread keeps, the latest.
+    monkeypatch.setattr(local_history, "_ASIDE", 2)
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()["set_asides"] == kept[-2:]
+
+
+def test_the_snapshots_a_repository_set_aside_whole_holds_are_named_by_every_open_while_it_is_kept(tmp_path, folder, monkeypatch):
+    monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 1)
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    first = recorded_aside(one, two, 0)
+    # Its refs packed, as git may keep them, and in its copy what a command wrote to look like them.
+    git(two.repo, "pack-refs", "--all")
+    (two.copy / "packed-refs").write_text(f"{'0' * 40} refs/set-aside/t2/00000009-{'0' * 40}\n")
+    # As an earlier guest can leave it: the mark of its first open's end is gone, and it is set aside whole.
+    (two.repo / "made").unlink()
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()
+    held = opened["set_aside_folders"]
+    assert (opened["copy"], opened["set_asides"], [name.rpartition(".")[2] for name in held]) == ("made", [first], ["copy", "repository"])
+    # Read as data: a ref there that names no commit is named not, nor one under a name no snapshot has.
+    refs = tmp_path / "store" / "set-aside" / held[1] / "refs" / "set-aside" / "t2"
+    refs.mkdir(parents=True, exist_ok=True)
+    (refs / f"00000008-{'1' * 40}").write_text("no commit\n")
+    (refs / "stray").write_text(f"{'2' * 40}\n")
+    # The repository made again sets aside its own: an open names both, the oldest first, and again at every open.
+    second = recorded_aside(one, two, 1)
+    for _ in range(2):
+        assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == {
+            "copy": "moved", "set_asides": [first, second], "set_aside_folders": held,
+        }
+    # Set aside whole once more, the thread keeps that repository alone: what the one that went held is named no more.
+    (two.repo / "made").unlink()
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open()
+    assert (opened["set_asides"], opened["set_aside_gone"]) == ([second], held)
 
 
 def test_a_landing_the_history_holds_whose_copy_cannot_be_made_its_files_refuses_every_act_and_writes_nothing(tmp_path, folder):

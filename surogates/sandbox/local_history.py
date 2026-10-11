@@ -175,6 +175,8 @@ _LEFT = "Surogate-Left"
 #: What a thread's copy held of its own when a record or a move made it other files is kept
 #: for the last sixteen times that happened: the oldest goes for one more.
 _ASIDE = 16
+#: Each one's name on its ref: the order it was set aside in, and what the copy was made.
+_ASIDE_REF = re.compile(r"[0-9]{8}-[0-9a-f]{40}")
 #: Where a place keeps a thread's copy and its repository that were made again, each renamed there as it was.
 _SET_ASIDE = "set-aside"
 #: The most one answer names of the files a pickup picked up, in characters of each as JSON spells it, which one
@@ -513,7 +515,10 @@ class LocalHistory(History):
         are the snapshots of what the copy held of its own when that, or a
         record, made it other files, the oldest first: all the thread's
         repository holds, read from its refs at every open, so that one
-        whose answer was lost is told again.
+        whose answer was lost is told again, and before them all each
+        repository of the thread's that the place keeps set aside whole
+        holds (:meth:`_held_aside`).  So one that went, at the thread's
+        bound or with the repository that held it, is named no more.
         """
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
@@ -546,7 +551,9 @@ class LocalHistory(History):
                 (self.repo / _MADE).write_bytes(b"")
                 self.making.unlink()
                 self._back()
-                return {"copy": "made", **self._asides_whole()}
+                whole = self._asides_whole()
+                held = self._held_aside(whole.get("set_aside_folders", []))
+                return {"copy": "made", **({"set_asides": held} if held else {}), **whole}
             if os.path.lexists(self.copy) and not (self._admin / "index").is_file():
                 # It was whole once, and its index is gone: git reads no file of it.
                 self._make_way_in_its_repository()
@@ -571,8 +578,9 @@ class LocalHistory(History):
             else:
                 self._catch_up()
                 moved = False
-            asides = [commit for _, commit in sorted(self._asides().values())]
-            return {"copy": "moved" if moved else "kept", **({"set_asides": asides} if asides else {}), **self._asides_whole()}
+            whole = self._asides_whole()
+            asides = [*self._held_aside(whole.get("set_aside_folders", [])), *(commit for _, commit in sorted(self._asides().values()))]
+            return {"copy": "moved" if moved else "kept", **({"set_asides": asides} if asides else {}), **whole}
         finally:
             _TIMEOUT.reset(budget)
 
@@ -1001,6 +1009,20 @@ class LocalHistory(History):
         }
         return {key: names for key, names in said.items() if names}
 
+    def _held_aside(self, names: list[str]) -> list[str]:
+        """The snapshots each repository of the thread's that the place keeps set aside whole holds, by *names*, its folders there.
+
+        The oldest first: they went with the repository, and are the
+        thread's while it is kept (:func:`_snapshots_in`).
+        """
+        folder = _opened_folder(str(self.aside_whole), None, False)
+        if folder is None:
+            return []
+        try:
+            return [commit for name in names if name.endswith(".repository") for commit in _snapshots_in(folder, name, self.thread)]
+        finally:
+            os.close(folder)
+
     def changed(self) -> dict:
         """The files the copy changed since its base, committed or not: what a landing looks at in the folder first.
 
@@ -1332,7 +1354,7 @@ class LocalHistory(History):
         kept = {}
         for line in self._main("for-each-ref", "--format=%(objectname) %(refname)", f"{self.aside}/").splitlines():
             commit, _, ref = line.partition(" ")
-            if re.fullmatch(r"[0-9]{8}-[0-9a-f]{40}", ref.rpartition("/")[2]):
+            if _ASIDE_REF.fullmatch(ref.rpartition("/")[2]):
                 kept[ref[-40:]] = (ref, commit)
         return kept
 
@@ -2203,10 +2225,13 @@ def _synced(path: Path) -> None:
         os.close(fd)
 
 
-def _read_as_data(path: Path, most: int) -> bytes | None:
-    """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read."""
+def _read_as_data(path: str | Path, most: int, *, dir_fd: int | None = None) -> bytes | None:
+    """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read.
+
+    With *dir_fd*, *path* is a name in the folder open as it.
+    """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
     except OSError:
         return None
     try:
@@ -2255,6 +2280,35 @@ def _asides_in(folder: int) -> tuple[list[tuple[str, str, str]], list[tuple[str,
         if (named := _WHOLE.fullmatch(name)) and stat.S_ISDIR(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
     )
     return [aside for aside in found if not aside[2].endswith(".gone")], [aside for aside in found if aside[2].endswith(".gone")]
+
+
+def _snapshots_in(folder: int, name: str, thread: str) -> list[str]:
+    """What the repository set aside whole as *name*, in the folder open as *folder*, kept of *thread*'s copy: the latest ``_ASIDE``.
+
+    The snapshots on its refs as the thread's repository kept them
+    (:meth:`LocalHistory._set_aside`), packed and loose, the oldest first by
+    the count in each one's name: read as data, through no link, and never
+    by git.  What cannot be read names nothing.
+    """
+    under = ("refs", "set-aside", thread)
+    found: dict[str, str] = {}
+    opened: list[int] = []
+    try:
+        opened.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=folder))
+        for line in (_read_as_data("packed-refs", _SEEN_BYTES, dir_fd=opened[0]) or b"").decode(errors="replace").splitlines():
+            commit, _, ref = line.partition(" ")
+            found[ref] = commit
+        for part in under:
+            opened.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=opened[-1]))
+        for leaf in os.listdir(opened[-1]):
+            found["/".join((*under, leaf))] = (_read_as_data(leaf, 64, dir_fd=opened[-1]) or b"").decode(errors="replace").strip()
+    except OSError:
+        pass  # what is not there, or is no folder, holds none
+    finally:
+        for fd in opened:
+            os.close(fd)
+    named = re.compile(rf"refs/set-aside/{re.escape(thread)}/{_ASIDE_REF.pattern}")
+    return [found[ref] for ref in sorted(found) if named.fullmatch(ref) and _ID.fullmatch(found[ref])][-_ASIDE:]
 
 
 def _on_disk(top: str | Path, inside: int | None = None) -> int:
