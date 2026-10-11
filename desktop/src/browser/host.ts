@@ -1083,9 +1083,14 @@ export class BrowserHost {
       if (signal.aborted) return CANCELLED;
       // At a chat's port that is not allowed its tab shows the proxy's own page, which is no page of the chat's:
       // the navigation did not open, and its answer says why.
-      // Sent there by the address it opened, the port is that site's choice: named to nobody.
       const shut = kind === "browser.navigate" ? chatPortOf(page.url()) : null;
-      if (shut !== null && !this.forwarded?.ports.includes(shut)) return failed(chatPortOf(String(args.url)) === shut ? NOT_ALLOWED(shut) : REDIRECTED_TO_A_CHAT);
+      if (shut !== null && !this.forwarded?.ports.includes(shut)) {
+        if (chatPortOf(String(args.url)) === shut) return failed(NOT_ALLOWED(shut));
+        // Sent there by the address it opened, the port is that site's choice: named to nobody, nor left in the tab, whose
+        // address and page say it. The browser says such a navigation is its agent's own, so the proxy cannot tell.
+        await page.goto("about:blank").catch(() => {});
+        return failed(REDIRECTED_TO_A_CHAT);
+      }
       const notices = this.took(session, id);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened: this.untold.delete(session) } : {}), notices } };
     } catch (error) {

@@ -3179,8 +3179,9 @@ new Image().src = "http://" + own("image") + "/";
       error: { type: "browser", message: "The agent's browser does not reach private networks (192.168.1.5:443)" },
     });
     // A site that sends the navigation on to a port of a chat's servers not allowed: refused as its redirect, naming
-    // no port of the site's choosing, so nobody is asked to allow one.
+    // no port of the site's choosing, so nobody is asked to allow one; nor is the tab left where it names one.
     expect(await op(a, "browser.navigate", { url: "http://fixture.test/redirect" })).toEqual({ error: { type: "browser", message: REDIRECTED_TO_A_CHAT } });
+    expect(await script(a, "return [location.href, document.title, document.body.innerText];")).toEqual(["about:blank", "", ""]);
     expect(hits).toEqual([]);
   });
 
