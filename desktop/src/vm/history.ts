@@ -191,6 +191,8 @@ function opened(thread: string | undefined): Parse<unknown> {
 
 // Every other action's answer (local_history.py's _ACTIONS).
 const ANSWERS: Record<string, Parse<unknown>> = {
+  // What became of a copy its root let go: removed, its branch holding all of it; kept as it is; or there was none.
+  close: fields({ copy: oneOf("removed", "kept", "gone") }),
   changed: fields({ paths: list(path) }),
   snapshot: fields({ hash: id }),
   restore: fields({}),

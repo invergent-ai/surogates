@@ -203,30 +203,45 @@ class WorkstreamStore:
                 Event.session_id == _any(ids), Event.type == EventType.TURN_SUMMARY.value,
             )) if with_files else ()
             # The files each landing recorded, and the project's Undos, which mark a
-            # row's: the cloud's records, asked by project, which the table's index is on.
-            here = (WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None))
+            # row's: asked by project, which the table's index is on.  A thread's
+            # landings are its own wherever it works, in the cloud or in a folder on
+            # a computer; an Undo is of the cloud's files.
             landings = (await db.execute(
-                select(WorkstreamHistory.thread_id, WorkstreamHistory.id, WorkstreamHistory.files).where(
-                    *here, WorkstreamHistory.thread_id == _any(ids), WorkstreamHistory.kind == "landing",
-                    WorkstreamHistory.saga_state == "completed", func.jsonb_array_length(WorkstreamHistory.files) > 0,
+                select(WorkstreamHistory.thread_id, WorkstreamHistory.id, WorkstreamHistory.files, WorkstreamHistory.device_id).where(
+                    WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.thread_id == _any(ids),
+                    WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state == "completed",
+                    func.jsonb_array_length(WorkstreamHistory.files) > 0,
                 )
             )).all() if with_files else ()
             undos = (await db.execute(
                 select(WorkstreamHistory.id, WorkstreamHistory.undoes, WorkstreamHistory.files).where(
-                    *here, WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
+                    WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None),
+                    WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
                 )
             )).all() if with_files else ()
             # A landing left running in a folder on a computer, whose thread's turn no worker holds.
             half = set(await db.scalars(_half_landed(
                 WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.thread_id == _any(ids),
             )))
+            # What each thread's computer keeps set aside of its work, as the newest of its turn ends to record it
+            # did: a command's end, or one that could not read it, records none, and hides none.
+            local = [thread.session_id for thread, _, _, execution in threads if place_of(execution)["kind"] == "device"]
+            set_aside = dict((await db.execute(
+                select(Event.session_id, Event.data["set_aside"])
+                .distinct(Event.session_id)
+                .where(
+                    Event.session_id == _any(local), Event.data.has_key("set_aside"),
+                    Event.type.in_((EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value)),
+                )
+                .order_by(Event.session_id, Event.id.desc())
+            )).all()) if local else {}
             items_of, events_of, landings_of = defaultdict(list), defaultdict(list), defaultdict(list)
             for item in items:
                 items_of[thread_of[item.session_id]].append(item)
             for event in (*latest, *summaries):
                 events_of[event.session_id].append(event)
-            for landed_by, row_id, files in landings:
-                landings_of[landed_by].append({"id": row_id, "files": files})
+            for landed_by, row_id, files, device_id in landings:
+                landings_of[landed_by].append({"id": row_id, "files": files, "on_computer": device_id is not None})
         undone = undone_files({"id": row_id, "undoes": undoes, "files": files} for row_id, undoes, files in undos)
         redoing = await self._redoing(landings_of)
         return [
@@ -236,7 +251,7 @@ class WorkstreamStore:
                 place=place_of(execution),
                 items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
                 landings=tuple(landings_of[thread.session_id]), redoing=redoing.get(thread.session_id, frozenset()),
-                undone=undone, half_landed=thread.session_id in half,
+                undone=undone, half_landed=thread.session_id in half, set_aside=set_aside.get(thread.session_id),
             )
             for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]

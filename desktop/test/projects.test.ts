@@ -182,12 +182,37 @@ describe("the projects the page serves", () => {
     const { source } = page();
     const asked = source.threads(REPORT);
     // As a page built before file history maps a row: no landing on a file, and none for its card's Undo.
-    const older = threads[REPORT]!.map(({ files, landingId: _none, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
+    const older = threads[REPORT]!.map(({ files, landingId: _none, setAside: _aside, ...row }) => ({ ...row, files: files.map(({ landing: _mark, ...file }) => file) }));
     source.answered(1, { ok: older });
     const rows = await asked;
     expect(rows.map((row) => row.id)).toEqual(threads[REPORT]!.map((row) => row.id));
     expect(rows.flatMap((row) => row.files).length).toBeGreaterThan(0);
-    expect(rows.every((row) => row.landingId === null && row.files.every((file) => file.landing === null))).toBe(true);
+    expect(rows.every((row) => row.landingId === null && row.setAside === null && row.files.every((file) => file.landing === null))).toBe(true);
+  });
+
+  it("take what a thread's computer set aside, leaving out an entry it does not know and never refusing the row", async () => {
+    const { source } = page();
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.computer)!;
+    const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+    const asked = source.threads(REPORT);
+    source.answered(1, { ok: [{ ...row, setAside: { kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] } }] });
+    expect((await asked)[0]!.setAside).toEqual({ kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] });
+    // A kind or a time the app does not know, a time whose digits make none, a count that is none: left out, the row taken.
+    const odd = source.threads(REPORT);
+    source.answered(2, { ok: [{ ...row, setAside: {
+      kept: [{ kind: "history", at: copy.at }, { kind: "copy", at: "2026-10-10T10:15:00" }, { kind: "copy", at: "2026-13-99T25:61:99Z" }, 7, copy],
+      snapshots: -1, gone: "all",
+    } }] });
+    expect((await odd)[0]!.setAside).toEqual({ kept: [copy], snapshots: 0, gone: [] });
+    // Nothing left of it is none; and a row says at most as many of each as its computer names.
+    for (const [at, setAside] of [{}, "aside", 7, { kept: [{ kind: "history", at: copy.at }], snapshots: 1.5, gone: [] }].entries()) {
+      const none = source.threads(REPORT);
+      source.answered(at + 3, { ok: [{ ...row, setAside }] });
+      expect((await none)[0]!.setAside, JSON.stringify(setAside)).toBeNull();
+    }
+    const many = source.threads(REPORT);
+    source.answered(7, { ok: [{ ...row, setAside: { kept: Array(70).fill(copy), snapshots: 0, gone: [] } }] });
+    expect((await many)[0]!.setAside!.kept).toHaveLength(64);
   });
 
   it("take the landing a row's card undoes, and refuse one that is no id", async () => {

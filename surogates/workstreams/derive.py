@@ -7,6 +7,7 @@ from the event log.  The row is the shell's ``ThreadRow``
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,9 @@ LATEST_TYPES = tuple(t.value for t in (
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
     EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
 ))
+#: A copy or a repository of a thread's that its computer set aside whole, by its folder's name there
+#: (``surogates.sandbox.local_history``): the order it was set aside in, when, in UTC, whose, and which of the two.
+_SET_ASIDE = re.compile(r"[0-9]{8}-([0-9]{8}T[0-9]{6}Z)-[0-9a-f-]{36}\.(copy|repository)")
 #: What a thread waits on you with over a landing of its that could not be finished: one that could not be put back
 #: whole, or one left running in its folder on its computer with no worker on its turn.
 UNFINISHED = "Couldn't finish landing my changes"
@@ -61,8 +65,8 @@ class ThreadFacts:
     #: Its latest event of each of ``LATEST_TYPES``, and its turn summaries:
     #: every one, or only the newest when its files are not read.
     events: tuple[Any, ...]
-    #: Its landings that recorded files, each ``{id, files}`` as its
-    #: ``workstream_history`` row has them; none when its files are not read.
+    #: Its landings that recorded files, wherever it works, each ``{id, files, on_computer}``
+    #: as its ``workstream_history`` row has them; none when its files are not read.
     landings: tuple[dict[str, Any], ...] = ()
     #: The files its next turn is told to redo (``landing.redo_files``).
     redoing: frozenset[str] = frozenset()
@@ -70,6 +74,9 @@ class ThreadFacts:
     undone: frozenset[tuple[int, str]] = frozenset()
     #: Whether a landing of its is left running in its folder on its computer with no worker holding its turn.
     half_landed: bool = False
+    #: What its computer keeps set aside of its work, as the newest of its turn ends to record it recorded it
+    #: (``local_landing.set_aside_of``); None where none did.
+    set_aside: Any = None
 
 
 def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
@@ -85,6 +92,7 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "progress": _progress(todos.data if todos else {}),
         "files": _files(facts, group),
         "landing_id": _landing_id(facts),
+        "set_aside": set_aside_said(facts.set_aside),
         "place": facts.place,
         "created_at": utc(facts.created_at),
         "updated_at": utc(facts.updated_at),
@@ -220,7 +228,8 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
     ``redoing`` while the thread's next turn is to redo it.  A resolved
     thread takes no next turn, so none of its files is being redone.  A
     file a landing deleted is no file to open: it is left out.  So is one
-    whose path the shell would refuse as a label.
+    whose path the shell would refuse as a label.  An Undo is of the
+    cloud's files: a file landed in a folder on a computer is never undone.
     """
     redoing = facts.redoing if group != "resolved" else frozenset()
     left_out: list[dict[str, Any]] = []
@@ -234,10 +243,8 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
             seen.add(path)
             if (f["merged"] and f["after"] is None) or units(path) > SHELL_LIMITS["label"]:
                 continue
-            mark = (
-                ("undone" if (landing["id"], path) in facts.undone else "landed") if f["merged"]
-                else ("redoing" if path in redoing else "not_merged")
-            )
+            undone = not landing.get("on_computer") and (landing["id"], path) in facts.undone
+            mark = ("undone" if undone else "landed") if f["merged"] else ("redoing" if path in redoing else "not_merged")
             (landed if f["merged"] else left_out).append(
                 {"kind": "file", "label": path, "ref": path, "thread_id": str(facts.id), "landing": mark}
             )
@@ -248,12 +255,49 @@ def _landing_id(facts: ThreadFacts) -> str | None:
     """The thread's newest landing with a file still as it landed: what its card's Undo undoes; None when it has none.
 
     A file it left out is no change of its, and one an Undo put back is
-    one it has no more to undo.
+    one it has no more to undo.  Never a landing in a folder on a
+    computer: it is undone on that computer, which no route reaches yet.
     """
     for landing in sorted(facts.landings, key=lambda row: row["id"], reverse=True):
+        if landing.get("on_computer"):
+            continue
         if any(f["merged"] and (landing["id"], f["path"]) not in facts.undone for f in landing["files"]):
             return str(landing["id"])
     return None
+
+
+def set_aside_said(told: Any) -> dict[str, Any] | None:
+    """What a thread's computer keeps set aside of its work, and what of that went at its bound, as a person is told it; None with none.
+
+    *told* is a turn end's record of it (``local_landing.set_aside_of``),
+    which names each by the computer's names for it.  Here each copy or
+    repository of the thread's kept whole is ``{kind, at}``, as is each that
+    went, oldest first; and the snapshots of what its copy held of its own
+    are counted.  A name that is none is left out.
+    """
+    if not isinstance(told, dict):
+        return None
+
+    def listed(key: str) -> list[Any]:
+        return told[key] if isinstance(told.get(key), list) else []
+
+    kept, gone = ([found for found in map(set_aside_name, listed(key)) if found is not None] for key in ("copies", "gone"))
+    snapshots = sum(isinstance(aside, str) for aside in listed("snapshots"))
+    return {"kept": kept, "snapshots": snapshots, "gone": gone} if kept or snapshots or gone else None
+
+
+def set_aside_name(name: Any) -> dict[str, str] | None:
+    """What its computer set aside whole of a thread's by the folder's name *name*: ``{kind, at}``, a copy or a repository,
+    and when, in UTC; None for a name that is none, its time among it."""
+    found = _SET_ASIDE.fullmatch(name) if isinstance(name, str) else None
+    if found is None:
+        return None
+    moment, kind = found.groups()
+    try:
+        at = datetime.strptime(moment, "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        return None
+    return {"kind": kind, "at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:

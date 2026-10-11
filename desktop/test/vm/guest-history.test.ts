@@ -611,6 +611,19 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     expect(await said(ONE, "changed")).toEqual({ paths: ["Kept.md"] });
   });
 
+  it("answers a copy's letting go, each as this computer knows it", async () => {
+    // One that holds work no snapshot has stays; one whose branch holds all of it goes, and is made again from it.
+    writeFileSync(join(copyOf(TWO), "Unsaved.md"), "in no snapshot\n");
+    expect(await said(TWO, "close")).toEqual({ copy: "kept" });
+    expect(readFileSync(join(copyOf(TWO), "Unsaved.md"), "utf8")).toBe("in no snapshot\n");
+    expect(await said(ONE, "close")).toEqual({ copy: "removed" });
+    expect([existsSync(copyOf(ONE)), await said(ONE, "close")]).toEqual([false, { copy: "gone" }]);
+    expect(await said(ONE, "open", { moves: false })).toEqual({ copy: "kept" });
+    expect(readFileSync(join(copyOf(ONE), "Kept.md"), "utf8")).toBe("kept\n");
+    // It is asked with nothing: anything more is no request of the history's.
+    expect(await code(ONE, "close", { force: true })).toBe("not_a_request");
+  });
+
   it("was asked every action a folder's history takes, and refused with each code a test can bring about", () => {
     const actions = /^_ACTIONS[^]*?^\}/m.exec(readFileSync(new URL("../../../surogates/sandbox/local_history.py", import.meta.url), "utf8"))![0];
     expect([...answered.keys()].sort()).toEqual([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort());

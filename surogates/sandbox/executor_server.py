@@ -42,7 +42,7 @@ from typing import Any
 from fastapi import FastAPI, Request, Response
 
 from surogates.sandbox.base import MAX_FILE_BYTES
-from surogates.sandbox.history import History, HistoryError
+from surogates.sandbox.history import UNKNOWN_STEP, History, HistoryError
 
 logger = logging.getLogger("tool-executor")
 
@@ -211,7 +211,7 @@ def _run_history(args: dict, history: History | None) -> str:
     action = step.pop("action", None)
     method = _HISTORY_STEPS.get(action)
     if method is None:
-        return json.dumps({"error": f"Unknown history action: {args.get('action')}"})
+        return json.dumps({"error": f"{UNKNOWN_STEP}: {args.get('action')}"})
     if history.copy is None and action not in _MASTER_STEPS:
         return json.dumps({"error": f"This pod has no copy of a project's files: it cannot {action}"})
     try:

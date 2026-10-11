@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 from uuid import UUID
 
 from surogates.devices.binding import device_of
@@ -334,6 +335,52 @@ def _found(key: str, entry: list) -> str:
     return named[0] if named and named[0] is not None else "a file"
 
 
+#: What a report says its computer set aside of the thread's work, out of its copy there, and what of that it no
+#: longer keeps: each once, in the report of the turn whose end first heard of it.
+_SET_ASIDE = {
+    "copies": "Set aside whole on its computer, as its copy there had to be made again",
+    "snapshots": "Set aside on its computer, as its copy there was made other files",
+    "gone": "No longer kept on its computer, which keeps only the latest of what it set aside",
+}
+#: Where what is set aside is, and that nothing here brings it back.
+_SET_ASIDE_WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
+
+
+def _set_aside_lines(data: dict) -> str:
+    """A report's lines on what its computer set aside of the thread's work since its last report: a line for each kind it names.
+
+    Each as the turn's end gave it (``derive.set_aside_said``): what it is
+    and when, and how many snapshots.  An entry that is none is left out.
+    """
+    told = data.get("set_aside")
+    if not isinstance(told, dict):
+        return ""
+
+    def when(entry: object, how: str) -> str | None:
+        kind, at = (entry.get("kind"), entry.get("at")) if isinstance(entry, dict) else (None, None)
+        try:
+            moment = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ") if isinstance(at, str) else None
+        except ValueError:
+            moment = None
+        return None if kind not in ("copy", "repository") or moment is None else f"its {kind} {how} {moment:%Y-%m-%d %H:%M} UTC"
+
+    def said(key: str, how: str) -> list[str]:
+        entries = told[key] if isinstance(told.get(key), list) else []
+        return [found for found in (when(entry, how) for entry in entries) if found]
+
+    copies, gone = said("kept", "as it was at"), said("gone", "set aside at")
+    snapshots = told["snapshots"] if type(told.get("snapshots")) is int and told["snapshots"] > 0 else 0
+    lines = ""
+    if copies:
+        lines += f"\n{_SET_ASIDE['copies']}: {_listed([{'label': found} for found in copies], limit=_MAX_LISTED_LEFT_OUT)}"
+    if snapshots:
+        counted = f"{snapshots} snapshot{'s' if snapshots > 1 else ''}"
+        lines += f"\n{_SET_ASIDE['snapshots']}: what the copy held of the thread's own, in {counted}"
+    if gone:
+        lines += f"\n{_SET_ASIDE['gone']}: {_listed([{'label': found} for found in gone], limit=_MAX_LISTED_LEFT_OUT)}"
+    return lines + (f"\n{_SET_ASIDE_WHERE}" if copies or snapshots else "")
+
+
 #: What a report says of the files a turn made that are in no landing, by where they were left.
 _LEFT_OUT = {
     "excluded": "Not saved, because the project's history leaves them out",
@@ -377,7 +424,7 @@ def worker_note(event_type: str, data: dict) -> dict:
         named = f"[Thread {json.dumps(title, ensure_ascii=False)} ({worker_id})"
         if failed:
             # A failed turn that was kept names what its take-ups left out, as a landing does.
-            content = f"{named} failed: {data.get('error', 'unknown error')}]" + _left_out_lines(data, "not_taken")
+            content = f"{named} failed: {data.get('error', 'unknown error')}]" + _left_out_lines(data, "not_taken") + _set_aside_lines(data)
         else:
             files = data.get("files")
             # A thread's files that did not land, and the ones it deleted,
@@ -405,7 +452,7 @@ def worker_note(event_type: str, data: dict) -> dict:
                     f"{named} reported]\n"
                     f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
                     f"Files: {listed}"
-                ) + _landing_lines(data, kept, deleted, redoing)
+                ) + _landing_lines(data, kept, deleted, redoing) + _set_aside_lines(data)
     return {"role": "user", "content": content}
 
 

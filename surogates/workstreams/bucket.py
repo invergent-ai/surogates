@@ -80,6 +80,7 @@ from surogates.sandbox.history import (
     _REF,
     _ZERO,
     MAIN,
+    UNKNOWN_STEP,
     HistoryConflict,
     HistoryError,
     _as,
@@ -405,7 +406,7 @@ class BucketHistory:
         request = json.loads(input or "{}")
         action = request.pop("action", None) if name == "_history" and isinstance(request, dict) else None
         if action not in _ACTIONS:
-            return json.dumps({"error": f"Unknown history action: {action}"})
+            return json.dumps({"error": f"{UNKNOWN_STEP}: {action}"})
         try:
             return json.dumps(await getattr(self, action)(**request))
         except (HistoryError, TypeError, OSError) as exc:
