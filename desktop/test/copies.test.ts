@@ -1424,6 +1424,28 @@ describe("a place another folder at the path takes", () => {
     expect(await second).toEqual({ failed: FOLDER_UNAVAILABLE });
   });
 
+  it("gives no host a copy the app's own open made where the place was let go before the open was answered", async () => {
+    let answer: () => void = () => {};
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const was = bound();
+    // The old folder's thread's first open is answered only once the new folder's thread has let its place go.
+    const one = copies(async (request) => {
+      if (request.thread === ROOT) await answered;
+      return undefined;
+    });
+    const first = one.open(ROOT, was, signal());
+    await vi.waitFor(() => expect(events).toEqual([`${ROOT}:open`]));
+    replace();
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+    expect(unplaced.map((given) => given.real.ino)).toEqual([was.ino]);
+    // Answered as made, at the path where the new folder's place is now: no host of the old folder's thread works there.
+    answer();
+    expect(await first).toEqual({ failed: FOLDER_UNAVAILABLE });
+    expect(events).toEqual([`${ROOT}:open`, `unplace:${was.ino}`, `${OTHER}:open`]);
+  });
+
   it("tells a host that takes a copy of the place while it is let go, and waits for it too", async () => {
     const was = bound();
     const one = copies();
