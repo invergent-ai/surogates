@@ -1339,23 +1339,37 @@ class AgentHarness(
             await self._redis.delete(key)
         await name_turn(self._store, session)
 
-    async def _opened_for_the_turn(self, session: Session, lease: SessionLease) -> bool:
+    async def _opened_for_the_turn(self, session: Session, lease: SessionLease, events: list[Any]) -> bool:
         """Open a thread's copy on its computer for the turn now starting; whether the turn goes on.
 
         The turn is named first, as its loop would name it, and its open is
-        asked under that name (``tool_exec._open_local_copy``).  A Stop ends
-        the open wherever it is, before it is asked, while it waits, or once
-        a Stop's pause closed it: its operation is closed, and the turn ends
+        asked under that name (``tool_exec._open_local_copy``).  An undo a
+        Stop of the thread's left owed is finished before it
+        (:meth:`_undo_what_a_stop_left`), and *events*, the wake's, gain
+        what that wrote.  A Stop ends the open wherever it is, before it is
+        asked, while it or that undo waits, or once a Stop's pause closed
+        it: its operation is closed, a put-back left open, and the turn ends
         stopped.  Nowhere to work ends the turn failed, saying why, before
-        its prompt is built.  An open the journal itself refused, the thread
-        held by another worker now or deleted, ends this wake with nothing
-        sent.
+        its prompt is built.  An open or an undo the journal itself refused,
+        the thread held by another worker now or deleted, ends this wake
+        with nothing sent.
         """
+        from surogates.governance.saga.compensator import UndoOwed
+
         await self._name_the_turn(session)
-        # Its first copy is said in its chat while it is made: the turn waits for it, minutes for a large folder.
-        opening = asyncio.ensure_future(_open_local_copy(
-            session, self._store, lease, session_factory=self._session_factory, redis=self._redis, telling=True,
-        ))
+
+        async def open_after_its_stop() -> Any:
+            if await self._undo_what_a_stop_left(session, lease):
+                # The stopped turn's saga is over: the turn's own loop starts its own, and closes nothing more.
+                events.extend(await self._store.get_events(
+                    session.id, after=max((e.id for e in events), default=0), exclude_types=[EventType.LLM_DELTA],
+                ))
+            # Its first copy is said in its chat while it is made: the turn waits for it, minutes for a large folder.
+            return await _open_local_copy(
+                session, self._store, lease, session_factory=self._session_factory, redis=self._redis, telling=True,
+            )
+
+        opening = asyncio.ensure_future(open_after_its_stop())
         # A Stop cancels it, as it cancels a resumed call: the cancel closes its operation in the journal.
         self._active_executor = SimpleNamespace(discard=opening.cancel)
         # A Stop that landed before this point only set the flag.
@@ -1389,6 +1403,12 @@ class AgentHarness(
                 return False
             logger.warning(
                 "Session %s: its copy was not opened for its turn, and this wake sends nothing: %s", session.id, refused,
+            )
+            return False
+        except UndoOwed:
+            logger.warning(
+                "Session %s: another worker has its thread now, so its last Stop's undo is not finished and this wake "
+                "sends nothing", session.id,
             )
             return False
         finally:
@@ -1920,9 +1940,10 @@ class AgentHarness(
             # A thread that works in a copy of its own on its computer opens
             # it for the turn now, before anything else of the turn reaches
             # that computer: a call resumed, the prompt's folder context, a
-            # step, the turn's mark, an artifact.  One with nowhere to work,
-            # or stopped meanwhile, ends its turn here.
-            if opens_its_copy(session) and not await self._opened_for_the_turn(session, lease):
+            # step, the turn's mark, an artifact; an undo its last Stop left
+            # owed first.  One with nowhere to work, or stopped meanwhile,
+            # ends its turn here.
+            if opens_its_copy(session) and not await self._opened_for_the_turn(session, lease, all_events):
                 return
             # A thread made on its computer before threads worked in copies, or a session under one, is bound to
             # the folder itself: its turn sends that computer nothing, and ends saying why.  What a worker before
@@ -4193,7 +4214,9 @@ class AgentHarness(
         turn's is, and ``escalated`` if it was being put back or was
         stopped, since nothing put its steps back.  A stopped turn still
         putting back holds the session's lease, so no new turn reaches here
-        until it has finished.
+        until it has finished; and a thread's on its computer whose undo was
+        left for its next turn has it finished before that turn opens its
+        copy (:meth:`_undo_what_a_stop_left`).
         """
         from surogates.governance.events import saga_complete_event
         from surogates.governance.saga.state_machine import SagaState
@@ -4228,12 +4251,13 @@ class AgentHarness(
         A project's thread on its user's computer has its copy there put
         back instead (:meth:`_undo_on_computer`), as the worker holding
         *lease*.  Answers each step of its turn that was not taken back,
-        for the stop to say; none for any other session.
+        or not yet, its undo left for the thread's next turn, for the stop
+        to say; none for any other session.
         """
         from functools import partial
 
         from surogates.governance.events import saga_compensate_event, saga_complete_event
-        from surogates.governance.saga.compensator import compensate_step
+        from surogates.governance.saga.compensator import UndoOwed, compensate_step
         from surogates.governance.saga.state_machine import SagaState
 
         left: list[dict] = []
@@ -4251,7 +4275,13 @@ class AgentHarness(
                 continue
 
             if opens_its_copy(session):
-                left += await self._undo_on_computer(active, session, reason, lease=lease)
+                try:
+                    left += await self._undo_on_computer(active, session, reason, lease=lease)
+                except UndoOwed as owed:
+                    logger.warning(
+                        "The undo of thread %s's stopped turn is left for its next turn: %s", session.id, owed,
+                    )
+                    left += owed.left
                 continue
             try:
                 # Capture count before compensate() transitions steps
@@ -4316,18 +4346,21 @@ class AgentHarness(
         return left
 
     async def _undo_on_computer(
-        self, active: Any, session: Any, reason: str, *, lease: SessionLease | None,
+        self, active: Any, session: Any, reason: str, *, lease: SessionLease | None, turn: int | None = None,
+        bounded: bool = True,
     ) -> list[dict]:
         """Put a stopped turn's copy of a thread on its user's computer back, and end its saga; what was not taken back.
 
         Through the computer, as the worker holding *lease*, under the turn
-        as it was named at its start: the stop's own end came after.  No pod
-        is asked.  Each step that began is put back, one the stop cut short
-        or another worker resumed among them (``undo_on_computer``), and the
-        saga's events name each step that was not.
+        as it was named at its start, or *turn*: the stop's own end came
+        after.  No pod is asked.  Each step that began is put back, one the
+        stop cut short or another worker resumed among them
+        (``undo_on_computer``, *bounded* as it says), and the saga's events
+        name each step that was not.  Raises ``UndoOwed`` where the undo is
+        left for the thread's next turn: nothing of the saga is written.
         """
         from surogates.governance.events import saga_compensate_event, saga_complete_event
-        from surogates.governance.saga.compensator import undo_on_computer
+        from surogates.governance.saga.compensator import UndoOwed, undo_on_computer
         from surogates.governance.saga.state_machine import StepState
         from surogates.harness.tool_exec import refused_before_it_runs
 
@@ -4337,8 +4370,8 @@ class AgentHarness(
                 lease_token=str(lease.lease_token) if lease is not None else None,
             )
             left = await undo_on_computer(
-                active, copy=copy, turn=await _turn_now(self._store, session),
-                ran=lambda step: not refused_before_it_runs(step.tool_name, step.arguments, session.config),
+                active, copy=copy, turn=turn if turn is not None else await _turn_now(self._store, session),
+                ran=lambda step: not refused_before_it_runs(step.tool_name, step.arguments, session.config), bounded=bounded,
             )
             compensated = saga_compensate_event(
                 active.saga_id, steps_rolled_back=sum(s.state is StepState.COMPENSATED for s in active.steps),
@@ -4352,10 +4385,55 @@ class AgentHarness(
                 session.id, EventType.SAGA_COMPLETE,
                 saga_complete_event(active.saga_id, status=active.state.value, steps_executed=len(active.steps)),
             )
+        except UndoOwed:
+            raise
         except Exception:
             logger.exception("Saga compensation failed for %s", active.saga_id)
             return []
         return left
+
+    async def _undo_what_a_stop_left(self, session: Session, lease: SessionLease) -> bool:
+        """Finish each undo a Stop of the thread's left owed on its computer, before its next turn opens the copy; whether one was.
+
+        Owed where a turn of the thread's ended stopped and nothing closed
+        its saga: its worker was lost before the undo or in it, or left it
+        (``UndoOwed``).  Read from the log as it stands, a stop written at
+        this turn's naming among it.  Its copy is put back under that turn's
+        own name, newest step first: a put-back already answered is answered
+        as it was, one left open is joined, and the rest are asked, each for
+        as long as its computer takes, as the open itself waits.  So the open
+        that follows moves the copy on from where the stopped turn started,
+        and nothing of that turn lands.  Its master hears what was not taken
+        back, as a Stop's own undo tells it.  Raises ``UndoOwed`` where
+        another worker has the thread now.
+        """
+        from surogates.governance.saga import SagaOrchestrator
+        from surogates.governance.saga.compensator import stop_left
+        from surogates.governance.saga.state_machine import SagaState
+
+        stops = (EventType.SESSION_PAUSE.value, EventType.SESSION_STOPPED.value)
+        logged = await self._store.get_events(session.id, types=[
+            EventType.SAGA_START, EventType.SAGA_STEP_BEGIN, EventType.SAGA_STEP_COMMITTED, EventType.SAGA_STEP_FAILED,
+            EventType.SAGA_COMPENSATE, EventType.SAGA_COMPLETE,
+            EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED,
+        ])
+        sagas = SagaOrchestrator()
+        sagas.reconstruct_from_events([e for e in logged if e.type.startswith("saga.")])
+        started = {e.data.get("saga_id"): e.id for e in logged if e.type == EventType.SAGA_START.value}
+        # A command's end is no turn's (``landing.last_turn_end``).
+        ends = [e for e in logged if not e.type.startswith("saga.") and "answers" not in e.data]
+        undid = False
+        for owed in [s for s in sagas.active_sagas if s.state is SagaState.RUNNING]:
+            start = started[owed.saga_id]
+            ended = next((e for e in ends if e.id > start), None)
+            if ended is None or ended.type not in stops:
+                continue
+            turn = max((e.id for e in ends if e.id < start), default=0)
+            left = await self._undo_on_computer(owed, session, "interrupt", lease=lease, turn=turn, bounded=False)
+            undid = True
+            if left:
+                await self._tell_what_the_stop_left(session, stop_left(left))
+        return undid
 
     # ------------------------------------------------------------------
     # Credential rotation and fallback (delegates to resilience module)
