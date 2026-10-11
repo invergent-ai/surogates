@@ -174,6 +174,39 @@ async def test_a_link_the_server_closed_is_made_again_and_answers_what_the_serve
     assert (len(hellos), [frame["id"] for frame in answered], laptop.ran) == ((2, ["op-1"], ["read"]) if back else (1, [], ["read"]))
 
 
+@pytest.mark.parametrize("again, back", [(1011, True), (CLOSE_REVOKED, False)], ids=["server error", "revoked"])
+async def test_a_link_closed_again_before_its_welcome_is_made_again_unless_it_may_not_be(tmp_path, again, back):
+    (tmp_path / "a.txt").write_text("a\n")
+    hellos: list[dict] = []
+    answered: list[dict] = []
+
+    async def server(ws) -> None:
+        hellos.append(json.loads(await ws.recv()))
+        if len(hellos) == 2:
+            # The link made again is closed before its welcome, as a bound of the server's runs out.
+            await ws.close(again, "closed")
+            return
+        await ws.send(json.dumps(WELCOME))
+        await ws.send(json.dumps(read_op(tmp_path / "a.txt")))
+        if len(hellos) == 1:
+            await ws.close(1011, "server error")
+            return
+        async for raw in ws:
+            if (frame := json.loads(raw))["type"] == "op_result":
+                answered.append(frame)
+
+    async with serve(server, "127.0.0.1", 0, max_size=None) as running:
+        port = running.sockets[0].getsockname()[1]
+        laptop = FakeLaptop(f"ws://127.0.0.1:{port}", "surg_dev_test", LocalWorkspaceIO(str(tmp_path)))
+        try:
+            await laptop.connect()
+            await until(lambda: len(hellos) == 3 and answered and laptop.connected) if back else await asyncio.sleep(1.0)
+        finally:
+            await laptop.disconnect()
+    # As the app: a close before the welcome is followed by another try, but where the app may not try again.
+    assert (len(hellos), [frame["id"] for frame in answered], laptop.connected) == ((3, ["op-1"], False) if back else (2, [], False))
+
+
 DATA = os.urandom(CHUNK_BYTES * 5 // 2)  # three chunks, the last one short
 
 

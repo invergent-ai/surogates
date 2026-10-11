@@ -584,17 +584,19 @@ class FakeLaptop:
                 self.connected = False
                 self._dropped()
                 if ws is not self._left and ws.close_code not in FINAL:
-                    self._tasks.append(asyncio.create_task(self._back(ws)))
+                    self._tasks.append(asyncio.create_task(self._back()))
             self._heard.set()
 
-    async def _back(self, ws: ClientConnection) -> None:
-        """Connect again after the server closed *ws*, as the app does, until it is back or replaced."""
-        while self._ws is ws:
+    async def _back(self) -> None:
+        """Connect again after the server closed the link, as the app does: whatever ended a try, before its
+        welcome or at its handshake, but a close the app may not try again after or a scene's own disconnect."""
+        while not self.connected and self._left is None:
             await asyncio.sleep(self.ping_interval_s)
             try:
                 await self.connect()
             except (OSError, ConnectionClosed, InvalidHandshake):
-                continue
+                if self._ws is not None and self._ws.close_code in FINAL:
+                    return
 
     def _dropped(self) -> None:
         """As the app when its link ends: the user's own requests still asked about, or waiting for their
