@@ -2596,6 +2596,93 @@ async def test_a_restore_that_meets_an_undo_holding_the_projects_lock_is_told_to
     assert (await restored(api, project, (await history_of(api, project, "Report.docx"))[1]))["applied"] == ["Report.docx"]
 
 
+async def test_an_act_past_as_many_as_the_api_runs_at_once_waits_its_patience_then_is_told_to_try_again(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    (tmp_path / "second").mkdir()
+    other, _, other_pods, _, other_row = await a_landing(api, tmp_path / "second", "printf ' by A' >> Report.docx")
+    monkeypatch.setattr(undo_module, "ACTS_AT_ONCE", 1)
+    monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 1.0)
+    apply, writing, go = BucketHistory.apply, asyncio.Event(), asyncio.Event()
+
+    async def slow(self, path, before, after):
+        writing.set()
+        await go.wait()
+        return await apply(self, path, before, after)
+
+    monkeypatch.setattr(BucketHistory, "apply", slow)
+    undoing = asyncio.create_task(undone(api, project, landing=str(row.id)))
+    await asyncio.wait_for(writing.wait(), 30)
+    # Another project's lock is free, but each act holds one of the api's connections for its whole run.
+    refused = await undone(api, other, status=409, landing=str(other_row.id))
+    assert refused["detail"] == "Other changes are being restored or undone right now. Try again in a moment."
+    assert (other_pods.project / "Report.docx").read_bytes() == REPORT_BY_A
+    go.set()
+    assert (await asyncio.wait_for(undoing, 60))["applied"] == ["Report.docx"]
+    assert (await undone(api, other, landing=str(other_row.id)))["applied"] == ["Report.docx"]
+
+
+async def test_an_act_whose_store_stops_answering_a_write_lets_the_copy_go_as_the_try_ends(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    monkeypatch.setattr(api.app.state.settings.saga, "default_step_timeout", 2)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    storage, upload, hung = api.app.state.storage, api.app.state.storage.upload, []
+
+    async def never_answers_once(bucket_name, key, source, **condition):
+        if key.endswith("/Report.docx") and not hung:
+            hung.append(key)
+            await asyncio.sleep(3600)
+        return await upload(bucket_name, key, source, **condition)
+
+    monkeypatch.setattr(storage, "upload", never_answers_once)
+    # The apply's try ends, and its write with it: the put-back finds the copy free, and nothing was written.
+    async with asyncio.timeout(60):
+        refused = await undone(api, project, status=409, landing=str(row.id))
+    assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
+    assert hung and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
+    async with asyncio.timeout(60):
+        assert (await undone(api, project, landing=str(row.id)))["applied"] == ["Report.docx"]
+    assert [r.saga_state for r in await rows_of(api, project) if r.kind == "undo"] == ["compensated", "completed"]
+
+
+async def test_the_api_lets_its_database_go_at_shutdown_only_once_the_acts_under_way_ended_or_their_time_did(monkeypatch):
+    from fastapi import FastAPI
+
+    from surogates.api import app as app_module
+
+    went: list[str] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            went.append("the database")
+
+    monkeypatch.setattr(app_module, "async_engine_from_settings", lambda settings: Engine())
+    monkeypatch.setattr(app_module, "_install_shared_runtime_plumbing", lambda app, settings: None)
+    monkeypatch.setattr(app_module, "_install_browser_api_dependencies", lambda app, settings: None)
+
+    def acting(seconds: float) -> asyncio.Future:
+        async def act() -> None:
+            await asyncio.sleep(seconds)
+            went.append("an act")
+
+        act_ = asyncio.ensure_future(act())
+        undo_module._ACTS.add(act_)
+        act_.add_done_callback(undo_module._ACTS.discard)
+        return act_
+
+    acting(0.3)
+    async with app_module.lifespan(FastAPI()):
+        pass
+    assert went == ["an act", "the database"]
+    # One that goes on past the most an act takes is cut as a kill cuts it: the next lock holder settles what it left.
+    went.clear()
+    monkeypatch.setattr(undo_module, "ENDING_PATIENCE", 0.2)
+    late = acting(3600)
+    async with asyncio.timeout(5), app_module.lifespan(FastAPI()):
+        pass
+    assert went == ["the database"]
+    late.cancel()
+
+
 async def test_a_computers_landing_left_running_is_none_of_the_clouds_to_wait_on_or_settle(api, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
     files = [{"path": "Report.docx", "before": None, "after": blob_of(b"x"), "merged": True}]

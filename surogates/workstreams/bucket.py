@@ -310,10 +310,18 @@ class _Room:
 
 
 class BucketHistory:
-    """A project's history in its bucket, for the api."""
+    """A project's history in its bucket, for the api.
 
-    def __init__(self, storage: Any, bucket: str, prefix: str, clone: Path, bounds: Bounds = Bounds()) -> None:
+    *within* is the seconds a try of a landing's step is given: an action
+    on the copy goes on past its try, to its end, but no further than that
+    from when it began (:meth:`_held`).
+    """
+
+    def __init__(
+        self, storage: Any, bucket: str, prefix: str, clone: Path, bounds: Bounds = Bounds(), *, within: float | None = None,
+    ) -> None:
         self.storage, self.bucket, self.prefix, self.clone, self.bounds = storage, bucket, prefix, clone, bounds
+        self.within = within
         # Within steady(): whether the copy was brought to the bucket's history since it began, and what the
         # real files were found to take, by key.
         self._steady = self._brought_in = False
@@ -339,7 +347,7 @@ class BucketHistory:
             self._steady, self._brought_in, self._taking = False, False, {}
 
     @classmethod
-    def of(cls, storage: Any, master: Any, settings: Any = None) -> BucketHistory:
+    def of(cls, storage: Any, master: Any, settings: Any = None, *, within: float | None = None) -> BucketHistory:
         """The history of the project whose master is *master*: its workspace prefix's ``_history/``.
 
         *settings* are the api's for its copies (``Settings.history``); none, the defaults.
@@ -348,9 +356,10 @@ class BucketHistory:
         prefix = boundary_workspace_prefix(master.config, master, master.id)
         key = hashlib.sha256(f"{bucket}/{prefix}".encode()).hexdigest()[:16]
         if settings is None:
-            return cls(storage, bucket, prefix, CLONES / key)
+            return cls(storage, bucket, prefix, CLONES / key, within=within)
         bounds = Bounds(settings.packs_bound, settings.file_bound, settings.copies_bound, settings.copy_idle)
-        return cls(storage, bucket, prefix, (Path(settings.copies_path) if settings.copies_path else CLONES) / key, bounds)
+        clones = Path(settings.copies_path) if settings.copies_path else CLONES
+        return cls(storage, bucket, prefix, clones / key, bounds, within=within)
 
     async def held(self, blobs: Iterable[str | None]) -> set[str]:
         """Which of *blobs*, versions of files, the project's history still holds: the others were pruned."""
@@ -707,14 +716,24 @@ class BucketHistory:
         while it waits begins nothing.  Once it has the copy its work ends
         in its own time, though its request leaves: what it began to write
         is never left half made with the copy let go under it, and
-        whoever has the copy next finds what it wrote.
+        whoever has the copy next finds what it wrote.  But never past the
+        copy's *within* from when it was asked for: a landing's next try,
+        or the lock holder after it, takes a try to have ended there.  Past
+        it, it is stopped, as a kill stops it, and said to have been.
         """
+        until = None if self.within is None else asyncio.get_running_loop().time() + self.within
         hold = _alone(self.clone, patient=patient)
         await hold.__aenter__()
 
         async def to_its_end() -> T:
+            bound = asyncio.timeout_at(until)
             try:
-                return await work()
+                async with bound:
+                    return await work()
+            except TimeoutError as exc:
+                if not bound.expired():
+                    raise
+                raise Slow(f"an action on the project's history took longer than {self.within:.0f}s") from exc
             finally:
                 await hold.__aexit__(None, None, None)
 

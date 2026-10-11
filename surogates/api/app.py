@@ -20,6 +20,7 @@ from surogates.session.store import SessionStore
 from surogates.storage.backend import create_backend
 from surogates.browser.profiles import BrowserProfileStore
 from surogates.tenant.credentials import CredentialVault
+from surogates.workstreams.undo import acts_ended
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # -- shutdown ---------------------------------------------------------
     logger.info("Surogates API shutting down")
+    # A Restore or an Undo runs to its end though its request left: each under way ends before the database goes.
+    await acts_ended()
     await _shutdown_shared_runtime_plumbing(app)
     await app.state.redis.aclose()
     await engine.dispose()

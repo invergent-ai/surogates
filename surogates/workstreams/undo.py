@@ -8,8 +8,10 @@ saga, as a thread's turn's is in its pod
 project's history (:class:`~surogates.workstreams.bucket.BucketHistory`),
 and by a landing's own rules:
 
-- it runs under the project's lock, waited for a while at most: a person
-  waits on it, and is told to try again in a moment past that;
+- it runs under the project's lock, waited for a while at most, and in
+  one of the few turns the api gives landings by you at once, each
+  holding a connection of its pool: a person waits on both, and is told to
+  try again in a moment past that;
 - the landings left running are settled first, a thread's or another
   landing by you, as every lock holder settles them; one that may still be
   alive is not waited out, and the person is told to try again;
@@ -30,14 +32,19 @@ since by you, by another thread or by a routine, is left as it is and named,
 with who changed it: never written over.
 
 A Restore or an Undo runs to its end, though who asked for it leaves: a
-landing is never left half made for a request's sake.
+landing is never left half made for a request's sake, and the api's
+shutdown waits for it, as long as one is planned to take.  Each action
+on the api's copy of the history ends with the try of the step it is,
+as the fence another lock holder waits out takes it to.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
@@ -54,6 +61,7 @@ from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, said
 from surogates.workstreams.history import (
     HISTORY_OFF,
+    LOCK_POLL,
     UNDOABLE,
     ProjectBusy,
     changed_since,
@@ -102,6 +110,17 @@ UNLANDED = "This file cannot be restored: the project's history keeps no file of
 UNTAKEN = "This file cannot be restored here: a folder of its name is there, or a file where its folder would be."
 #: The landings by you under way, each kept until done: none is cut short with the request that began it.
 _ACTS: set[asyncio.Future] = set()
+#: The landings by you this process runs at once: each holds one of the api's pooled connections, its project's
+#: lock's, for its whole run, of the ten the api keeps by default.  One past them waits as for its project's lock,
+#: within the same patience, then is told to try again.
+ACTS_AT_ONCE = 4
+CROWDED = "Other changes are being restored or undone right now. Try again in a moment."
+#: The landings by you that have one of those turns now.
+_TURNS: set[object] = set()
+#: How long the api's shutdown waits for the landings by you under way: the most one is planned to take, its wait
+#: for the lock and its time under it.  One still under way past that is cut as a kill cuts it, and the next lock
+#: holder settles what it left.
+ENDING_PATIENCE = LOCK_PATIENCE + LOCK_BUDGET_MS / 1000
 
 #: What a landing by you lands, once your edits are picked up: given the copy and ``main`` as the pickup
 #: left it, the applies, each ``{path, before, after}``; the files it leaves as they are, each ``{path, by}``;
@@ -343,6 +362,27 @@ async def _by_you(
     return await asyncio.shield(acting)
 
 
+async def acts_ended() -> None:
+    """Wait for the landings by you under way to end, for :data:`ENDING_PATIENCE` at most: what the api's shutdown waits for."""
+    if _ACTS:
+        await asyncio.wait(set(_ACTS), timeout=ENDING_PATIENCE)
+
+
+@contextlib.asynccontextmanager
+async def _turn(until: float) -> AsyncIterator[None]:
+    """One of this process's turns for a landing by you, waited for until *until*, by the clock that keeps it: refused after."""
+    while len(_TURNS) >= ACTS_AT_ONCE:
+        if time.monotonic() >= until:
+            raise Refused(CROWDED)
+        await asyncio.sleep(LOCK_POLL)
+    turn = object()
+    _TURNS.add(turn)
+    try:
+        yield
+    finally:
+        _TURNS.discard(turn)
+
+
 async def _act(
     state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide, announce: UUID,
 ) -> dict:
@@ -350,14 +390,17 @@ async def _act(
     master = await state.session_store.get_session(project.master_session_id)
     if await over_history_cap(state.storage, master):
         raise Refused(HISTORY_OFF)
-    place = BucketHistory.of(state.storage, master, state.settings.history)
+    # Each action on the copy ends with its try: the fence another lock holder waits out takes a try to end there.
+    place = BucketHistory.of(state.storage, master, state.settings.history, within=state.settings.saga.default_step_timeout)
     you = {"name": str(user_id), "email": f"user:{user_id}@surogate"}
     audit = [["Surogate-Project", str(project.id)], ["Surogate-Agent", str(project.agent_id)], ["Surogate-User", str(user_id)]]
     picked: list[str] = []
     answer: dict | None = None
     refused: Refused | None = None
+    # A turn of this process's, then the project's lock, both within one patience: a person waits on them.
+    until = time.monotonic() + LOCK_PATIENCE
     try:
-        async with project_lock(session_factory, project.id, patience=LOCK_PATIENCE) as held:
+        async with _turn(until), project_lock(session_factory, project.id, patience=max(0.0, until - time.monotonic())) as held:
             # The lock's holder alone moves the history: the copy is brought to it once, not once a file.
             with place.steady():
                 try:
@@ -368,6 +411,8 @@ async def _act(
                     refused = exc
     except ProjectBusy as exc:
         raise Refused(BUSY) from exc
+    except Refused:
+        raise
     except Exception as exc:
         if answer is None and refused is None:
             logger.warning("A %s by you in project %s did not start", kind, project.id, exc_info=True)

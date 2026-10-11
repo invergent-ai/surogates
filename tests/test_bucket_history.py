@@ -422,6 +422,39 @@ async def test_a_folder_beside_the_copies_that_is_no_copy_is_never_removed_or_co
     assert not idle.clone.exists() and not (copies / ".gone-0a1b2c3d").exists()
 
 
+async def test_an_action_on_the_copy_goes_on_past_its_try_to_its_bound_and_no_further_and_lets_the_copy_go(
+    tmp_path, storage, project, monkeypatch,
+):
+    landed(tmp_path, project, "saga:1", {"notes.txt": b"v2 notes\n"})
+    history = BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / "clone", within=0.5)
+    cut: list[bool] = []
+
+    async def never_answers(*args, **more):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cut.append(True)
+            raise
+
+    monkeypatch.setattr(storage, "upload", never_answers)
+    request = json.dumps({"action": "apply", "path": "notes.txt", "before": blob_of(b"v2 notes\n"), "after": blob_of(b"v1 notes\n")})
+    # Its try ends at its timeout, as a saga's step's does: the action goes on, shielded, to its bound and is stopped there.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(history.execute("api", "_history", request), 0.1)
+    async with asyncio.timeout(3), module._alone(history.clone, patient=True):
+        assert cut == [True]
+    # Waited for, it answers that it was stopped, in words.
+    assert "error" in json.loads(await history.execute("api", "_history", request)) and cut == [True, True]
+    assert (project / "notes.txt").read_bytes() == b"v2 notes\n"
+    # A store's own time running out, within the bound, is the store's to say.
+
+    async def times_out(*args, **more):
+        raise TimeoutError("the store did not answer")
+
+    monkeypatch.setattr(storage, "stat", times_out)
+    assert json.loads(await history.execute("api", "_history", request)) == {"error": "the store did not answer"}
+
+
 async def test_a_copy_asked_again_was_used_just_now_however_long_ago_it_was_made(tmp_path, storage, project):
     landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
     copies = tmp_path / "api"
