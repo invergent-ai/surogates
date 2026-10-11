@@ -3609,6 +3609,59 @@ return 1;`, FIRST)).toBe(1);
       expect(hits).toEqual([]);
     }, 60_000);
 
+    it("closes the running browser whole where its clear of a port that turned fails partway: the next chat's tab is in a browser launched after, cleared before anything acted in it", async () => {
+      const [FIRST, NEXT] = ["chat-first", "chat-next"];
+      host.forwards([at], doorPath(), KEY, [[at, "t1"]]);
+      const [a, kept] = [session(), session()];
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` }, FIRST)).ok?.title).toBe("Chat page");
+      expect(await script(a, `localStorage.setItem("kept", "first"); return "written";`, FIRST)).toBe("written");
+      // A tab elsewhere, so the browser runs on once the former page closes, and the clear goes on to the port's storage.
+      expect((await op(kept, "browser.navigate", { url: "http://fixture.test/" }, FIRST)).ok?.title).toBe("Fixture");
+      const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+      // The clear's line to the browser fails, once: the former page is closed by then, and nothing of the port is cleared.
+      const line = context.newCDPSession.bind(context);
+      Object.assign(context, { newCDPSession: () => {
+        Object.assign(context, { newCDPSession: line });
+        return Promise.reject(new Error("the clear's line failed"));
+      } });
+      host.forwards([at], doorPath(), KEY, [[at, "t2"]]);
+      const b = session();
+      expect((await op(b, "browser.navigate", { url: `http://localhost:${at}/` }, NEXT)).ok?.title).toBe("Chat page");
+      const next = await (host as unknown as { running: Promise<BrowserContext> }).running;
+      expect(next).not.toBe(context);
+      expect(context.pages()).toEqual([]);
+      expect(await script(b, `return localStorage.getItem("kept");`, NEXT)).toBeNull();
+      expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t2" });
+      expect(hits).toEqual([]);
+    }, 60_000);
+
+    it("closes a browser at its launch where its clear of a port that turned fails, before anything acts in it: the next launch clears it", async () => {
+      const [FIRST, NEXT] = ["chat-first", "chat-next"];
+      host.forwards([at], doorPath(), KEY, [[at, "t1"]]);
+      const a = session();
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` }, FIRST)).ok?.title).toBe("Chat page");
+      expect(await script(a, `localStorage.setItem("kept", "first"); return "written";`, FIRST)).toBe("written");
+      // The port turns while no browser runs; the next launch's clear fails, once.
+      await host.close();
+      host = hostWith();
+      host.forwards([at], doorPath(), KEY, [[at, "t2"]]);
+      const failing = host as unknown as { clearTurned: (...args: unknown[]) => Promise<void> };
+      const clear = failing.clearTurned.bind(host);
+      failing.clearTurned = () => {
+        failing.clearTurned = clear;
+        return Promise.reject(new Error("the clear failed"));
+      };
+      const b = session();
+      expect((await op(b, "browser.evaluate", { code: `return localStorage.getItem("kept");` }, NEXT)).error?.type).toBe("browser");
+      await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+      expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t1" });
+      // The next launch clears it before its first operation acts.
+      expect((await op(b, "browser.navigate", { url: `http://localhost:${at}/` }, NEXT)).ok?.title).toBe("Chat page");
+      expect(await script(b, `return localStorage.getItem("kept");`, NEXT)).toBeNull();
+      expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t2" });
+      expect(hits).toEqual([]);
+    }, 60_000);
+
     it("asks nobody and carries nothing when its user, holding the browser, goes to a port not allowed: the tab is shown the proxy's own page, which says what the port is", async () => {
       const a = session();
       expect((await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1")).ok?.opened).toBe(true);
