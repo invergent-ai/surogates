@@ -13,7 +13,8 @@ import asyncio
 import re
 import stat
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +27,7 @@ from surogates.devices.workspace import DeviceOperationError
 from surogates.governance.events import saga_start_event
 from surogates.governance.saga import SagaOrchestrator
 from surogates.governance.saga.compensator import STOP_LEFT_IN_COPY, STOP_LEFT_LANDED, WHY_NOT_TAKEN_BACK
+from surogates.harness import tool_exec
 from surogates.harness.loop_context_replay import worker_note
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.session.events import EventType
@@ -332,6 +334,24 @@ async def test_a_stop_by_its_user_puts_the_threads_copy_back_to_where_its_turn_s
     assert await status_of(api, thread) == "paused" and asked(computer, "land") == []
     # A Stop that took everything back says nothing more than that it stopped.
     assert "error_title" not in await what_the_stop_said(api, thread) and await what_the_master_heard(api, thread) == []
+
+
+async def test_a_stop_of_a_thread_on_its_computer_sets_up_no_pod_for_its_undo(api, computer, monkeypatch):
+    _, _, thread = await begun_with_copy(api, computer)
+    copy = computer.app.places.copy(str(thread.id))
+    worker = a_worker(api, monkeypatch, thread, [EDIT, calling(("memory", {"action": "add", "content": "x"})), _final_response("Done.")],
+                      during=stopped_by_its_user(api, thread))
+    # A worker with pods to give: the undo of a thread on its computer asks for none, its snapshots being in its copy there.
+    pool = SimpleNamespace(
+        ensure=AsyncMock(side_effect=RuntimeError("no pod")), destroy_for_session=AsyncMock(), holds_copy=lambda key: False,
+        copy_fresh=lambda key: False,
+    )
+    worker._sandbox_pool = pool
+    monkeypatch.setattr(tool_exec, "_build_session_sandbox_spec", AsyncMock(return_value=SimpleNamespace()))
+    await worker.wake(thread.id)
+    tool_exec._build_session_sandbox_spec.assert_not_awaited()
+    pool.ensure.assert_not_awaited()
+    assert (copy / "Report.docx").read_bytes() == b"PK report v1" and await undone(api, thread) == ("completed", {})
 
 
 async def test_each_stopped_turn_takes_its_own_snapshots_and_its_undo_puts_back_its_own_work(api, computer, monkeypatch):
