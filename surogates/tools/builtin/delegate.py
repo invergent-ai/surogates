@@ -678,13 +678,17 @@ async def _poll_child_completion(
                     "events": events,
                 }
             if event.type == EventType.SESSION_FAIL.value:
+                from surogates.harness.loop_context_replay import _listed
+
                 reason = (event.data or {}).get("reason", "unknown")
-                # A failed helper's files may be half made: they stay in the history, apart.
+                # A failed helper's files may be half made: they stay in the history, apart. Each name on the
+                # result's one line, as a report names a thread's files: the pod's names are data.
                 left = (event.data or {}).get("left")
+                named = _listed([{"label": path} for path in left]) if left else ""
                 return {
                     "status": "failed",
                     "reason": f"Child session failed: {reason}" + (
-                        f". Its changes to {', '.join(left)} were kept apart, not brought into this copy" if left else ""
+                        f". Its changes to {named} were kept apart, not brought into this copy" if left else ""
                     ),
                 }
 

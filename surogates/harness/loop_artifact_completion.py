@@ -1647,7 +1647,9 @@ class ArtifactCompletionMixin:
         )
         error = f"{reason}: {data}" if data else reason
         if left:
-            error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
+            # A helper's: each name on its thread's one line, as a report names a thread's files: the pod's names are data.
+            named = _listed([{"label": path} for path in left])
+            error += f". Its changes to {named} were kept apart, not brought into the thread's copy"
         elif kept_there:
             # Each name on the master's one line, as a report names a thread's files: the computer's names are data.
             named = _listed([{"label": path} for path in kept_there])
