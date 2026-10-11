@@ -807,8 +807,9 @@ def test_every_code_the_folders_history_has_and_every_action_it_takes_is_one_thi
     # Its ten, and none it says to a person alone: the guest's and the app's own are beside them.
     assert history_codes() == HISTORY_CODES - {"no_answer", "not_an_answer"}
     # A thread's history steps and its snapshots, as the app passes them on: none is asked that the history
-    # does not take, and the history takes none that is not asked and checked here.
-    assert set(local_history._ACTIONS) == ACTIONS["history"] | {"snapshot", "restore"}
+    # does not take, and the history takes none that is not asked and checked here but a copy's letting go,
+    # which the app alone asks, and its gate refuses from the server (desktop/src/history/kinds.ts).
+    assert set(local_history._ACTIONS) == ACTIONS["history"] | {"snapshot", "restore", "close"}
 
 
 class Folder:

@@ -350,32 +350,35 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
       const { dev, ino } = statSync(folder);
       journal.bindings.add({ root, nonce: `nonce-${root}`, folder, dev, ino, boot: BOOT_ID, mode: "free", boundAt: Date.now(), history: root });
     }
-    executor = new VmExecutor({
-      bindingOf: (root) => journal.bindings.get(root), dataDir: data, cacheDir: join(dir, "cache", "surogate"),
-      env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 60_000, user: "u1",
-      spawnHost: () => {
-        const host = forkHost();
-        let lands = false;
-        host.onExit(() => {
-          if (lands) landers.gone += 1;
-        });
-        return {
-          ...host,
-          send: (message) => {
-            if (message.type === "start") {
-              starts.push(message);
-              lands = message.landing !== undefined;
-              if (lands) landers.started += 1;
-            }
-            host.send(message);
-          },
-        };
-      },
-      vm: {
-        perform: (operation, stop) => vm.perform(operation, stop), teardown: (root) => vm.teardown(root), onProcesses: (listener) => vm.onProcesses(listener),
-        onAsk: (listener) => vm.onAsk(listener), history: (request, stop) => vm.history(request, stop), unplace: (place) => vm.unplace(place),
-      },
-    });
+    executor = executorOf(60_000);
+  });
+
+  // The app's executor on the one guest, as the app makes it at each start, its hosts going after *idleMs* with nothing to do.
+  const executorOf = (idleMs: number) => new VmExecutor({
+    bindingOf: (root) => journal.bindings.get(root), dataDir: data, cacheDir: join(dir, "cache", "surogate"),
+    env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs, user: "u1",
+    spawnHost: () => {
+      const host = forkHost();
+      let lands = false;
+      host.onExit(() => {
+        if (lands) landers.gone += 1;
+      });
+      return {
+        ...host,
+        send: (message) => {
+          if (message.type === "start") {
+            starts.push(message);
+            lands = message.landing !== undefined;
+            if (lands) landers.started += 1;
+          }
+          host.send(message);
+        },
+      };
+    },
+    vm: {
+      perform: (operation, stop) => vm.perform(operation, stop), teardown: (root) => vm.teardown(root), onProcesses: (listener) => vm.onProcesses(listener),
+      onAsk: (listener) => vm.onAsk(listener), history: (request, stop) => vm.history(request, stop), unplace: (place) => vm.unplace(place),
+    },
   });
 
   afterAll(async () => {
@@ -456,6 +459,40 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
     expect(await did(ONE, "read", { key: key("Report.md"), max_bytes: null })).toEqual(data64("# Report\n\nTotals: 47\n\nTidied by A.\n"));
     expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Budget.csv", "Report.md", "notes"]);
     expect(existsSync(kept()) ? readdirSync(kept()) : []).toEqual([]);
+  });
+
+  it("let a copy go once its thread is idle, where its branch holds all of it, and make it again from its branch at the thread's next operation", async () => {
+    // The app started again, its hosts going soon after their last operation.
+    await executor.stop();
+    executor = executorOf(400);
+    const place = join(data, "history", keyOf(folder));
+    // The second thread made a folder history leaves out: its copy stays, as its commands may need it again.
+    await command(TWO, "mkdir -p node_modules && echo 1 > node_modules/x.js");
+    // The first thread's harness keeps its results in its copy: they wait beside the copies while the copy is let go.
+    await command(ONE, "mkdir -p .surogates-results && echo 'a long result' > .surogates-results/call-1.txt");
+    await until(() => !existsSync(copyOf(ONE)), 60_000);
+    expect(readFileSync(join(place, "waiting", ONE, ".surogates-results", "call-1.txt"), "utf8")).toBe("a long result\n");
+    // Its repository stays, and its next operation has the copy made again from its branch, inside its turn.
+    expect(readdirSync(join(place, "clones")).sort()).toEqual([ONE, TWO].sort());
+    expect(await did(ONE, "read", { key: key("Report.md"), max_bytes: null })).toEqual(data64("# Report\n\nTotals: 47\n\nTidied by A.\n"));
+    expect(await command(ONE, "cat .surogates-results/call-1.txt")).toMatchObject({ output: "a long result\n" });
+    await until(() => !existsSync(copyOf(ONE)), 60_000);
+    expect(readFileSync(join(copyOf(TWO), "node_modules", "x.js"), "utf8")).toBe("1\n");
+  });
+
+  it("let a deleted thread's copy go as an idle one's is, and leave its repository, the folder, its history and the other thread as they are", async () => {
+    const place = join(data, "history", keyOf(folder));
+    expect(await did(ONE, "read", { key: key("A.md"), max_bytes: null })).toEqual(data64("notes of A\n"));
+    // As the binder retires a root: the tools are told while its binding is still there.
+    executor.retired(ONE);
+    journal.bindings.retire(ONE);
+    await until(() => !existsSync(copyOf(ONE)), 60_000);
+    // Its repository stays, with all it did, until this computer can show a person what was set aside of it.
+    expect(existsSync(join(place, "clones", ONE, "HEAD"))).toBe(true);
+    expect(await operate(ONE, "read", { key: key("A.md"), max_bytes: null })).toMatchObject({ error: { type: "folder_unavailable" } });
+    expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Budget.csv", "Report.md", "notes"]);
+    expect(await did(TWO, "read", { key: key("A.md"), max_bytes: null })).toEqual(data64("notes of A\n"));
+    expect(await did(TWO, "history", { action: "changed" }, "land:t3")).toEqual({ paths: [] });
   });
 });
 
