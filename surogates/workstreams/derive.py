@@ -61,8 +61,8 @@ class ThreadFacts:
     #: Its latest event of each of ``LATEST_TYPES``, and its turn summaries:
     #: every one, or only the newest when its files are not read.
     events: tuple[Any, ...]
-    #: Its landings that recorded files, each ``{id, files}`` as its
-    #: ``workstream_history`` row has them; none when its files are not read.
+    #: Its landings that recorded files, wherever it works, each ``{id, files, on_computer}``
+    #: as its ``workstream_history`` row has them; none when its files are not read.
     landings: tuple[dict[str, Any], ...] = ()
     #: The files its next turn is told to redo (``landing.redo_files``).
     redoing: frozenset[str] = frozenset()
@@ -220,7 +220,8 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
     ``redoing`` while the thread's next turn is to redo it.  A resolved
     thread takes no next turn, so none of its files is being redone.  A
     file a landing deleted is no file to open: it is left out.  So is one
-    whose path the shell would refuse as a label.
+    whose path the shell would refuse as a label.  An Undo is of the
+    cloud's files: a file landed in a folder on a computer is never undone.
     """
     redoing = facts.redoing if group != "resolved" else frozenset()
     left_out: list[dict[str, Any]] = []
@@ -234,10 +235,8 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
             seen.add(path)
             if (f["merged"] and f["after"] is None) or units(path) > SHELL_LIMITS["label"]:
                 continue
-            mark = (
-                ("undone" if (landing["id"], path) in facts.undone else "landed") if f["merged"]
-                else ("redoing" if path in redoing else "not_merged")
-            )
+            undone = not landing.get("on_computer") and (landing["id"], path) in facts.undone
+            mark = ("undone" if undone else "landed") if f["merged"] else ("redoing" if path in redoing else "not_merged")
             (landed if f["merged"] else left_out).append(
                 {"kind": "file", "label": path, "ref": path, "thread_id": str(facts.id), "landing": mark}
             )
@@ -248,9 +247,12 @@ def _landing_id(facts: ThreadFacts) -> str | None:
     """The thread's newest landing with a file still as it landed: what its card's Undo undoes; None when it has none.
 
     A file it left out is no change of its, and one an Undo put back is
-    one it has no more to undo.
+    one it has no more to undo.  Never a landing in a folder on a
+    computer: it is undone on that computer, which no route reaches yet.
     """
     for landing in sorted(facts.landings, key=lambda row: row["id"], reverse=True):
+        if landing.get("on_computer"):
+            continue
         if any(f["merged"] and (landing["id"], f["path"]) not in facts.undone for f in landing["files"]):
             return str(landing["id"])
     return None

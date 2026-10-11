@@ -428,6 +428,17 @@ def test_a_thread_with_every_landing_undone_or_none_has_none_for_its_card_to_und
     assert derive_thread(facts(IDLE, "Draft A", 5, "completed"), now=NOW)["landing_id"] is None
 
 
+def test_a_threads_landing_on_a_computer_marks_its_files_and_is_none_for_its_card_to_undo():
+    landed = {**landing(40, ("plan.md", None, "p1", True), ("notes.md", "n1", "n2", False)), "on_computer": True}
+    given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(landed,), redoing=frozenset({"notes.md"}))
+    assert marks(given) == [("notes.md", "redoing"), ("plan.md", "landed")]
+    assert derive_thread(given, now=NOW)["landing_id"] is None
+    # An Undo is of the cloud's files: one that names the row marks none of a computer's.
+    assert marks(replace(given, undone=frozenset({(40, "plan.md")}))) == [("notes.md", "redoing"), ("plan.md", "landed")]
+    # The same landing in the cloud is its card's to undo.
+    assert derive_thread(replace(given, landings=({**landed, "on_computer": False},)), now=NOW)["landing_id"] == "40"
+
+
 def undo_row(row_id: int, undoes: list[int], *paths: str) -> dict:
     """An Undo's row as the store reads it: the rows it undid, and each file it put back."""
     return {"id": row_id, "undoes": undoes, "files": [{"path": p, "before": "x", "after": "y", "merged": True} for p in paths]}
