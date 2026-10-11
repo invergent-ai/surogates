@@ -494,6 +494,7 @@ describe("what the guest answered, checked on this computer", () => {
   // Each action's answers, as the history gives them (local_history.py, _ACTIONS).
   const answers: Record<string, unknown[]> = {
     open: [{ copy: "made" }, { copy: "moved" }, { copy: "kept" }, { copy: "kept", set_asides: [BLOB, ID] }],
+    close: [{ copy: "removed" }, { copy: "kept" }, { copy: "gone" }],
     changed: [{ paths: ["Report.docx", "new folder/a b.md"] }, { paths: [] }],
     snapshot: [{ hash: ID }],
     restore: [{}],
@@ -535,6 +536,13 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("fetch", { ok: { main: ID, landing: null, hidden: false, packs: 0, missing: [], has_saga: true } }))
       .toEqual({ ok: { main: ID, landing: null, hidden: false, packs: 0, missing: [] } });
     expect(checked("restore", { ok: { commit: ID } })).toEqual({ ok: {} });
+  });
+
+  it("takes what became of a copy its root let go, and nothing else for it", () => {
+    expect(checked("close", { ok: { copy: "removed", set_aside_folders: [ID], planted: "x" } }, THREAD)).toEqual({ ok: { copy: "removed" } });
+    for (const answer of [{ copy: "made" }, { copy: "moved" }, { copy: "REMOVED" }, { copy: null }, {}, { removed: true }, null, "removed"]) {
+      expect(checked("close", { ok: answer }), JSON.stringify(answer)).toEqual(NOT_AN_ANSWER);
+    }
   });
 
   // What of a thread's own the place keeps set aside whole, each by its folder's name there: the order it was set
