@@ -394,6 +394,42 @@ async def test_a_redo_the_users_limit_holds_back_waits_for_the_next_message(api,
     assert await store.get_events(thread.id, types=[EventType.SESSION_FAIL]) == []
 
 
+async def test_a_file_whose_redo_the_users_limit_holds_back_is_not_being_redone_until_its_thread_is_sent_on(api, monkeypatch, pods):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+
+    async def marks() -> list[tuple[str, str | None]]:
+        return [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]]
+
+    # Its wake is to come.
+    assert await marks() == [("Report.docx", "redoing"), ("a.md", "landed")]
+    seen: list = []
+
+    async def the_redo_turn(session, *_, **__):
+        seen.append(await marks())
+
+    async def refused(session, content):
+        return "You have used this month's allowance."
+
+    # Held back, and again: the thread rests, and nothing redoes the file meanwhile, though its next turn will.
+    for _ in range(2):
+        harness = a_waking_thread_harness(api, monkeypatch, pool, the_redo_turn)
+        harness._admit_turn = refused
+        await harness.wake(thread.id)
+    assert seen == [] and (await store.get_session(thread.id)).status == "completed"
+    assert await marks() == [("Report.docx", "not_merged"), ("a.md", "landed")]
+    assert await landing_module.redo_files(store, thread.id) == {"Report.docx"}
+    # Marked once, and named on the project's stream, so that a client reads the row again.
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO_HELD])) == 1
+    assert EventType.HISTORY_REDO_HELD in STREAM_TYPES
+    # Your next message sends it on: the turn under way is the redo's.
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    await a_waking_thread_harness(api, monkeypatch, pool, the_redo_turn).wake(thread.id)
+    assert seen == [[("Report.docx", "redoing"), ("a.md", "landed")]]
+
+
 @pytest.mark.parametrize("command, skill", [
     ("/report-writer Edit the report.", "report-writer"), ("/deep-research Q3 revenue by region", None),
 ], ids=["skill", "deep-research"])
