@@ -1025,6 +1025,45 @@ async def test_a_landing_settled_as_escalated_puts_its_own_thread_in_waiting_on_
     assert (await row_of(api, project, first))["reason"] == "files"
 
 
+async def test_a_settled_landing_whose_master_could_not_be_told_is_settled_and_told_once_by_the_next_lock_holder(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    rows_stand(monkeypatch, "exact")
+    await edited(pool, first, "for f in a b c; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply c.md")
+    # Its put-back of b.md finds it changed, before it puts a.md back: the row says so as it goes on.
+    (pods.project / "b.md").write_text("saved by you over the half landing")
+    emit = SessionStore.emit_event
+    refused: list = []
+
+    async def the_report_is_refused_once(store, session_id, event_type, data, *args, **kwargs):
+        if event_type == EventType.WORKER_COMPLETE and data.get("recovered") and not refused:
+            refused.append(data["saga"])
+            raise ConnectionError("the database went away")
+        return await emit(store, session_id, event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(SessionStore, "emit_event", the_report_is_refused_once)
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    # Nobody was told, so the row is not given up as told: it is the next lock holder's, and B's turn landed nothing.
+    [killed] = await rows(api, first)
+    assert (refused, killed.saga_state, await rows(api, second)) == ([killed.saga_id], "running", [])
+    assert not (pods.project / "B.md").exists()
+    await edited(pool, second, "echo by B again > B.md")
+    await ends(api, pool, second)
+    [killed] = await rows(api, first)
+    assert killed.saga_state == "escalated" and (pods.project / "B.md").read_text() == "by B again\n"
+    # Told once, the file that could not be put back named, and one wait on you however many tries it took.
+    [report] = [r for r in await reports(api, master) if r.get("recovered")]
+    assert (report["saga"], [f["ref"] for f in report["files"]]) == (killed.saga_id, ["b.md"])
+    [wait] = await waits_of(api, first)
+    assert (wait.title, wait.payload["files"]) == ("Couldn't finish landing my changes", ["b.md"])
+
+
 async def test_a_redo_turns_files_are_sorted_each_from_its_own_clash():
     you = {"kind": "you"}
 

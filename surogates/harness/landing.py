@@ -39,7 +39,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 from uuid import UUID
@@ -961,6 +961,7 @@ def _row_files(saga: Any, state: str) -> list[dict]:
 async def _settle(
     saga: Any, orchestrator: SagaOrchestrator, sandbox_pool: Any, owner: str, row: _Row,
     *, recovered: bool = False, held: Any = None, at_issue: list[str] | None = None,
+    tell: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     """End a landing that did not finish: ``completed`` with its commit when it pushed, else put back.
 
@@ -979,6 +980,9 @@ async def _settle(
     first, as a landing's applies do.  *at_issue* takes the files of a
     landing left ``escalated`` that a person has to check: those whose
     put-back failed, or, for one given up, each that may have been written.
+    *tell* is awaited before the row reads ``escalated``: where it raises,
+    the row is left running, and the next settle puts back again what
+    failed (``saga_of``) and tells.
 
     A ``completed`` whose row could not be written is the caller's to tell
     from one that was, by the row's own ``state``.
@@ -1040,12 +1044,16 @@ async def _settle(
                 it.state, it.error = StepState.COMPENSATION_FAILED, _GONE
                 if at_issue is not None:
                     at_issue.append(it.arguments["path"])
+        if tell is not None:
+            await tell()
         await _written(row.write, tries=2, state="escalated")
         return "escalated", None
     failed = await _put_back(saga, orchestrator, sandbox_pool, owner, row, recovered=recovered, held=held)
     if at_issue is not None:
         at_issue.extend(it.arguments["path"] for it in failed if it.tool_name == "history.apply")
     state = "escalated" if failed else "compensated"
+    if failed and tell is not None:
+        await tell()
     await _written(row.write, tries=2, state=state)
     return state, None
 
@@ -1072,14 +1080,16 @@ async def _tell_escalated(
     it is ``recovered``, names the files *at_issue*, each to check, and
     says ``gone`` when the history had nothing to put back.  The master
     reads it at its next wake, and the thread's row shows it as the
-    thread's last report.  It is written once a landing, by its ``saga``:
-    a row whose ``escalated`` could not be written is settled again by
-    each later lock holder, and told by the first.  As best it can: the
-    row reads ``escalated`` whatever comes of the telling.  Both are
-    written through a store that has *redis*, so the project's stream
-    names them as it names a turn's own.  *waits* words the wait the
-    thread puts on you, given the thread and the files: where None, as
-    the cloud's files are worded (:func:`waiting_on_you`).
+    thread's last report.  It is written once a landing, by its ``saga``,
+    and so is the wait its thread puts on you: told again, each is
+    written only where it was not.  A telling that fails raises: a cloud
+    settle tells before its row reads ``escalated``, so its row is
+    settled again by the next lock holder, and told by the first that can
+    (:func:`settle_running`).  Both are written through a store that has
+    *redis*, so the project's stream names them as it names a turn's own.
+    *waits* words the wait the thread puts on you, given the thread and
+    the files: where None, as the cloud's files are worded
+    (:func:`waiting_on_you`).
     """
     from sqlalchemy import select
 
@@ -1087,32 +1097,44 @@ async def _tell_escalated(
     from surogates.session.store import SessionStore
     from surogates.workstreams.store import WorkstreamStore
 
-    try:
-        store = SessionStore(session_factory, redis)
-        thread = await store.get_session(thread_id)
-        named = await WorkstreamStore(session_factory).get_thread(thread_id)
-        if thread.parent_id is None:
-            return
+    store = SessionStore(session_factory, redis)
+    thread = await store.get_session(thread_id)
+    named = await WorkstreamStore(session_factory).get_thread(thread_id)
+    if thread.parent_id is None:
+        return
+
+    async def written(session_id: Any, event_type: EventType) -> bool:
         async with session_factory() as db:
-            told = await db.scalar(select(Event.id).where(
-                Event.session_id == thread.parent_id, Event.type == EventType.WORKER_COMPLETE.value,
-                Event.data["saga"].astext == saga.saga_id,
-            ).limit(1))
-        if told is not None:
-            return
+            return await db.scalar(select(Event.id).where(
+                Event.session_id == session_id, Event.type == event_type.value, Event.data["saga"].astext == saga.saga_id,
+            ).limit(1)) is not None
+
+    if await written(thread.parent_id, EventType.WORKER_COMPLETE):
+        return
+    if not await written(thread_id, EventType.INBOX_ACTION_REQUIRED):
         # Its thread waits on you over those files, whichever lock holder found it so.
-        await store.emit_event(
-            thread_id, EventType.INBOX_ACTION_REQUIRED,
-            waits(thread, at_issue) if waits is not None else waiting_on_you(at_issue, escalated=True),
-        )
-        await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
-            "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
-            "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in at_issue],
-            "landing": "escalated", "recovered": True, "saga": saga.saga_id,
-            **({"gone": True} if any(s.error == _GONE for s in saga.steps) else {}),
+        await store.emit_event(thread_id, EventType.INBOX_ACTION_REQUIRED, {
+            **(waits(thread, at_issue) if waits is not None else waiting_on_you(at_issue, escalated=True)), "saga": saga.saga_id,
         })
+    await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
+        "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
+        "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in at_issue],
+        "landing": "escalated", "recovered": True, "saga": saga.saga_id,
+        **({"gone": True} if any(s.error == _GONE for s in saga.steps) else {}),
+    })
+
+
+async def _told(session_factory: Any, row: Any, saga: Any, at_issue: list[str], redis: Any) -> None:
+    """Tell *row*'s thread's master of its landing a settle leaves ``escalated`` (:func:`_tell_escalated`), or say loudly
+    that it could not, and raise: its row is left running, for the next lock holder to settle and tell."""
+    try:
+        await _tell_escalated(session_factory, row.thread_id, saga, at_issue, redis=redis)
     except Exception:
-        logger.warning("Could not tell the master of thread %s that its landing escalated", thread_id, exc_info=True)
+        logger.error(
+            "Could not tell the master of thread %s that landing %s escalated: its row is left running, for the next lock "
+            "holder to settle and tell", row.thread_id, row.saga_id, exc_info=True,
+        )
+        raise
 
 
 async def _written(write: Any, *, tries: int = 1, **values: Any) -> None:
@@ -1146,8 +1168,11 @@ async def settle_running(
     ``escalated``: no one can put its files back, and no later landing
     waits on it.  A landing left ``escalated`` here, given up or with a
     put-back that failed, is reported to its thread's master, whichever
-    lock holder found it so.  *waited* takes the rows found quiet for the
-    fence, whose landings are dead whatever comes of settling them.
+    lock holder found it so, before its row says so: a report that could
+    not be made leaves the row running, and raises, so that the next
+    holder settles it again and tells it.  *waited* takes the rows found
+    quiet for the fence, whose landings are dead whatever comes of
+    settling them.
 
     A landing it completes had pushed before its worker died: its row's
     files are written only now, with no turn's end to announce them.  The
@@ -1180,13 +1205,12 @@ async def settle_running(
         orchestrator.adopt(saga)
         at_issue: list[str] = []
         written = _Row(session_factory, row.id, saga)
+        tell = partial(_told, session_factory, row, saga, at_issue, redis) if row.thread_id is not None else None
         state, _ = await _settle(
-            saga, orchestrator, sandbox_pool, owner, written, recovered=True, held=held, at_issue=at_issue,
+            saga, orchestrator, sandbox_pool, owner, written, recovered=True, held=held, at_issue=at_issue, tell=tell,
         )
         done.add(row.id)
         logger.warning("Settled landing %s of %s, left running: %s", row.saga_id, row.thread_id, state)
-        if state == "escalated" and row.thread_id is not None:
-            await _tell_escalated(session_factory, row.thread_id, saga, at_issue, redis=redis)
         if state == "completed" and written.state != "completed":
             raise LandingUnsettled(f"landing {row.saga_id} pushed, and its row could not be written")
         if state == "completed" and (row.thread_id or master) is not None:
