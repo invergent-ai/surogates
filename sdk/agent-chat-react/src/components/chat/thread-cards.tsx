@@ -16,7 +16,7 @@ import type {
 import { Button } from "../ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 
-const GROUP_LABEL: Record<AgentChatThreadRow["group"], string> = {
+const GROUP_LABEL: Record<NonNullable<AgentChatThreadRow["group"]>, string> = {
   waiting: "Waiting on you",
   working: "Working",
   idle: "Idle",
@@ -170,13 +170,15 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
   const { adapter, projectId, onFileSelect, onOpenSession, threadRows } = useAgentChatAdapterContext();
   const undoKey = `undo:${worker.id}`;
   const undone = useCardStarts(adapter).get(undoKey);
-  // A project's thread shows its row, live; any other worker what its reports said.
+  // A project's thread shows its row, live; any other worker what its reports said. A group this card has no
+  // words for, as a later server or another adapter may send, is no word, and a row with no files names none.
   const live = threadRows?.[worker.id];
+  const group = live?.group && Object.hasOwn(GROUP_LABEL, live.group) ? live.group : undefined;
   const status = live
-    ? GROUP_LABEL[live.group] + (live.progress ? ` · ${live.progress.done}/${live.progress.total}` : "")
+    ? [group && GROUP_LABEL[group], live.progress && `${live.progress.done}/${live.progress.total}`].filter(Boolean).join(" · ")
     : STATE_LABEL[worker.state];
   const statusLine = live ? live.statusLine : statusLineOf(worker.report);
-  const files = live ? live.files : worker.files;
+  const files = live ? (Array.isArray(live.files) ? live.files : []) : worker.files;
   // What its computer set aside of its work: nothing brings it back yet, so it is said, with no button.
   const setAside = setAsideLines(live?.setAside);
   const name = worker.title ?? firstLine(worker.goal);
@@ -195,7 +197,7 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
     }
   };
   return (
-    <div data-testid="worker-card" data-group={live?.group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
+    <div data-testid="worker-card" data-group={group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-medium text-foreground" title={name ?? undefined}>
           <bdi>{name}</bdi>

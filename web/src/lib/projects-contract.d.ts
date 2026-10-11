@@ -1,6 +1,10 @@
 // The wire types of projects and their threads, as the spec freezes them (Section 12,
 // "The wire types, and ProjectsSource"). A declaration file, so that desktop/, whose rootDir
 // is src, can import it, as it imports the bridge contract. projects.ts re-exports it.
+//
+// What a client takes of a thread's row, a Library's file or a project that it does not know, as a later server may
+// send: a value it does not know is unknown, a file of a kind it does not know is left out, and a field it does not
+// know is ignored. It never refuses the row or the list for one, and never throws on one.
 
 export type ThreadGroup = "waiting" | "working" | "idle" | "resolved";
 export type Tier = "basic" | "pro" | null; // null: the agent's own tier
@@ -19,14 +23,16 @@ export interface Project extends ProjectSummary {
   goal: string | null;
   instructions: string;
   masterSessionId: string;
-  coordinatorTier: Tier;
-  threadTier: Tier;
+  // "unknown": a tier this client does not know, as a later server may send. Shown as unknown, and never sent back.
+  coordinatorTier: Tier | "unknown";
+  threadTier: Tier | "unknown";
 }
 
 export type ThreadPlace =
   | { kind: "cloud" }
   | { kind: "device"; deviceId: string; deviceName: string; online: boolean };
 
+// A row lists only its files of a kind its client knows.
 export interface ProducedFile {
   kind: "file" | "artifact";
   label: string;
@@ -42,18 +48,19 @@ export interface ProducedFile {
 export interface ThreadRow {
   id: string; // the thread's session id
   title: string;
-  group: ThreadGroup;
-  reason: "question" | "approval" | "failed" | "computer" | "files" | null; // files: a file that did not merge, or a landing that escalated
+  group: ThreadGroup | null; // null: a group this client does not know
+  // files: a file that did not merge, or a landing that escalated; null: none, or one this client does not know
+  reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
-  files: ProducedFile[];
+  files: ProducedFile[]; // none where a row lists none
   // The thread's newest landing with a file still as it landed: what its card's Undo undoes; null when it has
   // none. Optional, as a file's landing is: a page built before file history serves none.
   landingId?: string | null;
   // What its computer set aside of a thread's work there, out of its copy; null when it set none aside, and for a
   // thread in the cloud. Optional: a page built before set-asides were told serves none.
   setAside?: SetAside | null;
-  place: ThreadPlace;
+  place: ThreadPlace | null; // null: a place this client does not know, or none
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
@@ -77,11 +84,11 @@ export interface SetAside {
 
 export interface LibraryEntry {
   path: string;
-  origin: "added" | "produced";
+  origin: "added" | "produced" | null; // null: an origin this client does not know
   threadId: string | null; // set when produced
   size: number | null;
   updatedAt: string | null;
-  place: ThreadPlace; // a local thread's files are on its computer
+  place: ThreadPlace | null; // a local thread's files are on its computer; null: a place this client does not know, or none
 }
 
 // Who changed a file: the signed-in user, a thread by its title, or a routine by its name.
@@ -130,9 +137,10 @@ export interface ProjectsSource {
   list(): Promise<ProjectSummary[]>;
   get(projectId: string): Promise<Project>;
   create(input: { name: string; goal?: string; instructions?: string }): Promise<Project>;
+  // A tier is sent only as one the client knows: one it shows as unknown is left as it is.
   update(
     projectId: string,
-    patch: Partial<Pick<Project, "name" | "icon" | "goal" | "instructions" | "coordinatorTier" | "threadTier">>,
+    patch: Partial<Pick<Project, "name" | "icon" | "goal" | "instructions"> & { coordinatorTier: Tier; threadTier: Tier }>,
   ): Promise<Project>;
   archive(projectId: string): Promise<void>;
   // With threadId, that thread's row alone: none once it is no longer one of the project's threads.

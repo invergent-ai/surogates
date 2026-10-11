@@ -16,11 +16,11 @@ interface ProjectRow {
   working: number;
 }
 
-// A thread, as Section 12's ThreadRow has it.
+// A thread, as Section 12's ThreadRow has it. A group or a place the app does not know is none.
 interface ThreadRow {
   id: string;
   title: string;
-  group: "waiting" | "working" | "idle" | "resolved";
+  group: "waiting" | "working" | "idle" | "resolved" | null;
   reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
@@ -30,7 +30,7 @@ interface ThreadRow {
     kept: Array<{ kind: "copy" | "repository" | "place"; at: string }>; snapshots: number;
     gone: Array<{ kind: "copy" | "repository" | "place"; at: string }>;
   } | null;
-  place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean };
+  place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean } | null;
   updatedAt: string;
 }
 
@@ -54,8 +54,9 @@ interface State {
   failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
   overview: {
     threads: ThreadRow[]; // last active first
+    // An origin or a place the app does not know is none.
     library: Array<{
-      path: string; origin: "added" | "produced"; threadId: string | null; size: number | null; updatedAt: string | null;
+      path: string; origin: "added" | "produced" | null; threadId: string | null; size: number | null; updatedAt: string | null;
       place: ThreadRow["place"];
     }>;
     routines: Array<{ name: string; scheduleDisplay: string }>;
@@ -202,8 +203,8 @@ function renderCards(): void {
 }
 
 const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`;
-const kilobytes = (size: number | null): string => (size === null ? "" : ` · ${Math.max(1, Math.round(size / 1024))} KB`);
-// A row's state in a word or two: what it waits for, or else its group.
+const kilobytes = (size: number | null): string[] => (size === null ? [] : [`${Math.max(1, Math.round(size / 1024))} KB`]);
+// A row's state in a word or two: what it waits for, or else its group; neither, for a group the app does not know.
 const REASONS = { question: "Question", approval: "Approval", failed: "Failed", computer: "Computer away", files: "Files" } as const;
 const GROUPS = { waiting: "Waiting", working: "Working", idle: "Idle", resolved: "Resolved" } as const;
 let tab = "threads";
@@ -254,7 +255,7 @@ function openHistory(path: string): void {
 
 // A thread's, or a file's, on the user's computer: a laptop, titled with the computer and whether it is online.
 function laptop(place: ThreadRow["place"]): HTMLElement[] {
-  if (place.kind !== "device") return [];
+  if (place?.kind !== "device") return [];
   const mark = element("span", "place");
   mark.title = `On ${place.deviceName}, which is ${place.online ? "online" : "offline"}`;
   mark.append(icon("laptop", 14));
@@ -264,19 +265,20 @@ function laptop(place: ThreadRow["place"]): HTMLElement[] {
 // A row reads its thread in the pane; the pane's Open shows it in the centre. One that waits on
 // the user over a file that did not merge opens that file's History, the first such file's.
 function threadRow(thread: ThreadRow): HTMLElement {
-  const unmerged = thread.reason === "files" && thread.place.kind === "cloud"
+  const unmerged = thread.reason === "files" && thread.place?.kind === "cloud"
     ? thread.files.find((file) => file.kind === "file" && file.landing === "not_merged") : undefined;
   const row = button("thread", "", () => void (unmerged ? openHistory(unmerged.ref) : shell.read(thread.id)));
-  row.dataset.group = thread.group;
+  if (thread.group) row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
   row.dataset.focus = `thread:${thread.id}`;
   const title = element("span", "title", thread.title);
   title.append(...laptop(thread.place));
-  const words = thread.reason ? REASONS[thread.reason] : GROUPS[thread.group];
+  const words = thread.reason ? REASONS[thread.reason] : thread.group ? GROUPS[thread.group] : null;
   const side = element("span", "side");
   if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
   side.append(aged(element("span", "age"), thread.updatedAt));
-  row.append(element("span", "mark"), title, element("span", "status", thread.statusLine ? `${words} · ${thread.statusLine}` : words), side);
+  const status = [words, thread.statusLine].filter((part) => part).join(" · ");
+  row.append(element("span", "mark"), title, element("span", "status", status), side);
   const aside = asideChip(thread.setAside);
   if (thread.files.length > 0 || aside) {
     const chips = element("span", "chips");
@@ -424,8 +426,9 @@ function renderOverview(state: State): void {
   byId("thread-count").textContent = String(waiting);
   byId("thread-count").hidden = waiting === 0;
   // Waiting on you always shows, and says what it holds while it holds nothing; the other groups show only with threads.
+  // A thread in a group the app does not know is listed among the idle ones.
   for (const section of document.querySelectorAll<HTMLElement>(".section")) {
-    const rows = threads.filter((found) => found.group === section.dataset.group);
+    const rows = threads.filter((found) => (found.group ?? "idle") === section.dataset.group);
     section.hidden = rows.length === 0 && section.dataset.group !== "waiting";
     const desc = section.querySelector<HTMLElement>(":scope > .desc");
     if (desc) desc.hidden = rows.length > 0;
@@ -435,19 +438,17 @@ function renderOverview(state: State): void {
   const titles = new Map(threads.map((found) => [found.id, found.title]));
   const library = [...(overview?.library ?? [])].sort((a, b) => Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
   byId("files").replaceChildren(...library.map((entry) => {
-    const item = listRow(
-      entry.path,
-      `${entry.origin === "added" ? "Added by you" : `From ${titles.get(entry.threadId ?? "") ?? "a thread"}`}${kilobytes(entry.size)}`,
-      entry.updatedAt ? ago(entry.updatedAt) : "",
-      entry.place,
-    );
-    // A file on a computer has its History there.
-    return entry.place.kind === "cloud" ? historyRow(entry.path, item) : item;
+    // Where it came from, where that is a way the app knows.
+    const from = entry.origin === "added" ? ["Added by you"]
+      : entry.origin === "produced" ? [`From ${titles.get(entry.threadId ?? "") ?? "a thread"}`] : [];
+    const item = listRow(entry.path, [...from, ...kilobytes(entry.size)].join(" · "), entry.updatedAt ? ago(entry.updatedAt) : "", entry.place);
+    // A file on a computer has its History there, and one in a place the app does not know none it can show.
+    return entry.place?.kind === "cloud" ? historyRow(entry.path, item) : item;
   }));
   byId("no-files").hidden = library.length > 0;
   // The files that are gone, under those that are there. One that is among the files again, as one its
   // user uploaded anew and no landing has recorded yet, is not gone.
-  const there = new Set(library.filter((entry) => entry.place.kind === "cloud").map((entry) => entry.path));
+  const there = new Set(library.filter((entry) => entry.place?.kind === "cloud").map((entry) => entry.path));
   const deleted = (overview?.deleted.files ?? []).filter((version) => !there.has(version.path));
   byId("deleted-files").replaceChildren(...deleted.map((version) => historyRow(
     version.path, listRow(version.path, what(version, "deleted"), ago(version.at)), "deleted",

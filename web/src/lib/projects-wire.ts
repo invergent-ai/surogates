@@ -7,29 +7,44 @@
 
 import type {
   ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, SetAside, SetAsideWhole,
-  ThreadPlace, ThreadRow, UndoResult,
+  ThreadGroup, ThreadPlace, ThreadRow, Tier, UndoResult,
 } from "./projects-contract";
 
-/** A thread's row as GET /v1/workstreams/{id}/threads answers it. */
+/** A place as the routes answer it: the cloud, or a computer. A later server may send another kind. */
+type PlaceResponse = { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean };
+
+/**
+ * A thread's row as GET /v1/workstreams/{id}/threads answers it. A later server may send a group, a reason, a file's
+ * kind or a place not known here, and the page takes each as unknown (projects-contract.d.ts).
+ */
 export interface ThreadRowResponse {
   id: string;
   title: string;
-  group: ThreadRow["group"];
-  reason: ThreadRow["reason"];
+  group?: ThreadGroup | string | null; // none, or no group's name: taken as unknown too
+  reason: ThreadRow["reason"] | string;
   status_line: string | null;
   progress: { done: number; total: number } | null;
   // A server from before file history sends a file with no landing, and a later one may send a mark not known here.
-  files: { kind: "file" | "artifact"; label: string; ref: string; thread_id: string; landing?: ProducedFile["landing"] }[];
+  files?: {
+    kind: ProducedFile["kind"] | string; label: string; ref: string; thread_id: string; landing?: ProducedFile["landing"] | string;
+  }[];
   landing_id?: string | null;
   // A server from before set-asides were told sends none.
   set_aside?: { kept: SetAsideWhole[]; snapshots: number; gone: SetAsideWhole[] } | null;
-  place: { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean };
+  place?: PlaceResponse | { kind: string };
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
 }
 
 const MARKS: readonly unknown[] = ["landed", "redoing", "not_merged", "undone"];
+const GROUPS: readonly unknown[] = ["waiting", "working", "idle", "resolved"];
+const REASONS: readonly unknown[] = ["question", "approval", "failed", "computer", "files"];
+const KINDS: readonly unknown[] = ["file", "artifact"];
+const ORIGINS: readonly unknown[] = ["added", "produced"];
+const TIERS: readonly unknown[] = [null, "basic", "pro"];
+
+const fields = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
 
 /** A file's mark when it is one the page knows, else none: the file is served either way. */
 function markOf(landing: unknown): NonNullable<ProducedFile["landing"]> | null {
@@ -57,21 +72,33 @@ function setAsideOf(aside: unknown): SetAside | null {
   return found.kept.length > 0 || found.snapshots > 0 || found.gone.length > 0 ? found : null;
 }
 
-function placeOf(place: ThreadRowResponse["place"]): ThreadPlace {
-  return place.kind === "cloud"
-    ? { kind: "cloud" }
-    : { kind: "device", deviceId: place.device_id, deviceName: place.device_name, online: place.online };
+/** A place the page knows, or none: a kind it does not know, or a computer whose fields it cannot read, is no place it names. */
+function placeOf(place: unknown): ThreadPlace | null {
+  const { kind, device_id, device_name, online } = fields(place);
+  if (kind === "cloud") return { kind: "cloud" };
+  return kind === "device" && typeof device_id === "string" && typeof device_name === "string" && typeof online === "boolean"
+    ? { kind: "device", deviceId: device_id, deviceName: device_name, online }
+    : null;
+}
+
+/** A row's files of a kind the page knows, each with its mark where it knows it; the others left out, and none where the row lists none. */
+function filesOf(files: unknown): ProducedFile[] {
+  return (Array.isArray(files) ? files : []).flatMap((file) => {
+    const { kind, label, ref, thread_id, landing } = fields(file);
+    return KINDS.includes(kind) ? [{ kind, label, ref, threadId: thread_id, landing: markOf(landing) } as ProducedFile] : [];
+  });
 }
 
 export function threadRowOf(row: ThreadRowResponse): ThreadRow {
   return {
     id: row.id,
     title: row.title,
-    group: row.group,
-    reason: row.reason,
+    // A group or a reason the page does not know is none: the row is served all the same.
+    group: GROUPS.includes(row.group) ? (row.group as ThreadGroup) : null,
+    reason: REASONS.includes(row.reason) ? (row.reason as ThreadRow["reason"]) : null,
     statusLine: row.status_line,
     progress: row.progress,
-    files: row.files.map(({ kind, label, ref, thread_id, landing }) => ({ kind, label, ref, threadId: thread_id, landing: markOf(landing) })),
+    files: filesOf(row.files),
     // A landing that is no id the routes give is none: the card offers no Undo of it.
     landingId: typeof row.landing_id === "string" && row.landing_id !== "" ? row.landing_id : null,
     setAside: setAsideOf(row.set_aside),
@@ -98,8 +125,9 @@ export interface ProjectResponse extends ProjectSummaryResponse {
   goal: string | null;
   instructions: string;
   master_session_id: string;
-  coordinator_tier: Project["coordinatorTier"];
-  thread_tier: Project["threadTier"];
+  // A later server may send a tier not known here: the page takes it as unknown.
+  coordinator_tier: Tier | string;
+  thread_tier: Tier | string;
 }
 
 export function projectSummaryOf(project: ProjectSummaryResponse): ProjectSummary {
@@ -114,14 +142,16 @@ export function projectSummaryOf(project: ProjectSummaryResponse): ProjectSummar
   };
 }
 
+const tierOf = (tier: unknown): Project["coordinatorTier"] => (TIERS.includes(tier) ? (tier as Tier) : "unknown");
+
 export function projectOf(project: ProjectResponse): Project {
   return {
     ...projectSummaryOf(project),
     goal: project.goal,
     instructions: project.instructions,
     masterSessionId: project.master_session_id,
-    coordinatorTier: project.coordinator_tier,
-    threadTier: project.thread_tier,
+    coordinatorTier: tierOf(project.coordinator_tier),
+    threadTier: tierOf(project.thread_tier),
   };
 }
 
@@ -146,17 +176,18 @@ export function projectChangeOf(change: ProjectChange): Record<string, unknown> 
 /** A file of a project's Library, as GET /v1/workstreams/{id}/library lists it. */
 export interface LibraryEntryResponse {
   path: string;
-  origin: LibraryEntry["origin"];
+  // A later server may send an origin or a place not known here: the page takes either as unknown.
+  origin: NonNullable<LibraryEntry["origin"]> | string;
   thread_id: string | null;
   size: number | null;
   updated_at: string | null;
-  place: ThreadRowResponse["place"];
+  place?: ThreadRowResponse["place"];
 }
 
 export function libraryEntryOf(entry: LibraryEntryResponse): LibraryEntry {
   return {
     path: entry.path,
-    origin: entry.origin,
+    origin: ORIGINS.includes(entry.origin) ? (entry.origin as LibraryEntry["origin"]) : null,
     threadId: entry.thread_id,
     size: entry.size,
     updatedAt: entry.updated_at,

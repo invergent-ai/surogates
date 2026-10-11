@@ -46,7 +46,6 @@ const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 const time = (value: unknown): value is string => text(value, 40) && ISO_UTC.test(value) && !Number.isNaN(Date.parse(value));
 const count = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 1_000_000;
 const one = <T>(value: unknown, allowed: readonly T[]): value is T => allowed.includes(value as T);
-const tier = (value: unknown): value is Project["coordinatorTier"] => value === null || value === "basic" || value === "pro";
 const need = (ok: boolean): void => {
   if (!ok) throw new Unusable();
 };
@@ -62,28 +61,40 @@ function summaryOf(value: unknown): ProjectSummary {
   return { id, name, icon, createdAt, updatedAt, waiting, working } as ProjectSummary;
 }
 
+// A tier the app does not know, as a later agent's page may serve, is one it shows as unknown, never a project refused.
+const TIERS = [null, "basic", "pro"] as const;
+const tierOf = (value: unknown): Project["coordinatorTier"] => (one(value, TIERS) ? value : "unknown");
+
 function projectOf(value: unknown): Project {
   const { goal, instructions, masterSessionId, coordinatorTier, threadTier } = fields(value);
-  need((goal === null || text(goal, 16_000)) && text(instructions, 16_000) && named(masterSessionId) && tier(coordinatorTier) && tier(threadTier));
-  return { ...summaryOf(value), goal, instructions, masterSessionId, coordinatorTier, threadTier } as Project;
+  need((goal === null || text(goal, 16_000)) && text(instructions, 16_000) && named(masterSessionId));
+  return {
+    ...summaryOf(value), goal, instructions, masterSessionId, coordinatorTier: tierOf(coordinatorTier), threadTier: tierOf(threadTier),
+  } as Project;
 }
 
-function placeOf(value: unknown): ThreadPlace {
+// A place of a kind the app does not know, as a later agent's page may serve, and none, are no place it can name:
+// none, never a row refused. A computer's place is checked, as a row's own facts are.
+function placeOf(value: unknown): ThreadPlace | null {
   const { kind, deviceId, deviceName, online } = fields(value);
   if (kind === "cloud") return { kind };
-  need(kind === "device" && named(deviceId) && text(deviceName, 200) && typeof online === "boolean");
+  if (kind !== "device") return null;
+  need(named(deviceId) && text(deviceName, 200) && typeof online === "boolean");
   return { kind: "device", deviceId, deviceName, online } as ThreadPlace;
 }
 
 const MARKS = ["landed", "redoing", "not_merged", "undone"] as const;
+const FILE_KINDS = ["file", "artifact"] as const;
 
 // A file's mark is taken only when it is one the app knows. A page of an older agent serves none,
 // and a later one's may be new: either is no mark, never a row refused, so its projects still show
-// their threads.
-function fileOf(value: unknown): ProducedFile {
+// their threads. A file of a kind the app does not know is left out, as an entry set aside is; one of
+// a kind it knows is checked.
+function fileOf(value: unknown): ProducedFile[] {
   const { kind, label, ref, threadId, landing } = fields(value);
-  need(one(kind, ["file", "artifact"]) && text(label, 500) && text(ref, 4096) && named(threadId));
-  return { kind, label, ref, threadId, landing: one(landing, MARKS) ? landing : null } as ProducedFile;
+  if (!one(kind, FILE_KINDS)) return [];
+  need(text(label, 500) && text(ref, 4096) && named(threadId));
+  return [{ kind, label, ref, threadId, landing: one(landing, MARKS) ? landing : null } as ProducedFile];
 }
 
 // What a thread's computer set aside of its work, as a row says it. Taken as a file's mark is: an entry the app
@@ -101,27 +112,34 @@ function setAsideOf(value: unknown): SetAside | null {
   return found.kept.length > 0 || found.snapshots > 0 || found.gone.length > 0 ? found : null;
 }
 
-// A row of an agent older than this app names no landing for its card's Undo, and nothing set aside: that is none.
+const GROUPS = ["waiting", "working", "idle", "resolved"] as const;
+const REASONS = ["question", "approval", "failed", "computer", "files"] as const;
+const ORIGINS = ["added", "produced"] as const;
+
+// A row of an agent older than this app names no landing for its card's Undo, and nothing set aside: that is none;
+// and a row that lists no files has none. A group or a reason the app does not know, as a later agent's page may
+// serve, is none, never a row refused: the Overview lists its thread all the same.
 function threadOf(value: unknown): ThreadRow {
   const {
-    id, title, group, reason, statusLine, progress, files, landingId = null, setAside = null, place, createdAt, updatedAt, resolvedAt,
+    id, title, group, reason, statusLine, progress, files = [], landingId = null, setAside = null, place, createdAt, updatedAt, resolvedAt,
   } = fields(value);
   const { done, total } = fields(progress);
-  need(named(id) && text(title, 500) && one(group, ["waiting", "working", "idle", "resolved"])
-    && one(reason, ["question", "approval", "failed", "computer", "files", null]) && (statusLine === null || text(statusLine, 2_000))
+  need(named(id) && text(title, 500) && (statusLine === null || text(statusLine, 2_000))
     && (progress === null || (count(done) && count(total))) && (landingId === null || (text(landingId, 40) && landingId !== ""))
     && time(createdAt) && time(updatedAt) && (resolvedAt === null || time(resolvedAt)));
   return {
-    id, title, group, reason, statusLine, progress: progress === null ? null : { done, total }, files: listOf(files, 200, fileOf),
+    id, title, group: one(group, GROUPS) ? group : null, reason: one(reason, REASONS) ? reason : null, statusLine,
+    progress: progress === null ? null : { done, total }, files: listOf(files, 200, fileOf).flat(),
     landingId, setAside: setAsideOf(setAside), place: placeOf(place), createdAt, updatedAt, resolvedAt,
   } as ThreadRow;
 }
 
+// A file's origin the app does not know is none, never a Library refused.
 function entryOf(value: unknown): LibraryEntry {
   const { path, origin, threadId, size, updatedAt, place } = fields(value);
-  need(text(path, 4096) && one(origin, ["added", "produced"]) && (threadId === null || named(threadId))
+  need(text(path, 4096) && (threadId === null || named(threadId))
     && (size === null || (Number.isSafeInteger(size) && (size as number) >= 0)) && (updatedAt === null || time(updatedAt)));
-  return { path, origin, threadId, size, updatedAt, place: placeOf(place) } as LibraryEntry;
+  return { path, origin: one(origin, ORIGINS) ? origin : null, threadId, size, updatedAt, place: placeOf(place) } as LibraryEntry;
 }
 
 function routineOf(value: unknown): Routine {

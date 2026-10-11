@@ -137,7 +137,8 @@ export interface AgentChatThreadProposal {
 export interface AgentChatThreadRow {
   id: string;
   title: string;
-  group: "waiting" | "working" | "idle" | "resolved";
+  /** null: a group the adapter does not know, as a later server may send. The card says nothing of a group it does not know. */
+  group: "waiting" | "working" | "idle" | "resolved" | null;
   reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;

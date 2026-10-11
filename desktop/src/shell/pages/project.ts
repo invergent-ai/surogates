@@ -10,15 +10,15 @@ interface Shown {
   name: string;
   goal: string | null;
   instructions: string;
-  coordinatorTier: Tier;
-  threadTier: Tier;
+  coordinatorTier: Tier | "unknown"; // unknown: a tier the app does not know
+  threadTier: Tier | "unknown";
 }
 
 interface Fields {
   name: string;
   goal: string;
   instructions?: string;
-  coordinatorTier?: Tier;
+  coordinatorTier?: Tier; // none: shown as a tier the app does not know, and left as it was
   threadTier?: Tier;
 }
 
@@ -36,7 +36,9 @@ markTheme();
 
 let editing = false;
 const value = (id: string) => byId<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(id).value;
-const tier = (id: string): Tier => (value(id) === "basic" || value(id) === "pro" ? (value(id) as Tier) : null);
+// A tier the app does not know shows as another model: one its user leaves as it was is not sent.
+const tier = (id: string): Tier | undefined =>
+  value(id) === "basic" || value(id) === "pro" ? (value(id) as Tier) : value(id) === "unknown" ? undefined : null;
 
 async function render(): Promise<void> {
   const { editing: shown, project, refused } = await dialog.state();
