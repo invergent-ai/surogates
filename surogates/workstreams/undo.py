@@ -35,7 +35,9 @@ A Restore or an Undo runs to its end, though who asked for it leaves: a
 landing is never left half made for a request's sake, and the api's
 shutdown waits for it, as long as one is planned to take.  Each action
 on the api's copy of the history ends with the try of the step it is,
-as the fence another lock holder waits out takes it to.
+as the fence another lock holder waits out takes it to, once a write it
+had begun has ended: its put-back never reads a file a write it cut
+lands on after.
 """
 
 from __future__ import annotations

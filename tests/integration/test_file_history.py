@@ -2631,20 +2631,23 @@ async def test_an_act_past_as_many_as_the_api_runs_at_once_waits_its_patience_th
     assert (await undone(api, other, landing=str(other_row.id)))["applied"] == ["Report.docx"]
 
 
-async def test_an_act_whose_store_stops_answering_a_write_lets_the_copy_go_as_the_try_ends(api, monkeypatch, tmp_path):
+async def test_an_act_whose_store_stops_answering_lets_the_copy_go_as_the_try_ends(api, monkeypatch, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
     monkeypatch.setattr(api.app.state.settings.saga, "default_step_timeout", 2)
     monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
-    storage, upload, hung = api.app.state.storage, api.app.state.storage.upload, []
+    storage, stat, asked, hung = api.app.state.storage, api.app.state.storage.stat, [], []
 
-    async def never_answers_once(bucket_name, key, source, **condition):
-        if key.endswith("/Report.docx") and not hung:
-            hung.append(key)
-            await asyncio.sleep(3600)
-        return await upload(bucket_name, key, source, **condition)
+    async def the_applys_look_never_answers(bucket_name, key):
+        # The report is looked at by the pickup's look, then by the apply's check, which the store never answers.
+        if key.endswith("/Report.docx"):
+            asked.append(key)
+            if len(asked) == 2:
+                hung.append(key)
+                await asyncio.sleep(3600)
+        return await stat(bucket_name, key)
 
-    monkeypatch.setattr(storage, "upload", never_answers_once)
-    # The apply's try ends, and its write with it: the put-back finds the copy free, and nothing was written.
+    monkeypatch.setattr(storage, "stat", the_applys_look_never_answers)
+    # The apply's try ends, and its look with it: the put-back finds the copy free, and nothing was written.
     async with asyncio.timeout(60):
         refused = await undone(api, project, status=409, landing=str(row.id))
     assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
