@@ -2619,8 +2619,10 @@ def test_a_pruning_leaves_each_repository_in_the_place_whole_by_what_it_names_an
     connected(place)
     # What the repository set aside names is whole: its snapshot, on a commit no live thread names.
     assert git(aside, "show", f"{planned}:Plan.md") == "t3's plan" and git(store, "cat-file", "-t", first) == "commit"
-    # So is what t4 set aside, on its turn, which only a landing the window let go leads to.
+    # So is what t4 set aside, on its turn, which only a landing the window let go leads to.  The history keeps that turn:
+    # t4's repository holds none of it itself.
     assert git(t4.repo, "show", f"{aside_of_t4}:late.md") == "written after its turn was committed"
+    assert git(store, "cat-file", "-t", step["turn"]) == "commit" and step["turn"] not in held_here(t4.repo)
     # The version only its index named, t1 holds itself now.
     assert untold in held_here(t1.repo)
     assert subprocess.run(["git", f"--git-dir={store}", "cat-file", "-e", untold], env=HERMETIC).returncode != 0
