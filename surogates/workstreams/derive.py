@@ -420,8 +420,8 @@ def _messaged(latest: dict[str, Any]) -> int:
 
 
 def _redo_held(facts: ThreadFacts) -> bool:
-    """Whether the thread rests with its redo's wake held back by its user's limit (``history.redo_held``): until it
-    is sent on, nothing redoes the redo's files.
+    """Whether the thread rests with its redo's wake held back, by its user's limit or with ops unreachable
+    (``history.redo_held``): until it is sent on, nothing redoes the redo's files.
 
     Held until a turn of the model's has run since: a later redo comes
     only at the end of one, and a command's turn asks the model nothing.
