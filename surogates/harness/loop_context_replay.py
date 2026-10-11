@@ -203,7 +203,9 @@ _NOT_LANDED_HERE = {
     "unanswered": "its computer did not answer",
     "refused": "its computer refused a step of it: {code}",
     "too_large": "more of its files changed than one landing on a computer carries",
-    "yours_too_large": "the user changed more files in its folder since the folder's last landing than one landing can record",
+    "yours_too_large": (
+        "the user added, changed, moved or deleted more files in its folder since the folder's last landing than one landing can record"
+    ),
     "settling": (
         "a landing left unfinished in its folder had recorded, and the server could not write that down, "
         "so nothing lands there until it can"
@@ -221,9 +223,10 @@ _NOT_IN_ONE_LANDING = {
     "too_large": "The thread's work is in its copy on its computer, and lands once fewer of its files are changed",
     # The cause is the user's, and so is what can be done now: nothing in the folder lands until then.
     "yours_too_large": (
-        "The thread's work is in its copy on its computer. Nothing lands in that folder until the user's own changes there "
-        "can be recorded: for now the user can move some of the files they added to it out of it, or start a thread on a "
-        "folder inside it"
+        "The thread's work is in its copy on its computer. Nothing lands in that folder until fewer of the user's own changes "
+        "there wait to be recorded: for now the user can move some of the files they added out of it, or start a thread on a "
+        "folder inside it. A folder they renamed or moved lands in two turns: moved out of the folder, then back in once a "
+        "turn has ended"
     ),
 }
 #: What a report says its landing's helper found in its folder, left there by a landing that was cut short.

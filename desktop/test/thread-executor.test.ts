@@ -347,6 +347,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     expect(await executor.run(history({ action: "open" }, { invocationId: "open:turn-1" }), signal())).toEqual({ ok: { copy: "made" } });
     const steps: Array<[string, Record<string, unknown>]> = [
       ["changed", {}], ["fetch", { commits: [HASH], saga: "saga-1", since: null }], ["pickup", { author, trailers }],
+      ["picked", { pickup: HASH, after: "Photos/2026/IMG_009445.jpg" }],
       ["commit", { author, trailers, pickup: null }], ["record", { turn: HASH, applied: [], author, trailers, main: HASH, pickup: null, left: [] }],
       ["keep", { author, trailers, base: true }], ["forget", { saga: "saga-1", applied: [] }],
     ];

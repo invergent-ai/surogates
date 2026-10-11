@@ -638,8 +638,8 @@ async def test_more_changes_of_yours_than_one_landing_records_are_told_as_yours_
     [report] = await told(api, master)
     assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "yours_too_large")
     words = said(report)
-    assert "the user changed more files in its folder since the folder's last landing than one landing can record" in words
-    assert "move some of the files they added to it out of it, or start a thread on a folder inside it" in words
+    assert "the user added, changed, moved or deleted more files in its folder since the folder's last landing than one landing can record" in words
+    assert "for now the user can move some of the files they added out of it, or start a thread on a folder inside it" in words
     assert "of its files" not in words
     [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
     assert end.data["saved"] is False

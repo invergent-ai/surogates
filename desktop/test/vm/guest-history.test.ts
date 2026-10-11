@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { MAX_MESSAGE_CHARS } from "../../src/files/answers.js";
 import { type Context, perform } from "../../src/files/operations.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { Outcome } from "../../src/link/protocol.js";
@@ -500,8 +501,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     const picked = await said(ONE, "pickup", { author: YOU, trailers });
     expect(picked).toEqual({
       main: expect.stringMatching(/^[0-9a-f]{40}$/), commit: expect.stringMatching(/^[0-9a-f]{40}$/), packs: expect.any(Number),
-      picked_up: [{ path: "notes/old.txt", before: expect.stringMatching(/^[0-9a-f]{40}$/), after: null }],
+      picked_up: [{ path: "notes/old.txt", before: expect.stringMatching(/^[0-9a-f]{40}$/), after: null }], more: 0,
     });
+    // A part of its files from a file on: here all of them, as one answer names them; and none of a commit that is no pickup.
+    expect(await said(ONE, "picked", { pickup: picked.commit, after: "notes" })).toEqual({ picked_up: picked.picked_up, more: 0 });
+    expect(await code(ONE, "picked", { pickup: NO_ID, after: "notes" })).toBe("not_a_request");
     const turn = await said(ONE, "commit", { author: author(ONE), trailers, pickup: picked.commit });
     const changes = turn.changes as Change[];
     // The turn's deletion of it is a change with nothing to do: there is no file, before or after.
@@ -554,6 +558,35 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     expect(await said(ONE, "keep", { author: author(ONE), trailers: [["Surogate-Saga", "saga-3"]], base: false })).toEqual({
       commit: expect.stringMatching(/^[0-9a-f]{40}$/), not_taken: [],
     });
+  });
+
+  it("names your edits in parts when you added more files than one answer names, each part one answer, and moves nothing", async () => {
+    const photos = Array.from({ length: 12_000 }, (_unused, n) => `Photos/2026/IMG_${String(n).padStart(6, "0")}.jpg`);
+    mkdirSync(join(folder, "Photos", "2026"), { recursive: true });
+    for (const [n, path] of photos.entries()) writeFileSync(join(folder, path), `photo ${n}\n`);
+    try {
+      const trailers = [["Surogate-Saga", "saga-parts"]];
+      const answers = [await raw(ONE, "pickup", { author: YOU, trailers })];
+      const picked = ok(answers[0]!);
+      expect(picked.more).toBeGreaterThan(0);
+      let left = picked.more as number;
+      let named = picked.picked_up as Change[];
+      while (left > 0) {
+        answers.push(await raw(ONE, "picked", { pickup: picked.commit, after: named.at(-1)!.path }));
+        const part = ok(answers.at(-1)!);
+        expect((part.picked_up as Change[]).length + (part.more as number)).toBe(left);
+        named = [...named, ...(part.picked_up as Change[])];
+        left = part.more as number;
+      }
+      // Each answer fits one frame of the link; together they name each photo once, in order, as one you added.
+      expect(answers.length).toBe(2);
+      for (const answer of answers) expect(JSON.stringify(answer).length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
+      expect(named.map((change) => [change.path, change.before])).toEqual(photos.map((path) => [path, null]));
+      // Asked of the history's own, a pickup moves nothing: the folder's history is as the landing before left it.
+      expect(await said(ONE, "fetch", { saga: "saga-parts", since: null })).toMatchObject({ landing: null });
+    } finally {
+      rmSync(join(folder, "Photos"), { recursive: true, force: true });
+    }
   });
 
   it("answers a folder history cannot record, and a history that is not the platform's, each as this computer knows it", async () => {

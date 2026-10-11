@@ -440,6 +440,88 @@ def test_your_save_is_picked_up_as_yours_and_holds_the_threads_change(tmp_path, 
     ]
 
 
+def you_add_photos(folder: Path, many: int) -> list[str]:
+    """*many* photos you add to *folder*, named as a camera names them: their paths, in the order a pickup names files."""
+    photos = folder / "Photos" / "2026"
+    photos.mkdir(parents=True, exist_ok=True)
+    for n in range(many):
+        (photos / f"IMG_{n:06d}.jpg").write_bytes(b"\xff\xd8 photo %d" % n)
+    return [f"Photos/2026/IMG_{n:06d}.jpg" for n in range(many)]
+
+
+def parts_of(history: LocalHistory, picked: dict) -> list[list[dict]]:
+    """Each part a pickup's files are named in, its own answer's first: every part after it asked from where the last one ended."""
+    parts, left = [picked["picked_up"]], picked["more"]
+    while left:
+        part = history.picked(pickup=picked["commit"], after=parts[-1][-1]["path"])
+        # Each goes on from where the last ended, and says how many are left after it.
+        assert part["picked_up"] and len(part["picked_up"]) + part["more"] == left, part
+        parts.append(part["picked_up"])
+        left = part["more"]
+    return parts
+
+
+def test_a_pickup_of_more_files_than_one_answer_names_names_them_in_parts_each_file_once_in_order(tmp_path, folder, monkeypatch):
+    one = a_copy(tmp_path, folder)
+    photos = you_add_photos(folder, 40)
+    (folder / "notes.txt").write_text("your notes\n")
+    (folder / "Report.docx").unlink()
+    store, refs = tmp_path / "store", git(one.repo, "for-each-ref")
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", 1_000)
+    picked = one.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "pickup"]])
+    place = as_it_is(store)
+    parts = parts_of(one, picked)
+    assert len(parts) > 3
+    # Each part is at most what one answer names, in characters of its files as JSON spells them.
+    assert all(sum(len(json.dumps(entry)) + 2 for entry in part) <= 1_000 for part in parts)
+    # Together they are the pickup's files, each once and in order: your photos, the report you deleted, your notes.
+    named = [entry for part in parts for entry in part]
+    expected = []
+    for path in [*photos, "Report.docx", "notes.txt"]:
+        before = None if path in photos else git(one.repo, "rev-parse", f"refs/heads/main:{path}")
+        after = None if path == "Report.docx" else git(one.repo, "rev-parse", f"{picked['commit']}:{path}")
+        expected.append({"path": path, "before": before, "after": after})
+    assert named == expected
+    # A part asked from a file that is not one of them goes on from where that file would be.
+    assert one.picked(pickup=picked["commit"], after="Photos/2026/IMG_000038.jpz") == {"picked_up": named[39:], "more": 0}
+    # Its parts only read: nothing of the place changed since the pickup, and no ref moved.
+    assert as_it_is(store) == place and git(one.repo, "for-each-ref") == refs
+    # Where they fit one answer, the pickup's own names them all.
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", 1 << 20)
+    again = one.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:2"], ["Surogate-Kind", "pickup"]])
+    assert (again["picked_up"], again["more"]) == (named, 0)
+
+
+def test_a_part_of_a_pickup_names_one_file_at_least_and_never_more_than_an_answer_lists(tmp_path, folder, monkeypatch):
+    one = a_copy(tmp_path, folder)
+    photos = you_add_photos(folder, 7)
+    trailers = [["Surogate-Saga", "saga:1"], ["Surogate-Kind", "pickup"]]
+    # Fewer characters than any file's name takes: one file a part, so every part goes on from the last.
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", 10)
+    assert [[entry["path"] for entry in part] for part in parts_of(one, one.pickup(author=YOURS, trailers=trailers))] == [[p] for p in photos]
+    # However short their names, no more files than a list of an answer holds.
+    monkeypatch.setattr(local_history, "_PICKED_CHARS", 1 << 20)
+    monkeypatch.setattr(local_history, "HISTORY_CAP", 3)
+    assert [len(part) for part in parts_of(one, one.pickup(author=YOURS, trailers=trailers))] == [3, 3, 1]
+
+
+def test_a_part_of_a_pickup_is_asked_only_of_a_pickup_this_thread_made_and_from_a_file_of_the_folder(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "Summary.md").write_text("summary\n")
+    landing = land(one, "saga:0")["landing"]
+    you_add_photos(folder, 3)
+    picked = one.pickup(author=YOURS, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "pickup"]])
+    first = git(one.repo, "rev-list", "--max-parents=0", "refs/heads/main")
+    for pickup in ("f" * 40, first, landing):
+        # A commit this thread's repository does not hold, the folder's first, or a landing: none picked up your edits.
+        with refused("not_a_request", "it names no commit of this thread's with one parent"):
+            one.picked(pickup=pickup, after="Photos")
+    for after in ("../outside", "/etc/passwd", "", "a//b", "x/", None, 7):
+        with refused("not_a_request", "it names no file to go on from"):
+            one.picked(pickup=picked["commit"], after=after)
+    assert one.picked(pickup=picked["commit"], after="Photos/2026/IMG_000000.jpg") == {"picked_up": picked["picked_up"][1:], "more": 0}
+
+
 def test_a_clean_copy_moves_to_mains_tip_at_its_next_open_and_unlanded_work_stays(tmp_path, folder):
     one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
     (one.copy / "A.md").write_text("A's, landed\n")
@@ -1025,7 +1107,7 @@ def test_nothing_an_earlier_guest_left_among_a_threads_objects_is_read_as_one(tm
     assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").changed() == {"paths": ["Secret.md"]}
 
 
-@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "restore", "fetch", "pickup", "commit", "record", "keep"])
+@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "restore", "fetch", "pickup", "picked", "commit", "record", "keep"])
 def test_whichever_request_comes_first_the_place_is_put_right_before_git_runs(tmp_path, folder, first):
     one = a_copy(tmp_path, folder)
     (one.copy / "notes.txt").write_text("the thread's notes\n")
@@ -1049,6 +1131,7 @@ def test_whichever_request_comes_first_the_place_is_put_right_before_git_runs(tm
         "restore": lambda: again.restore(tip),
         "fetch": lambda: again.fetch(saga="saga:1"),
         "pickup": lambda: again.pickup(author=YOURS, trailers=saga),
+        "picked": lambda: again.picked(pickup=tip, after="notes"),
         "commit": lambda: again.commit_turn(author=A, trailers=saga, pickup=picked["commit"]),
         "record": lambda: again.record(turn=turn["commit"], applied=[], author=A, trailers=saga, main=picked["main"], pickup=picked["commit"]),
         "keep": lambda: again.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True),
@@ -1735,7 +1818,14 @@ def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, fo
     picked = ask(tree, {**place, "action": "pickup", "args": {"author": YOURS, "trailers": [["Surogate-Saga", "s1"]]}})
     # The folder's first commit is in its history from the copy's making on.
     main = git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/main")
-    assert picked == {"main": main, "commit": None, "picked_up": [], "packs": picked["packs"]} and picked["packs"] > 0
+    assert picked == {"main": main, "commit": None, "picked_up": [], "packs": picked["packs"], "more": 0} and picked["packs"] > 0
+    # A part of a pickup's files, asked from where the last part ended.
+    (folder / "yours.md").write_text("yours\n")
+    (folder / "zeta.md").write_text("zeta\n")
+    picked = ask(tree, {**place, "action": "pickup", "args": {"author": YOURS, "trailers": [["Surogate-Saga", "s1"]]}})
+    assert ([entry["path"] for entry in picked["picked_up"]], picked["more"]) == (["yours.md", "zeta.md"], 0)
+    part = ask(tree, {**place, "action": "picked", "args": {"pickup": picked["commit"], "after": "yours.md"}})
+    assert part == {"picked_up": picked["picked_up"][1:], "more": 0}
     turn = ask(tree, {**place, "action": "commit", "args": {"author": A, "trailers": [["Surogate-Saga", "s1"]], "pickup": None}})
     assert [(c["path"], c["after"] is not None) for c in turn["changes"]] == [("notes.txt", True)]
 
@@ -1754,6 +1844,9 @@ def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, fo
     ({"action": "restore", "args": {"commit": "--upload-pack=/planted"}}, "its commit holds what is not a commit id"),
     ({"action": "fetch", "args": {"commits": ["-o", "x"]}}, "its commits holds what is not a commit id"),
     ({"action": "fetch", "args": {"saga": "s1", "since": "--not"}}, "its since holds what is not a commit id"),
+    ({"action": "picked", "args": {"pickup": "--upload-pack=/planted", "after": "a.txt"}}, "its pickup holds what is not a commit id"),
+    ({"action": "picked", "args": {"pickup": "0" * 40, "after": "../../etc/passwd"}}, "it names no file to go on from"),
+    ({"action": "picked", "args": {"pickup": "0" * 40, "after": "a.txt", "most": 10}}, "it names no action this computer's history takes"),
     ({"action": "record", "args": {
         "turn": "0" * 40, "applied": [{"path": "a\0b", "before": None, "after": None}], "author": A, "trailers": [], "main": None,
     }}, "a file it applied has no path"),
@@ -3194,14 +3287,14 @@ def test_a_first_open_killed_at_any_step_leaves_the_folder_as_it_was_and_the_his
         the_next_turn_lands_whole(root, kept, landed=False, new=THREAD.replace("0b6c", "3b6c"))
 
 
-@pytest.mark.parametrize("action", ["open", "changed", "pickup", "commit", "keep"])
+@pytest.mark.parametrize("action", ["open", "changed", "pickup", "picked", "commit", "keep"])
 def test_a_request_killed_at_any_step_before_a_landing_applies_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path, action):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
     args = {
-        "open": {}, "changed": {}, "pickup": {"author": YOURS, "trailers": SAGA},
+        "open": {}, "changed": {}, "pickup": {"author": YOURS, "trailers": SAGA}, "picked": {"pickup": None, "after": "Report.docx"},
         "commit": {"author": B, "trailers": SAGA, "pickup": None}, "keep": {"author": B, "trailers": SAGA, "base": True},
     }[action]
-    if action == "commit":
+    if action in ("commit", "picked"):
         args["pickup"] = ours.pickup(author=YOURS, trailers=SAGA)["commit"]
     for _at, root in each_cut(tmp_path, OURS, action, args):
         the_next_turn_lands_whole(root, kept, landed=False)

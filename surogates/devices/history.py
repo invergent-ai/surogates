@@ -364,10 +364,16 @@ def _fetched(answer: dict[str, Any]) -> dict[str, Any]:
 
 
 def _picked_up(answer: dict[str, Any]) -> dict[str, Any]:
+    """A pickup: your edits committed on ``main``, the first part of its files, and how many are left for the parts after it."""
     return {
         "main": _id_or_none(_has(answer, "main")), "commit": _id_or_none(_has(answer, "commit")),
-        "picked_up": _listed(answer.get("picked_up"), _version), "packs": _count(answer.get("packs")),
+        "picked_up": _listed(answer.get("picked_up"), _version), "packs": _count(answer.get("packs")), "more": _count(answer.get("more")),
     }
+
+
+def _picked(answer: dict[str, Any]) -> dict[str, Any]:
+    """A part of a pickup's files after the first, and how many are left after it."""
+    return {"picked_up": _listed(answer.get("picked_up"), _version), "more": _count(answer.get("more"))}
 
 
 def _committed(answer: dict[str, Any]) -> dict[str, Any]:
@@ -465,7 +471,7 @@ def _forgotten(answer: dict[str, Any]) -> dict[str, Any]:
 _ANSWERS: dict[str, dict[str, Callable[..., dict[str, Any]]]] = {
     "checkpoint": {"take": _snapshot, "restore": _done},
     "history": {
-        "open": _opened, "changed": _changed, "fetch": _fetched, "pickup": _picked_up, "commit": _committed,
+        "open": _opened, "changed": _changed, "fetch": _fetched, "pickup": _picked_up, "picked": _picked, "commit": _committed,
         "record": _recorded, "keep": _kept, "forget": _forgettable,
     },
     "land": {"recover": _recovered, "revisions": _looked, "apply": _applied, "unapply": _unapplied, "forget": _forgotten},

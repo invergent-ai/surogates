@@ -95,7 +95,6 @@ from surogates.harness.landing import (
     LandingUnsettled,
     _orchestrator,
     _Row,
-    _row_picked_up,
     _tell,
     _tell_escalated,
     _written,
@@ -103,6 +102,7 @@ from surogates.harness.landing import (
     redo_files,
 )
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
+from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
 from surogates.workstreams.derive import UNFINISHED
 from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
@@ -150,6 +150,12 @@ CARRIES = MAX_MESSAGE_CHARS
 _PER_FILE = 256
 #: What a look's answer says of one file beside its name: a revision at its longest.
 _PER_LOOK = 128
+#: The most of your edits in a folder one landing records: as many as two folders the history keeps can differ by,
+#: each file of one gone and each of the other new, as a rename of the whole folder is.
+YOURS_MOST = 2 * HISTORY_CAP
+#: The most answers one landing hears your edits in, the pickup's own among them: an answer but the last is at least
+#: a part's worth of names, so your edits in all are at most this many parts of them, however long the names.
+PARTS_MOST = 16
 #: Why a landing put back is not tried again at once: the next try would meet the same, or its thread was stopped or
 #: deleted, or its computer did not answer a step for as long as a step waits.
 _ONCE = frozenset({"stale", "too_large", "yours_too_large", "stopped", "deleted", "unanswered"})
@@ -174,7 +180,7 @@ class _TooLarge(Exception):
 
 
 class _YoursTooLarge(Exception):
-    """You changed more files in the folder since its last landing than one landing's pickup records."""
+    """You changed more files in the folder since its last landing than one landing records, or than its computer's answer carries."""
 
 
 class _Waited(Exception):
@@ -331,8 +337,9 @@ async def land_local_turn(
     folder changed while it landed (``changed``), the copy was still being
     written (``stale``), the turn changed more than one landing carries
     (``too_large``), you changed more files in the folder since its last
-    landing than one landing records (``yours_too_large``, told apart by
-    its computer's answer to the pickup), its row could not be written
+    landing than one landing records, more than the folder's history keeps
+    or than its computer's answer to a part of the pickup carries
+    (``yours_too_large``), its row could not be written
     (``unwritten``), another chat held the folder (``busy``), its computer
     did not answer (``unanswered``), or refused it (``refused``, with its
     word, ``code``), or a landing left in its folder had recorded, and its
@@ -783,6 +790,9 @@ async def _land(
         # anything is committed: a save of yours after the look is either
         # picked up, or found by its apply.
         paths = (await _within(_asked(ending, partial(steps.history, "changed"), wrote=False)))["paths"]
+        # Its files until its commit says otherwise: a landing that ends before that names these, the turn's own, and
+        # none of yours that its turn's open brought into the copy.
+        changes = [{"path": path} for path in paths]
         if paths and not carries(paths):
             raise _TooLarge(f"the turn changed {len(paths)} files")
         revisions: dict[str, str] = {}
@@ -792,7 +802,7 @@ async def _land(
         turned: dict[str, Any] = {"commit": None, "changes": [], "overlapped": [], "excluded": [], "repositories": [], "not_taken": []}
         if paths:
             pickup = step("pickup", author=you, trailers=[*audit, ["Surogate-Kind", "pickup"]])
-            picked = await _your_edits(execute, pickup, steps)
+            picked = await _your_edits(execute, step, pickup, steps)
             outcome["packs"] = picked["packs"]
             commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
             # The one answer the saga keeps: each apply's step is its file's place among its changes.
@@ -886,6 +896,7 @@ async def _land(
         logger.warning("The landing of thread %s on its computer cannot record your edits there in one go", session.id, exc_info=True)
         # Nothing of it was done: no ref moved, no file was written, and no row is left of it.
         outcome.update(state="compensated", reason="yours_too_large", saved=False)
+        outcome["files"] = _told(changes, [], [])
         await _written(row.drop)
         outcome["forgot"] = await _forgotten(saga, orchestrator, steps, None, nothing, "compensated", wait=RELEASE_WAIT)
         return outcome
@@ -941,22 +952,94 @@ def _sent(saga: Saga) -> bool:
     return any(s.tool_name == "history.apply" and s.state is not StepState.PENDING for s in saga.steps)
 
 
-async def _your_edits(execute: Any, pickup: SagaStep, steps: Steps) -> dict:
-    """Your edits in the folder since its last landing, committed on ``main`` for the landing's record to push: the pickup's answer.
+async def _your_edits(execute: Any, step: Callable[..., SagaStep], pickup: SagaStep, steps: Steps) -> dict:
+    """Your edits in the folder since its last landing, committed on ``main`` for the landing's record to push: the pickup's answer, whole.
 
-    Read here alone.  It names every file you changed there since, which
-    no bound of the turn's limits: one too many for one answer of the link
-    is answered ``too_large`` by its computer once it ran.  On a computer a
-    pickup moves no ref, so nothing of it is left, and the landing goes no
-    further (:class:`_YoursTooLarge`).  Your edits stay as they are in the
-    folder, and are asked for again by the next landing there.
+    They are any number of files, and one answer of its computer's is one
+    frame of the link: the pickup's own answer names the first part of
+    them, and how many are left, and each part after it is a step of the
+    landing's own (``history.picked``), asked from the file the last one
+    ended at.  So its row records each part, a turn taken up again hears
+    each from the journal, and none moves a ref: on a computer a pickup
+    moves none, and the record pushes it.  Each is checked as it comes: a
+    part that does not go on from the one before it is no answer, and the
+    landing goes no further.
+
+    More of them than two of the folder's histories can differ by are
+    more than one landing records: no part is asked, and the landing goes
+    no further (:class:`_YoursTooLarge`); nor where they take more than
+    :data:`PARTS_MOST` answers in all, before the next would be asked; nor
+    where its computer answered the pickup or a part ``too_large``, which
+    it does once it ran.  Your edits stay as they are in the folder, and
+    are asked for again by the next landing there.
     """
     try:
-        return await execute(pickup, partial(steps.history, "pickup", **pickup.arguments))
+        picked = await execute(pickup, partial(_picked_up, steps, **pickup.arguments))
+        yours, left, answers = list(picked["picked_up"]), picked["more"], 1
+        while left:
+            if answers == PARTS_MOST:
+                raise _YoursTooLarge(f"your edits in the folder take more than {PARTS_MOST} answers of its computer's")
+            answers += 1
+            part = step("picked", pickup=picked["commit"], after=yours[-1]["path"])
+            named = await execute(part, partial(_part, steps, left, **part.arguments))
+            yours += named["picked_up"]
+            left = named["more"]
     except ComputerRefused as refused:
         if refused.kind == "too_large":
             raise _YoursTooLarge("your edits in the folder do not fit one answer of its computer's") from refused
         raise
+    return {**picked, "picked_up": yours}
+
+
+async def _picked_up(steps: Steps, **asked: Any) -> dict:
+    """The pickup: your edits committed on ``main``, the first part of their files, and how many are left after it.
+
+    Refused where they are more than one landing records.  Its files are
+    named each once, in the order a pickup names them; and where any are
+    left after them, by a pickup that is a commit, and in a part that
+    names one at least.
+    """
+    picked = await steps.history("pickup", **asked)
+    told = len(picked["picked_up"]) + picked["more"]
+    if told > YOURS_MOST:
+        raise _YoursTooLarge(f"you changed {told} files in the folder since its last landing")
+    if not _in_order(picked["picked_up"], None) or (picked["more"] and (picked["commit"] is None or not picked["picked_up"])):
+        raise NotAnAnswer("This computer's answer to 'pickup' names your edits otherwise than a pickup does")
+    return picked
+
+
+async def _part(steps: Steps, left: int, **asked: Any) -> dict:
+    """A part of the pickup's files after its first, *left* of them still to name: the files it names, and how many are left after it.
+
+    It goes on from the part before it: it names one file at least, each
+    after the file that part ended at, once and in order, and as many are
+    left after it as were before it, less those it names.
+    """
+    named = await steps.history("picked", **asked)
+    if not named["picked_up"] or len(named["picked_up"]) + named["more"] != left or not _in_order(named["picked_up"], asked["after"]):
+        raise NotAnAnswer("This computer's answer to 'picked' does not go on from the part before it")
+    return named
+
+
+def _in_order(picked: list[dict], after: str | None) -> bool:
+    """Whether *picked* names each file once, in the order a pickup names them, by their paths, and each after the file *after*."""
+    last = after
+    for entry in picked:
+        if last is not None and entry["path"] <= last:
+            return False
+        last = entry["path"]
+    return True
+
+
+def _row_picked_up(saga: Saga) -> list[dict]:
+    """A completed landing row's pickup: your edits it recorded on ``main``, each ``{path, before, after}``.
+
+    From the pickup's answer and each part after it, in the order its
+    computer named them: the row holds each as its step.
+    """
+    return [
+        entry for s in saga.steps if s.tool_name in ("history.pickup", "history.picked") for entry in (s.execute_result or {}).get("picked_up", [])
+    ]
 
 
 async def _applied(steps: Steps, **asked: Any) -> dict:
@@ -1397,7 +1480,7 @@ async def _settled(
 
 #: The steps of a landing's row, by the operation of its computer's each one is.
 _STEPS = {
-    ("history", "pickup"): "history.pickup", ("history", "commit"): "history.commit",
+    ("history", "pickup"): "history.pickup", ("history", "picked"): "history.picked", ("history", "commit"): "history.commit",
     ("land", "apply"): "history.apply", ("history", "record"): "history.record",
 }
 
