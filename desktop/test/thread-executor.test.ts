@@ -66,7 +66,7 @@ let recoveryStarts: Extract<FromHost, { type: "failed" }> | null;
 let landRefuses: ((args: Record<string, unknown>) => Outcome | undefined) | undefined;
 
 // A step's record, as a landing's helper writes it before the step changes anything (files/land.ts).
-const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0 });
+const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0, kept: null });
 
 // A file host that says it is ready, answers each operation as a file helper on an empty folder would, and lets
 // a command run. A landing's answers its steps as the land kind does, keeping a record of each apply until it is put
