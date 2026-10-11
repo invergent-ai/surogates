@@ -43,7 +43,7 @@ describe("the projects the page serves", () => {
   it("refuse an answer that is not of its shape, and say the page's own error", async () => {
     const { source } = page();
     const wrong = source.threads(REPORT);
-    source.answered(1, { ok: [{ ...threads[REPORT]![0], group: "landing" }] });
+    source.answered(1, { ok: [{ ...threads[REPORT]![0], title: 7 }] });
     await expect(wrong).rejects.toThrow("The agent's page answered threads with something Surogate cannot use");
     const refused = source.get("nope");
     source.answered(2, { error: "No such project" });
@@ -194,9 +194,10 @@ describe("the projects the page serves", () => {
     const { source } = page();
     const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.computer)!;
     const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+    const place = { kind: "place", at: "2026-10-09T08:00:00Z" };
     const asked = source.threads(REPORT);
-    source.answered(1, { ok: [{ ...row, setAside: { kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] } }] });
-    expect((await asked)[0]!.setAside).toEqual({ kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] });
+    source.answered(1, { ok: [{ ...row, setAside: { kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] } }] });
+    expect((await asked)[0]!.setAside).toEqual({ kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] });
     // A kind or a time the app does not know, a time whose digits make none, a count that is none: left out, the row taken.
     const odd = source.threads(REPORT);
     source.answered(2, { ok: [{ ...row, setAside: {
@@ -236,6 +237,120 @@ describe("the projects the page serves", () => {
     const row = threads[REPORT]![0]!;
     source.answered(1, { ok: [{ ...row, waitingSince: "2026-10-06T11:00:00Z", files: row.files.map((file) => ({ ...file, version: "41:f" })) }] });
     expect(await asked).toEqual([row]);
+  });
+
+  it("list a thread whose reason it does not know, as a later agent's page may serve, with no reason, and every reason it knows", async () => {
+    const { source } = page();
+    const all = threads[REPORT]!;
+    // A shell built before a reason was added refused its project's whole list over one row: this one lists it.
+    const later = source.threads(REPORT);
+    source.answered(1, { ok: all.map((row, at) => (at === 0 ? { ...row, reason: "reviewing" } : row)) });
+    const rows = await later;
+    expect(rows.map((row) => row.id)).toEqual(all.map((row) => row.id));
+    expect(rows[0]).toEqual({ ...all[0], reason: null });
+    for (const [at, reason] of ["toString", "", 7, { files: true }, undefined].entries()) {
+      const odd = source.threads(REPORT);
+      source.answered(at + 2, { ok: [{ ...all[0], reason }] });
+      expect((await odd)[0]!.reason, JSON.stringify(reason)).toBeNull();
+    }
+    const known = source.threads(REPORT);
+    const reasons = ["question", "approval", "failed", "computer", "files", null];
+    source.answered(7, { ok: reasons.map((reason, at) => ({ ...all[0], id: `t-${at}`, reason })) });
+    expect((await known).map((row) => row.reason)).toEqual(reasons);
+  });
+
+  it("list a thread whose group it does not know with none, which the Overview lists among the idle ones", async () => {
+    const { source } = page();
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.idle)!;
+    for (const [at, group] of ["landing", "toString", "", 7, null, undefined].entries()) {
+      const odd = source.threads(REPORT);
+      source.answered(at + 1, { ok: [{ ...row, group }] });
+      expect(await odd, JSON.stringify(group)).toEqual([{ ...row, group: null }]);
+    }
+    const known = source.threads(REPORT);
+    const groups = ["waiting", "working", "idle", "resolved"];
+    source.answered(7, { ok: groups.map((group, at) => ({ ...row, id: `t-${at}`, group })) });
+    expect((await known).map((found) => found.group)).toEqual(groups);
+  });
+
+  it("leave out a row's file of a kind it does not know, never refusing the row, and take a row with no files as having none", async () => {
+    const { source } = page();
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.working)!;
+    // A later agent's kind of file, one that names something every array has, and what is no file at all: left out.
+    const odd = [{ ...row.files[0]!, kind: "folder", landing: "kept_apart" }, { ...row.files[0]!, kind: "toString" }, "file", null, 7];
+    const later = source.threads(REPORT);
+    source.answered(1, { ok: [{ ...row, files: [...odd, ...row.files] }] });
+    expect((await later)[0]!.files).toEqual(row.files);
+    // A file of a kind it knows is still checked: a ref that is no text refuses the row.
+    const broken = source.threads(REPORT);
+    source.answered(2, { ok: [{ ...row, files: [{ ...row.files[0]!, ref: 7 }] }] });
+    await expect(broken).rejects.toThrow("The agent's page answered threads with something Surogate cannot use");
+    const { files: _files, ...none } = row;
+    const older = source.threads(REPORT);
+    source.answered(3, { ok: [none] });
+    expect(await older).toEqual([{ ...row, files: [] }]);
+  });
+
+  it("take a row's place it does not know, or none, as no place it can name, never refusing the row", async () => {
+    const { source } = page();
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.computer)!;
+    for (const [at, place] of [{ kind: "server", name: "build-1" }, { kind: "toString" }, "cloud", null, undefined].entries()) {
+      const odd = source.threads(REPORT);
+      source.answered(at + 1, { ok: [{ ...row, place }] });
+      expect(await odd, JSON.stringify(place)).toEqual([{ ...row, place: null }]);
+    }
+    // A computer's place is still checked: one with no name for its computer refuses the row.
+    const broken = source.threads(REPORT);
+    source.answered(6, { ok: [{ ...row, place: { kind: "device", deviceId: "d", online: true } }] });
+    await expect(broken).rejects.toThrow("The agent's page answered threads with something Surogate cannot use");
+    const known = source.threads(REPORT);
+    source.answered(7, { ok: [row, { ...row, id: "t-1", place: { kind: "cloud" } }] });
+    expect((await known).map((found) => found.place)).toEqual([row.place, { kind: "cloud" }]);
+  });
+
+  it("take a row of a later agent whose reason, group, file kind, mark and place are all new, listing its thread with each unknown", async () => {
+    const { source } = page();
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.question)!;
+    const asked = source.threads(REPORT);
+    source.answered(1, { ok: [{
+      ...row, group: "landing", reason: "reviewing", place: { kind: "server" }, waitingSince: "2026-10-06T11:00:00Z",
+      files: [{ ...row.files[0]!, landing: "kept_apart" }, { ...row.files[0]!, kind: "folder", ref: "threads/revenue" }],
+    }, ...threads[REPORT]!.filter((found) => found !== row)] });
+    const rows = await asked;
+    expect(rows.map((found) => found.id)).toEqual([row.id, ...threads[REPORT]!.filter((found) => found !== row).map((found) => found.id)]);
+    expect(rows[0]).toEqual({ ...row, group: null, reason: null, place: null, files: [{ ...row.files[0]!, landing: null }] });
+  });
+
+  it("take a Library file whose origin or place it does not know with neither, never refusing the Library", async () => {
+    const { source } = page();
+    const entry = { path: "brief.docx", origin: "added", threadId: null, size: 18_342, updatedAt: "2026-10-06T11:43:00Z", place: { kind: "cloud" } };
+    const asked = source.library(REPORT);
+    source.answered(1, { ok: [
+      { ...entry, origin: "synced" }, { ...entry, origin: "toString" }, { ...entry, place: { kind: "server" } }, { ...entry, place: undefined }, entry,
+      { ...entry, origin: "produced", threadId: FIXTURE_IDS.idle, place: { kind: "device", deviceId: "d", deviceName: "thinkpad", online: true } },
+    ] });
+    expect((await asked).map(({ origin, place }) => [origin, place])).toEqual([
+      [null, { kind: "cloud" }], [null, { kind: "cloud" }], ["added", null], ["added", null], ["added", { kind: "cloud" }],
+      ["produced", { kind: "device", deviceId: "d", deviceName: "thinkpad", online: true }],
+    ]);
+  });
+
+  it("take a project whose tier it does not know with that tier unknown, never refusing the project or its Overview", async () => {
+    const { source } = page();
+    const project = projects[0]!;
+    for (const [at, tier] of ["max", "toString", "", 7, undefined].entries()) {
+      const read = source.get(REPORT);
+      source.answered(at + 1, { ok: { ...project, coordinatorTier: tier, threadTier: "pro" } });
+      expect(await read, JSON.stringify(tier)).toEqual({ ...project, coordinatorTier: "unknown", threadTier: "pro" });
+    }
+    const known = source.update(REPORT, { threadTier: "basic" });
+    source.answered(6, { ok: { ...project, coordinatorTier: null, threadTier: "max" } });
+    expect(await known).toEqual({ ...project, coordinatorTier: null, threadTier: "unknown" });
+    for (const [at, tier] of [null, "basic", "pro"].entries()) {
+      const read = source.get(REPORT);
+      source.answered(at + 7, { ok: { ...project, coordinatorTier: tier, threadTier: tier } });
+      expect(await read).toEqual({ ...project, coordinatorTier: tier, threadTier: tier });
+    }
   });
 
   it("take a file's History, and refuse a version of another file, one with no zone or more than it lists", async () => {

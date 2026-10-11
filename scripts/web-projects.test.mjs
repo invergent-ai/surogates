@@ -8,7 +8,7 @@ import { test } from "node:test";
 
 import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
 import { workstreamRoutes } from "../web/src/api/workstream-routes.ts";
-import { threadRowOf } from "../web/src/lib/projects-wire.ts";
+import { libraryEntryOf, projectOf, threadRowOf } from "../web/src/lib/projects-wire.ts";
 import { savedName } from "../web/src/lib/save-file.ts";
 import {
   INBOX_REOPENING,
@@ -263,9 +263,10 @@ test("what a thread's computer set aside maps to the row's, each entry taken onl
     created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }).setAside;
   const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+  const place = { kind: "place", at: "2026-10-09T08:00:00Z" };
   assert.deepEqual(
-    asideOf({ kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] }),
-    { kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] },
+    asideOf({ kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] }),
+    { kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] },
   );
   // A kind or a time the page does not know, or a count that is none, is left out; and with nothing left, none.
   assert.deepEqual(
@@ -320,6 +321,81 @@ const ROUTINE = {
   id: "r-1", name: "Weekly cash report", prompt: "Report the cash.", status: "active", kind: "cron",
   schedule_display: "Every Monday at 08:00", next_run_at: "2026-10-12T08:00:00Z", created_from_session_id: "m-1",
 };
+
+test("a row's reason or group this page does not know is none, and every one it knows is as it is: the row is never refused", () => {
+  const row = (fields) => threadRowOf({
+    id: "t-7", title: "Draft F", group: "idle", reason: null, status_line: null, progress: null, files: [],
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null, ...fields,
+  });
+  // As a later server may send them, one that names something every object has among them.
+  assert.deepEqual(["reviewing", "toString", "", 7, undefined].map((reason) => row({ reason }).reason), [null, null, null, null, null]);
+  assert.deepEqual(["landing", "toString", "", 7, null].map((group) => row({ group }).group), [null, null, null, null, null]);
+  const reasons = ["question", "approval", "failed", "computer", "files", null];
+  assert.deepEqual(reasons.map((reason) => row({ reason }).reason), reasons);
+  const groups = ["waiting", "working", "idle", "resolved"];
+  assert.deepEqual(groups.map((group) => row({ group }).group), groups);
+});
+
+test("a row's file of a kind this page does not know is left out, its place it does not know is none, and a row with neither has none", () => {
+  const row = (fields) => threadRowOf({
+    id: "t-8", title: "Draft G", group: "idle", reason: null, status_line: null, progress: null, files: [],
+    place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null, ...fields,
+  });
+  const file = { kind: "file", label: "g.md", ref: "g.md", thread_id: "t-8", landing: "kept_apart" };
+  assert.deepEqual(row({ files: [{ ...file, kind: "folder" }, { ...file, kind: "toString" }, "g.md", null, file] }).files, [
+    { kind: "file", label: "g.md", ref: "g.md", threadId: "t-8", landing: null },
+  ]);
+  // A place of a kind it does not know, a computer's among them, and a computer's it cannot read, as no empty computer.
+  const places = [
+    { kind: "server", name: "build-1" }, { kind: "server", device_id: "d-1", device_name: "thinkpad", online: true }, { kind: "toString" },
+    "cloud", null, { kind: "device", device_name: "thinkpad", online: true },
+  ];
+  assert.deepEqual(places.map((place) => row({ place }).place), [null, null, null, null, null, null]);
+  assert.deepEqual(row({ place: { kind: "device", device_id: "d-1", device_name: "thinkpad", online: true } }).place, {
+    kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: true,
+  });
+  const { files: _files, place: _place, ...bare } = ROW;
+  assert.deepEqual([threadRowOf(bare).files, threadRowOf(bare).place], [[], null]);
+});
+
+test("a row of a later server whose reason, group, file kind, mark and place are all new is served with each unknown", () => {
+  assert.deepEqual(threadRowOf({
+    ...ROW, group: "landing", reason: "reviewing", place: { kind: "server" }, waiting_since: "2026-10-07T10:30:00Z",
+    files: [
+      { kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx", thread_id: "t-1", landing: "kept_apart" },
+      { kind: "folder", label: "Drafts", ref: "threads/Draft A", thread_id: "t-1" },
+    ],
+  }), {
+    id: "t-1", title: "Draft A", group: null, reason: null, statusLine: "Drafted the memo.", progress: null,
+    files: [{ kind: "file", label: "A.docx", ref: "threads/Draft A/A.docx", threadId: "t-1", landing: null }],
+    landingId: null, setAside: null, place: null,
+    createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z", resolvedAt: null,
+  });
+});
+
+test("a Library file's origin or place, and a project's tier, this page does not know are unknown", () => {
+  const entry = (fields) => libraryEntryOf({ ...FILE, ...fields });
+  assert.deepEqual(["synced", "toString", 7].map((origin) => entry({ origin }).origin), [null, null, null]);
+  assert.deepEqual(["added", "produced"].map((origin) => entry({ origin }).origin), ["added", "produced"]);
+  assert.deepEqual([{ kind: "server" }, undefined].map((place) => entry({ place }).place), [null, null]);
+  const tiers = (coordinator_tier, thread_tier) => {
+    const { coordinatorTier, threadTier } = projectOf({ ...PROJECT, coordinator_tier, thread_tier });
+    return [coordinatorTier, threadTier];
+  };
+  assert.deepEqual(tiers("max", "toString"), ["unknown", "unknown"]);
+  assert.deepEqual(tiers(7, undefined), ["unknown", "unknown"]);
+  assert.deepEqual([tiers(null, "basic"), tiers("pro", null)], [[null, "basic"], ["pro", null]]);
+});
+
+test("a project's threads route serves a row with no group, or one that is no group's name, as a row with none, never refusing it", async () => {
+  const { group: _group, ...bare } = ROW;
+  const odd = [bare, { ...ROW, id: "t-2", group: null }, { ...ROW, id: "t-3", group: 7 }, { ...ROW, id: "t-4", group: ["idle"] }, { ...ROW, id: "t-5" }];
+  const { routes } = routesOver((url, init) => Response.json(init.method === "POST" ? { ...ROW, group: 7 } : odd));
+  assert.deepEqual((await routes.threads("p-1")).map(({ id, group }) => [id, group]), [
+    ["t-1", null], ["t-2", null], ["t-3", null], ["t-4", null], ["t-5", "idle"],
+  ]);
+  assert.equal((await routes.resolve("p-1", "t-1")).group, null);
+});
 
 test("each project route is asked at its own path, and answers the shell's types", async () => {
   const { asked, routes } = routesOver((url, init) => {

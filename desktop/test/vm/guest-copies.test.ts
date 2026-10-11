@@ -258,9 +258,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's copy of its f
     // The new folder's copy is of its own files, in a place of its own under the same key.
     expect(copy.place).toMatchObject({ key: old.place.key, real: identity(folder) });
     expect(files(copy.folder.path)).toEqual(["Other.md"]);
-    expect(readdirSync(join(dataDir, "history")).filter((name) => name.includes(".was-") && !name.endsWith(".json"))).toHaveLength(1);
+    const asides = readdirSync(join(dataDir, "history")).filter((name) => name.includes(".was-") && !name.endsWith(".json"));
+    expect(asides).toHaveLength(1);
     // The old folder's thread works nowhere now.
     expect(await copies.open(ONE, was, signal())).toEqual({ failed: FOLDER_UNAVAILABLE });
+    // The new folder's thread, whose host's start set the old place aside, has it named by its next turn's open, once.
+    expect(await copies.ask(THREE, bound(THREE), "open", {}, signal())).toEqual({ ok: { copy: expect.any(String), set_aside_places: asides } });
+    expect(await copies.ask(THREE, bound(THREE), "open", {}, signal())).toEqual({ ok: { copy: expect.any(String) } });
   });
 
   it("lets the place go once nothing holds it, and the guest, holding nothing else, stops", async () => {

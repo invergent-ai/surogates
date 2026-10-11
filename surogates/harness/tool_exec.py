@@ -303,13 +303,18 @@ async def _open_local_copy(
     computer (``AgentHarness._opened_for_the_turn``), and answered from the
     journal to every later asking of the turn's, a step's among them
     (:meth:`ThreadCopy.opened`), which says the thread's first copy is
-    being made, *telling*, while it is.  Raises ``NowhereToWork`` where the
-    thread has nowhere to work, the ``ComputerRefused`` of an open the
-    turn's Stop closed, and the journal's own refusals.
+    being made, *telling*, while it is.  A turn its person asked for again,
+    with a Retry since the turn before it ended (the retry route's
+    ``session.resume``, from ``user_retry``), says so to its computer, which
+    then tries again a folder it refused as too large.  Raises
+    ``NowhereToWork`` where the thread has nowhere to work, the
+    ``ComputerRefused`` of an open the turn's Stop closed, and the journal's
+    own refusals.
     """
     copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=str(lease.lease_token))
     turn = await _turn_now(store, session)
-    return copy, turn, await copy.opened(turn, telling=telling)
+    retry = await store.last_event(session.id, EventType.SESSION_RESUME, containing={"source": "user_retry"})
+    return copy, turn, await copy.opened(turn, telling=telling, retried=retry is not None and retry.id > turn)
 
 
 async def _snapshot_local_copy(
