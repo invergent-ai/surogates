@@ -2456,3 +2456,42 @@ async def test_a_stop_taken_before_a_threads_turn_has_a_name_writes_nothing_and_
     assert "was not carried out on its hand-off" not in caplog.text
     assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
     assert pods.pods == {}
+
+
+async def test_a_pod_older_than_its_worker_refuses_the_pickup_once_and_the_turn_is_kept_to_land_once_its_pod_is_new(
+    api, monkeypatch, tmp_path,
+):
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, "Draft A", master)
+    pods = stored(api, thread, tmp_path)
+    pool = SandboxPool(pods)
+    await edited(pool, thread, "echo a > a.md")
+    asked, execute, older = [], pods.execute, True
+
+    async def watched(sandbox_id, name, input, **kwargs):
+        if name == "_history":
+            asked.append(json.loads(input)["action"])
+            if older and asked[-1] == "pickup":
+                # The sandbox image from before a landing's pickup: its daemon knows no such step, and says so.
+                return json.dumps({"error": "Unknown history action: pickup"})
+        return await execute(sandbox_id, name, input, **kwargs)
+
+    monkeypatch.setattr(pods, "execute", watched)
+    await ends(api, pool, thread, settings=SimpleNamespace(default_step_timeout=29, default_max_retries=2, retry_delay=0))
+    # No try again changes that refusal: asked once, and the landing not tried again.  The real files are as they
+    # were, the turn is kept on its branch, and the master reads that it did not land and that the work is kept.
+    assert asked == ["pickup", "keep"]
+    assert pods.real_names() == ["Report.docx", "notes.txt"]
+    assert git(pods.project / "_history", "show", f"refs/heads/threads/{thread.id}:a.md") == "a"
+    assert [(r.saga_state, r.commit) for r in await rows(api, thread)] == [("compensated", None)]
+    assert [done["saved"] for done in await turn_ends(api, thread)] == [True]
+    [report] = await reports(api, master)
+    assert (report["landing"], report["saved"]) == ("compensated", True)
+    said = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    assert "\nNot landed, and the project's files are as they were: " in said
+    assert said.endswith("\nThe thread's work is kept, and lands with its next turn")
+    # Its next turn's pod is of the new image: the kept work lands.
+    older = False
+    await ends(api, SandboxPool(pods), thread)
+    assert pods.real_names() == ["Report.docx", "a.md", "notes.txt"]
+    assert [r.saga_state for r in await rows(api, thread)] == ["compensated", "completed"]
