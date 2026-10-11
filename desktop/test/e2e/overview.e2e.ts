@@ -229,6 +229,29 @@ describe("the Overview pane", () => {
     await expect.poll(() => texts(page, chip)).toEqual([]);
   });
 
+  it("counts in a row's last chip the files its thread has past those the row lists, as the web client's card does", async () => {
+    const { shell, page } = await opened();
+    // The main process's state as it is, but for rows that count files past their list: the page draws them.
+    const state = await page.evaluate(() => (globalThis as unknown as { surogateShell: { state(): Promise<unknown> } }).surogateShell.state());
+    const more: Record<string, number> = { [IDLE]: 1_800, [FIXTURE_IDS.working]: 4, [APPROVAL]: 2 };
+    await shell.evaluate(({ BrowserWindow }, [asItIs, counts]) => {
+      const given = asItIs as { overview: { threads: Array<{ id: string }> } };
+      const contents = BrowserWindow.getAllWindows()[0]!.webContents;
+      contents.ipc.removeHandler("shell:state");
+      contents.ipc.handle("shell:state", () => ({
+        ...given,
+        overview: { ...given.overview, threads: given.overview.threads.map((thread) => ({ ...thread, moreFiles: counts[thread.id] })) },
+      }));
+      contents.send("shell:changed");
+    }, [state, more] as const);
+    // Past the two it shows, and past its list; a row that lists none of them shows their count alone.
+    await expect.poll(() => texts(page, `[data-thread="${IDLE}"] .chip`)).toEqual(["north.csv", "south.csv", "+1801"]);
+    expect(await texts(page, `[data-thread="${FIXTURE_IDS.working}"] .chip`)).toEqual(["summary.docx · being redone", "Sales chart", "+4"]);
+    expect(await texts(page, `[data-thread="${APPROVAL}"] .chip`)).toEqual(["+2"]);
+    // A row that counts none more is as it was.
+    expect(await texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["revenue.xlsx · not merged"]);
+  });
+
   it("shows the project's library, and its routines only when it has some", async () => {
     const { page } = await opened();
     expect(await page.isVisible('[data-tab="routines"]')).toBe(false);

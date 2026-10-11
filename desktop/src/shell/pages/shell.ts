@@ -25,6 +25,7 @@ interface ThreadRow {
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: Array<{ kind: "file" | "artifact"; label: string; ref: string; landing: "landed" | "redoing" | "not_merged" | "undone" | null }>;
+  moreFiles?: number; // how many more files its thread changed or named than files lists: none where it counts none
   // What its computer set aside of its work, out of its copy there: none for a thread in the cloud.
   setAside?: {
     kept: Array<{ kind: "copy" | "repository" | "place"; at: string }>; snapshots: number;
@@ -296,10 +297,12 @@ function threadRow(thread: ThreadRow): HTMLElement {
   const status = [words, thread.statusLine].filter((part) => part).join(" · ");
   row.append(element("span", "mark"), title, element("span", "status", status), side);
   const aside = asideChip(thread.setAside);
-  if (thread.files.length > 0 || aside) {
+  // The rest are counted, as the web client's card counts them: those past the two shown, and those past the row's list.
+  const more = Math.max(thread.files.length - 2, 0) + (thread.moreFiles ?? 0);
+  if (thread.files.length > 0 || more > 0 || aside) {
     const chips = element("span", "chips");
     for (const file of thread.files.slice(0, 2)) chips.append(chip(file));
-    if (thread.files.length > 2) chips.append(element("span", "chip", `+${thread.files.length - 2}`));
+    if (more > 0) chips.append(element("span", "chip", `+${more}`));
     if (aside) chips.append(aside);
     row.append(chips);
   }
