@@ -201,6 +201,11 @@ class LandingStepError(RuntimeError):
     """A pod's answer to a ``_history`` call is not its step's result."""
 
 
+#: What a pod's daemon answers a ``_history`` call of a step it does not know, ``<this>: <step>``: every
+#: image's the same, so a worker newer than a pod tells that refusal from a step that failed.
+UNKNOWN_STEP = "Unknown history action"
+
+
 def step_result(answer: str) -> dict:
     """A pod's *answer* to a ``_history`` call, read as its step's result; LandingStepError when it is none.
 

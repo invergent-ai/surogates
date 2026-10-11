@@ -51,10 +51,12 @@ from surogates.governance.saga.orchestrator import (
     SAGA_DEFAULT_MAX_RETRIES,
     SAGA_DEFAULT_RETRY_DELAY_SECONDS,
     SAGA_DEFAULT_STEP_TIMEOUT_SECONDS,
+    StepRefused,
 )
 from surogates.sandbox.history import (
     _PRUNE_EVERY,
-    LandingStepError,  # noqa: F401  (what _call raises, named here for its callers)
+    UNKNOWN_STEP,
+    LandingStepError,
     step_result,
 )
 from surogates.sandbox.pool import sandbox_session_key
@@ -192,9 +194,22 @@ class _Row:
             raise LeaseLost(self._held[0])
 
 
+class PodTooOld(LandingStepError, StepRefused):
+    """A pod of an image older than its worker's, which knows no such step: no try again changes that."""
+
+
 async def _call(sandbox_pool: Any, owner: str, action: str, **arguments: Any) -> dict:
-    """One ``_history`` action in *owner*'s pod; LandingStepError unless it answers with the step's result."""
-    return step_result(await sandbox_pool.execute(owner, "_history", json.dumps({**arguments, "action": action})))
+    """One ``_history`` action in *owner*'s pod; LandingStepError unless it answers with the step's result.
+
+    PodTooOld when the pod's daemon does not know the action: a pod made
+    before its image rolled, met by a worker that already has.
+    """
+    try:
+        return step_result(await sandbox_pool.execute(owner, "_history", json.dumps({**arguments, "action": action})))
+    except LandingStepError as exc:
+        if str(exc) == f"{UNKNOWN_STEP}: {action}":
+            raise PodTooOld(str(exc)) from None
+        raise
 
 
 async def land_turn(
@@ -241,7 +256,9 @@ async def land_turn(
     changed rather than rolling back over them.  The lock frees itself if
     its connection drops, so the landing asks it before each apply and the
     record, and stops when it is gone.  A landing put back whole is tried
-    once more, at once, as a new saga.  The landings a killed worker left
+    once more, at once, as a new saga; not one whose pod is older than this
+    worker and refused a step it does not know, which is kept as it is to
+    land with a turn whose pod is new.  The landings a killed worker left
     running are settled first; this thread's own, if one had pushed, is
     reported with this turn's files.
     """
@@ -263,10 +280,12 @@ async def land_turn(
             )
             began = True
             outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
-            if outcome["state"] == "compensated":
+            refused = outcome.pop("refused", False)
+            if outcome["state"] == "compensated" and not refused:
                 # Put back whole: a file changed between the pickup and its
                 # apply, or a step failed.  Tried once more, at once, as a new
                 # saga, whose pickup sees the change: never with the lock lost.
+                # Not when its pod refused a step it does not know: no new saga changes that.
                 await held()
                 outcome = await _land(session_factory, sandbox_pool, session, owner, saga_settings, tool_saga_id, calls, held)
     except Exception as exc:
@@ -878,6 +897,10 @@ async def _land(
                 logger.warning("Could not keep the copy of %s under its landing's lock", session.id, exc_info=True)
                 # Its caller's, once this lock is let go: under one taken afresh, which a lock lost here is no bar to.
                 outcome["unkept"] = True
+        if isinstance(exc, PodTooOld):
+            # A pod made before its image rolled: the turn lands with a later one, made since.
+            logger.warning("The pod of %s is older than its worker: %s", session.id, exc)
+            outcome["refused"] = True
     applied = {c["path"]: c for c in outcome["landed"]}
     reasons = {o["path"]: o["reason"] for o in outcome["overlapped"]}
     paths = sorted({c["path"] for c in changes} | set(reasons))

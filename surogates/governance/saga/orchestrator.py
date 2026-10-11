@@ -51,6 +51,10 @@ class SagaTimeoutError(Exception):
     """Raised when a saga step exceeds its timeout."""
 
 
+class StepRefused(Exception):
+    """A step's try that failed for good: no try again changes it, so none is made."""
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -205,6 +209,8 @@ class SagaOrchestrator:
                 last_error = exc
                 step.error = str(exc)
                 step.transition(StepState.FAILED)
+                if isinstance(exc, StepRefused):
+                    break
                 if attempt < attempts - 1:
                     step.state = StepState.PENDING
                     step.error = None
