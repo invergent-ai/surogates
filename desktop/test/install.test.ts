@@ -3425,7 +3425,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     // More certificates than a process may have files open, behind one that is no CA's.
     writeFileSync(join(certs, "thousand.pem"), readFileSync(site, "utf8") + readFileSync(company, "utf8").repeat(1100));
-    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "megabyte.pem", "megabyte-and-one.pem", "thousand.pem"]) {
+    // Files joined as cat joins files that end with no new line: two CAs' certificates, the second's
+    // key after it, and a third certificate after the key, each on the line where the one before ends.
+    const unended = (file: string) => readFileSync(file, "utf8").trimEnd();
+    writeFileSync(join(certs, "joined.pem"), unended(another) + unended(company) + unended(join(certs, "company.key")) + readFileSync(bare, "utf8"));
+    // The company's CA with a line of its certificate gone, which openssl cannot read.
+    writeFileSync(join(certs, "cut.pem"), readFileSync(company, "utf8").split("\n").filter((_, at) => at !== 2).join("\n"));
+    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "megabyte.pem", "megabyte-and-one.pem", "thousand.pem", "joined.pem", "cut.pem"]) {
       expect(docker(["cp", join(certs, file), `${box.container}:/home/tester/${file}`]).status).toBe(0);
     }
     // The other user's own copy, for a build of their own.
@@ -3583,6 +3589,14 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(taken).toMatchObject({ status: 0, stderr: "", stdout: rewritten(join(certs, "bare.pem")) + rewritten(join(certs, "company.pem")) });
     expect(appTakes(taken.stdout)).toBe(2);
     expect(appTakes(kept())).toBe(2);
+    expect(leftovers()).toBe("");
+  });
+
+  it("takes each certificate of a file that cat joined with no new line between them, a key among them, and says of one that openssl cannot read just that", () => {
+    const taken = alone('company_ca /home/tester/joined.pem; cat "$GIVEN_CA"');
+    expect(taken).toMatchObject({ status: 0, stderr: "", stdout: rewritten(join(certs, "another.pem")) + rewritten(join(certs, "company.pem")) + rewritten(join(certs, "bare.pem")) });
+    expect(appTakes(taken.stdout)).toBe(3);
+    expect(alone("company_ca /home/tester/cut.pem")).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/cut.pem holds a certificate that openssl cannot read\n" });
     expect(leftovers()).toBe("");
   });
 

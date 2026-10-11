@@ -965,11 +965,14 @@ company_ca() {
   taken "$file" "$work/given" 1048576 "$SMALL_WAIT" \
     || fail "$(named "$file") holds more than a megabyte, and a file of certificate authorities holds far less"
   # Each certificate into a file of its own, one open at a time: a megabyte holds more of them
-  # than a process may have files open.
-  awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { if (file) close(file); file = sprintf("%s/cert-%04d.pem", dir, ++n) } file { print > file } /-----END CERTIFICATE-----/ { if (file) close(file); file = "" }' "$work/given"
+  # than a process may have files open. Each on lines of its own first, whatever is joined to its
+  # first line or its last: cat joins files that end with no new line on the line where one ends.
+  sed 's/-----BEGIN CERTIFICATE-----/\n&/g; s/-----END CERTIFICATE-----/&\n/g' "$work/given" \
+    | awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { if (file) close(file); file = sprintf("%s/cert-%04d.pem", dir, ++n) } file { print > file } /-----END CERTIFICATE-----/ { if (file) close(file); file = "" }'
   for cert in "$work"/cert-*.pem; do
     [ -e "$cert" ] || break
-    said="$(openssl x509 -in "$cert" -noout -ext basicConstraints,keyUsage 2>/dev/null)" || said=
+    said="$(openssl x509 -in "$cert" -noout -ext basicConstraints,keyUsage 2>/dev/null)" \
+      || fail "$(named "$file") holds a certificate that openssl cannot read"
     [[ "$said" == *CA:TRUE* ]] && { [[ "$said" != *"X509v3 Key Usage"* ]] || [[ "$said" == *"Certificate Sign"* ]]; } \
       || fail "$(named "$file") holds a certificate that is not a certificate authority's"
     openssl x509 -in "$cert" >>"$work/ca.pem"
