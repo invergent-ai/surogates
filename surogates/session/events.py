@@ -152,6 +152,8 @@ class EventType(str, Enum):
     THREAD_PROPOSED = "thread.proposed"
     # A project's thread is told to redo its change to files its landing left out.
     HISTORY_REDO = "history.redo"
+    # A thread's redo whose wake its user's limit held back: the thread rests, and its next turn redoes it.
+    HISTORY_REDO_HELD = "history.redo_held"
     # A project coordinator's follow-up to one of its threads: the thread
     # reads it as a message typed into it, but it is never the user's.
     COORDINATOR_MESSAGE = "coordinator.message"

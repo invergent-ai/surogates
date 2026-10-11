@@ -28,7 +28,7 @@ WAITING_KINDS = {"input_required": "question", "action_required": "approval", "g
 LATEST_TYPES = tuple(t.value for t in (
     *MESSAGE_TYPES, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
-    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
+    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE, EventType.HISTORY_REDO_HELD,
 ))
 #: A copy or a repository of a thread's that its computer set aside whole, by its folder's name there
 #: (``surogates.sandbox.local_history``): the order it was set aside in, when, in UTC, whose, and which of the two.
@@ -234,7 +234,8 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
     whose path the shell would refuse as a label.  An Undo is of the
     cloud's files: a file landed in a folder on a computer is never undone.
     """
-    redoing = facts.redoing if group != "resolved" else frozenset()
+    # Nor has a thread at rest with its redo held back by its user's limit, until it is sent on.
+    redoing = facts.redoing if group != "resolved" and not _redo_held(facts) else frozenset()
     left_out: list[dict[str, Any]] = []
     landed: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -403,6 +404,18 @@ def _id(event: Any) -> int:
 def _messaged(latest: dict[str, Any]) -> int:
     """The id of the thread's newest message, the user's or its coordinator's follow-up; 0 with none."""
     return max(_id(latest.get(t.value)) for t in MESSAGE_TYPES)
+
+
+def _redo_held(facts: ThreadFacts) -> bool:
+    """Whether the thread rests with its redo's wake held back by its user's limit (``history.redo_held``): until it
+    is sent on, nothing redoes the redo's files.
+
+    Held until a turn of the model's has run since: a later redo comes
+    only at the end of one, and a command's turn asks the model nothing.
+    """
+    latest = _latest(facts)
+    held = latest.get(EventType.HISTORY_REDO_HELD.value)
+    return held is not None and held.id > _id(latest.get(EventType.LLM_RESPONSE.value)) and facts.status != "active"
 
 
 def aware(moment: datetime) -> datetime:

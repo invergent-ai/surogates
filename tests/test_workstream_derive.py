@@ -393,6 +393,26 @@ def test_a_resolved_threads_file_is_not_being_redone(ended):
     assert (derived["group"], marks(given)) == ("resolved", [("budget.xlsx", "not_merged")])
 
 
+@pytest.mark.parametrize("status, since, mark", [
+    ("completed", (), "redoing"),
+    ("completed", (event(51, "history.redo_held"),), "not_merged"),
+    ("active", (event(51, "history.redo_held"),), "redoing"),
+    # A command answered since asks the model nothing: the thread rests as it did.
+    ("completed", (event(51, "history.redo_held"), event(55, "harness.wake")), "not_merged"),
+    # A turn of the model's ran since, and its landing told the thread to redo again: that redo's wake is to come.
+    ("completed", (event(51, "history.redo_held"), event(58, "llm.response")), "redoing"),
+], ids=["its wake to come", "held back by its user's limit", "sent on since", "a command answered since", "a turn ran since"])
+def test_a_file_whose_redo_its_users_limit_held_back_is_not_being_redone_while_its_thread_rests(status, since, mark):
+    # The turn whose landing left the file out, and told the thread to redo it.
+    given = replace(
+        facts(IDLE, "Draft A", 5, status, events=(event(49, "llm.response"), *since)),
+        landings=(landing(41, ("budget.xlsx", "c1", "c2", False)),), redoing=frozenset({"budget.xlsx"}),
+    )
+    assert marks(given) == [("budget.xlsx", mark)]
+    # The store reads the newest of it.
+    assert "history.redo_held" in LATEST_TYPES
+
+
 def test_a_landing_of_two_thousand_files_lists_the_shells_limit_those_left_out_first():
     changed = [(f"data/part-{i:04}.csv", None, f"v{i}", i % 500 != 499) for i in range(2000)]
     given = replace(facts(IDLE, "Draft A", 5, "completed", events=[

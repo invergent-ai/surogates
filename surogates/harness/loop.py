@@ -1038,6 +1038,18 @@ class AgentHarness(
         events = await self._store.get_events(session_id, types=[EventType.LLM_REQUEST, EventType.HISTORY_REDO])
         return _redo_unread(events)
 
+    async def _hold_redo(self, session_id: UUID) -> None:
+        """Say that the user's limit held back the wake of the thread's last redo, once a redo.
+
+        Nothing else of the wake is written, so without it the thread's row
+        could not tell a redo that rests from one whose wake is to come: it
+        says the redo's files are not being redone until the thread is sent
+        on (``workstreams.derive``).  The redo is still its next turn's.
+        """
+        redo = await self._store.last_event(session_id, EventType.HISTORY_REDO)
+        if not await self._store.has_event(session_id, EventType.HISTORY_REDO_HELD, after=redo.id):
+            await self._store.emit_event(session_id, EventType.HISTORY_REDO_HELD, {"redo": redo.id})
+
     async def _has_unread_report(self, session_id: UUID) -> bool:
         """Return True if a worker's report is newer than the session's last model request.
 
@@ -1812,6 +1824,8 @@ class AgentHarness(
                         return
                     if refused is not None:
                         logger.info("Session %s: the user's limit holds back %s", session_id, revived_by)
+                        if revived_by == "history_redo":
+                            await self._hold_redo(session_id)
                         return
                 if revived_by is not None:
                     logger.info(
