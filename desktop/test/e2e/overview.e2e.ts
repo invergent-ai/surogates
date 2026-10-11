@@ -143,6 +143,8 @@ interface Served {
   unrestored: string | null;
   notUndone: string | null;
   put: { applied: string[]; skipped: Array<{ path: string; by: unknown; pruned?: boolean }>; pickedUp: string[] } | null;
+  historyHeld: Promise<void> | null;
+  letHistory?: () => void;
   changed(id: string, threadId: string | null): void;
   register(lacks?: string[]): void;
 }
@@ -1188,6 +1190,26 @@ describe("a file's History in the Library", () => {
     await expect.poll(() => page.isVisible("#no-versions")).toBe(true);
     expect(await page.textContent("#no-versions")).toBe("No change to this file is recorded yet.");
     expect(await texts(page, "#versions .version")).toEqual([]);
+  });
+
+  it("leaves the Overview's rows drawn at each change of the project however long the History shown takes to read, and reads it after", async () => {
+    const { page, client } = await opened();
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    // From now on the agent's page holds each read of the History, as a busy server would.
+    await (await served(client)).evaluate((fake) => {
+      fake.historyHeld = new Promise((resolve) => (fake.letHistory = resolve));
+    });
+    await (await served(client)).evaluate((fake, [project, thread, path]) => {
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.statusLine = "Which rate for the second quarter?";
+      fake.data.history[project!]![path!]!.find((version) => version.id === "9:f")!.available = false;
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION, REVENUE]);
+    await expect.poll(() => page.textContent(`[data-thread="${QUESTION}"] .status`), { timeout: 3_000 }).toBe("Question · Which rate for the second quarter?");
+    expect(await texts(page, '[data-version="9:f"] .from')).toEqual([""]);
+    // Its read, let go, is drawn.
+    await (await served(client)).evaluate((fake) => fake.letHistory!());
+    await expect.poll(() => texts(page, '[data-version="9:f"] .from')).toEqual(["No longer kept"]);
   });
 
   it("is read again at the project's change, and goes with its project", async () => {
