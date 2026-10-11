@@ -20,7 +20,7 @@ type PlaceResponse = { kind: "cloud" } | { kind: "device"; device_id: string; de
 export interface ThreadRowResponse {
   id: string;
   title: string;
-  group: ThreadGroup | string;
+  group?: ThreadGroup | string | null; // none, or no group's name: taken as unknown too
   reason: ThreadRow["reason"] | string;
   status_line: string | null;
   progress: { done: number; total: number } | null;

@@ -386,6 +386,16 @@ test("a Library file's origin or place, and a project's tier, this page does not
   assert.deepEqual([tiers(null, "basic"), tiers("pro", null)], [[null, "basic"], ["pro", null]]);
 });
 
+test("a project's threads route serves a row with no group, or one that is no group's name, as a row with none, never refusing it", async () => {
+  const { group: _group, ...bare } = ROW;
+  const odd = [bare, { ...ROW, id: "t-2", group: null }, { ...ROW, id: "t-3", group: 7 }, { ...ROW, id: "t-4", group: ["idle"] }, { ...ROW, id: "t-5" }];
+  const { routes } = routesOver((url, init) => Response.json(init.method === "POST" ? { ...ROW, group: 7 } : odd));
+  assert.deepEqual((await routes.threads("p-1")).map(({ id, group }) => [id, group]), [
+    ["t-1", null], ["t-2", null], ["t-3", null], ["t-4", null], ["t-5", "idle"],
+  ]);
+  assert.equal((await routes.resolve("p-1", "t-1")).group, null);
+});
+
 test("each project route is asked at its own path, and answers the shell's types", async () => {
   const { asked, routes } = routesOver((url, init) => {
     if (init.method === "DELETE") return new Response(null, { status: 204 });
