@@ -90,6 +90,7 @@ from surogates.harness.structured_output import generate_structured, parse_json_
 from surogates.harness.tool_exec import _open_local_copy, _turn_now, execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
+from surogates.sandbox.history import PRUNE_DAYS
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
@@ -440,22 +441,19 @@ _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
 #: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
 #: pod's answer together.  Past it the stop goes on, and the hand-off stays as the turn left it.
 _STOP_HAND_OFF_BOUND = 60.0
-#: The threads whose stopped turn this worker could not write a turn-ending event for, each with the
-#: stopped turn's name and the event: written before the thread's next turn starts here, unless the
-#: thread has a later turn end by then.
-_STOPS_NOT_WRITTEN: dict[Any, tuple[int, dict[str, Any]]] = {}
-#: How many of them a worker keeps: the oldest goes for one more.
-_STOPS_KEPT = 1024
+#: Where a thread's stopped turn waits whose worker could not write a turn-ending event for it, with
+#: the stopped turn's name and the event: in Redis, through which the interrupt came, so that the
+#: thread's next turn writes it first on whichever worker starts it, unless the thread has a later
+#: turn end by then.  Kept as long as the history keeps a resolved thread's hand-off.
+_STOP_NOT_WRITTEN_PREFIX = "surogates:stop_not_written:"
+_STOP_NOT_WRITTEN_SECONDS = PRUNE_DAYS * 86_400
 
 
-def _keep_to_write(session_id: Any, turn: int, said: dict[str, Any]) -> None:
-    """Keep the stop of *session_id*'s turn *turn*, which could not be written, for the thread's next turn here."""
-    _STOPS_NOT_WRITTEN.pop(session_id, None)
-    _STOPS_NOT_WRITTEN[session_id] = (turn, said)
-    while len(_STOPS_NOT_WRITTEN) > _STOPS_KEPT:
-        oldest = next(iter(_STOPS_NOT_WRITTEN))
-        del _STOPS_NOT_WRITTEN[oldest]
-        logger.warning("Let go of the stop of thread %s that could not be written: too many are kept", oldest)
+async def _keep_to_write(redis: Any, session_id: Any, turn: int, said: dict[str, Any]) -> None:
+    """Keep the stop of *session_id*'s turn *turn*, which could not be written, for the thread's next turn."""
+    await redis.set(
+        f"{_STOP_NOT_WRITTEN_PREFIX}{session_id}", json.dumps({"turn": turn, "said": said}), ex=_STOP_NOT_WRITTEN_SECONDS,
+    )
 
 # The commands a project's thread refuses.  A routine's runs would start from
 # old files, and their work would land only when someone next speaks to the
@@ -1323,20 +1321,22 @@ class AgentHarness(
     async def _name_the_turn(self, session: Session) -> None:
         """Before a thread's turn makes any pod: the name its pods are told (see :func:`landing.name_turn`).
 
-        A stop this worker could not write down for the thread is written
+        A stop a worker could not write down for the thread is written
         first, so the turn starting now comes after it; unless the thread
-        has had a turn end since, when it is only let go.
+        has had a turn end since, when it is only let go.  A read of it that
+        fails fails the turn's start, as the name's own read does.
         """
         from surogates.harness.landing import last_turn_end, name_turn
 
-        kept = _STOPS_NOT_WRITTEN.get(session.id)
+        key = f"{_STOP_NOT_WRITTEN_PREFIX}{session.id}"
+        kept = await self._redis.get(key) if self._redis is not None else None
         if kept is not None:
-            stopped, said = kept
+            stopped = json.loads(kept)
             ended = await last_turn_end(self._store, session.id)
-            if (ended.id if ended else 0) == stopped:
-                await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
+            if (ended.id if ended else 0) == stopped["turn"]:
+                await self._store.emit_event(session.id, EventType.SESSION_PAUSE, stopped["said"])
             # With a later turn end, written elsewhere since, the stopped turn is over already.
-            del _STOPS_NOT_WRITTEN[session.id]
+            await self._redis.delete(key)
         await name_turn(self._store, session)
 
     async def _opened_for_the_turn(self, session: Session, lease: SessionLease) -> bool:
@@ -1401,10 +1401,11 @@ class AgentHarness(
         The user's own stop has one already, written by its route.  Any
         other interrupt gets one now, so the thread's next turn is another
         turn whatever becomes of this worker.  Whether one was written
-        here.  Where it cannot be, the log says so, and this worker writes
-        it before the thread's next turn starts here; a turn taken by
-        another worker first takes this turn's hand-off for its own, if
-        the stop could not take it back either.
+        here.  Where it cannot be, the log says so, and it is kept in
+        Redis, through which the interrupt came, to be written before the
+        thread's next turn starts, on whichever worker starts it.  Only
+        where it cannot be kept either does that turn take this turn's
+        hand-off for its own, if the stop could not take it back.
         """
         from surogates.harness.landing import last_turn_end
 
@@ -1416,13 +1417,18 @@ class AgentHarness(
             await self._store.emit_event(session.id, EventType.SESSION_PAUSE, said)
             return True
         except Exception:
-            _keep_to_write(session.id, session.config.get("turn_after") or 0, said)
             logger.warning(
                 "Could not write that the turn of thread %s was stopped: it is written before the thread's next turn "
-                "here. Until then a turn another worker starts takes this turn's hand-off for its own, where the "
-                "stop did not take it back.", session.id, exc_info=True,
+                "starts, on whichever worker starts it.", session.id, exc_info=True,
             )
-            return False
+        try:
+            await _keep_to_write(self._redis, session.id, session.config.get("turn_after") or 0, said)
+        except Exception:
+            logger.warning(
+                "Nor could the stop of thread %s be kept to be written: its next turn takes this turn's hand-off for "
+                "its own, where the stop did not take it back.", session.id, exc_info=True,
+            )
+        return False
 
     async def _turn_started_a_helper(self, session: Session) -> bool:
         """Whether a step of the thread's turn now ending called a tool that starts a helper, by its log."""

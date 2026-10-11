@@ -25,7 +25,7 @@ import surogates.harness.loop as loop_module
 from surogates.governance.policy import GovernanceGate
 from surogates.harness import agent_resolver, tool_exec
 from surogates.harness import landing as landing_module
-from surogates.sandbox.history import History, HistoryError
+from surogates.sandbox.history import PRUNE_DAYS, History, HistoryError
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
@@ -1205,6 +1205,71 @@ async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_thr
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
 
 
+async def test_a_stop_its_worker_could_not_write_down_is_written_before_the_threads_next_turn_on_another_worker(api, monkeypatch, tmp_path):
+    master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
+    store = api.app.state.session_store
+    emit = store.emit_event
+
+    async def no_stop_is_written(session_id, type, data, *args, **kwargs):
+        if type == EventType.SESSION_PAUSE:
+            raise ConnectionError("the database did not answer")
+        return await emit(session_id, type, data, *args, **kwargs)
+
+    async def stopped_by_no_route(harness):
+        landing_module.turn_ended(thread)  # nor is the stop carried out on the hand-off
+        monkeypatch.setattr(store, "emit_event", no_stop_is_written)
+        await stop(harness)
+
+    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+        calling(("spawn_worker", {"goal": "Check the sources."})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Done."),
+    ], pool=mine, during=stopped_by_no_route), 120)
+    monkeypatch.setattr(store, "emit_event", emit)
+    assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
+    # Kept where every worker reads it, in Redis, through which the interrupt came: its worker goes, and all it knew with it.
+    kept = f"{loop_module._STOP_NOT_WRITTEN_PREFIX}{thread.id}"
+    assert await api.app.state.redis.get(kept) is not None
+    # The thread's next turn, on another worker, writes it first, and so is another turn: the stopped file stays out.
+    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
+    assert len(await store.get_events(thread.id, types=[EventType.SESSION_PAUSE])) == 1
+    assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
+    assert await api.app.state.redis.get(kept) is None
+
+
+async def test_a_stop_that_can_be_neither_written_down_nor_kept_still_ends_its_turn_and_says_so(api, monkeypatch, pods, caplog):
+    thread = await a_thread(api)
+    store, redis = api.app.state.session_store, api.app.state.redis
+    emit, keep = store.emit_event, redis.set
+
+    async def no_stop_is_written(session_id, type, data, *args, **kwargs):
+        if type == EventType.SESSION_PAUSE:
+            raise ConnectionError("the database did not answer")
+        return await emit(session_id, type, data, *args, **kwargs)
+
+    async def nor_kept(name, *args, **kwargs):
+        if str(name).startswith(loop_module._STOP_NOT_WRITTEN_PREFIX):
+            raise ConnectionError("Redis did not answer")
+        return await keep(name, *args, **kwargs)
+
+    async def stopped_by_no_route(harness):
+        monkeypatch.setattr(store, "emit_event", no_stop_is_written)
+        monkeypatch.setattr(redis, "set", nor_kept)
+        await stop(harness)
+
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Draft the outline."})
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+            calling(("memory", {"action": "add", "content": "x"})),
+            _final_response("Done."),
+        ], pool=SandboxPool(pods), during=stopped_by_no_route), 120)
+    # The stop goes on all the same: its turn lands nothing, and its pod goes.
+    assert "Nor could the stop of thread" in caplog.text
+    assert (pods.real_names(), pods.pods) == (["Report.docx", "notes.txt"], {})
+
+
 async def test_a_threads_coding_agent_run_has_its_pod_made_for_the_threads_turn(api, monkeypatch, pods):
     thread = await a_thread(api)
     store, pool, told = api.app.state.session_store, SandboxPool(pods), []
@@ -1307,22 +1372,19 @@ async def test_a_pause_is_its_status_and_its_event_together_or_neither(api, monk
     assert (await store.get_session(thread.id)).status == "archived"
 
 
-async def test_a_stop_kept_to_be_written_is_let_go_once_the_thread_has_a_later_turn_end_and_few_are_kept(api, monkeypatch, pods):
+async def test_a_stop_kept_to_be_written_is_let_go_once_the_thread_has_a_later_turn_end_and_is_kept_no_longer_than_a_hand_off(api, monkeypatch, pods):
     thread = await a_thread(api)
-    store = api.app.state.session_store
-    monkeypatch.setattr(loop_module, "_STOPS_NOT_WRITTEN", {})
+    store, redis = api.app.state.session_store, api.app.state.redis
     looping = a_looping_harness(api, monkeypatch, thread, [_final_response("Done.")], pool=SandboxPool(pods))
-    # A stop of the thread's first turn that this worker could not write down.
-    loop_module._STOPS_NOT_WRITTEN[thread.id] = (0, {"reason": "interrupted"})
+    # A stop of the thread's first turn that its worker could not write down.
+    await loop_module._keep_to_write(redis, thread.id, 0, {"reason": "interrupted"})
+    kept = f"{loop_module._STOP_NOT_WRITTEN_PREFIX}{thread.id}"
+    # Kept no longer than the history keeps a resolved thread's hand-off, which it protects.
+    assert 0 < await redis.ttl(kept) <= PRUNE_DAYS * 86_400
     # The thread's turn ends otherwise meanwhile, written by another worker or a route.
     await store.emit_event(thread.id, EventType.SESSION_FAIL, {"reason": "provider_error"})
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
     await the_loop_runs(api, looping, thread)
     # The thread has a later turn end than the stop: no late pause is added to its log.
-    assert thread.id not in loop_module._STOPS_NOT_WRITTEN
+    assert await redis.get(kept) is None
     assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
-    # And no more than a few are kept: the oldest goes for one more.
-    monkeypatch.setattr(loop_module, "_STOPS_KEPT", 2)
-    for n in range(3):
-        loop_module._keep_to_write(f"thread-{n}", 0, {"reason": "interrupted"})
-    assert list(loop_module._STOPS_NOT_WRITTEN) == ["thread-1", "thread-2"]
