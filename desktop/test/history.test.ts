@@ -1,4 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -407,6 +410,26 @@ describe("a request to a folder's history, as the agent runs it", () => {
     await none.mount(KEY, R1, R2);
     expect(await none.history(KEY, request("say"), signal())).toEqual(NO_ANSWER);
     expect(await none.history(KEY, request("say"), signal())).toEqual(NO_ANSWER);
+  });
+
+  it("answers that the history did not where the agent has no file descriptor left to start it with, and goes on", async () => {
+    // This process's own bound on open files, lowered to what it has open and a few more, and every one of those
+    // few taken: Node then gives a child with no stdio, and says why only after.
+    const limit = Number(/^Max open files\s+(\d+)/m.exec(readFileSync("/proc/self/limits", "utf8"))![1]);
+    const bound = (soft: number) => execFileSync("/usr/bin/prlimit", ["--pid", String(process.pid), `--nofile=${soft}:`]);
+    bound(readdirSync("/proc/self/fd").length + 16);
+    const taken: number[] = [];
+    let asked: Promise<string>;
+    try {
+      for (;;) taken.push(openSync("/dev/null", "r"));
+    } catch {
+      asked = askHistory({ store, folder: join(dir, "places", KEY, "real"), ...request("answer") }, signal(), [process.execPath, join(dir, "history.mjs")]);
+    } finally {
+      for (const fd of taken) closeSync(fd);
+      bound(limit);
+    }
+    await expect(asked!).rejects.toThrow("the history ended without an answer");
+    expect(await mounted.history(KEY, request("answer"), signal())).toEqual({ ok: {} });
   });
 });
 
