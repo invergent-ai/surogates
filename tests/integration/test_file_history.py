@@ -1935,7 +1935,7 @@ def the_api_goes(monkeypatch, api, at: str, *, kind: str = "restore") -> None:
         monkeypatch.setattr(BucketHistory, "record", never_tried)
 
 
-@pytest.mark.parametrize("next_act", ["another Restore", "a thread's landing"])
+@pytest.mark.parametrize("next_act", ["another Restore", "a thread's landing", "a routine's pickup"])
 @pytest.mark.parametrize("at", list(KILLS))
 async def test_a_restore_killed_anywhere_loses_no_edit_and_is_settled_by_the_next_act_once_and_whole(api, monkeypatch, tmp_path, at, next_act):
     project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
@@ -1952,19 +1952,29 @@ async def test_a_restore_killed_anywhere_loses_no_edit_and_is_settled_by_the_nex
     await aged(api)
     if next_act == "another Restore":
         await restored(api, project, by_a)
-    else:
+    elif next_act == "a thread's landing":
         # The next lock holder, a thread's landing in its pod, settles what was left first.
         await edited(pool, first, "echo c > c.md")
         await ends(api, pool, first)
         assert (pods.project / "c.md").read_text() == "c\n"
+    else:
+        # The next lock holder, a routine's run through the master's pod, settles what was left first, then picks up
+        # what it changed.
+        run, _ = await a_routine_run(api, await master_of(api, project), "Tidy up")
+        await in_its_pod(api, pool, run, "true")
+        (pods.project / "notes.txt").write_text("tidied\n")  # as the run's call wrote it
+        await ends(api, pool, run)
     # Nothing is left running, nothing was restored twice or half, and your edit is a version in the History.
     assert [r.saga_state for r in await rows_of(api, project) if r.saga_state == "running"] == []
     restored_now = next_act == "another Restore" or at == "the record's push"
     assert restores_on_main(pods) == int(restored_now)
     assert (pods.project / "Report.docx").read_bytes() == (b"PK\x03\x04 report v1 by A" if restored_now else YOURS)
     listed = await history_of(api, project, "Report.docx")
+    # A routine's run works in the real files, and its pickup records whatever they hold that main does not, as its
+    # own: your edit too, where the Restore died before its own pickup pushed it.
+    by = "routine" if next_act == "a routine's pickup" and at in ("the look", "the pickup's row", "the pickup's pack") else "you"
     assert [(v["by"]["kind"], v["change"]) for v in listed] == [
-        *([("you", "restored")] if restored_now else []), ("you", "changed"), ("thread", "changed"), ("thread", "changed"), ("you", "added"),
+        *([("you", "restored")] if restored_now else []), (by, "changed"), ("thread", "changed"), ("thread", "changed"), ("you", "added"),
     ]
     yours = listed[1 if restored_now else 0]
     assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
