@@ -1954,10 +1954,10 @@ def test_a_stop_puts_the_copy_back_and_takes_away_what_the_turn_made(tmp_path, f
     with refused("failed", "git read-tree failed"):
         one.restore("f" * 40)
     assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
-    # And a file git may not read is refused by its name.
+    # And it is named by the git that failed, whatever options it was run with: a file of the copy it may not read.
     (one.copy / "locked.txt").write_text("not to be read\n")
     (one.copy / "locked.txt").chmod(0)
-    with refused("file_unreadable", '^refused the request: the file "locked.txt" cannot be read on this computer'):
+    with refused("failed", "^git update-index failed: "):
         one.snapshot("before a step")
 
 
