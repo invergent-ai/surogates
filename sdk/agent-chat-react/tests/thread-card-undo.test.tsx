@@ -72,6 +72,22 @@ describe("a project thread's card", () => {
     expect(lines(drawnCard)).toEqual(["Budget.xlsx · not merged", "part-0.csv", "part-1.csv", "+1997 more"]);
   });
 
+  it("counts among the rest the files its row did not list, past its own limit", () => {
+    const listed = Array.from({ length: 200 }, (_, at) => ({ kind: "file" as const, label: `part-${at}.csv`, ref: `part-${at}.csv`, landing: "landed" as const }));
+    expect(lines(drawn({ ...ROW, files: listed, moreFiles: 1_800 }))).toEqual(["part-0.csv", "part-1.csv", "part-2.csv", "+1997 more"]);
+    act(() => root?.unmount());
+    container?.remove();
+    // A row of three that lists them all but counts more says so; one that counts none, or what is no count, says nothing more.
+    expect(lines(drawn({ ...ROW, moreFiles: 2 })).at(-1)).toBe("+2 more");
+    for (const moreFiles of [0, -1, Number.NaN, "7"]) {
+      act(() => root?.unmount());
+      container?.remove();
+      expect(lines(drawn({ ...ROW, moreFiles } as unknown as AgentChatThreadRow)), String(moreFiles)).toEqual([
+        "Budget.xlsx · not merged", "Notes.md · being redone", "A.docx",
+      ]);
+    }
+  });
+
   it("marks nothing on a file that carries no mark", () => {
     // An agent from before file history, an artifact, and a file of a thread that works on the real files.
     const drawnCard = drawn({ ...ROW, files: [

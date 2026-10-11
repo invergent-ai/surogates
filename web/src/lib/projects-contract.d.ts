@@ -54,6 +54,9 @@ export interface ThreadRow {
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: ProducedFile[]; // none where a row lists none
+  // How many more files the thread changed or named than its files list: past the row's 200, or with a name this
+  // client would refuse. Optional: a page built before rows counted them serves none, which is none more.
+  moreFiles?: number;
   // The thread's newest landing with a file still as it landed: what its card's Undo undoes; null when it has
   // none. Optional, as a file's landing is: a page built before file history serves none.
   landingId?: string | null;

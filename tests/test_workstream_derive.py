@@ -71,6 +71,7 @@ def row(thread_id: str, title: str, minutes: float, *, group: str, reason=None, 
         "status_line": status_line, "progress": progress,
         # A thread with no landing: its files are its turn summaries', with no mark.
         "files": [{"kind": kind, "label": label, "ref": ref, "thread_id": thread_id, "landing": None} for kind, label, ref in files],
+        "more_files": 0,
         "landing_id": None,
         "set_aside": None,
         "place": place, "created_at": wire(ago(minutes + 60)), "updated_at": wire(ago(minutes)),
@@ -398,12 +399,28 @@ def test_a_landing_of_two_thousand_files_lists_the_shells_limit_those_left_out_f
     given = replace(facts(IDLE, "Draft A", 5, "completed", events=[
         summary(8, "Done.", ("artifact", "Sales chart", "art-1")),
     ]), landings=(landing(41, *changed),))
-    files = derive_thread(given, now=NOW)["files"]
+    derived = derive_thread(given, now=NOW)
+    files = derived["files"]
     assert len(files) == SHELL_LIMITS["files"]
     assert [f["ref"] for f in files[:5]] == [
         "data/part-0499.csv", "data/part-0999.csv", "data/part-1499.csv", "data/part-1999.csv", "data/part-0000.csv",
     ]
     assert [f["landing"] for f in files[:5]] == ["not_merged"] * 4 + ["landed"]
+    # The row says how many more it changed, and the artifact its summary named.
+    assert derived["more_files"] == 2001 - SHELL_LIMITS["files"]
+
+
+def test_a_row_counts_the_files_its_turn_summaries_named_past_the_shells_limit():
+    named = [("file", f"part-{i:03}.csv", f"data/part-{i:03}.csv") for i in range(250)]
+    given = facts(IDLE, "Draft A", 5, "completed", events=[summary(8, "Done.", *named[:150]), summary(9, "Done.", *named[100:])])
+    derived = derive_thread(given, now=NOW)
+    # Each file once, however many summaries named it.
+    assert (len(derived["files"]), derived["more_files"]) == (SHELL_LIMITS["files"], 50)
+    assert derive_thread(facts(IDLE, "Draft A", 5, "completed", events=[summary(8, "Done.", *named[:3])]), now=NOW)["more_files"] == 0
+    # A file a summary named in words the shell would refuse is no more one, where an earlier summary named it in its own.
+    worded = summary(9, "Done.", ("file", "w" * (SHELL_LIMITS["label"] + 1), "data/part-000.csv"))
+    derived = derive_thread(facts(IDLE, "Draft A", 5, "completed", events=[summary(8, "Done.", *named[:3]), worded]), now=NOW)
+    assert ([f["label"] for f in derived["files"]], derived["more_files"]) == (["part-000.csv", "part-001.csv", "part-002.csv"], 0)
 
 
 def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_it_is():
@@ -412,10 +429,19 @@ def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_
     given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(
         landing(41, (longest + "a", None, "v1", True), (markup, None, "v2", False), (longest, None, "v3", True)),
     ))
-    assert derive_thread(given, now=NOW)["files"] == [
+    derived = derive_thread(given, now=NOW)
+    assert derived["files"] == [
         {"kind": "file", "label": markup, "ref": markup, "thread_id": IDLE, "landing": "not_merged"},
         {"kind": "file", "label": longest, "ref": longest, "thread_id": IDLE, "landing": "landed"},
     ]
+    # One it cannot name is one more file it changed all the same.
+    assert derived["more_files"] == 1
+    # As is a file a summary named that the shell would refuse.  A deletion that landed is no file, and a thread
+    # with a landing takes none of its summaries' files.
+    too_long = summary(9, "Done.", ("file", "notes.md", "n" * (SHELL_LIMITS["ref"] + 1)), ("artifact", "Chart", "art-1"))
+    assert derive_thread(replace(facts(IDLE, "Draft A", 5, "completed"), events=(too_long,)), now=NOW)["more_files"] == 1
+    gone = landing(42, ("gone.md", "g1", None, True))
+    assert derive_thread(replace(given, landings=(gone,), events=(too_long,)), now=NOW)["more_files"] == 0
 
 
 def test_a_file_an_undo_put_back_is_undone_and_the_card_undoes_the_newest_landing_still_as_it_landed():

@@ -179,6 +179,9 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
     : STATE_LABEL[worker.state];
   const statusLine = live ? live.statusLine : statusLineOf(worker.report);
   const files = live ? (Array.isArray(live.files) ? live.files : []) : worker.files;
+  // The rest are counted: those past the first few, and those the row did not list, past its own limit.
+  const unlisted = live && Number.isSafeInteger(live.moreFiles) && (live.moreFiles as number) > 0 ? (live.moreFiles as number) : 0;
+  const more = Math.max(files.length - FILES_SHOWN, 0) + unlisted;
   // What its computer set aside of its work: nothing brings it back yet, so it is said, with no button.
   const setAside = setAsideLines(live?.setAside);
   const name = worker.title ?? firstLine(worker.goal);
@@ -211,7 +214,7 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
           <bdi>{statusLine}</bdi>
         </p>
       )}
-      {files.length > 0 && (
+      {files.length + unlisted > 0 && (
         <ul className="mt-1 flex flex-wrap gap-x-3 text-xs">
           {files.slice(0, FILES_SHOWN).map((file) => {
             // Only a live row's file has one: a report's files say nothing of the project's.
@@ -242,7 +245,7 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
               </li>
             );
           })}
-          {files.length > FILES_SHOWN && <li>+{files.length - FILES_SHOWN} more</li>}
+          {more > 0 && <li>+{more} more</li>}
         </ul>
       )}
       {setAside.length > 0 && (
