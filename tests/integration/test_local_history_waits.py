@@ -431,6 +431,25 @@ async def test_a_stop_while_a_landing_settles_another_left_in_its_folder_ends_th
     assert await status_of(api, next_) == "paused"
 
 
+async def test_a_stop_at_a_turn_end_with_nothing_to_land_leaves_the_thread_stopped(api, computer, monkeypatch):
+    _, master, thread = await begun_with_copy(api, computer)
+    before = seen(computer.folder)
+    worker = a_worker(api, monkeypatch, thread, [_final_response("Nothing in the folder needs to change.")])
+    lands = local_landing.lands
+
+    async def stopped_as_it_ends(*args, **kwargs) -> bool:
+        # You press Stop once the turn's end has found it has nothing to land.
+        anything = await lands(*args, **kwargs)
+        await stop(api, thread, worker)
+        return anything
+
+    monkeypatch.setattr(local_landing, "lands", stopped_as_it_ends)
+    await asyncio.wait_for(worker.wake(thread.id), 30.0)
+    # It had nothing to land, and its computer was asked nothing for it: the thread stays as the Stop left it.
+    assert ran(computer) == [("open:0", "open")] and seen(computer.folder) == before
+    assert await status_of(api, thread) == "paused" and await lease_let_go(api, thread)
+
+
 # -- a deletion ----------------------------------------------------------------------------------------------------
 
 

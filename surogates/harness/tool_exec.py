@@ -324,18 +324,20 @@ async def _snapshot_local_copy(
 
     Taken only once the turn's open answered the copy, which the journal
     holds from the turn's start.  Outside the step's own tool call, so under
-    an invocation of its own: the turn, the step's number in its saga, since
+    an invocation of its own: the turn, the step's number in its turn, since
     a provider may give two calls one id, and the call.  A step run again
     after its worker was lost asks under the same name, and is answered the
-    snapshot it took: the computer hears of it once.  None where none is
-    had: the step then runs without one, and a stop cannot take it back.
+    snapshot it took: the computer hears of it once.  A turn taken up again
+    in a saga of its own, its end lost after its first saga closed, numbers
+    its steps on from that saga's.  None where none is had: the step then
+    runs without one, and a stop cannot take it back.
     """
     current = saga.current_saga
     if current is None:
         return None
     try:
         copy, turn, _ = await _open_local_copy(session, store, lease, session_factory=session_factory, redis=redis)
-        return await copy.take(turn, len(current.steps), tool_call_id, reason)
+        return await copy.take(turn, current.first_step + len(current.steps), tool_call_id, reason)
     except (DeviceOperationError, OperationConflict, NowhereToWork) as failed:
         logger.warning(
             "Snapshot %s was not taken for thread %s on its computer, so a stop cannot take the step back: %s",
