@@ -800,6 +800,43 @@ describe("a landing cut short by a kill", () => {
     expect([readdirSync(folder), readdirSync(kept)]).toEqual([["Report.bin"], []]);
   }));
 
+  it("has every byte of a put-back's copy from another filesystem on disk before its record says that much of the copy is", { timeout: 60_000 }, () => keptElsewhere(async () => {
+    const { target, mine } = await replaced(40 * 1024 * 1024);
+    // Loaded into the helper: notes each record that says how much of the copy is there, and whether a byte the helper
+    // wrote was not yet synced as it took its name.
+    const notes = join(base, "synced.log");
+    const synced = `data:text/javascript,${encodeURIComponent(`
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      const { appendFileSync, closeSync, fsyncSync, readFileSync, renameSync, writeSync } = fs;
+      const unsynced = new Set();
+      fs.writeSync = (fd, ...rest) => { unsynced.add(fd); return writeSync(fd, ...rest); };
+      fs.fsyncSync = (fd) => { fsyncSync(fd); unsynced.delete(fd); };
+      fs.closeSync = (fd) => { unsynced.delete(fd); return closeSync(fd); };
+      fs.renameSync = (from, to) => {
+        if (String(from).endsWith(".json.new") && JSON.parse(readFileSync(from, "utf8")).copied > 0) {
+          appendFileSync(${JSON.stringify(notes)}, unsynced.size > 0 ? "unsynced\\n" : "synced\\n");
+        }
+        return renameSync(from, to);
+      };
+      syncBuiltinESMExports();
+    `)}`;
+    const child = spawn(process.execPath, ["--import", synced, HELPER], {
+      env: { SUROGATE_FOLDER: folder, HOME: base, PATH: "/usr/bin:/bin", SUROGATE_COPY: copy, SUROGATE_KEPT: kept }, stdio: ["pipe", "pipe", "inherit"],
+    });
+    const answered = new Promise<unknown>((resolve) => createInterface({ input: child.stdout }).on("line", (line) => {
+      const said = JSON.parse(line) as { ready?: boolean; outcome?: unknown };
+      if (said.ready) child.stdin.write(`${JSON.stringify({ id: "1", kind: "land", args: unapply(1, "Report.bin") })}\n`);
+      else resolve(said.outcome);
+    }));
+    expect(await answered).toEqual({ ok: { path: "Report.bin", put_back: true } });
+    child.stdin.end();
+    await new Promise((resolve) => child.once("exit", resolve));
+    const said = readFileSync(notes, "utf8").split("\n").filter(Boolean);
+    expect([said.length > 1, said.filter((one) => one !== "synced")]).toEqual([true, []]);
+    expect(readFileSync(target).equals(mine)).toBe(true);
+  }));
+
   it("begins a put-back's copy again where what its record names is not a copy of its own, and never writes through a second name", { timeout: 60_000 }, () => keptElsewhere(async () => {
     const { target, mine } = await replaced(40 * 1024 * 1024);
     expect(await helper([unapply(1, "Report.bin")], ["renameSync", 0, "\\.json\\.new$", 4])).toEqual({ answers: [], signal: "SIGKILL" });

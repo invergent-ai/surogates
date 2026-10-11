@@ -1985,6 +1985,56 @@ describe("what landings cut short in this computer's folders, put back by a host
     expect(told[5]).toEqual(held(`A thread's landing on this computer is working in ${folder()}`));
   });
 
+  it("starts one chat's host for two of its operations that waited for one put-back, and none for one whose wait the app's quit ended", async () => {
+    left();
+    let go = () => {};
+    // The first recovery's host holds the folder when the test says; those after it never do.
+    says = (nth) => {
+      if (nth === 0) void new Promise<void>((resolve) => {
+        go = resolve;
+      }).then(() => recoveries()[0]?.say(ready));
+      return null;
+    };
+    const chats = () => fakes.filter((host) => (host.sent[0] as HostStart).recovery === undefined);
+    const executor = recovering();
+    executor.recoverLeft();
+    const both = [executor.run(op("resolve", { path: "" }), signal()), executor.run(op("resolve", { path: "" }), signal())];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    go();
+    expect(await Promise.all(both)).toEqual([{ ok: expect.any(String) }, { ok: expect.any(String) }]);
+    expect(chats()).toHaveLength(1);
+    // A chat's operation still waiting for the put-back when the app quits starts no host after the quit.
+    left(folders[ROOT_B] ?? "");
+    executor.recoverLeft();
+    await until(() => recoveries().length === 3);
+    const waiting = executor.run(op("resolve", { path: "" }, ROOT_B), signal());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await executor.stop();
+    expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } });
+    expect(chats()).toHaveLength(1);
+  });
+
+  it("answers a read that waits for a put-back cancelled at once, and the app's quit puts back nothing more", async () => {
+    left();
+    // A recovery's host that never holds the folder.
+    says = () => null;
+    const executor = recovering();
+    executor.recoverLeft();
+    const cancel = new AbortController();
+    const reading = executor.recoverBefore(folder(), cancel.signal);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    cancel.abort();
+    expect(await Promise.race([reading, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 500))])).toEqual(CANCELLED);
+    await executor.stop();
+    // Asked once the app is quitting: said, and no host is started for it.
+    const hosts = fakes.length;
+    executor.recoverLeft();
+    const quitting = { error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } };
+    expect(await executor.recoverBefore(folder(), signal())).toEqual(quitting);
+    expect(told.at(-1)).toEqual({ folder: folder(), state: "left", why: "the app is quitting" });
+    expect(fakes).toHaveLength(hosts);
+  });
+
   it("names a put-back of what another landing cut short, where that holds the folder a recovery waits for in vain", async () => {
     left();
     left(folder(), `${keyOf(folder())}.was-1700000000000`);
