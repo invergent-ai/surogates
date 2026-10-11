@@ -3390,7 +3390,11 @@ def test_a_repository_made_again_that_holds_a_commit_of_the_threads_own_is_set_a
     (one.repo / "made").unlink()
     kept = as_it_is(one.repo)
     opened = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
-    assert set(opened) == {"copy", "set_aside_folders"} and opened["copy"] == "made", opened
+    # What a record set aside it holds as the thread's, and the open names it.
+    named = {"set_asides"} if holds == "what a record set aside" else set()
+    assert set(opened) == {"copy", "set_aside_folders", *named} and opened["copy"] == "made", opened
+    if named:
+        assert opened["set_asides"] == [tip]
     [repository] = opened["set_aside_folders"]
     assert repository.endswith("-t1.repository") and set_aside_whole(tmp_path / "store") == [repository]
     assert as_it_is(tmp_path / "store" / "set-aside" / repository) == kept
