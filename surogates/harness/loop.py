@@ -1067,13 +1067,17 @@ class AgentHarness(
         back the browser gave it, unless they took it over again since.
 
         Read for each model request, and at the end of a reply, one message
-        each, as replay renders them.  Of workers, only a master reads them
-        live: its only reporting children are its threads.  A
-        ``delegate_task`` parent, which a master never is, already has its
-        child's result as the tool's result.
+        each, as replay renders them.  Of workers, a master reads them live,
+        whose only reporting children are its threads, and so does a
+        coordinator whose mission is in flight, of its helpers: replay puts
+        a report before the first request written after it, so one that
+        request did not read would stand ahead of the turn's answer, and
+        the next turn's request would end on that answer.  A ``delegate_task``
+        parent, which a master never is, already has its child's result as
+        the tool's result.
         """
         types: list[EventType] = []
-        if is_project_master(session.config):
+        if is_project_master(session.config) or (session.config or {}).get("active_mission_id"):
             types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
         if is_project_thread(session.config):
             # Another thread's turn end can find this one's landing escalated, while it works.
@@ -3614,6 +3618,20 @@ class AgentHarness(
                 # at the top of process_wake_cycle, leaving the mission
                 # active forever even after its verifier task finishes.
                 if await self._mission_has_pending_work(session):
+                    # A message typed meanwhile the turn reads, as any turn's
+                    # end does: one typed as its last request was made ready,
+                    # which that request did not read, would be replayed ahead
+                    # of the answer, and the next turn's request would end on
+                    # that answer.
+                    followup, steer_cursor = await self._collect_steer_messages(session, steer_cursor)
+                    if followup is not None:
+                        messages.append(followup)
+                        request = _latest_user_message_text([followup])
+                        turn_id = str(uuid4())
+                        turn_base_iteration = iteration
+                        self._pending_iteration_summary_tasks = {}
+                        self._completed_iteration_summaries = {}
+                        continue
                     logger.debug(
                         "Session %s: mission has in-flight tasks; deferring completion",
                         session.id,
@@ -3622,9 +3640,8 @@ class AgentHarness(
                     # answer, so a wake with nothing new asks the model nothing.
                     # Not past what no request of the turn read, which has a
                     # turn of its own: a message past the steer cursor, typed
-                    # as a request was made ready or answered, and a report or
-                    # a redo past the report cursor, which a coordinator that
-                    # is no project's master reads only at its next turn.
+                    # as the turn ended, and a report or a redo past the report
+                    # cursor, which came after the turn's last request.
                     try:
                         since = await self._store.get_events(
                             session.id, after=min(steer_cursor, report_cursor),
