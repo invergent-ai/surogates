@@ -67,8 +67,8 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: strin
 const chosen = (): string | null => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")?.value ?? null;
 
 // A button was pressed, by a key, a press, or with neither as assistive technology presses one: the main
-// process says whether it is taken. One it refuses came too soon, and the prompt says so in a line a screen
-// reader reads by itself: a person who pressed with no key hears why nothing happened.
+// process says whether it is taken. One it refuses came too soon, and the prompt says so in a line beside the
+// buttons, which a screen reader reads by itself: a person who pressed sees, or hears, why nothing happened.
 function answer(id: string): void {
   const offered = content?.buttons.find((button) => button.id === id);
   if (!offered) return;

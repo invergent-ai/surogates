@@ -94,11 +94,25 @@ describe("the folders the app holds", () => {
     expect(said).toEqual(["/dead1 silent", "/dead2 silent", "/healthy busy"]);
   });
 
-  it("look at a PATH's entries each in a child of its own, while the looks wait on folders that do not answer: an entry that answers is kept, one not there is not", async () => {
+  it("look at a PATH's entries each in a child of its own, while the looks wait on folders that do not answer: an entry that answers is kept, one not there is not, nor one that is no whole path", async () => {
     const looks = new FolderLooks(() => new Promise<Stats>(() => {}), 50);
     expect(await looks.held(["/dead1", "/dead2"])).toEqual([]);
-    expect(await looks.path(`/usr/bin:${join(dir, "gone")}:relative:${dir}`)).toBe(`/usr/bin:${dir}`);
+    // The folder the app runs in is there: as an entry of the PATH it is no folder of its own, and is not looked at.
+    expect(await looks.path(`/usr/bin:${join(dir, "gone")}:relative:.:${dir}`)).toBe(`/usr/bin:${dir}`);
     expect(await looks.answers(dir)).toBe(true);
+  });
+
+  it("say the looks they give up on as silent before the folder left out as busy, though no bound of theirs has been told yet", async () => {
+    const said: string[] = [];
+    const looks = new FolderLooks((folder) => (folder.startsWith("/dead") ? new Promise<Stats>(() => {}) : Promise.resolve({ dev: 5, ino: 1 } as Stats)), 20, (folder, why) => said.push(`${folder} ${why}`));
+    const first = looks.held(["/dead1", "/dead2"]);
+    // The computer busy past their bound, before any timer of theirs has run.
+    const until = Date.now() + 40;
+    while (Date.now() < until) {}
+    expect(await looks.held(["/healthy"])).toEqual([]);
+    expect(said).toEqual(["/dead1 silent", "/dead2 silent", "/healthy busy"]);
+    expect(await first).toEqual([]);
+    expect(said).toHaveLength(3);
   });
 
   it("say a folder that did not answer in its time by when it is left out, also where its look took a moment to begin, and to each who asks after", async () => {

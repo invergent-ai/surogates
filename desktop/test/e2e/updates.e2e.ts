@@ -130,6 +130,16 @@ describe("updates, through the app", () => {
     await expect.poll(() => page.textContent("#update-text"), { timeout: 100_000, interval: 1_000 }).toBe("Update available: Surogate 0.0.1");
   });
 
+  it("checks at once when the computer wakes, whatever is left of the wait after a check that failed", async () => {
+    const page = await launched();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(await page.textContent("#update-text")).toBe("");
+    publish("0.0.1");
+    // The system's word that the computer woke from a sleep, with most of the minute's wait still to go.
+    await app!.evaluate(({ powerMonitor }) => powerMonitor.emit("resume"));
+    await expect.poll(() => page.textContent("#update-text"), { timeout: 20_000 }).toBe("Update available: Surogate 0.0.1");
+  });
+
   it("installs the update by its root helper at Restart to update, then quits as the app quits and starts again from its launcher", async () => {
     publish("0.0.1");
     const page = await launched();

@@ -85,6 +85,31 @@ describe("the shell", () => {
     expect(layout.close.right <= controls.left || layout.close.top >= controls.bottom).toBe(true);
   });
 
+  it("says in the sidebar while threads' copies of their folders are made, in a live region that is there from the start, empty and taking no room", async () => {
+    seedAgent();
+    app = await launch(home);
+    const page = await shellPage(app);
+    await page.waitForSelector("#panel #close-panel");
+    const line = () => page.$eval("#copying", (found) => ({
+      text: found.textContent, role: found.getAttribute("role"), present: found.closest("[hidden]") === null, height: found.getBoundingClientRect().height,
+    }));
+    expect(await line()).toEqual({ text: "", role: "status", present: true, height: 0 });
+    // The main process's state as it is, but for a copy being made, and then none: the page draws each.
+    const state = await page.evaluate(() => (globalThis as unknown as { surogateShell: { state(): Promise<unknown> } }).surogateShell.state());
+    const says = (copying: string | null) => app!.evaluate(({ BrowserWindow }, [asItIs, now]) => {
+      const contents = BrowserWindow.getAllWindows()[0]!.webContents;
+      contents.ipc.removeHandler("shell:state");
+      contents.ipc.handle("shell:state", () => ({ ...(asItIs as object), copying: now }));
+      contents.send("shell:changed");
+    }, [state, copying] as const);
+    const making = "Making a copy of /home/me/notes for a thread to work in";
+    await says(making);
+    await expect.poll(() => line()).toMatchObject({ text: making, role: "status", present: true });
+    expect((await line()).height).toBeGreaterThan(0);
+    await says(null);
+    await expect.poll(() => line()).toEqual({ text: "", role: "status", present: true, height: 0 });
+  });
+
   it("spell-checks its pages and the agent's web client in en-US alone, from the dictionary it ships, with no request for one", async () => {
     // Every connection for Chromium's dictionary server, and the hosts it sends a download to, comes to
     // a server of the test's, which counts it and ends it; the computer's locale is German.

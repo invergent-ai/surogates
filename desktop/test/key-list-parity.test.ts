@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { releaseKeys } from "../src/shell/updates.js";
+import { listedKeys, releaseKeys } from "../src/shell/updates.js";
 
 import { inForm, KEY_LISTS } from "./key-list-forms.js";
 
@@ -93,6 +93,8 @@ describe("a script's list of release keys, read by the install script, by the re
   it("is read alike by the install script's own reader and by the app, in every spelling: the list in its one form, and no key of any other", () => {
     expect(KEY_LISTS.map(([name, written]) => [name, helperReads(written(SCRIPT)), appReads(written(SCRIPT))]))
       .toEqual(KEY_LISTS.map(([name, , read]) => [name, read, read]));
+    // The app's reader never throws: what it takes of a spelling is a key, and what it does not take is no list.
+    expect(KEY_LISTS.map(([name, written]) => [name, listedKeys(written(SCRIPT)).length])).toEqual(KEY_LISTS.map(([name, , read]) => [name, read]));
   });
 
   it("is handed on by the install script's reader as it is written, and each entry is a key to the app: the two read the same keys, and not only as many", () => {

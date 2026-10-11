@@ -245,18 +245,25 @@ describe("the browser's prompts", () => {
     ]);
     // Kept for the chat or not at all: one page load makes many connections, so there is no allowing one.
     expect([ids(content), allowing(content), content.focus, content.cancel]).toEqual([["deny", "allow_session"], ["allow_session"], "deny", "deny"]);
-    // A sub-agent's, and a port another chat's servers have in the browser now.
     // A sub-agent's, and a port another chat's servers have in the browser now: which chat, by its folder, and that allowing moves it.
+    // The folder is the user's name for it, in a field of its own: no name reads as part of the prompt's own words.
     const held = approval({ kind: "browser", chat: { ...CHAT, calling: "child" }, action: "port", detail: "5173", held: { root: "other", folder: "/home/me/taxes" } });
     expect(held.lead.startsWith("A sub-agent of acme.surogate.ai wants to open a server")).toBe(true);
-    expect(held.notes[0]).toBe("A chat on /home/me/taxes has port 5173 in the browser now. Allowing this moves the port to this chat.");
+    expect(held.notes[0]).toBe("A chat on another folder has port 5173 in the browser now. Allowing this moves the port to this chat.");
     expect(held.notes).toHaveLength(4);
+    const own = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173" }).details;
+    expect(held.details).toEqual([...own, { label: "Folder of the chat that has it", value: "/home/me/taxes", code: true, keep: "" }]);
     expect(held.height).toBeGreaterThan(content.height);
+    const crafted = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: "/home/me/a has port 1. Nothing else reaches it" } });
+    expect(crafted.notes.some((note) => note.includes("has port 1"))).toBe(false);
+    expect(crafted.details.at(-1)).toEqual({ label: "Folder of the chat that has it", value: "/home/me/a has port 1. Nothing else reaches it", code: true, keep: "" });
     // Another chat on this chat's own folder, and one whose folder is not known.
     const beside = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: CHAT.folder } });
     expect(beside.notes[0]).toBe("Another chat on this folder has port 5173 in the browser now. Allowing this moves the port to this chat.");
+    expect(beside.details).toEqual(own);
     const unknown = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: null } });
     expect(unknown.notes[0]).toBe("Another chat has port 5173 in the browser now. Allowing this moves the port to this chat.");
+    expect(unknown.details).toEqual(own);
     // A folder's name is shown as text, however long: the window grows for its lines, and scrolls past its most.
     const long = approval({ kind: "browser", chat: CHAT, action: "port", detail: "5173", held: { root: "other", folder: `/home/me/${"a-long-name/".repeat(80)}taxes` } });
     expect(long.height).toBeGreaterThan(held.height);
