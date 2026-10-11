@@ -1107,7 +1107,7 @@ def test_nothing_an_earlier_guest_left_among_a_threads_objects_is_read_as_one(tm
     assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").changed() == {"paths": ["Secret.md"]}
 
 
-@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "restore", "fetch", "pickup", "picked", "commit", "record", "keep"])
+@pytest.mark.parametrize("first", ["open", "changed", "snapshot", "restore", "fetch", "pickup", "picked", "commit", "record", "keep", "close"])
 def test_whichever_request_comes_first_the_place_is_put_right_before_git_runs(tmp_path, folder, first):
     one = a_copy(tmp_path, folder)
     (one.copy / "notes.txt").write_text("the thread's notes\n")
@@ -1135,6 +1135,7 @@ def test_whichever_request_comes_first_the_place_is_put_right_before_git_runs(tm
         "commit": lambda: again.commit_turn(author=A, trailers=saga, pickup=picked["commit"]),
         "record": lambda: again.record(turn=turn["commit"], applied=[], author=A, trailers=saga, main=picked["main"], pickup=picked["commit"]),
         "keep": lambda: again.keep(author=A, trailers=[["Surogate-Kind", "turn"]], base=True),
+        "close": again.close,
     }[first]()
     assert not marker.exists()
     assert "filter" not in (one.repo / "config").read_text()
@@ -3060,6 +3061,73 @@ def test_a_thread_whose_own_oldest_goes_lets_no_other_threads_go_where_the_place
     assert LocalHistory.at(place, folder, thread="t2", user="u1").open() == {"copy": "moved", "set_aside_folders": theirs}
 
 
+def test_what_a_place_keeps_set_aside_whole_takes_ten_gibibytes_of_its_disk_at_most_the_oldest_going_first_and_never_a_threads_newest(tmp_path, folder, monkeypatch):
+    assert local_history._ASIDE_BYTES == 10 << 30
+    # A place of a few mebibytes, with copies of one or two each.
+    monkeypatch.setattr(local_history, "_ASIDE_BYTES", 7 << 19)
+    place = tmp_path / "store"
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+
+    def heavy(history: LocalHistory, mib: int, text: str) -> dict:
+        # A file that does not compress, in no snapshot: the copy set aside holds it, and the copy made again does not.
+        (history.copy / "Film.bin").write_bytes(os.urandom(mib << 20))
+        return set_aside_once_more(history, text)
+
+    def kept() -> list[str]:
+        return [name for name in set_aside_whole(place) if not name.endswith(".gone")]
+
+    # What holds next to nothing on the disk counts as little: a file of 64 MiB with nothing written in it.
+    with open(one.copy / "Sparse.img", "wb") as sparse:
+        sparse.truncate(64 << 20)
+    names = [set_aside_once_more(one, "one's, sparse\n")["set_aside_folders"][-1]]
+    names += [heavy(history, 1, f"{n}\n")["set_aside_folders"][-1] for n, history in enumerate((two, one, two))]
+    assert kept() == names
+    # One more mebibyte is past the bound: the oldest go first, until what is kept is within it.
+    names.append(heavy(one, 1, "one's, 4\n")["set_aside_folders"][-1])
+    assert kept() == names[2:]
+    assert not any(entry for name in names[:2] for entry in (place / "set-aside" / f"{name}.gone").iterdir())
+    # A thread's newest never goes, but the place keeps no more than the bound past them: one of two mebibytes takes
+    # the two oldest, and the other thread's newest stays.
+    opened = heavy(two, 2, "two's, 5\n")
+    names.append(opened["set_aside_folders"][-1])
+    assert kept() == [names[4], names[5]]
+    assert opened == {"copy": "moved", "set_aside_folders": [names[5]], "set_aside_gone": [names[1], names[3]]}
+    # One larger than the bound by itself is kept whole, as each thread's newest is, and the rest goes.
+    names.append(heavy(one, 4, "one's, 6\n")["set_aside_folders"][-1])
+    assert kept() == [names[5], names[6]]
+    assert (place / "set-aside" / names[6] / "unlanded.md").read_text() == "one's, 6\n"
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {
+        "copy": "moved", "set_aside_folders": [names[6]], "set_aside_gone": [names[0], names[2], names[4]],
+    }
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes from a folder nothing may be removed from")
+def test_what_cannot_be_let_go_for_room_is_kept_whole_and_the_copy_is_set_aside_all_the_same(tmp_path, folder, monkeypatch, caplog):
+    monkeypatch.setattr(local_history, "_ASIDE_BYTES", 3 << 19)
+    one = a_copy(tmp_path, folder)
+    aside = tmp_path / "store" / "set-aside"
+
+    def heavy(text: str) -> dict:
+        (one.copy / "Film.bin").write_bytes(os.urandom(1 << 20))
+        return set_aside_once_more(one, text)
+
+    [first] = heavy("one's, 1\n")["set_aside_folders"]
+    # The name it would go by is taken, by what an earlier guest left there: a folder that cannot be emptied.
+    taken = aside / f"{first}.gone"
+    (taken / "locked").mkdir(parents=True)
+    (taken / "locked" / "theirs.md").write_text("another's\n")
+    (taken / "locked").chmod(0o555)
+    try:
+        was = as_it_is(aside / first)
+        opened = heavy("one's, 2\n")
+        # Letting go is upkeep: the copy is set aside and the turn starts, and what did not go is whole and still kept.
+        assert opened["copy"] == "moved" and opened["set_aside_folders"][0] == first and len(opened["set_aside_folders"]) == 2
+        assert "could not be let go, and is kept" in caplog.text
+        assert as_it_is(aside / first) == was
+    finally:
+        (taken / "locked").chmod(0o755)
+
+
 def test_a_repository_set_aside_by_a_request_that_is_no_open_lets_the_oldest_go_at_once(tmp_path, folder, monkeypatch):
     monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 1)
     one = a_copy(tmp_path, folder)
@@ -3130,6 +3198,276 @@ def test_what_was_set_aside_whole_is_named_in_the_answer_the_agent_gives(tmp_pat
     assert re.fullmatch(rf"00000001-[0-9]{{8}}T[0-9]{{6}}Z-{THREAD}\.copy", copy)
     assert (tmp_path / "store" / "set-aside" / copy / "notes.txt").read_text() == "the thread's, in no snapshot\n"
     assert ask(tree, {**place, "action": "open", "args": {}}) == answer
+
+
+def platform_folders_in(copy: Path) -> None:
+    """The harness's own files, the whiteboard and a coding tool's checkout in *copy*: no file of a branch's."""
+    (copy / ".surogates-results").mkdir()
+    (copy / ".surogates-results" / "call-1.txt").write_text("a long result\n")
+    (copy / "_whiteboard").mkdir()
+    (copy / "_whiteboard" / "canvas.json").write_text("{}")
+    (copy / ".threads" / "site").mkdir(parents=True)
+    (copy / ".threads" / "site" / "index.html").write_text("<p>checked out</p>\n")
+
+
+def platform_folders(top: Path) -> list[tuple[str, int, int, bytes]]:
+    return [entry for entry in as_it_is(top) if entry[0].split("/")[0] in (".surogates-results", "_whiteboard", ".threads")]
+
+
+def test_a_copy_its_root_let_go_is_removed_only_where_its_branch_holds_all_of_it(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    waiting = tmp_path / "store" / "waiting" / "t1"
+    platform_folders_in(one.copy)
+    platform = platform_folders(one.copy)
+    (one.copy / "notes.txt").write_text("v2 notes\n")
+    # A change no snapshot holds yet.
+    assert one.close() == {"copy": "kept"}
+    first = one.snapshot("before a step")
+    # What history leaves out, which the thread made: its commands may need it again.  A folder with nothing in it,
+    # which no branch holds.  A repository of the thread's own in it, and one at the copy's top, whose folder git
+    # never lists.
+    for made, name in (("node_modules", "left-pad.js"), ("an empty folder", None), ("a checkout", "main.py"), (".git", "HEAD")):
+        (one.copy / made).mkdir()
+        if made == "a checkout":
+            subprocess.run(["git", "init", "-q", str(one.copy / made)], check=True, env=HERMETIC)
+        if name:
+            (one.copy / made / name).write_text("the thread's\n")
+        assert one.close() == {"copy": "kept"}, made
+        shutil.rmtree(one.copy / made)
+    # A copy a stop put back: its files are older than its branch's tip, which holds the turn it undid.
+    (one.copy / "notes.txt").write_text("v3 notes\n")
+    one.snapshot("before a step")
+    one.restore(first)
+    assert one.close() == {"copy": "kept"}
+    assert (one.copy / "notes.txt").read_text() == "v2 notes\n"
+    # Its branch holds all of it: it goes, its index with it, and the platform's folders wait beside the copies.
+    one.snapshot("before a step")
+    assert one.close() == {"copy": "removed"}
+    assert not one.copy.exists() and not (one.repo / "worktrees" / "t1").exists()
+    assert sorted(p.name for p in (tmp_path / "store" / "threads").iterdir()) == []
+    assert platform_folders(waiting) == platform
+    assert one.close() == {"copy": "gone"}
+    assert files_of(folder) == [("Report.docx", b"PK\x03\x04 report v1"), ("notes.txt", b"v1 notes\n")]
+    # Made again from its branch at its root's next operation, the platform's folders back in it as they were.
+    assert one.open(moves=False) == {"copy": "kept"}
+    assert (one.copy / "notes.txt").read_text() == "v2 notes\n"
+    assert platform_folders(one.copy) == platform
+    assert not waiting.exists() and not (one.copy / ".git").exists()
+    assert one.changed() == {"paths": ["notes.txt"]}
+
+
+def a_repository_with_a_commit(at: Path) -> str:
+    """A repository of the thread's own at *at*, its files in a commit of its own: the commit."""
+    subprocess.run(["git", "init", "-q", str(at)], check=True, env=HERMETIC)
+    subprocess.run(["git", "-C", str(at), "add", "-A"], check=True, env=HERMETIC)
+    subprocess.run(
+        ["git", "-C", str(at), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "the thread's own commit"],
+        check=True, env=HERMETIC,
+    )
+    return git(at / ".git", "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("held", [
+    "a repository two folders down, with a commit, among files its branch holds",
+    "a git file naming a repository elsewhere",
+    "a git folder that is no repository",
+    "a folder of the thread's where the user's folder keeps a repository",
+])
+def test_a_copy_that_holds_a_name_git_never_lists_anywhere_is_kept_with_all_of_it(tmp_path, folder, held):
+    if held.startswith("a folder of the thread's"):
+        # A repository in the user's folder, which history leaves out: the copy's folder of that name is the thread's.
+        (folder / "vendor").mkdir()
+        (folder / "vendor" / "lib.js").write_text("the user's\n")
+        a_repository_with_a_commit(folder / "vendor")
+    one = a_copy(tmp_path, folder)
+    if held.startswith("a repository two folders down"):
+        (one.copy / "lib" / "sub").mkdir(parents=True)
+        (one.copy / "lib" / "sub" / "mod.py").write_text("x = 1\n")
+        one.snapshot("before a step")
+        a_repository_with_a_commit(one.copy / "lib" / "sub")
+    elif held.startswith("a git file"):
+        (one.copy / "site").mkdir()
+        (one.copy / "site" / "index.html").write_text("<p>a submodule's checkout, copied in</p>\n")
+        (one.copy / "site" / ".git").write_text("gitdir: ../.git/modules/site\n")
+    elif held.startswith("a git folder"):
+        (one.copy / "notes" / ".git").mkdir(parents=True)
+        (one.copy / "notes" / "todo.md").write_text("in a snapshot\n")
+        (one.copy / "notes" / ".git" / "NOTES.md").write_text("the thread's own\n")
+    else:
+        (one.copy / "vendor").mkdir()
+        (one.copy / "vendor" / "mine.js").write_text("the thread's own\n")
+    # Every file git lists is in a snapshot.
+    one.snapshot("before a step")
+    held_now = as_it_is(one.copy)
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").close() == {"copy": "kept"}
+    assert as_it_is(one.copy) == held_now
+
+
+def test_a_checkout_in_the_platforms_own_folder_waits_whole_beside_the_copies_as_the_copy_goes(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    checkout = one.copy / ".threads" / "site"
+    checkout.mkdir(parents=True)
+    (checkout / "index.html").write_text("<p>checked out</p>\n")
+    commit = a_repository_with_a_commit(checkout)
+    assert one.close() == {"copy": "removed"}
+    assert git(tmp_path / "store" / "waiting" / "t1" / ".threads" / "site" / ".git", "rev-parse", "HEAD") == commit
+    assert one.open(moves=False) == {"copy": "kept"}
+    assert git(checkout / ".git", "rev-parse", "HEAD") == commit
+
+
+@pytest.mark.parametrize("how", ["from its branch", "moved at its turn's start", "with its repository made again"])
+def test_what_waited_beside_the_copies_comes_back_whichever_way_the_copy_is_made_again(tmp_path, folder, how):
+    one = a_copy(tmp_path, folder)
+    platform_folders_in(one.copy)
+    platform = platform_folders(one.copy)
+    assert one.close() == {"copy": "removed"}
+    if how == "with its repository made again":
+        (one.repo / "made").unlink()
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open(moves=how == "moved at its turn's start") == {
+        "from its branch": {"copy": "kept"}, "moved at its turn's start": {"copy": "moved"}, "with its repository made again": {"copy": "made"},
+    }[how]
+    assert platform_folders(again.copy) == platform
+    assert not os.path.lexists(tmp_path / "store" / "waiting" / "t1")
+    # Nothing of it lands, and nothing of it is said to be unsaved.
+    assert again.changed() == {"paths": []}
+
+
+def test_what_waits_beside_the_copies_is_never_put_over_what_the_copy_holds_at_its_name(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    platform_folders_in(one.copy)
+    assert one.close() == {"copy": "removed"}
+    waiting = tmp_path / "store" / "waiting" / "t1"
+    held = [entry for entry in platform_folders(waiting) if entry[0].startswith(".surogates-results")]
+    # As no act of this computer's leaves it: the copy made again with nothing waiting beside it, and then a folder
+    # of the harness's at that name in the copy as the folders that waited are there again.
+    waiting.rename(tmp_path / "hidden")
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open(moves=False) == {"copy": "kept"}
+    (tmp_path / "hidden").rename(waiting)
+    (again.copy / ".surogates-results").mkdir()
+    (again.copy / ".surogates-results" / "call-2.txt").write_text("a later result\n")
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open(moves=False) == {"copy": "kept"}
+    # Each stays where it is, whole: the one beside the copies is not put over it, nor let go; the others go back.
+    assert sorted(p.name for p in (again.copy / ".surogates-results").iterdir()) == ["call-2.txt"]
+    assert platform_folders(waiting) == held
+    assert (again.copy / "_whiteboard" / "canvas.json").read_text() == "{}"
+    # And the copy is not let go while the folder beside it would be put over: it is kept, both whole.
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").close() == {"copy": "kept"}
+    assert (again.copy / ".surogates-results" / "call-2.txt").read_text() == "a later result\n"
+    assert (waiting / ".surogates-results" / "call-1.txt").read_text() == "a long result\n"
+
+
+def test_a_copy_let_go_inside_a_turn_is_made_again_where_its_branch_is_and_moves_at_its_next_turn(tmp_path, folder):
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    (two.copy / "notes.txt").write_text("v2 notes, by B\n")
+    land(two, "saga:1", B)
+    assert one.close() == {"copy": "removed"}
+    # Made again for an operation inside its turn: from its branch, not moved to what landed meanwhile.
+    again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+    assert again.open(moves=False) == {"copy": "kept"}
+    assert (again.copy / "notes.txt").read_text() == "v1 notes\n"
+    # Its next turn starts on the folder as it is now.
+    assert again.open() == {"copy": "moved"}
+    assert (again.copy / "notes.txt").read_text() == "v2 notes, by B\n"
+
+
+def test_a_copy_whose_making_did_not_end_or_whose_index_is_gone_is_let_go_as_an_open_lets_it_go(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    place = tmp_path / "store"
+    # Its making again cut, as a quit leaves it: marked, and half its files written.  No thread worked in it.
+    shutil.rmtree(one.copy)
+    (place / "threads" / "t1.making").write_bytes(b"")
+    (one.copy / "half").mkdir(parents=True)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").close() == {"copy": "removed"}
+    assert not os.path.lexists(one.copy) and not os.path.lexists(place / "threads" / "t1.making") and set_aside_whole(place) == []
+    # Whole once, with the thread's work in it, and its index gone as no removal of this computer's leaves it: set aside
+    # whole, never removed.
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    assert again.open(moves=False) == {"copy": "kept"}
+    (again.copy / "Draft.md").write_text("in no snapshot\n")
+    (again.repo / "worktrees" / "t1" / "index").unlink()
+    held = as_it_is(again.copy)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").close() == {"copy": "removed"}
+    [aside] = set_aside_whole(place)
+    assert as_it_is(place / "set-aside" / aside) == held and not os.path.lexists(again.copy)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open(moves=False) == {"copy": "kept", "set_aside_folders": [aside]}
+    assert files_of(again.copy) == files_of(folder)
+    # One that is its branch's files and no more holds nothing of the thread's own: it is removed, and nothing more is kept.
+    (again.repo / "worktrees" / "t1" / "index").unlink()
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").close() == {"copy": "removed"}
+    assert set_aside_whole(place) == [aside] and not os.path.lexists(again.copy)
+
+
+@pytest.mark.parametrize("cut", ["a record cut after its push", "a move cut part way through its files"])
+def test_a_copy_is_let_go_only_once_what_a_request_of_its_thread_was_cut_in_the_middle_of_is_finished(tmp_path, folder, cut):
+    if cut == "a record cut after its push":
+        again, step = a_record_cut_after_its_push(tmp_path, folder)
+        assert again.close() == {"copy": "removed"}
+        assert git(again.repo, "rev-parse", "refs/landed/t2") == step["landing"]
+        # Made again, it is the landing's files: the newer report, and the other thread's new file.
+        made = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1")
+        assert made.open(moves=False) == {"copy": "kept"}
+        assert (made.copy / "Report.docx").read_bytes() == b"PK\x03\x04 A's report"
+        assert (made.copy / "A-new.md").read_text() == "A's new file\n"
+        assert made.changed() == {"paths": []}
+        return
+    root = tmp_path / "whole"
+    a_clean_copy_whose_main_moved(root, False)
+    stepped(root, OURS, "open", {}, before="read-tree -u -m")
+    ours = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+    (ours.copy / "g.txt").write_text("g by them\n")
+    (ours.copy / "e.txt").unlink()
+    assert ours.close() == {"copy": "removed"}
+    assert not git(ours.repo, "for-each-ref", "refs/moving/")
+    assert LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1").open(moves=False) == {"copy": "kept"}
+    the_folder_goes_back_and_the_thread_lands_its_own_file_alone(root, cut)
+
+
+def test_a_copys_letting_go_follows_no_link_an_earlier_guest_left(tmp_path, folder):
+    assert request(tmp_path, folder, THREAD, "open") == {"copy": "made"}
+    assert request(tmp_path, folder, OTHER, "open") == {"copy": "made"}
+    place = tmp_path / "store"
+    (place / "threads" / OTHER / ".surogates-results").mkdir()
+    (place / "threads" / OTHER / ".surogates-results" / "call-1.txt").write_text("a long result\n")
+    # Where a let-go copy's own folders wait, made the copies' folder itself: the copy would wait in its own place.
+    (place / "waiting").symlink_to(place / "threads")
+    assert request(tmp_path, folder, OTHER, "close") == {"copy": "removed"}
+    assert not (place / "waiting").is_symlink()
+    assert (place / "waiting" / OTHER / ".surogates-results" / "call-1.txt").read_text() == "a long result\n"
+    assert sorted(p.name for p in (place / "threads").iterdir()) == [THREAD]
+    # Where this thread's own wait, a link to another folder, which holds a folder of the harness's name: the copy
+    # made again takes nothing from it.
+    assert request(tmp_path, folder, THREAD, "close") == {"copy": "removed"}
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / ".surogates-results").mkdir(parents=True)
+    (elsewhere / ".surogates-results" / "theirs.txt").write_text("another folder's file\n")
+    (place / "waiting" / THREAD).symlink_to(elsewhere)
+    assert request(tmp_path, folder, THREAD, "open", moves=False) == {"copy": "kept"}
+    assert files_of(elsewhere) == [(".surogates-results/theirs.txt", b"another folder's file\n")]
+    assert not os.path.lexists(place / "threads" / THREAD / ".surogates-results")
+    # The copies' folder made a link to another's, where this thread's name is a folder: what it led to stays.
+    (elsewhere / THREAD).mkdir()
+    (elsewhere / THREAD / "theirs.docx").write_text("another folder's file\n")
+    shutil.rmtree(place / "threads")
+    (place / "threads").symlink_to(elsewhere)
+    assert request(tmp_path, folder, THREAD, "close") == {"copy": "gone"}
+    assert not (place / "threads").is_symlink()
+    assert (elsewhere / THREAD / "theirs.docx").read_text() == "another folder's file\n"
+
+
+def test_a_copys_letting_go_is_one_the_agent_runs_and_a_threads_dropping_is_none_yet(tmp_path, folder, tree):
+    place = {"store": str(tmp_path / "store"), "folder": str(folder), "thread": THREAD, "user": "u1"}
+    assert ask(tree, {**place, "action": "open", "args": {"moves": False}}) == {"copy": "made"}
+    assert ask(tree, {**place, "action": "close", "args": {}}) == {"copy": "removed"}
+    assert ask(tree, {**place, "action": "close", "args": {}}) == {"copy": "gone"}
+    assert ask(tree, {**place, "action": "open", "args": {"moves": False}}) == {"copy": "kept"}
+    # A deleted thread's copy and repository stay until a person can be shown what was set aside of it.
+    for refused_ in ({"action": "close", "args": {"force": True}}, {"action": "drop", "args": {}}):
+        assert ask(tree, {**place, **refused_}) == {"error": {
+            "code": "not_a_request", "message": "refused the request: it names no action this computer's history takes",
+        }}
+    assert sorted(p.name for p in (tmp_path / "store").iterdir()) == ["clones", "history.git", "threads"]
 
 
 #: One request, as its runner takes it, run to its end or killed at one of its steps: each git it
@@ -3859,3 +4197,71 @@ def test_an_open_after_a_record_that_left_files_out_was_cut_after_its_push_kille
     stepped(tmp_path / "whole", OURS, "record", step, before="update-ref refs/heads/main")
     for at, root in each_cut(tmp_path, OURS, "open", {}, inside=inside):
         left_as_the_thread_has_them(root, kept, at)
+
+
+def a_copy_to_let_go(root: Path) -> tuple[dict, list[tuple[str, bytes]], list[tuple[str, int, int, bytes]]]:
+    """A folder under *root* whose thread's work is all in a snapshot, and the platform's folders in its copy: its
+    branch holds every other file of the copy, and the copy is let go next.  What the folder must hold whatever is
+    cut, every file of the copy, and the platform's folders in it as they lie."""
+    ours, kept = a_folder_two_threads_work_on(root)
+    LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1").snapshot("before a step")
+    platform_folders_in(ours.copy)
+    return kept, files_of(ours.copy), platform_folders(ours.copy)
+
+
+def made_whole_again(root: Path, kept: dict, files: list[tuple[str, bytes]], at: object) -> None:
+    """After a cut: the thread's next operation has its copy made again from its branch, every file of it as it was and
+    the platform's folders back in it; and its next turn lands its work, and nobody else's."""
+    place = root / "store"
+    again = LocalHistory.at(place, root / "Documents", thread=OURS, user="u1")
+    assert again.open(moves=False) == {"copy": "kept"}, at
+    assert files_of(again.copy) == files, at
+    assert not os.path.lexists(place / "waiting" / OURS) and not os.path.lexists(place / "threads" / f"{OURS}.going"), at
+    assert set_aside_whole(place) == [], at
+    the_next_turn_lands_whole(root, kept, landed=False)
+
+
+def test_a_letting_go_killed_at_any_step_leaves_the_whole_copy_at_its_name_or_nothing_and_its_next_open_makes_it_whole(tmp_path):
+    kept, files, platform = a_copy_to_let_go(tmp_path / "whole")
+    held = [entry for entry in as_it_is(tmp_path / "whole" / "store" / "threads" / OURS) if entry not in platform]
+    for at, root in each_cut(tmp_path, OURS, "close", {}, removals=True):
+        copy, waiting = root / "store" / "threads" / OURS, root / "store" / "waiting" / OURS
+        # Cut anywhere: at the copy's name is the whole copy, but the platform's folders, or nothing; and each of those
+        # is whole, in the copy or beside the copies.
+        assert not os.path.lexists(copy) or [entry for entry in as_it_is(copy) if entry not in platform] == held, at
+        assert sorted([*platform_folders(copy), *platform_folders(waiting)]) == platform, at
+        made_whole_again(root, kept, files, at)
+
+
+@pytest.mark.parametrize("repository", ["whole", "made again"])
+def test_an_open_after_a_letting_go_killed_at_any_step_loses_nothing_that_waited_beside_the_copies(tmp_path, repository):
+    kept, files, platform = a_copy_to_let_go(tmp_path / "whole")
+    ours = LocalHistory.at(tmp_path / "whole" / "store", tmp_path / "whole" / "Documents", thread=OURS, user="u1")
+    assert ours.close() == {"copy": "removed"}
+    if repository == "made again":
+        # Its first open, as it is not marked as ended: what the thread did is set aside with its repository.
+        (ours.repo / "made").unlink()
+    for at, root in each_cut(tmp_path, OURS, "open", {"moves": False}, removals=True):
+        copy, waiting = root / "store" / "threads" / OURS, root / "store" / "waiting" / OURS
+        # Cut anywhere, each of the platform's folders is whole, beside the copies or in a whole copy.
+        assert sorted([*platform_folders(copy), *platform_folders(waiting)]) == platform, at
+        if repository == "whole":
+            made_whole_again(root, kept, files, at)
+            continue
+        again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+        assert again.open(moves=False)["copy"] in ("made", "kept"), at
+        assert platform_folders(again.copy) == platform and not os.path.lexists(waiting), at
+
+
+@pytest.mark.parametrize("broken", [name for name in BROKEN if name != "its copy's index is gone"])
+def test_a_copy_whose_repository_is_none_a_request_reads_is_kept_as_it_is_for_its_next_open(tmp_path, folder, broken):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "Draft.md").write_text("the thread's, in no snapshot\n")
+    BROKEN[broken](one)
+    held = as_it_is(one.copy)
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").close() == {"copy": "kept"}
+    assert as_it_is(one.copy) == held
+    # Its next open makes way for the copy made again, as it would have: what the thread made is kept.
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open(moves=False)
+    [copy] = [name for name in opened.get("set_aside_folders", []) if name.endswith("-t1.copy")]
+    assert as_it_is(tmp_path / "store" / "set-aside" / copy) == held

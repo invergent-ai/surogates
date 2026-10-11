@@ -11,7 +11,7 @@ import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,11 +22,11 @@ import surogates.harness.loop as loop_module
 from surogates.db.models import WorkstreamHistory
 from surogates.devices.binding import THREAD_KINDS
 from surogates.devices.history import NO_COPY, NOWHERE, OPEN_TRIES, thread_copy
-from surogates.devices.operations import OperationRequest
+from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationRequest
 from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.landing import last_turn_end
-from surogates.harness.tool_exec import _open_local_copy
+from surogates.harness.tool_exec import _open_local_copy, execute_single_tool
 from surogates.runtime import SlashCommandConfig
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
@@ -40,7 +40,7 @@ from tests.test_wake_slash_command_gate import _harness as a_waking_harness
 from tests.thread_pods import ThreadPods
 
 from .test_device_sessions import is_bound
-from .test_devices import FOLDER, NONCE, api, eventually, link_url  # noqa: F401  (api and link_url are fixtures)
+from .test_devices import FOLDER, NONCE, api, builtin_tools, eventually, link_url  # noqa: F401  (api and link_url are fixtures)
 from .test_durable_landings import ends
 from .test_local_history_threads import computer, made_with_copy, picture  # noqa: F401  (computer is a fixture)
 from .test_local_threads import begin, begun_local, confirmed, journal, laptop, made_before_copies  # noqa: F401  (laptop is a fixture)
@@ -638,15 +638,48 @@ async def test_a_thread_made_before_threads_had_copies_works_nowhere_and_a_chat_
     assert (await begin(api, project, str(thread.id))).status_code == 201
     helper = await create_child_session(store=store, parent=thread, channel="worker")
     folder = picture(laptop.folder)
-    # Bound to the folder itself, it would write the user's files with nothing kept: no turn of it, nor of its helper's, runs.
+    # A worker before the switch called write_file for the thread; its computer had its write when that worker was killed.
+    call = calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"}))[0]["tool_calls"][0]
+    await store.emit_event(thread.id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "", "tool_calls": [call]}})
+    laptop.app.hold_asked = True
+    lease = await store.try_acquire_lease(thread.id, "the-killed-worker", ttl_seconds=60)
+    killed = asyncio.create_task(execute_single_tool(
+        call, session=thread, lease=lease, store=store, tools=builtin_tools(), tenant=MagicMock(asset_root="/tmp/test"),
+        redis=api.app.state.redis, session_factory=api.app.state.session_factory,
+    ))
+
+    async def written() -> bool:
+        return any(frame["kind"] == "write" for frame in laptop.app._asked.values())
+
+    await eventually(written)
+    [left] = [UUID(frame["id"]) for frame in laptop.app._asked.values()]
+    # Killed, it ran no clean-up of its own: the write stays open in the journal, and its call unanswered.
+    with monkeypatch.context() as dying:
+        dying.setattr(DeviceOperations, "_cancel_own", AsyncMock())
+        killed.cancel()
+        await asyncio.gather(killed, return_exceptions=True)
+    await store.release_lease(thread.id, lease.lease_token)
+    await laptop.app.disconnect()
+    laptop.app.hold_asked = False
+    since = await database_now(api)
+    # Bound to the folder itself, it would write the user's files with nothing kept: no turn of it, nor of its helper's,
+    # runs, and what it left open is closed before anything of the turn could ask it again.
     for session, said in ((thread, None), (helper, "Write the notes.")):
-        worker = await woken(api, monkeypatch, session, [WRITES], said=said)
-        assert worker.model_asked == 0 and await steps_of(api, session) == []
+        worker = await asyncio.wait_for(woken(api, monkeypatch, session, [WRITES], said=said), 30)
+        assert worker.model_asked == 0 and await steps_of(api, session) == (["write_file"] if session is thread else [])
         failed = await failure(api, session)
         assert (failed["reason"], failed["why"], failed["error_title"], failed["retryable"]) == (
             "nowhere_to_work", "made_before_copies", NOWHERE["made_before_copies"], False,
         )
     assert NOWHERE["made_before_copies"].endswith("Start a new thread.")
+    async with api.app.state.session_factory() as db:
+        closed = await db.scalar(text("SELECT outcome FROM device_operations WHERE id = :id"), {"id": left})
+    assert closed == CANCELLED_OUTCOME
+    # Nothing was asked again, and nothing new was sent: its call stays unanswered.
+    assert await journal_of(api, thread, since=since) == [] and await steps_of(api, thread) == ["write_file"]
+    assert await store.get_events(thread.id, types=[EventType.TOOL_RESULT]) == []
+    # Its computer back, it is sent nothing of the thread's: the folder stays as the user left it.
+    await laptop.app.connect()
     # Nor does a turn end of its land anything anywhere, though a landing a killed worker left in the project's
     # files in the cloud waits for a thread's turn end to settle it.
     async with api.app.state.session_factory() as db:
@@ -661,8 +694,7 @@ async def test_a_thread_made_before_threads_had_copies_works_nowhere_and_a_chat_
     assert (pods.pods, pods.copies) == ({}, {})
     [*_, told] = await store.get_events(master.id, types=[EventType.WORKER_COMPLETE])
     assert (told.data["worker_id"], "landing" in told.data) == (str(thread.id), False)
-    # Its computer was asked for nothing but its bind, and its folder is as the user left it.
-    assert await operations_of(api, thread) == [("bind", "bind")] and await operations_of(api, helper) == []
+    assert await operations_of(api, helper) == []
     assert picture(laptop.folder) == folder
     laptop.app.prepare("chat-binding-nonce-0001", FOLDER)
     created = await api.client.post(
@@ -670,6 +702,9 @@ async def test_a_thread_made_before_threads_had_copies_works_nowhere_and_a_chat_
     )
     assert created.status_code == 201, created.text
     await eventually(lambda: is_bound(api, created.json()["id"]))
+    # Bound after the thread's write would have been sent again, oldest first: its app was told it is closed, and never ran it.
+    assert str(left) in laptop.app.cancelled and str(left) not in laptop.app.outcomes
+    assert not (laptop.folder / "Budget.xlsx").exists()
     chat = await store.get_session(UUID(created.json()["id"]))
     await woken(api, monkeypatch, chat, [calling(("write_file", {"path": "Notes.md", "content": "notes\n"})), _final_response("Noted.")], said="Note it.")
     assert (laptop.folder / "Notes.md").read_text() == "notes\n"
