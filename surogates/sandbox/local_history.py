@@ -647,22 +647,22 @@ class LocalHistory(History):
         The thread's chat was deleted, and its app asks once nothing more of
         the thread runs on this computer.  Its work in its copy goes with it:
         its person deleted it.  Each goes as what holds nothing of a
-        thread's goes, renamed first (:func:`_let_go`): cut anywhere, each
-        is whole under its name or not there, and the next drop finishes
-        it.  The copy goes before its repository: cut between, the
-        repository is whole beside no copy, as one whose copy was let go.
-        What the place set aside whole stays, under the place's bound, and
-        so does the folder's history.  ``dropped``; ``gone`` where none of
-        it was there.
+        thread's goes, renamed first (:data:`_GOING`), and all of it before
+        any is removed: cut anywhere, each is whole under its name or under
+        the name it goes by, and the place's next request, whoever's,
+        removes what goes by it (:meth:`_pin`).  The copy is renamed before
+        its repository: cut between, the repository is whole beside no
+        copy, as one whose copy was let go.  What the place set aside whole
+        stays, under the place's bounds as any other thread's, and so does
+        the folder's history.  ``dropped``; ``gone`` where none of it was
+        there.
         """
         self._pin()
-        found = False
-        for at in (self.copy, self.making, self.waiting, self.repo):
-            if os.path.lexists(going := at.with_name(f"{at.name}{_GOING}")):
-                _removed(going)
-            if os.path.lexists(at):
-                _let_go(at)
-                found = True
+        found = [at for at in (self.copy, self.making, self.waiting, self.repo) if os.path.lexists(at)]
+        for at in found:
+            os.rename(at, at.with_name(f"{at.name}{_GOING}"))
+        for at in found:
+            _removed(at.with_name(f"{at.name}{_GOING}"))
         return {"thread": "dropped" if found else "gone"}
 
     def _holds_git(self) -> bool:
@@ -1935,8 +1935,9 @@ class LocalHistory(History):
           sets aside, or this thread's own: removed;
         - a link, or anything else that is no file, where the making of this
           thread's copy is marked: removed, as no mark of this module's;
-        - what a removal that was cut left of this thread's repository or
-          copy, under the name it was going by: removed;
+        - what a removal that was cut left under the name it was going by,
+          of any thread's, a deleted one's as this one's: removed, for no
+          request names it again;
         - anything but files and folders in the folder's history, in any
           folder of it: the history is refused whole, before a byte is
           written through it;
@@ -1966,9 +1967,10 @@ class LocalHistory(History):
                 _removed(folder)
         if os.path.lexists(self.making) and (self.making.is_symlink() or not self.making.is_file()):
             _removed(self.making)
-        for left in (self.repo, self.copy):
-            if os.path.lexists(going := left.with_name(f"{left.name}{_GOING}")):
-                _removed(going)
+        for folder in (self.repo.parent, self.copy.parent, self.waiting.parent):
+            for name in os.listdir(folder) if folder.is_dir() else ():
+                if name.endswith(_GOING):
+                    _removed(folder / name)
         if os.path.lexists(self._pruning):
             # A pruning's work that was cut: it links packs the history may have let go, which it would keep on the disk.
             _removed(self._pruning)

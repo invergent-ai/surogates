@@ -4193,12 +4193,16 @@ def test_a_deleted_threads_dropping_takes_its_copy_what_waits_beside_it_and_its_
     assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "dropped"}
     assert [sorted(p.name for p in (place / at).iterdir()) for at in ("threads", "clones", "waiting")] == [["t2"], ["t2"], []]
     assert [as_it_is(at) for at in (place / "set-aside", place / "history.git", two.copy, two.repo, folder)] == kept
-    # What a dropping cut part way left under the name it went by goes with the next, and there is nothing more.
+    # What a dropping cut part way left under the names it went by goes with the place's next request, whoever's: no
+    # dropping is asked again.
     for at in ("threads/t1.going", "clones/t1.going", "waiting/t1.going"):
         (place / at / "left").mkdir(parents=True)
-    assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "gone"}
+    (place / "threads" / "t1.making.going").write_bytes(b"")
+    kept = [as_it_is(at) for at in (place / "set-aside", two.copy, folder)]
+    assert LocalHistory.at(place, folder, thread="t2", user="u1").open(moves=False)["copy"] == "kept"
     assert [sorted(p.name for p in (place / at).iterdir()) for at in ("threads", "clones", "waiting")] == [["t2"], ["t2"], []]
-    assert [as_it_is(at) for at in (place / "set-aside", place / "history.git", two.copy, two.repo, folder)] == kept
+    assert [as_it_is(at) for at in (place / "set-aside", two.copy, folder)] == kept
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "gone"}
     # Through no link an earlier guest left where the place keeps what waits.
     elsewhere = tmp_path / "elsewhere"
     (elsewhere / "t1").mkdir(parents=True)
@@ -4813,7 +4817,7 @@ def test_an_open_that_removes_what_holds_nothing_of_the_threads_own_killed_at_an
         assert sorted(p.name for p in (place / "threads").iterdir()) == [OURS] == sorted(p.name for p in (place / "clones").iterdir()), at
 
 
-def test_a_threads_dropping_killed_at_any_step_leaves_each_of_its_folders_whole_or_gone_and_the_next_finishes_it(tmp_path):
+def test_a_threads_dropping_killed_at_any_step_leaves_each_of_its_folders_whole_or_going_and_the_places_next_request_removes_what_goes(tmp_path):
     root = tmp_path / "whole"
     folder = root / "Documents"
     folder.mkdir(parents=True)
@@ -4832,11 +4836,21 @@ def test_a_threads_dropping_killed_at_any_step_leaves_each_of_its_folders_whole_
         assert as_it_is(place / "threads" / OURS) in ([], copy), at
         assert as_it_is(place / "waiting" / OURS) in ([], waiting), at
         assert not os.path.lexists(place / "threads" / OURS) or (place / "clones" / OURS / "made").is_file(), at
-        # The next finishes it, and nothing of another thread's goes.
+        # The place's next request, another thread's, removes what was going; a dropping asked again finishes the rest.
+        assert LocalHistory.at(place, cut / "Documents", thread=THEIRS, user="u1").open(moves=False)["copy"] == "kept", at
+        assert not [name for name in ("threads", "clones", "waiting") for p in (place / name).iterdir() if p.name.endswith(".going")], at
         assert LocalHistory.at(place, cut / "Documents", thread=OURS, user="u1").drop()["thread"] in ("dropped", "gone"), at
         assert [sorted(p.name for p in (place / name).iterdir()) for name in ("threads", "clones")] == [[THEIRS], [THEIRS]], at
         assert not any((place / "waiting").iterdir()), at
         assert files_of(place / "threads" / THEIRS) == files_of(cut / "Documents"), at
+    # Killed as it removes the copy: all of it went by the names it goes by first, so the place's next request removes
+    # it all, and none of it stays whole for a dropping no one asks again.
+    cut = tmp_path / "cut-in-the-copy"
+    shutil.copytree(root, cut, symlinks=True)
+    stepped(cut, OURS, "drop", {}, before="unlanded.md", removals=True)
+    assert os.path.lexists(cut / "store" / "threads" / f"{OURS}.going")
+    assert LocalHistory.at(cut / "store", cut / "Documents", thread=THEIRS, user="u1").open(moves=False)["copy"] == "kept"
+    assert [sorted(p.name for p in (cut / "store" / name).iterdir()) for name in ("threads", "clones", "waiting")] == [[THEIRS], [THEIRS], []]
 
 
 #: What our thread's landing leaves out, which no landing writes: a name that runs code, which it made, and a
