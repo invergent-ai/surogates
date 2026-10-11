@@ -115,6 +115,7 @@ from surogates.harness.landing import (
     redo_files,
 )
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
+from surogates.runtime.turn_slots import turn_waiting
 from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
 from surogates.workstreams.derive import UNFINISHED, set_aside_said
@@ -708,6 +709,17 @@ async def _land_asked(steps: Steps, action: str, **arguments: Any) -> dict:
         except ComputerRefused as refused:
             if refused.kind != "busy" or time.monotonic() >= patience:
                 raise
+        await _busy_waited()
+
+
+async def _busy_waited() -> None:
+    """Wait :data:`BUSY_WAIT` for a folder another holds, as a turn waits for its computer.
+
+    Another worker can take the wait over from the journal, which answers
+    each step asked so far: a deploy's drain hands the turn on meanwhile,
+    rather than waiting on it until the turn is killed.
+    """
+    async with turn_waiting(resumable=True):
         await asyncio.sleep(BUSY_WAIT)
 
 
@@ -1470,12 +1482,13 @@ async def settle_folder(
     settles one takes its thread's lease first, and holds it meanwhile.
     One whose lease a worker holds is that worker's to finish: this landing
     gives the folder back, waits, and takes it again, for
-    :data:`BUSY_PATIENCE` at most, then lands nothing (``_Waited``).  So it
-    never looks at a folder that holds half of another's landing, and no
-    pickup takes that landing's files for yours.  This turn's own landings
-    are its own to go on with.  An earlier turn's of this thread is settled
-    under this worker's own lease, *held*; and a deleted thread's, which
-    nobody holds, under none.
+    :data:`BUSY_PATIENCE` at most, then gives the folder back for that
+    worker and lands nothing (``_Waited``).  So it never looks at a folder
+    that holds half of another's landing, and no pickup takes that
+    landing's files for yours.  This turn's own landings are its own to go
+    on with.  An earlier turn's of this thread is settled under this
+    worker's own lease, *held*; and a deleted thread's, which nobody holds,
+    under none.
 
     A landing settled ``escalated`` is told to its thread's master, and its
     thread waits on you over it, once a landing.  Raises
@@ -1514,11 +1527,11 @@ async def settle_folder(
         if not waits:
             await _forget_owed(store, session_factory, copy, session, turn, held)
             return
-        if time.monotonic() >= patience:
-            raise _Waited("a landing left running in the folder is its own worker's still")
         # Its own worker's to finish, which needs the folder: given back meanwhile, and taken again.
         await _given_back(hold, session, turn)
-        await asyncio.sleep(BUSY_WAIT)
+        if time.monotonic() >= patience:
+            raise _Waited("a landing left running in the folder is its own worker's still")
+        await _busy_waited()
         await _held(copy, hold)
 
 

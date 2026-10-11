@@ -420,6 +420,33 @@ async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_work
         assert (await db.execute(text("SELECT count(*) FROM session_leases WHERE session_id = :id"), {"id": lost.id})).scalar() == 0
 
 
+async def test_a_landing_that_gives_up_waiting_for_a_workers_half_landing_gives_the_folder_back_for_that_worker(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 1)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    store = api.app.state.session_store
+    still = await store.try_acquire_lease(lost.id, "worker-still-there", ttl_seconds=120)
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
+    monkeypatch.setattr(local_landing, "BUSY_PATIENCE", 1.0)
+    await lands_next(api, monkeypatch, here, next_)
+    # It waited as long as a landing waits, then gave up, landing nothing: the folder is given back as it gives up.
+    [report] = await told(api, next_master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "busy")
+    assert asked_by(here, next_, "land:0") == [] and asked_by(here, next_, "land:0:hold")[-1] == "forget"
+    assert here.app.places.holder is None
+    # So the worker that holds the half landing's turn finishes it at once, answered busy by nobody.
+    await store.release_lease(lost.id, still.lease_token)
+    asked = len(here.app.places.asked)
+    await woken(api, monkeypatch, lost, [_final_response("Done.")])
+    [row] = await records(api, lost)
+    assert row.saga_state == "completed" and [action for under, _, _, action in here.app.places.asked[asked:] if under == "land:0"] == [
+        "apply", "record", "forget",
+    ]
+    assert kept(here) == {} and here.app.places.holder is None
+
+
 def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") -> None:
     """*thread*'s worker is lost just before it would ask *action* under *invocation*."""
     ask = Steps.ask
