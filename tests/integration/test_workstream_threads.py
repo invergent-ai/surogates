@@ -527,6 +527,40 @@ async def test_stopping_a_working_thread_pauses_it(api):
     assert paused.data == {"reason": "The brief changed."}
 
 
+async def test_the_masters_stop_of_a_thread_is_its_status_and_its_event_together_or_neither(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    state = api.app.state
+    store = state.session_store
+    sessions = store._sf
+
+    def a_database_that_goes_before_the_commit():
+        db = sessions()
+
+        async def gone():
+            raise ConnectionError("the database went away")
+
+        db.commit = gone
+        return db
+
+    # A thread left paused with no turn-ending event would have its next turn named as the stopped one.
+    with monkeypatch.context() as down:
+        down.setattr(store, "_sf", a_database_that_goes_before_the_commit)
+        with pytest.raises(ConnectionError):
+            await threads_module.stop_thread(
+                thread, reason="The brief changed.", interrupt="stopped by the coordinator",
+                session_store=store, redis=state.redis,
+            )
+    assert (await store.get_session(thread.id)).status == "active"
+    assert await events_of(api, thread.id, EventType.SESSION_PAUSE) == []
+    # And whole, once the database answers.
+    assert await threads_module.stop_thread(
+        thread, reason="The brief changed.", interrupt="stopped by the coordinator", session_store=store, redis=state.redis,
+    )
+    assert (await store.get_session(thread.id)).status == "paused"
+    assert [e.data for e in await events_of(api, thread.id, EventType.SESSION_PAUSE)] == [{"reason": "The brief changed."}]
+
+
 async def its_turn_ends_once_it_is_read(api, monkeypatch, thread) -> None:
     """*thread*'s turn ends right after a tool reads it, before the tool acts on what it read."""
     get = SessionStore.get_session
