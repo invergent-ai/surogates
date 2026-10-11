@@ -491,6 +491,8 @@ class FakeLaptop:
         # The type of every frame received after welcome, in order.
         self.frames: list[str] = []
         self.connected = False
+        # How many connections were welcomed: one made again after a drop counts too.
+        self.connections = 0
         self._ws: ClientConnection | None = None
         # The connection it ended itself, which it does not make again.
         self._left: ClientConnection | None = None
@@ -520,6 +522,7 @@ class FakeLaptop:
         welcome = json.loads(await ws.recv())
         assert welcome["type"] == "welcome", welcome
         self.connected = True
+        self.connections += 1
         self._chunk_acks, self._ended, self._incoming = {}, set(), {}
         # Each task works on its own connection's socket. Added to, not replaced: an earlier
         # connection's tasks still end at disconnect().
