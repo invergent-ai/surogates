@@ -235,20 +235,23 @@ async def test_a_file_your_edit_clashed_with_is_being_redone_until_the_redo_land
     assert await marks_of(api, project, thread) == [("Report.docx", "landed"), ("a.md", "landed")]
 
 
-@pytest.mark.parametrize("since, mark", [
-    ((), "redoing"),
-    ((REQUEST,), "redoing"),
-    ((REQUEST, EventType.SESSION_COMPLETE), "not_merged"),
-    ((REQUEST, EventType.SESSION_FAIL), "not_merged"),
-    ((REQUEST, EventType.SESSION_PAUSE), "not_merged"),
-    ((REQUEST, EventType.SESSION_STOPPED), "not_merged"),
-    ((EventType.SESSION_FAIL,), "redoing"),
-    ((EventType.SESSION_FAIL, REQUEST, EventType.SESSION_STOPPED), "not_merged"),
+@pytest.mark.parametrize("since, mark, redone", [
+    ((), "redoing", True),
+    ((REQUEST,), "redoing", True),
+    ((REQUEST, EventType.SESSION_COMPLETE), "not_merged", False),
+    ((REQUEST, EventType.SESSION_FAIL), "not_merged", False),
+    ((REQUEST, EventType.SESSION_PAUSE), "not_merged", False),
+    ((REQUEST, EventType.SESSION_STOPPED), "not_merged", False),
+    # The thread rests, waiting on its user's allowance: nothing redoes the file meanwhile, though its next turn will.
+    ((EventType.SESSION_FAIL,), "not_merged", True),
+    ((EventType.SESSION_FAIL, REQUEST, EventType.SESSION_STOPPED), "not_merged", False),
 ], ids=[
     "told", "its turn under way", "its turn ended and left the file", "its turn failed", "its turn stopped",
     "its turn stopped by the route", "a turn refused before it asked the model, which read nothing", "the turn after that one stopped",
 ])
-async def test_a_file_is_being_redone_exactly_while_its_threads_next_turn_would_redo_it(api, monkeypatch, pods, since, mark):
+async def test_a_file_is_being_redone_while_its_threads_turn_that_redoes_it_is_under_way_or_to_come(
+    api, monkeypatch, pods, since, mark, redone,
+):
     project = await create(api)
     thread = await a_thread(api, "Draft A", await master_of(api, project))
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -257,7 +260,21 @@ async def test_a_file_is_being_redone_exactly_while_its_threads_next_turn_would_
         await store.emit_event(thread.id, kind, {})
     assert await marks_of(api, project, thread) == [("Report.docx", mark), ("a.md", "landed")]
     # The landing's own rule, for the turn the thread takes next.
-    assert await landing_module.redo_files(store, thread.id) == ({"Report.docx"} if mark == "redoing" else set())
+    assert await landing_module.redo_files(store, thread.id) == ({"Report.docx"} if redone else set())
+
+
+async def test_a_file_whose_redo_turn_was_refused_is_being_redone_again_once_its_thread_is_sent_on(api, monkeypatch, pods):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    # Refused by its user's limit before it asked the model: it rests, failed, and the file is not being redone.
+    await store.update_session_status(thread.id, "failed")
+    await store.emit_event(thread.id, EventType.SESSION_FAIL, {"reason": "usage_limit"})
+    assert await marks_of(api, project, thread) == [("Report.docx", "not_merged"), ("a.md", "landed")]
+    # Sent on, the turn under way is the redo's.
+    await store.update_session_status(thread.id, "active")
+    assert await marks_of(api, project, thread) == [("Report.docx", "redoing"), ("a.md", "landed")]
 
 
 async def test_a_projects_rows_read_their_threads_redos_in_one_statement_however_many_threads_have_one(

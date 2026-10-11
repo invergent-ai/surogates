@@ -62,8 +62,10 @@ async def _redoing(db: AsyncSession, statuses: dict[UUID, str]) -> dict[UUID, fr
 
     By the landing's own rule (``landing.redo_files``): those of its last
     ``history.redo`` while no turn that read it has ended, which its next
-    turn is told to redo, so that a row says a file is being redone exactly
-    while that turn would redo it.
+    turn is told to redo.  And while that turn is under way or to come: a
+    turn that ended before it asked the model anything, refused by its
+    user's limit, read no redo, so its next turn will, but until the
+    thread is sent on it rests, and nothing redoes the file.
     """
     from surogates.harness.landing import TURN_ENDS
 
@@ -89,7 +91,7 @@ async def _redoing(db: AsyncSession, statuses: dict[UUID, str]) -> dict[UUID, fr
     return {
         thread_id: frozenset(f["path"] for f in files or [])
         for thread_id, files, since, read in found
-        if not since or not read
+        if not since or (not read and statuses[thread_id] == "active")
     }
 
 

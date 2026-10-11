@@ -71,7 +71,7 @@ class ThreadFacts:
     #: Its landings that recorded files, wherever it works, each ``{id, files, on_computer}``
     #: as its ``workstream_history`` row has them; none when its files are not read.
     landings: tuple[dict[str, Any], ...] = ()
-    #: The files its next turn is told to redo (``landing.redo_files``).
+    #: The files its next turn is told to redo (``landing.redo_files``), while that turn is under way or to come.
     redoing: frozenset[str] = frozenset()
     #: Each ``(row, path)`` of the project an Undo put back and no later Undo brought back (:func:`undone_files`).
     undone: frozenset[tuple[int, str]] = frozenset()
