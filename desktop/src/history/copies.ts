@@ -14,7 +14,8 @@
 // them, so a guest that holds nothing else can stop; the next request adds it again. Before
 // another folder's place is made under its key, and whenever the place's folder in the app's data
 // is not the one the app knew, the place is let go: each host on its copies first, then the guest,
-// by the place it was given. What the app knew of its copies goes with it.
+// by the place it was given. What the app knew of its copies goes with it. A place set aside for
+// another is named once, to the thread whose operation set it aside, on its next turn's open.
 //
 // A thread whose folder has no history works nowhere: no copy is made, and it is told why. The
 // guest's word can deny a thread its copy; nothing it says gives a thread the folder itself. Nor
@@ -23,7 +24,7 @@
 // again (history/too-large.ts).
 
 import { lstat, realpath, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED } from "../guest/command.js";
@@ -211,6 +212,9 @@ export class Copies {
   private readonly leaving = new Map<string, Promise<void>>();
   // How often each key's place was let go for another: a place found before one is found again.
   private readonly lettings = new Map<string, number>();
+  // The places each root's operations set aside, by their names in the app's data, oldest first, until its next turn's
+  // open names them: no other answer the server gets does.
+  private readonly asides = new Map<string, string[]>();
   // Told at each take and each close of a copy: a letting go waits for the hosts on its place's copies.
   private readonly changes = new Set<() => void>();
   // Aborted at the app's stop: a copy's making is stopped by nothing else.
@@ -246,8 +250,10 @@ export class Copies {
   /**
    * One request to the history of *root*'s folder, for its own copy, which is made first for every
    * action but a turn's own open; that one is asked as it came, and answered as the guest answered
-   * it. A turn's open asked as retried (retried: true) is a turn its person asked for again: a
-   * folder refused as too large is tried again, and the guest is asked the open without it. A
+   * it, with the places the thread's operations set aside since it was last answered, if any
+   * (set_aside_places). A turn's open asked as retried (retried: true) is a turn its person asked
+   * for again: a folder refused as too large is tried again, and the guest is asked the open
+   * without it. A
    * request the history refuses for want of a whole copy is asked again once, after an open that
    * does not move the copy; refused again, it is answered so in words. A cancel is answered at
    * once, and stops the request's git in the guest. Never rejects.
@@ -313,9 +319,17 @@ export class Copies {
       else if (await tooLargeFor(found.place, this.options.countMs)) return tooLarge(bound.folder);
       if (signal.aborted) return CANCELLED;
       const outcome = await this.opened(found.known, found.place, root, args, signal);
-      if (outcome !== STALE) return outcome;
+      if (outcome !== STALE) return this.named(root, outcome);
     }
     return unavailable(CHANGED);
+  }
+
+  // A turn's open *outcome* for *root*, with the places its operations set aside since it was last answered: once each.
+  private named(root: string, outcome: Outcome): Outcome {
+    const names = this.asides.get(root);
+    if (names === undefined || !("ok" in outcome)) return outcome;
+    this.asides.delete(root);
+    return { ok: { ...(outcome.ok as Record<string, unknown>), set_aside_places: names } };
   }
 
   private async step(root: string, bound: BoundFolder, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
@@ -385,7 +399,8 @@ export class Copies {
     for (let turn = 0; turn < TURNS; turn += 1) {
       const lettings = this.lettings.get(key) ?? 0;
       try {
-        const { place } = await placeOf(this.options.dataDir, bound, { letGo: (was, store) => this.letGo(was, store) });
+        const { place, aside } = await placeOf(this.options.dataDir, bound, { letGo: (was, store) => this.letGo(was, store) });
+        if (aside) this.asides.set(root, [...(this.asides.get(root) ?? []), basename(aside.history)]);
         const store = await look(place.history);
         if (store === null || store === "other") return { failed: unavailable("its place in the app's data is not a folder of the app's own") };
         if ((this.lettings.get(key) ?? 0) !== lettings) continue;

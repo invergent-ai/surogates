@@ -1446,6 +1446,46 @@ describe("a place another folder at the path takes", () => {
     expect(setAside()).toHaveLength(1);
   });
 
+  it("is named once, on the next answer of a turn's open that the thread whose operation set it aside gets", async () => {
+    let refusing = false;
+    const one = copies((request) => (request.action === "open" && refusing ? QUICK : undefined));
+    await one.open(ROOT, bound(), signal());
+    one.close(ROOT);
+    replace();
+    // A host's start sets it aside: no answer the server gets says so, and another thread's open names nothing.
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+    const [aside] = setAside();
+    expect(aside).toMatch(new RegExp(`^${keyOf(folder)}\\.was-[0-9]+$`));
+    expect(await one.ask(THIRD, bound(THIRD), "open", {}, signal())).toEqual({ ok: { copy: "made" } });
+    // A refusal names nothing, and keeps it for the next.
+    refusing = true;
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual(QUICK);
+    refusing = false;
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places: [aside] } });
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual({ ok: { copy: "kept" } });
+  });
+
+  it("is named on the answer of the turn's open that set it aside, on either of its forms, each place set aside once, oldest first", async () => {
+    const off: Outcome = { ok: { history: "off", reason: "cap" } };
+    let answer: Outcome | undefined = off;
+    const one = copies((request) => (request.action === "open" ? answer : undefined));
+    // A record that cannot be read: the place is set aside, the thread's own as it may be, and a new one made.
+    await one.open(ROOT, bound(), signal());
+    writeFileSync(join(dataDir, "history", `${keyOf(folder)}.json`), "{");
+    const first = await one.ask(ROOT, bound(), "open", {}, signal());
+    expect(first).toEqual({ ok: { ...(off as { ok: object }).ok, set_aside_places: setAside() } });
+    // Twice before a turn's open: both, in the order they were set aside.
+    answer = undefined;
+    for (let time = 0; time < 2; time += 1) {
+      writeFileSync(join(dataDir, "history", `${keyOf(folder)}.json`), "{");
+      await one.open(ROOT, bound(), signal());
+      one.close(ROOT);
+    }
+    const names = setAside().sort((a, b) => Number(a.split("-").at(-1)) - Number(b.split("-").at(-1)));
+    expect(names).toHaveLength(3);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places: names.slice(1) } });
+  });
+
   it("is let go, and what the app knew of its copies with it, once the place's folder is not the one it knew", async () => {
     const one = copies();
     const first = await one.open(ROOT, bound(), signal());
