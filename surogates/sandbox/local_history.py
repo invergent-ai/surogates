@@ -191,8 +191,8 @@ _NAMED = "[A-Za-z0-9_-]{1,64}"
 _WHOLE = re.compile(rf"([0-9]{{8}})-[0-9]{{8}}T[0-9]{{6}}Z-({_NAMED})\.(?:copy|repository)(\.gone)?")
 #: A thread keeps the last four times a copy or a repository of its own was set aside there, and a
 #: place the last sixteen of all its threads', in this many bytes of its disk at most: the oldest
-#: goes for one more, and never a thread's newest.  Of those of its own that went, a thread is told
-#: the last sixteen.
+#: goes for one more, and never the newest of a thread the place still has.  Of those of its own
+#: that went, a thread is told the last sixteen.
 _ASIDE_WHOLE = 4
 _ASIDE_WHOLE_IN_ALL = 16
 _ASIDE_BYTES = 10 << 30
@@ -954,8 +954,9 @@ class LocalHistory(History):
         *left* is about to be set aside there as its *nth* time, this
         thread's newest from then on.  A time is one thread's, its count and
         its thread: what one request set aside of it, a repository with its
-        copy.  The oldest time goes first, both its folders, and never a
-        thread's newest: where those hold more, the place keeps more.  What
+        copy.  The oldest time goes first, both its folders, and never the
+        newest of a thread the place still has (:meth:`_lives`): where those
+        hold more, the place keeps more.  What
         each holds is what its files take of the disk, no link followed: a
         file most of which was never written counts for what it holds.  One
         that goes is renamed ``<name>.gone``, and is emptied as those the
@@ -964,7 +965,7 @@ class LocalHistory(History):
         """
         kept, _ = _asides_in(folder)
         taken = {name: _on_disk(name, folder) for _, _, name in kept}
-        newest = {thread: (at, thread) for at, thread, _ in kept} | {self.thread: (nth, self.thread)}
+        newest = {thread: (at, thread) for at, thread, _ in kept if self._lives(thread)} | {self.thread: (nth, self.thread)}
         held = sum(taken.values()) + _on_disk(left)
         for at in sorted({(at, thread) for at, thread, _ in kept} - set(newest.values())):
             if held <= _ASIDE_BYTES:
@@ -986,8 +987,9 @@ class LocalHistory(History):
         ``_ASIDE_WHOLE`` times one was set aside, each time its own count of
         its own (:meth:`_set_aside_whole`): two threads' under one count are
         two times.  A place keeps the last ``_ASIDE_WHOLE_IN_ALL`` of all its threads': the
-        oldest goes for one more, whoever's it is, and never a thread's
-        newest; and no more of the disk than room was made for as each was
+        oldest goes for one more, whoever's it is, and never the newest of a
+        thread the place still has (:meth:`_lives`), so that a deleted
+        thread's go as any other; and no more of the disk than room was made for as each was
         set aside (:meth:`_make_room`).  The thread's own beyond what it
         keeps go first, and another's only where the place then still keeps
         more than it may.
@@ -1007,7 +1009,7 @@ class LocalHistory(History):
             kept, gone = _asides_in(folder)
             times = list(dict.fromkeys((nth, thread) for nth, thread, _ in kept))
             mine = [at for at in times if at[1] == self.thread]
-            newest = {thread: (nth, thread) for nth, thread, _ in kept}.values()
+            newest = {thread: (nth, thread) for nth, thread, _ in kept if self._lives(thread)}.values()
             going = set(mine[:-_ASIDE_WHOLE])
             going |= {at for at in [at for at in times if at not in going][:-_ASIDE_WHOLE_IN_ALL] if at not in newest}
             for name in [name for nth, thread, name in kept if (nth, thread) in going]:
@@ -1033,6 +1035,18 @@ class LocalHistory(History):
             "set_aside_gone": [name.removesuffix(".gone") for _, thread, name in gone if thread == self.thread],
         }
         return {key: names for key, names in said.items() if names}
+
+    def _lives(self, thread: str) -> bool:
+        """Whether *thread*, one whose copy or repository the place set aside whole, is still the place's.
+
+        It is this request's own, whatever it has set aside so far, or one
+        whose repository or copy is there: a copy whose repository a request
+        cut short set aside, or a repository whose copy was let go.  A
+        deleted thread's went with its drop, and what it set aside has no
+        newest kept for it.  Its name is one :data:`_WHOLE` read: a folder's
+        of the place's, and no other path.
+        """
+        return thread == self.thread or any(os.path.lexists(at / thread) for at in (self.repo.parent, self.copy.parent))
 
     def _held_aside(self, names: list[str]) -> list[str]:
         """The snapshots each repository of the thread's that the place keeps set aside whole holds, by *names*, its folders there.

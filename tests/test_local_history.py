@@ -3662,6 +3662,24 @@ def test_two_threads_set_aside_under_one_count_are_two_times_for_room_too_and_on
     assert (place / "set-aside" / ours / "unlanded.md").read_text() == "one's\n"
 
 
+@pytest.mark.parametrize("bound", ["_ASIDE_WHOLE_IN_ALL", "_ASIDE_BYTES"])
+def test_what_a_dropped_thread_set_aside_whole_goes_at_the_places_bounds_as_any_other_and_is_no_threads_newest(tmp_path, folder, monkeypatch, bound):
+    # A place of one time in all, or of one byte.
+    monkeypatch.setattr(local_history, bound, 1)
+    place = tmp_path / "store"
+    one, two, three = (a_copy(tmp_path, folder, thread) for thread in ("t1", "t2", "t3"))
+    [ours] = set_aside_once_more(one, "one's, deleted since\n")["set_aside_folders"]
+    # A thread whose copy was let go since, its repository kept: it is the place's still.
+    [idle] = set_aside_once_more(three, "three's\n")["set_aside_folders"]
+    assert LocalHistory.at(place, folder, thread="t3", user="u1").close() == {"copy": "removed"}
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").drop() == {"thread": "dropped"}
+    # Another thread's first set aside takes the deleted thread's: that thread has no newest any more.  The idle
+    # thread's newest stays.
+    [theirs] = set_aside_once_more(two, "two's\n")["set_aside_folders"]
+    assert [name for name in set_aside_whole(place) if not name.endswith(".gone")] == [idle, theirs]
+    assert not any((place / "set-aside" / f"{ours}.gone").iterdir())
+
+
 def test_a_repository_and_its_copy_set_aside_by_one_request_are_one_time_and_go_together(tmp_path, folder, monkeypatch):
     monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 2)
     one = a_copy(tmp_path, folder)
