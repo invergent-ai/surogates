@@ -267,7 +267,9 @@ describe("a thread's operations, through the app's executor", { timeout: 10_000 
     const staged = join(dir, "staging", "page.txt");
     writeFileSync(staged, "from a page\n");
     const save = downloadSaver({ get: (root) => bindings.get(root) as Binding | undefined }, { admit: async () => null, run: (operation, stop) => browsing.run(operation, stop) });
-    expect(await save({ root: THREAD, session: THREAD, name: "page.txt", path: staged, user: false })).toMatch(/It is saved in the chat's folder as Downloads\/page\.txt\.$/);
+    expect(await save({ root: THREAD, session: THREAD, name: "page.txt", path: staged, user: false })).toMatch(
+      /It is saved in the thread's copy of its folder as Downloads\/page\.txt, and lands in the folder with the thread's turn\.$/,
+    );
     const copy = copyOf(THREAD);
     expect(ops.map((done) => [done.held, done.kind, done.args.key ?? done.args.path])).toEqual([
       [copy, "read", join(folder, "a.txt")],
