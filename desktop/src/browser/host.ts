@@ -208,6 +208,8 @@ const unmeasured = (name: string): string => `The page downloaded ${quoted(name)
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 // Why a navigation to a port of a chat's own servers that is not allowed did not open.
 const NOT_ALLOWED = (port: number): string => `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${port})`;
+/** Why a navigation that its address sent on to a port of a chat's servers that is not allowed did not open: the port is the site's choice, and not named. */
+export const REDIRECTED_TO_A_CHAT = "The address sent the agent's browser on to a server a chat started, on a port that is not allowed, so it did not open";
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
 const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
 // True of an operation that still runs, and of one that was answered already and still acts in its page: one
@@ -1081,8 +1083,9 @@ export class BrowserHost {
       if (signal.aborted) return CANCELLED;
       // At a chat's port that is not allowed its tab shows the proxy's own page, which is no page of the chat's:
       // the navigation did not open, and its answer says why.
+      // Sent there by the address it opened, the port is that site's choice: named to nobody.
       const shut = kind === "browser.navigate" ? chatPortOf(page.url()) : null;
-      if (shut !== null && !this.forwarded?.ports.includes(shut)) return failed(NOT_ALLOWED(shut));
+      if (shut !== null && !this.forwarded?.ports.includes(shut)) return failed(chatPortOf(String(args.url)) === shut ? NOT_ALLOWED(shut) : REDIRECTED_TO_A_CHAT);
       const notices = this.took(session, id);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened: this.untold.delete(session) } : {}), notices } };
     } catch (error) {

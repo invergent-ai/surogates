@@ -27,7 +27,7 @@ import { CANCELLED, type Launch, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
+  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, REDIRECTED_TO_A_CHAT, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { BrowserProxy, notOpenPage } from "../src/browser/proxy.js";
@@ -3143,6 +3143,9 @@ new Image().src = "http://" + own("image") + "/";
     expect(await op(a, "browser.navigate", { url: "https://192.168.1.5/" })).toEqual({
       error: { type: "browser", message: "The agent's browser does not reach private networks (192.168.1.5:443)" },
     });
+    // A site that sends the navigation on to a port of a chat's servers not allowed: refused as its redirect, naming
+    // no port of the site's choosing, so nobody is asked to allow one.
+    expect(await op(a, "browser.navigate", { url: "http://fixture.test/redirect" })).toEqual({ error: { type: "browser", message: REDIRECTED_TO_A_CHAT } });
     expect(hits).toEqual([]);
   });
 
