@@ -330,15 +330,15 @@ export async function contain(root: string, pid: number | undefined): Promise<vo
  * command's own, *id* in the root's *leaf* folder (runner.ts, ENTER): by the agent, as the guest's root, since the
  * root's user may move no process between the root's cgroups (enter). Only a process in the
  * runner's cgroup is moved. One not found there stays where it is, and its shell, finding
- * itself outside the command's cgroup, runs nothing.
+ * itself outside the command's cgroup, runs nothing. *cgroups* and *proc*: the guest's, unless a test says.
  */
-export async function admit(root: string, leaf: "run" | "proc", id: string, pid: number): Promise<void> {
+export async function admit(root: string, leaf: "run" | "proc", id: string, pid: number, cgroups = CGROUPS, proc = "/proc"): Promise<void> {
   if (!ROOT_ID.test(root)) return;
-  const cgroup = join(CGROUPS, root);
+  const cgroup = join(cgroups, root);
   for (const member of (await readFile(join(cgroup, "init", "cgroup.procs"), "utf8")).split("\n").filter(Boolean)) {
     // Its pid in the guest's PID namespace and in the root's, which it is in: unshare is in the runner's cgroup
     // too, outside the root's, with one pid alone, which a shell's in the root's may equal.
-    const status = await readFile(`/proc/${member}/status`, "utf8").catch(() => "");
+    const status = await readFile(join(proc, member, "status"), "utf8").catch(() => "");
     if (Number(/^NSpid:\s*\d+\s+(\d+)\s*$/m.exec(status)?.[1]) === pid) return writeFile(join(cgroup, leaf, id, "cgroup.procs"), member);
   }
 }
