@@ -24,7 +24,7 @@ import surogates.devices.operations as operations_module
 from surogates.db.models import Event
 from surogates.devices.history import thread_copy
 from surogates.devices.workspace import DeviceOperationError
-from surogates.governance.events import saga_start_event
+from surogates.governance.events import saga_complete_event, saga_start_event, saga_step_event
 from surogates.governance.saga import SagaOrchestrator
 from surogates.governance.saga.compensator import STOP_LEFT_IN_COPY, STOP_LEFT_LANDED, WHY_NOT_TAKEN_BACK
 from surogates.harness import tool_exec
@@ -248,6 +248,30 @@ async def test_a_step_run_again_after_its_worker_was_lost_is_answered_the_snapsh
     await woken(api, monkeypatch, thread, [WRITE, _final_response("Done.")])
     assert await calls_of(api, thread) == [("write_file", taken)]
     assert asked(computer, "checkpoint") == [("checkpoint:0:0:call_0_write_file", "take")]
+
+
+async def test_a_turn_taken_up_again_after_its_end_was_lost_numbers_its_steps_on_from_its_first_run(api, computer, monkeypatch):
+    _, _, thread = await begun_with_copy(api, computer)
+    store = api.app.state.session_store
+    # The turn's first run: its open, its step's snapshot and its saga, closed as its end began, which was then lost.
+    first = copy_of_thread(api, thread)
+    await first.opened(0)
+    taken = await first.take(0, 0, "call_0_write_file", "before write_file")
+    ran = f"saga:{uuid4()}"
+    await store.emit_event(thread.id, EventType.SAGA_START, saga_start_event(ran, str(thread.id), "tools"))
+    for kind, state in ((EventType.SAGA_STEP_BEGIN, "executing"), (EventType.SAGA_STEP_COMMITTED, "committed")):
+        await store.emit_event(thread.id, kind, saga_step_event(
+            ran, "step-1", "write_file", state, tool_call_id="call_0_write_file", checkpoint_hash=taken,
+        ))
+    await store.emit_event(thread.id, EventType.SAGA_COMPLETE, saga_complete_event(ran, "completed", 1))
+    # Taken up again, its model calls the same tool under the same id, in a saga of the turn's own: its computer takes a
+    # snapshot for it, never answering it with the first run's.
+    await woken(api, monkeypatch, thread, [WRITE, _final_response("Done.")])
+    [(_, again)] = await calls_of(api, thread)
+    assert ID.fullmatch(again)
+    assert [under for under, action in asked(computer, "checkpoint") if action == "take"] == [
+        "checkpoint:0:0:call_0_write_file", "checkpoint:0:1:call_0_write_file",
+    ]
 
 
 async def test_a_call_resumed_by_another_worker_takes_no_second_snapshot_and_a_stop_after_it_takes_it_back(api, computer, monkeypatch):

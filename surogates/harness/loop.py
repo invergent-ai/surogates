@@ -2495,6 +2495,14 @@ class AgentHarness(
                     EventType.SAGA_START,
                     saga_start_event(new_saga.saga_id, str(session.id), new_saga.kind),
                 )
+            if opens_its_copy(session):
+                # Its snapshots are named by the step's number in the turn: a saga of a turn taken up again after
+                # its end was lost numbers its steps on from the turn's earlier one.
+                current, turn = saga.current_saga, session.config.get("turn_after") or 0
+                current.first_step = sum(
+                    1 for e in all_events or []
+                    if e.type == EventType.SAGA_STEP_BEGIN.value and e.id > turn and e.data.get("saga_id") != current.saga_id
+                )
 
         # One stable turn_id per user turn. The wake() body services
         # exactly one user turn (returns on session.complete/pause/fail),
