@@ -2084,7 +2084,8 @@ interface ProjectFields {
   threadTier?: Tier;
 }
 
-const tierOf = (value: unknown): value is Tier => value === null || value === "basic" || value === "pro";
+// A tier the dialog shows as one the app does not know, and its user left as it was, comes as none: it is not sent.
+const tierOf = (value: unknown): value is Tier | undefined => value === undefined || value === null || value === "basic" || value === "pro";
 
 function projectFields(value: unknown, editing: boolean): ProjectFields {
   const { name, goal, instructions, coordinatorTier, threadTier } = (value ?? {}) as Record<string, unknown>;
@@ -2092,9 +2093,12 @@ function projectFields(value: unknown, editing: boolean): ProjectFields {
   if (!fits(name, 256) || !fits(goal, 2_000)) throw new Error("Not a project's fields");
   if (editing && !(fits(instructions, 16_000) && tierOf(coordinatorTier) && tierOf(threadTier))) throw new Error("Not a project's fields");
   const named = { name: (name as string).trim(), goal: goal as string };
-  return editing
-    ? { ...named, instructions: instructions as string, coordinatorTier: coordinatorTier as Tier, threadTier: threadTier as Tier }
-    : named;
+  if (!editing) return named;
+  return {
+    ...named, instructions: instructions as string,
+    ...(coordinatorTier === undefined ? {} : { coordinatorTier: coordinatorTier as Tier }),
+    ...(threadTier === undefined ? {} : { threadTier: threadTier as Tier }),
+  };
 }
 
 // What the dialog changed of *shown*, the project as it showed it: a change made elsewhere meanwhile
@@ -2418,8 +2422,8 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:history", (path) => {
     const open = view.kind === "project" && overview?.project.id === view.id ? view : null;
     const listed = open && overview && (
-      overview.library.some((entry) => entry.path === path && entry.place.kind === "cloud")
-      || overview.threads.some((row) => row.place.kind === "cloud" && row.files.some((file) => file.kind === "file" && file.ref === path))
+      overview.library.some((entry) => entry.path === path && entry.place?.kind === "cloud")
+      || overview.threads.some((row) => row.place?.kind === "cloud" && row.files.some((file) => file.kind === "file" && file.ref === path))
       || overview.deleted.files.some((version) => version.path === path)
     );
     if (!open || typeof path !== "string" || !listed) throw new Error("No such file in the open project");
