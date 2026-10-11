@@ -27,7 +27,7 @@ import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js"
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, vmEnv, vmOptions } from "../vm/client.js";
+import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
 import { missingTools } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
@@ -56,7 +56,7 @@ import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
-import { appTools, BWRAP } from "./tools.js";
+import { appTools, appVm, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
 import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
@@ -477,10 +477,10 @@ const alive = new LiveProcesses();
 const copying = new Copying(changed);
 const vmFor = (): VmClient => {
   if (vm) return vm;
-  vm = new VmClient({
+  vm = appVm({
     vm: {
       ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
-      ca: companyCertificates, ...(BWRAP ? { bwrap: BWRAP } : {}),
+      ca: companyCertificates,
     },
     ready: vmReady,
     spawn: utilityManager,
