@@ -1174,7 +1174,8 @@ class History:
                     # The packs as they were told a little less than the one pack made of them.
                     kept -= 1
                     packed = self._cut(git, work, mains=ids, kept=kept)
-            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack")}
+            # The cut's own pack, with its index: one a write cut short left alone is no pack git reads, and goes below.
+            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack") if p.with_suffix(".idx").is_file()}
             for kind in ("pack", "idx"):
                 self._put_durable(f"objects/pack/{name}.{kind}", work / "objects" / "pack" / f"{name}.{kind}")
             if (work / "shallow").is_file():

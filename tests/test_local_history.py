@@ -2661,6 +2661,8 @@ def test_a_repository_astray_already_is_read_as_data_alone_and_the_pruning_goes_
     # The folder's history was taken away by hand, and another thread's first copy made a new one: t1's repository
     # notes packs the history no longer holds, and its snapshot stands on a commit nobody holds now.
     shutil.rmtree(tmp_path / "store" / "history.git")
+    # Your save since: the new history's first commit is not the old one's, made again in the same second from the same files.
+    (folder / "notes.txt").write_text("saved by you before the history was made again\n")
     busy = a_copy(tmp_path, folder, "t2")
     lands_often(busy, "notes.txt", 3)
     held = as_it_is(one.repo)
@@ -2669,6 +2671,21 @@ def test_a_repository_astray_already_is_read_as_data_alone_and_the_pruning_goes_
     assert as_it_is(one.repo) == held
     opened = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
     assert opened["copy"] == "made" and any(name.endswith("-t1.repository") for name in opened["set_aside_folders"]), opened
+
+
+@pytest.mark.parametrize("left", [".pack", ".idx"])
+def test_a_pruning_finishes_where_a_write_cut_between_a_pack_and_its_index_left_one_alone_and_takes_it_away(tmp_path, folder, left):
+    one = a_copy(tmp_path, folder)
+    lands_often(one, "notes.txt", 2)
+    pack = tmp_path / "store" / "history.git" / "objects" / "pack"
+    # As a push, or a pruning, killed between a pack and its index leaves it; or a pruning killed between the two it let go.
+    source = sorted(pack.glob(f"pack-*{left}"))[0]
+    shutil.copyfile(source, pack / f"pack-{'f' * 40}{left}")
+    assert one.prune(keep=[], now=time.time())["pruned"] is True
+    [kept] = packs_of(tmp_path / "store")
+    assert sorted(p.name for p in pack.iterdir()) == [f"pack-{kept}.idx", f"pack-{kept}.pack"]
+    assert noted(one.repo) == {kept}
+    connected(tmp_path / "store")
 
 
 def test_what_a_pruning_cut_part_way_left_beside_the_history_is_gone_with_the_next_request(tmp_path, folder):
