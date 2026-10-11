@@ -490,6 +490,8 @@ def test_a_row_says_nothing_set_aside_where_its_turn_ends_recorded_none_or_none_
     for told in (
         {"copies": [], "snapshots": [], "gone": []},
         {"copies": ["../../etc", f"00000001-20261010T101500Z-{COMPUTER}.history", 7], "snapshots": "all", "gone": None},
+        # A name with more around it is none.
+        {"copies": [f"../{COPY_NAME}", f"{COPY_NAME}.gone"], "snapshots": [], "gone": []},
         # Digits in a time's places that make no time.
         {"copies": [f"00000001-20261399T256199Z-{COMPUTER}.copy"], "snapshots": [], "gone": [f"00000002-20260230T101500Z-{COMPUTER}.copy"]},
         "everything",

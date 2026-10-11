@@ -297,8 +297,7 @@ def set_aside_name(name: Any) -> dict[str, str] | None:
         at = datetime.strptime(moment, "%Y%m%dT%H%M%SZ")
     except ValueError:
         return None
-    # Each of its digits where the time's own are: a parse may take a month or a day of one digit.
-    return {"kind": kind, "at": at.strftime("%Y-%m-%dT%H:%M:%SZ")} if at.strftime("%Y%m%dT%H%M%SZ") == moment else None
+    return {"kind": kind, "at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:
