@@ -750,24 +750,30 @@ async def handle_mission_accept(
     The amendment is recorded before it is applied: a rubric amended and
     not recorded is one a second run of the command could not tell for its
     own.  *typed_at* is the id of the event the command was typed in, where
-    a command is what calls this.  An amendment recorded since then is the
-    one a run of this very command made before its worker died: it is
-    applied again, which changes nothing applied already, and answered, its
-    continuation with it, as that run would have.
+    a command is what calls this, and the record names it.  The record of
+    the mission's amendment that names it is the one a run of this very
+    command made before its worker died: it is applied again, which changes
+    nothing applied already, and answered, its continuation with it, as that
+    run would have.  Another accept's record is never this one's.  Nor is an
+    amendment recorded twice: one recorded since the mission's latest
+    proposal, by an accept whose amendment then failed, is the one applied.
     """
     active = await mission_store.get_active_for_session(session_id)
-    recorded = await session_store.get_events(
-        session_id, after=typed_at, types=[EventType.MISSION_AMENDED],
-    ) if active is not None and typed_at is not None else []
-    amended = recorded[-1].data if recorded else None
+    mine = await session_store.last_event(
+        session_id, EventType.MISSION_AMENDED, containing={"mission_id": str(active.id), "typed_at": typed_at},
+    ) if active is not None and typed_at is not None else None
+    amended = mine.data if mine is not None else None
     if amended is None:
         if active is None or active.paused_reason != "awaiting_refinement":
             return MissionHandlerResult(
                 ok=False,
                 error="No rubric refinement is awaiting your decision.",
             )
-        proposal = await session_store.latest_mission_proposal(session_id, active.id)
-        new_rubric = str((proposal or {}).get("proposed_rubric") or "").strip()
+        proposal = await session_store.last_event(
+            session_id, EventType.MISSION_REFINEMENT_PROPOSED, containing={"mission_id": str(active.id)},
+        )
+        proposed = proposal.data if proposal is not None else {}
+        new_rubric = str(proposed.get("proposed_rubric") or "").strip()
         if not new_rubric:
             return MissionHandlerResult(
                 ok=False, mission_id=active.id,
@@ -776,13 +782,20 @@ async def handle_mission_accept(
                     "/mission reject or /mission cancel."
                 ),
             )
-        amended = {
-            "mission_id": str(active.id),
-            "old_rubric": active.rubric,
-            "new_rubric": new_rubric,
-            "evidence": str((proposal or {}).get("evidence") or ""),
-        }
-        await session_store.emit_event(session_id, EventType.MISSION_AMENDED, amended)
+        earlier = await session_store.last_event(
+            session_id, EventType.MISSION_AMENDED, containing={"mission_id": str(active.id)},
+        )
+        if earlier is not None and earlier.id > proposal.id:
+            amended = earlier.data
+        else:
+            amended = {
+                "mission_id": str(active.id),
+                "old_rubric": active.rubric,
+                "new_rubric": new_rubric,
+                "evidence": str(proposed.get("evidence") or ""),
+                "typed_at": typed_at,
+            }
+            await session_store.emit_event(session_id, EventType.MISSION_AMENDED, amended)
     await mission_store.amend_rubric(active.id, new_rubric=amended["new_rubric"])
     return MissionHandlerResult(
         ok=True, mission_id=active.id,

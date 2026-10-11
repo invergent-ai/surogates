@@ -1610,6 +1610,62 @@ async def test_a_mission_accept_whose_worker_died_is_finished_by_the_wake_that_r
     assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
 
 
+def answers_to(events: list, typed: list) -> list[list[str]]:
+    """The answers in *events* to each of the commands typed at the events *typed*, in order."""
+    return [
+        [e.data["message"]["content"] for e in events if e.type == EventType.LLM_RESPONSE.value and e.data.get("answers") == at]
+        for at in typed
+    ]
+
+
+@pytest.mark.parametrize("between", [None, "/mission pause hold on"])
+async def test_a_mission_accept_typed_before_an_earlier_one_ran_is_refused_once_that_one_has_amended_the_rubric(workers, between):
+    chat = await a_coordinator(workers)
+    await a_proposal_waits(workers, chat)
+    [mission] = await workers.missions(chat)
+    typed = []
+    # Typed one after the other, before any wake has run the first.
+    for command in ["/mission accept", *([between] if between else []), "/mission accept"]:
+        await workers.says(chat, command)
+        typed.append(await workers.typed(chat))
+    for _ in range(5):
+        await workers.wake(chat)
+
+    events = await workers.store.get_events(chat)
+    assert answers_to(events, typed) == [
+        ["Rubric amended; mission resumed."], *([["Mission paused."]] if between else []),
+        ["No rubric refinement is awaiting your decision."],
+    ]
+    [mission] = await workers.missions(chat, mission.id)
+    # The pause typed between the two stands, and the rubric was amended once.
+    assert (mission.status, mission.paused_reason) == (("paused", "hold on") if between else ("active", None))
+    assert [e.type for e in events].count(EventType.MISSION_AMENDED.value) == 1
+
+
+async def test_an_amendment_whose_write_failed_after_its_record_is_applied_by_the_next_accept_and_counted_once(workers, monkeypatch):
+    chat = await a_coordinator(workers)
+    await a_proposal_waits(workers, chat)
+    [mission] = await workers.missions(chat)
+    amend = MissionStore.amend_rubric
+    failed = []
+
+    async def fails_once(self, *args, **kwargs):
+        if not failed:
+            failed.append(True)
+            raise ConnectionError("the database did not answer")
+        return await amend(self, *args, **kwargs)
+
+    monkeypatch.setattr(MissionStore, "amend_rubric", fails_once)
+    assert (await workers.types(chat, "/mission accept")).startswith("/mission was cut off before it could answer.")
+    assert await workers.types(chat, "/mission accept") == "Rubric amended; mission resumed."
+
+    [mission] = await workers.missions(chat, mission.id)
+    assert (mission.rubric, mission.status) == (PROPOSAL["proposed_rubric"], "active")
+    # One amendment applied is one counted against the mission's allowance, and told it once.
+    assert await workers.store.count_mission_amendments(chat, mission.id) == 1
+    assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
+
+
 async def a_task_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID:
     """A task of the chat's mission whose helper is at work: the helper's session."""
     helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
