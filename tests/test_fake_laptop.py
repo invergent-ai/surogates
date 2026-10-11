@@ -11,6 +11,7 @@ import os
 import pytest
 from websockets.asyncio.server import serve
 
+from surogates.devices.link import CLOSE_IDLE, CLOSE_REVOKED, CLOSE_SUPERSEDED, CLOSE_UNAUTHENTICATED
 from surogates.devices.workspace import CHUNK_BYTES, MAX_PAYLOAD_BYTES, MAX_WRITE_BYTES
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop
@@ -134,6 +135,43 @@ async def test_an_operation_repeated_after_its_transfer_was_acknowledged_is_answ
     # As the app's journal: the chunks went with the acknowledgement, so the server has its result.
     assert connections[1] == []
     assert laptop.ran == ["read"]
+
+
+@pytest.mark.parametrize("close, back", [
+    (CLOSE_IDLE, True), (1011, True), (CLOSE_SUPERSEDED, False), (CLOSE_REVOKED, False), (CLOSE_UNAUTHENTICATED, False), (None, False),
+], ids=["silent", "server error", "superseded", "revoked", "unauthenticated", "dropped off by the laptop"])
+async def test_a_link_the_server_closed_is_made_again_and_answers_what_the_server_sends_again_unless_it_may_not_be(tmp_path, close, back):
+    (tmp_path / "a.txt").write_text("a\n")
+    hellos: list[dict] = []
+    answered: list[dict] = []
+
+    async def server(ws) -> None:
+        hellos.append(json.loads(await ws.recv()))
+        await ws.send(json.dumps(WELCOME))
+        await ws.send(json.dumps(read_op(tmp_path / "a.txt")))
+        if len(hellos) == 1 and close is not None:
+            # The operation reaches the laptop, and the link is closed before its answer gets back.
+            await ws.close(close, "closed")
+            return
+        async for raw in ws:
+            if (frame := json.loads(raw))["type"] == "op_result":
+                answered.append(frame)
+
+    async with serve(server, "127.0.0.1", 0, max_size=None) as running:
+        port = running.sockets[0].getsockname()[1]
+        laptop = FakeLaptop(f"ws://127.0.0.1:{port}", "surg_dev_test", LocalWorkspaceIO(str(tmp_path)))
+        # A computer that drops off as it runs the operation, without answering it.
+        laptop.reply = close is not None
+        try:
+            await laptop.connect()
+            await until(lambda: len(hellos) == 2 and answered and laptop.connected) if back else await asyncio.sleep(1.0)
+            # And one a scene disconnects stays away.
+            await laptop.disconnect()
+            await asyncio.sleep(1.0)
+        finally:
+            await laptop.disconnect()
+    # As the app after a close that is not final: it connects again, and the operation sent again is answered from its journal.
+    assert (len(hellos), [frame["id"] for frame in answered], laptop.ran) == ((2, ["op-1"], ["read"]) if back else (1, [], ["read"]))
 
 
 DATA = os.urandom(CHUNK_BYTES * 5 // 2)  # three chunks, the last one short
