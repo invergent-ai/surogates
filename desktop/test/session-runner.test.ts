@@ -192,13 +192,19 @@ describe("the session runner", { timeout: 20_000 }, () => {
     expect(moved).toEqual([[child.id, child.pid, false]]);
   });
 
-  it("kills a command whose shell still waits to be moved into its cgroup", async () => {
+  it("kills a command whose shell still waits to be moved into its cgroup, and the cgroup too, whatever the agent moved there", async () => {
     const started = await inCgroups(() => new Promise(() => {}));
-    const child = started.spawn(request("echo ran"));
-    const ended = collect(child);
-    await child.started;
-    child.kill();
-    expect(await ended).toEqual({ out: "", err: "", end: { code: null, signal: "SIGKILL" } });
+    for (const background of [false, true]) {
+      const asked = request("echo ran", background);
+      // A background process's cgroup is the agent's to make.
+      if (background) mkdirSync(join(base, "cgroups", "proc", asked.id), { recursive: true });
+      const child = started.spawn(asked);
+      const ended = collect(child);
+      await child.started;
+      child.kill();
+      expect(await ended).toEqual({ out: "", err: "", end: { code: null, signal: "SIGKILL" } });
+      expect(readFileSync(join(base, "cgroups", background ? "proc" : "run", asked.id, "cgroup.kill"), "utf8")).toBe("1");
+    }
   });
 
   it("answers a command it cannot start", async () => {

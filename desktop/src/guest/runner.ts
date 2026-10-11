@@ -97,9 +97,16 @@ function signalAll(child: Child, signal: NodeJS.Signals): void {
     }
     return;
   }
-  // A shell that still waits to be moved into its cgroup has started nothing: it alone is signalled.
+  // A shell that still waits to be moved into its cgroup has started nothing: it alone is signalled, and at a
+  // kill its cgroup too, whatever the agent may have moved there in its place (root.ts, admit).
   if (!child.entered) {
     child.proc.kill(signal);
+    if (signal !== "SIGKILL") return;
+    try {
+      writeFileSync(join(child.cgroup, "cgroup.kill"), "1");
+    } catch {
+      // Its cgroup has gone, and everything in it.
+    }
     return;
   }
   try {
@@ -210,8 +217,9 @@ function start(request: SpawnRequest): void {
   });
   proc.on("exit", () => {
     child.exited = true;
-    // As in a sandbox of its own: a run's leftovers end when its shell does.
-    if (child.foreground) signalAll(child, "SIGKILL");
+    // As in a sandbox of its own: a run's leftovers end when its shell does; and a shell's that ended before it
+    // was let into its cgroup, so nothing moved there outlives it.
+    if (child.foreground || !child.entered) signalAll(child, "SIGKILL");
     if (child.killed) finish(id);
   });
   proc.on("close", () => finish(id));
