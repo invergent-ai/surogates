@@ -3589,6 +3589,40 @@ def test_a_thread_whose_own_oldest_goes_lets_no_other_threads_go_where_the_place
     assert LocalHistory.at(place, folder, thread="t2", user="u1").open() == {"copy": "moved", "set_aside_folders": theirs}
 
 
+def test_two_threads_set_aside_under_one_count_are_two_times_and_one_threads_going_takes_nothing_of_the_others(tmp_path, folder, monkeypatch):
+    monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 1)
+    place = tmp_path / "store"
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    [ours] = set_aside_once_more(one, "one's\n")["set_aside_folders"]
+    # Two threads' requests at once count alike: the other thread's first is under the first thread's count.
+    theirs = ours.replace("-t1.", "-t2.")
+    (place / "set-aside" / theirs).mkdir()
+    (place / "set-aside" / theirs / "unlanded.md").write_text("two's, 1\n")
+    # The other thread's second takes its own first, and nothing of the first thread's, which is that thread's newest.
+    assert set_aside_once_more(two, "two's, 2\n")["set_aside_gone"] == [theirs]
+    assert (place / "set-aside" / ours / "unlanded.md").read_text() == "one's\n"
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {"copy": "moved", "set_aside_folders": [ours]}
+
+
+def test_a_repository_and_its_copy_set_aside_by_one_request_are_one_time_and_go_together(tmp_path, folder, monkeypatch):
+    monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 2)
+    one = a_copy(tmp_path, folder)
+    # The thread's work in its copy, and a link an earlier guest left in its repository: the request's first step sets
+    # the repository aside, and its open the copy after it.
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (one.repo / "refs" / "elsewhere").symlink_to(tmp_path)
+    first = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()["set_aside_folders"]
+    assert [name.rpartition(".")[2] for name in first] == ["copy", "repository"]
+    assert first[0].removesuffix(".copy") == first[1].removesuffix(".repository")
+    # One time more, and the thread keeps both times whole: none goes without the other.
+    opened = set_aside_once_more(one, "one's, 2\n")
+    second = opened["set_aside_folders"][-1]
+    assert opened == {"copy": "moved", "set_aside_folders": [*first, second]}
+    # Another, and the oldest goes, both its folders.
+    opened = set_aside_once_more(one, "one's, 3\n")
+    assert opened == {"copy": "moved", "set_aside_folders": [second, opened["set_aside_folders"][-1]], "set_aside_gone": first}
+
+
 def test_what_a_place_keeps_set_aside_whole_takes_ten_gibibytes_of_its_disk_at_most_the_oldest_going_first_and_never_a_threads_newest(tmp_path, folder, monkeypatch):
     assert local_history._ASIDE_BYTES == 10 << 30
     # A place of a few mebibytes, with copies of one or two each.

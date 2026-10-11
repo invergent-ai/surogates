@@ -183,8 +183,9 @@ _SET_ASIDE = "set-aside"
 _PICKED_CHARS = 1 << 20
 #: A thread's name is one name, of these alone: it names a folder of the place's, and none of another's.
 _NAMED = "[A-Za-z0-9_-]{1,64}"
-#: What one is named there: the order it was set aside in, counted over the place; when, by this
-#: computer's clock, in UTC; whose it was; and which of the two it is.
+#: What one is named there: the order it was set aside in, counted over the place, one count for what
+#: one request sets aside of a thread; when, by this computer's clock, in UTC; whose it was; and which
+#: of the two it is.
 _WHOLE = re.compile(rf"([0-9]{{8}})-[0-9]{{8}}T[0-9]{{6}}Z-({_NAMED})\.(?:copy|repository)(\.gone)?")
 #: A thread keeps the last four times a copy or a repository of its own was set aside there, and a
 #: place the last sixteen of all its threads', in this many bytes of its disk at most: the oldest
@@ -251,6 +252,9 @@ class LocalHistory(History):
     #: Holds, once a pruning has read them, the history's commits every repository in the place reaches from its refs,
     #: which the cut keeps (:meth:`_cut`), and those the history was cut at before.  It lasts one pruning.
     reached: list[set[str]] = field(default_factory=list, init=False, repr=False, compare=False)
+    #: Holds, once this request has set a folder of the thread's aside whole, the stem of its name there: whatever else
+    #: the request sets aside of the thread is the same time (:meth:`_set_aside_whole`).  It lasts one request.
+    stem: list[str] = field(default_factory=list, init=False, repr=False, compare=False)
 
     excludes: ClassVar[list[str]] = LOCAL_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = LOCAL_PLATFORM
@@ -740,13 +744,12 @@ class LocalHistory(History):
         The bound is kept at once, and not at the open's end alone: an open
         cut while it makes the copy again leaves no more kept than may be.
         """
-        stem = None
         for left, kept in own.items():
             if kept:
-                stem = self._set_aside_whole(left, stem)
+                self._set_aside_whole(left)
             else:
                 _let_go(left)
-        if stem is not None:
+        if any(own.values()):
             self._asides_whole()
 
     def _names_its_own(self, refs: dict[str, str]) -> bool:
@@ -866,16 +869,18 @@ class LocalHistory(History):
             for fd in opened:
                 os.close(fd)
 
-    def _set_aside_whole(self, left: Path, stem: str | None = None) -> str:
-        """Rename *left*, the thread's repository or its copy, into the place's set-aside folder as it is; the stem of its name there.
+    def _set_aside_whole(self, left: Path) -> None:
+        """Rename *left*, the thread's repository or its copy, into the place's set-aside folder as it is.
 
         The name is this module's own: ``<nth>-<when>-<thread>`` and which
-        of the two it is.  ``<nth>`` is one more than any name there has,
-        whatever that name is of, so nothing is at the name before: a rename
-        replaces no folder that holds anything, and goes through no link.
-        With *stem*, the repository's just set aside, the copy takes its
-        name.  The folder is opened as a folder, never through a link, and
-        the rename goes by its handle.
+        of the two it is.  What one request sets aside of the thread is one
+        time, under one stem: the copy set aside after its repository takes
+        the repository's, however the request came to each, and a request
+        sets each of the two aside once at most.  ``<nth>`` is one more than
+        any name there has, whatever that name is of, so nothing is at the
+        name before: a rename replaces no folder that holds anything, and
+        goes through no link.  The folder is opened as a folder, never
+        through a link, and the rename goes by its handle.
 
         A repository is kept borrowing the folder's history by the one line,
         which names the history from the set-aside folder as from the
@@ -898,25 +903,25 @@ class LocalHistory(History):
             _pinned(left / _BORROWS, _ALTERNATES)
         folder = _opened_folder(str(self.aside_whole), None, True)
         try:
-            if stem is None:
+            if not self.stem:
                 last = max((int(named[1]) for named in map(_WHOLE.fullmatch, os.listdir(folder)) if named), default=0)
-                stem = f"{last + 1:08d}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{self.thread}"
-            name = f"{stem}.{'repository' if left == self.repo else 'copy'}"
+                self.stem.append(f"{last + 1:08d}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{self.thread}")
+            name = f"{self.stem[0]}.{'repository' if left == self.repo else 'copy'}"
             if not _WHOLE.fullmatch(name):
                 raise HistoryError("the place has no name left for what is set aside")
-            self._make_room(folder, left, stem[:8])
+            self._make_room(folder, left, self.stem[0][:8])
             os.rename(left, name, dst_dir_fd=folder)
         finally:
             os.close(folder)
         logger.warning("Set aside whole as %s, to be made again: %s", name, left)
-        return stem
 
     def _make_room(self, folder: int, left: Path, nth: str) -> None:
         """Let go of the oldest the set-aside folder open as *folder* keeps, until with *left* it holds ``_ASIDE_BYTES`` of the disk at most.
 
         *left* is about to be set aside there as its *nth* time, this
-        thread's newest from then on.  The oldest time goes first, a
-        repository with the copy set aside at the same time, and never a
+        thread's newest from then on.  A time is one thread's, its count and
+        its thread: what one request set aside of it, a repository with its
+        copy.  The oldest time goes first, both its folders, and never a
         thread's newest: where those hold more, the place keeps more.  What
         each holds is what its files take of the disk, no link followed: a
         file most of which was never written counts for what it holds.  One
@@ -926,12 +931,12 @@ class LocalHistory(History):
         """
         kept, _ = _asides_in(folder)
         taken = {name: _on_disk(name, folder) for _, _, name in kept}
-        newest = {thread: at for at, thread, _ in kept} | {self.thread: nth}
+        newest = {thread: (at, thread) for at, thread, _ in kept} | {self.thread: (nth, self.thread)}
         held = sum(taken.values()) + _on_disk(left)
-        for at in sorted({at for at, _, _ in kept} - set(newest.values())):
+        for at in sorted({(at, thread) for at, thread, _ in kept} - set(newest.values())):
             if held <= _ASIDE_BYTES:
                 return
-            for name in [name for of, _, name in kept if of == at]:
+            for name in [name for of, thread, name in kept if (of, thread) == at]:
                 try:
                     os.rename(name, f"{name}.gone", src_dir_fd=folder, dst_dir_fd=folder)
                 except OSError as why:
@@ -945,8 +950,9 @@ class LocalHistory(History):
 
         ``set_aside_folders`` are the thread's copies and repositories kept
         there, by name, the oldest first.  A thread keeps the last
-        ``_ASIDE_WHOLE`` times one was set aside, each time one count, and
-        a place the last ``_ASIDE_WHOLE_IN_ALL`` of all its threads': the
+        ``_ASIDE_WHOLE`` times one was set aside, each time its own count of
+        its own (:meth:`_set_aside_whole`): two threads' under one count are
+        two times.  A place keeps the last ``_ASIDE_WHOLE_IN_ALL`` of all its threads': the
         oldest goes for one more, whoever's it is, and never a thread's
         newest; and no more of the disk than room was made for as each was
         set aside (:meth:`_make_room`).  The thread's own beyond what it
@@ -966,12 +972,12 @@ class LocalHistory(History):
             return {}
         try:
             kept, gone = _asides_in(folder)
-            times = list(dict.fromkeys(nth for nth, _, _ in kept))
-            mine = list(dict.fromkeys(nth for nth, thread, _ in kept if thread == self.thread))
-            newest = {thread: nth for nth, thread, _ in kept}.values()
+            times = list(dict.fromkeys((nth, thread) for nth, thread, _ in kept))
+            mine = [at for at in times if at[1] == self.thread]
+            newest = {thread: (nth, thread) for nth, thread, _ in kept}.values()
             going = set(mine[:-_ASIDE_WHOLE])
-            going |= {nth for nth in [nth for nth in times if nth not in going][:-_ASIDE_WHOLE_IN_ALL] if nth not in newest}
-            for name in [name for nth, _, name in kept if nth in going]:
+            going |= {at for at in [at for at in times if at not in going][:-_ASIDE_WHOLE_IN_ALL] if at not in newest}
+            for name in [name for nth, thread, name in kept if (nth, thread) in going]:
                 try:
                     os.rename(name, f"{name}.gone", src_dir_fd=folder, dst_dir_fd=folder)
                     logger.warning("What was set aside as %s is let go, for what was set aside since", name)
