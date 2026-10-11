@@ -201,6 +201,11 @@ class LandingStepError(RuntimeError):
     """A pod's answer to a ``_history`` call is not its step's result."""
 
 
+#: What a pod's daemon answers a ``_history`` call of a step it does not know, ``<this>: <step>``: every
+#: image's the same, so a worker newer than a pod tells that refusal from a step that failed.
+UNKNOWN_STEP = "Unknown history action"
+
+
 def step_result(answer: str) -> dict:
     """A pod's *answer* to a ``_history`` call, read as its step's result; LandingStepError when it is none.
 
@@ -1125,11 +1130,11 @@ class History:
             marked = _looked(history, "pruned", self.durable) if history is not None else None
         if MAIN not in refs or marked and stat.S_ISREG(marked.st_mode) and now - marked.st_mtime < _PRUNE_EVERY:
             return {"pruned": False}
-        self._put_durable("pruned", b"")
+        self._mark_pruned(now)
         self._sweep()
         refs = self._take()
         packs = [p.name for p in (self._taken / "objects" / "pack").iterdir()]
-        work = self.repo / "pruning.git"
+        work = self._pruning
         shutil.rmtree(work, ignore_errors=True)
         try:
             # Linked, not copied: git never writes a file in place, and the cut writes its shallow anew.
@@ -1174,7 +1179,8 @@ class History:
                     # The packs as they were told a little less than the one pack made of them.
                     kept -= 1
                     packed = self._cut(git, work, mains=ids, kept=kept)
-            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack")}
+            # The cut's own pack, with its index: one a write cut short left alone is no pack git reads, and goes below.
+            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack") if p.with_suffix(".idx").is_file()}
             for kind in ("pack", "idx"):
                 self._put_durable(f"objects/pack/{name}.{kind}", work / "objects" / "pack" / f"{name}.{kind}")
             if (work / "shallow").is_file():
@@ -1194,14 +1200,32 @@ class History:
                     listed.rpartition(".")[0] for listed in packs
                     if (seen := _looked(folder, listed)) is not None and (written is None or written.st_mtime - seen.st_mtime < spare)
                 } if old is None else {listed.rpartition(".")[0] for listed in packs} - set(old)
-                for listed in packs:
-                    if listed not in (f"{name}.pack", f"{name}.idx") and listed.rpartition(".")[0] not in young:
-                        with contextlib.suppress(FileNotFoundError):
-                            os.unlink(listed, dir_fd=folder)
+                gone = [listed for listed in packs if listed not in (f"{name}.pack", f"{name}.idx") and listed.rpartition(".")[0] not in young]
+                self._letting_go(work, name, {listed.rpartition(".")[0] for listed in gone})
+                for listed in gone:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(listed, dir_fd=folder)
                 os.fsync(folder)
             return {"pruned": True, "commits": min(kept, len(mains)), "size": packed, "files": size}
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    @property
+    def _pruning(self) -> Path:
+        """Where the history is cut: a copy of it on the pod's disk, its files linked, which goes once the cut has."""
+        return self.repo / "pruning.git"
+
+    def _mark_pruned(self, now: float) -> None:
+        """Mark the history pruned, before it is cut: one cut off by its bound is tried again the next day, by the disk's date."""
+        self._put_durable("pruned", b"")
+
+    def _letting_go(self, work: Path, new: str, gone: set[str]) -> None:
+        """Whatever reads the history's objects besides its own refs, before the packs *gone* go: nothing does in the cloud.
+
+        *work* is the history as it was cut, the one pack *new* its own, and
+        each pack is named without its ending.  The history's refs and
+        ``shallow`` are the cut's already.
+        """
 
     def _cut(self, git: Callable[..., str], work: Path, *, mains: list[str], kept: int) -> int:
         """Cut *work*'s history to *mains*' newest *kept* and what only they reach; the size of its one pack after.
@@ -1627,10 +1651,19 @@ class History:
         Not whole where the base is behind a pruning's cut.  The cut's commit
         has no parent for git, which lists its whole tree as its change: it
         names no one, and neither does what was changed behind it.
+
+        It runs under the project's lock, so each path a commit touched is
+        looked up once, with each folder above it, never against every path
+        still wanted: the work is the log's length, however many are held.
         """
         wanted = set(paths)
         if not wanted:
             return {}, True
+        # Each wanted path under each folder above it: a file a commit made of that folder's name touches them all.
+        under: dict[str, set[str]] = {}
+        for path in wanted:
+            for folder in _folders(path):
+                under.setdefault(folder, set()).add(path)
         log = ["log", "--no-renames", "--raw", "--no-abbrev", "-z", "--format=%x01%H%x00%an%x00%ae"]
         commits = []
         if pickup is not None:
@@ -1648,9 +1681,12 @@ class History:
             if commit in cut:
                 whole = False
                 continue
-            for path in wanted - set(found):
-                if any(t == path or t.startswith(f"{path}/") or path.startswith(f"{t}/") for t in touched):
-                    found[path] = _who(name, email)
+            who = _who(name, email)
+            for t in touched:
+                # The path itself, a folder above it, and those under it: once touched, found, and never looked through again.
+                for path in (t, *_folders(t), *under.pop(t, ())):
+                    if path in wanted:
+                        found.setdefault(path, who)
         return found, whole
 
     def _in_durable(self, commit: str) -> bool:
@@ -2220,6 +2256,13 @@ def _together(held: set[str], links: list[tuple[str, str]]) -> set[str]:
     while more := ({b for a, b in links if a in held} | {a for a, b in links if b in held}) - held:
         held |= more
     return held
+
+
+def _folders(path: str) -> Iterator[str]:
+    """The folders above *path*, nearest first: ``a/b`` and ``a`` for ``a/b/c``."""
+    while (cut := path.rfind("/")) > 0:
+        path = path[:cut]
+        yield path
 
 
 def _as(author: dict[str, str]) -> list[str]:

@@ -2,9 +2,10 @@
 // the tree at /run/surogate/agent/history, one request a run, as the guest's root outside every
 // root's namespaces, which is where the agent runs it for a request (guest-history.test.ts). Here the
 // guest's init starts a scenario of its own (guest-history-tree.py) beside the agent, on the guest's
-// own disk: it reaches into the tree to cut a record and a move short, which no request can, and it
-// says each check on the console, and how long a landing took over a copy that holds fifty thousand
-// files history leaves out, on the guest's sessions disk. Behind SUROGATE_VM_TESTS=1.
+// own disk: it reaches into the tree to cut a record and a move short, which no request can, prunes
+// the history as a request does, and it says each check on the console, and how long a landing took
+// over a copy that holds fifty thousand files history leaves out, on the guest's sessions disk.
+// Behind SUROGATE_VM_TESTS=1.
 
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,7 +49,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("lands two threads' turns from the tree on the agent disk, finishes a record cut after its push and a copy's move cut before its base, and keeps what a landing left out", async () => {
+  it("lands two threads' turns from the tree on the agent disk, finishes a record cut after its push and a copy's move cut before its base, keeps what a landing left out, and prunes the history", async () => {
     const lines = () => readFileSync(options.console, "utf8").split("\n").flatMap((line) => /history-tree: (.*?)\r?$/.exec(line)?.[1] ?? []);
     await until(() => lines().some((line) => line === "passed" || line === "failed"), 280_000);
     const said = lines();
@@ -64,6 +65,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
       "a clean copy's move to main cut before its base moved is finished by the next act",
       "what a landing left out stays in the copy as the thread left it, by the guest's git, and so when its record is cut after its push",
       "no thread's repository names what neither it nor the history holds, by the guest's git",
+      "a pruning leaves the history one pack, which every repository notes, and each whole and at work, by the guest's git",
       "timed",
       "passed",
     ]);

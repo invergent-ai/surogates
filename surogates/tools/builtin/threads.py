@@ -311,8 +311,7 @@ async def _stop(thread: Any, reason: str, **kwargs: Any) -> bool:
     from surogates.workstreams.threads import stop_thread
 
     return await stop_thread(
-        thread, reason=reason, interrupt=_STOP_REASON, session_store=kwargs["session_store"],
-        session_factory=kwargs["session_factory"], redis=kwargs.get("redis"),
+        thread, reason=reason, interrupt=_STOP_REASON, session_store=kwargs["session_store"], redis=kwargs.get("redis"),
     )
 
 

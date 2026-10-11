@@ -6,17 +6,21 @@
 // copy that is still the folder the guest left costs no request. The app never walks a place or
 // removes anything in it: its guest writes there.
 //
-// One thing at a time on a root's copy: its making, and each request to its history. A folder's
-// place stays in the guest while a copy on it is open or a request runs, and is let go a while
-// after the last of them, so a guest that holds nothing else can stop; the next request adds it
-// again. Before another folder's place is made under its key, and whenever the place's folder in
-// the app's data is not the one the app knew, the place is let go: each host on its copies first,
-// then the guest, by the place it was given. What the app knew of its copies goes with it.
+// One thing at a time on a root's copy: its making, each request to its history, and its letting
+// go. Once the last host on a copy has gone, its root idle, the guest removes the copy where the
+// thread's branch holds all of it, and the root's next operation has it made again; a deleted
+// thread's copy is let go the same way, and its repository stays. A folder's place stays in the
+// guest while a copy on it is open or a request runs, and is let go a while after the last of
+// them, so a guest that holds nothing else can stop; the next request adds it again. Before
+// another folder's place is made under its key, and whenever the place's folder in the app's data
+// is not the one the app knew, the place is let go: each host on its copies first, then the guest,
+// by the place it was given. What the app knew of its copies goes with it.
 //
 // A thread whose folder has no history works nowhere: no copy is made, and it is told why. The
 // guest's word can deny a thread its copy; nothing it says gives a thread the folder itself.
 
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
+import { join } from "node:path";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED } from "../guest/command.js";
@@ -120,10 +124,13 @@ const AS_IT_WAS: ReadonlySet<unknown> = new Set<HistoryCode>(["not_a_request", "
 const asItWas = (outcome: Outcome): boolean =>
   "error" in outcome && (outcome.error.type === "value" || (outcome.error.type === "history" && AS_IT_WAS.has(outcome.error.code)));
 
-// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, in the copy and the history
-// alone; and a landing's forgetting, which refuses where a file is not what was there before, as one moved aside is
-// not, and which is asked from inside its landing's last step, where waiting for that landing would wait for itself.
-const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "forget"]);
+// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, and a copy's letting go, in the
+// copy and the history alone; and a landing's forgetting, which refuses where a file is not what was there before, as one
+// moved aside is not, and which is asked from inside its landing's last step, where waiting for that landing would wait
+// for itself.
+const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "close", "forget"]);
+// What the guest says of a copy it was asked to let go that is not there any more: removed by it, or gone before.
+const letGone = (outcome: Outcome): boolean => "ok" in outcome && ["removed", "gone"].includes(String((outcome.ok as { copy?: unknown } | null)?.copy));
 
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not make this thread's copy of its folder: ${why}` },
@@ -250,16 +257,40 @@ export class Copies {
   }
 
   /**
-   * The host given *handle* has let its root's copy go: once every host has, the folder's place is let
-   * go when idle. A hold closed already lets go of nothing more.
+   * The host given *handle* has let its root's copy go: once every host has, the guest lets the copy go, in
+   * the root's turn, and the folder's place is let go when idle. A hold closed already lets go of nothing more.
    */
   close(handle: Handle): void {
-    const open = this.opens.get(handle.root);
+    const { root } = handle;
+    const open = this.opens.get(root);
     if (!open?.handles.delete(handle)) return;
     if (open.handles.size > 0) return;
-    this.opens.delete(handle.root);
+    this.opens.delete(root);
+    void this.inTurn(root, () => this.letCopyGo(root, open.copy)).catch(() => {});
     this.release(open.held);
     this.changed();
+  }
+
+  /**
+   * *root*'s chat was deleted, and *bound* is its binding: its copy is let go as an idle one is, once no
+   * host holds it, where the thread's branch holds all of it. Its repository, what was set aside of it and
+   * what waits beside its copy stay, until this computer can show a person what was set aside. A thread
+   * with no copy here asks the guest nothing. Never rejects.
+   */
+  drop(root: string, bound: BoundFolder): Promise<void> {
+    return this.inTurn(root, async () => {
+      // A host on it lets it go as it goes.
+      if (this.halt.signal.aborted || this.opens.has(root)) return;
+      // By the data's real path, as a place is (history/place.ts): where there is no copy, no place is made for it.
+      const there = await look(join(await realpath(this.options.dataDir), "history", keyOf(bound.folder), "threads", root));
+      if (there === null || there === "other") return;
+      const found = await this.found(root, bound);
+      if ("failed" in found) return;
+      const outcome = await this.request(found.known, found.place, root, "close", {}, this.halt.signal);
+      if (outcome === STALE || !letGone(outcome)) return;
+      found.known.copies.delete(root);
+      await this.forget(root, there);
+    }).catch(() => {});
   }
 
   /** The app's stop: no place is let go later, and a copy's making under way is told to stop. */
@@ -438,6 +469,36 @@ export class Copies {
   private unvouched(known: Known, root: string): void {
     known.copies.delete(root);
     if (this.opens.has(root)) this.options.replaced?.(root);
+  }
+
+  // *copy*, which the last host on *root*'s copy was given, let go by them all: where it is still the root's whole copy,
+  // the guest removes it if the thread's branch holds all of it, and what the app kept for its hosts goes with it. One the
+  // guest made again since, or that is no longer vouched for, is the guest's no more to remove: what the app kept for it
+  // goes once it is not at the copy's path. Not where a host took the copy again meanwhile, nor after the app's stop.
+  private async letCopyGo(root: string, copy: Copy): Promise<void> {
+    if (this.halt.signal.aborted || this.opens.has(root)) return;
+    const known = this.known.get(copy.place.key);
+    const whole = known?.copies.get(root);
+    if (known && whole && same(whole, copy.folder)) {
+      const outcome = await this.request(known, copy.place, root, "close", {}, this.halt.signal);
+      if (outcome !== STALE) {
+        if (!letGone(outcome)) return;
+        known.copies.delete(root);
+        return this.forget(root, copy.folder);
+      }
+    }
+    const there = await look(copyOf(copy.place, root)).catch(() => undefined);
+    if (there === null || there === "other" || (there !== undefined && !same(there, copy.folder))) await this.forget(root, copy.folder);
+  }
+
+  // What the app kept for the hosts of *root* that worked in a copy that is gone: the folder's record, its sandbox's
+  // folder, and the root's working folder. The app's own, outside every place, by names of its own making.
+  private async forget(root: string, { dev, ino }: Identity): Promise<void> {
+    const { dataDir } = this.options;
+    const key = `${dev}-${ino}`;
+    await Promise.all([join(dataDir, "folders", `${key}.json`), join(dataDir, "srt", key), join(dataDir, "tmp", root)].map(
+      (path) => rm(path, { recursive: true, force: true }).catch(() => {}),
+    ));
   }
 
   // The place *was*, whose folder in the app's data has the inode *store*, leaves this computer's hands, for

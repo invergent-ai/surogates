@@ -138,21 +138,21 @@ async def reopen_if_thread(session: Session, *, app_state: Any) -> None:
 
 
 async def stop_thread(
-    thread: Session, *, reason: str, interrupt: str, session_store: Any, session_factory: Any, redis: Any,
+    thread: Session, *, reason: str, interrupt: str, session_store: Any, redis: Any,
 ) -> bool:
     """Pause *thread* if it is working, and interrupt its turn; whether it was working.
 
-    The status first, so the thread reads as stopped, then the interrupt
-    that ends its turn.  A thread already paused is interrupted again: its
-    turn may not have heard the first time.  Unlike the pause route, it
-    leaves the device operations of the thread's tree alone.  *reason*
-    goes into its ``session.pause``; *interrupt* is always the server's
-    words, never a model's, because the dispatcher reads some reasons as
-    commands (``_SESSION_GONE_REASONS``).
+    The status and its event first, in one transaction, so the thread
+    reads as stopped and its next turn comes after the stop, then the
+    interrupt that ends its turn.  A stop that lands as the thread's turn
+    ends leaves the thread as its turn left it.  A thread already paused
+    is interrupted again: its turn may not have heard the first time.
+    Unlike the pause route, it leaves the device operations of the
+    thread's tree alone.  *reason* goes into its ``session.pause``;
+    *interrupt* is always the server's words, never a model's, because the
+    dispatcher reads some reasons as commands (``_SESSION_GONE_REASONS``).
     """
-    stopped = await WorkstreamStore(session_factory).pause_thread(thread.id)
-    if stopped:
-        await session_store.emit_event(thread.id, EventType.SESSION_PAUSE, {"reason": reason})
+    stopped = await session_store.pause_if_active(thread.id, {"reason": reason})
     if redis is not None and (stopped or thread.status == "paused"):
         await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": interrupt}))
     return stopped
