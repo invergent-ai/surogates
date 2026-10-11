@@ -68,8 +68,11 @@ export const QUIT_STEP_MS = 30_000;
 export const RETIRE_STEP_MS = QUIT_STEP_MS;
 // How long every other stop of a landing's or a recovery's host waits for the steps its helper runs, and a step sent
 // alone for those sent before it: one hung on a dead mount never ends, and would hold the folder, and whatever waits for
-// that host, for ever. Past it the host is stopped as at the quit. A put-back that copies the most a folder's landings
-// keep, 4 GiB, between two filesystems at 10 MB a second ends within it.
+// that host, for ever. Past it the host is stopped as at the quit. The longest steps move about twice 4 GiB, the most a
+// folder's landings keep, through the folder's disk: a put-back that copies a kept file back reads its copy again whole
+// before it takes the name, and an apply stages up to a GiB and copies a replaced file of up to 4 GiB. That is some
+// 14 minutes at 10 MB a second: on a disk that slow such a step is cut, put back by its record as a quit's is, and cut
+// again each time it is asked there; nothing of the user's is lost.
 export const STEP_MS = 10 * 60_000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A step a turn's landing asks for a landing it only settles, one another left running in the folder: named so by the
