@@ -1,18 +1,18 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync,
-  writeFileSync,
+  chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  symlinkSync, utimesSync, writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { downloadSaver } from "../src/browser/downloads.js";
 import { untoldIn } from "../src/files/land.js";
-import { kinds, perform } from "../src/files/operations.js";
+import { kinds, OWN_FILE, perform } from "../src/files/operations.js";
 import { type Copy, type Handle, historyOff, type Opened } from "../src/history/copies.js";
 import { keyOf } from "../src/history/place.js";
 import type { Binding } from "../src/journal/bindings.js";
@@ -2285,10 +2285,17 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     return step("apply", { saga: "s1", step: 0, path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), expected });
   };
   const applied = { ok: { path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), made: [] } };
+  // The names in the folder that are a landing's own.
+  const own = (lying: ReturnType<typeof lies>) => Object.keys(lying).filter((name) => OWN_FILE.test(basename(name)));
   // The folder once the thread's a.txt has landed whole over the user's: its bytes at the name, with the user's file's
-  // mode, and nothing else changed or left beside it; and the user's file kept, whole, where the folder's landings keep theirs.
+  // mode, and nothing else changed; beside it, under the step's own name until the landing is forgotten, the user's file
+  // it replaced; and a copy of that kept, whole, where the folder's landings keep theirs, another mount in the helper's sandbox.
   const landed = (folder: string, before: ReturnType<typeof lies>) => {
-    expect(lies(folder)).toEqual({ ...before, "a.txt": { mode: before["a.txt"]?.mode, size: 13, mtime: expect.any(Number), bytes: sha256("the thread's\n") } });
+    const now = lies(folder);
+    const [left, ...more] = own(now);
+    expect([now[left ?? ""], more]).toEqual([{ mode: before["a.txt"]?.mode, size: 15, mtime: before["a.txt"]?.mtime, bytes: sha256("the user's own\n") }, []]);
+    delete now[left ?? ""];
+    expect(now).toEqual({ ...before, "a.txt": { mode: before["a.txt"]?.mode, size: 13, mtime: expect.any(Number), bytes: sha256("the thread's\n") } });
     expect(readFileSync(join(base, "data", "landings", keyOf(folder), "s1", "0"), "utf8")).toBe("the user's own\n");
   };
 
@@ -2313,10 +2320,11 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(await chat).toEqual({
       error: { type: "unavailable", message: "This computer could not open the folder's sandbox: another chat on this computer is working in this folder; this one can use it once that one is done" },
     });
-    const after = lies(folder);
-    // Recorded, as the folder's history says: the landing names the apply it sent, and what it kept goes.
+    // Recorded, as the folder's history says: the landing names the apply it sent, and what it kept goes, from the folder too.
     const { ok: { path, before: from, after: to } } = applied;
     expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toEqual({ ok: {} });
+    const after = lies(folder);
+    expect(own(after)).toEqual([]);
     // Forgotten, the landing lets the folder go, and what it kept goes. The chat's host and the second landing's that
     // were told have gone, and the hosts on the copies stay.
     await until(() => exits === 3, 15_000);
@@ -2327,6 +2335,26 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     await until(() => exits === 4, 15_000);
     expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
     expect(lies(folder)).toEqual(after);
+  });
+
+  it("leaves beside its name what a program holding the user's file open wrote into it after a landing replaced it, as the landing is forgotten, and tells it", { timeout: 90_000 }, async () => {
+    const folder = changed();
+    const executor = threads();
+    const apply = await looked(executor);
+    const open = openSync(join(folder, "a.txt"), "r+");
+    try {
+      expect(await executor.land(apply, signal())).toEqual(applied);
+      writeSync(open, "THE USER'S OWN\n", 0);
+    } finally {
+      closeSync(open);
+    }
+    const { ok: { path, before: from, after: to } } = applied;
+    expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toEqual({ ok: {} });
+    expect(Object.fromEntries(readdirSync(folder).map((name) => [name, readFileSync(join(folder, name), "utf8")]))).toEqual({
+      "a.txt": "the thread's\n", "a (kept by Surogate).txt": "THE USER'S OWN\n",
+    });
+    // The next landing's put-back tells it.
+    expect(await executor.land(step("recover"), signal())).toEqual({ ok: { restored: [], beside: [["a.txt", "a (kept by Surogate).txt"]], lost: [], unread: [] } });
   });
 
   it("forgets nothing a landing's helper kept where the forgetting leaves out an apply it holds a record of, and forgets it once named", async () => {
