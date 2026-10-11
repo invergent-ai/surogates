@@ -157,6 +157,8 @@ STOP_NOT_YET = (
     "computer answers."
 )
 STOP_NOT_YET_LEFT_IN_COPY = f"{STOP_NOT_YET} {_STAYS_IN_COPY}"
+#: What its master hears where the thread's next turn took all of a turn back that its Stop left not taken back yet.
+STOP_TAKEN_BACK = "Stopped, and all of this turn is taken back now."
 #: Why a step was not taken back, as its person reads it.
 WHY_NOT_TAKEN_BACK = {
     "no_snapshot": "no snapshot of the copy was taken before it",

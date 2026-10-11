@@ -27,7 +27,7 @@ from surogates.devices.workspace import DeviceOperationError
 from surogates.governance.events import saga_complete_event, saga_start_event, saga_step_event
 from surogates.governance.saga import SagaOrchestrator
 from surogates.governance.saga.compensator import (
-    STOP_LEFT_IN_COPY, STOP_LEFT_LANDED, STOP_NOT_YET, STOP_NOT_YET_LEFT_IN_COPY, WHY_NOT_TAKEN_BACK,
+    STOP_LEFT_IN_COPY, STOP_LEFT_LANDED, STOP_NOT_YET, STOP_NOT_YET_LEFT_IN_COPY, STOP_TAKEN_BACK, WHY_NOT_TAKEN_BACK,
 )
 from surogates.harness import tool_exec
 from surogates.harness.loop_context_replay import worker_note
@@ -664,6 +664,11 @@ async def test_a_stop_whose_computer_does_not_answer_its_undo_lets_the_thread_go
     assert restores == [f"checkpoint:0:restore:{hash_}" for hash_ in (third, second, first)]
     assert await undone_of(api, thread, stopped) == ("completed", {})
     assert picture(computer.folder) == folder
+    # Its master, told at the Stop that the turn was not taken back yet, is told in a line that it is now.
+    owed, finished = await what_the_master_heard(api, thread)
+    assert [entry["why"] for entry in owed["not_taken_back"]] == ["owed"] * 3
+    assert (finished["result"], finished["not_taken_back"]) == (STOP_TAKEN_BACK, [])
+    assert worker_note(EventType.WORKER_COMPLETE.value, finished)["content"].endswith(f"was stopped]\n{STOP_TAKEN_BACK}")
 
 
 async def test_a_stop_whose_undo_is_owed_says_what_no_undo_can_take_back_stays_in_the_copy_and_it_lands_with_the_next_turn(
