@@ -1970,14 +1970,43 @@ async def test_a_restore_killed_anywhere_loses_no_edit_and_is_settled_by_the_nex
     assert restores_on_main(pods) == int(restored_now)
     assert (pods.project / "Report.docx").read_bytes() == (b"PK\x03\x04 report v1 by A" if restored_now else YOURS)
     listed = await history_of(api, project, "Report.docx")
-    # A routine's run works in the real files, and its pickup records whatever they hold that main does not, as its
-    # own: your edit too, where the Restore died before its own pickup pushed it.
-    by = "routine" if next_act == "a routine's pickup" and at in ("the look", "the pickup's row", "the pickup's pack") else "you"
-    assert [(v["by"]["kind"], v["change"]) for v in listed] == [
-        *([("you", "restored")] if restored_now else []), (by, "changed"), ("thread", "changed"), ("thread", "changed"), ("you", "added"),
+    seen = [(v["by"]["kind"], v["change"]) for v in listed]
+    at_yours = 1 if restored_now else 0
+    if next_act == "a routine's pickup" and at in UNPICKED:
+        # Whom your edit is by there is a known fault, held by the test after this one: all else stands.
+        seen[at_yours] = ("you", seen[at_yours][1])
+    assert seen == [
+        *([("you", "restored")] if restored_now else []), ("you", "changed"), ("thread", "changed"), ("thread", "changed"), ("you", "added"),
     ]
-    yours = listed[1 if restored_now else 0]
+    assert (await opened(api, project, listed[at_yours]["id"], "Report.docx")).content == YOURS
+
+
+#: Where a Restore can die before its own pickup pushed your edit.
+UNPICKED = ("the look", "the pickup's row", "the pickup's pack")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "a routine's pickup records whatever the real files hold that main does not as the routine's own, "
+    "your edit a Restore died before picking up among them"
+))
+@pytest.mark.parametrize("at", UNPICKED)
+async def test_your_edit_a_killed_restore_never_picked_up_stays_yours_when_a_routines_pickup_records_it(api, monkeypatch, tmp_path, at):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    owned = await the_project(api, project)
+    entry = await rows_module.version_of(api.app.state.session_factory, project["id"], by_a["id"], "Report.docx")
+    with monkeypatch.context() as patch:
+        the_api_goes(patch, api, at)
+        with pytest.raises(TheApiWent):
+            await restore(api.app.state, owned, api.user_id, path="Report.docx", blob=entry["after"])
+    await aged(api)
+    run, _ = await a_routine_run(api, await master_of(api, project), "Tidy up")
+    await in_its_pod(api, pool, run, "true")
+    (pods.project / "notes.txt").write_text("tidied\n")  # as the run's call wrote it
+    await ends(api, pool, run)
+    [yours, *_] = await history_of(api, project, "Report.docx")
     assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
+    assert yours["by"] == {"kind": "you"}
 
 
 @pytest.mark.parametrize("refused", ["the pickup's row", "the pickup recorded", "the restore's row", "the restore recorded"])
