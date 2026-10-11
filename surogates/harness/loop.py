@@ -1346,13 +1346,13 @@ class AgentHarness(
         asked under that name (``tool_exec._open_local_copy``).  An undo a
         Stop of the thread's left owed is finished before it
         (:meth:`_undo_what_a_stop_left`), and *events*, the wake's, gain
-        what that wrote.  A Stop ends the open wherever it is, before it is
-        asked, while it or that undo waits, or once a Stop's pause closed
-        it: its operation is closed, a put-back left open, and the turn ends
-        stopped.  Nowhere to work ends the turn failed, saying why, before
-        its prompt is built.  An open or an undo the journal itself refused,
-        the thread held by another worker now or deleted, ends this wake
-        with nothing sent.
+        the saga events that undo wrote, and nothing else.  A Stop ends
+        the open wherever it is, before it is asked, while it or that undo
+        waits, or once a Stop's pause closed it: its operation is closed, a
+        put-back left open, and the turn ends stopped.  Nowhere to work
+        ends the turn failed, saying why, before its prompt is built.  An
+        open or an undo the journal itself refused, the thread held by
+        another worker now or deleted, ends this wake with nothing sent.
         """
         from surogates.governance.saga.compensator import UndoOwed
 
@@ -1360,9 +1360,11 @@ class AgentHarness(
 
         async def open_after_its_stop() -> Any:
             if await self._undo_what_a_stop_left(session, lease):
-                # The stopped turn's saga is over: the turn's own loop starts its own, and closes nothing more.
+                # The stopped turn's saga is over: the turn's own loop starts its own, and closes nothing more.  Only
+                # what the undo wrote: this wake's own ``harness.wake`` would say this worker woke the thread last.
                 events.extend(await self._store.get_events(
-                    session.id, after=max((e.id for e in events), default=0), exclude_types=[EventType.LLM_DELTA],
+                    session.id, after=max((e.id for e in events), default=0),
+                    types=[EventType.SAGA_COMPENSATE, EventType.SAGA_COMPLETE],
                 ))
             # Its first copy is said in its chat while it is made: the turn waits for it, minutes for a large folder.
             return await _open_local_copy(

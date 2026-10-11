@@ -708,6 +708,27 @@ async def test_a_stop_whose_undo_is_owed_says_what_no_undo_can_take_back_stays_i
     assert [entry["why"] for entry in last["not_taken_back"]] == ["no_snapshot"]
 
 
+async def test_a_next_turn_that_finishes_a_stops_undo_forgets_its_compacted_reads_where_another_worker_woke_the_thread_since(
+    api, computer, monkeypatch,
+):
+    _, _, thread = await begun_with_copy(api, computer)
+    store = api.app.state.session_store
+    # worker-a woke the thread for an earlier turn, and worker-b for the turn its user stopped, and was lost before its undo.
+    await store.emit_event(thread.id, EventType.HARNESS_WAKE, {"worker_id": "worker-a", "cursor": 0, "names_answers": True})
+    stopped = a_worker(api, monkeypatch, thread, [WRITE, MEMORY, _final_response("Done.")], during=stopped_by_its_user(api, thread))
+    stopped._worker_id, stopped._compensate_sagas = "worker-b", lost
+    with pytest.raises(Lost):
+        await stopped.wake(thread.id)
+    assert (await api.client.post(f"/v1/sessions/{thread.id}/resume", headers=api.auth())).status_code == 200
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    following = a_worker(api, monkeypatch, await store.get_session(thread.id), [_final_response("Done.")])
+    following._worker_id, forgot = "worker-a", []
+    following._forget_compacted_reads = forgot.append
+    await asyncio.wait_for(following.wake(thread.id), 10)
+    # worker-b may have compacted the thread's history: what worker-a's reads point at may be gone.
+    assert await undone_of(api, thread, await the_stopped_saga(api, thread)) == ("completed", {}) and len(forgot) == 1
+
+
 async def test_a_second_stop_while_its_undo_waits_for_its_computer_leaves_the_undo_to_go_on(api, computer, monkeypatch):
     monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
     _, _, thread = await begun_with_copy(api, computer)
