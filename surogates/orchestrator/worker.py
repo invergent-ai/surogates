@@ -718,19 +718,22 @@ def _entitlement_tool_exclusions(
     session_config: dict | None,
     tool_registry: Any,
     mcp_scope: tuple[set[str], set[str]] | None,
+    browser_enabled: bool,
 ) -> set[str]:
-    """Concrete tool names the pinned package excludes for this wake.
+    """Concrete tool names this wake must never offer.
 
-    Capability exclusions (browser toolset, the coding tool) come
-    straight from the package; MCP/Composio exclusions compare each
-    tool's server name / toolkit prefix against the resolved
-    ``mcp_scope`` (``None`` scope with a restricted dimension = drop
-    them all, see :func:`_resolve_mcp_entitlement_scope`).
+    What the pinned package excludes, plus the browser toolset when the
+    agent has "Live browser support" off.  Capability exclusions (browser
+    toolset, the coding tool) come straight from the package;
+    MCP/Composio exclusions compare each tool's server name / toolkit
+    prefix against the resolved ``mcp_scope`` (``None`` scope with a
+    restricted dimension = drop them all, see
+    :func:`_resolve_mcp_entitlement_scope`).
     """
     from surogates.orchestrator.mcp_client import is_composio_router_name
 
     excluded: set[str] = set()
-    if not _entitlement_capability_allowed(session_config, "browser"):
+    if not browser_enabled or not _entitlement_capability_allowed(session_config, "browser"):
         excluded.update(
             e.name
             for e in tool_registry.get_all()
@@ -1907,23 +1910,12 @@ async def run_worker(settings: Settings) -> None:
             effective_tools.discard("kb_search_pages")
         # The "mate" toolset (mate_ambient_post) is only meaningful inside a
         # dedicated ambient review session; hide it from every other session
-        # (same toolset-gating mechanism as the browser/kb tools above).
+        # (same toolset-gating mechanism as the kb tools above).
         if session.channel != "ambient":
             effective_tools.difference_update(
                 e.name
                 for e in tool_registry.get_all()
                 if e.toolset == "mate"
-            )
-        # "Live browser support" capability: drop the browser_* tools from
-        # the model-visible set when the agent has it turned off.  The
-        # shared browser pool stays wired; this agent's LLM just never
-        # sees the schemas, so the browser pane stays empty.  Derived from
-        # the registry's ``browser`` toolset so it never drifts.
-        if not ctx.browser_enabled:
-            effective_tools.difference_update(
-                e.name
-                for e in tool_registry.get_all()
-                if e.toolset == "browser"
             )
         effective_tools.difference_update(
             _media_tool_exclusions(media_gen_config),
@@ -1960,9 +1952,10 @@ async def run_worker(settings: Settings) -> None:
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding
-        # tool, and non-included MCP servers / Composio toolkits. Dropped
-        # from the prompt surface here AND handed to the harness, whose
-        # per-iteration tool filter is what actually bounds the
+        # tool, and non-included MCP servers / Composio toolkits; and the
+        # browser toolset when the agent has browser support off.
+        # Dropped from the prompt surface here AND handed to the harness,
+        # whose per-iteration tool filter is what actually bounds the
         # model-visible schemas and dispatch.
         mcp_entitlement_allowlist = dimension_allowlist(
             session.config, "mcp_server_ids",
@@ -1976,6 +1969,7 @@ async def run_worker(settings: Settings) -> None:
             session_config=session.config,
             tool_registry=tool_registry,
             mcp_scope=mcp_entitlement_scope,
+            browser_enabled=ctx.browser_enabled,
         )
         if entitlement_excluded_tools:
             effective_tools.difference_update(entitlement_excluded_tools)
