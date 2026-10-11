@@ -145,8 +145,11 @@ async def test_a_failed_turns_keep_its_computer_does_not_answer_in_time_ends_the
     # Its end waits no longer for a computer that is away: nothing was kept, and nothing is left open to run when it is back.
     await asyncio.wait_for(turn, 10.0)
     assert (await failure(api, thread))["saved"] is False and await left_open(api, thread) == []
+    # Its master hears where its work is all the same: nothing names its files, and nothing says they were kept.
     [report] = await events_of(api, master.id, EventType.WORKER_FAILED)
-    assert "kept" not in report.data["error"]
+    assert "kept" not in report.data["error"] and report.data["error"].endswith(
+        ". Its work is in its copy on its computer, and the thread's next turn lands it, but for any file a landing never writes"
+    )
     # A computer away is no fault of the server's: one line of the log says the keep was not done, at a warning's level.
     assert kept_said(caplog) == [("WARNING", False)]
     await back(here)
@@ -244,6 +247,9 @@ async def test_a_turn_whose_landing_a_stop_ended_is_kept_on_its_threads_branch_a
     [report] = await told(api, master)
     assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "stopped")
     assert files_of(report) == [("Budget.xlsx", "not_merged", None), ("Report.docx", "not_merged", None)]
+    # In words of a Stop: the thread stays stopped, and its work lands with the turn it is sent on with.
+    words = worker_note(report.type, report.data)["content"]
+    assert "\nThe thread was stopped: its work is in its copy on its computer, and lands with its next turn once it is sent on again" in words
     # The thread stays as the Stop left it, and its end says the turn is not landed, so its next turn lands it.
     [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
     assert end.data["saved"] is False and await status_of(api, thread) == "paused" and await lease_let_go(api, thread)

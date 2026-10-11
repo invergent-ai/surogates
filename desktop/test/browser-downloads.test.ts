@@ -93,6 +93,14 @@ describe("a download the agent's page started", () => {
     expect([readdirSync(folder), readdirSync(downloads).sort()]).toEqual([["Downloads"], ["Makefile", "report (2).txt", "report.txt"]]);
   });
 
+  it("is said to be in a project's thread's copy of its folder, which lands in the folder with the thread's turn, for a thread", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n", folder, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1, history: ROOT });
+    expect(await saveDownload(stage("report.txt", "first"), journal.bindings, saver)).toBe(
+      'The page downloaded "report.txt". It is saved in the thread\'s copy of its folder as Downloads/report.txt, and lands in the folder with the thread\'s turn.',
+    );
+    expect(read("report.txt")).toBe("first");
+  });
+
   it("saves a page's download with no question in a chat that works freely, as any write of the chat's: whatever the page named it, and whether or not anything clicked", async () => {
     // The rule as it stands, stated once: a change of it is this test's to make. A page the agent only opened
     // can download by itself, and its file is then in the user's folder unasked, under the name the page chose.

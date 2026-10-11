@@ -759,7 +759,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     for (const [root, shared] of more.slice(0, 6)) expect(await guest.ready(root, shared)).toBeNull();
     const [ninth, its] = more[6]!;
     expect(await guest.ready(ninth, its)).toEqual({
-      error: { type: "unavailable", message: "This computer's sandbox could not add this chat's folder: it holds 8 folders already, each of a chat at work" },
+      error: { type: "unavailable", message: "This computer's sandbox could not add this chat's folder: it holds as many folders as it has room for, 8: the folders of 8 chats" },
     });
     await guest.teardown("root-3");
     expect(await guest.ready(ninth, its)).toBeNull();

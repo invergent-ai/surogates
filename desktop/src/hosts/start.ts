@@ -117,12 +117,15 @@ function copyKey(path: unknown, dataDir: string): string | null {
   return path === copyAt(data, key, thread) ? key : null;
 }
 
-// The copy at *path* of the folder *at*, as a host may hold it or a landing read it; or why not, said
-// by the folder: the copy's own path is the app's, and names nothing to whoever is answered.
-function checkCopy(path: unknown, dataDir: string, at: string, uid: number): FolderCheck {
+// The copy at *path* of the folder the app keys by *folder*, as a host may hold it or a landing read it; or why not,
+// said by the folder, *at* as it is named: the copy's own path is the app's, and names nothing to whoever is answered.
+function checkCopy(path: unknown, dataDir: string, folder: string, at: string, uid: number): FolderCheck {
   const what = `the copy of ${shown(at)} this thread works in`;
   const no = (message: string, missing = false): FolderCheck => ({ ok: false, missing, message });
-  if (typeof path !== "string" || copyKey(path, dataDir) === null) return no(`${what} is not where the app keeps one`);
+  const key = copyKey(path, dataDir);
+  if (typeof path !== "string" || key === null) return no(`${what} is not where the app keeps one`);
+  // Under another folder's key, it is that folder's copy: one landed here would put that folder's files in this one.
+  if (key !== keyOf(folder)) return no(`${what} is a copy of another folder`);
   // The key and the thread's id hold none of these: the app's data does, or does not.
   if (LINE_BREAK.test(path)) return no(`this computer cannot work in ${what}: the path of the app's data holds a line break`);
   if (GLOB.test(path)) return no(`this computer cannot sandbox ${what}: the path of the app's data holds *, ?, [ or ]`);
@@ -207,7 +210,7 @@ function onCopy(message: HostStart, guards: FolderGuards, uid: number): StartChe
   if (copyKey(folder, guards.dataDir) !== null && alone !== null) {
     return refused("given" in alone ? cannotStand(at, alone.given) : `${shown(at)} is no path a thread's copy can stand for`);
   }
-  const held = checkCopy(folder, guards.dataDir, at, uid);
+  const held = checkCopy(folder, guards.dataDir, at, at, uid);
   if (!held.ok) return held;
   // Its sandbox holds the copy and nothing else of the folder's: not the folder itself, nor any place or kept folder.
   const through = given(message, guards.appDirs, [at, ...keptApart(guards.dataDir)]);
@@ -226,7 +229,7 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
   const held = checkFolder(message.folder, guards);
   if (!held.ok) return held;
   const { copy, kept } = (typeof message.landing === "object" && message.landing !== null ? message.landing : {}) as Partial<NonNullable<HostStart["landing"]>>;
-  const from = checkCopy(copy, guards.dataDir, held.path, uid);
+  const from = checkCopy(copy, guards.dataDir, message.folder, held.path, uid);
   if (!from.ok) return refused(`this landing's copy is not a thread's copy of the folder: ${from.message}`);
   // The copy is one, so the app's data is there, and no part of its path is one the sandbox cannot be given.
   const data = realpathSync(guards.dataDir);

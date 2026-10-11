@@ -62,12 +62,10 @@ const roots = new Roots({
 });
 new Inbound(await openPort(await findPort(INBOUND_PORT)), (root, to, first) => roots.reach(root, to, first));
 const places = new Places();
-// The guest's stop ends what a folder's history runs with what the roots run: nothing of either writes on while it goes.
-const stop = () => powerOff(places.stop());
 // A store that could not be made leaves each root the image's, with the public roots alone: the console says why.
 const trusted = (certificates: string[]) => trust(certificates).then(() => {}, (error: unknown) => {
   console.error(`surogate: this computer's sandbox does not trust your company's certificate authority: ${error instanceof Error ? error.message : String(error)}`);
 });
-const control = new Control(say, roots, { setClock, powerOff: stop, woke: (ms) => roots.woke(ms), heard: () => roots.heard(), trust: trusted }, places);
+const control = new Control(say, roots, { setClock, powerOff, woke: (ms) => roots.woke(ms), heard: () => roots.heard(), trust: trusted }, places);
 createInterface({ input: port, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();

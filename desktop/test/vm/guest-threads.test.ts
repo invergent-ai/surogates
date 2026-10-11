@@ -6,7 +6,8 @@
 // agent-disk first.
 
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+  chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../../src/binding/folder.js";
+import { OWN_FILE } from "../../src/files/operations.js";
 import { keyOf } from "../../src/history/place.js";
 import type { FromHost, HostStart, ToHost } from "../../src/hosts/messages.js";
 import { forkHost, type HostProcess, ToolHosts } from "../../src/hosts/tool-hosts.js";
@@ -40,6 +42,8 @@ type Lies = Record<string, unknown>;
 const differing = (before: Lies, after: Lies): string[] =>
   [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((name) => JSON.stringify(before[name]) !== JSON.stringify(after[name])).sort();
 const up = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".");
+// A name a landing gives a file of its own beside a real one: the file it replaced, until the landing is forgotten.
+const ours = (name: string) => OWN_FILE.test(name.slice(name.lastIndexOf("/") + 1));
 // The folders a file's coming or going shows in: the one it is in, and each above it down to one that was there.
 function above(path: string, before: Lies): string[] {
   const folders: string[] = [];
@@ -257,14 +261,14 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
   const landers = { started: 0, gone: 0 };
 
   // One operation of *root*'s, as the device link delivers it under *invocation*; and around it, the folder: what is
-  // not as it was is what *may* names, by the folder as it was.
+  // not as it was is what *may* names, by the folder as it was. A landing's own files are looked at by the landing.
   const operate = async (root: string, kind: string, args: Record<string, unknown>, invocation = "17", may: (before: Lies) => string[] = () => []) => {
     count += 1;
     const operation: Operation = { id: `${kind}-${count}`, sessionId: root, callingSessionId: root, invocationId: invocation, ordinal: count, kind, args, digest: "d" };
     const before = asItLies(folder);
     const outcome = await executor.run(operation, signal());
     const changed = "ok" in outcome ? may(before).sort() : [];
-    expect(differing(before, asItLies(folder)), `what ${kind} ${String(args.action ?? "")} of ${root} changed in the folder`).toEqual(changed);
+    expect(differing(before, asItLies(folder)).filter((name) => !ours(name)), `what ${kind} ${String(args.action ?? "")} of ${root} changed in the folder`).toEqual(changed);
     return outcome;
   };
   const did = async (root: string, kind: string, args: Record<string, unknown>, invocation?: string, may?: (before: Lies) => string[]) => {
@@ -285,9 +289,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
    * the look saw, the landing recorded, and what it kept forgotten. An apply that is refused has each one before it put
    * back, the newest first, and the landing forgotten without a record. A change with no version on either side is no
    * apply's. The forgetting names every apply that was answered, by its step. *between* runs once the files to apply are
-   * fixed. Around each step, the folder changed where the step may change it, and nowhere else.
+   * fixed, *applied* once the files are applied. Around each step, the folder changed where the step may change it, and
+   * nowhere else; each file a step replaced stays beside its name under the step's own name until the forgetting, which
+   * takes it away, or puts it beside its name as *beside* names it where a program wrote into it since.
    */
-  const landing = async (root: string, turn: string, between: () => void = () => {}) => {
+  const landing = async (root: string, turn: string, between: () => void = () => {}, { applied: done = () => {}, beside = [] }: { applied?: () => void; beside?: string[] } = {}) => {
     const invocation = `land:${turn}`;
     const saga = `saga-${root.slice(0, 8)}-${turn}`;
     const trailers = [["Surogate-Saga", saga]];
@@ -318,11 +324,14 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
     for (const { step, path } of failed ? [...applied].reverse() : []) {
       putBack.push((await land("unapply", { saga, step, path }, where(path)) as { ok: unknown }).ok);
     }
+    done();
     const recorded = failed || committed.commit === null ? null : await history("record", {
       turn: committed.commit, applied: changes, author, trailers, main: picked.main, pickup: picked.commit,
     });
-    expect(await land("forget", { saga, applied })).toEqual({ ok: {} });
+    // The folders that held a file of the landing's own, and the names *beside* says.
+    expect(await land("forget", { saga, applied }, (before) => [...new Set([...Object.keys(before).filter(ours).map(up), ...beside])])).toEqual({ ok: {} });
     expect(existsSync(kept(saga))).toBe(false);
+    expect(Object.keys(asItLies(folder)).filter(ours)).toEqual([]);
     // Forgotten, the landing is over: its host lets the folder go at once, not once idle.
     await until(() => landers.gone === landers.started, 15_000);
     return { state: failed ? "compensated" as const : "completed" as const, failed, recovered, picked, committed, changes, putBack, recorded };
@@ -493,6 +502,23 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
     expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Budget.csv", "Report.md", "notes"]);
     expect(await did(TWO, "read", { key: key("A.md"), max_bytes: null })).toEqual(data64("notes of A\n"));
     expect(await did(TWO, "history", { action: "changed" }, "land:t3")).toEqual({ paths: [] });
+  });
+
+  it("leave beside its name what a program holding your file open writes into it once a landing replaced it, as the landing is forgotten: the file it replaced stays in the folder's own mount until then", async () => {
+    await did(TWO, "history", { action: "open" }, "open:t4");
+    expect(await write(TWO, "Report.md", "# Report\n\nTotals: 50\n\nTidied by A.\n")).toBeNull();
+    // A program of yours has the file open as the landing replaces it, and saves through it after.
+    const open = openSync(key("Report.md"), "r+");
+    let landed: Awaited<ReturnType<typeof landing>>;
+    try {
+      landed = await landing(TWO, "t4", () => {}, { applied: () => writeSync(open, "# REPORT\n", 0), beside: ["Report (kept by Surogate).md"] });
+    } finally {
+      closeSync(open);
+    }
+    expect([landed.state, landed.changes.map((change) => change.path)]).toEqual(["completed", ["Report.md"]]);
+    expect([real("Report.md"), real("Report (kept by Surogate).md")]).toEqual(["# Report\n\nTotals: 50\n\nTidied by A.\n", "# REPORT\n\nTotals: 47\n\nTidied by A.\n"]);
+    // The thread's next landing is told it.
+    expect((await did(TWO, "land", { action: "recover" }, "land:t5")).beside).toEqual([["Report.md", "Report (kept by Surogate).md"]]);
   });
 });
 

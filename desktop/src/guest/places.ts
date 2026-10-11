@@ -76,6 +76,10 @@ export function askHistory(asked: Asked, signal: AbortSignal, command: readonly 
       cwd: "/", detached: true, stdio: ["pipe", "pipe", "ignore"],
       env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/nonexistent", LANG: "C.UTF-8" },
     });
+    // One that could not be started closes with no exit: it is answered there. One the agent had no file
+    // descriptor left for has no stdio, and neither exits nor closes: it is answered now.
+    child.on("error", () => {});
+    if (!child.stdin || !child.stdout) return reject(new Error("the history ended without an answer"));
     const pieces: Buffer[] = [];
     let size = 0;
     // The history itself has ended, and its group with it.
@@ -95,8 +99,6 @@ export function askHistory(asked: Asked, signal: AbortSignal, command: readonly 
       else pieces.push(piece);
     });
     child.stdin.on("error", () => {});
-    // One that could not be started closes with no exit: it is answered there.
-    child.on("error", () => {});
     // The history has ended, however it did: what it left running goes with it. Once its group is
     // empty the group's number may be another's, so nothing signals it after this.
     child.once("exit", () => {
