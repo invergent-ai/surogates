@@ -11,6 +11,8 @@ import pytest
 from fastapi import FastAPI
 import httpx
 from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from surogates.browser.base import BrowserEndpoint
 from surogates.browser.control import AcquireOutcome, ControlEntry
@@ -22,6 +24,10 @@ from surogates.tenant.context import TenantContext
 ORG_1 = UUID("00000000-0000-0000-0000-000000000001")
 ORG_2 = UUID("00000000-0000-0000-0000-000000000002")
 USER_1 = UUID("10000000-0000-0000-0000-000000000001")
+# Another member of the first organisation.
+USER_2 = UUID("10000000-0000-0000-0000-000000000002")
+# A service's own token in the first organisation, as the ops proxy's.
+SERVICE = UUID("40000000-0000-0000-0000-000000000001")
 
 
 class StubResolver:
@@ -182,6 +188,43 @@ class StubSessions:
         return emit
 
 
+class CloudSessions(StubSessions):
+    """The session store in a test of a chat in the cloud: a session the resolver has a browser for is
+    a chat of that browser's organisation and user, as the worker registered its browser, unless the
+    test gives its row."""
+
+    def __init__(self, resolver: StubResolver) -> None:
+        super().__init__()
+        self.resolver = resolver
+
+    async def get_session(self, session_id: UUID) -> Any:
+        entry = self.resolver.entries.get(str(session_id))
+        if session_id not in self.sessions and entry is not None:
+            self.sessions[session_id] = SimpleNamespace(
+                org_id=UUID(entry.org_id), user_id=UUID(entry.user_id), agent_id="agent", config={},
+            )
+        return await super().get_session(session_id)
+
+
+def _tenant(
+    *, org_id: UUID = ORG_1, user_id: UUID | None = USER_1, session_scope_id: UUID | None = None,
+    sign_in: UUID | None = None, service_account_id: UUID | None = None, agent_id: str | None = None,
+) -> TenantContext:
+    """The caller of a test: a user of the first organisation's, unless the test says who else."""
+    return TenantContext(
+        org_id=org_id,
+        user_id=user_id,
+        org_config={},
+        user_preferences={},
+        permissions=frozenset(),
+        asset_root="/tmp/surogates-test",
+        service_account_id=service_account_id,
+        session_scope_id=session_scope_id,
+        service_account_agent_id=agent_id,
+        oauth_family_id=sign_in,
+    )
+
+
 @pytest.fixture()
 def app_factory():
     from surogates.api.routes import browser as browser_routes
@@ -189,27 +232,18 @@ def app_factory():
 
     resolver = StubResolver()
     control = StubControl()
+    sessions = CloudSessions(resolver)
 
-    def build(
-        *, org_id: UUID = ORG_1, user_id: UUID | None = USER_1, session_scope_id: UUID | None = None,
-        sign_in: UUID | None = None,
-    ) -> FastAPI:
+    def build(**who: Any) -> FastAPI:
         app = FastAPI()
         app.include_router(browser_routes.router, prefix="/v1")
         app.state.browser_resolver = resolver
         app.state.browser_control = control
+        app.state.session_store = sessions
+        tenant = _tenant(**who)
 
         async def fake_tenant() -> TenantContext:
-            return TenantContext(
-                org_id=org_id,
-                user_id=user_id,
-                org_config={},
-                user_preferences={},
-                permissions=frozenset(),
-                asset_root="/tmp/surogates-test",
-                session_scope_id=session_scope_id,
-                oauth_family_id=sign_in,
-            )
+            return tenant
 
         app.dependency_overrides[get_current_tenant] = fake_tenant
         return app
@@ -300,9 +334,12 @@ class TestStateEndpoint:
     async def test_returns_404_when_no_browser(self, app_factory) -> None:
         build, _resolver, _control = app_factory
         sid = str(uuid4())
+        app = build()
+        # The user's own chat, with no browser.
+        app.state.session_store.sessions[UUID(sid)] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config={})
 
         async with AsyncClient(
-            transport=ASGITransport(app=build()),
+            transport=ASGITransport(app=app),
             base_url="http://test",
         ) as client:
             response = await client.get(f"/v1/sessions/{sid}/browser/state")
@@ -937,6 +974,7 @@ class TestDeleteEndpoint:
         app = build()
         app.state.browser_pool = pool
         app.state.browser_registry = registry
+        app.state.session_store.sessions[UUID(sid)] = SimpleNamespace(org_id=ORG_1, agent_id="agent", config={})
 
         async with AsyncClient(
             transport=ASGITransport(app=app),
@@ -944,16 +982,16 @@ class TestDeleteEndpoint:
         ) as client:
             response = await client.delete(f"/v1/sessions/{sid}/browser")
 
-        # 204 with no destroy / no delete calls — the session simply
-        # has no browser to close.
+        # 204 with no destroy / no delete calls — the user's own session
+        # simply has no browser to close.
         assert response.status_code == 204
         assert pool.destroyed == []
         assert registry.deleted == []
 
     async def test_cross_tenant_browser_invisible(self, app_factory) -> None:
-        """A session in a different org must be unaddressable: the
-        resolver returns None, the response is 204, and no destruction
-        happens."""
+        """A session in a different org must be unaddressable: answered
+        404, as another member's session and one that does not exist are,
+        and no destruction happens."""
         build, resolver, _control = app_factory
         sid = str(uuid4())
         foreign_org = uuid4()
@@ -970,7 +1008,7 @@ class TestDeleteEndpoint:
         ) as client:
             response = await client.delete(f"/v1/sessions/{sid}/browser")
 
-        assert response.status_code == 204
+        assert response.status_code == 404
         assert pool.destroyed == []
         assert registry.deleted == []
 
@@ -1171,6 +1209,131 @@ class TestPreviewEndpoint:
             response = await client.get(f"/v1/sessions/{sid}/browser/preview.png")
 
         assert response.status_code == 404
+
+
+# A cloud browser's routes, in the order a test asks them.
+ROUTES = ("acquire", "release", "state", "preview", "teardown")
+# What each answers its own user, and a caller it is not theirs: the shell's are the codes its socket closes with.
+WORKS = {"acquire": 200, "release": 200, "state": 200, "preview": 200, "teardown": 204, "shell": 4502}
+NOT_THEIRS = {**{route: 404 for route in ROUTES}, "shell": 4404}
+
+
+@pytest.fixture()
+def cloud(app_factory, monkeypatch):
+    """A chat in the cloud of USER_1's with a live browser, and each of its browser's routes asked as a test says who asks."""
+    from surogates.api.routes import browser as browser_routes
+
+    build, resolver, control = app_factory
+    sid = uuid4()
+    resolver.entries[str(sid)] = _resolved(str(sid))
+    pool, backend, registry = _StubBrowserPool(), _StubBackend(), _StubRegistry()
+    events: list[tuple[str, str, dict]] = []
+    wakes: list[str] = []
+    shots: list[str] = []
+
+    class Preview:
+        def __init__(self, rest_url: str) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def screenshot(self) -> dict[str, bytes]:
+            shots.append(str(sid))
+            return {"png_bytes": b"\x89PNG\r\n\x1a\npreview"}
+
+    async def no_devtools(_cdp_url: str, **_: Any) -> str:
+        # Past every check, the shell reaches for the browser's own socket: none answers in a test.
+        raise RuntimeError("no browser behind the entry")
+
+    monkeypatch.setattr(browser_routes, "_browser_preview_client", Preview)
+    monkeypatch.setattr(browser_routes, "_cdp_browser_ws_url", no_devtools)
+
+    def app_of(who: dict) -> FastAPI:
+        app = build(**who)
+        app.state.browser_pool, app.state.browser_backend, app.state.browser_registry = pool, backend, registry
+        app.state.session_event_emitter = _event_recorder(events)
+        app.state.session_wake = _wake_recorder(wakes)
+        return app
+
+    async def ask(route: str, prefix: str, who: dict) -> httpx.Response:
+        on = f"{prefix}/sessions/{sid}/browser"
+        # On the service path the caller names the user it acts for.
+        speaks_for = {"owner_user_id": str(USER_1)} if prefix == "/v1/api" else {}
+        async with AsyncClient(transport=ASGITransport(app=app_of(who)), base_url="http://test") as client:
+            if route in ("acquire", "release"):
+                return await client.post(f"{on}/control", json={"action": route, **speaks_for})
+            if route == "teardown":
+                return await client.delete(on)
+            return await client.get(f"{on}/state" if route == "state" else f"{on}/preview.png")
+
+    def shell(prefix: str, who: dict) -> int:
+        tenant = _tenant(**who)
+
+        async def authenticated(*_: Any, **__: Any) -> TenantContext:
+            return tenant
+
+        monkeypatch.setattr(browser_routes, "authenticate_websocket_tenant", authenticated)
+        speaks_for = f"?owner_user_id={USER_1}" if prefix == "/v1/api" else ""
+        with TestClient(app_of(who)) as client, pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect(f"{prefix}/sessions/{sid}/browser/shell{speaks_for}"):
+                pass
+        return closed.value.code
+
+    async def answers(*, prefix: str = "/v1", **who: Any) -> dict[str, int]:
+        """What each route answers the caller *who*, its shell included."""
+        said = {route: (await ask(route, prefix, who)).status_code for route in ROUTES}
+        return {**said, "shell": shell(prefix, who)}
+
+    def untouched() -> bool:
+        """Whether nothing was done to the browser: not taken over, told of, seen or torn down."""
+        return (control.flag, events, wakes, shots, pool.destroyed, backend.destroyed, registry.deleted) == (
+            {}, [], [], [], [], [], [],
+        )
+
+    return SimpleNamespace(sid=sid, ask=ask, answers=answers, untouched=untouched, events=events, pool=pool)
+
+
+class TestACloudBrowserIsItsOwnUsers:
+    async def test_another_member_of_the_organisation_is_answered_as_for_no_browser(self, cloud) -> None:
+        # Not taken over, seen, watched or torn down: as for a session that does not exist.
+        assert await cloud.answers(user_id=USER_2) == NOT_THEIRS
+        assert cloud.untouched()
+
+    async def test_its_own_user_takes_it_over_sees_it_and_tears_it_down(self, cloud) -> None:
+        assert await cloud.answers() == WORKS
+        assert [kind for _, kind, _ in cloud.events] == ["browser.control_granted", "browser.control_returned"]
+        assert cloud.pool.destroyed == [str(cloud.sid)]
+
+    async def test_a_services_token_acts_for_the_user_it_names(self, cloud) -> None:
+        # As the ops proxy asks: no user of its own, trusted to say whose the view is.
+        service = {"user_id": None, "service_account_id": SERVICE}
+        taken = await cloud.ask("acquire", "/v1/api", service)
+        assert taken.json() == {"outcome": "granted", "owner_user_id": str(USER_1)}
+
+        assert await cloud.answers(prefix="/v1/api", **service) == WORKS
+        assert cloud.pool.destroyed == [str(cloud.sid)]
+
+    async def test_a_key_bound_to_another_agent_is_answered_as_for_no_browser(self, cloud) -> None:
+        theirs = {"user_id": None, "service_account_id": SERVICE, "agent_id": "another-agent"}
+        assert await cloud.answers(prefix="/v1/api", **theirs) == NOT_THEIRS
+        assert cloud.untouched()
+        # The key bound to the session's own agent reaches it.
+        assert await cloud.answers(prefix="/v1/api", **{**theirs, "agent_id": "agent"}) == WORKS
+
+    async def test_a_key_of_another_organisation_bound_to_an_agent_of_that_name_is_answered_as_for_no_browser(self, cloud) -> None:
+        elsewhere = {"org_id": ORG_2, "user_id": None, "service_account_id": SERVICE, "agent_id": "agent"}
+        # Its teardown too, which answers a browser it finds of no other org as none to close.
+        assert await cloud.answers(prefix="/v1/api", **elsewhere) == NOT_THEIRS
+        assert cloud.untouched()
+
+    async def test_a_token_for_one_session_reaches_that_sessions_browser_alone(self, cloud) -> None:
+        assert await cloud.answers(prefix="/v1/api", user_id=None, session_scope_id=uuid4()) == NOT_THEIRS
+        assert cloud.untouched()
+        assert await cloud.answers(prefix="/v1/api", user_id=None, session_scope_id=cloud.sid) == WORKS
 
 
 def _event_recorder(events: list[tuple[str, str, dict]]):

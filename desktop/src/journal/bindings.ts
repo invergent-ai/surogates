@@ -3,6 +3,7 @@
 // journal's own handle: the file is opened with an exclusive lock, and one device
 // is one agent identity, which is what a binding belongs to.
 
+import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 import { SANDBOX_PORTS } from "../browser/ports.js";
@@ -72,14 +73,22 @@ export class Bindings {
    * The folder is not touched; an unknown root changes nothing, and tells nothing.
    */
   retire(root: string): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    let forgotten: number | bigint;
-    try {
+    const forgotten = this.atomically(() => {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
       this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
-      this.db.prepare(`DELETE FROM browser_ports WHERE root = ?`).run(root);
-      forgotten = this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
+      this.takePorts(root);
+      return this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
+    });
+    if (forgotten > 0) this.changed(root);
+  }
+
+  // *write*, kept whole or not at all.
+  private atomically<T>(write: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const done = write();
       this.db.exec("COMMIT");
+      return done;
     } catch (error) {
       try {
         this.db.exec("ROLLBACK");
@@ -88,7 +97,21 @@ export class Bindings {
       }
       throw error;
     }
-    if (forgotten > 0) this.changed(root);
+  }
+
+  // *port* has turned: given to a chat, moved to another, or taken back. Its mark is new, one no turn had
+  // before, in this journal or in another of the same browser profiles: what was stored at the port's origins
+  // before is cleared there (BrowserHost.forwards).
+  private turn(port: number): void {
+    this.db.prepare(`INSERT INTO browser_port_turns (port, turn) VALUES (?, ?) ON CONFLICT (port) DO UPDATE SET turn = excluded.turn`)
+      .run(port, randomBytes(16).toString("hex"));
+  }
+
+  // Take every port of *root*'s own servers back, each a turn: how many there were.
+  private takePorts(root: string): number {
+    const taken = this.db.prepare(`DELETE FROM browser_ports WHERE root = ? RETURNING port`).all(root) as Array<{ port: number }>;
+    for (const { port } of taken) this.turn(port);
+    return taken.length;
   }
 
   /** A root's mode from now on, for it and its sub-agents. An unknown root changes nothing. */
@@ -139,9 +162,12 @@ export class Bindings {
    * own servers go with it, first. One not allowed changes nothing.
    */
   disallowBrowser(root: string): void {
-    const { changes } = this.db.prepare(`DELETE FROM browser_ports WHERE root = ?`).run(root);
-    this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
-    if (changes > 0) this.changed(root);
+    const taken = this.atomically(() => {
+      const ports = this.takePorts(root);
+      this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
+      return ports;
+    });
+    if (taken > 0) this.changed(root);
   }
 
   /**
@@ -153,7 +179,11 @@ export class Bindings {
     if (SANDBOX_PORTS.has(port)) throw new Error(`Port ${port} is the sandbox's own proxy`);
     const former = this.portOwner(port);
     if (former === root) return;
-    const { changes } = this.db.prepare(`INSERT OR REPLACE INTO browser_ports (port, root) SELECT ?, root FROM bindings WHERE root = ?`).run(port, root);
+    const changes = this.atomically(() => {
+      const { changes: kept } = this.db.prepare(`INSERT OR REPLACE INTO browser_ports (port, root) SELECT ?, root FROM bindings WHERE root = ?`).run(port, root);
+      if (kept > 0) this.turn(port);
+      return kept;
+    });
     if (changes === 0) return;
     if (former !== undefined) this.changed(former);
     this.changed(root);
@@ -161,7 +191,11 @@ export class Bindings {
 
   /** Take *port* back from a root: the browser reaches it no more. One the root does not have changes nothing. */
   disallowPort(root: string, port: number): void {
-    const { changes } = this.db.prepare(`DELETE FROM browser_ports WHERE root = ? AND port = ?`).run(root, port);
+    const changes = this.atomically(() => {
+      const { changes: taken } = this.db.prepare(`DELETE FROM browser_ports WHERE root = ? AND port = ?`).run(root, port);
+      if (taken > 0) this.turn(port);
+      return taken;
+    });
     if (changes > 0) this.changed(root);
   }
 
@@ -180,6 +214,15 @@ export class Bindings {
   forwards(): Array<{ port: number; root: string }> {
     return (this.db.prepare(`SELECT port, root FROM browser_ports ORDER BY port`).all() as Array<{ port: number; root: string }>)
       .map(({ port, root }) => ({ port, root }));
+  }
+
+  /**
+   * Every port that has turned, with the mark of its last turn, lowest first: a port given to a chat, moved to another, or
+   * taken back, whether or not a chat has it now. What the browser is told, to clear each origin of a port that turned since.
+   */
+  turns(): Array<{ port: number; turn: string }> {
+    return (this.db.prepare(`SELECT port, turn FROM browser_port_turns ORDER BY port`).all() as Array<{ port: number; turn: string }>)
+      .map(({ port, turn }) => ({ port, turn }));
   }
 
   /** Whether the root's user let its agent use the browser on this computer. */

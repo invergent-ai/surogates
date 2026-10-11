@@ -45,11 +45,33 @@ def scenario(place: Path) -> None:
     def files(of: Path) -> dict:
         return {str(p.relative_to(of)): p.read_text() for p in sorted(of.rglob("*")) if p.is_file()}
 
+    def git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", f"--git-dir={repo}", *args], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+
+    def connected() -> None:
+        # By the guest's git: each thread's repository finds every object its refs and its copy's index lead to.
+        for thread in (ONE, TWO):
+            looked = git(store / "clones" / thread, "fsck", "--connectivity-only", "--no-dangling", "--cache")
+            assert looked.returncode == 0 and not looked.stdout, (thread, looked)
+
     assert ask(ONE, "prune") == {"error": {"code": "not_a_request", "message": "refused the request: it names no action this computer's history takes"}}
     assert ask(ONE, "open") == {"copy": "made"} == ask(TWO, "open")
     one, two = store / "threads" / ONE, store / "threads" / TWO
     assert files(one) == files(folder) and not (one / ".git").exists()
     print("each thread's copy is made")
+    # The folder's first commit is its history's, pushed with the first copy, and each repository borrows it.
+    main = git(store / "history.git", "rev-parse", "refs/heads/main").stdout.strip()
+    for thread in (ONE, TWO):
+        repo = store / "clones" / thread
+        assert (repo / "objects" / "info" / "alternates").read_text() == "../../../history.git/objects\n"
+        assert git(repo, "rev-parse", "refs/heads/main").stdout.strip() == main
+        # It holds none of the folder's files: they are the history's alone.
+        assert not list((repo / "objects" / "pack").glob("*.pack")), (thread, list((repo / "objects" / "pack").iterdir()))
+    connected()
+    print("each thread's repository borrows the folder's history, which holds the folder's first commit")
     (one / "Report.docx").write_text("A's report\n")
     (one / "A-new.md").write_text("A's new file\n")
     (two / "Report.docx").write_text("B's report\n")
@@ -183,6 +205,8 @@ def scenario(place: Path) -> None:
     assert (two / ".vscode" / "launch.json").read_text() == "{}\n" and (two / "C.md").read_text() == "A's third\n"
     assert ask(TWO, "changed") == {"paths": [".vscode/launch.json"]} and ".vscode/launch.json" not in main_has()
     print("what a landing left out stays in the copy as the thread left it, by the guest's git, and so when its record is cut after its push")
+    connected()
+    print("no thread's repository names what neither it nor the history holds, by the guest's git")
 
 
 def a_large_folder_left_out(place: Path) -> str:

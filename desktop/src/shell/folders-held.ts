@@ -16,14 +16,16 @@ export const LOOK_MS = 5_000;
 const LOOKS_AT_ONCE = 2;
 
 type Found = { dev: number; ino: number } | null;
+// A look under way: its answer, when it began, and whether it was said for not answering in its time.
+type Look = { answer: Promise<Found>; began: number; said: boolean };
 
 export class FolderLooks {
-  // The looks that have not answered yet, each by its folder, with when it began.
-  private readonly running = new Map<string, { answer: Promise<Found>; began: number }>();
+  // The looks that have not answered yet, each by its folder.
+  private readonly running = new Map<string, Look>();
   // Those waiting for one of them to end.
   private waiting: Array<() => void> = [];
 
-  /** *said*: told once of each folder whose look did not answer in its time, for the log. */
+  /** *said*: told once of each folder whose look did not answer in its time, for the log, by when a call leaves it out for that. */
   constructor(private readonly look: (folder: string) => Promise<Stats> = stat, private readonly ms = LOOK_MS, private readonly said: (folder: string) => void = () => {}) {}
 
   /**
@@ -42,13 +44,16 @@ export class FolderLooks {
   private async one(folder: string): Promise<Found> {
     for (;;) {
       const shared = this.running.get(folder);
-      if (shared) return this.bounded(shared);
+      if (shared) return this.bounded(folder, shared);
       if (this.running.size < LOOKS_AT_ONCE) break;
       const now = Date.now();
       // How long each running look still has to answer in. Where none has any time left, none
-      // will end: given up. Else waited for, to the soonest that one ends or runs out of time.
+      // will end: given up, each of them said. Else waited for, to the soonest that one ends or runs out of time.
       const left = [...this.running.values()].map(({ began }) => began + this.ms - now).filter((ms) => ms > 0);
-      if (left.length === 0) return null;
+      if (left.length === 0) {
+        for (const [silent, look] of this.running) this.late(silent, look);
+        return null;
+      }
       const soonest = Math.min(...left);
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, soonest).unref();
@@ -62,22 +67,28 @@ export class FolderLooks {
       this.waiting = [];
       for (const wake of waiting) wake();
     });
-    const begun = { answer, began };
+    const begun = { answer, began, said: false };
     this.running.set(folder, begun);
-    const timer = setTimeout(() => {
-      if (this.running.get(folder) === begun) this.said(folder);
-    }, this.ms).unref();
-    void answer.finally(() => clearTimeout(timer));
-    return this.bounded(begun);
+    return this.bounded(folder, begun);
   }
 
   // A look's answer, or null once the look is older than its bound: at once where it is already.
-  private bounded({ answer, began }: { answer: Promise<Found>; began: number }): Promise<Found> {
-    const left = began + this.ms - Date.now();
-    if (left <= 0) return Promise.resolve(null);
+  private bounded(folder: string, look: Look): Promise<Found> {
+    const left = look.began + this.ms - Date.now();
+    if (left <= 0) return Promise.resolve(this.late(folder, look));
     let timer: NodeJS.Timeout | undefined;
-    return Promise.race([answer, new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), left).unref();
+    return Promise.race([look.answer, new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(this.late(folder, look)), left).unref();
     })]).finally(() => clearTimeout(timer));
+  }
+
+  // *look*, at *folder*, has not answered in its time: said once, by whichever asker first gives it up, so
+  // that it has been said by when any of them leaves the folder out.
+  private late(folder: string, look: Look): null {
+    if (!look.said && this.running.get(folder) === look) {
+      look.said = true;
+      this.said(folder);
+    }
+    return null;
   }
 }

@@ -524,7 +524,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
     // The sandbox still holds the first folder's place: it is let go, and only then renamed. The answer says where.
     const { place: second, aside } = await placeOf(data, bound(), sandbox);
     expect([second.key, second.history, aside?.place]).toEqual([first.key, first.history, first]);
-    expect(readdirSync(aside!.history).sort()).toEqual(["clones", "threads"]);
+    expect(readdirSync(aside!.history).sort()).toEqual(["clones", "history.git", "threads"]);
     expect(readFileSync(join(aside!.history, "threads", ONE, "first.txt"), "utf8")).toBe("of the first folder\n");
     expect(readdirSync(second.history)).toEqual([]);
     // The new folder's thread works in a copy of the new folder, with a history of its own.
@@ -539,6 +539,6 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
     expect(ok(await of(second, TWO, "changed"))).toEqual({ paths: [] });
     // Neither folder was written, and the first one's history is where it was set aside.
     expect([readdirSync(notes), readdirSync(join(dir, "Notes.old"))]).toEqual([["second.txt"], ["first.txt"]]);
-    expect(readdirSync(aside!.history).sort()).toEqual(["clones", "threads"]);
+    expect(readdirSync(aside!.history).sort()).toEqual(["clones", "history.git", "threads"]);
   });
 });

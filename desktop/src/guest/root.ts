@@ -6,7 +6,7 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { join, posix } from "node:path";
@@ -20,6 +20,7 @@ import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
 import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
+import { STORE } from "./trust.js";
 
 // The sessions disk (vm/init), and its folder of roots, each named by its root session id.
 const SESSIONS_DISK = "/run/surogate/sessions";
@@ -88,6 +89,11 @@ const FULL = `This computer's sandbox holds ${MAX_SHARES} chats already`;
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
 const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
+// The system's bundle, as each root's /etc/ssl/certs shows it, and the variables the common tools
+// read for their own: Node's beside its own roots, pip's, requests', OpenSSL's (uv's and httpx's
+// too), curl's and git's in place of theirs.
+const SYSTEM_BUNDLE = "/etc/ssl/certs/ca-certificates.crt";
+const BUNDLE_VARIABLES = ["NODE_EXTRA_CA_CERTS", "PIP_CERT", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"];
 // A share the host has just added is there once the guest's kernel has found its
 // device, within about 50 ms: until then its mount fails, and is tried again.
 const MOUNT_MS = BOUNDS.mountMs;
@@ -110,7 +116,9 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 // through git's own environment, after any the layout gives: the folder's files are the root's
 // uid in the guest and the user's on the host, so git in the guest would otherwise rehash every
 // file after any git on the host refreshed the index. The user's repository config is untouched.
-export function rootEnvironment(layout: string, user: HostUser): Record<string, string> {
+// Where the guest's trust store holds the company's CA (*companyCa*, trust.ts), the tools that keep
+// roots of their own are pointed at the system's bundle, which holds it, whatever the layout says.
+export function rootEnvironment(layout: string, user: HostUser, companyCa: boolean): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of layout.split("\n")) {
     const at = line.indexOf("=");
@@ -120,8 +128,9 @@ export function rootEnvironment(layout: string, user: HostUser): Record<string, 
   const git = Number(env.GIT_CONFIG_COUNT ?? 0);
   const proxies = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].flatMap((name) => [[name, PROXY_URL], [name.toLowerCase(), PROXY_URL]]));
   const direct = "localhost,127.0.0.1,::1,0.0.0.0,surogate";
+  const bundle = companyCa ? Object.fromEntries(BUNDLE_VARIABLES.map((name) => [name, SYSTEM_BUNDLE])) : {};
   return {
-    ...env, ...proxies, NO_PROXY: direct, no_proxy: direct, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
+    ...env, ...proxies, ...bundle, NO_PROXY: direct, no_proxy: direct, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8",
     GIT_CONFIG_COUNT: String(git + 1), [`GIT_CONFIG_KEY_${git}`]: "core.checkStat", [`GIT_CONFIG_VALUE_${git}`]: "minimal",
   };
 }
@@ -257,6 +266,8 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root);
+  // Made, if at all, before the host's answer to hello let any root be set up (Control), and kept for the boot.
+  const companyCa = existsSync(STORE);
   const mount = await mountShare(share.tag);
   const cgroup = join(CGROUPS, root);
   // Made at the root's first setup in this guest, and kept until the guest stops: the root's
@@ -293,9 +304,9 @@ export async function enter(root: string, place: Place, share: Share, user: Host
     [
       "-c", 'echo $$ > "$1/cgroup.procs" && shift && exec "$@"', "sh", cgroup,
       "/usr/bin/unshare", "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
-      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name, socketOf(root),
+      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name, socketOf(root), ...(companyCa ? [STORE] : []),
     ],
-    { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
+    { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user, companyCa), stdio: ["pipe", "pipe", "pipe"] },
   );
 }
 

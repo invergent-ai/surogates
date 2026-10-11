@@ -497,6 +497,66 @@ describe("the bindings", () => {
     journal.close();
   });
 
+  it("turn a port each time it is given to a chat, moved to another or taken back, with a mark no other turn has: what its browser's origins are cleared by", () => {
+    const before = new OperationJournal(path);
+    for (const [root, at] of [["r1", 1], ["r2", 2], ["r3", 3]] as const) {
+      before.bindings.add(binding(root, at));
+      before.bindings.allowBrowser(root);
+    }
+    const turns = (journal: OperationJournal) => new Map(journal.bindings.turns().map(({ port, turn }) => [port, turn]));
+    const marks = new Set<string>();
+    const turned = (journal: OperationJournal, port: number, was: Map<number, string>) => {
+      const now = turns(journal);
+      expect(now.get(port), `port ${port}`).toMatch(/^[0-9a-f]{32}$/);
+      expect(now.get(port)).not.toBe(was.get(port));
+      expect(marks.has(now.get(port)!)).toBe(false);
+      marks.add(now.get(port)!);
+      // No other port turned.
+      for (const [other, turn] of was) if (other !== port) expect(now.get(other), `port ${other}`).toBe(turn);
+    };
+    expect(before.bindings.turns()).toEqual([]);
+    // Given to a chat: its first.
+    let was = turns(before);
+    before.bindings.allowPort("r1", 3000);
+    turned(before, 3000, was);
+    was = turns(before);
+    before.bindings.allowPort("r1", 8000);
+    turned(before, 8000, was);
+    // Allowed again for the chat that has it, for a chat with no binding, or a port the chat does not have taken back: no turn.
+    was = turns(before);
+    before.bindings.allowPort("r1", 3000);
+    before.bindings.allowPort("r9", 3000);
+    before.bindings.disallowPort("r2", 3000);
+    expect(turns(before)).toEqual(was);
+    // Moved to another chat.
+    before.bindings.allowPort("r2", 3000);
+    turned(before, 3000, was);
+    // Taken back, alone.
+    was = turns(before);
+    before.bindings.disallowPort("r2", 3000);
+    turned(before, 3000, was);
+    const kept = turns(before);
+    before.close();
+    // Kept across a restart, as the rows are, the turn of a port with no row any more among them.
+    const after = new OperationJournal(path);
+    expect(turns(after)).toEqual(kept);
+    // Taken back with the browser, or gone with a deleted chat.
+    after.bindings.allowPort("r2", 5173);
+    was = turns(after);
+    marks.add(was.get(5173)!);
+    after.bindings.disallowBrowser("r1");
+    turned(after, 8000, was);
+    was = turns(after);
+    after.bindings.retire("r2");
+    turned(after, 5173, was);
+    // A chat deleted with no port turns none.
+    was = turns(after);
+    after.bindings.retire("r3");
+    expect(turns(after)).toEqual(was);
+    expect(after.bindings.turns().map(({ port }) => port)).toEqual([3000, 5173, 8000]);
+    after.close();
+  });
+
   it("read back a folder whose device and inode numbers are past 2^53", () => {
     const journal = new OperationJournal(path);
     const large = { ...binding("r1", 1), dev: 2 ** 53 + 4, ino: 2 ** 53 + 2 };

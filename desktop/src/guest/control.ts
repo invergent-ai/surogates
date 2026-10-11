@@ -27,7 +27,7 @@ export interface ControlPlaces {
   history(key: string, request: { thread: string; user: string; action: string; args: Record<string, unknown> }, signal: AbortSignal): Promise<Outcome>;
 }
 
-// What the control asks of the guest itself (root.ts): its clock, its runs' backstops, and its power.
+// What the control asks of the guest itself (root.ts, trust.ts): its clock, its runs' backstops, its trust store, and its power.
 export interface ControlMachine {
   // The guest's clock set to *now*, milliseconds since the epoch.
   setClock(now: number): Promise<void>;
@@ -35,6 +35,9 @@ export interface ControlMachine {
   woke(ms: number): void;
   // The host said something: a backstop that waited to hear it goes on (Roots.heard).
   heard(): void;
+  // The guest's trust store holds *certificates*, the company's CA the host gave, for every root set up after.
+  // Settles once it does, or once it could not, which it says itself: never rejects.
+  trust(certificates: string[]): Promise<void>;
   // Every root's processes end, the sessions disk is written out and let go, and the guest powers off.
   powerOff(): Promise<void>;
 }
@@ -42,6 +45,8 @@ export interface ControlMachine {
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const malformed = (type: string) => `The agent cannot take this ${type} request`;
 const isText = (value: unknown): value is string => typeof value === "string";
+// The company's CA of hello's answer: a list of certificates as text, or none.
+const certificatesOf = (value: unknown): string[] => (Array.isArray(value) && value.every(isText) ? value : []);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -56,6 +61,8 @@ function isUser(value: unknown): value is HostUser {
 
 export class Control {
   private user: HostUser | null = null;
+  // The guest's trust store being made from hello's answer: every root's setup waits for it.
+  private trusted: Promise<void> = Promise.resolve();
   // The operations and the history requests still running, by id.
   private readonly running = new Map<number, AbortController>();
 
@@ -98,7 +105,10 @@ export class Control {
     const { id } = message;
     if (message.type === "done") {
       // Hello's answer, once: an answer to a request of the agent's names no user.
-      if (id === 0 && !this.user && isUser(message.user)) this.user = message.user;
+      if (id === 0 && !this.user && isUser(message.user)) {
+        this.user = message.user;
+        this.trusted = this.machine?.trust(certificatesOf(message.ca)) ?? Promise.resolve();
+      }
     } else if (message.type === "ping") {
       this.send({ type: "pong", id });
     } else if (message.type === "uid") {
@@ -113,7 +123,9 @@ export class Control {
         return this.send({ type: "failed", id, message: malformed("setup") });
       }
       if (!this.user) return this.send({ type: "failed", id, message: NO_HELLO });
-      this.roots.setup(message.root, message.folder, message.share, this.user, message.ended).then(
+      const { root, folder, share, ended } = message;
+      const user = this.user;
+      this.trusted.then(() => this.roots.setup(root, folder, share, user, ended)).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );

@@ -903,7 +903,7 @@ describe("the VM manager, asked for a folder's history", () => {
     const control = new Control(
       (message) => void agent.write(`${JSON.stringify(message)}\n`),
       { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) },
-      { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill },
+      { setClock: async () => {}, woke: () => {}, heard: () => {}, powerOff: kill, trust: async () => {} },
       {
         mount: async (key, store, real) => void asked.push(["mount", key, store.tag, real.tag]),
         unmount: async (key) => void asked.push(["unmount", key]),
