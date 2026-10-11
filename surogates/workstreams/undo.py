@@ -113,8 +113,8 @@ UNTAKEN = "This file cannot be restored here: a folder of its name is there, or 
 #: The landings by you under way, each kept until done: none is cut short with the request that began it.
 _ACTS: set[asyncio.Future] = set()
 #: The landings by you this process runs at once: each holds one of the api's pooled connections, its project's
-#: lock's, for its whole run, of the ten the api keeps by default.  One past them waits as for its project's lock,
-#: within the same patience, then is told to try again.
+#: lock's, for its whole run, of the ten the api keeps by default.  So a turn is held with the lock alone: one past
+#: them waits as for its project's lock, within the same patience, then is told to try again.
 ACTS_AT_ONCE = 4
 CROWDED = "Other changes are being restored or undone right now. Try again in a moment."
 #: The landings by you that have one of those turns now.
@@ -385,6 +385,29 @@ async def _turn(until: float) -> AsyncIterator[None]:
         _TURNS.discard(turn)
 
 
+@contextlib.asynccontextmanager
+async def _locked(session_factory: Any, project_id: UUID, until: float) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+    """The project's lock, held in one of this process's turns, both waited for until *until*: a check that it is still held.
+
+    A turn is taken to try the lock, and kept only with it: an act that
+    waits for its project's lock holds none of the turns between its
+    tries, as it holds no pooled connection.  :class:`ProjectBusy` once
+    the lock was not had by *until*, :class:`Refused` once no turn was.
+    """
+    while True:
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(_turn(until))
+            try:
+                held = await stack.enter_async_context(project_lock(session_factory, project_id, patience=0))
+            except ProjectBusy:
+                if time.monotonic() >= until:
+                    raise
+            else:
+                yield held
+                return
+        await asyncio.sleep(LOCK_POLL)
+
+
 async def _act(
     state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide, announce: UUID,
 ) -> dict:
@@ -402,7 +425,7 @@ async def _act(
     # A turn of this process's, then the project's lock, both within one patience: a person waits on them.
     until = time.monotonic() + LOCK_PATIENCE
     try:
-        async with _turn(until), project_lock(session_factory, project.id, patience=max(0.0, until - time.monotonic())) as held:
+        async with _locked(session_factory, project.id, until) as held:
             # The lock's holder alone moves the history: the copy is brought to it once, not once a file.
             with place.steady():
                 try:

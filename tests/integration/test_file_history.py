@@ -2631,6 +2631,32 @@ async def test_an_act_past_as_many_as_the_api_runs_at_once_waits_its_patience_th
     assert (await undone(api, other, landing=str(other_row.id)))["applied"] == ["Report.docx"]
 
 
+async def test_an_act_waiting_for_its_projects_lock_holds_none_of_the_turns_another_projects_act_needs(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    (tmp_path / "second").mkdir()
+    other, _, other_pods, _, other_row = await a_landing(api, tmp_path / "second", "printf ' by A' >> Report.docx")
+    monkeypatch.setattr(undo_module, "ACTS_AT_ONCE", 1)
+    monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 10.0)
+    held, go = asyncio.Event(), asyncio.Event()
+
+    async def a_landing_holds_the_lock() -> None:
+        async with rows_module.project_lock(api.app.state.session_factory, project["id"]):
+            held.set()
+            await go.wait()
+
+    holding = asyncio.create_task(a_landing_holds_the_lock())
+    await asyncio.wait_for(held.wait(), 30)
+    waiting = asyncio.create_task(undone(api, project, landing=str(row.id)))
+    await asyncio.sleep(1.0)  # it tries its project's lock, and waits between its tries
+    # That act holds no connection between its tries, nor the api's one turn: another project's act runs meanwhile.
+    async with asyncio.timeout(5):
+        assert (await undone(api, other, landing=str(other_row.id)))["applied"] == ["Report.docx"]
+    assert (other_pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and not waiting.done()
+    go.set()
+    await holding
+    assert (await asyncio.wait_for(waiting, 30))["applied"] == ["Report.docx"]
+
+
 async def test_an_act_whose_store_stops_answering_lets_the_copy_go_as_the_try_ends(api, monkeypatch, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
     monkeypatch.setattr(api.app.state.settings.saga, "default_step_timeout", 2)
