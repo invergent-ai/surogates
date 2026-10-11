@@ -65,6 +65,8 @@ export interface VmOptions extends Disks {
   // boot's guest trusts them for its commands' TLS, given as data in hello's answer. None without.
   ca?: string[];
   kvm?: string; // the device KVM is opened from: /dev/kvm
+  virtiofsd?: string; // each folder's daemon: Ubuntu's (qemu.ts, VIRTIOFSD) unless a test says
+  bwrap?: string; // what a folder the guest reads alone is shared through (linux.ts): the version's own copy, else the PATH's
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
@@ -110,8 +112,8 @@ export interface VmBackend {
    * folder's owner to *uid* (protocol.ts, Share), or rejects with why not, by
    * *deadline* (performance.now()). A share whose server goes takes the VM with it,
    * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
-   * *uid* 0 is the guest's root, for the agent's own git on a folder's place; with *readonly*
-   * the share refuses every write of the guest's, where the backend's server can.
+   * *uid* 0 is the guest's root, for the agent's own git on a folder's place; with *readonly*,
+   * for it alone, no write of the guest's reaches the folder, whatever the guest mounts.
    */
   share(folder: string, uid: number, deadline: number, readonly?: boolean): Promise<Share>;
   /**

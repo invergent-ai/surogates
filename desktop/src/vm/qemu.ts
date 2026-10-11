@@ -77,13 +77,25 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
 // with. Unprivileged, the daemon holds a descriptor for each file the guest keeps, up to
 // the user's hard limit; with cache=auto the guest kept every file it had looked at, and a
 // 150 000-file node_modules ran it out of them.
-// *guestUid* 0: the guest's root, for the agent's own git on a folder's place. *readonly*: the
-// daemon refuses every write, whatever the guest mounts (a virtiofsd that has the option).
-export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }, readonly = false): string[] {
+// *guestUid* 0: the guest's root, for the agent's own git on a folder's place.
+export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }): string[] {
   return [
     `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never",
     `--uid-map=:${guestUid}:${host.uid}:1:`, `--gid-map=:${guestUid}:${host.gid}:1:`,
-    ...(readonly ? ["--readonly"] : []),
+  ];
+}
+
+// A folder the guest's root reads alone: *daemon*, a virtiofsd, in a user namespace of *bwrap*'s, where the
+// host user is root, as the guest's root is to the guest, and a mount namespace where the folder is bound
+// read-only over itself. So nothing of the guest's writes it, whatever the guest mounts, on a virtiofsd
+// that cannot refuse writes itself too (Ubuntu 24.04's 1.10). Root there, the daemon makes no user
+// namespace of its own, and maps no ids: its PID, mount and network namespaces alone. bwrap's own child
+// dies with it, as the daemon with the manager.
+export function readOnlyDaemon(bwrap: string, daemon: string, folder: string, socket: string): string[] {
+  return [
+    bwrap, "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "ALL", "--bind", "/", "/", "--dev-bind", "/dev", "/dev",
+    "--ro-bind", folder, folder, "--die-with-parent", "--",
+    daemon, `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never",
   ];
 }
 

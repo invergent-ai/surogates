@@ -3,17 +3,14 @@
 // by images/guest/build.sh, the agent disk from this package (npm run build first). Behind
 // SUROGATE_VM_TESTS=1.
 
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { readonlyFlag } from "../../src/vm/linux.js";
 import { type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
-import { VIRTIOFSD } from "../../src/vm/qemu.js";
-import { agentDisk, agentDiskWith, altered, folderOf, IMAGE, KVM, needsKvm, OTHER, ROOT, signal, until, USER } from "./guest-support.js";
+import { agentDisk, agentDiskWith, altered, DAEMON, folderOf, IMAGE, KVM, needsKvm, OTHER, ROOT, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -68,7 +65,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
     }
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
+      run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM, ...DAEMON,
     };
     manager = new VmManager(options);
     place = { key: KEY, history: join(dir, "store"), real: folderOf(join(dir, "Documents")) };
@@ -84,11 +81,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
     expect(await manager.place(place, signal())).toBeNull();
     const started = daemons();
     expect(Object.keys(started).sort()).toEqual([join(dir, "Documents"), join(dir, "store")]);
-    // Both for the guest's root. Where this computer's virtiofsd can refuse writes itself, the folder's does.
-    const refuses = readonlyFlag(spawnSync(VIRTIOFSD, ["--help"], { encoding: "utf8" }).stdout);
-    for (const args of Object.values(started)) expect(args).toContain(`--uid-map=:0:${USER.uid}:1:`);
-    expect(started[join(dir, "Documents")]!.includes("--readonly")).toBe(refuses);
-    expect(started[join(dir, "store")]).not.toContain("--readonly");
+    // Both for the guest's root: the history by its daemon's map, the folder from bwrap's namespaces, bound read-only there.
+    expect(started[join(dir, "store")]).toContain(`--uid-map=:0:${USER.uid}:1:`);
+    expect(started[join(dir, "Documents")]!.join(" ")).toContain(`--uid 0 --gid 0 --cap-add ALL --bind / / --dev-bind /dev /dev --ro-bind ${join(dir, "Documents")} ${join(dir, "Documents")}`);
   });
 
   it("binds a thread's copy at its folder's path, where its commands see no other thread's copy, the history or the real files", async () => {
@@ -170,7 +165,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the
     options = {
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDiskWith(dir, altered([AGENT, `${AS_ROOT}${AGENT}`])),
       sessions: join(dir, "sessions.img"), run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"),
-      user: USER, kvm: KVM,
+      user: USER, kvm: KVM, ...DAEMON,
     };
     manager = new VmManager(options);
   });
@@ -185,8 +180,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the
     expect(await manager.place({ key: KEY, history: join(dir, "store"), real: folderOf(join(dir, "Documents")) }, signal())).toBeNull();
     const found = join(dir, "store", "found");
     await until(() => existsSync(found));
-    // Where this computer's virtiofsd refuses writes itself, a remount of the folder changes nothing.
-    const refuses = readonlyFlag(spawnSync(VIRTIOFSD, ["--help"], { encoding: "utf8" }).stdout);
+    // A remount of the folder changes nothing: it is read-only on this computer too, whatever its virtiofsd.
     expect(readFileSync(found, "utf8").split("\n")).toEqual([
       `${AT}/history virtiofs rw,nosuid,nodev,noexec,relatime`,
       `${AT}/real virtiofs ro,nosuid,nodev,noexec,relatime`,
@@ -195,11 +189,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the
       "make: refused",
       "replace: refused",
       "remove: refused",
-      `make again: ${refuses ? "refused" : "done"}`,
+      "make again: refused",
       "",
     ]);
     expect(statSync(found).uid).toBe(USER.uid);
-    expect(readdirSync(join(dir, "Documents"))).toEqual(refuses ? ["Report.docx"] : ["Report.docx", "made-again"]);
+    expect(readdirSync(join(dir, "Documents"))).toEqual(["Report.docx"]);
     expect(readFileSync(join(dir, "Documents", "Report.docx"), "utf8")).toBe("the real report\n");
   });
 });

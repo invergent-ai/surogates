@@ -3,7 +3,6 @@
 // built by images/guest/build.sh, the agent disk from this package (npm run build first).
 // Behind SUROGATE_VM_TESTS=1.
 
-import { spawnSync } from "node:child_process";
 import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
@@ -17,10 +16,9 @@ import { type Context, perform } from "../../src/files/operations.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { Outcome } from "../../src/link/protocol.js";
 import { checked, forgettable, type HistoryRequest } from "../../src/vm/history.js";
-import { bootLinux, readonlyFlag } from "../../src/vm/linux.js";
+import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
-import { VIRTIOFSD } from "../../src/vm/qemu.js";
-import { agentDisk, folderOf, IMAGE, KVM, median, needsKvm, signal, until, USER, withHistory } from "./guest-support.js";
+import { agentDisk, DAEMON, folderOf, IMAGE, KVM, median, needsKvm, signal, until, USER, withHistory } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -150,7 +148,7 @@ function world(prefix: string) {
   // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
   const disks = (at: string, disk = agentDisk(at)): VmOptions => ({
     kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: disk, sessions: join(at, "sessions.img"),
-    run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(at, "console.log"), user: USER, kvm: KVM,
+    run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(at, "console.log"), user: USER, kvm: KVM, ...DAEMON,
   });
   const place: Place = { key: KEY, history: join(dir, "store"), real: folderOf(folder) };
   return { dir, folder, place, disks, copyOf: (thread: string) => join(dir, "store", "threads", thread) };
@@ -301,18 +299,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Report.docx", "notes"]);
   });
 
-  it("refuses the guest's own root every write to the folder, a remount aside where this computer's virtiofsd cannot", async () => {
+  it("refuses the guest's own root every write to the folder, a remount of it too, whatever this computer's virtiofsd", async () => {
     try {
       // A guest whose agent runs this in place of the history: what a guest that is not ours could try.
       const answer = await subverted(PROBE);
-      const refuses = readonlyFlag(spawnSync(VIRTIOFSD, ["--help"], { encoding: "utf8" }).stdout);
       expect(answer.excluded).toEqual([
         "make: EROFS", "replace: EROFS", "remove: EROFS", "remount: 0",
-        // Past the guest's own mount option, only the daemon on this computer refuses: 1.11 and later.
-        `make again: ${refuses ? "EROFS" : "done"}`,
+        // Past the guest's own mount option, the folder is read-only on this computer too.
+        "make again: EROFS",
         "history: done",
       ]);
-      expect(existsSync(join(folder, "planted.txt"))).toBe(!refuses);
+      expect(existsSync(join(folder, "planted.txt"))).toBe(false);
       expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe("A's report\n");
       expect(existsSync(join(dir, "store", "probe.txt"))).toBe(true);
     } finally {

@@ -18,7 +18,7 @@ import { findOnPath } from "../files/operations.js";
 import type { Share } from "../guest/protocol.js";
 import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
-import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
+import { Qmp, qemuArgs, readOnlyDaemon, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const RETRY_MS = 5;
@@ -33,11 +33,12 @@ const late = (deadline: number) => new Promise<"late">((resolve) => {
 /**
  * What a manager that died left running, where its pdeathsig did not reach. Each
  * pidfile this backend writes in *run* names a process, killed only when it is that
- * QEMU or that virtiofsd: its program, and an argument that names its own file in
- * *run*, never a part of its command line. A pid used again since is left alone.
+ * QEMU or that virtiofsd: its program, one of *daemons* for a folder's (virtiofsd, or
+ * the bwrap a folder read alone has it run in), and an argument that names its own
+ * file in *run*, never a part of its command line. A pid used again since is left alone.
  * The folder is then emptied for the next guest's sockets.
  */
-export function sweep(run: string): void {
+export function sweep(run: string, daemons: string[] = [VIRTIOFSD]): void {
   let names: string[] = [];
   try {
     names = readdirSync(run);
@@ -54,7 +55,7 @@ export function sweep(run: string): void {
       const program = readlinkSync(`/proc/${pid}/exe`);
       const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
       const ours = share
-        ? program === VIRTIOFSD && argv.includes(`--socket-path=${join(run, `vfs-${share[1]}.sock`)}`)
+        ? daemons.includes(program) && argv.includes(`--socket-path=${join(run, `vfs-${share[1]}.sock`)}`)
         : basename(program) === "qemu-system-x86_64" && argv.includes(join(run, "qemu.pid"));
       if (ours) process.kill(pid, "SIGKILL");
     } catch {
@@ -89,6 +90,9 @@ function launch(argv: string[]): { child: ChildProcess; said: () => string } {
   child.on("error", () => {});
   return { child, said: () => said.trim() };
 }
+
+// The bwrap a folder the guest reads alone is shared through: the app's own copy, else the PATH's.
+const bwrapOf = (options: VmOptions): string | null => options.bwrap ?? findOnPath("bwrap", toolPath(), "/");
 
 // Whether *name* is a program on *path*, where virtiofsd looks for newuidmap and newgidmap.
 const onPath = (name: string, path = toolPath()) => findOnPath(name, path, "/") !== null;
@@ -134,33 +138,6 @@ export async function missingTools(
     ...(onPath("newuidmap", path) && onPath("newgidmap", path) ? [] : ["newuidmap and newgidmap"]),
     ...(zstd || !unpacking ? [] : ["zstd"]),
   ];
-}
-
-/** Whether a virtiofsd whose --help says *help* refuses a guest's writes itself (--readonly: 1.11 and later). */
-export const readonlyFlag = (help: string) => /^\s*--readonly(\s|$)/m.test(help);
-
-// What each virtiofsd's --help said of --readonly, once it was read.
-const helps = new Map<string, Promise<boolean>>();
-
-/**
- * Whether *program*, a virtiofsd, refuses a guest's writes itself, by its --help, read within *ms*.
- * Only a help that was read is an answer, and is kept: one that could not be read rejects, so the
- * folder is not shared without the option on a computer whose virtiofsd has it, and the next share asks again.
- */
-export function refusesWrites(program = VIRTIOFSD, ms = 5_000): Promise<boolean> {
-  const known = helps.get(program);
-  if (known) return known;
-  const asked = new Promise<boolean>((resolve, reject) => {
-    execFile(...cleanly(program, ["--help"]), { timeout: ms, killSignal: "SIGKILL", env: toolEnv() }, (error, stdout) => {
-      if (error) reject(new Error("the folder could not be shared read-only: virtiofsd did not say whether it refuses a guest's writes"));
-      else resolve(readonlyFlag(stdout));
-    });
-  });
-  helps.set(program, asked);
-  asked.catch(() => {
-    if (helps.get(program) === asked) helps.delete(program);
-  });
-  return asked;
 }
 
 const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
@@ -230,7 +207,7 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
   if (signal?.aborted) throw new Error("The boot was stopped");
   // Its uid and gid maps: without them no folder could be shared, and virtiofsd's own words would not reach the user.
   if (!onPath("newuidmap") || !onPath("newgidmap")) throw new Error("virtiofsd needs newuidmap and newgidmap (the uidmap package)");
-  sweep(options.run);
+  sweep(options.run, [options.virtiofsd ?? VIRTIOFSD, ...[bwrapOf(options)].filter((bwrap) => bwrap !== null)]);
   if (!existsSync(options.sessions)) {
     mkdirSync(dirname(options.sessions), { recursive: true, mode: 0o700 });
     // Sparse: the guest formats it at its first boot, and it grows as it is used.
@@ -306,12 +283,14 @@ class LinuxVm implements VmBackend {
   /**
    * *folder* on a free root port, by *deadline*: its virtiofsd, which maps the host user
    * to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
-   * A share not added gives its port back. *readonly*: its virtiofsd refuses every write, where it
-   * has the option; the guest mounts it read-only either way (guest/places.ts). Where it cannot be
-   * told whether it has, the folder is not shared.
+   * A share not added gives its port back. *readonly*, for the guest's root (*uid* 0): its virtiofsd
+   * serves it from bwrap's namespaces, where it is read-only on this computer, so no write of the
+   * guest's reaches it, through a remount of the guest's read-only mount (guest/places.ts) neither.
    */
   async share(folder: string, uid: number, deadline: number, readonly = false): Promise<Share> {
-    const refusing = readonly && (await refusesWrites());
+    const program = this.options.virtiofsd ?? VIRTIOFSD;
+    const bwrap = readonly ? bwrapOf(this.options) : null;
+    if (readonly && bwrap === null) throw new Error("the folder could not be shared read-only: bubblewrap is not on the PATH");
     if (this.killed) throw new Error("the VM has gone");
     const port = Math.min(...this.free);
     if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);
@@ -319,7 +298,7 @@ class LinuxVm implements VmBackend {
     const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
     const pidfile = join(this.options.run, `vfs-${n}.pid`);
-    const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user, refusing)]);
+    const { child: daemon, said } = launch(readonly ? readOnlyDaemon(bwrap!, program, folder, socket) : [program, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
     this.daemons.push(daemon);
     writeFileSync(pidfile, String(daemon.pid ?? ""));
     try {

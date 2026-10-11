@@ -476,7 +476,10 @@ const copying = new Copying(changed);
 const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = new VmClient({
-    vm: { ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }), ca: companyCertificates },
+    vm: {
+      ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+      ca: companyCertificates, ...(BWRAP ? { bwrap: BWRAP } : {}),
+    },
     ready: vmReady,
     spawn: utilityManager,
   });
