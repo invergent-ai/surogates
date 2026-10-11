@@ -40,6 +40,12 @@ END $$;
 -- When a device's token was last reissued (``Device.reauthorized_at``): none was dated before.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS reauthorized_at timestamptz;
 
+-- Retrofit for databases created before ``idx_device_operations_session_kind`` joined the model: what a session asked
+-- of one kind, by when it closed.  A landing on a computer reads a thread's commands, writes and records since its last
+-- landing; without this it reads every operation the thread ever asked, at every landing.
+CREATE INDEX IF NOT EXISTS idx_device_operations_session_kind
+    ON device_operations (calling_session_id, kind, completed_at);
+
 CREATE INDEX IF NOT EXISTS idx_events_audit_type_time
     ON events (org_id, type, created_at);
 

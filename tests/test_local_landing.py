@@ -168,6 +168,21 @@ def test_a_report_says_why_a_landing_on_a_computer_left_a_file_out_that_no_landi
     assert "Not merged, because the folder has a link there, or a file with a second name, which a landing never replaces: Twin.txt" in said
 
 
+def test_a_report_says_why_a_landing_on_a_computer_left_a_file_out_that_nothing_its_thread_did_named():
+    said = report(files=[
+        {"kind": "file", "label": "Plan.docx", "ref": "Plan.docx", "landing": "not_merged", "reason": "gone"},
+        {"kind": "file", "label": "Report.docx", "ref": "Report.docx", "landing": "not_merged", "reason": "unnamed"},
+    ])
+    assert (
+        "Not deleted, because the thread's copy lacks them, and none of the thread's file tools deleted them and it ran no command "
+        "(they are in its copy again): Plan.docx"
+    ) in said
+    assert (
+        "Not merged, because none of the thread's file tools wrote them and it ran no command "
+        "(its copy differed there, and has the folder's file again): Report.docx"
+    ) in said
+
+
 class Leases:
     """A session store's leases as a settle asks them: each renewal answered in turn by *renewals*, an exception raised."""
 
