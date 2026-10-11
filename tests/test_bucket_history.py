@@ -210,6 +210,8 @@ async def test_the_api_reads_the_history_a_pod_pushed_and_which_versions_it_hold
     # A version is a file's bytes: a commit's id names none, nor does an id the history never held.
     assert await history.held([v2, one, "0" * 40, None]) == {v2}
     assert await history.held([]) == set()
+    # And the bytes of each it holds.
+    assert await history.sizes([v2, one, None]) == {v2: len(b"PK\x03\x04 report v2")}
     # Its copy is its own repository: none of the bucket's config or HEAD.
     assert (history.clone / "config").read_text() != (project / "_history" / "config").read_text()
     # A project with no landing yet has no history to copy, and holds no version.

@@ -352,15 +352,19 @@ class BucketHistory:
         bounds = Bounds(settings.packs_bound, settings.file_bound, settings.copies_bound, settings.copy_idle)
         return cls(storage, bucket, prefix, (Path(settings.copies_path) if settings.copies_path else CLONES) / key, bounds)
 
-    @_using
     async def held(self, blobs: Iterable[str | None]) -> set[str]:
         """Which of *blobs*, versions of files, the project's history still holds: the others were pruned."""
+        return set(await self.sizes(blobs))
+
+    @_using
+    async def sizes(self, blobs: Iterable[str | None]) -> dict[str, int]:
+        """Those of *blobs*, versions of files, the project's history still holds, each with its bytes."""
         wanted = sorted({_checked_id(b, "a version") for b in blobs if b})
         if not wanted:
-            return set()
+            return {}
         if self._steady and self._brought_in:
-            return set(await self._held(functools.partial(self._asked, wanted)))
-        return set((await self._brought(wanted))[1])
+            return await self._held(functools.partial(self._asked, wanted))
+        return (await self._brought(wanted))[1]
 
     @_using
     async def version(self, blob: str) -> Staged:

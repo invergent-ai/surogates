@@ -91,6 +91,10 @@ CALLS_AN_ACT = 30
 CALLS_A_FILE = 7
 #: The most files one Undo puts back: all it does under the lock, at that call, within its time.
 UNDO_MOST = (LOCK_BUDGET_MS - CALLS_AN_ACT * CALL_MS) // (CALLS_A_FILE * CALL_MS + FILE_MS)
+#: The bytes a second the cloud's store moves at its slowest that an Undo is planned for.  Under the lock each
+#: file is read twice, by the look and by the check, as the version it is to be found as, and written once, as
+#: the version it goes back to: an Undo whose files' bytes would pass its time with its calls puts back none.
+STORE_RATE = 16 * 2**20
 #: The most files a refusal names: the rest it counts.
 _NAMED_MOST = 3
 CUT_SHORT = "This was cut short: the files are put back as they were when the project's files are next saved. Try again in a moment."
@@ -201,8 +205,9 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
     changed it; one whose version from before is no longer kept is named,
     ``pruned``.  Raises :class:`LookupError` for no such change among the
     project's cloud records; and :class:`Refused` for one undone already,
-    for more files than one Undo puts back, and while a thread whose
-    changes these are is working: its next landing would land on top.
+    for more files than one Undo puts back, or more bytes than it moves in
+    its time, and while a thread whose changes these are is working: its
+    next landing would land on top.
     """
     landed = await _undoable(state.session_factory, project, landing=landing, thread=thread)
     threads = {row.thread_id for row in landed if row.thread_id is not None} | ({thread} if thread is not None else set())
@@ -236,7 +241,7 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
             raise Refused(UNDONE)
         # Each file as the pickup recorded it, never a fresh read: your edit to it is a version by now.
         now = await place.recorded(main, [back.path for back in backs])
-        kept = await place.held(back.to for back in backs)
+        kept = await place.sizes(blob for back in backs for blob in (back.to, back.expected))
         by_id = {row.id: row for row in landed}
         applies, skipped, undoes = [], [], {}
         for back in backs:
@@ -256,11 +261,23 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
             else:
                 applies.append({"path": back.path, "before": back.expected, "after": back.to})
                 undoes[back.path] = [by_id[row] for row in back.rows]
+        moved = sum(2 * kept.get(a["before"], 0) + kept.get(a["after"], 0) for a in applies)
+        if _planned_ms(len(applies), moved) > LOCK_BUDGET_MS:
+            raise Refused(
+                "This change's files are too large to put back in one Undo. Restore each file from its History."
+                if landing is not None else
+                "This thread's files are too large to put back in one Undo. Undo its landings one at a time from its card."
+            )
         return applies, skipped, undoes
 
     # One thread's changes are that thread's to tell of; any other Undo, of a landing by you, is the master's.
     announce = next(iter(threads)) if len(threads) == 1 else project.master_session_id
     return await _by_you(state, project, user_id, kind="undo", paths=list(plan), decide=decide, announce=announce)
+
+
+def _planned_ms(files: int, moved: int) -> float:
+    """What an Undo of *files* files, with *moved* bytes of them read and written, holds the lock for at most, in ms."""
+    return CALLS_AN_ACT * CALL_MS + files * (CALLS_A_FILE * CALL_MS + FILE_MS) + moved * 1000 / STORE_RATE
 
 
 async def _undoable(session_factory: Any, project: Any, *, landing: int | None, thread: UUID | None) -> list[_Landed]:

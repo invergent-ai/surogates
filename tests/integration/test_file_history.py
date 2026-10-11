@@ -2558,6 +2558,23 @@ async def test_an_undo_of_more_files_than_one_undo_puts_back_is_refused_in_words
     assert len(await rows_of(api, project)) == len(before) and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
 
 
+async def test_an_undo_of_more_bytes_than_one_undo_moves_in_its_time_is_refused_in_words_and_writes_nothing(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "head -c 3000000 /dev/zero > big.bin && printf ' by A' >> Report.docx")
+    # A store this slow moves the large file, read twice and taken away, in more than an Undo's time under the lock.
+    monkeypatch.setattr(undo_module, "STORE_RATE", 100_000)
+    assert (await undone(api, project, status=409, landing=str(row.id)))["detail"] == (
+        "This change's files are too large to put back in one Undo. Restore each file from its History."
+    )
+    assert (await undone(api, project, status=409, thread=str(thread.id)))["detail"] == (
+        "This thread's files are too large to put back in one Undo. Undo its landings one at a time from its card."
+    )
+    assert (pods.project / "big.bin").stat().st_size == 3_000_000 and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
+    assert undos_on_main(pods) == 0
+    # Through a store as fast as an Undo is planned for, the same Undo puts both back.
+    monkeypatch.undo()
+    assert (await undone(api, project, landing=str(row.id)))["applied"] == ["Report.docx", "big.bin"]
+
+
 async def test_a_restore_that_meets_an_undo_holding_the_projects_lock_is_told_to_try_again(api, monkeypatch, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && echo a > a.md")
     monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 1.0)
