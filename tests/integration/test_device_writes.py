@@ -501,8 +501,8 @@ async def test_a_large_read_and_large_writes_go_at_once_on_one_connection(laptop
     assert read == up
     assert (rig.folder / "a.bin").read_bytes() == most
     assert (rig.folder / "b.bin").read_bytes() == BIG
-    # One connection throughout: the laptop never reconnects by itself.
-    assert rig.laptop.connected
+    # One connection throughout: none was dropped and made again.
+    assert (rig.laptop.connected, rig.laptop.connections) == (True, 1)
 
 
 async def test_write_file_and_research_notes_over_1_mib_land_on_the_computer(laptop_rig, session_factory, redis_client):

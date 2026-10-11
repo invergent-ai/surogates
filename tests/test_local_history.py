@@ -69,6 +69,16 @@ def land(history: LocalHistory, saga: str, author: dict = A) -> dict:
     return {**turn, "landing": recorded["commit"]}
 
 
+def held_open(path: Path) -> list[str]:
+    """This process's file descriptors open on *path*, or on what was there and is gone."""
+    held = []
+    for fd in os.listdir("/proc/self/fd"):
+        with contextlib.suppress(OSError):
+            if os.readlink(f"/proc/self/fd/{fd}") in (str(path), f"{path} (deleted)"):
+                held.append(fd)
+    return held
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", f"--git-dir={repo}", *args], capture_output=True, text=True, check=True, env=HERMETIC).stdout.strip()
 
@@ -792,6 +802,8 @@ def test_what_an_earlier_guest_left_for_a_copys_note_is_no_note_and_counts_all_i
     # Read as data, it is none: everything history leaves out in the copy is taken as written since, and the deletion waits.
     again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
     assert again._seen() == {"names": [], "files": {}}
+    # And nothing of it is left open: the guest's agent runs request after request, and a handle a read kept is never let go.
+    assert held_open(note) == []
     if planted in ("a link to a note", "a pipe"):
         # Anything but files and folders in the repository has it set aside whole at the next request, the note with it.
         assert again.open() == {"copy": "made", "set_aside_folders": set_aside_whole(tmp_path / "store")}
@@ -799,6 +811,36 @@ def test_what_an_earlier_guest_left_for_a_copys_note_is_no_note_and_counts_all_i
     (again.copy / "notes.txt").unlink()
     held = land(again, "saga:2")
     assert [(o["path"], o["reason"]) for o in held["overlapped"]] == [("notes.txt", "with")] and held["excluded"] == ["__pycache__/"]
+
+
+def test_a_folder_an_earlier_guest_left_where_the_repository_keeps_a_file_of_its_own_is_made_that_file_and_left_open_nowhere(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    attributes = one.repo / "info" / "attributes"
+    attributes.unlink()
+    attributes.mkdir()
+    # The next request pins the file in the folder's place before any git reads it.
+    LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
+    assert attributes.read_text() == local_history._ATTRIBUTES
+    assert held_open(attributes) == []
+
+
+def test_a_file_that_a_folder_takes_the_place_of_as_it_is_read_is_left_open_nowhere(tmp_path, monkeypatch):
+    file = tmp_path / "notes.txt"
+    file.write_text("v1 notes\n")
+    real = os.open
+
+    def swapped(path, *args, **kwargs):
+        # Between the look at it and the open, a folder takes the file's place.
+        if path == str(file):
+            file.unlink()
+            file.mkdir()
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(local_history.os, "open", swapped)
+    with pytest.raises(IsADirectoryError):
+        local_history._recorded(str(file))
+    monkeypatch.undo()
+    assert held_open(file) == []
 
 
 def test_a_deletion_waits_while_the_turn_itself_writes_where_history_leaves_out_however_old_that_place_is(tmp_path, folder):

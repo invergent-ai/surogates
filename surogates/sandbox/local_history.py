@@ -2157,21 +2157,24 @@ def _read_as_data(path: Path, most: int) -> bytes | None:
     """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        with open(fd, "rb") as file:
-            return file.read(most) if stat.S_ISREG(os.fstat(fd).st_mode) else None
     except OSError:
         return None
+    try:
+        # Looked at before it is read: a folder opens, and open() refuses it without closing it.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with open(fd, "rb", closefd=False) as file:
+            return file.read(most)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _pinned(path: Path, text: str) -> None:
     """Make *path* a file holding *text*, replacing whatever is there."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with open(fd, "rb") as file:
-            if file.read(len(text) + 1) == text.encode():
-                return
-    except OSError:
-        pass
+    if _read_as_data(path, len(text) + 1) == text.encode():
+        return
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
     _replace(path, text.encode())
@@ -2245,11 +2248,16 @@ def _recorded(name: str | Path, *, dir_fd: int | None = None) -> tuple[str, str]
         return "120000", hashlib.sha1(b"blob %d\0" % len(target) + target).hexdigest()
     if not stat.S_ISREG(info.st_mode):
         return None
-    # Non-blocking, so whatever took the file's place since the look answers at once.
-    with open(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd), "rb") as file:
-        blob = hashlib.sha1(b"blob %d\0" % os.fstat(file.fileno()).st_size)
-        while chunk := file.read(1 << 20):
-            blob.update(chunk)
+    # Non-blocking, so whatever took the file's place since the look answers at once; and closed here, as a folder
+    # there is refused by open() without its handle closed.
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    try:
+        with open(fd, "rb", closefd=False) as file:
+            blob = hashlib.sha1(b"blob %d\0" % os.fstat(fd).st_size)
+            while chunk := file.read(1 << 20):
+                blob.update(chunk)
+    finally:
+        os.close(fd)
     return "100755" if info.st_mode & stat.S_IXUSR else "100644", blob.hexdigest()
 
 
