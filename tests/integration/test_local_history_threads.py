@@ -121,20 +121,26 @@ async def test_a_root_is_bound_with_a_copy_only_as_the_server_marked_it(api):
     device = await register(api)
     _, _, marked = await made_with_copy(api, device["id"])
     _, _, plain = await made_before_copies(api, device["id"])
+    # A thread whose mark names another thread's copy: its bind, asked as it is marked, would give it that one.
+    _, _, stray = await made_with_copy(api, device["id"])
+    store = api.app.state.session_store
+    await store.update_session_config_key(stray.id, "execution", {**stray.config["execution"], "history": {"thread": str(marked.id)}})
     ops = journal(api)
     bound = {"device_id": UUID(device["id"]), "folder": FOLDER, "nonce": NONCE}
     for case, (session_id, history) in {
         "a thread marked for a copy, bound to the folder itself": (marked.id, None),
         "a thread marked for a copy, bound to another's": (marked.id, uuid4()),
         "a thread made before threads had copies, asked for one": (plain.id, plain.id),
+        "a thread marked for another's copy, bound to it as marked": (stray.id, marked.id),
     }.items():
         with pytest.raises(ValueError, match="A root is bound with a copy only where the server made it a thread that works in one"):
             await ops.bind(session_id=session_id, history=history, **bound)
             pytest.fail(case)
-    # That thread's own bind to its folder stands as it was, and nothing was recorded for the marked one.
+    # That thread's own bind to its folder stands as it was, and nothing was recorded for the marked ones.
     [bind] = await ops.pending(UUID(device["id"]), 1)
     assert (bind.root_session_id, bind.args) == (plain.id, {"folder": FOLDER, "nonce": NONCE})
-    assert await binding(api, marked.id) == Binding("failed", "The computer was never asked to set it up")
+    for session in (marked, stray):
+        assert await binding(api, session.id) == Binding("failed", "The computer was never asked to set it up")
 
 
 async def answered_bind(api, thread, outcome: dict) -> None:
