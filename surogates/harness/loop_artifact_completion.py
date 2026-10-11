@@ -52,7 +52,7 @@ from surogates.harness.landing import (
     turn_ended,
     waiting_on_you,
 )
-from surogates.harness.local_landing import land_local_turn, waiting_on_you_here
+from surogates.harness.local_landing import keep_local_turn, land_local_turn, waiting_on_you_here
 from surogates.runtime.turn_slots import detach_turn
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
@@ -1542,10 +1542,28 @@ class ArtifactCompletionMixin:
         left: list[str] = []
         # The helpers' files the turn's take-ups left as its copy had them: named here, as a landing names them.
         not_taken: list[str] = []
+        # A thread's files kept on its branch on its user's computer: named here, as no History lists them.
+        kept_there: list[str] = []
         owner = sandbox_session_key(session)
         # The turn is over, kept or not: what it handed on is no later Stop's to drop.
         turn_ended(session)
-        if self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
+        if opens_its_copy(session) and reason != "nowhere_to_work":
+            # Its copy stays on its computer, and only its branch in the folder's history moves.  A turn with nowhere
+            # to work asks that computer nothing more.
+            try:
+                kept_there = await keep_local_turn(
+                    store=self._store, session_factory=self._session_factory, redis=self._redis, session=session,
+                    lease_token=str(lease.lease_token),
+                )
+                saved = True if kept_there else None
+            except LeaseLost:
+                # Another worker runs this thread now: this one stands down, and ends nothing.
+                detach_turn()
+                raise asyncio.CancelledError("another worker runs this session now") from None
+            except Exception:
+                logger.exception("Could not keep the copy of %s on its computer", session.id)
+                saved = False
+        elif self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
             helper = bool(session.config.get("history_thread"))
             try:
                 kept = await keep_copy(
@@ -1594,6 +1612,9 @@ class ArtifactCompletionMixin:
         error = f"{reason}: {data}" if data else reason
         if left:
             error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
+        elif kept_there:
+            named = ", ".join(kept_there[:20]) + (f" and {len(kept_there) - 20} more" if len(kept_there) > 20 else "")
+            error += f". Its changes to {named} are kept on its computer, and land with the thread's next turn"
         elif saved and is_project_thread(session.config):
             # Said as a landing that did not finish says it: nothing of the turn is lost.
             error += ". Its work is kept, and lands with the thread's next turn"
