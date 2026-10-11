@@ -507,6 +507,9 @@ async def _kept_at_a_stop(copy: ThreadCopy, session: Any, turn: int, outcome: di
         kept = await _kept(copy, session, turn, wait=STOP_FORGET)
     except LeaseLost:
         raise
+    except TimeoutError:
+        logger.warning("The turn of thread %s was not kept on its branch: its computer did not answer in time", session.id)
+        return
     except Exception:
         logger.warning("The turn of thread %s, whose landing a Stop ended, was not kept on its branch", session.id, exc_info=True)
         return

@@ -53,6 +53,7 @@ from surogates.harness.landing import (
     waiting_on_you,
 )
 from surogates.harness.local_landing import keep_local_turn, land_local_turn, waiting_on_you_here
+from surogates.harness.loop_context_replay import _listed
 from surogates.runtime.turn_slots import detach_turn
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
@@ -180,6 +181,11 @@ async def announce_failure(store: Any, session: Any, *, error: str, summary: str
 # folder's own filesystem, so its clock is the one that stamps the turn's
 # files, a network share's or a FAT stick's included.
 _TURN_MARK = f"{WORKSPACE_STORAGE_DIR}/.turn"
+
+# Why a thread's turn on its user's computer failed before it ran: its
+# user's allowance refused it at its wake, or it had nowhere to work.  Such
+# a turn did nothing, and its end asks that computer for no keep.
+_NEVER_RAN = frozenset({"usage_limit", "nowhere_to_work"})
 
 
 class ArtifactCompletionMixin:
@@ -1547,9 +1553,8 @@ class ArtifactCompletionMixin:
         owner = sandbox_session_key(session)
         # The turn is over, kept or not: what it handed on is no later Stop's to drop.
         turn_ended(session)
-        if opens_its_copy(session) and reason != "nowhere_to_work":
-            # Its copy stays on its computer, and only its branch in the folder's history moves.  A turn with nowhere
-            # to work asks that computer nothing more.
+        if opens_its_copy(session) and reason not in _NEVER_RAN:
+            # Its copy stays on its computer, and only its branch in the folder's history moves.
             try:
                 kept_there = await keep_local_turn(
                     store=self._store, session_factory=self._session_factory, redis=self._redis, session=session,
@@ -1560,6 +1565,10 @@ class ArtifactCompletionMixin:
                 # Another worker runs this thread now: this one stands down, and ends nothing.
                 detach_turn()
                 raise asyncio.CancelledError("another worker runs this session now") from None
+            except TimeoutError:
+                # Its computer is away: what was not kept is in its copy there, and lands with the next turn all the same.
+                logger.warning("The turn of thread %s was not kept on its branch: its computer did not answer in time", session.id)
+                saved = False
             except Exception:
                 logger.exception("Could not keep the copy of %s on its computer", session.id)
                 saved = False
@@ -1613,8 +1622,13 @@ class ArtifactCompletionMixin:
         if left:
             error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
         elif kept_there:
-            named = ", ".join(kept_there[:20]) + (f" and {len(kept_there) - 20} more" if len(kept_there) > 20 else "")
-            error += f". Its changes to {named} are kept on its computer, and land with the thread's next turn"
+            # Each name on the master's one line, as a report names a thread's files: the computer's names are data.
+            named = _listed([{"label": path} for path in kept_there])
+            # Its copy can hold files no landing writes, a name that runs code or a link: the next landing says which.
+            error += (
+                f". Its copy, with its changes to {named}, is kept on its computer on the thread's branch, and the thread's "
+                "next turn lands them, but for any file a landing never writes"
+            )
         elif saved and is_project_thread(session.config):
             # Said as a landing that did not finish says it: nothing of the turn is lost.
             error += ". Its work is kept, and lands with the thread's next turn"
