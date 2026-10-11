@@ -76,6 +76,7 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master
+from surogates.workstreams.history import landing_on_a_computer
 from surogates.workstreams.threads import reopen_if_thread
 
 logger = logging.getLogger(__name__)
@@ -1729,11 +1730,12 @@ async def pause_session(
 
     # Durably, for the session and the sessions under it: a computer that is
     # away hears of it when it comes back.  A failure must not keep the
-    # interrupt below from reaching the turn.
+    # interrupt below from reaching the turn.  A thread's landing is its
+    # worker's to end: one that has written a file finishes, or is put back
+    # whole, and a step of it closed here would leave that undone.
     try:
-        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel(
-            await store.session_tree_ids(session_id),
-        )
+        tree = await store.session_tree_ids(session_id)
+        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel(tree, sparing=tree)
     except Exception:
         logger.warning("could not cancel the device operations of paused session %s", session_id, exc_info=True)
 
@@ -1993,10 +1995,15 @@ async def archive_session_tree(
     )
 
     # A deleted chat's computer stops what it was doing, its folder's set-up
-    # included; the journal refuses anything more for its tree.
+    # included; the journal refuses anything more for its tree.  But for a
+    # thread's landing still running there: its worker puts back whole what
+    # it wrote, and its computer, though told to forget the folder, keeps
+    # that landing's steps until then.
     operations = DeviceOperations(request.app.state.session_factory, request.app.state.redis)
     try:
-        await operations.cancel([archived.id for archived in archived_sessions], bindings=True)
+        ids = [archived.id for archived in archived_sessions]
+        landing = await landing_on_a_computer(request.app.state.session_factory, ids)
+        await operations.cancel(ids, bindings=True, sparing=landing)
     except Exception:
         logger.warning("could not cancel the device operations of deleted session %s", session_id, exc_info=True)
     # Then each deleted root's computer forgets its folder: after the cancel,

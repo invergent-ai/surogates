@@ -658,8 +658,10 @@ class FakeLaptop:
             if frame["kind"] == "bind":
                 outcome = self._bind(frame)
             elif frame["kind"] == "retire":
-                # A deleted chat: its folder is forgotten, never touched.
+                # A deleted chat: its folder is forgotten, never touched; but for a thread's landing that has written there.
                 self.bindings.pop(frame["session_id"], None)
+                if self.places is not None:
+                    self.places.retired(frame["session_id"])
                 outcome = {"ok": None}
             elif frame["kind"].startswith("browser."):
                 outcome = self._browse(frame["kind"], frame["args"])
@@ -690,7 +692,9 @@ class FakeLaptop:
         """A thread's own kind, as the app's executor answers it: git off the event loop, as the guest runs it."""
         if self.places is None:
             outcome = cannot(frame["kind"])
-        elif frame["session_id"] not in self.bindings:
+        elif frame["session_id"] not in self.bindings and (
+            frame["kind"] == "checkpoint" or not self.places.deleted_landing(frame["session_id"])
+        ):
             outcome = FOLDER_UNAVAILABLE
         else:
             outcome = await asyncio.to_thread(self.places.run, frame)

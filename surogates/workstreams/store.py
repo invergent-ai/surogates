@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Event, InboxItem, Workstream, WorkstreamHistory, WorkstreamThread
+from surogates.db.models import Event, InboxItem, SessionLease, Workstream, WorkstreamHistory, WorkstreamThread
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import master_instructions
@@ -35,6 +35,25 @@ def _owned(workstream_id: UUID | None, *, org_id: UUID, agent_id: str, user_id: 
         Workstream.status == "active",
     )
     return clauses if workstream_id is None else (*clauses, Workstream.id == workstream_id)
+
+
+def _half_landed(*of: Any) -> Any:
+    """The threads, of the landings *of* names, with one left running in a folder on a computer and no worker on their turn.
+
+    A landing there is its turn's own worker's to finish while that worker
+    holds the turn.  With none, nothing goes on with it until its thread is
+    sent on, or another landing in its folder settles it: its thread waits
+    on you meanwhile.
+    """
+    held = (
+        select(SessionLease.session_id)
+        .where(SessionLease.session_id == WorkstreamHistory.thread_id, SessionLease.expires_at > func.now())
+        .exists()
+    )
+    return select(WorkstreamHistory.thread_id).where(
+        *of, WorkstreamHistory.kind == "landing", WorkstreamHistory.device_id.is_not(None),
+        WorkstreamHistory.saga_state == "running", WorkstreamHistory.thread_id.is_not(None), ~held,
+    )
 
 
 class WorkstreamStore:
@@ -211,6 +230,10 @@ class WorkstreamStore:
                     *here, WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
                 )
             )).all() if with_files else ()
+            # A landing left running in a folder on a computer, whose thread's turn no worker holds.
+            half = set(await db.scalars(_half_landed(
+                WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.thread_id == _any(ids),
+            )))
             items_of, events_of, landings_of = defaultdict(list), defaultdict(list), defaultdict(list)
             for item in items:
                 items_of[thread_of[item.session_id]].append(item)
@@ -227,7 +250,7 @@ class WorkstreamStore:
                 place=place_of(execution),
                 items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
                 landings=tuple(landings_of[thread.session_id]), redoing=redoing.get(thread.session_id, frozenset()),
-                undone=undone,
+                undone=undone, half_landed=thread.session_id in half,
             )
             for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]
@@ -293,7 +316,10 @@ class WorkstreamStore:
             .distinct()
             .cte("asking")
         )
-        unresolved, asks = live.c.resolved_at.is_(None), asking.c.thread_id.is_not(None)
+        # A landing of its left half done on its computer, as ``derive_thread`` reads it: it waits on you too.
+        half = _half_landed(WorkstreamHistory.workstream_id == _any(workstream_ids)).distinct().cte("half")
+        unresolved = live.c.resolved_at.is_(None)
+        asks = asking.c.thread_id.is_not(None) | half.c.thread_id.is_not(None)
         query = (
             select(
                 live.c.workstream_id,
@@ -301,7 +327,9 @@ class WorkstreamStore:
                 func.count().filter(unresolved & (asks | (live.c.status == "failed"))),
                 func.count().filter(unresolved & ~asks & (live.c.status == "active")),
             )
-            .select_from(live.outerjoin(asking, asking.c.thread_id == live.c.id))
+            .select_from(
+                live.outerjoin(asking, asking.c.thread_id == live.c.id).outerjoin(half, half.c.thread_id == live.c.id)
+            )
             .group_by(live.c.workstream_id)
         )
         async with self._sf() as db:

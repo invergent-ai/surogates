@@ -48,6 +48,12 @@ settles one otherwise changes this file with it.
   out, or names for another file, or, where the history holds no landing of
   the saga, a step still keeps the file it replaced; only then is the
   helper's ``forget`` asked, and the folder let go.
+- A deleted thread (``retire``): its binding goes, but where its landing's
+  host was sent an apply or a put-back since it took the folder, the
+  binding is kept for that landing while the host holds the folder, and
+  takes only the steps that put the landing back, record it or forget it
+  (the app's ``FINISHING``); every other step is ``refused``.  Its landing's
+  own forgetting lets it go (desktop/src/hosts/tool-hosts.ts, ``retired``).
 - A folder with no history: the app's open answers ``{history: "off",
   reason}``, and every other operation of a thread's, its file operations
   among them, ``history_off``.  The thread works nowhere.
@@ -102,6 +108,13 @@ RECORDS_UNREAD = {"error": {
 NOT_A_FORGETTING = {"error": {
     "type": "value", "message": "This is no answer of a folder's history to forgetting a landing, so what the landing kept was not forgotten",
 }}
+# As desktop/src/history/kinds.ts answers a deleted thread's step that does not finish the landing it had begun.
+DELETED_THREAD = {"error": {
+    "type": "refused",
+    "message": "This thread was deleted: on this computer only the steps that put back, record or forget the landing it had begun are taken",
+}}
+# What a deleted thread still asks of the landing it had begun (the app's FINISHING).
+FINISHING = {"history": {"fetch", "record", "forget"}, "land": {"recover", "unapply", "forget"}}
 # The actions of each of a thread's kinds the app takes.
 ACTIONS = {
     "checkpoint": {"take", "restore"},
@@ -142,6 +155,10 @@ class Places:
         # these rules, or the app's own helper in their place (tests.test_fake_places.Real).
         self.land_helper: Any = LandHelper
         self._helper: Any = None
+        # Whether the landing's host on the folder now was sent an apply or a put-back: it is kept for a deleted thread.
+        self._wrote = False
+        # The deleted threads whose landing's host was kept, by their root.
+        self.deleted: set[str] = set()
         # The threads whose copy the app opened, in this run of it.
         self._opened: set[str] = set()
 
@@ -203,6 +220,8 @@ class Places:
             invocation.startswith("land:") or (kind == "history" and action == "open" and invocation.startswith("open:"))
         ):
             return NOT_ITS_TURN
+        if root in self.deleted and action not in FINISHING.get(kind, ()):
+            return DELETED_THREAD
         self.asked.append((invocation, calling, kind, action))
         if self.off is not None:
             return {"ok": {"history": "off", "reason": self.off}} if (kind, action) == ("history", "open") else HISTORY_OFF
@@ -267,6 +286,7 @@ class Places:
             self._helper = self.land_helper(self.real, self.copy(thread), self.kept)
         self.holder, self._held_at = root, now
         if action != "forget":
+            self._wrote = self._wrote or action in ("apply", "unapply")
             return self._helper.land({"action": action, **args})
         # The history first: what a landing kept goes only where it was recorded, or put back whole.
         forgotten = self._ask(thread, "forget", {"saga": args.get("saga"), "applied": args.get("applied")})
@@ -286,9 +306,19 @@ class Places:
 
     def let_go(self) -> None:
         """A landing's host stops: its helper with it, one the app started included."""
-        helper, self._helper = self._helper, None
+        helper, self._helper, self._wrote = self._helper, None, False
+        self.deleted.discard(self.holder)
         if helper is not None and hasattr(helper, "end"):
             helper.end()
+
+    def retired(self, root: str) -> None:
+        """*root*'s thread was deleted: its landing's host is kept where it holds the folder and has written there."""
+        if self.holder == root and self._helper is not None and self._wrote:
+            self.deleted.add(root)
+
+    def deleted_landing(self, root: str) -> bool:
+        """Whether *root*'s thread was deleted and the host its landing kept still holds the folder: that landing's steps reach it."""
+        return root in self.deleted and self.holder == root and time.monotonic() - self._held_at <= self.idle_s
 
 
 def _forgetting(args: dict[str, Any]) -> bool:

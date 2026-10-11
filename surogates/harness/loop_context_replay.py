@@ -208,6 +208,12 @@ _NOT_LANDED_HERE = {
         "a landing left unfinished in its folder had recorded, and the server could not write that down, "
         "so nothing lands there until it can"
     ),
+    "stopped": "the thread was stopped before its landing wrote a file",
+    "deleted": "the thread was deleted before its landing finished",
+}
+#: How a landing whose thread was stopped once it was under way ended: it was not interrupted.
+_STOPPED_UNDER_WAY = {
+    "compensated": "was put back whole", "escalated": "could not be put back whole", "unsettled": "is not finished yet",
 }
 #: Where the work of a thread on a computer is when its landing was put back: in its copy there, as its turn left it.
 _IN_ITS_COPY = "The thread's work is in its copy on its computer, and lands with its next turn"
@@ -280,7 +286,8 @@ def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
             words += f" ({_NOT_LANDED_HERE[here].format(code=code or 'other')})"
         # And that nothing is lost for it, when the turn is on the thread's branch.
         lines += f"\n{words}: {named}" + (f"\n{WORK_KEPT}" if saved else "")
-        if here is not None and data["landing"] == "compensated":
+        # A deleted thread has no next turn to land its work with.
+        if here is not None and data["landing"] == "compensated" and here != "deleted":
             lines += f"\n{_NOT_IN_ONE_LANDING.get(here, _IN_ITS_COPY)}"
     elif kept:
         # A report from before reasons were given says the file changed.
@@ -288,6 +295,10 @@ def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
         for f in kept:
             why[f.get("reason") if f.get("reason") in _NOT_MERGED else "changed"].append(f)
         lines += "".join(f"\n{_NOT_MERGED[reason]}: {_listed(named)}" for reason, named in why.items() if named)
+    if data.get("landing_stopped") is True:
+        # A landing that has written a file finishes, or is put back whole, whatever stops its thread.
+        how = _STOPPED_UNDER_WAY.get(data.get("landing"), "finished")
+        lines += f"\nStopped while its landing was already under way, so the landing was not interrupted: it {how}"
     return lines + _left_out_lines(data, "excluded", "repositories", "not_taken") + _recovered_lines(data)
 
 

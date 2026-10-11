@@ -29,6 +29,9 @@ LATEST_TYPES = tuple(t.value for t in (
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
     EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
 ))
+#: What a thread waits on you with over a landing of its that could not be finished: one that could not be put back
+#: whole, or one left running in its folder on its computer with no worker on its turn.
+UNFINISHED = "Couldn't finish landing my changes"
 #: A thread with no activity for this long counts as resolved.
 QUIET_RESOLVES_AFTER = timedelta(days=7)
 #: What the shell takes of a project's answers (``desktop/src/shell/projects.ts``,
@@ -65,6 +68,8 @@ class ThreadFacts:
     redoing: frozenset[str] = frozenset()
     #: Each ``(row, path)`` of the project an Undo put back and no later Undo brought back (:func:`undone_files`).
     undone: frozenset[tuple[int, str]] = frozenset()
+    #: Whether a landing of its is left running in its folder on its computer with no worker holding its turn.
+    half_landed: bool = False
 
 
 def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
@@ -121,8 +126,8 @@ def question_of(facts: ThreadFacts) -> Any | None:
 def _waiting(facts: ThreadFacts, latest: dict[str, Any]) -> tuple[str, str | None] | None:
     """Why the thread waits on the user, and what for; None when it does not.
 
-    The newest pending item first, then a failure, then a question that
-    expired unanswered.
+    The newest pending item first, then a failure, then a landing left
+    half done that nobody runs, then a question that expired unanswered.
     """
     pending = [i for i in facts.items if i.status == "pending"]
     if pending:
@@ -132,6 +137,10 @@ def _waiting(facts: ThreadFacts, latest: dict[str, Any]) -> tuple[str, str | Non
         failure = latest.get(EventType.SESSION_FAIL.value)
         data = failure.data if failure else {}
         return "failed", _line(data.get("error_title") or data.get("error") or data.get("reason"))
+    if facts.half_landed:
+        # Nothing resumes a turn that had given its answer: until the thread is sent on, or another landing in its
+        # folder settles this one, the folder holds part of its work.
+        return "files", UNFINISHED
     asked = question_of(facts)
     if asked is not None:
         return "question", asked.title

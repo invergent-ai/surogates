@@ -133,6 +133,22 @@ def test_a_report_says_a_turn_too_large_to_land_stays_in_its_copy_and_a_landing_
     assert "lands with its next turn" not in left
 
 
+@pytest.mark.parametrize(("landing", "how"), [
+    (None, "finished"), ("compensated", "was put back whole"), ("escalated", "could not be put back whole"),
+    ("unsettled", "is not finished yet"),
+])
+def test_a_report_says_how_a_landing_its_thread_was_stopped_in_once_under_way_ended(landing, how):
+    said = report(landing=landing, landing_stopped=True, **({"landing_reason": "changed"} if landing == "compensated" else {}))
+    assert f"\nStopped while its landing was already under way, so the landing was not interrupted: it {how}" in said
+
+
+def test_a_report_says_a_thread_deleted_before_its_landing_finished_has_no_next_turn_to_land_with():
+    for landing in ("compensated", "unsettled"):
+        said = report(landing=landing, landing_reason="deleted")
+        assert "(the thread was deleted before its landing finished): Budget.xlsx" in said, landing
+        assert "lands with its next turn" not in said and "Stopped while" not in said
+
+
 def test_a_report_says_what_its_landing_found_left_in_its_folder_by_one_cut_short():
     said = report(landing=None, recovery={
         "beside": [["Report.docx", "Report (kept by Surogate).docx"]], "lost": [["Plans/Q3.md", ".surogate-x.tmp"]],

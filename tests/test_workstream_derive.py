@@ -215,10 +215,24 @@ THREAD = "9f0e1d2c-3b4a-4c5d-8e6f-708192a3b4c5"
     (facts(THREAD, "T", 60, "completed", events=[
         event(9, "llm.response", message={"role": "assistant", "content": "x" * 500}),
     ]), "idle", None, "x" * 199 + "…"),
+    # A landing left half done in its folder on a computer, which no worker runs, waits on you, though its thread works.
+    (replace(facts(THREAD, "T", 60, "active", place=THINKPAD), half_landed=True),
+     "waiting", "files", "Couldn't finish landing my changes"),
+    # A pending item, and a failure, come before it; it comes before a question that expired.
+    (replace(facts(THREAD, "T", 60, "active", place=THINKPAD, items=[item("action_required", "pending", "Send it?", 3)]),
+             half_landed=True),
+     "waiting", "approval", "Send it?"),
+    (replace(facts(THREAD, "T", 60, "failed", place=THINKPAD, events=[event(6, "session.fail", reason="provider_error")]),
+             half_landed=True),
+     "waiting", "failed", "provider_error"),
+    (replace(facts(THREAD, "T", 60, "completed", place=THINKPAD, events=[event(1, "user.message", content="Go.")],
+                   items=[item("input_required", "expired", "Which year?", 3)]), half_landed=True),
+     "waiting", "files", "Couldn't finish landing my changes"),
 ], ids=[
     "expired-question", "expired-question-answered", "expired-approval", "pending-before-failed",
     "failed-before-expired-question", "paused", "seven-quiet-days", "quiet-but-working", "resolved-first",
     "stale-iteration-summary", "computer-back", "computer-woken", "ended-early", "long-line",
+    "half-landed", "pending-before-half-landed", "failed-before-half-landed", "half-landed-before-expired-question",
 ])
 def test_the_first_rule_that_matches_wins(given, group, reason, status_line):
     derived = derive_thread(given, now=NOW)
