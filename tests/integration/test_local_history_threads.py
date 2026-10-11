@@ -121,20 +121,26 @@ async def test_a_root_is_bound_with_a_copy_only_as_the_server_marked_it(api):
     device = await register(api)
     _, _, marked = await made_with_copy(api, device["id"])
     _, _, plain = await made_before_copies(api, device["id"])
+    # A thread whose mark names another thread's copy: its bind, asked as it is marked, would give it that one.
+    _, _, stray = await made_with_copy(api, device["id"])
+    store = api.app.state.session_store
+    await store.update_session_config_key(stray.id, "execution", {**stray.config["execution"], "history": {"thread": str(marked.id)}})
     ops = journal(api)
     bound = {"device_id": UUID(device["id"]), "folder": FOLDER, "nonce": NONCE}
     for case, (session_id, history) in {
         "a thread marked for a copy, bound to the folder itself": (marked.id, None),
         "a thread marked for a copy, bound to another's": (marked.id, uuid4()),
         "a thread made before threads had copies, asked for one": (plain.id, plain.id),
+        "a thread marked for another's copy, bound to it as marked": (stray.id, marked.id),
     }.items():
         with pytest.raises(ValueError, match="A root is bound with a copy only where the server made it a thread that works in one"):
             await ops.bind(session_id=session_id, history=history, **bound)
             pytest.fail(case)
-    # That thread's own bind to its folder stands as it was, and nothing was recorded for the marked one.
+    # That thread's own bind to its folder stands as it was, and nothing was recorded for the marked ones.
     [bind] = await ops.pending(UUID(device["id"]), 1)
     assert (bind.root_session_id, bind.args) == (plain.id, {"folder": FOLDER, "nonce": NONCE})
-    assert await binding(api, marked.id) == Binding("failed", "The computer was never asked to set it up")
+    for session in (marked, stray):
+        assert await binding(api, session.id) == Binding("failed", "The computer was never asked to set it up")
 
 
 async def answered_bind(api, thread, outcome: dict) -> None:
@@ -352,10 +358,13 @@ async def test_a_threads_own_kind_is_journaled_as_every_operation_is(api, sessio
     with pytest.raises(DeviceOperationError, match="Another worker runs this session now"):
         await ops.run(stale)
     assert await ops.pending(device_id, 1) == []
-    # One that is stopped is closed, and its computer told.
+    # One that is stopped is closed, and its computer told; but a put-back, a Stop's own, which only a deletion closes.
     waiting = asyncio.create_task(ops.run(OperationRequest(**{**fields_of(stale), "lease_token": str(other.lease_token)})))
     await eventually(lambda: has_pending(ops, device_id))
-    assert await ops.cancel([thread.id]) == 1
+    puts_back = (kind, action) == ("checkpoint", "restore")
+    if puts_back:
+        assert await ops.cancel([thread.id]) == 0
+    assert await ops.cancel([thread.id], bindings=puts_back) == 1
     assert await asyncio.wait_for(waiting, 10) == CANCELLED_OUTCOME
     # A computer revoked answers nothing: its operation is closed with the revocation.
     assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth())).status_code == 204
@@ -388,6 +397,22 @@ async def test_a_paused_or_failed_threads_own_kind_is_still_asked_and_a_deleted_
     # Nor does a session under it, however it stands itself.
     with pytest.raises(DeviceOperationError, match="This session was stopped"):
         await ops.run(asked(device, thread, "checkpoint", "take", invocation="checkpoint:9:0:call_1", calling=helper))
+    assert len(await ops.pending(UUID(device["id"]), 1)) == 2
+
+
+async def test_a_deleted_session_under_a_thread_at_work_asks_neither_a_snapshot_nor_a_put_back_of_its_copy(api):
+    device, _, thread = await bound_with_copy(api)
+    store, ops = api.app.state.session_store, journal(api)
+    helper = await create_child_session(store=store, parent=thread, channel="worker")
+    await store.update_session_status(helper.id, "archived")
+    for action, invocation in (("take", "checkpoint:0:0:call_1"), ("restore", f"checkpoint:0:restore:{'a' * 40}")):
+        with pytest.raises(DeviceOperationError, match="This session was stopped"):
+            await ops._record(asked(device, thread, "checkpoint", action, invocation=invocation, calling=helper))
+            pytest.fail(f"{action} from a deleted helper")
+    assert await ops.pending(UUID(device["id"]), 1) == []
+    # The thread itself, at work, still asks both of its copy.
+    for action, invocation in (("take", "checkpoint:0:1:call_2"), ("restore", f"checkpoint:0:restore:{'b' * 40}")):
+        await recorded(api, asked(device, thread, "checkpoint", action, invocation=invocation))
     assert len(await ops.pending(UUID(device["id"]), 1)) == 2
 
 

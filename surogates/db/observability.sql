@@ -46,6 +46,12 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS reauthorized_at timestamptz;
 CREATE INDEX IF NOT EXISTS idx_device_operations_session_kind
     ON device_operations (calling_session_id, kind, completed_at);
 
+-- Retrofit for databases created before ``idx_workstream_history_undoes`` joined the model: the Undos a History, a
+-- thread's row or an Undo reads, those naming its records and the Undos of those, found by the records each undoes,
+-- not by a walk of every record of the project at each step.
+CREATE INDEX IF NOT EXISTS idx_workstream_history_undoes
+    ON workstream_history USING gin (undoes) WHERE kind = 'undo';
+
 CREATE INDEX IF NOT EXISTS idx_events_audit_type_time
     ON events (org_id, type, created_at);
 

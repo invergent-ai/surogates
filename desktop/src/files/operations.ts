@@ -625,7 +625,12 @@ function runnable(path: string): boolean {
   }
 }
 
-// The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-".
+// A file of the helper's own beside a real one (OWN_FILE), as a glob of rg's: rg takes the last glob that matches a file,
+// so given after the caller's it keeps every one of them out, as list_dir and walk do. One of the user's whose name only
+// begins and ends like it is theirs.
+const NOT_OWN = "!.surogate-????????-????-????-????-????????????.tmp";
+
+// The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-"; and no file of the helper's own.
 async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Context, signal: AbortSignal): Promise<string> {
   const key = keyInFolder(folder, text(args, "key"), at);
   const mode = text(args, "mode");
@@ -638,9 +643,10 @@ async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Conte
   if (!rg) throw new Failure({ type: "ripgrep", message: RG_MISSING });
   const argv = ["--no-ignore"];
   if (mode === "files") {
-    argv.push("--files", "-g", pattern);
+    argv.push("--files", "-g", pattern, "-g", NOT_OWN);
   } else {
     if (glob) argv.push("-g", glob);
+    argv.push("-g", NOT_OWN);
     if (mode === "count") argv.push("-c");
     else argv.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
     argv.push("-e", pattern);

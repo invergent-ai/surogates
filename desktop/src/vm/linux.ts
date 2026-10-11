@@ -288,9 +288,10 @@ class LinuxVm implements VmBackend {
   private readonly daemons: ChildProcess[] = [];
   // Each share in the guest, by its tag.
   private readonly shares = new Map<string, Shared>();
-  // The root ports no share is on. A share's number, in its tag, ids, socket and pidfile,
-  // is never used again in this VM, so nothing of a share removed is taken for the next's.
-  private readonly free = new Set(Array.from({ length: ROOT_PORTS }, (_, n) => n + 1));
+  // The root ports a share is on, each with the guest uid its folder is mapped to: 0 for one of a folder's place, which
+  // takes two. A share's number, in its tag, ids, socket and pidfile, is never used again in this VM, so nothing of a
+  // share removed is taken for the next's.
+  private readonly taken = new Map<number, number>();
   private made = 0;
   private killed: Promise<void> | null = null;
 
@@ -322,9 +323,9 @@ class LinuxVm implements VmBackend {
     if (readonly && bwrap === null) throw new Error("the folder could not be shared read-only: bubblewrap is not on the PATH");
     const refusing = readonly && (await refusesWrites(program));
     if (this.killed) throw new Error("the VM has gone");
-    const port = Math.min(...this.free);
-    if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);
-    this.free.delete(port);
+    const port = Array.from({ length: ROOT_PORTS }, (_, n) => n + 1).find((free) => !this.taken.has(free));
+    if (port === undefined) throw new Error(this.full());
+    this.taken.set(port, uid);
     const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
     const pidfile = join(this.options.run, `vfs-${n}.pid`);
@@ -354,7 +355,7 @@ class LinuxVm implements VmBackend {
         this.qemu.kill("SIGKILL");
         await this.exited;
       } else {
-        this.free.add(port);
+        this.taken.delete(port);
       }
       throw error;
     }
@@ -406,7 +407,18 @@ class LinuxVm implements VmBackend {
     if ((await Promise.race([exited(daemon), late(deadline)])) === "late") daemon.kill("SIGKILL");
     this.shares.delete(share.tag);
     rmSync(join(this.options.run, `vfs-${n}.pid`), { force: true });
-    this.free.add(shared.port);
+    this.taken.delete(shared.port);
+  }
+
+  // Why no other folder is shared: what holds each root port, a chat's folder or half a folder's place.
+  private full(): string {
+    const chats = [...this.taken.values()].filter((uid) => uid !== 0).length;
+    const places = this.taken.size - chats;
+    const held = [
+      ...(chats > 0 ? [`the folders of ${chats} ${chats === 1 ? "chat" : "chats"}`] : []),
+      ...(places > 0 ? [`${places} for the histories of project folders, which take two each`] : []),
+    ];
+    return `it holds as many folders as it has room for, ${ROOT_PORTS}: ${held.join(", and ")}`;
   }
 
   // A power cut: only the sessions disk is written, and it is journaled and checked at the next boot.

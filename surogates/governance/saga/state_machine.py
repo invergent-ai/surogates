@@ -161,6 +161,8 @@ class Saga:
     completed_at: datetime | None = None
     error: str | None = None
     kind: str = "tools"
+    #: The number its first step goes by among its turn's: the steps of an earlier saga of the same turn come first.
+    first_step: int = 0
 
     def transition(self, new_state: SagaState) -> None:
         """Transition the saga to *new_state*."""

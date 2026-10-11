@@ -875,6 +875,18 @@ describe("a folder's place and its history, through the manager's process", { ti
     expect(managers).toHaveLength(0);
   });
 
+  it("sends a manager that runs no letting-go of a place that is not whole, which would end the manager's process", async () => {
+    const { vm, managers, said } = recording((message) => (message.type === "place" ? { ok: null } : message.type === "unplace" ? { ok: true } : undefined));
+    expect(await vm.place(place(), signal())).toBeNull();
+    const broken = [
+      { key: KEY, history: join(dir, "place") }, { key: KEY, history: join(dir, "place"), real: {} }, { key: KEY, history: join(dir, "place"), real: null },
+      { key: KEY, real: place().real }, { history: join(dir, "place"), real: place().real }, null,
+    ] as unknown as Place[];
+    for (const part of broken) expect(await vm.unplace(part)).toBe(false);
+    expect([said(), managers.map((manager) => manager.killed)]).toEqual([["place"], [false]]);
+    expect(await vm.unplace(place())).toBe(true);
+  });
+
   it("sends its manager what is asked of a place in the order it was asked: a letting-go after what was asked before it, though the VM cannot boot yet, and what is asked after it once the place has gone", async () => {
     let here = () => {};
     const able = new Promise<void>((resolve) => {

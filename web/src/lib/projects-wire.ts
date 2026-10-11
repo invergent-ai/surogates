@@ -28,6 +28,8 @@ export interface ThreadRowResponse {
   files?: {
     kind: ProducedFile["kind"] | string; label: string; ref: string; thread_id: string; landing?: ProducedFile["landing"] | string;
   }[];
+  // A server from before rows counted their files past the list sends none.
+  more_files?: number;
   landing_id?: string | null;
   // A server from before set-asides were told sends none.
   set_aside?: { kept: SetAsideWhole[]; snapshots: number; gone: SetAsideWhole[] } | null;
@@ -99,6 +101,8 @@ export function threadRowOf(row: ThreadRowResponse): ThreadRow {
     statusLine: row.status_line,
     progress: row.progress,
     files: filesOf(row.files),
+    // A count that is none is none more.
+    moreFiles: Number.isSafeInteger(row.more_files) && (row.more_files as number) > 0 ? (row.more_files as number) : 0,
     // A landing that is no id the routes give is none: the card offers no Undo of it.
     landingId: typeof row.landing_id === "string" && row.landing_id !== "" ? row.landing_id : null,
     setAside: setAsideOf(row.set_aside),
