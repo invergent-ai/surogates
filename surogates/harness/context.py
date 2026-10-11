@@ -76,6 +76,31 @@ _SUMMARY_FAILURE_COOLDOWN_SECONDS: int = 600
 # Fallback context window when the model is unknown.
 _DEFAULT_CONTEXT_WINDOW: int = 128_000
 
+# Below this window compaction triggers at no less than
+# _SMALL_CTX_THRESHOLD_PERCENT.  At 50% the part of the prompt compaction
+# cannot shrink -- system prompt, tool schemas, protected head and tail --
+# sits close to the trigger, so a compaction leaves the prompt over it and
+# the next iteration compacts again.
+_SMALL_CTX_WINDOW_LIMIT: int = 512_000
+_SMALL_CTX_THRESHOLD_PERCENT: float = 0.75
+
+# Most recent messages the tail keeps even past its token budget.  The full
+# protect_last_n (20) kept runs of bulky tool results nothing could shrink.
+_MAX_TAIL_MESSAGE_FLOOR: int = 8
+
+# Compactions in a row that leave the provider's next prompt count over the
+# threshold before automatic compaction pauses.
+_INEFFECTIVE_COMPACTIONS_TO_PAUSE: int = 2
+# How long automatic compaction pauses once it cannot free enough, or finds
+# nothing to summarise.  The provider's context-length error still compacts.
+_COMPACTION_PAUSE_SECONDS: float = 300.0
+
+# Strategies of a compress() call that left the messages as they were; the
+# caller has nothing to persist.
+NOOP_STRATEGIES: frozenset[str] = frozenset({
+    "too_few_messages", "boundaries_overlap", "nothing_to_summarise",
+})
+
 
 def _estimate_messages_tokens_rough(messages: list[dict[str, Any]]) -> int:
     """Rough token estimate for a message list (chars/4 heuristic)."""
@@ -240,13 +265,19 @@ class ContextCompressor:
         self.compression_count = 0
         self._derive_budgets()
 
+        # Whether the last compaction freed enough is judged on the next
+        # prompt count the provider reports (see ``_judge_last_compaction``).
+        self._judge_next_prompt = False
+        self._ineffective_compactions = 0
+        self._paused_until: float = 0.0
+
         if not quiet_mode:
             logger.info(
                 "Context compressor initialized: model=%s context_length=%d "
                 "threshold=%d (%.0f%%) target_ratio=%.0f%% tail_budget=%d",
                 model_id, self.context_length, self.threshold_tokens,
-                threshold_percent * 100, self.summary_target_ratio * 100,
-                self.tail_token_budget,
+                self.threshold_tokens * 100 / max(self.context_length, 1),
+                self.summary_target_ratio * 100, self.tail_token_budget,
             )
 
         self.last_prompt_tokens = 0
@@ -267,7 +298,10 @@ class ContextCompressor:
         downwards, so the threshold and summary budgets never keep
         referring to a window the provider has already rejected.
         """
-        self.threshold_tokens = int(self.context_length * self.threshold_percent)
+        percent = self.threshold_percent
+        if self.context_length < _SMALL_CTX_WINDOW_LIMIT:
+            percent = max(percent, _SMALL_CTX_THRESHOLD_PERCENT)
+        self.threshold_tokens = int(self.context_length * percent)
         # Ratio is relative to the threshold, not to total context.
         self.tail_token_budget = int(self.threshold_tokens * self.summary_target_ratio)
         self.max_summary_tokens = min(
@@ -310,13 +344,52 @@ class ContextCompressor:
           list plus the system prompt string.
         - ``(prompt_tokens,)`` -- an integer token count (e.g. from API
           response usage).
+
+        Answers no while automatic compaction is paused, even over the
+        threshold.
         """
         if isinstance(messages, int):
-            return messages >= self.threshold_tokens
-        rough = _estimate_messages_tokens_rough(messages)
-        if system_prompt:
-            rough += len(system_prompt) // _CHARS_PER_TOKEN
-        return rough >= self.threshold_tokens
+            tokens = messages
+            self._judge_last_compaction(tokens)
+        else:
+            tokens = _estimate_messages_tokens_rough(messages)
+            if system_prompt:
+                tokens += len(system_prompt) // _CHARS_PER_TOKEN
+        if tokens < self.threshold_tokens:
+            return False
+        return time.monotonic() >= self._paused_until
+
+    def _judge_last_compaction(self, prompt_tokens: int) -> None:
+        """Count a compaction that left the next real prompt over the threshold.
+
+        Only the provider's count for the prompt built from the compacted
+        history says whether compaction freed enough: that prompt includes
+        the system prompt and tool schemas, which compaction cannot shrink.
+        A second such compaction in a row pauses automatic compaction; when
+        the pause ends one more attempt runs, and pauses again if it fails.
+        """
+        if prompt_tokens < self.threshold_tokens:
+            self._ineffective_compactions = 0
+        elif self._judge_next_prompt:
+            self._ineffective_compactions += 1
+            if not self.quiet_mode:
+                logger.warning(
+                    "Compaction left the prompt at %d tokens, over the %d "
+                    "threshold (%d time(s) in a row)",
+                    prompt_tokens, self.threshold_tokens,
+                    self._ineffective_compactions,
+                )
+            if self._ineffective_compactions >= _INEFFECTIVE_COMPACTIONS_TO_PAUSE:
+                self._pause_compaction("compacting does not bring the prompt under the threshold")
+        self._judge_next_prompt = False
+
+    def _pause_compaction(self, reason: str) -> None:
+        self._paused_until = time.monotonic() + _COMPACTION_PAUSE_SECONDS
+        if not self.quiet_mode:
+            logger.warning(
+                "Automatic compaction paused for %.0fs: %s",
+                _COMPACTION_PAUSE_SECONDS, reason,
+            )
 
     def should_compress_preflight(self, messages: list[dict[str, Any]]) -> bool:
         """Quick pre-flight check using rough estimate (before API call)."""
@@ -665,16 +738,28 @@ Use this exact structure:
 
         try:
             client = self._summary_client or llm_client
+            # No max_tokens: a reasoning summariser spends a capped budget
+            # thinking and returns an empty or cut-off summary.  The prompt's
+            # target length sizes the summary.
             response = await client.chat.completions.create(
                 model=summariser_model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=summary_budget * 2,
             )
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp).
             if not isinstance(content, str):
                 content = str(content) if content else ""
             summary = content.strip()
+            # Committing any of these would replace the previous summary with
+            # nothing or with part of a summary.
+            refusal = getattr(choice.message, "refusal", None)
+            if refusal:
+                raise ValueError(f"summariser refused: {refusal}")
+            if getattr(choice, "finish_reason", None) == "length":
+                raise ValueError("summary was cut off at the output limit")
+            if not summary:
+                raise ValueError("summariser returned no text")
             # Fail-soft normalisation: if the summariser produced free-prose
             # plan sections, rewrite them as numbered lists so step identity
             # survives across compactions.
@@ -1009,13 +1094,14 @@ Use this exact structure:
         derived from ``summary_target_ratio * context_length``, so it
         scales automatically with the model's context window.
 
-        Never cuts inside a tool_call/result group. Falls back to the old
-        ``protect_last_n`` if the budget would protect fewer messages.
+        Never cuts inside a tool_call/result group. Keeps at least
+        ``protect_last_n`` messages, capped at ``_MAX_TAIL_MESSAGE_FLOOR``,
+        if the budget would protect fewer.
         """
         if token_budget is None:
             token_budget = self.tail_token_budget
         n = len(messages)
-        min_tail = self.protect_last_n
+        min_tail = min(self.protect_last_n, _MAX_TAIL_MESSAGE_FLOOR)
         accumulated = 0
         cut_idx = n  # start from beyond the end
 
@@ -1033,14 +1119,14 @@ Use this exact structure:
             accumulated += msg_tokens
             cut_idx = i
 
-        # Ensure we protect at least protect_last_n messages.
+        # Ensure we protect at least min_tail messages.
         fallback_cut = n - min_tail
         if cut_idx > fallback_cut:
             cut_idx = fallback_cut
 
         # If the token budget would protect everything (small conversations),
-        # fall back to the fixed protect_last_n approach so compression can
-        # still remove middle turns.
+        # fall back to the fixed min_tail so compression can still remove
+        # middle turns.
         if cut_idx <= head_end:
             cut_idx = fallback_cut
 
@@ -1093,12 +1179,9 @@ Use this exact structure:
                     n_messages,
                     self.protect_first_n + self.protect_last_n + 1,
                 )
-            return messages, self._build_summary_data(
-                original_count=n_messages,
-                original_tokens=original_tokens,
-                compressed_count=n_messages,
-                compressed_tokens=_estimate_messages_tokens_rough(messages),
-                strategy="truncate_tool_results" if truncated_count else "too_few_messages",
+            return self._unsummarised(
+                messages, n_messages, original_tokens,
+                changed=bool(truncated_count), strategy="too_few_messages",
             )
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or _estimate_messages_tokens_rough(messages)
@@ -1118,24 +1201,37 @@ Use this exact structure:
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 
         if compress_start >= compress_end:
-            return messages, self._build_summary_data(
-                original_count=n_messages,
-                original_tokens=original_tokens,
-                compressed_count=len(messages),
-                compressed_tokens=_estimate_messages_tokens_rough(messages),
+            return self._unsummarised(
+                messages, n_messages, original_tokens,
+                changed=bool(truncated_count or pruned_count),
                 strategy="boundaries_overlap",
             )
 
         summary_idx = self._recover_previous_summary(
             messages, compress_start, compress_end,
         )
-        turns_to_summarize = [
-            msg
-            for i, msg in enumerate(
-                messages[compress_start:compress_end], compress_start,
+        turns_to_summarize = []
+        for i, msg in enumerate(messages[compress_start:compress_end], compress_start):
+            if i == summary_idx:
+                # A summary merged into a tail message carries that message
+                # after the delimiter: live conversation, not summary text.
+                content = msg.get("content")
+                live = (
+                    content.split(SUMMARY_END_DELIMITER, 1)[1].strip()
+                    if isinstance(content, str) and SUMMARY_END_DELIMITER in content
+                    else ""
+                )
+                if not live:
+                    continue
+                msg = {**msg, "content": live}
+            turns_to_summarize.append(msg)
+        if not turns_to_summarize:
+            # The window holds only the previous summary: nothing new to fold in.
+            return self._unsummarised(
+                messages, n_messages, original_tokens,
+                changed=bool(truncated_count or pruned_count),
+                strategy="nothing_to_summarise",
             )
-            if i != summary_idx
-        ]
 
         if not self.quiet_mode:
             logger.info(
@@ -1146,7 +1242,7 @@ Use this exact structure:
             logger.info(
                 "Model context limit: %d tokens (%.0f%% = %d)",
                 self.context_length,
-                self.threshold_percent * 100,
+                self.threshold_tokens * 100 / max(self.context_length, 1),
                 self.threshold_tokens,
             )
             tail_msgs = n_messages - compress_end
@@ -1170,14 +1266,20 @@ Use this exact structure:
         # middle silently makes the agent re-do finished work and contradict
         # its own decisions with no visible cause.  Say so in-context and in
         # the event payload instead; placement then reuses the normal path.
+        # What earlier compactions recorded is carried forward: only the
+        # turns dropped now are lost.
         summary_failed = summary is None
         if summary_failed:
-            summary = (
-                f"{SUMMARY_PREFIX}\n[{len(turns_to_summarize)} earlier messages "
-                "were dropped to free context space and could not be summarised "
-                "-- the summarisation model was unavailable. That detail is not "
+            note = (
+                f"[{len(turns_to_summarize)} earlier messages were dropped to "
+                "free context space and could not be summarised -- the "
+                "summarisation model was unavailable. That detail is not "
                 "recoverable here; ask the user rather than assuming.]"
             )
+            if self._previous_summary:
+                note = f"{self._previous_summary}\n\n{note}"
+            self._previous_summary = note
+            summary = self._with_summary_prefix(note)
 
         # Phase 4: Assemble compressed message list.
         compressed: list[dict[str, Any]] = []
@@ -1226,12 +1328,15 @@ Use this exact structure:
             compressed.append(msg)
 
         self.compression_count += 1
+        self._judge_next_prompt = True
 
         compressed = self._sanitize_tool_pairs(compressed)
 
         compressed_tokens = _estimate_messages_tokens_rough(compressed)
         if not self.quiet_mode:
-            saved_estimate = display_tokens - compressed_tokens
+            # Like for like: display_tokens also counts the system prompt and
+            # tool schemas, which compaction leaves as they were.
+            saved_estimate = original_tokens - compressed_tokens
             logger.info(
                 "Compressed: %d -> %d messages (~%d tokens saved)",
                 n_messages,
@@ -1247,6 +1352,34 @@ Use this exact structure:
             compressed_tokens=compressed_tokens,
             strategy="summary_unavailable" if summary_failed else "summarise",
             summary=summary,
+        )
+
+    def _unsummarised(
+        self,
+        messages: list[dict[str, Any]],
+        original_count: int,
+        original_tokens: int,
+        *,
+        changed: bool,
+        strategy: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Result of a pass that summarised nothing.
+
+        Shortened tool results are still a compaction to persist and judge.
+        Otherwise *strategy* is a no-op, and automatic compaction pauses:
+        retrying each iteration would find the same nothing.
+        """
+        if changed:
+            self._judge_next_prompt = True
+            strategy = "truncate_tool_results"
+        else:
+            self._pause_compaction(f"nothing to compact ({strategy})")
+        return messages, self._build_summary_data(
+            original_count=original_count,
+            original_tokens=original_tokens,
+            compressed_count=len(messages),
+            compressed_tokens=_estimate_messages_tokens_rough(messages),
+            strategy=strategy,
         )
 
     @staticmethod

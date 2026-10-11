@@ -11,6 +11,7 @@ from uuid import UUID
 
 from surogates.devices.binding import device_of
 from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
+from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
     _attachments_note_from_data,
@@ -981,6 +982,8 @@ class ContextReplayMixin:
         compressed, summary_data = await self._compressor.compress(
             messages, self._llm, pre_compress_guidance=pre_compress_text,
         )
+        if summary_data.get("strategy") in NOOP_STRATEGIES:
+            return messages
 
         await self._store.emit_event(
             session.id,
