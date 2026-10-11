@@ -585,13 +585,15 @@ async def _run_single_delegation(
                     "files_read": file_changes["read"],
                 },
             )
+            from surogates.harness.loop_context_replay import _listed, not_handed_back
+
             result_text = outcome["text"]
             done = next((e.data or {} for e in outcome["events"] if e.type == EventType.SESSION_COMPLETE.value), {})
             if done.get("not_kept"):
-                # The helper's version of these is in the history, not in the thread's copy.
-                result_text += "\n\nNot kept, because the thread or another helper changed them first: " + ", ".join(done["not_kept"])
-            from surogates.harness.loop_context_replay import not_handed_back
-
+                # The helper's version of these is in the history, not in the thread's copy. Each name on the result's
+                # one line, as a report names a thread's files: the pod's names are data.
+                named = _listed([{"label": path} for path in done["not_kept"]])
+                result_text += f"\n\nNot kept, because the thread or another helper changed them first: {named}"
             if unkept := not_handed_back(done, copy="this copy"):
                 # Its hand-back failed: none of its work is in the thread's copy.
                 result_text += f"\n\n{unkept}"
