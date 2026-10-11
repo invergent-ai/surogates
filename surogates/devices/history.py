@@ -26,10 +26,12 @@ and by whoever reads an outcome out of the journal later.
   absolute, no empty, ``.`` or ``..`` part.  A word is one of the few its
   answer may say.  A count is a whole number from 0 to 2**53 - 1.  A list
   holds at most 50,000 entries; a look at most 2,000 files; an open at most
-  64 names of what was set aside, each the asking thread's own.  Who changed
-  a file is one of three shapes, each word text of a path's length.  So an
-  answer holds nothing that names a session, a project, a computer or a
-  folder: those are the session's own, which the server stamped.
+  64 names of each of what was set aside: a copy or a repository, each the
+  asking thread's own, and a place of the folder's, by its key and when.
+  Who changed a file is one of three shapes, each word text of a path's
+  length.  So an answer holds nothing that names a session, a project, a
+  computer or a folder: those are the session's own, which the server
+  stamped.
 - A refusal is read by its type and its code, each taken only from the
   server's own list of them, never by its words.  Its words are for a
   person: at most 2,000 characters are kept, and nothing is looked up by
@@ -172,6 +174,9 @@ _SAGA = re.compile(r"[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}")
 _OWN_FILE = re.compile(r"\.surogate-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp")
 #: When a copy or a repository was set aside, and which in its place's order: what its name starts with.
 _ASIDE = re.compile(r"[0-9]{8}-[0-9]{8}T[0-9]{6}Z-")
+#: A place of the folder's its computer's app set aside, by its name in the app's data (``desktop/src/history/place.ts``):
+#: the folder's key, and when, in milliseconds.
+_PLACE_ASIDE = re.compile(r"[0-9a-f]{16}\.was-[0-9]{1,16}")
 _COPIES = ("made", "moved", "kept")
 _OFF = ("cap", "names")
 _REASONS = ("changed", "shape", "with", "protected")
@@ -344,12 +349,20 @@ def _aside(value: Any, thread: str | None) -> str:
     return value
 
 
+def _place_aside(value: Any) -> str:
+    """A place of the folder's its computer's app set aside, by its name there: the folder's own, and no thread's."""
+    _need(isinstance(value, str) and _PLACE_ASIDE.fullmatch(value) is not None)
+    return value
+
+
 def _opened(answer: dict[str, Any], thread: str | None) -> dict[str, Any]:
     """A turn's open: the thread's copy, made, moved to the folder as it is or kept as it was; or why the folder has no history.
 
     On either, what the place keeps set aside whole of the thread's own,
-    and what of it went at the place's bound.  The first form that holds,
-    as the app takes them.
+    and what of it went at the place's bound; and the places of the
+    folder's the app set aside, which one open names, the first since the
+    thread's operation that set it aside.  The first form that holds, as
+    the app takes them.
     """
     for form in (_with_copy, _with_no_history):
         try:
@@ -357,6 +370,8 @@ def _opened(answer: dict[str, Any], thread: str | None) -> dict[str, Any]:
             for names in ("set_aside_folders", "set_aside_gone"):
                 if names in answer:
                     opened[names] = _listed(answer[names], lambda name: _aside(name, thread), MAX_ASIDE)
+            if "set_aside_places" in answer:
+                opened["set_aside_places"] = _listed(answer["set_aside_places"], _place_aside, MAX_ASIDE)
             return opened
         except _No:
             continue

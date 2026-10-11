@@ -269,7 +269,8 @@ describe("a thread's card, live", () => {
     try {
       const stream = new FakeStream();
       const copy = { kind: "copy" as const, at: "2026-10-10T10:15:00Z" };
-      let current = row({ group: "idle", setAside: { kept: [copy], snapshots: 2, gone: [{ kind: "repository", at: "2026-10-09T08:00:00Z" }] } });
+      const place = { kind: "place" as const, at: "2026-10-08T07:30:00Z" };
+      let current = row({ group: "idle", setAside: { kept: [place, copy], snapshots: 2, gone: [{ kind: "repository", at: "2026-10-09T08:00:00Z" }] } });
       const live = project(stream, () => [current]);
       const adapter = { ...NO_BROWSER_ADAPTER, ...live } as unknown as AgentChatAdapter;
       container = document.createElement("div");
@@ -279,7 +280,10 @@ describe("a thread's card, live", () => {
       const said = () => [...container!.querySelectorAll('[data-testid="worker-card-set-aside"] p')].map((line) => line.textContent);
       stream.emit("ready");
       await settle();
-      expect(said()).toEqual(["Kept on its computer: its copy from 10 Oct, 10:15 · 2 snapshots", "No longer kept: its repository from 9 Oct, 08:00"]);
+      expect(said()).toEqual([
+        "Kept on its computer: its folder's earlier history from 8 Oct, 07:30 · its copy from 10 Oct, 10:15 · 2 snapshots",
+        "No longer kept: its repository from 9 Oct, 08:00",
+      ]);
       expect(container!.querySelector('[data-testid="worker-card-set-aside"] button')).toBeNull();
       // An entry the card does not know, or whose time is none, is left out; with nothing left, nothing is said.
       current = row({ group: "idle", setAside: {

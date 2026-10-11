@@ -21,6 +21,9 @@ export function setAsideWhen(at: string, timeZone?: string): string {
   return `${part("day")} ${part("month")}, ${part("hour")}:${part("minute")}`;
 }
 
+// What each kind of what a thread's computer set aside is, as a row names it.
+const ASIDE_WHAT: Record<string, string> = { copy: "its copy", repository: "its repository", place: "its folder's earlier history" };
+
 /**
  * What a thread's computer keeps set aside of its work, out of its copy there, and what of that it no longer keeps, in
  * the app's words: "Kept on its computer: its copy from 10 Oct, 10:15 · 2 snapshots" and "No longer kept: its copy from
@@ -30,7 +33,7 @@ export function setAsideLines(
   aside: { kept: Array<{ kind: string; at: string }>; snapshots: number; gone: Array<{ kind: string; at: string }> },
   timeZone?: string,
 ): string[] {
-  const each = (entry: { kind: string; at: string }) => `its ${entry.kind} from ${setAsideWhen(entry.at, timeZone)}`;
+  const each = (entry: { kind: string; at: string }) => `${ASIDE_WHAT[entry.kind] ?? `its ${entry.kind}`} from ${setAsideWhen(entry.at, timeZone)}`;
   const kept = [...aside.kept.map(each), ...(aside.snapshots > 0 ? [`${aside.snapshots} snapshot${aside.snapshots > 1 ? "s" : ""}`] : [])];
   return [
     ...(kept.length > 0 ? [`Kept on its computer: ${kept.join(" · ")}`] : []),
