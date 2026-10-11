@@ -2714,6 +2714,34 @@ def test_a_pruning_leaves_each_repository_in_the_place_whole_by_what_it_names_an
     connected(place)
 
 
+def test_a_pruning_leaves_a_threads_copy_whole_by_what_its_index_names_where_no_kept_commit_holds_it(tmp_path, folder, monkeypatch):
+    place, store = tmp_path / "store", tmp_path / "store" / "history.git"
+    one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    # t1's turn writes the notes, and a landing's first look adds them to its copy's index: in no commit yet.
+    (one.copy / "notes.txt").write_text("the notes, as both threads wrote them\n")
+    assert one.changed() == {"paths": ["notes.txt"]}
+    staged = subprocess.run(
+        ["git", f"--git-dir={one.repo / 'worktrees' / 't1'}", "rev-parse", ":notes.txt"], capture_output=True, text=True, check=True, env=HERMETIC,
+    ).stdout.strip()
+    # t2 lands the same notes, and t1's repository, packed again at its next turn's start, lets go of them: the history holds them.
+    (busy.copy / "notes.txt").write_text("the notes, as both threads wrote them\n")
+    land(busy, "saga:same", B)
+    monkeypatch.setattr(local_history, "_PACKS", 0)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open(moves=False)["copy"] == "kept"
+    monkeypatch.undo()
+    assert staged not in held_here(one.repo)
+    # Main moves on past the window, and only the landing the pruning lets go of held those notes.
+    lands_often(busy, "notes.txt", 21)
+    assert LocalHistory.at(place, folder, thread="t2", user="u1").prune(keep=[], now=time.time() + LATER)["pruned"] is True
+    assert subprocess.run(["git", f"--git-dir={store}", "cat-file", "-e", staged], env=HERMETIC).returncode != 0
+    # The version only t1's copy's index named, t1 holds itself now: its next snapshot commits it.
+    assert staged in held_here(one.repo)
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    tip = again.snapshot("before a step")
+    assert git(one.repo, "rev-parse", f"{tip}:notes.txt") == staged
+    connected(place)
+
+
 def test_a_pruning_writes_nothing_through_a_link_an_earlier_guest_left_in_a_repository_and_keeps_what_its_refs_name(tmp_path, folder):
     one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
     lands_often(busy, "notes.txt", 22)
