@@ -665,6 +665,42 @@ def test_a_gitignore_of_the_folders_that_takes_back_what_history_leaves_out_brin
     assert (folder / ".env").read_text() == "SECRET=1\n"
 
 
+@pytest.mark.parametrize("read", ["several at once", "by one git"])
+def test_a_request_cut_as_it_first_made_a_threads_repository_leaves_out_what_history_leaves_out_all_the_same(tmp_path, folder, monkeypatch, read):
+    (folder / ".env").write_text("SECRET=1\n")
+    (folder / "build").mkdir()
+    (folder / "build" / "out.bin").write_bytes(b"\0")
+    # And a package's own repository, with nothing committed in it, where history leaves out.
+    subprocess.run(["git", "init", "-q", str(folder / "node_modules" / "pkg")], check=True, env=HERMETIC)
+    (folder / "node_modules" / "pkg" / "index.js").write_text("// a package\n")
+    one = a_copy(tmp_path, folder)
+    if read == "by one git":
+        # As where a reader fails twice: one git reads the folder, as it finds it.
+        monkeypatch.setattr(History, "_read_at_once", lambda self, new: False)
+    (one.copy / "A.md").write_text("A\n")
+    land(one, "saga:1")
+    main = History._main
+
+    def cut(self, *args, **kwargs):
+        # Killed right after git made the repository, before its first config was set.
+        if args[0] == "config":
+            raise KeyboardInterrupt
+        return main(self, *args, **kwargs)
+
+    yours = [["Surogate-Saga", "saga:2"], ["Surogate-Kind", "pickup"]]
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_main", cut)
+        with pytest.raises(KeyboardInterrupt):
+            LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").pickup(author=YOURS, trailers=yours)
+    assert (tmp_path / "store" / "clones" / "t2" / "HEAD").is_file()
+    # The next request finds the repository there, and names nothing history leaves out as yours.
+    picked = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").pickup(author=YOURS, trailers=yours)
+    assert (picked["commit"], picked["picked_up"]) == (None, [])
+    (folder / "notes.txt").write_text("v2 notes, saved by you\n")
+    picked = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").pickup(author=YOURS, trailers=yours)
+    assert [p["path"] for p in picked["picked_up"]] == ["notes.txt"]
+
+
 def test_a_file_under_the_coding_tools_folder_never_lands(tmp_path, folder):
     (folder / ".threads").mkdir()
     (folder / ".threads" / "old.txt").write_text("left by an earlier checkout\n")

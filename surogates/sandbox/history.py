@@ -387,19 +387,23 @@ class History:
             self.take_up()
 
     def _init(self) -> None:
-        """Make the pod's repository, once."""
+        """Make the pod's repository, once.
+
+        Its excludes and attributes are there before git makes it, which
+        keeps them: ``HEAD`` says it is made, so one a request was cut in the
+        middle of making leaves out what history leaves out all the same.
+        """
         if (self.repo / "HEAD").exists():
             return
-        self.repo.mkdir(parents=True, exist_ok=True)
+        (self.repo / "info").mkdir(parents=True, exist_ok=True)
+        (self.repo / "info" / "exclude").write_text("\n".join(self.excludes) + "\n")
+        (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
         self._main("init", "-q", "-b", "main")
         self._main("config", "user.name", "Surogates Checkpoint")
         self._main("config", "user.email", "surogates@local")
         # The kept index decides by size and time alone: geesefs's
         # inode numbers and change times differ from pod to pod.
         self._main("config", "core.checkStat", "minimal")
-        (self.repo / "info").mkdir(exist_ok=True)
-        (self.repo / "info" / "exclude").write_text("\n".join(self.excludes) + "\n")
-        (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
 
     def _read_real(self, main: str | None) -> None:
         """The index made the real files, from *main*: only a file whose size or time changed since is read.
