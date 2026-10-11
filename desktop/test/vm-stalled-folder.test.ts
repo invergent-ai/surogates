@@ -303,7 +303,8 @@ describe("the app's PATH with an entry on a mount that does not answer", () => {
     const app = process.env.PATH;
     process.env.PATH = `/usr/bin:${folder.path}:/bin`;
     try {
-      const looks = new FolderLooks(undefined, 300);
+      const said: string[][] = [];
+      const looks = new FolderLooks(undefined, 300, (entry, why) => said.push([entry, why]));
       const { answer, longest } = await stalling(async () => {
         const path = await looks.path(process.env.PATH);
         fileToolsMissing(undefined, pathOutside(path, []));
@@ -312,6 +313,9 @@ describe("the app's PATH with an entry on a mount that does not answer", () => {
       });
       expect(answer).toBe("/usr/bin:/bin");
       expect(longest).toBeLessThan(1_000);
+      // Said to the log; and its look, killed at its bound, waits on the mount no longer than that.
+      expect(said).toEqual([[folder.path, "silent"]]);
+      await expect.poll(() => spawnSync("pgrep", ["-f", `^/usr/bin/stat -L --printf= -- ${folder.path}$`]).status, { timeout: 2_000 }).toBe(1);
     } finally {
       process.env.PATH = app;
       release();
