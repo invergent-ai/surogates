@@ -1112,7 +1112,8 @@ class ArtifactCompletionMixin:
                 raise asyncio.CancelledError("another worker runs this session now") from None
             except Exception:
                 logger.exception("Landing failed for %s on its computer", session.id)
-                landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
+                # Its copy there outlives it: the report says the work is in it, and lands with the thread's next turn.
+                landing = {"state": "failed", "reason": "failed", "files": [], "excluded": [], "repositories": []}
         elif is_project_thread(session.config) and device_of(session.config) is None and self._sandbox_pool is not None:
             # A thread on its user's computer with no copy there, made before threads had them, lands nothing anywhere.
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
@@ -1672,6 +1673,9 @@ class ArtifactCompletionMixin:
         elif saved and is_project_thread(session.config):
             # Said as a landing that did not finish says it: nothing of the turn is lost.
             error += ". Its work is kept, and lands with the thread's next turn"
+        elif saved is False and opens_its_copy(session):
+            # Not kept, its computer away or its keep refused: its copy there holds the work all the same.
+            error += ". Its work is in its copy on its computer, and the thread's next turn lands it, but for any file a landing never writes"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )

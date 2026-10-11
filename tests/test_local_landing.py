@@ -155,6 +155,37 @@ def test_a_report_says_a_thread_deleted_before_its_landing_finished_has_no_next_
         assert "lands with its next turn" not in said and "Stopped while" not in said
 
 
+def test_a_report_says_a_landing_on_a_computer_that_failed_left_its_work_in_its_copy_for_its_next_turn():
+    said = report(landing="failed", landing_reason="failed")
+    assert "\nNot landed, because the landing failed: Budget.xlsx\nThe thread's work is in its copy on its computer, and lands with its next turn" in said
+    assert "Not saved" not in said
+    # A pod's landing that failed took its work with it, unless the turn was kept.
+    assert "Not saved, because the landing failed: Budget.xlsx" in report(landing="failed")
+    assert "in its copy on its computer" not in report(landing="failed")
+
+
+def test_a_report_says_a_stopped_landings_work_waits_in_its_copy_and_names_apart_what_no_landing_writes():
+    said = report(landing="compensated", landing_reason="stopped", files=[
+        {"kind": "file", "label": "Budget.xlsx", "ref": "Budget.xlsx", "landing": "not_merged"},
+        {"kind": "file", "label": ".vscode/tasks.json", "ref": ".vscode/tasks.json", "landing": "not_merged", "reason": "protected"},
+        {"kind": "file", "label": "Twin.txt", "ref": "Twin.txt", "landing": "not_merged", "reason": "linked"},
+    ])
+    assert "(the thread was stopped before its landing wrote a file): Budget.xlsx\n" in said
+    assert (
+        "\nThe thread was stopped: its work is in its copy on its computer, and lands with its next turn once it is sent on again, "
+        "but for any file a landing never writes"
+    ) in said
+    assert "The thread's work is in its copy on its computer, and lands with its next turn" not in said
+    # What no landing writes lands with no turn: it is said apart, as a landing that finished says it.
+    assert "\nNot merged, because a change to them could run code on the user's computer, which a landing never writes: .vscode/tasks.json" in said
+    assert "\nNot merged, because the folder has a link there, or a file with a second name, which a landing never replaces: Twin.txt" in said
+    # A landing whose every file is one no landing writes did not land any of the thread's work, and says so.
+    alone = report(landing="compensated", landing_reason="stopped", files=[
+        {"kind": "file", "label": "Twin.txt", "ref": "Twin.txt", "landing": "not_merged", "reason": "linked"},
+    ])
+    assert "(the thread was stopped before its landing wrote a file): none\n" in alone
+
+
 def test_a_report_says_what_its_landing_found_left_in_its_folder_by_one_cut_short():
     said = report(landing=None, recovery={
         "beside": [["Report.docx", "Report (kept by Surogate).docx"]], "lost": [["Plans/Q3.md", ".surogate-x.tmp"]],

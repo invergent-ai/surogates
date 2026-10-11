@@ -618,6 +618,29 @@ async def test_a_commit_naming_a_file_the_landings_look_did_not_see_is_put_back_
     assert (computer.folder / "Late.md").read_text() == "late\n" and (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
 
 
+async def test_a_landing_that_raises_says_its_work_is_in_its_copy_and_its_next_turn_lands_it(api, computer, monkeypatch):
+    _, master, thread = await begun_with_copy(api, computer)
+    folder = seen(computer.folder)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("the database went away")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(local_landing, "redo_files", broken)
+        await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    assert seen(computer.folder) == folder
+    # Its master hears the landing failed, and where the work is: a computer's copy outlives a landing.
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("failed", "failed")
+    words = said(report)
+    assert "\nNot landed, because the landing failed: " in words and "Not saved" not in words
+    assert "\nThe thread's work is in its copy on its computer, and lands with its next turn" in words
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    assert end.data["saved"] is False
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
+    assert (computer.folder / "Budget.xlsx").read_text() == "Total,42\n" and (computer.folder / "Report.docx").read_bytes() == b"PK report v1 edited"
+
+
 async def test_a_landing_that_never_asked_what_its_copy_changed_names_none_of_the_turns_files(api, computer, monkeypatch):
     _, master, thread = await begun_with_copy(api, computer)
     # Its folder's helper refuses the hold, before the landing asks anything of the copy.
