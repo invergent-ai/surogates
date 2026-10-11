@@ -1648,21 +1648,24 @@ def _read_as_data(path: Path, most: int) -> bytes | None:
     """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        with open(fd, "rb") as file:
-            return file.read(most) if stat.S_ISREG(os.fstat(fd).st_mode) else None
     except OSError:
         return None
+    try:
+        # Looked at before it is read: a folder opens, and open() refuses it without closing it.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with open(fd, "rb", closefd=False) as file:
+            return file.read(most)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _pinned(path: Path, text: str) -> None:
     """Make *path* a file holding *text*, replacing whatever is there."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with open(fd, "rb") as file:
-            if file.read(len(text) + 1) == text.encode():
-                return
-    except OSError:
-        pass
+    if _read_as_data(path, len(text) + 1) == text.encode():
+        return
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
     _replace(path, text.encode())
