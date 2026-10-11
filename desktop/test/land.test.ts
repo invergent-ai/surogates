@@ -1427,11 +1427,14 @@ function folding(at: string, run: string, ...more: string[]) {
   ], { encoding: "utf8", timeout: 30_000 });
 }
 const probe = mkdtempSync(join(tmpdir(), "land-folding-"));
-const folds = folding(probe, 'touch "$1/Documents/A" && test -e "$1/Documents/a"').status === 0;
+const probed = folding(probe, 'touch "$1/Documents/A" && test -e "$1/Documents/a"');
 rmSync(probe, { recursive: true, force: true });
+// Why no such disk is here, said beside the test it skips, which the run's summary counts: or null.
+const noFolding = probed.status === 0 ? null : `no disk that folds names can be mounted here: ${(probed.stderr || probed.error?.message || `bwrap exited ${probed.status}`).trim().split("\n")[0]}`;
 
 describe("a folder that tells names apart less than the thread's copy does", () => {
-  it.skipIf(!folds)("never writes one file twice for two names of a landing, by their case or by how their letters are composed, and says which two", () => {
+  it("never writes one file twice for two names of a landing, by their case or by how their letters are composed, and says which two", (context) => {
+    context.skip(noFolding !== null, noFolding ?? "");
     const mount = join(base, "mount");
     mkdirSync(mount);
     const [composed, decomposed] = ["café.txt", "café.txt"];
@@ -1563,10 +1566,11 @@ describe("what a landing's file is, and what its put-back gives back", () => {
 });
 
 describe("a landing's helper in the file helper's sandbox", () => {
-  const sandboxed = fileToolsMissing(undefined, process.env.PATH ?? "").length === 0;
+  const missing = fileToolsMissing(undefined, process.env.PATH ?? "");
   const dist = (file: string) => new URL(`../dist/${file}`, import.meta.url).href;
 
-  it.skipIf(!sandboxed)("lands and puts back there, given the thread's copy to read and the kept folder to write", { timeout: 60_000 }, async () => {
+  it("lands and puts back there, given the thread's copy to read and the kept folder to write", { timeout: 60_000 }, async (context) => {
+    context.skip(missing.length > 0, `the file helper's sandbox needs ${missing.join(", ")}, which this computer's PATH lacks`);
     writeFileSync(join(folder, "Report.docx"), "the report, v1");
     const after = turn("Report.docx", "the report, by the thread");
     const fresh = turn("threads/A/new.md", "new\n");
