@@ -2798,6 +2798,8 @@ new Image().src = "http://" + own("image") + "/";
     let secure: TcpServer;
     // What the site was asked for, a socket's handshake too, and how many tunnels reached its https port.
     let heard: string[];
+    // Each sign-in a request brought the site, its own or a proxy's.
+    let signedTo: string[];
     let tunnels: number;
     // The site's ends of every connection, a socket's too: closed at the test's end.
     let taken: Set<Duplex>;
@@ -2813,8 +2815,10 @@ new Image().src = "http://" + own("image") + "/";
       tunnels = 0;
       asked = [];
       taken = new Set();
+      signedTo = [];
       origin = createServer((req, res) => {
         heard.push(`${req.method} ${req.url}`);
+        for (const name of ["authorization", "proxy-authorization"]) if (req.headers[name] !== undefined) signedTo.push(`${req.url} ${name}: ${req.headers[name]}`);
         if (req.url?.startsWith("/signs/")) return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(SIGNS);
         if (req.url === "/kept.js") return void res.writeHead(200, { "content-type": "text/javascript", "cache-control": "public, max-age=3600" }).end("window.kept = 1;");
         if (req.url?.startsWith("/file.bin")) return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" }).end("f".repeat(64 * 1024));
@@ -2822,6 +2826,13 @@ new Image().src = "http://" + own("image") + "/";
         if (req.url?.startsWith("/asks/challenge")) return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"', "content-type": "text/html" }).end("<title>Asks</title>");
         if (req.url?.startsWith("/asks/")) return void res.writeHead(407, { "content-type": "text/html" }).end("<title>Asks</title>");
         if (req.url === "/asking") return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(`<title>Asking</title><img src="/asks/image"><img src="/asks/challenge-image">`);
+        // A site that wants a sign-in of its own; and its page, which asks for that, and for what the site answers as a proxy
+        // that wants one. The site's own question opens the browser's sign-in dialog, which nobody answers: the page waits on it.
+        if (req.url === "/wants") return void res.writeHead(401, { "www-authenticate": 'Basic realm="site"', "content-type": "text/plain", "cache-control": "no-store" }).end("wants");
+        if (req.url === "/wanting") {
+          return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" })
+            .end(`<title>Wanting</title><script>fetch("/wants"); fetch("/asks/challenge").finally(() => fetch("/done/wanting"));</script>`);
+        }
         res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" }).end("ok");
       });
       origin.on("upgrade", (req, socket) => {
@@ -3064,6 +3075,29 @@ new Image().src = "http://" + own("image") + "/";
       await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
       await expect.poll(() => (host as unknown as { running: unknown }).running, { timeout: 10_000 }).toBeNull();
       expect(await signedAs(secret)).toBe(407);
+    }, 60_000);
+
+    it("gives a site no sign-in in the first tab, the one its launch's check signed in from: the site's own 401 and its 407 get none, and the browser stays signed in", async () => {
+      const a = session();
+      expected("first");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/first" })).ok?.title).toBe("Signs");
+      await carried("first", 0);
+      // The session's tab is the browser's first, the one its launch's check ran in.
+      expect((await context()).pages()).toHaveLength(1);
+      const mark = asked.length;
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/wanting" })).ok?.title).toBe("Wanting");
+      await done("wanting");
+      // Each asked and answered the site's way: the 401 the site's own, its 407 the proxy's 502 in its place.
+      const site = ["GET http://fixture.test/wants", "GET http://fixture.test/asks/challenge"];
+      expect(asked.slice(mark).filter(({ what }) => site.includes(what)).map(({ what, signed, status }) => [what, signed, status]).sort()).toEqual([
+        [site[1], true, 502], [site[0], true, 401],
+      ]);
+      // And no sign-in came to the site with either, the proxy's nor one of its own, nor with any request since the launch.
+      expect([heard.filter((what) => what === "GET /wants").length, signedTo]).toEqual([1, []]);
+      expected("after");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/after" })).ok?.title).toBe("Signs");
+      await carried("after", mark);
+      expect(asked.filter(({ status }) => status === 407)).toHaveLength(1);
     }, 60_000);
 
     it("stays signed in whatever a site answers: a site's own 407, to an image or to a navigation, with a challenge or with none, is never the proxy's to its browser", async () => {
