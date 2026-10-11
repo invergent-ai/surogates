@@ -3648,6 +3648,20 @@ def test_two_threads_set_aside_under_one_count_are_two_times_and_one_threads_goi
     assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {"copy": "moved", "set_aside_folders": [ours]}
 
 
+def test_two_threads_set_aside_under_one_count_are_two_times_for_room_too_and_one_threads_going_takes_nothing_of_the_others(tmp_path, folder, monkeypatch):
+    # A place of one byte: room for what is set aside now lets go of every time that is no thread's newest.
+    monkeypatch.setattr(local_history, "_ASIDE_BYTES", 1)
+    place = tmp_path / "store"
+    one, two = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    [ours] = set_aside_once_more(one, "one's\n")["set_aside_folders"]
+    theirs = ours.replace("-t1.", "-t2.")
+    (place / "set-aside" / theirs).mkdir()
+    (place / "set-aside" / theirs / "unlanded.md").write_text("two's, 1\n")
+    # The other thread's second makes room by its own first, and takes nothing of the first thread's newest.
+    assert set_aside_once_more(two, "two's, 2\n")["set_aside_gone"] == [theirs]
+    assert (place / "set-aside" / ours / "unlanded.md").read_text() == "one's\n"
+
+
 def test_a_repository_and_its_copy_set_aside_by_one_request_are_one_time_and_go_together(tmp_path, folder, monkeypatch):
     monkeypatch.setattr(local_history, "_ASIDE_WHOLE", 2)
     one = a_copy(tmp_path, folder)
