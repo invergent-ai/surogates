@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.devices.history import ComputerRefused
 from surogates.devices.link import MAX_FRAME_CHARS
 from surogates.harness import local_landing
 from surogates.harness.local_landing import carries, looks, waiting_on_you_here
@@ -153,6 +155,37 @@ def test_a_report_says_a_thread_deleted_before_its_landing_finished_has_no_next_
         assert "lands with its next turn" not in said and "Stopped while" not in said
 
 
+def test_a_report_says_a_landing_on_a_computer_that_failed_left_its_work_in_its_copy_for_its_next_turn():
+    said = report(landing="failed", landing_reason="failed")
+    assert "\nNot landed, because the landing failed: Budget.xlsx\nThe thread's work is in its copy on its computer, and lands with its next turn" in said
+    assert "Not saved" not in said
+    # A pod's landing that failed took its work with it, unless the turn was kept.
+    assert "Not saved, because the landing failed: Budget.xlsx" in report(landing="failed")
+    assert "in its copy on its computer" not in report(landing="failed")
+
+
+def test_a_report_says_a_stopped_landings_work_waits_in_its_copy_and_names_apart_what_no_landing_writes():
+    said = report(landing="compensated", landing_reason="stopped", files=[
+        {"kind": "file", "label": "Budget.xlsx", "ref": "Budget.xlsx", "landing": "not_merged"},
+        {"kind": "file", "label": ".vscode/tasks.json", "ref": ".vscode/tasks.json", "landing": "not_merged", "reason": "protected"},
+        {"kind": "file", "label": "Twin.txt", "ref": "Twin.txt", "landing": "not_merged", "reason": "linked"},
+    ])
+    assert "(the thread was stopped before its landing wrote a file): Budget.xlsx\n" in said
+    assert (
+        "\nThe thread was stopped: its work is in its copy on its computer, and lands with its next turn once it is sent on again, "
+        "but for any file a landing never writes"
+    ) in said
+    assert "The thread's work is in its copy on its computer, and lands with its next turn" not in said
+    # What no landing writes lands with no turn: it is said apart, as a landing that finished says it.
+    assert "\nNot merged, because a change to them could run code on the user's computer, which a landing never writes: .vscode/tasks.json" in said
+    assert "\nNot merged, because the folder has a link there, or a file with a second name, which a landing never replaces: Twin.txt" in said
+    # A landing whose every file is one no landing writes did not land any of the thread's work, and says so.
+    alone = report(landing="compensated", landing_reason="stopped", files=[
+        {"kind": "file", "label": "Twin.txt", "ref": "Twin.txt", "landing": "not_merged", "reason": "linked"},
+    ])
+    assert "(the thread was stopped before its landing wrote a file): none\n" in alone
+
+
 def test_a_report_says_what_its_landing_found_left_in_its_folder_by_one_cut_short():
     said = report(landing=None, recovery={
         "beside": [["Report.docx", "Report (kept by Surogate).docx"]], "lost": [["Plans/Q3.md", ".surogate-x.tmp"]],
@@ -193,6 +226,12 @@ REPOSITORY = f"00000002-20261011T090000Z-{THREAD}.repository"
 #: Each as a person is told it: what it is, and when.
 A_COPY = {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
 A_REPOSITORY = {"kind": "repository", "at": "2026-10-11T09:00:00Z"}
+#: The thread's folder on its computer, and a place of it its computer's app set aside, by its name there, and as a
+#: person is told it.
+FOLDER = "/home/u/Reports"
+KEY = hashlib.sha256(FOLDER.encode()).hexdigest()[:16]
+PLACE = f"{KEY}.was-1791532800000"
+A_PLACE = {"kind": "place", "at": "2026-10-09T08:00:00Z"}
 WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
 
 
@@ -210,6 +249,14 @@ def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went
     })["content"]
     assert failed.endswith(f"in 1 snapshot\n{WHERE}")
     assert report(set_aside={"kept": [], "snapshots": 0, "gone": [A_COPY]}).endswith("its copy set aside at 2026-10-10 10:15 UTC")
+    # A place of its folder's set aside, on a line of its own.
+    assert report(set_aside={"kept": [A_PLACE, A_COPY], "snapshots": 0, "gone": []}).endswith(
+        "\nSet aside whole on its computer, as its copy there had to be made again: its copy as it was at 2026-10-10 10:15 UTC"
+        "\nSet aside on its computer, as what it kept at its folder's path was another folder's history or could not be read: "
+        "the earlier history at its folder's path, with its threads' copies as they were at 2026-10-09 08:00 UTC"
+        f"\n{WHERE}"
+    )
+    assert report(set_aside={"kept": [A_PLACE], "snapshots": 0, "gone": []}).endswith(f"copies as they were at 2026-10-09 08:00 UTC\n{WHERE}")
 
 
 def test_a_report_says_nothing_set_aside_where_its_payload_names_nothing_that_is_one():
@@ -238,7 +285,7 @@ async def told_at_its_end(monkeypatch, opened: dict | None, told: dict | None = 
         return None if opened is None else {"ok": opened}
 
     monkeypatch.setattr(local_landing.DeviceOperations, "last_opened", last_opened)
-    session = SimpleNamespace(id=THREAD)
+    session = SimpleNamespace(id=THREAD, config={"workspace_path": FOLDER})
     return await local_landing.set_aside_of(store=Ends(told), session_factory=None, redis=None, session=session, landing=landing)
 
 
@@ -268,6 +315,27 @@ async def test_a_turns_end_records_what_its_computer_keeps_set_aside_and_tells_o
     many = [f"{n:040x}" for n in range(local_landing.MAX_ASIDE + 5)]
     kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_asides": many})
     assert (kept["snapshots"], new["snapshots"]) == (many[-local_landing.MAX_ASIDE:], local_landing.MAX_ASIDE)
+
+
+async def test_a_place_its_computers_app_set_aside_is_recorded_from_the_one_open_that_names_it_and_told_once(monkeypatch):
+    # Named once, by the next open the thread's turn gets: recorded, and told by what it is and when.
+    kept, new = await told_at_its_end(monkeypatch, {"copy": "made", "set_aside_places": [PLACE]})
+    assert (kept, new) == ({"copies": [], "snapshots": [], "gone": [], "places": [PLACE]}, {"kept": [A_PLACE], "snapshots": 0, "gone": []})
+    # The opens after it name it no more: it stays recorded, told no more, beside what is set aside later.
+    assert await told_at_its_end(monkeypatch, {"copy": "kept"}, told=kept) == (kept, None)
+    later = f"{KEY}.was-1791627300000"
+    off = {"history": "off", "reason": "cap", "set_aside_folders": [COPY], "set_aside_places": [later, PLACE, later]}
+    assert await told_at_its_end(monkeypatch, off, told=kept) == (
+        {"copies": [COPY], "snapshots": [], "gone": [], "places": [PLACE, later]},
+        {"kept": [A_COPY, {"kind": "place", "at": "2026-10-10T10:15:00Z"}], "snapshots": 0, "gone": []},
+    )
+    # An open answered with what is no answer says nothing, a place another folder's among it; and a record keeps as many
+    # as an open names at most.
+    for none in (["../x"], ["0123456789abcdef.was-1791627300000"]):
+        assert await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_places": none}, told=kept) == (kept, None)
+    many = [f"{KEY}.was-{n}" for n in range(local_landing.MAX_ASIDE)]
+    kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_places": many}, told=kept)
+    assert (kept["places"], len(new["kept"])) == (many, local_landing.MAX_ASIDE)
 
 
 async def test_the_snapshots_told_before_a_repository_was_set_aside_whole_stay_counted_while_it_is_kept(monkeypatch):
@@ -349,3 +417,88 @@ async def test_a_settle_holds_the_lost_threads_lease_through_a_failed_renewal_an
     async with local_landing._lease_of(store, uuid4(), "settle:t"):
         await asyncio.sleep(0.5)
     assert store.asked == 1
+
+
+class Busy:
+    """A landing's steps on a folder another chat holds: each ``land`` refused ``busy`` *times* times, then answered."""
+
+    def __init__(self, times: int = 1) -> None:
+        self.times, self.asked = times, []
+
+    async def land(self, action, **arguments):
+        self.asked.append(action)
+        if action != "forget" and self.times:
+            self.times -= 1
+            raise ComputerRefused("busy", "Another chat is working in this folder on this computer")
+        return {} if action == "forget" else {"restored": [], "beside": [], "lost": [], "unread": []}
+
+
+class Held:
+    """A session store whose every lease is a worker's: a settle waits for that worker."""
+
+    async def try_acquire_lease(self, session_id, owner, *, ttl_seconds):
+        return None
+
+
+async def a_settle_that_waits(monkeypatch) -> list[str]:
+    """A settle of a folder that holds a landing another worker's lease still holds, which ends after one wait; what it asked."""
+    from surogates.harness.local_landing import settle_folder
+
+    left = [[SimpleNamespace(saga_id="saga:another", thread_id=uuid4())], []]
+
+    async def running_in(session_factory, device_id, folder):
+        return left.pop(0)
+
+    async def unforgotten_in(session_factory, device_id, folder, *, besides, most):
+        return []
+
+    monkeypatch.setattr(local_landing, "running_in", running_in)
+    monkeypatch.setattr(local_landing, "unforgotten_in", unforgotten_in)
+    hold = Busy(times=0)
+    copy = SimpleNamespace(device_id=uuid4(), folder="/home/u/Reports")
+    await settle_folder(Held(), None, copy, SimpleNamespace(id=uuid4()), 0, hold, None, redis=None)
+    return hold.asked
+
+
+async def asked_waiting(monkeypatch, asking) -> tuple[object, list[bool]]:
+    """What *asking* gives, run as a turn's work; and whether, each fiftieth of a second, all of the turn waited resumably."""
+    import asyncio
+
+    from surogates.runtime.turn_slots import TurnSlots, current_turn
+
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.3)
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="org", agent_id="agent", gate_held=False)
+    seen: list[bool] = []
+
+    async def watching() -> None:
+        while True:
+            seen.append(slots.waiting_resumably)
+            await asyncio.sleep(0.02)
+
+    token = current_turn.set(slots)
+    try:
+        async with slots.activity():
+            watcher = asyncio.ensure_future(watching())
+            try:
+                answer = await asking()
+            finally:
+                watcher.cancel()
+    finally:
+        current_turn.reset(token)
+    return answer, seen
+
+
+@pytest.mark.parametrize("where", ["a step answered busy", "a settle waiting for another worker's landing"])
+async def test_a_landings_wait_for_its_folder_is_one_another_worker_can_take_over(monkeypatch, where):
+    # A deploy's drain hands on a turn whose every activity waits resumably: a landing waiting for the folder is one.
+    if where == "a step answered busy":
+        steps = Busy()
+        answer, seen = await asked_waiting(monkeypatch, lambda: local_landing._land_asked(steps, "recover"))
+        assert steps.asked == ["recover", "recover"] and answer["restored"] == []
+    else:
+        answer, seen = await asked_waiting(monkeypatch, lambda: a_settle_that_waits(monkeypatch))
+        # It gave the folder back, waited, and took it again.
+        assert answer == ["forget", "recover"]
+    assert sum(seen) >= 5

@@ -534,30 +534,44 @@ async def test_an_app_that_keeps_no_copy_for_the_thread_gets_nothing_of_its_turn
     )
 
 
-async def test_a_folder_too_large_to_copy_in_time_has_its_threads_turn_fail_saying_why_once_its_app_says_so(api, computer, monkeypatch):
+async def test_a_folder_too_large_to_copy_in_time_fails_its_threads_turns_with_a_retry_that_alone_has_its_app_try_again(api, computer, monkeypatch):
     _, _, thread = await begun_with_copy(api, computer)
-    copied = [0]
     too_large = {"error": {
         "type": "history_off",
         "message": "This folder is too large for a thread of the project to have a copy of its own on this computer: its copy could "
-                   "not be made within the time a copy may take, twice. Choose a folder inside it that holds less",
+                   "not be made within the time a copy may take. Choose a folder inside it that holds less",
     }}
+    opens: list[dict] = []
 
-    def cut_twice(frame, outcome):
-        # As the app answers a turn's open: two makings of the copy cut short by their bound, then no copy for the thread.
+    def refusing(frame, outcome):
+        # As the app answers once its bound cut a copy of the folder: at once, every open its person did not ask again.
         if frame["args"].get("action") != "open":
             return outcome
-        copied[0] += 1
-        return {"error": {"type": "history", "code": "no_answer", "message": "Cut short"}} if copied[0] <= 2 else too_large
+        opens.append(frame["args"])
+        return outcome if frame["args"].get("retried") is True else too_large
 
-    computer.app.lie = cut_twice
+    computer.app.lie = refusing
     worker = await woken(api, monkeypatch, thread, [WRITES])
     assert worker.model_asked == 0 and await steps_of(api, thread) == []
-    assert [name for name, _ in await opens_of(api, thread)] == ["open:0", "open:0:1", "open:0:2"]
+    assert opens == [{"action": "open"}]
     failed = await failure(api, thread)
     assert (failed["why"], failed["code"], failed["error_title"], failed["retryable"]) == (
-        "history_off", "history_off", NOWHERE["history_off"], False,
+        "history_off", "history_off", NOWHERE["history_off"], True,
     )
+    # A message is no asking again of the turn, though it resumes the thread: refused at once, as before.
+    sent = await api.client.post(f"/v1/sessions/{thread.id}/messages", json={"content": "Go on."}, headers=api.auth())
+    assert sent.status_code == 202, sent.text
+    await woken(api, monkeypatch, thread, [WRITES])
+    assert opens[1:] == [{"action": "open"}] and await status_of(api, thread) == "failed"
+    # Its person's Retry is: the turn's first open says so, its app tries again, and this time the copy is opened.
+    retried = await api.client.post(f"/v1/sessions/{thread.id}/retry", headers=api.auth())
+    assert retried.status_code == 200, retried.text
+    await woken(api, monkeypatch, thread, [WRITES, _final_response("The totals are in Budget.xlsx.")])
+    assert opens[2:] == [{"action": "open", "retried": True}]
+    assert (computer.folder / "Budget.xlsx").read_text() == "Total,42\n" and await status_of(api, thread) == "completed"
+    # The turn after it is no asking again.
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Thanks.")
+    assert opens[3:] == [{"action": "open"}]
 
 
 @pytest.mark.parametrize(("case", "lie", "why", "code"), [

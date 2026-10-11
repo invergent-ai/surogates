@@ -33,6 +33,9 @@ LATEST_TYPES = tuple(t.value for t in (
 #: A copy or a repository of a thread's that its computer set aside whole, by its folder's name there
 #: (``surogates.sandbox.local_history``): the order it was set aside in, when, in UTC, whose, and which of the two.
 _SET_ASIDE = re.compile(r"[0-9]{8}-([0-9]{8}T[0-9]{6}Z)-[0-9a-f-]{36}\.(copy|repository)")
+#: A place of a thread's folder that its computer's app set aside, by its name in the app's data
+#: (``desktop/src/history/place.ts``): the folder's key, and when, in milliseconds since 1970 in UTC.
+_PLACE_ASIDE = re.compile(r"[0-9a-f]{16}\.was-([0-9]{1,16})")
 #: What a thread waits on you with over a landing of its that could not be finished: one that could not be put back
 #: whole, or one left running in its folder on its computer with no worker on its turn.
 UNFINISHED = "Couldn't finish landing my changes"
@@ -272,8 +275,10 @@ def set_aside_said(told: Any) -> dict[str, Any] | None:
     *told* is a turn end's record of it (``local_landing.set_aside_of``),
     which names each by the computer's names for it.  Here each copy or
     repository of the thread's kept whole is ``{kind, at}``, as is each that
-    went, oldest first; and the snapshots of what its copy held of its own
-    are counted.  A name that is none is left out.
+    went, and each place of its folder's the app set aside, ``place``: those
+    kept oldest first, by when, and those gone as they went.  The snapshots
+    of what its copy held of its own are counted.  A name that is none is
+    left out.
     """
     if not isinstance(told, dict):
         return None
@@ -281,7 +286,9 @@ def set_aside_said(told: Any) -> dict[str, Any] | None:
     def listed(key: str) -> list[Any]:
         return told[key] if isinstance(told.get(key), list) else []
 
-    kept, gone = ([found for found in map(set_aside_name, listed(key)) if found is not None] for key in ("copies", "gone"))
+    copies, gone = ([found for found in map(set_aside_name, listed(key)) if found is not None] for key in ("copies", "gone"))
+    places = [found for found in map(set_aside_place, listed("places")) if found is not None]
+    kept = sorted([*copies, *places], key=lambda whole: whole["at"])
     snapshots = sum(isinstance(aside, str) for aside in listed("snapshots"))
     return {"kept": kept, "snapshots": snapshots, "gone": gone} if kept or snapshots or gone else None
 
@@ -298,6 +305,19 @@ def set_aside_name(name: Any) -> dict[str, str] | None:
     except ValueError:
         return None
     return {"kind": kind, "at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def set_aside_place(name: Any) -> dict[str, str] | None:
+    """What a thread's computer's app set aside of its folder's by the place's name *name*: ``{kind: "place", at}``, when, in
+    UTC, to the second; None for a name that is none, its time among it."""
+    found = _PLACE_ASIDE.fullmatch(name) if isinstance(name, str) else None
+    if found is None:
+        return None
+    try:
+        at = datetime.fromtimestamp(int(found.group(1)) / 1000, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return {"kind": "place", "at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:

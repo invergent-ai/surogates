@@ -96,6 +96,32 @@ describe("a project thread's card", () => {
     expect(drawn(null).querySelector("[data-mark]")).toBeNull();
   });
 
+  it("says nothing of a group it does not know, and names a file of a kind it does not know by its name alone", () => {
+    // As a later server, or another adapter, may send: a group this card has no words for, one that names something
+    // every object has, and none; with a reason and a file's kind it does not know.
+    const status = (within: Element) => within.querySelector('[data-testid="worker-card-status"]')!.textContent;
+    for (const group of ["landing", "toString", null]) {
+      const drawnCard = drawn({
+        ...ROW, group, reason: "reviewing", progress: { done: 1, total: 3 },
+        files: [{ kind: "folder", label: "Drafts", ref: "Drafts" }, ROW.files[0]!],
+      } as unknown as AgentChatThreadRow);
+      expect(status(drawnCard), String(group)).toBe("1/3");
+      expect(drawnCard.querySelector('[data-testid="worker-card"]')!.hasAttribute("data-group")).toBe(false);
+      expect(lines(drawnCard)).toEqual(["Drafts", "Budget.xlsx · not merged"]);
+      act(() => root?.unmount());
+      container?.remove();
+    }
+    const known = drawn({ ...ROW, group: "working", progress: { done: 1, total: 3 } });
+    expect([status(known), known.querySelector('[data-testid="worker-card"]')!.getAttribute("data-group")]).toEqual(["Working · 1/3", "working"]);
+  });
+
+  it("draws a row with no files with none, as another adapter may send it", () => {
+    const { files: _files, ...none } = ROW;
+    const drawnCard = drawn(none as unknown as AgentChatThreadRow);
+    expect(drawnCard.querySelector('[data-testid="worker-card-status"]')!.textContent).toBe("Idle");
+    expect(lines(drawnCard)).toEqual([]);
+  });
+
 });
 
 describe("a project thread's card's Undo", () => {

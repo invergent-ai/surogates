@@ -89,7 +89,8 @@ const many = <T>(item: (body: unknown) => T) => (body: unknown): T[] => {
 };
 const SUMMARY = one(["id", "name", "created_at", "updated_at"], projectSummaryOf);
 const PROJECT = one(["id", "name", "created_at", "updated_at", "master_session_id"], projectOf);
-const ROW = one(["id", "title", "group", "created_at", "updated_at"], threadRowOf);
+// A row's group is no part of its shape: one that is none, or no group's name, is a group the page does not know.
+const ROW = one(["id", "title", "created_at", "updated_at"], threadRowOf);
 const MADE = one(["thread_id"], (body: { thread_id: string }) => body.thread_id);
 const ENTRY = one(["path", "origin"], libraryEntryOf);
 const ROUTINE = one(["id", "schedule_display", "status"], routineOf);

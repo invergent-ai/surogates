@@ -150,26 +150,65 @@ STOP_LEFT_IN_COPY = (
     "thread's copy, and lands in your folder with the thread's next turn."
 )
 STOP_LEFT_LANDED = "Stopped, but part of this turn had already landed in your folder, so it was not taken back."
+#: What its person reads where a Stop's undo was left for the thread's next turn (``UndoOwed``).
+STOP_NOT_YET = (
+    "Stopped, but this turn is not taken back yet. It is taken back before the thread's next turn starts, once your "
+    "computer answers."
+)
 #: Why a step was not taken back, as its person reads it.
 WHY_NOT_TAKEN_BACK = {
     "no_snapshot": "no snapshot of the copy was taken before it",
     "landed": "it had already landed in your folder",
-    "not_answered": "your computer did not answer in time",
+    "owed": "not taken back yet",
     "refused": "your computer did not put the copy back",
     "not_asked": "your computer could not be asked to put the copy back",
 }
 
 
-async def undo_on_computer(saga: Saga, *, copy: Any, turn: int, ran: Callable[[SagaStep], bool]) -> list[dict]:
+class UndoOwed(Exception):
+    """A Stop's undo of a thread's copy on its computer, left for the thread's next turn: nothing of it is written.
+
+    Its computer did not answer a put-back in time, or another worker has
+    the thread now.  The saga stays open in the log, the put-back asked
+    stays open in the journal for its computer to run once it is back, and
+    the thread's next turn finishes the undo before it opens the copy.
+    *left* names each step that ran and is not taken back yet, as
+    :func:`undo_on_computer` names one, ``why`` ``owed``.
+    """
+
+    def __init__(self, left: list[dict]) -> None:
+        super().__init__(f"{len(left)} step(s) not taken back yet")
+        self.left = left
+
+
+def _not_taken_back(step: SagaStep, why: str, code: str | None = None) -> dict:
+    path = step.arguments.get("path") if isinstance(step.arguments, dict) else None
+    return {
+        "step_id": step.step_id, "tool": step.tool_name, "why": why,
+        **({"code": code} if code else {}), **({"path": path} if isinstance(path, str) else {}),
+    }
+
+
+async def undo_on_computer(
+    saga: Saga, *, copy: Any, turn: int, ran: Callable[[SagaStep], bool], bounded: bool = True,
+) -> list[dict]:
     """Put a stopped turn's copy of a project's thread on its user's computer back to where the turn started.
 
     *copy* is the thread's (``surogates.devices.history.ThreadCopy``), and
     *turn* the name the turn's snapshots were taken under.  Every step that
-    began, however it was left, is put back by its snapshot, newest first,
-    each restore bounded by its step's timeout.  The copy is then where the
-    oldest snapshot put back left it: that step and every one after it are
-    taken back, those with no snapshot of their own among them.  The folder
-    changes only at a landing, so nothing here reaches it.
+    began, however it was left, is put back by its snapshot, newest first.
+    The copy is then where the oldest snapshot put back left it: that step
+    and every one after it are taken back, those with no snapshot of their
+    own among them.  The folder changes only at a landing, so nothing here
+    reaches it.
+
+    Each put-back is asked under its snapshot's name, so asked again it is
+    answered as it was, or joined while its computer runs it.  *bounded*,
+    as at the Stop, each waits its step's timeout at most: one its computer
+    does not answer by then, or one the journal refuses because another
+    worker has the thread now, raises :class:`UndoOwed`, and nothing more is
+    asked.  Else, as at the thread's next turn, each waits as long as its
+    computer takes, as the turn's open would.
 
     Answers each step before that one that is not taken back, oldest first,
     as ``{step_id, tool, why}`` and the file it named (``path``): ``why`` a
@@ -181,6 +220,7 @@ async def undo_on_computer(saga: Saga, *, copy: Any, turn: int, ran: Callable[[S
     """
     # Imported here: the devices' modules reach this one through the governance package they import.
     from surogates.devices.history import ComputerRefused, NotAnAnswer, code_of
+    from surogates.devices.operations import LeaseLost
     from surogates.devices.workspace import DeviceOperationError
 
     saga.transition(SagaState.COMPENSATING)
@@ -192,9 +232,9 @@ async def undo_on_computer(saga: Saga, *, copy: Any, turn: int, ran: Callable[[S
         if step.checkpoint_hash is None:
             continue
         try:
-            await asyncio.wait_for(copy.restore(turn, step.checkpoint_hash), timeout=step.timeout_seconds)
-        except TimeoutError:
-            why[step.step_id] = ("not_answered", None)
+            await asyncio.wait_for(copy.restore(turn, step.checkpoint_hash), timeout=step.timeout_seconds if bounded else None)
+        except (TimeoutError, LeaseLost):
+            raise UndoOwed([_not_taken_back(s, "owed") for s in began[:back_from] if ran(s)]) from None
         except ComputerRefused as refused:
             # The folder's history's refusal of a snapshot that is not built on the copy's base as it stands.
             why[step.step_id] = ("landed", None) if refused.code == "not_on_base" else ("refused", code_of(refused))
@@ -213,11 +253,7 @@ async def undo_on_computer(saga: Saga, *, copy: Any, turn: int, ran: Callable[[S
         step.state = StepState.COMPENSATION_FAILED
         reason, code = why.get(step.step_id, ("no_snapshot", None))
         step.error = WHY_NOT_TAKEN_BACK[reason]
-        path = step.arguments.get("path") if isinstance(step.arguments, dict) else None
-        left.append({
-            "step_id": step.step_id, "tool": step.tool_name, "why": reason,
-            **({"code": code} if code else {}), **({"path": path} if isinstance(path, str) else {}),
-        })
+        left.append(_not_taken_back(step, reason, code))
     if left:
         saga.transition(SagaState.ESCALATED)
         saga.error = f"{len(left)} step(s) not taken back"
@@ -231,12 +267,15 @@ async def undo_on_computer(saga: Saga, *, copy: Any, turn: int, ran: Callable[[S
 
 
 def stop_left(left: list[dict]) -> dict:
-    """What a Stop says where it did not take all of the turn back, as the chat draws a turn's failure: why, step by step."""
+    """What a Stop says where it did not take all of the turn back, or not yet, as the chat draws a turn's failure: step by step."""
     staying = any(entry["why"] != "landed" for entry in left)
     named = [f"{entry['tool']} ({entry['path']})" if "path" in entry else entry["tool"] for entry in left]
     lines = [f"{step}: {WHY_NOT_TAKEN_BACK[entry['why']]}" for step, entry in zip(named, left)]
+    title = (
+        STOP_NOT_YET if any(entry["why"] == "owed" for entry in left) else STOP_LEFT_IN_COPY if staying else STOP_LEFT_LANDED
+    )
     return {
-        "error_title": STOP_LEFT_IN_COPY if staying else STOP_LEFT_LANDED, "error_detail": "\n".join(lines),
+        "error_title": title, "error_detail": "\n".join(lines),
         "error_category": "storage_error", "retryable": False, "not_taken_back": left,
     }
 

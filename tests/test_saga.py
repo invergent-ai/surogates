@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from surogates.governance.saga.compensator import compensate_step
+from surogates.governance.saga.compensator import UndoOwed, compensate_step, undo_on_computer
 from surogates.governance.saga.state_machine import (
     Saga,
     SagaState,
@@ -430,6 +430,53 @@ class TestCompensateStep:
         )
         await compensate_step(step, sandbox_pool=Pool(), session_id="s")
         assert calls == ["delete_ticket", "_checkpoint"]
+
+
+class TestUndoOnComputer:
+    """A Stop's undo of a thread's copy on its computer, which a computer away holds up."""
+
+    @staticmethod
+    def stopped_turn(timeout: int) -> Saga:
+        orch = SagaOrchestrator(default_step_timeout=timeout)
+        saga = orch.create_saga(uuid4())
+        for n, path in enumerate(("a.md", "b.md")):
+            step = orch.add_step(saga.saga_id, tool_name="write_file", tool_call_id=f"tc{n}", arguments={"path": path},
+                                 checkpoint_hash=f"{n}" * 40)
+            step.transition(StepState.EXECUTING)
+            step.transition(StepState.COMMITTED)
+        return saga
+
+    @staticmethod
+    def away_until(back: asyncio.Event) -> tuple[SimpleNamespace, list]:
+        asked: list = []
+
+        async def restore(turn, commit) -> None:
+            asked.append(commit)
+            await back.wait()
+
+        return SimpleNamespace(restore=restore), asked
+
+    @pytest.mark.asyncio
+    async def test_at_the_stop_a_put_back_its_computer_does_not_answer_in_time_leaves_the_rest_owed(self):
+        saga = self.stopped_turn(timeout=1)
+        copy, asked = self.away_until(asyncio.Event())
+        with pytest.raises(UndoOwed) as owed:
+            await undo_on_computer(saga, copy=copy, turn=0, ran=lambda step: True)
+        # Nothing more is asked once one put-back went unanswered: each step that ran is owed, oldest first.
+        assert asked == ["1" * 40]
+        assert [(entry["path"], entry["why"]) for entry in owed.value.left] == [("a.md", "owed"), ("b.md", "owed")]
+
+    @pytest.mark.asyncio
+    async def test_at_the_threads_next_turn_each_put_back_waits_for_its_computer_as_long_as_it_takes(self):
+        # Its steps' bound is none of its own: past it, it waits on.
+        saga = self.stopped_turn(timeout=0)
+        back = asyncio.Event()
+        copy, asked = self.away_until(back)
+        undoing = asyncio.ensure_future(undo_on_computer(saga, copy=copy, turn=0, ran=lambda step: True, bounded=False))
+        await asyncio.sleep(0.05)
+        assert not undoing.done() and asked == ["1" * 40]
+        back.set()
+        assert await undoing == [] and saga.state is SagaState.COMPLETED and asked == ["1" * 40, "0" * 40]
 
 
 class TestSagaRecord:

@@ -7,6 +7,8 @@
 //       threads/<thread>/          the thread's copy, which is also its root's share
 //   <data>/history/<key>.json      which folder it is the history of: its path, and its device's
 //                                  and its file's numbers as digits
+//   <data>/history/<key>.too-large.json  a folder whose first copy the history's bound cut, and how
+//                                  many of its files history took then (history/too-large.ts)
 //   <data>/landings/<key>/         what a landing keeps of the files it replaces, until it is recorded
 //
 // <key> is the checkpoint manager's (surogates/tools/utils/checkpoint_manager.py,
@@ -117,15 +119,19 @@ interface Recorded {
   boot: string;
 }
 
-// A device's or a file's number as a record holds it: its digits, whole. A binding keeps each as the number
-// stat gave, past 2^53 too, where SMB, CIFS and overlayfs give them (journal/bindings.ts), and a record keeps the
-// same number: none is written or read as a fraction, which would round it. Null for what is no whole number.
-const digitsOf = (value: number): string | null => (Number.isInteger(value) ? BigInt(value).toString() : null);
+/**
+ * A device's or a file's number as a record holds it: its digits, whole. A binding keeps each as the number stat gave,
+ * past 2^53 too, where SMB, CIFS and overlayfs give them (journal/bindings.ts), and a record keeps the same number:
+ * none is written or read as a fraction, which would round it. Null for what is no whole number.
+ */
+export const digitsOf = (value: number): string | null => (Number.isInteger(value) ? BigInt(value).toString() : null);
 const DIGITS = /^-?[0-9]{1,309}$/;
 
-// The number a record's digits are, where they are those of a number a binding can hold, spelt as digitsOf
-// spells it: it began as that number, so Number() gives it back exactly. Null for anything else.
-function numberOf(digits: unknown): number | null {
+/**
+ * The number a record's digits are, where they are those of a number a binding can hold, spelt as digitsOf spells
+ * it: it began as that number, so Number() gives it back exactly. Null for anything else.
+ */
+export function numberOf(digits: unknown): number | null {
   if (typeof digits !== "string" || !DIGITS.test(digits)) return null;
   const value = Number(BigInt(digits));
   return digitsOf(value) === digits ? value : null;

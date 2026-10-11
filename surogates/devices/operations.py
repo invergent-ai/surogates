@@ -354,6 +354,11 @@ def _starts_work(request: OperationRequest) -> bool:
     )
 
 
+def _puts_back(request: OperationRequest) -> bool:
+    """Whether *request* is a thread's put-back of its copy: a Stop's own, which a worker that stops waiting for it leaves open."""
+    return request.kind == "checkpoint" and request.args.get("action") == "restore"
+
+
 #: What a deleted thread still asks of a landing it had begun on its computer: the steps that put the landing back,
 #: record it or forget it, and the looks they need (the app's own list, ``FINISHING`` in desktop/src/history/kinds.ts).
 FINISHING: dict[str, frozenset[str]] = {
@@ -625,7 +630,9 @@ class DeviceOperations:
         being recorded, closes its own operation unless its turn is detached,
         handed to another worker that carries the wait on, or it is
         *keep_open*: a request whose HTTP wait ended before its computer
-        answered, which the same request joins again later.  The call
+        answered, which the same request joins again later.  Nor does a
+        thread's put-back of its copy close: its computer runs it once it is
+        back, and the undo it is a step of joins it again later.  The call
         returns, or raises, only after its wait's subscription is closed.
         """
         waiter: asyncio.Future | None = None
@@ -649,7 +656,7 @@ class DeviceOperations:
             # again, so it must not run when the computer comes back.  Found by
             # the request's key: a stop during the record's commit leaves no
             # operation id to name, and the row may be committed.
-            if not keep_open and not turn_detached():
+            if not keep_open and not turn_detached() and not _puts_back(request):
                 await self._cancel_own(request)
             raise
         finally:
@@ -1312,14 +1319,16 @@ class DeviceOperations:
     ) -> int:
         """Cancel the open operations of these sessions, and tell their computers.
 
-        What a computer already reported keeps its outcome.  A binding and the
-        user's own requests are cancelled only with *bindings*: deleting a chat
-        ends its folder's set-up and the changes it waits on; pausing or failing
-        it stops only the agent's work.  The landing of a thread *sparing*
-        names is left to its worker, which ends one that has written no file
-        and finishes, or puts back whole, one that has: its ``history`` and
-        ``land`` steps under ``land:`` are not cancelled.  Returns how many
-        were cancelled.
+        What a computer already reported keeps its outcome.  A binding, the
+        user's own requests and a thread's put-back of its copy are cancelled
+        only with *bindings*: deleting a chat ends its folder's set-up, the
+        changes it waits on and the undo of its stopped turn; pausing or
+        failing it stops only the agent's work, and a put-back is a Stop's
+        own, which a second Stop leaves to go on.  The landing of a thread
+        *sparing* names is left to its worker, which ends one that has
+        written no file and finishes, or puts back whole, one that has: its
+        ``history`` and ``land`` steps under ``land:`` are not cancelled.
+        Returns how many were cancelled.
         """
         if not calling_session_ids:
             return 0
@@ -1327,6 +1336,7 @@ class DeviceOperations:
         if not bindings:
             conditions.append(DeviceOperation.kind != BIND)
             conditions.append(DeviceOperation.invocation_id.not_like(f"{REQUEST_PREFIX}%"))
+            conditions.append(~and_(DeviceOperation.kind == "checkpoint", DeviceOperation.args["action"].as_string() == "restore"))
         if sparing:
             conditions.append(~and_(
                 DeviceOperation.calling_session_id.in_(list(sparing)),

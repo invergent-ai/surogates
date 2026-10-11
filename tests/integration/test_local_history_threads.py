@@ -358,10 +358,13 @@ async def test_a_threads_own_kind_is_journaled_as_every_operation_is(api, sessio
     with pytest.raises(DeviceOperationError, match="Another worker runs this session now"):
         await ops.run(stale)
     assert await ops.pending(device_id, 1) == []
-    # One that is stopped is closed, and its computer told.
+    # One that is stopped is closed, and its computer told; but a put-back, a Stop's own, which only a deletion closes.
     waiting = asyncio.create_task(ops.run(OperationRequest(**{**fields_of(stale), "lease_token": str(other.lease_token)})))
     await eventually(lambda: has_pending(ops, device_id))
-    assert await ops.cancel([thread.id]) == 1
+    puts_back = (kind, action) == ("checkpoint", "restore")
+    if puts_back:
+        assert await ops.cancel([thread.id]) == 0
+    assert await ops.cancel([thread.id], bindings=puts_back) == 1
     assert await asyncio.wait_for(waiting, 10) == CANCELLED_OUTCOME
     # A computer revoked answers nothing: its operation is closed with the revocation.
     assert (await api.client.delete(f"/v1/devices/{device_id}", headers=api.auth())).status_code == 204
