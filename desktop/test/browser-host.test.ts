@@ -3744,11 +3744,12 @@ return 1;`, FIRST)).toBe(1);
         `Port ${at} of a chat's servers is not open in this browser\n\nIt opens when that chat's agent navigates to it and the chat's user allows it.\n\n`
           + "The ports allowed now are listed in Surogate's Settings, under Folders and permissions.",
       ]);
-      // A page that sends its tab there is shown the same.
+      // A page of another site that sends its tab there is shown a page that names no port: the port is that site's choice.
       const sent = await context.newPage();
       await sent.goto("http://fixture.test/second");
       await sent.evaluate(`location.href = "http://127.0.0.1:${at}/sent"`);
-      await expect.poll(() => sent.title(), { timeout: 10_000 }).toBe(`Port ${at} is not open`);
+      await expect.poll(() => sent.title(), { timeout: 10_000 }).toBe("Not opened");
+      expect(await sent.locator("body").innerText()).toBe("A site tried to open a chat's local server, and was refused");
       // Nothing in that page runs or loads: it asks for nothing of the port.
       expect(await sent.evaluate(`fetch("/fetched", { cache: "no-store" }).then(() => "fetched", () => "nothing")`)).toBe("nothing");
       await sent.close();

@@ -18,7 +18,8 @@
 // bytes are read: only a WebSocket such a page opens is carried (ownSocket).
 //
 // A port not allowed is refused, and nobody is asked: a tab that goes there is shown a short
-// page of the proxy's own, which says what the port is (notOpenPage).
+// page of the proxy's own, which says what the port is (notOpenPage), or, where another site
+// sent it there, only that it was refused (SENT_PAGE).
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
@@ -98,7 +99,13 @@ export function notOpenPage(port: number): string {
     + `<body><h1>Port ${port} of a chat's servers is not open in this browser</h1><p>It opens when that chat's agent navigates to it and the chat's user allows it.</p>`
     + "<p>The ports allowed now are listed in Surogate's Settings, under Folders and permissions.</p></body></html>";
 }
-// What it is sent with: nothing in it runs or loads, no page frames it, and no copy of it is kept past a port's allowing.
+/**
+ * The page a tab is shown where a page of another site sent it to a port of a chat's servers that is not allowed, a
+ * redirect or a link: the port is that site's choice, so it names none, nor how one is opened.
+ */
+export const SENT_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Not opened</title></head>`
+  + "<body><h1>A site tried to open a chat's local server, and was refused</h1></body></html>";
+// What each is sent with: nothing in it runs or loads, no page frames it, and no copy of it is kept past a port's allowing.
 const NOT_OPEN_HEADERS = {
   "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
 };
@@ -429,11 +436,12 @@ export class BrowserProxy {
       // of a chat's own page, and never dialed here; whatever else needs the sign-in is carried for nobody.
       const chat = chatPort(url.hostname, port);
       const allowed = this.chats?.ports;
-      // A tab sent to a port not allowed, by its user or by a page: nobody is asked, and the tab is told what the port is. Not
-      // a page the browser loads ahead of any visit (Sec-Purpose), which no tab shows yet.
+      // A tab sent to a port not allowed, by its user, its agent or a page: nobody is asked, and the tab is told what the port
+      // is; where another site sent it, only that it was refused. Not a page the browser loads ahead of any visit
+      // (Sec-Purpose), which no tab shows yet.
       const tab = request.headers["sec-fetch-mode"] === "navigate" && request.headers["sec-fetch-dest"] === "document" && request.headers["sec-purpose"] === undefined;
       if (chat !== null && !allowed?.has(chat) && !SANDBOX_PORTS.has(chat) && tab) {
-        const page = notOpenPage(chat);
+        const page = request.headers["sec-fetch-site"] === "cross-site" ? SENT_PAGE : notOpenPage(chat);
         return void response.writeHead(403, { ...NOT_OPEN_HEADERS, "content-length": Buffer.byteLength(page) }).end(page);
       }
       if (chat === null || !allowed?.has(chat) || !ownRequest(request.method ?? "", request.headers, allowed)) return void response.writeHead(403).end();
