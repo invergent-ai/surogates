@@ -168,12 +168,12 @@ async def test_a_threads_row_lists_what_its_landing_changed_each_as_it_landed(ap
 
 
 async def an_undo_recorded(api, landing, *, undoes: list[int], paths: list[str], **columns: str) -> int:
-    """An Undo's record made by hand, as a landing by you records it, of *paths* and the rows it *undoes*; its id.
+    """An Undo's record made by hand, as a landing by you records it, of *paths*, each put back over the rows it *undoes*; its id.
 
     A column is given as SQL, as :func:`recorded` takes it.
     """
     given = {"saga_state": "'completed'", "device_id": "NULL", **columns}
-    files = [{"path": path, "before": None, "after": blob_of(path.encode()), "merged": True} for path in paths]
+    files = [{"path": path, "before": None, "after": blob_of(path.encode()), "merged": True, "undoes": undoes} for path in paths]
     async with api.app.state.session_factory() as db:
         made = (await db.execute(text(
             "INSERT INTO workstream_history (workstream_id, device_id, kind, saga_id, saga_state, agent_id, undoes, files) "
@@ -2213,9 +2213,10 @@ async def test_undo_of_a_threads_changes_puts_each_file_back_to_before_the_threa
     landings = await rows(api, thread)
     assert await undone(api, project, thread=str(thread.id)) == {"applied": ["Report.docx", "c.md"], "skipped": [], "picked_up": []}
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and not (pods.project / "c.md").exists()
-    # One landing by you, which names each landing it undid.
+    # One landing by you, which names each landing it undid, and each file the landings it went back over there, newest first.
     [the_undo] = [r for r in await rows_of(api, project) if r.kind == "undo"]
     assert the_undo.undoes == [r.id for r in landings]
+    assert [(f["path"], f["undoes"]) for f in the_undo.files] == [("Report.docx", [r.id for r in reversed(landings)]), ("c.md", [landings[1].id])]
     assert last_on_main(pods, "Surogate-Undoes") == ["Undo", ",".join(r.commit for r in landings)]
     [found] = await thread_rows(api, project, thread_id=str(thread.id))
     assert ([(f["ref"], f["landing"]) for f in found["files"]], found["landing_id"]) == ([("Report.docx", "undone"), ("c.md", "undone")], None)
@@ -2632,6 +2633,10 @@ async def test_an_undo_of_many_files_killed_anywhere_loses_no_edit_and_is_settle
     undone_now = next_act == "another Undo" or landed
     assert undos_on_main(pods) == int(undone_now) and as_undone(pods, 2 if undone_now else 0)
     assert (pods.project / "notes.txt").read_text() == YOUR_NOTES
+    # Whoever wrote the Undo's row, each file names the landing it went back over.
+    [the_undo] = [r for r in await rows_of(api, project) if r.kind == "undo" and r.saga_state == "completed"] if undone_now else [None]
+    if the_undo is not None:
+        assert [(f["path"], f["undoes"]) for f in the_undo.files] == [("Report.docx", [row.id]), ("a.md", [row.id])]
     yours = [v for v in await history_of(api, project, "notes.txt") if v["by"] == {"kind": "you"} and v["change"] == "changed"]
     assert len(yours) == 1 and (await opened(api, project, yours[0]["id"], "notes.txt")).content == YOUR_NOTES.encode()
 

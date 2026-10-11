@@ -389,8 +389,7 @@ async def _landed(
     for tried in range(2):
         if not applies:
             break
-        undid = sorted({row.id: row for a in applies for row in undoes.get(a["path"], ())}.values(), key=lambda row: row.id)
-        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undid)
+        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undoes)
         if not left:
             break
         if tried:
@@ -451,32 +450,36 @@ async def _pick_up(
 
 async def _land(
     session_factory: Any, place: BucketHistory, project: Any, user_id: UUID, you: dict, audit: list, settings: Any,
-    held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: list[Any],
+    held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: dict[str, list[Any]],
 ) -> list[dict]:
     """The saga of a landing by you: one apply a file, then the record; put back whole if a step fails.
 
     The files it left as they are, each ``{path, by}``: none when it
     landed.  Put back, a file saved since the pickup is one, by you, and
-    nothing of the landing is written.
+    nothing of the landing is written.  *undoes* are, by an apply's path,
+    the landings it goes back over: its row names them all, and its record
+    step each file's own, which its row's files are written from.
 
     Its row is written running with its steps fixed, the record among
     them, before the first apply: all a put-back by another lock holder
     needs.  It is written again before the record's first try, with what
     each apply did, so that a push is one its row can list.
     """
+    undid = sorted({row.id: row for a in applies for row in undoes.get(a["path"], ())}.values(), key=lambda row: row.id)
     orchestrator = _orchestrator(settings)
     saga = orchestrator.create_saga(project.master_session_id, kind="landing")
     steps = [orchestrator.add_step(saga.saga_id, tool_name="history.apply", tool_call_id="", arguments=a) for a in applies]
     record = orchestrator.add_step(saga.saga_id, tool_name="history.record", tool_call_id="", arguments={
-        "applied": applies, "author": you, "main": main,
+        "applied": [{**a, "undoes": [r.id for r in undoes[a["path"]]]} if a["path"] in undoes else a for a in applies],
+        "author": you, "main": main,
         "trailers": [
-            *audit, ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", kind], *(["Surogate-Undoes", r.commit] for r in undoes),
+            *audit, ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", kind], *(["Surogate-Undoes", r.commit] for r in undid),
         ],
     })
     try:
         row = _Row(session_factory, await start_landing(
             session_factory, saga, workstream_id=project.id, thread_id=None, agent_id=str(project.agent_id),
-            user_id=user_id, tool_saga_id=None, events=None, kind=kind, undoes=[r.id for r in undoes] or None,
+            user_id=user_id, tool_saga_id=None, events=None, kind=kind, undoes=[r.id for r in undid] or None,
         ), saga)
     except Exception as exc:
         logger.warning("A %s by you in project %s did not start", kind, project.id, exc_info=True)
