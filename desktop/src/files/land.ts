@@ -84,6 +84,10 @@ interface Identity {
   size: string;
   mtimeNs: string;
 }
+// A file as it was kept, by its change time too, which any write to it moves and nothing sets back.
+interface Kept extends Identity {
+  ctimeNs: string;
+}
 
 // What a step does, written down before it does it. Its own names beside the real file are each a
 // `.surogate-<uuid>.tmp` there, and each is in the record before the file is made.
@@ -100,6 +104,7 @@ interface Step {
   out: string | null; // a put-back's: the landing's file, moved out of the real one's way
   back: string | null; // a put-back's: the kept file's copy, on its way back from another filesystem
   copied: number; // how much of that copy is on disk: one cut short goes on from there
+  kept: Kept | null; // the file it replaced as it kept it, or none until it is kept
 }
 
 /** What a landing's helper put right at its start, of steps an earlier one was cut short in. */
@@ -416,9 +421,11 @@ function stage(from: number, temp: string, path: string, after: string, mode: nu
 // A record as this module writes one, or null: nothing else in it is acted on.
 function stepOf(value: unknown): Step | null {
   if (typeof value !== "object" || value === null) return null;
-  const { path, was, wrote, mode, made, above, temp, aside, moved, out, back, copied } = value as Record<string, unknown>;
-  const identity = (id: unknown): id is Identity | null =>
-    id === null || (typeof id === "object" && ["dev", "ino", "size", "mtimeNs"].every((key) => /^-?[0-9]+$/.test(String((id as Record<string, unknown>)[key]))));
+  const { path, was, wrote, mode, made, above, temp, aside, moved, out, back, copied, kept } = value as Record<string, unknown>;
+  const numbered = (keys: string[]) => (id: unknown): boolean =>
+    id === null || (typeof id === "object" && keys.every((key) => /^-?[0-9]+$/.test(String((id as Record<string, unknown>)[key]))));
+  const identity = numbered(["dev", "ino", "size", "mtimeNs"]) as (id: unknown) => id is Identity | null;
+  const keptAs = numbered(["dev", "ino", "size", "mtimeNs", "ctimeNs"]) as (id: unknown) => id is Kept | null;
   const own = (name: unknown): name is string | null => name === null || (typeof name === "string" && OWN_FILE.test(name));
   const inside = (dir: unknown): dir is string => {
     try {
@@ -432,10 +439,11 @@ function stepOf(value: unknown): Step | null {
     !inside(path) || !identity(was) || !identity(wrote) || !(mode === null || whole(mode)) || !Array.isArray(made) || !made.every(inside)
     || !Array.isArray(above) || !above.every((one) => Array.isArray(one) && one.length === 2 && inside(one[0]) && whole(one[1]))
     || !own(temp) || !own(aside) || !own(out) || !own(back) || typeof moved !== "boolean" || typeof copied !== "number" || !Number.isSafeInteger(copied) || copied < 0
+    || !keptAs(kept)
   ) {
     return null;
   }
-  return { path, was, wrote, mode, made, above: above as Array<[string, number]>, temp, aside, moved, out, back, copied };
+  return { path, was, wrote, mode, made, above: above as Array<[string, number]>, temp, aside, moved, out, back, copied, kept };
 }
 
 // How many bytes each folder's landings keep, by where they keep them: counted once, kept up as a file is kept, and
@@ -670,7 +678,7 @@ class Landing {
         temp: after === null ? null : ownFile(), aside: found === null ? null : ownFile(), moved: false,
         // The two names its look for a second name uses: a deletion stages no file of its own to give one to.
         out: found === null ? null : ownFile(), back: found === null || after !== null ? null : ownFile(),
-        copied: 0,
+        copied: 0, kept: null,
       };
       this.write(step, did, source === null);
       let dir = way.dir;
@@ -697,6 +705,10 @@ class Landing {
           }
           remove(second);
           if (did.temp === null) remove(first);
+          // Looked at again just before it leaves its name, by its change time too, which a save in place moves whatever it
+          // leaves of the file's size and time: a file saved since the look is the user's, and stays where it is.
+          const now = look(real);
+          if (now === null || !plain(now) || revisionOf(now) !== expected) throw conflict(path);
           // Not synced: a kill loses nothing written, and after a power cut a step that may have moved its file is taken to have.
           did = { ...did, moved: true };
           this.write(step, did, false);
@@ -719,8 +731,8 @@ class Landing {
           }
           remove(dir.at(did.temp));
         }
-        if (did.aside !== null) this.keep(dir.at(did.aside), step);
-        this.write(step, { ...did, temp: null, aside: null, moved: false, out: null, back: null, copied: 0 });
+        const kept = did.aside === null ? null : this.keep(dir.at(did.aside), step);
+        this.write(step, { ...did, temp: null, aside: null, moved: false, out: null, back: null, copied: 0, kept });
         if (after === null) this.empty(folders.map((_, index) => pathTo(folders.length - index)));
         syncDir(dir.at("."));
         return { ...done, made: did.made };
@@ -744,8 +756,8 @@ class Landing {
     }
   }
 
-  // *from*, the real file moved aside, kept in the app's data: moved, or copied where that is another filesystem.
-  private keep(from: string, step: number): void {
+  // *from*, the real file moved aside, kept in the app's data: moved, or copied where that is another filesystem. As it is kept.
+  private keep(from: string, step: number): Kept {
     const to = this.bytes(step);
     try {
       renameSync(from, to);
@@ -768,8 +780,10 @@ class Landing {
     }
     // The user's file, in the app's data: this user's alone to open there, whatever its mode was in the folder.
     chmodSync(to, 0o600);
+    const as = lstatSync(to, { bigint: true });
     const counted = keeping.get(this.store);
-    if (counted !== undefined) keeping.set(this.store, counted + Number(look(to)?.size ?? 0n));
+    if (counted !== undefined) keeping.set(this.store, counted + Number(as.size));
+    return { ...identityOf(as), ctimeNs: String(as.ctimeNs) };
   }
 
   // The file *held*, the one a step replaced, takes *name* in *dir* again, only where nothing holds it: a link,
@@ -1069,6 +1083,12 @@ class Landing {
         throw new Failure({ type: "conflict", message: `${did.path} was left by a step cut short and is not put back yet, so its landing was not forgotten` });
       }
     }
+    // A file a step replaced that a program held open and wrote into since it was kept holds the user's bytes: it goes
+    // beside its name in the folder, as a file that could not take its name back does, and is told.
+    for (const step of this.steps()) {
+      const did = this.read(step);
+      if (did !== null && this.writtenSince(step, did)) this.besideIt(step, did);
+    }
     const gone = join(this.store, `${FORGOTTEN}${randomUUID()}`);
     try {
       renameSync(this.kept, gone);
@@ -1079,6 +1099,49 @@ class Landing {
     rmSync(gone, { recursive: true, force: true });
     keeping.delete(this.store);
     return {};
+  }
+
+  // Whether what step *step* kept is the very file it replaced, written since it was kept: a copy from another filesystem
+  // is the app's own, which no program of the user's holds open.
+  private writtenSince(step: number, did: Step): boolean {
+    const now = look(this.bytes(step));
+    if (now === null || did.kept === null || did.was === null) return false;
+    const { dev, ino, size, mtimeNs } = identityOf(now);
+    if (dev !== did.was.dev || ino !== did.was.ino) return false;
+    return size !== did.kept.size || mtimeNs !== did.kept.mtimeNs || String(now.ctimeNs) !== did.kept.ctimeNs;
+  }
+
+  // What step *step* kept, given a name beside its own in the folder with its own mode again, the folders on its way made
+  // again where they went; and told. Never a second name beside it: one given by a forgetting cut short is the one.
+  private besideIt(step: number, did: Step): void {
+    const parts = did.path.split("/");
+    const [name, folders] = [parts.at(-1)!, parts.slice(0, -1)];
+    const kept = this.bytes(step);
+    const held = look(kept)!;
+    const dir = enter(this.root(did.path), folders, did.path, true).dir!;
+    try {
+      if (did.mode !== null) chmodSync(kept, did.mode);
+      for (let count = 1; count < 100; count += 1) {
+        const to = besideName(name, count);
+        const there = look(dir.at(to));
+        if (there !== null && (there.dev !== held.dev || there.ino !== held.ino)) continue;
+        try {
+          if (there === null) linkSync(kept, dir.at(to));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+          throw fromNode(error, did.path);
+        }
+        const beside: [string, string] = [did.path, [...folders, to].join("/")];
+        if (!untoldIn(this.store).beside.some(([path, at]) => path === beside[0] && at === beside[1])) untell(this.store, { beside: [beside] });
+        return;
+      }
+      throw osError("EEXIST", did.path);
+    } catch (error) {
+      chmodSync(kept, 0o600);
+      throw error;
+    } finally {
+      dir.close();
+    }
   }
 
   // The steps the saga has a record of.
