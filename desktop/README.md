@@ -274,10 +274,14 @@ They launch Chrome where it is installed, else Edge; `SUROGATE_TEST_BROWSER` nam
 `test/acceptance.test.ts` installs the release this package builds on Ubuntu 24.04 and 26.04,
 each from its cloud image booted under QEMU, with the install script and from a server on this
 computer, as a person installs it; starts the app, updates it, cuts the power, rolls it back and
-removes it. It is behind `SUROGATE_ACCEPTANCE_TESTS=1`, needs `/dev/kvm`, QEMU, `qemu-img`,
-`ssh` and `ssh-keygen`, a build, and the Ubuntu archive for the VMs' own apt, and takes about
-40 minutes:
+removes it. In the VMs with nested virtualization the app also downloads its guest's image from
+that server and boots it, and runs a command there in a chat and in a project thread's copy, whose
+folder the guest's root reads through a share served on the version's bwrap and cannot write. It
+is behind `SUROGATE_ACCEPTANCE_TESTS=1`, needs `/dev/kvm`, QEMU, `qemu-img`, `ssh` and
+`ssh-keygen`, the guest's image and a build, and the Ubuntu archive for the VMs' own apt, and
+takes about 40 minutes:
 
+    ../images/guest/build.sh
     npm run build
     SUROGATE_ACCEPTANCE_TESTS=1 SUROGATE_ACCEPTANCE_IMAGES=~/.cache/surogate-scratch/cloud-images npx vitest run test/acceptance.test.ts
 

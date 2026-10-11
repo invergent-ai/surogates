@@ -1,7 +1,7 @@
 // The executor of the file and process kinds, and the VM, as the app makes them, in a module of
-// their own: the app's main makes its own through it, and so does the acceptance VMs' probe, a
-// second main in an installed version (test/acceptance/probe.mjs). What a file host and the VM are
-// given here is then what the probe runs on a clean Ubuntu, where the wrong bwrap is refused.
+// their own: the app's main makes its own through it, and so do the acceptance VMs' probes, second
+// mains in an installed version (test/acceptance/probe.mjs, guest-probe.mjs). What a file host and
+// the VM are given here is then what the probes run on a clean Ubuntu, where the wrong bwrap is refused.
 
 import { dirname, join } from "node:path";
 

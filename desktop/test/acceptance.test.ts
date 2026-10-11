@@ -4,18 +4,22 @@
 // computer with the install script and a company's CA, as a person installs it; the app starts
 // with its sandbox and trusts that CA, a file tool runs through its chain on the version's bwrap
 // copy, an update is whole on the disk when the power is cut as it ends, and --uninstall removes
-// it, and the app's entry for the CA with it. Then an update inside the app: a
+// it, and the app's entry for the CA with it. With nested virtualization, the app also downloads
+// its guest's image from that server and boots it, QEMU with no locked memory, and runs a command
+// there in a chat and in a project thread's copy, whose folder the guest's root reads through a
+// share served on that bwrap copy and cannot write. Then an update inside the app: a
 // version with a bound folder takes the next release through polkit and starts again on it, a
 // user who is no administrator keeps it, and --version rolls it back.
 //
 // Behind SUROGATE_ACCEPTANCE_TESTS=1, with SUROGATE_ACCEPTANCE_IMAGES naming a folder that holds
 // noble.img and resolute.img (cloud-images.ubuntu.com's <release>-server-cloudimg-amd64.img).
-// It needs /dev/kvm, QEMU, qemu-img, ssh and ssh-keygen, npm run build first, the Ubuntu archive
-// for the VMs' apt, and about 40 minutes. The VMs and everything they wrote are removed after.
+// It needs /dev/kvm, QEMU, qemu-img, ssh and ssh-keygen, the guest's image (images/guest/build.sh)
+// and npm run build first, the Ubuntu archive for the VMs' apt, and about 40 minutes. The VMs and
+// everything they wrote are removed after.
 
 import { type ChildProcess, type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +30,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const DESKTOP = fileURLToPath(new URL("..", import.meta.url));
 const IMAGES = process.env.SUROGATE_ACCEPTANCE_IMAGES ?? "";
+// The guest's image as images/guest/build.sh leaves it: the release carries its manifest, and the
+// server has its two files where a release publishes them.
+const GUEST = join(DESKTOP, "..", "images", "guest", "out");
 const VERSION = "1.2.3";
 // The release an update brings, applied just before the power is cut.
 const NEXT = "1.2.4";
@@ -49,6 +56,29 @@ createServer((request, response) => {
 const DESKTOP_LIBRARIES = "xvfb xauth libgtk-3-0t64 libnss3 libgbm1 libasound2t64";
 // The app's AppArmor profile, as the kernel names it on a process it has.
 const LABEL = "surogate-desktop (unconfined)";
+// The end of the guest's init (vm/init), and what the guest probe's agent disk runs before it: the
+// guest's own root, beside the agent and in its mount namespace, doing in a project folder's place
+// what no write of the guest's may. Once the place's two folders are mounted for the agent's git,
+// it says how the folder is mounted, reads it, and tries to write it, a remount aside. What it found
+// is a file in the place's history, which this computer reads.
+const AGENT = "exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js";
+const AS_ROOT = `(
+  until at=$(ls -d /run/surogate/places/* 2>/dev/null) && mountpoint -q "$at/history" && mountpoint -q "$at/real"; do sleep 0.1; done
+  tried() { "$@" 2>/dev/null && echo done || echo refused; }
+  {
+    findmnt -rn -o FSTYPE,OPTIONS "$at/real"
+    cat "$at/real/Report.txt" || echo "read: refused"
+    echo "make: $(tried cp /dev/null "$at/real/made")"
+    echo "replace: $(tried cp /dev/null "$at/real/Report.txt")"
+    echo "remove: $(tried rm "$at/real/Report.txt")"
+    echo "remount: $(tried mount -o remount,rw "$at/real")"
+    findmnt -rn -o FSTYPE,OPTIONS "$at/real"
+    echo "make again: $(tried cp /dev/null "$at/real/made-again")"
+    echo "replace again: $(tried cp /dev/null "$at/real/Report.txt")"
+  } > "$at/history/found.partial" 2>&1
+  mv "$at/history/found.partial" "$at/history/found"
+) &
+`;
 // A release's tarball $1, tarred again as $2, the release of version $4, with the file $5 in its
 // app as that app's main, in a folder of its own under $3.
 const WITH_MAIN = String.raw`
@@ -149,13 +179,15 @@ const control = (qemu: ChildProcessWithoutNullStreams) => new Promise<(command: 
 });
 
 describe("the acceptance VMs' probe", () => {
-  it("runs the executor the app's main makes its own through, which makes no other", () => {
+  it("runs the executor and the VM the app's main makes its own through, which makes no other", () => {
     // The probe is a second main: what it runs is the app's only as long as the app's main makes
-    // its executor where the probe does, and gives no file host and no VM a bwrap of its own choosing.
+    // its executor and its VM where the probe does, and gives no file host and no VM a bwrap of
+    // its own choosing.
     const makes = (file: string) => readFileSync(join(DESKTOP, file), "utf8").match(/new (?:VmExecutor|ToolHosts|VmClient)\(|app(?:Tools|Vm)\(|bwrapPath|bwrap:/g);
     expect(makes("src/shell/main.ts")).toEqual(["appVm(", "appTools("]);
     // The probe's other executor is its control's, which is given no bwrap either.
     expect(makes("test/acceptance/probe.mjs")).toEqual(["new VmExecutor(", "appTools("]);
+    expect(makes("test/acceptance/guest-probe.mjs")).toEqual(["appVm(", "appTools("]);
   });
 });
 
@@ -197,6 +229,7 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     for (const image of ["noble.img", "resolute.img"]) {
       if (!existsSync(join(IMAGES, image))) throw new Error(`SUROGATE_ACCEPTANCE_IMAGES names no folder that holds ${image}: "The acceptance VMs" in the README says where the images are kept, and the two lines that bring them back`);
     }
+    if (!existsSync(join(GUEST, "manifest.json"))) throw new Error(`${GUEST} holds no guest image: run images/guest/build.sh first`);
     dir = mkdtempSync(join(tmpdir(), "acceptance-"));
     const www = join(dir, "www", "desktop");
     // The install script that trusts the test's own key, and publish.sh beside it, as the two are
@@ -208,12 +241,11 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     writeFileSync(join(dir, "release", "install.sh"), script);
     copyFileSync(join(DESKTOP, "release", "publish.sh"), join(dir, "release", "publish.sh"));
     chmodSync(join(dir, "release", "publish.sh"), 0o755);
-    writeFileSync(join(dir, "vm-manifest.json"), `${JSON.stringify({ key: "a".repeat(64), files: [] })}\n`);
     // Each release where the bucket has it, <base>/desktop/releases/<version>/: its tarball, and
     // its manifest and signature.
     for (const version of [VERSION, NEXT]) {
       const out = join(www, "releases", version);
-      const packed = await run(join(DESKTOP, "scripts", "package.sh"), [version, join(dir, "vm-manifest.json"), out, join(dir, "release", "install.sh")]);
+      const packed = await run(join(DESKTOP, "scripts", "package.sh"), [version, join(GUEST, "manifest.json"), out, join(dir, "release", "install.sh")]);
       expect(packed.status, packed.stderr).toBe(0);
       await signed(version, out);
     }
@@ -225,7 +257,15 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     // The newest release is the first: the update is one the app would have found later.
     copyFileSync(join(www, "releases", VERSION, "manifest.json"), join(www, "latest.json"));
     writeFileSync(join(www, "install.sh"), script);
-    copyFileSync(join(DESKTOP, "test", "acceptance", "probe.mjs"), join(dir, "www", "probe.mjs"));
+    // The guest's image where a release publishes it, <base>/desktop/vm/<key>/, as it is downloaded.
+    const { key } = JSON.parse(readFileSync(join(GUEST, "manifest.json"), "utf8")) as { key: string };
+    mkdirSync(join(www, "vm", key), { recursive: true });
+    for (const file of ["rootfs.img.zst", "vmlinuz.zst"]) symlinkSync(join(GUEST, file), join(www, "vm", key, file));
+    for (const probe of ["probe.mjs", "guest-probe.mjs"]) copyFileSync(join(DESKTOP, "test", "acceptance", probe), join(dir, "www", probe));
+    // The guest probe's init, with the guest's root trying a place's folder before the agent starts.
+    const init = readFileSync(join(DESKTOP, "vm", "init"), "utf8");
+    if (!init.includes(AGENT)) throw new Error(`vm/init has no ${AGENT}`);
+    writeFileSync(join(dir, "www", "guest-init"), init.replace(AGENT, `${AS_ROOT}${AGENT}`));
     // The VMs' own login key: never this user's, and no agent of theirs is offered.
     expect((await run("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", join(dir, "key")])).status).toBe(0);
     server = spawn(process.execPath, ["-e", SERVE, join(dir, "www")], { stdio: ["ignore", "pipe", "inherit"] });
@@ -263,7 +303,7 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     expect((await run("qemu-img", ["create", "-q", "-f", "qcow2", "-b", join(IMAGES, image), "-F", "qcow2", join(vm, "disk.qcow2"), "20G"])).status).toBe(0);
     const sshPort = await freePort();
     const qemu = spawn("qemu-system-x86_64", [
-      "-machine", "q35,accel=kvm", "-cpu", nested ? "host" : "host,-vmx,-svm", "-m", "4096", "-smp", "4", "-display", "none", "-serial", `file:${join(vm, "console.log")}`,
+      "-machine", "q35,accel=kvm", "-cpu", nested ? "host" : "host,-vmx,-svm", "-m", "8192", "-smp", "4", "-display", "none", "-serial", `file:${join(vm, "console.log")}`,
       "-drive", `file=${join(vm, "disk.qcow2")},if=virtio`, "-nic", `user,hostfwd=tcp:127.0.0.1:${sshPort}-:22`,
       "-smbios", `type=1,serial=ds=nocloud;s=http://10.0.2.2:${port}/seed/`,
       "-qmp", "stdio", "-pidfile", join(vm, "qemu.pid"),
@@ -305,7 +345,7 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
 
   for (const [release, image] of [["24.04", "noble.img"], ["26.04", "resolute.img"]] as const) {
     for (const nested of [true, false]) {
-      it(`installs on a clean Ubuntu ${release} ${nested ? "with" : "without"} hardware virtualization, starts sandboxed, runs a file tool on its bwrap copy, has an update whole after a power cut as it ends, and uninstalls`, async () => {
+      it(`installs on a clean Ubuntu ${release} ${nested ? "with" : "without"} hardware virtualization, starts sandboxed, runs a file tool on its bwrap copy${nested ? ", boots its guest and runs commands there, a thread's folder served read-only from that copy" : ""}, has an update whole after a power cut as it ends, and uninstalls`, async () => {
         const { login, env, ssh, serial, tell, stop } = await booted(image, nested);
         try {
           const base = `http://10.0.2.2:${port}`;
@@ -378,6 +418,61 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
           expect(Object.keys(system.programs)).not.toContain("/opt/surogate/versions/0.0.1/bin/bwrap");
           if (release === "24.04") expect(system).toMatchObject({ outcome: { ok: null }, programs: { "/usr/bin/bwrap": LABEL } });
           else expect(system.outcome.error?.message).toContain("nested userns is capability-restricted");
+
+          // Commands in the guest, as the app runs them: the guest probe, the same version's main in
+          // place of the file tool's, makes its VM and its executor where the app's main makes its
+          // own, downloads the image from the server, and boots it under KVM. A chat's command runs
+          // in its folder; a project thread's in its copy, which the guest's git makes from the
+          // thread's folder, shared with the guest's root read-only from the version's bwrap copy.
+          // Its agent disk has the guest's root try to write that folder, a remount aside (AS_ROOT).
+          if (nested) {
+            const disk = "/opt/surogate/versions/0.0.1/resources/vm/agent.img";
+            expect((await ssh(`curl -fsS ${base}/guest-probe.mjs | sudo tee /opt/surogate/versions/0.0.1/resources/app/guest-probe.mjs >/dev/null `
+              + "&& sudo sh -c 'jq \".main = \\\"guest-probe.mjs\\\"\" /opt/surogate/versions/0.0.1/resources/app/package.json >/tmp/p.json && mv /tmp/p.json /opt/surogate/versions/0.0.1/resources/app/package.json' "
+              // debugfs ends 0 whatever it could not do: the disk is read back.
+              + `&& curl -fsS -o init ${base}/guest-init && sudo chown root:root init && sudo chmod 0755 init `
+              + `&& sudo debugfs -w -R 'rm /init' ${disk} && sudo debugfs -w -R 'write init /init' ${disk} && sudo debugfs -R 'cat /init' ${disk} 2>/dev/null | cmp - init && sudo rm init`)).status).toBe(0);
+            const said = await ssh("DBUS_SESSION_BUS_ADDRESS=disabled: timeout 900 xvfb-run -a /opt/surogate/versions/0.0.1/surogate --password-store=basic 2>guest-probe.log | grep '^{' | tail -n 1 | grep . "
+              + "|| { tail -c 4000 guest-probe.log >&2; false; }", 960_000);
+            expect(said.status, said.stderr).toBe(0);
+            const guest = JSON.parse(said.stdout) as {
+              main: string; boot: string; error?: string; chat?: { ok?: { output: string } }; thread?: unknown; found?: string | null;
+              qemu?: { program: string; label: string; memlock: string[] | null };
+              daemons?: Array<{ program: string; label: string; under: Array<{ program: string; label: string }> }>;
+            };
+            expect(guest.error, said.stdout).toBeUndefined();
+            expect(guest.main).toBe(LABEL);
+            // The chat's command ran in the guest, a kernel booted apart from this VM's, and wrote its folder.
+            expect(guest.chat, said.stdout).toEqual({ ok: { output: expect.stringMatching(/^[0-9a-f-]{36}\n$/), returncode: 0, timed_out: false } });
+            expect(guest.chat!.ok!.output.trim()).not.toBe(guest.boot);
+            expect((await ssh("cat chat/made.txt")).stdout).toBe("made in the guest\n");
+            // The thread's ran in its copy, made of the folder, which kept its own file.
+            expect(guest.thread, said.stdout).toEqual({ ok: { output: "the real report\nthe thread's\n", returncode: 0, timed_out: false } });
+            // QEMU as the app starts it, under the app's profile with no locked memory allowed; the
+            // folder the guest's root reads alone, from the version's bwrap copy under that profile.
+            expect(guest.qemu, said.stdout).toEqual({ program: "/usr/bin/qemu-system-x86_64", label: LABEL, memlock: ["0", "0"] });
+            // Its daemon is Ubuntu's virtiofsd, under the profile Ubuntu gives it, as every other folder's is.
+            const bwrap = "/opt/surogate/versions/0.0.1/bin/bwrap";
+            const virtiofsd = { program: "/usr/libexec/virtiofsd", label: "virtiofsd (unconfined)" };
+            expect(guest.daemons!.filter((daemon) => daemon.program === bwrap), said.stdout).toEqual([{ program: bwrap, label: LABEL, under: [{ program: bwrap, label: LABEL }, virtiofsd, virtiofsd] }]);
+            const others = guest.daemons!.filter((daemon) => daemon.program !== bwrap).map(({ program, label }) => ({ program, label }));
+            expect(new Set(others.map((daemon) => JSON.stringify(daemon))), said.stdout).toEqual(new Set([JSON.stringify(virtiofsd)]));
+            // The guest's root reads the folder, and writes nothing of it: not through its mount,
+            // nor once it has remounted it for writing.
+            expect(guest.found?.split("\n"), said.stdout).toEqual([
+              "virtiofs ro,nosuid,nodev,noexec,relatime",
+              "the real report",
+              "make: refused",
+              "replace: refused",
+              "remove: refused",
+              "remount: done",
+              "virtiofs rw,nosuid,nodev,noexec,relatime",
+              "make again: refused",
+              "replace again: refused",
+              "",
+            ]);
+            expect((await ssh("ls -A project && cat project/Report.txt")).stdout).toBe("Report.txt\nthe real report\n");
+          }
           await ssh("sudo rm -rf /opt/surogate/versions/0.0.1");
 
           // The scheme registered for every user, the user in kvm, and the record.
