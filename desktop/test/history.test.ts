@@ -15,8 +15,8 @@ import { type Asked, askHistory, Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
 import { boundsFor } from "../src/guest/root.js";
 import type { Outcome } from "../src/link/protocol.js";
-import { checked, forgettable, type HistoryRequest, named } from "../src/vm/history.js";
-import { type BootVm, type Place, VmManager, type VmOptions, WAITS } from "../src/vm/manager.js";
+import { checked, forgettable, type HistoryRequest, named, NOT_A_REQUEST } from "../src/vm/history.js";
+import { type BootVm, Guest, type Place, VmManager, type VmOptions, WAITS } from "../src/vm/manager.js";
 
 const KEY = "0123456789abcdef";
 const OTHER_KEY = "fedcba9876543210";
@@ -297,6 +297,15 @@ if (args.then === "look") {
   process.stdout.write(JSON.stringify({ asked, argv: readFileSync("/proc/self/cmdline", "utf8").split("\0").slice(2, -1), env: process.env, cwd: process.cwd() }));
 } else if (args.then === "flood") {
   process.stdout.write("x".repeat(7 * 1024 ** 2), wait);
+} else if (args.then === "outlive") {
+  // It ends well at once, and leaves behind, in a group of its own, what writes an answer past its size once it has
+  // gone: all that comes before the answer's size is one that could be read.
+  spawn(process.execPath, ["-e", \`
+    const gone = () => { try { process.kill(\${process.pid}, 0); return false; } catch { return true; } };
+    const write = () => (gone() ? process.stdout.write("{}" + " ".repeat(7 * 1024 ** 2)) : setTimeout(write, 10));
+    write();
+  \`], { detached: true, stdio: ["ignore", "inherit", "ignore"] }).unref();
+  process.exit(0);
 } else {
   const writer = spawn("/bin/sh", ["-c", "while [ -d " + store + " ]; do echo beat >> " + store + "/beat; sleep 0.02; done"], { stdio: "ignore" });
   writeFileSync(store + "/writer.pid", String(writer.pid));
@@ -403,6 +412,8 @@ describe("a request to a folder's history, as the agent runs it", () => {
 
   it("answers that the history did not, for an answer past its size and a history that cannot be run", async () => {
     expect(await mounted.history(KEY, request("flood"), signal())).toEqual(NO_ANSWER);
+    // Past its size, whatever came before that, though the history itself ended well.
+    expect(await mounted.history(KEY, request("outlive"), signal())).toEqual(NO_ANSWER);
     const none = new Places({
       folder: join(dir, "places"), mount: async () => {}, unmount: async () => {},
       ask: (asked, stop) => askHistory(asked, stop, [join(dir, "no-python"), "-I", join(dir, "history.mjs")]),
@@ -1030,6 +1041,14 @@ describe("the VM manager, asked for a folder's history", () => {
     setTimeout(() => cancel.abort(), 50);
     expect(await waiting).toEqual(CANCELLED);
     await manager.stop();
+    // Nor does a guest asked itself: it adds no place for such a request, and asks its agent nothing.
+    const told: unknown[] = [];
+    const booted = await Guest.boot(guest(told, async () => ({ ok: {} })), options());
+    for (const change of [{ thread: "../x" }, { user: "u1\n" }, { action: 7 }, { args: [] }]) {
+      expect(await booted.history({ ...ask("open"), ...change } as unknown as HistoryRequest, signal())).toEqual(NOT_A_REQUEST);
+    }
+    expect(told).toEqual([]);
+    await booted.stop();
   });
 
   // A history whose requests are answered when the test says: what was asked, and each one's answer let go.
