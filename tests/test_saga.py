@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.devices.history import ComputerRefused
 from surogates.governance.saga.compensator import UndoOwed, compensate_step, undo_on_computer
 from surogates.governance.saga.state_machine import (
     Saga,
@@ -467,6 +468,29 @@ class TestUndoOnComputer:
         assert [(entry["path"], entry["why"]) for entry in owed.value.left] == [("a.md", "owed"), ("b.md", "owed")]
 
     @pytest.mark.asyncio
+    async def test_at_the_stop_a_step_its_undo_can_never_take_back_is_named_why_and_only_the_rest_owed(self):
+        orch = SagaOrchestrator(default_step_timeout=1)
+        saga = orch.create_saga(uuid4())
+        # a.md had no snapshot, before every step that has one; c.md had none either, after b.md's.
+        for n, (path, taken) in enumerate((("a.md", None), ("b.md", "1" * 40), ("c.md", None), ("d.md", "3" * 40))):
+            step = orch.add_step(saga.saga_id, tool_name="write_file", tool_call_id=f"tc{n}", arguments={"path": path},
+                                 checkpoint_hash=taken)
+            step.transition(StepState.EXECUTING)
+            step.transition(StepState.COMMITTED)
+
+        async def restore(turn, commit) -> None:
+            if commit == "3" * 40:
+                raise ComputerRefused("history", "The folder's history failed", "failed")
+            await asyncio.Event().wait()
+
+        with pytest.raises(UndoOwed) as owed:
+            await undo_on_computer(saga, copy=SimpleNamespace(restore=restore), turn=0, ran=lambda step: True)
+        # d.md's put-back was refused already, and no snapshot is older than a.md: only b.md's snapshot can take back the rest.
+        assert [(entry["path"], entry["why"], entry.get("code")) for entry in owed.value.left] == [
+            ("a.md", "no_snapshot", None), ("b.md", "owed", None), ("c.md", "owed", None), ("d.md", "refused", "failed"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_at_the_threads_next_turn_each_put_back_waits_for_its_computer_as_long_as_it_takes(self):
         # Its steps' bound is none of its own: past it, it waits on.
         saga = self.stopped_turn(timeout=0)
@@ -508,3 +532,25 @@ class TestSagaRecord:
         rebuilt = SagaOrchestrator()
         rebuilt.reconstruct_from_events([SimpleNamespace(type="saga.start", data={"saga_id": "s1", "session_id": str(uuid4())})])
         assert rebuilt.get_saga("s1").kind == "tools"
+
+
+class TestStopLeft:
+
+    def test_a_stop_left_owed_promises_the_take_back_only_of_the_steps_owed_and_says_what_the_others_do(self):
+        from surogates.governance.saga.compensator import (
+            STOP_NOT_YET, STOP_NOT_YET_LANDED, STOP_NOT_YET_LEFT_IN_COPY, stop_left,
+        )
+
+        owed = {"step_id": "s2", "tool": "write_file", "why": "owed", "path": "b.md"}
+        staying = {"step_id": "s1", "tool": "terminal", "why": "no_snapshot"}
+        landed = {"step_id": "s0", "tool": "write_file", "why": "landed", "path": "a.md"}
+        assert stop_left([owed])["error_title"] == STOP_NOT_YET
+        assert stop_left([staying, owed])["error_title"] == STOP_NOT_YET_LEFT_IN_COPY
+        assert stop_left([landed, staying, owed])["error_title"] == STOP_NOT_YET_LEFT_IN_COPY
+        # Steps already landed are not said to stay in the copy.
+        assert stop_left([landed, owed])["error_title"] == STOP_NOT_YET_LANDED
+        # Where a step is not owed, the take-back is promised to the steps owed alone, and the others' fate said.
+        for title in (STOP_NOT_YET_LEFT_IN_COPY, STOP_NOT_YET_LANDED):
+            assert "this turn is taken back" not in title and "not taken back yet are taken back" in title
+        assert "What the others changed stays in this thread's copy" in STOP_NOT_YET_LEFT_IN_COPY
+        assert "The others had already landed in your folder." in STOP_NOT_YET_LANDED

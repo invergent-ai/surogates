@@ -1,18 +1,18 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync,
-  writeFileSync,
+  chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  symlinkSync, utimesSync, writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { downloadSaver } from "../src/browser/downloads.js";
 import { untoldIn } from "../src/files/land.js";
-import { kinds, perform } from "../src/files/operations.js";
+import { kinds, OWN_FILE, perform } from "../src/files/operations.js";
 import { type Copy, type Handle, historyOff, type Opened } from "../src/history/copies.js";
 import { keyOf } from "../src/history/place.js";
 import type { Binding } from "../src/journal/bindings.js";
@@ -21,7 +21,7 @@ import { LOCK_WAIT_MS } from "../src/hosts/folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
   APP_DIRS, type BoundFolder, CANCELLED, folderBusy, forkHost, type Guard, HOST_STOPPED, type HostProcess, LAND_WAIT_MS, NODE, NOT_BOUND, nothingToLand, QUIT_STEP_MS,
-  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions,
+  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, STEP_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 import { asItLies } from "./as-it-lies.js";
 
@@ -1315,6 +1315,20 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(fakes).toHaveLength(2);
   });
 
+  it("names a thread among those working from its landing's first step until the landing is forgotten, between its steps too, and says each time that changes", async () => {
+    let changes = 0;
+    const executor = threads({ changed: () => void (changes += 1) });
+    const step = landing("apply", { saga: "s1", step: 0, path: "a.txt" });
+    expect(await executor.land(step, signal())).toEqual({ ok: step.id });
+    // No step of it runs now, and its next is still to come: a quit now would cut the landing in the folder.
+    expect([executor.liveRoots(), changes]).toEqual([[ROOT_A], 1]);
+    const forget = landing("forget", { saga: "s1", applied: [] });
+    expect(await executor.land(forget, signal())).toEqual({ ok: forget.id });
+    await until(() => gone === 1);
+    expect(executor.liveRoots()).toEqual([]);
+    expect(changes).toBeGreaterThan(1);
+  });
+
   it("keeps the folder held through the forgetting of a landing its turn only settled, and starts no host for a hold's forgetting where the thread holds nothing", async () => {
     const executor = threads();
     // Its turn gives back a hold it never took: nothing is let go, nothing waits for the folder, and its copy is not opened.
@@ -1459,10 +1473,7 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(fakes[2]?.sent[0]).toMatchObject({ type: "start", folder: copyOf(ROOT_A).folder.path, expect: { dev: 7, ino: 71, boot: BOOT_ID } });
   });
 
-  it.each([
-    ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
-    ["this computer's access ended", (executor: ToolHosts) => executor.end()],
-  ])("stops a landing's host, %s, only once the step its helper runs has ended, a cancelled one too, and the landing's next step waits in a host of its own", async (_, going) => {
+  it("stops a landing's host, this computer's access ended, only once the step its helper runs has ended, a cancelled one too, and the landing's next step waits in a host of its own", async () => {
     const executor = threads({ spawnHost: spawnHost(readyOnly) });
     const cancel = new AbortController();
     const step = landing("apply", { saga: "s1", step: 0, path: "a.txt" });
@@ -1472,7 +1483,7 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     cancel.abort();
     expect(await applying).toEqual(CANCELLED);
     let over = false;
-    const stopped = going(executor).then(() => {
+    const stopped = executor.end().then(() => {
       over = true;
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1486,6 +1497,53 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect([fakes[0]?.count("stop"), fakes[0]?.killed]).toEqual([1, 0]);
     fakes[1]?.say({ type: "result", id: next.id, outcome: { ok: "looked" } });
     expect(await looking).toEqual({ ok: "looked" });
+  });
+
+  it.each([
+    ["this computer's access ending", (executor: ToolHosts): Promise<unknown> => executor.end(), undefined],
+    // A forgetting that waited for the step is not sent: it can be asked again of the next landing's host.
+    ["its landing forgotten", (executor: ToolHosts): Promise<unknown> => executor.land(landing("forget", { saga: "s1", applied: [] }), signal()), NOT_BEGUN],
+  ])("gives a landing's step hung on a dead mount STEP_MS, %s, and then stops its host: what the step left, the next landing's helper puts back", async (_, going, answered) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const executor = threads({ spawnHost: spawnHost(readyOnly) });
+      const hung = landing("apply", { saga: "s1", step: 0, path: "a.txt" });
+      const applying = executor.land(hung, signal());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fakes[0]?.count("op")).toBe(1);
+      let over: { outcome: unknown } | null = null;
+      void going(executor).then((outcome) => {
+        over = { outcome };
+      });
+      await vi.advanceTimersByTimeAsync(STEP_MS - 1);
+      expect([fakes[0]?.count("stop"), fakes[0]?.count("op"), over]).toEqual([0, 1, null]);
+      // Its host is stopped then: a forgetting that gave the step up stops it at once.
+      await vi.advanceTimersByTimeAsync(2);
+      expect(fakes[0]?.count("stop")).toBe(1);
+      expect(await applying).toEqual(HOST_STOPPED);
+      await vi.advanceTimersByTimeAsync(0);
+      expect([over, fakes[0]?.count("op")]).toEqual([{ outcome: answered }, 1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives a landing's step hung on a dead mount STEP_MS once no step of it is waited for, a cancelled one, and then stops its host", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const executor = threads({ spawnHost: spawnHost(readyOnly) });
+      const cancel = new AbortController();
+      const applying = executor.land(landing("apply", { saga: "s1", step: 0, path: "a.txt" }), cancel.signal);
+      await vi.advanceTimersByTimeAsync(1);
+      cancel.abort();
+      expect(await applying).toEqual(CANCELLED);
+      await vi.advanceTimersByTimeAsync(STEP_MS - 1);
+      expect(fakes[0]?.count("stop")).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(fakes[0]?.count("stop")).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("gives a landing's step QUIT_STEP_MS at the app's quit, and then stops its host: what the step left, the next landing's helper puts back", async () => {
@@ -1542,21 +1600,18 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     await until(() => fakes[0]?.count("stop") === 1);
   });
 
-  it("stops, when its thread is dismissed, the hosts its operations were starting while its copy was opened, once they are made", async () => {
+  it("stops, when its thread is deleted, the hosts its operations were starting while its copy was opened, once they are made", async () => {
     const makes: Array<(opened: Opened) => void> = [];
     answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
     // Hosts that are still starting when they are told to go.
     const executor = threads({ spawnHost: spawnHost(onStop) });
     const waiting = [executor.run(op("resolve", { path: "" }), signal()), executor.land(landing("revisions", { paths: [] }), signal())];
     await until(() => opens.length === 2);
-    let over = false;
-    const dismissed = executor.dismiss(ROOT_A).then(() => {
-      over = true;
-    });
+    executor.retired(ROOT_A, boundA());
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(over).toBe(false);
+    expect(fakes).toHaveLength(0);
     for (const make of makes) make(handed(ROOT_A));
-    await dismissed;
+    await until(() => gone === 2);
     // Each was told to go as it was made: neither ran what waited for it, and each let its hold go.
     expect([fakes.length, fakes.map((host) => host.count("stop")), fakes.map((host) => host.count("op")), closed.length]).toEqual([2, [1, 1], [0, 0], 2]);
     for (const outcome of await Promise.all(waiting)) {
@@ -1733,7 +1788,10 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
   });
 
   it.each([
-    ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
+    ["its thread deleted", (executor: ToolHosts) => {
+      executor.retired(ROOT_A, boundA());
+      return until(() => gone === 1);
+    }],
     ["the app quitting", (executor: ToolHosts) => executor.stop()],
   ])("begins no step in a landing's host told to go, %s, while the step waited for it to start, whatever it says as it stops", async (_, going) => {
     // As a host that has just taken the folder when it is told to stop: it says it is ready, then goes.
@@ -1880,6 +1938,120 @@ describe("what landings cut short in this computer's folders, put back by a host
     expect(recoveries()).toHaveLength(2);
   });
 
+  it("names what holds the folder where a recovery waits for it in vain: a thread's landing there, or what the app ran before its last connection", async () => {
+    left();
+    says = (nth) => (nth < 3 ? BUSY : ready);
+    // The folder's thread, with its copy to land from.
+    const place = { key: keyOf(folder()), history: join(realpathSync(data()), "history", keyOf(folder())), real: { path: folder(), ...identities.get(folder())! } };
+    const lands = (host: FakeHost) => (host.sent[0] as HostStart).landing !== undefined;
+    const executor = recovering({
+      bindingOf: (root) => (root === ROOT_A ? { folder: folder(), ...identities.get(folder())!, history: root } : undefined),
+      copies: {
+        open: async (root) => ({ copy: { place, folder: { path: join(place.history, "threads", root), dev: 7, ino: 70, boot: BOOT_ID }, at: folder() }, handle: Object.freeze({ root }) }),
+        close: () => {},
+        ask: forgets,
+      },
+      // A landing's host is ready when the test says, and answers its steps.
+      spawnHost: () => {
+        const host = new FakeHost((one, message) => {
+          if (!lands(one)) return behave(one, message);
+          if (message.type === "op") one.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+          onStop(one, message);
+        });
+        fakes.push(host);
+        return host;
+      },
+    });
+    // Nothing of this computer's tools holds it: what the app ran before it connected again does, as its hosts stop.
+    executor.recoverLeft();
+    const earlier = `What the app ran on this computer before its last connection to the server is still working in ${folder()}`;
+    const held = (holder: string) => ({ folder: folder(), state: "left", why: `${holder}, so what a landing cut short there is not put back yet. It is put back once that one is done` });
+    expect(await executor.recoverBefore(folder(), signal())).toEqual({
+      error: { type: "busy", message: `${earlier}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+    });
+    expect(told[1]).toEqual(held(earlier));
+    // A thread's landing whose host still waits for the folder holds nothing of it.
+    const look = { ...op("land", { action: "revisions", paths: [] }), invocationId: "land:7" };
+    const looking = executor.land(look, signal());
+    await until(() => fakes.some(lands));
+    executor.recoverLeft();
+    await until(() => told.length === 4);
+    expect(told[3]).toEqual(held(earlier));
+    // Once it holds the folder, it is what holds it.
+    fakes.find(lands)?.say({ type: "ready", processes: [] });
+    expect(await looking).toEqual({ ok: look.id });
+    executor.recoverLeft();
+    await until(() => told.length === 6);
+    expect(told[5]).toEqual(held(`A thread's landing on this computer is working in ${folder()}`));
+  });
+
+  it("starts one chat's host for two of its operations that waited for one put-back, and none for one whose wait the app's quit ended", async () => {
+    left();
+    let go = () => {};
+    // The first recovery's host holds the folder when the test says; those after it never do.
+    says = (nth) => {
+      if (nth === 0) void new Promise<void>((resolve) => {
+        go = resolve;
+      }).then(() => recoveries()[0]?.say(ready));
+      return null;
+    };
+    const chats = () => fakes.filter((host) => (host.sent[0] as HostStart).recovery === undefined);
+    const executor = recovering();
+    executor.recoverLeft();
+    const both = [executor.run(op("resolve", { path: "" }), signal()), executor.run(op("resolve", { path: "" }), signal())];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    go();
+    expect(await Promise.all(both)).toEqual([{ ok: expect.any(String) }, { ok: expect.any(String) }]);
+    expect(chats()).toHaveLength(1);
+    // A chat's operation still waiting for the put-back when the app quits starts no host after the quit.
+    left(folders[ROOT_B] ?? "");
+    executor.recoverLeft();
+    await until(() => recoveries().length === 3);
+    const waiting = executor.run(op("resolve", { path: "" }, ROOT_B), signal());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await executor.stop();
+    expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } });
+    expect(chats()).toHaveLength(1);
+  });
+
+  it("answers a read that waits for a put-back cancelled at once, and the app's quit puts back nothing more", async () => {
+    left();
+    // A recovery's host that never holds the folder.
+    says = () => null;
+    const executor = recovering();
+    executor.recoverLeft();
+    const cancel = new AbortController();
+    const reading = executor.recoverBefore(folder(), cancel.signal);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    cancel.abort();
+    expect(await Promise.race([reading, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 500))])).toEqual(CANCELLED);
+    await executor.stop();
+    // Asked once the app is quitting: said, and no host is started for it.
+    const hosts = fakes.length;
+    executor.recoverLeft();
+    const quitting = { error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } };
+    expect(await executor.recoverBefore(folder(), signal())).toEqual(quitting);
+    expect(told.at(-1)).toEqual({ folder: folder(), state: "left", why: "the app is quitting" });
+    expect(fakes).toHaveLength(hosts);
+  });
+
+  it("names a put-back of what another landing cut short, where that holds the folder a recovery waits for in vain", async () => {
+    left();
+    left(folder(), `${keyOf(folder())}.was-1700000000000`);
+    // The first holds the folder, and puts back until the test says.
+    holds = true;
+    says = (nth) => (nth === 0 ? ready : BUSY);
+    const executor = recovering();
+    executor.recoverLeft();
+    await until(() => told.some(({ state }) => state === "left"));
+    expect(told.find(({ state }) => state === "left")).toEqual({
+      folder: folder(), state: "left",
+      why: `This computer is putting back in ${folder()} what another landing there cut short, so what a landing cut short there is not put back yet. It is put back once that one is done`,
+    });
+    const step = recoveries()[0]?.sent.find((message) => message.type === "op") as Extract<ToHost, { type: "op" }>;
+    recoveries()[0]?.say({ type: "result", id: step.id, outcome: { ok: found } });
+  });
+
   it("starts a chat's host on a folder only once that folder's recovery holds it, and waits for that no longer than a chat waits for its folder", async () => {
     left();
     let go = () => {};
@@ -1916,7 +2088,7 @@ describe("what landings cut short in this computer's folders, put back by a host
     }
   });
 
-  it("never stops a recovery's host inside its put-back: this computer's access ending waits for it, and the app's quit gives it QUIT_STEP_MS", async () => {
+  it("never stops a recovery's host inside its put-back but past a bound: this computer's access ending waits STEP_MS for it, and the app's quit QUIT_STEP_MS", async () => {
     left();
     holds = true;
     const executor = recovering();
@@ -2113,10 +2285,17 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     return step("apply", { saga: "s1", step: 0, path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), expected });
   };
   const applied = { ok: { path: "a.txt", before: blob("the user's own\n"), after: blob("the thread's\n"), made: [] } };
+  // The names in the folder that are a landing's own.
+  const own = (lying: ReturnType<typeof lies>) => Object.keys(lying).filter((name) => OWN_FILE.test(basename(name)));
   // The folder once the thread's a.txt has landed whole over the user's: its bytes at the name, with the user's file's
-  // mode, and nothing else changed or left beside it; and the user's file kept, whole, where the folder's landings keep theirs.
+  // mode, and nothing else changed; beside it, under the step's own name until the landing is forgotten, the user's file
+  // it replaced; and a copy of that kept, whole, where the folder's landings keep theirs, another mount in the helper's sandbox.
   const landed = (folder: string, before: ReturnType<typeof lies>) => {
-    expect(lies(folder)).toEqual({ ...before, "a.txt": { mode: before["a.txt"]?.mode, size: 13, mtime: expect.any(Number), bytes: sha256("the thread's\n") } });
+    const now = lies(folder);
+    const [left, ...more] = own(now);
+    expect([now[left ?? ""], more]).toEqual([{ mode: before["a.txt"]?.mode, size: 15, mtime: before["a.txt"]?.mtime, bytes: sha256("the user's own\n") }, []]);
+    delete now[left ?? ""];
+    expect(now).toEqual({ ...before, "a.txt": { mode: before["a.txt"]?.mode, size: 13, mtime: expect.any(Number), bytes: sha256("the thread's\n") } });
     expect(readFileSync(join(base, "data", "landings", keyOf(folder), "s1", "0"), "utf8")).toBe("the user's own\n");
   };
 
@@ -2141,10 +2320,11 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(await chat).toEqual({
       error: { type: "unavailable", message: "This computer could not open the folder's sandbox: another chat on this computer is working in this folder; this one can use it once that one is done" },
     });
-    const after = lies(folder);
-    // Recorded, as the folder's history says: the landing names the apply it sent, and what it kept goes.
+    // Recorded, as the folder's history says: the landing names the apply it sent, and what it kept goes, from the folder too.
     const { ok: { path, before: from, after: to } } = applied;
     expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toEqual({ ok: {} });
+    const after = lies(folder);
+    expect(own(after)).toEqual([]);
     // Forgotten, the landing lets the folder go, and what it kept goes. The chat's host and the second landing's that
     // were told have gone, and the hosts on the copies stay.
     await until(() => exits === 3, 15_000);
@@ -2155,6 +2335,26 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     await until(() => exits === 4, 15_000);
     expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
     expect(lies(folder)).toEqual(after);
+  });
+
+  it("leaves beside its name what a program holding the user's file open wrote into it after a landing replaced it, as the landing is forgotten, and tells it", { timeout: 90_000 }, async () => {
+    const folder = changed();
+    const executor = threads();
+    const apply = await looked(executor);
+    const open = openSync(join(folder, "a.txt"), "r+");
+    try {
+      expect(await executor.land(apply, signal())).toEqual(applied);
+      writeSync(open, "THE USER'S OWN\n", 0);
+    } finally {
+      closeSync(open);
+    }
+    const { ok: { path, before: from, after: to } } = applied;
+    expect(await executor.land(step("forget", { saga: "s1", applied: [{ step: 0, path, before: from, after: to }] }), signal())).toEqual({ ok: {} });
+    expect(Object.fromEntries(readdirSync(folder).map((name) => [name, readFileSync(join(folder, name), "utf8")]))).toEqual({
+      "a.txt": "the thread's\n", "a (kept by Surogate).txt": "THE USER'S OWN\n",
+    });
+    // The next landing's put-back tells it.
+    expect(await executor.land(step("recover"), signal())).toEqual({ ok: { restored: [], beside: [["a.txt", "a (kept by Surogate).txt"]], lost: [], unread: [] } });
   });
 
   it("forgets nothing a landing's helper kept where the forgetting leaves out an apply it holds a record of, and forgets it once named", async () => {
@@ -2206,10 +2406,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect([existsSync(keeps), readFileSync(join(folder, "a.txt"), "utf8")]).toEqual([false, "the user's own\n"]);
   });
 
-  it.each([
-    ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
-    ["the app quitting", (executor: ToolHosts) => executor.stop()],
-  ])("leaves the file whole where a landing's host is told to go, %s, inside an apply: the step ends first, and then the host", async (_, going) => {
+  it("leaves the file whole where a landing's host is told to go, the app quitting, inside an apply: the step ends first, and then the host", async () => {
     const folder = changed();
     const executor = threads({ spawnHost: upset() });
     arm("hold");
@@ -2220,7 +2417,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     // Inside it, between its two renames: the user's file moved aside, its name empty.
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
     let over = false;
-    const gone = going(executor).then(() => {
+    const gone = executor.stop().then(() => {
       over = true;
     });
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -2402,17 +2599,19 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     const { folder, before } = await killed();
     const { executor, told } = startedAgain({ idleMs: 30_000, landWaitMs: 3_000 });
     // A chat holds the folder: the start's put-back waits in vain, and so does the landing that comes after.
+    const chat = spawned.length;
     expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
     executor.recoverLeft();
     await until(() => told.length === 2, 15_000);
     const hosts = spawned.length;
     const landing = executor.land(step("recover"), signal());
     await until(() => spawned.length === hosts + 1, 5_000);
-    expect(await executor.recoverBefore(folder, signal())).toEqual(stillCutShort(folder));
+    expect(await executor.recoverBefore(folder, signal())).toEqual(stillCutShort(folder, "chat"));
     expect(await landing).toEqual(folderBusy(folder));
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
     // Once the chat lets the folder go, the landing's host puts the file back, and the folder may be read.
-    await executor.dismiss(CHAT);
+    executor.retired(CHAT, { folder, ...identities.get(folder)! });
+    await new Promise<void>((resolve) => spawned[chat]?.onExit(resolve));
     expect(await executor.land(step("recover"), signal())).toEqual({ ok: putBack });
     expect(await executor.recoverBefore(folder, signal())).toBeNull();
     expect(lies(folder)).toEqual(before);

@@ -26,7 +26,9 @@ from surogates.devices.history import thread_copy
 from surogates.devices.workspace import DeviceOperationError
 from surogates.governance.events import saga_complete_event, saga_start_event, saga_step_event
 from surogates.governance.saga import SagaOrchestrator
-from surogates.governance.saga.compensator import STOP_LEFT_IN_COPY, STOP_LEFT_LANDED, STOP_NOT_YET, WHY_NOT_TAKEN_BACK
+from surogates.governance.saga.compensator import (
+    STOP_LEFT_IN_COPY, STOP_LEFT_LANDED, STOP_NOT_YET, STOP_NOT_YET_LEFT_IN_COPY, STOP_TAKEN_BACK, WHY_NOT_TAKEN_BACK,
+)
 from surogates.harness import tool_exec
 from surogates.harness.loop_context_replay import worker_note
 from surogates.harness.tool_exec import execute_single_tool
@@ -662,6 +664,74 @@ async def test_a_stop_whose_computer_does_not_answer_its_undo_lets_the_thread_go
     assert restores == [f"checkpoint:0:restore:{hash_}" for hash_ in (third, second, first)]
     assert await undone_of(api, thread, stopped) == ("completed", {})
     assert picture(computer.folder) == folder
+    # Its master, told at the Stop that the turn was not taken back yet, is told in a line that it is now.
+    owed, finished = await what_the_master_heard(api, thread)
+    assert [entry["why"] for entry in owed["not_taken_back"]] == ["owed"] * 3
+    assert (finished["result"], finished["not_taken_back"]) == (STOP_TAKEN_BACK, [])
+    assert worker_note(EventType.WORKER_COMPLETE.value, finished)["content"].endswith(f"was stopped]\n{STOP_TAKEN_BACK}")
+
+
+async def test_a_stop_whose_undo_is_owed_says_what_no_undo_can_take_back_stays_in_the_copy_and_it_lands_with_the_next_turn(
+    api, computer, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    _, _, thread = await begun_with_copy(api, computer)
+    copy = computer.app.places.copy(str(thread.id))
+    refusals = [1]
+
+    def refuses_the_first_snapshot(frame, outcome):
+        if (frame["kind"], frame["args"]["action"]) == ("checkpoint", "take") and refusals[0]:
+            refusals[0] -= 1
+            return refusing_snapshots(frame, outcome)
+        return outcome
+
+    computer.app.lie = refuses_the_first_snapshot
+    held, let_go = holding(computer, "restore")
+    worker = a_worker(api, monkeypatch, thread, [WRITE, EDIT, MEMORY, _final_response("Done.")], during=stopped_by_its_user(api, thread))
+    worker._saga_settings = SimpleNamespace(default_step_timeout=1, default_max_retries=0, retry_delay=0.0)
+    await asyncio.wait_for(worker.wake(thread.id), 10)
+    assert len(held) == 1
+    # The write had no snapshot, and none is older than it: no undo can take it back, and the Stop says it stays and lands.
+    said = await what_the_stop_said(api, thread)
+    assert said["error_title"] == STOP_NOT_YET_LEFT_IN_COPY and said["error_detail"] == "\n".join((
+        f"write_file (Budget.xlsx): {WHY_NOT_TAKEN_BACK['no_snapshot']}",
+        *(f"{step}: {WHY_NOT_TAKEN_BACK['owed']}" for step in ("terminal", "memory")),
+    ))
+    [heard] = await what_the_master_heard(api, thread)
+    assert [entry["why"] for entry in heard["not_taken_back"]] == ["no_snapshot", "owed", "owed"]
+    await let_go()
+
+    async def answered() -> bool:
+        return await left_open(api, thread) == []
+
+    await eventually(answered)
+    await the_next_turn(api, monkeypatch, thread, copy)
+    # As it said: the write lands with the next turn, and the rest is taken back.
+    assert (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
+    assert (computer.folder / "Report.docx").read_bytes() == b"PK report v1"
+    _, last = await what_the_master_heard(api, thread)
+    assert [entry["why"] for entry in last["not_taken_back"]] == ["no_snapshot"]
+
+
+async def test_a_next_turn_that_finishes_a_stops_undo_forgets_its_compacted_reads_where_another_worker_woke_the_thread_since(
+    api, computer, monkeypatch,
+):
+    _, _, thread = await begun_with_copy(api, computer)
+    store = api.app.state.session_store
+    # worker-a woke the thread for an earlier turn, and worker-b for the turn its user stopped, and was lost before its undo.
+    await store.emit_event(thread.id, EventType.HARNESS_WAKE, {"worker_id": "worker-a", "cursor": 0, "names_answers": True})
+    stopped = a_worker(api, monkeypatch, thread, [WRITE, MEMORY, _final_response("Done.")], during=stopped_by_its_user(api, thread))
+    stopped._worker_id, stopped._compensate_sagas = "worker-b", lost
+    with pytest.raises(Lost):
+        await stopped.wake(thread.id)
+    assert (await api.client.post(f"/v1/sessions/{thread.id}/resume", headers=api.auth())).status_code == 200
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    following = a_worker(api, monkeypatch, await store.get_session(thread.id), [_final_response("Done.")])
+    following._worker_id, forgot = "worker-a", []
+    following._forget_compacted_reads = forgot.append
+    await asyncio.wait_for(following.wake(thread.id), 10)
+    # worker-b may have compacted the thread's history: what worker-a's reads point at may be gone.
+    assert await undone_of(api, thread, await the_stopped_saga(api, thread)) == ("completed", {}) and len(forgot) == 1
 
 
 async def test_a_second_stop_while_its_undo_waits_for_its_computer_leaves_the_undo_to_go_on(api, computer, monkeypatch):
