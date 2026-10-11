@@ -3,7 +3,7 @@
 // its own. All text comes from the main process and is set with textContent, or with showText
 // where it may hold the user's paths or QEMU's words.
 
-import { ago, asShown } from "../text.js";
+import { ago, asShown, setAsideLines } from "../text.js";
 import { aged, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
@@ -25,6 +25,10 @@ interface ThreadRow {
   statusLine: string | null;
   progress: { done: number; total: number } | null;
   files: Array<{ kind: "file" | "artifact"; label: string; ref: string; landing: "landed" | "redoing" | "not_merged" | "undone" | null }>;
+  // What its computer set aside of its work, out of its copy there: none for a thread in the cloud.
+  setAside?: {
+    kept: Array<{ kind: "copy" | "repository"; at: string }>; snapshots: number; gone: Array<{ kind: "copy" | "repository"; at: string }>;
+  } | null;
   place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean };
   updatedAt: string;
 }
@@ -216,6 +220,17 @@ function chip(file: ThreadRow["files"][number]): HTMLElement {
   return made;
 }
 
+// What its computer set aside of a thread's work, as a chip whose title says what and when; none where it set none aside.
+// Nothing brings one back yet, so it is a mark and no button.
+function asideChip(aside: ThreadRow["setAside"]): HTMLElement | null {
+  if (!aside) return null;
+  const lines = setAsideLines(aside);
+  if (lines.length === 0) return null;
+  const made = element("span", "chip aside", aside.kept.length > 0 || aside.snapshots > 0 ? "Set aside" : "Set aside, now gone");
+  made.title = `${lines.join(". ")}.`;
+  return made;
+}
+
 // How a version came to be, and who made it, in a line of the app's own words. A thread is said to
 // be one, so that a thread titled "you" never reads as the user. A name from the history is data:
 // shown as the app's prompts show text (asShown), so that none of its characters reorders or hides
@@ -261,10 +276,12 @@ function threadRow(thread: ThreadRow): HTMLElement {
   if (thread.progress) side.append(element("span", "progress", `${thread.progress.done}/${thread.progress.total}`));
   side.append(aged(element("span", "age"), thread.updatedAt));
   row.append(element("span", "mark"), title, element("span", "status", thread.statusLine ? `${words} · ${thread.statusLine}` : words), side);
-  if (thread.files.length > 0) {
+  const aside = asideChip(thread.setAside);
+  if (thread.files.length > 0 || aside) {
     const chips = element("span", "chips");
     for (const file of thread.files.slice(0, 2)) chips.append(chip(file));
     if (thread.files.length > 2) chips.append(element("span", "chip", `+${thread.files.length - 2}`));
+    if (aside) chips.append(aside);
     row.append(chips);
   }
   // Resolved threads come back with Reopen; any other is resolved from its row, a working one stopped first.

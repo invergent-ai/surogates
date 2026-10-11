@@ -17,7 +17,7 @@ from uuid import UUID
 import pytest
 
 from surogates.workstreams.derive import (
-    GROUPS, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of, undone_files,
+    GROUPS, LATEST_TYPES, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of, set_aside_name, undone_files,
 )
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -72,6 +72,7 @@ def row(thread_id: str, title: str, minutes: float, *, group: str, reason=None, 
         # A thread with no landing: its files are its turn summaries', with no mark.
         "files": [{"kind": kind, "label": label, "ref": ref, "thread_id": thread_id, "landing": None} for kind, label, ref in files],
         "landing_id": None,
+        "set_aside": None,
         "place": place, "created_at": wire(ago(minutes + 60)), "updated_at": wire(ago(minutes)),
         "resolved_at": resolved_at and wire(resolved_at),
     }
@@ -306,6 +307,8 @@ def test_a_row_has_the_shells_fields_and_values():
     thread_row = _interface(source, "ThreadRow")
     fields = re.findall(r"^\s*(\w+)\??:", thread_row, re.M)
     file_fields = re.findall(r"^\s*(\w+)\??:", _interface(source, "ProducedFile"), re.M)
+    aside_fields = re.findall(r"^\s*(\w+)\??:", _interface(source, "SetAside"), re.M)
+    whole_fields = re.findall(r"^\s*(\w+)\??:", _interface(source, "SetAsideWhole"), re.M)
     groups = re.findall(r'"(\w+)"', re.search(r"type ThreadGroup = ([^;]+);", source).group(1))
     reasons = re.findall(r'"(\w+)"', re.search(r"^\s*reason: ([^;]+);", thread_row, re.M).group(1))
     assert (list(GROUPS), list(REASONS)) == (groups, reasons)
@@ -315,6 +318,10 @@ def test_a_row_has_the_shells_fields_and_values():
         assert derived["group"] in GROUPS and derived["reason"] in (*REASONS, None)
         assert all(list(f) == [_snake(field) for field in file_fields] for f in derived["files"])
         assert all(derived[key] is None or derived[key].endswith("Z") for key in ("created_at", "updated_at", "resolved_at"))
+    # What a thread's computer set aside, where it set any aside.
+    aside = derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=SET_ASIDE_TOLD), now=NOW)["set_aside"]
+    assert list(aside) == [_snake(field) for field in aside_fields]
+    assert aside["kept"] and aside["gone"] and all(list(whole) == whole_fields for whole in (*aside["kept"], *aside["gone"]))
 
 
 def test_a_thread_whose_files_did_not_merge_waits_on_you_with_the_reason_files():
@@ -428,6 +435,17 @@ def test_a_thread_with_every_landing_undone_or_none_has_none_for_its_card_to_und
     assert derive_thread(facts(IDLE, "Draft A", 5, "completed"), now=NOW)["landing_id"] is None
 
 
+def test_a_threads_landing_on_a_computer_marks_its_files_and_is_none_for_its_card_to_undo():
+    landed = {**landing(40, ("plan.md", None, "p1", True), ("notes.md", "n1", "n2", False)), "on_computer": True}
+    given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(landed,), redoing=frozenset({"notes.md"}))
+    assert marks(given) == [("notes.md", "redoing"), ("plan.md", "landed")]
+    assert derive_thread(given, now=NOW)["landing_id"] is None
+    # An Undo is of the cloud's files: one that names the row marks none of a computer's.
+    assert marks(replace(given, undone=frozenset({(40, "plan.md")}))) == [("notes.md", "redoing"), ("plan.md", "landed")]
+    # The same landing in the cloud is its card's to undo.
+    assert derive_thread(replace(given, landings=({**landed, "on_computer": False},)), now=NOW)["landing_id"] == "40"
+
+
 def undo_row(row_id: int, undoes: list[int], *paths: str) -> dict:
     """An Undo's row as the store reads it: the rows it undid, and each file it put back."""
     return {"id": row_id, "undoes": undoes, "files": [{"path": p, "before": "x", "after": "y", "merged": True} for p in paths]}
@@ -446,3 +464,38 @@ def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
     first, second = undo_row(50, [40], "a.md", "b.md"), undo_row(51, [50], "a.md")
     assert undone_files([first, second]) == {(50, "a.md"), (40, "b.md")}
     assert undone_files([]) == frozenset()
+
+
+#: The names its computer gives what it set aside whole of a thread's: the order, when, whose, and which.
+COPY_NAME = f"00000001-20261010T101500Z-{COMPUTER}.copy"
+REPOSITORY_NAME = f"00000002-20261010T101501Z-{COMPUTER}.repository"
+#: What the newest of a thread's turn ends to record it recorded its computer keeping set aside of the thread's work.
+SET_ASIDE_TOLD = {"copies": [REPOSITORY_NAME], "snapshots": ["a" * 40, "b" * 40], "gone": [COPY_NAME]}
+
+
+def test_a_threads_row_says_what_its_computer_keeps_set_aside_of_its_work_as_its_newest_turn_end_to_record_it_did():
+    given = replace(SHELL_FIXTURES["computer"][0], set_aside=SET_ASIDE_TOLD)
+    assert derive_thread(given, now=NOW)["set_aside"] == {
+        "kept": [{"kind": "repository", "at": "2026-10-10T10:15:01Z"}], "snapshots": 2,
+        "gone": [{"kind": "copy", "at": "2026-10-10T10:15:00Z"}],
+    }
+    # It is a fact of its own: no event the row reads of its state says it, a command's end among them.
+    command = event(31, "session.complete", reason="stop", answers=40)
+    assert derive_thread(replace(given, events=(command,)), now=NOW)["set_aside"] == derive_thread(given, now=NOW)["set_aside"]
+    assert "session.complete" not in LATEST_TYPES
+
+
+def test_a_row_says_nothing_set_aside_where_its_turn_ends_recorded_none_or_none_of_it_is_a_name_or_a_time():
+    assert all(derive_thread(given, now=NOW)["set_aside"] is None for given, _ in SHELL_FIXTURES.values())
+    for told in (
+        {"copies": [], "snapshots": [], "gone": []},
+        {"copies": ["../../etc", f"00000001-20261010T101500Z-{COMPUTER}.history", 7], "snapshots": "all", "gone": None},
+        # A name with more around it is none.
+        {"copies": [f"../{COPY_NAME}", f"{COPY_NAME}.gone"], "snapshots": [], "gone": []},
+        # Digits in a time's places that make no time.
+        {"copies": [f"00000001-20261399T256199Z-{COMPUTER}.copy"], "snapshots": [], "gone": [f"00000002-20260230T101500Z-{COMPUTER}.copy"]},
+        "everything",
+    ):
+        assert derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=told), now=NOW)["set_aside"] is None, told
+    assert set_aside_name(COPY_NAME) == {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
+    assert set_aside_name(f"00000001-20261010T246000Z-{COMPUTER}.copy") is None

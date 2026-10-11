@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
 import { savedName, saveFile } from "../../../web/src/lib/save-file.js";
+import { setAsideLines } from "../../src/shell/text.js";
 import { ACCOUNT, connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
 import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
 
@@ -199,6 +200,31 @@ describe("the Overview pane", () => {
       fake.changed(project!, thread!);
     }, [REPORT, IDLE]);
     await expect.poll(() => texts(page, chips)).toEqual(['<img src=x onerror="document.title=1">\u202Egpj.md', long]);
+  });
+
+  it("marks a thread whose computer set its work aside, its chip's title saying what and when, and no other thread", async () => {
+    const computer = agent.projects!.threads[REPORT]!.find((thread) => thread.id === FIXTURE_IDS.computer)!;
+    const aside = { kept: [{ kind: "copy" as const, at: "2026-10-10T10:15:00Z" }], snapshots: 2, gone: [{ kind: "repository" as const, at: "2026-10-09T08:00:00Z" }] };
+    computer.setAside = aside;
+    const { page, client } = await opened();
+    const chip = `[data-thread="${FIXTURE_IDS.computer}"] .chip.aside`;
+    expect(await texts(page, chip)).toEqual(["Set aside"]);
+    expect(await page.getAttribute(chip, "title")).toBe(`${setAsideLines(aside).join(". ")}.`);
+    expect(await page.$$eval(".chip.aside", (found) => found.length)).toBe(1);
+    // Once only what went is left, the chip says so; with nothing, it goes.
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      const row = fake.data.threads[project!]!.find((found) => found.id === thread)!;
+      row.setAside = { kept: [], snapshots: 0, gone: [{ kind: "copy", at: "2026-10-09T08:00:00Z" }] };
+      fake.changed(project!, thread!);
+    }, [REPORT, FIXTURE_IDS.computer]);
+    await expect.poll(() => texts(page, chip)).toEqual(["Set aside, now gone"]);
+    await client.evaluate(([project, thread]) => {
+      const fake = (window as unknown as { fakeProjects: Served }).fakeProjects;
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.setAside = null;
+      fake.changed(project!, thread!);
+    }, [REPORT, FIXTURE_IDS.computer]);
+    await expect.poll(() => texts(page, chip)).toEqual([]);
   });
 
   it("shows the project's library, and its routines only when it has some", async () => {

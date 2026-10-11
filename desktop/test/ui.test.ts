@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ago, segments } from "../src/shell/text.js";
+import { ago, segments, setAsideLines, setAsideWhen } from "../src/shell/text.js";
 
 const NOW = Date.parse("2026-10-06T12:00:00Z");
 
@@ -14,6 +14,19 @@ describe("an age", () => {
   ])("of %s is %s, or %s", (when, short, long) => {
     expect(ago(when, NOW)).toBe(short);
     expect(ago(when, NOW, "long")).toBe(long);
+  });
+});
+
+describe("what a thread's computer set aside", () => {
+  const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+  it("is said by what each is and when, in this computer's time, and the snapshots by their count", () => {
+    expect(setAsideWhen(copy.at, "UTC")).toBe("10 Oct, 10:15");
+    expect(setAsideWhen(copy.at, "Europe/Bucharest")).toBe("10 Oct, 13:15");
+    expect(setAsideLines({ kept: [{ kind: "repository", at: "2026-10-09T08:00:00Z" }], snapshots: 2, gone: [copy] }, "UTC")).toEqual([
+      "Kept on its computer: its repository from 9 Oct, 08:00 · 2 snapshots", "No longer kept: its copy from 10 Oct, 10:15",
+    ]);
+    expect(setAsideLines({ kept: [], snapshots: 1, gone: [] }, "UTC")).toEqual(["Kept on its computer: 1 snapshot"]);
+    expect(setAsideLines({ kept: [], snapshots: 0, gone: [] }, "UTC")).toEqual([]);
   });
 });
 

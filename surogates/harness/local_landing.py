@@ -85,6 +85,7 @@ from sqlalchemy import select
 
 from surogates.db.models import Session as SessionRow
 from surogates.devices.history import (
+    MAX_ASIDE,
     MAX_LOOKED,
     ComputerRefused,
     NotAnAnswer,
@@ -94,7 +95,7 @@ from surogates.devices.history import (
     code_of,
     thread_copy,
 )
-from surogates.devices.operations import LeaseLost, OperationConflict, as_named
+from surogates.devices.operations import DeviceOperations, LeaseLost, OperationConflict, as_named
 from surogates.devices.workspace import MAX_MESSAGE_CHARS, DeviceOperationError
 from surogates.governance.saga import Saga, SagaState, SagaStep, StepState
 from surogates.governance.saga.orchestrator import SagaTimeoutError
@@ -113,7 +114,7 @@ from surogates.harness.landing import (
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
-from surogates.workstreams.derive import UNFINISHED
+from surogates.workstreams.derive import UNFINISHED, set_aside_said
 from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
 
 logger = logging.getLogger(__name__)
@@ -474,6 +475,63 @@ async def keep_local_turn(*, store: Any, session_factory: Any, redis: Any, sessi
         return []
     copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=lease_token)
     return await _kept(copy, session, turn, wait=RELEASE_WAIT)
+
+
+async def set_aside_of(
+    *, store: Any, session_factory: Any, redis: Any, session: Any, landing: dict | None,
+) -> tuple[dict | None, dict | None]:
+    """What *session*'s computer keeps set aside of the thread's work, as its turn's end records it, and what of that no earlier end told.
+
+    Its computer names it at every open of the thread's copy: the copies and
+    repositories of the thread's it kept whole where it made them again, and
+    those of them that went at its bound, each by its folder's name there;
+    and, where the open found a copy, the snapshots of what the copy held of
+    the thread's own when it was made other files; those of them a
+    repository set aside whole took with it no open names, and are kept
+    while it is.  A landing's record names its own snapshot at once
+    (*landing*'s ``set_aside``); one whose answer was lost, or a turn's end
+    taken up again, has the next open name it.
+
+    A turn's end records all of it by the computer's names,
+    ``{copies, snapshots, gone}``, and its report tells what no earlier end
+    recorded, as a person is told it (``derive.set_aside_said``): so each is
+    told once, and the master hears what each is and when, not its names.
+    The open is read from the journal and checked as an answer given now:
+    one that is none says nothing, and the last word stands.  None for
+    either where it holds nothing: nothing was ever set aside, or nothing
+    is new.
+    """
+    before = await store.last_event(session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="set_aside")
+    told = _set_aside_told(before.data["set_aside"] if before is not None else None)
+    opened = answered("history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id), thread=str(session.id))
+    now = dict(told)
+    if opened is not None:
+        now.update(copies=opened.get("set_aside_folders", []), gone=opened.get("set_aside_gone", []))
+        if "copy" in opened:
+            # An open that found the folder's history off says nothing of the snapshots in the thread's repository.
+            named = opened.get("set_asides", [])
+            # A repository set aside whole holds those told before: no open names them, and they are kept with it.
+            held = any(name.endswith(".repository") for name in now["copies"])
+            now["snapshots"] = [*(aside for aside in told["snapshots"] if held and aside not in named), *named]
+    recorded = [aside for aside in (landing or {}).get("set_aside", []) if aside not in now["snapshots"]]
+    # Its computer keeps the latest sixteen: a word of more is kept to as many as an open names of what is set aside whole.
+    now["snapshots"] = [*now["snapshots"], *recorded][-MAX_ASIDE:]
+    new = {
+        "copies": [name for name in now["copies"] if name not in told["copies"]],
+        "snapshots": [aside for aside in now["snapshots"] if aside not in told["snapshots"]],
+        "gone": [name for name in now["gone"] if name not in told["gone"]],
+    }
+    kept = now if before is not None or any(now.values()) else None
+    return kept, set_aside_said(new)
+
+
+def _set_aside_told(told: Any) -> dict[str, list[str]]:
+    """What a turn's end recorded its computer keeping set aside, as :func:`set_aside_of` gave it; nothing, where it recorded none."""
+    told = told if isinstance(told, dict) else {}
+    return {
+        key: [name for name in told.get(key) or () if isinstance(name, str)] if isinstance(told.get(key), list) else []
+        for key in ("copies", "snapshots", "gone")
+    }
 
 
 async def _kept(copy: ThreadCopy, session: Any, turn: int, *, wait: float) -> list[str]:
@@ -951,7 +1009,11 @@ async def _land(
         await fixed()
         recorded = await execute(record, partial(steps.history, "record", **record.arguments), wrote=True)
         saga.transition(SagaState.COMPLETED)
-        outcome.update(commit=recorded["commit"], landed=landed, picked_up=picked["picked_up"])
+        outcome.update(
+            commit=recorded["commit"], landed=landed, picked_up=picked["picked_up"],
+            # What its record set aside of the copy, where it set any aside: the thread's next open names it too.
+            set_aside=[recorded["set_aside"]] if recorded["set_aside"] else [],
+        )
         await row.write(state="completed", commit=recorded["commit"], files=_row_files(saga), picked_up=_row_picked_up(saga))
     except LeaseLost:
         # Another worker runs the thread now, and goes on with this landing from the journal.

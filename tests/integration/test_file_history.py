@@ -300,15 +300,21 @@ async def test_a_thread_with_no_landing_lists_its_turn_summaries_files_unmarked(
     assert await marks_of(api, project, thread) == [("a.md", "landed"), ("art-1", None)]
 
 
-async def test_a_computers_records_are_none_of_the_clouds(api, tmp_path):
+async def test_a_computers_records_mark_its_threads_row_and_offer_no_undo(api, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
-    # As a folder's landing on a computer will be recorded: the same table, with its computer and its folder.
+    # As a folder's landing on a computer is recorded: the same table, with its computer and its folder.
     async with api.app.state.session_factory() as db:
         await db.execute(text(
             "UPDATE workstream_history SET device_id = gen_random_uuid(), folder = '/home/you/Reports' WHERE id = :id"
         ), {"id": row.id})
         await db.commit()
-    assert await marks_of(api, project, thread) == []
+    # Its thread's row lists the file it landed there, and its card offers no Undo of a landing on a computer.
+    assert await marks_of(api, project, thread) == [("Report.docx", "landed")]
+    [found] = await thread_rows(api, project, thread_id=str(thread.id))
+    assert found["landing_id"] is None
+    # An Undo of a computer's file is none of the cloud's: an Undo of the cloud's or of an Undo marks none of it.
+    await an_undo_recorded(api, row, undoes=[row.id], paths=["Report.docx"])
+    assert await marks_of(api, project, thread) == [("Report.docx", "landed")]
 
 
 async def test_only_a_threads_own_completed_landings_in_its_project_mark_its_files(api, tmp_path):
