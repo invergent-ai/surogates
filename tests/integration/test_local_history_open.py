@@ -451,8 +451,7 @@ async def test_a_stop_that_leaves_device_operations_alone_still_ends_a_turns_ope
         # As the project's master stops a thread: the thread paused, its operations left as they are, its turn interrupted.
         state = api.app.state
         await stop_thread(
-            thread, reason="Stopped by its master.", interrupt="stopped by the master", session_store=state.session_store,
-            session_factory=state.session_factory, redis=None,
+            thread, reason="Stopped by its master.", interrupt="stopped by the master", session_store=state.session_store, redis=None,
         )
         worker.interrupt("stopped by the master")
 

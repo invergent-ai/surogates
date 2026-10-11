@@ -291,11 +291,12 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   // No cgroup deeper than a command's, and at most CGROUPS_MAX.
   await writeFile(join(cgroup, "cgroup.max.descendants"), String(CGROUPS_MAX));
   await writeFile(join(cgroup, "cgroup.max.depth"), "2");
-  // Delegated to the root's user, so its runner can give each run a cgroup of its own in
-  // run and move its processes between the root's cgroups; it sets none of the root's own
-  // limits, and makes no cgroup beside init, run and proc, nor any in proc, whose cgroups
-  // the agent makes (ProcessCgroups).
-  for (const path of [join(cgroup, "cgroup.procs"), join(cgroup, "run")]) await chown(path, uid, uid);
+  // Its run folder is the root's user's, so its runner can give each run a cgroup of its own
+  // there. It sets none of the root's own limits, and makes no cgroup beside init, run and proc,
+  // nor any in proc, whose cgroups the agent makes (ProcessCgroups). Nor may it move a process
+  // between the root's cgroups, which takes writing the cgroup.procs of the root's own: the agent
+  // moves each command's shell into its cgroup (admit), and nothing of the command can leave it.
+  await chown(join(cgroup, "run"), uid, uid);
   // In the root's cgroup before unshare runs, so it and everything it starts are
   // there, and the cgroup namespace it makes is rooted there. Each by its path:
   // never through the PATH made for the commands.
@@ -325,11 +326,29 @@ export async function contain(root: string, pid: number | undefined): Promise<vo
 }
 
 /**
+ * A command's shell, *pid* in its root's namespaces, moved from its runner's cgroup into the
+ * command's own, *id* in the root's *leaf* folder (runner.ts, ENTER): by the agent, as the guest's root, since the
+ * root's user may move no process between the root's cgroups (enter). Only a process in the
+ * runner's cgroup is moved. One not found there stays where it is, and its shell, finding
+ * itself outside the command's cgroup, runs nothing. *cgroups* and *proc*: the guest's, unless a test says.
+ */
+export async function admit(root: string, leaf: "run" | "proc", id: string, pid: number, cgroups = CGROUPS, proc = "/proc"): Promise<void> {
+  if (!ROOT_ID.test(root)) return;
+  const cgroup = join(cgroups, root);
+  for (const member of (await readFile(join(cgroup, "init", "cgroup.procs"), "utf8")).split("\n").filter(Boolean)) {
+    // Its pid in the guest's PID namespace and in the root's, which it is in: unshare is in the runner's cgroup
+    // too, outside the root's, with one pid alone, which a shell's in the root's may equal.
+    const status = await readFile(join(proc, member, "status"), "utf8").catch(() => "");
+    if (Number(/^NSpid:\s*\d+\s+(\d+)\s*$/m.exec(status)?.[1]) === pid) return writeFile(join(cgroup, leaf, id, "cgroup.procs"), member);
+  }
+}
+
+/**
  * The cgroups the agent makes for a root's background processes, in the root's proc
  * folder (spec, Section 11, Cgroups), which only the agent writes. None counts memory:
- * the root's own cgroup does (contain), so none lingers once removed. Each is
- * the root's user's to enter and to end, through its cgroup.procs and cgroup.kill, which
- * its runner writes; the agent removes it once nothing of it runs.
+ * the root's own cgroup does (contain), so none lingers once removed. The agent moves each
+ * process's shell into its cgroup (admit); each is the root's user's to end, through its
+ * cgroup.kill, which its runner writes; the agent removes it once nothing of it runs.
  */
 export class ProcessCgroups {
   // Ended processes whose cgroups still held what they left: tried again at each start.
@@ -342,7 +361,7 @@ export class ProcessCgroups {
     this.tidy();
     const cgroup = join(this.folder, id);
     mkdirSync(cgroup);
-    for (const file of ["cgroup.procs", "cgroup.kill"]) chownSync(join(cgroup, file), this.uid, this.uid);
+    chownSync(join(cgroup, "cgroup.kill"), this.uid, this.uid);
   }
 
   // Once its process has ended: removed now, or once what it left has ended too.
@@ -545,6 +564,8 @@ export interface RootsOptions {
   kill(root: string): void | Promise<void>;
   // Once the root's runner is up, the cgroup per command: *pid* is the process start gave.
   contain?(root: string, pid: number | undefined): Promise<void>;
+  // A command's shell, *pid* in its runner's view, moved into its cgroup (admit): a run's in run, a background process's in proc.
+  admit?(root: string, leaf: "run" | "proc", id: string, pid: number): Promise<void>;
   // Told of a root that was set up and has lost its runner: the host sets it up again.
   lost?(root: string): void;
   // Told a root's process handles to keep, and how many of its processes live, each time they change.
@@ -672,7 +693,8 @@ export class Roots {
       unlisten();
       throw error;
     }
-    const runner = new SessionRunner(child, () => void lose(), RUNNER_READY_MS);
+    const { admit: move } = this.options;
+    const runner = new SessionRunner(child, () => void lose(), RUNNER_READY_MS, move && ((id, pid, stdin) => move(root, stdin ? "proc" : "run", id, pid)));
     try {
       await runner.ready;
       await this.options.contain?.(root, child.pid);

@@ -22,7 +22,7 @@ sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_di
 mount -t securityfs -o nosuid,nodev,noexec securityfs /sys/kernel/security
 mount -t bpf -o nosuid,nodev,noexec bpf /sys/fs/bpf
 mkdir -p /sys/fs/bpf/surogate
-want=11 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
+want=15 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
 (
   if ! grep -qw bpf /sys/kernel/security/lsm; then
     echo "failed: the bpf LSM is not active; refusing to run commands unprotected"

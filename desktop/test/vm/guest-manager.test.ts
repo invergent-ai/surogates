@@ -3,7 +3,7 @@
 // first). Behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -84,6 +84,21 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     const environ = (pid: number) => readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean).map((entry) => entry.slice(0, entry.indexOf("=")));
     expect(environ(qemuPid())).toEqual(["PATH"]);
     expect(environ(newestDaemon(options.run))).toEqual(["PATH"]);
+  });
+
+  it("starts this computer's QEMU with no io_uring ring, which the user's other processes could leave it too little locked memory for", async () => {
+    // The system's QEMU, as the app finds it: not the one a test's wrapper starts.
+    const path = process.env.PATH;
+    process.env.PATH = "/usr/bin:/bin";
+    try {
+      managers.push(new VmManager(options));
+      expect(await op(ROOT, join(dir, "a"), "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    } finally {
+      process.env.PATH = path;
+    }
+    const qemu = qemuPid();
+    expect(readlinkSync(`/proc/${qemu}/exe`)).toBe("/usr/bin/qemu-system-x86_64");
+    expect(readdirSync(`/proc/${qemu}/fd`).filter((fd) => readlinkSync(`/proc/${qemu}/fd/${fd}`) === "anon_inode:[io_uring]")).toEqual([]);
   });
 
   it("refuses a folder replaced since its chat was bound", async () => {

@@ -90,10 +90,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
   });
 
-  it("activates the bpf LSM and attaches all eleven rule hooks before sessions run", () => {
+  it("activates the bpf LSM and attaches all fifteen rule hooks before sessions run", () => {
     // No command runs as the guest's root: its agent says on the console what the init's load of the rule found, before its hello.
     const said = /surogate: the protected-names rule attached (\d+) of \d+ hooks, under the LSMs (\S+)/.exec(readFileSync(options.console, "utf8"));
-    expect(said?.slice(1)).toEqual(["11", expect.stringMatching(/\bbpf\b/)]);
+    expect(said?.slice(1)).toEqual(["15", expect.stringMatching(/\bbpf\b/)]);
   });
 
   it("runs a root's background process in its runner, where the next command reaches it, and answers for it", async () => {
@@ -187,7 +187,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("makes each background process's cgroup itself, counting no memory, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
+  it("makes each background process's cgroup itself, counting no memory, which the root's user can end but neither make nor enter, and removes it once the process ends", async () => {
     const started = await guest.op(ROOT, "start", background("sleep 310"), signal()) as { ok: { session_id: string } };
     const { session_id } = started.ok;
     const cgroup = `/sys/fs/cgroup/proc/${session_id}`;
@@ -198,12 +198,29 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
       `(mkdir ${cgroup}/below) 2>&1 | sed 's/.*: //'`,
       `(rmdir ${cgroup}) 2>&1 | sed 's/.*: //'`,
-      `sh -c 'echo $$ > ${cgroup}/cgroup.procs && cut -d: -f3 /proc/self/cgroup'`,
+      // Its process is in it, moved there by the agent.
+      `cat ${cgroup}/cgroup.procs | wc -l`,
     ].join("; "))).toEqual({
-      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} \nuncounted\nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
+      ok: { output: `0 0 ${FIRST_UID} \nuncounted\nPermission denied\nPermission denied\nPermission denied\n1\n`, returncode: 0, timed_out: false },
     });
     expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
     expect(await run("find /sys/fs/cgroup/proc -mindepth 1 -type d | wc -l")).toMatchObject({ ok: { output: "0\n" } });
+  });
+
+  it("keeps all a command starts in its cgroup, none moving itself to another of the root's, so the command's end ends them all", async () => {
+    const started = await guest.op(ROOT, "start", background("sleep 312"), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    // Every cgroup of the root's but the command's own: the root's, its runner's, its runs', its background processes' and one of those.
+    const away = ["", "/init", "/run", "/proc", `/proc/${session_id}`].map((to) => `/sys/fs/cgroup${to}`);
+    expect(await run(away.map((to) => `(sh -c 'echo $$ > ${to}/cgroup.procs && echo left for ${to}') 2>&1 | sed 's/.*: //'`).join("; "))).toEqual({
+      ok: { output: "Permission denied\n".repeat(away.length), returncode: 0, timed_out: false },
+    });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    // What a command leaves, moving itself to the root's cgroup, and writing in the folder once the command has ended.
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c 'echo $$ > /sys/fs/cgroup/cgroup.procs; sleep 1; echo late > late.txt' < /dev/null > /dev/null 2>&1 & sleep 0.2; echo started";
+    expect(await run(leaver)).toEqual({ ok: { output: "started\n", returncode: 0, timed_out: false } });
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(existsSync(join(folder, "late.txt"))).toBe(false);
   });
 
   it("stops a command that makes cgroups at its root's bound, none below a command's, and the guest keeps its memory", async () => {
@@ -439,6 +456,34 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         expect(state(path)).toEqual(before);
       });
     }
+
+    // An attribute or a POSIX ACL set or removed on a protected file, by setxattr and removexattr: an ACL would widen who may
+    // write it. Refused there by the rule; an ordinary file's goes on to the share, whose daemon keeps none (no --xattr).
+    // security.* and trusted.* are refused any session already, which has no CAP_SYS_ADMIN.
+    it("refuses an attribute or an ACL set or removed on a protected file, and leaves an ordinary file's to the share", async () => {
+      // version 2; the file's owner rw, the uid 65534 rw, the group r, the mask rw, others r.
+      const acl = "02000000" + "01000600ffffffff" + "02000600feff0000" + "04000400ffffffff" + "10000600ffffffff" + "20000400ffffffff";
+      const tries = [
+        "import errno, os",
+        `acl = bytes.fromhex('${acl}')`,
+        "for path in ('.git/config', 'a.txt'):",
+        "    for what, act in (('set', lambda: os.setxattr(path, 'user.x', b'1')), ('set acl', lambda: os.setxattr(path, 'system.posix_acl_access', acl)),",
+        "                      ('remove', lambda: os.removexattr(path, 'user.x')), ('remove acl', lambda: os.removexattr(path, 'system.posix_acl_access'))):",
+        "        try:",
+        "            act()",
+        "            print(path, what, 'done')",
+        "        except OSError as error:",
+        "            print(path, what, errno.errorcode[error.errno])",
+      ].join("\n");
+      const before = [state(".git/config"), state("a.txt")];
+      expect(await inRepo(`python3 -c "${tries}"`)).toBe([
+        ".git/config set EPERM", ".git/config set acl EPERM", ".git/config remove EPERM", ".git/config remove acl EPERM",
+        "a.txt set ENOTSUP", "a.txt set acl ENOTSUP", "a.txt remove ENOTSUP", "a.txt remove acl ENOTSUP", "",
+      ].join("\n"));
+      expect([state(".git/config"), state("a.txt")]).toEqual(before);
+      const kept = spawnSync("python3", ["-c", "import os, sys; print([os.listxattr(path) for path in sys.argv[1:]])", join(repo, ".git/config"), join(repo, "a.txt")], { encoding: "utf8" });
+      expect(kept.stdout).toBe("[[], []]\n");
+    });
 
     // Refused by the rule at the move itself, not by a mount held over .git.
     it("C1/I3: mv .git is refused at the mv itself and the host repo is intact", async () => {
@@ -1176,6 +1221,6 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined)("the
     expect(emulated).toMatchObject({ emulated: "no-kvm", flagged: true });
     expect(kvm).toMatchObject({ emulated: null, flagged: false });
     expect(emulated.helloMs).toBeLessThan(120_000);
-    expect(readFileSync(join(dir, "tcg-console.log"), "utf8")).toMatch(/surogate: the protected-names rule attached 11 of 11 hooks/);
+    expect(readFileSync(join(dir, "tcg-console.log"), "utf8")).toMatch(/surogate: the protected-names rule attached 15 of 15 hooks/);
   });
 });

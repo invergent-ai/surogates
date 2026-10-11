@@ -30,6 +30,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import Range
 
+from surogates.db.models import Session as SessionRow
 from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
 from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, YOU, _who, tracked
@@ -401,8 +402,49 @@ async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str
         ]
 
 
+async def kept_refs_in(session_factory: Any, device_id: UUID, folder: str) -> list[str]:
+    """The refs a pruning of *folder*'s history on the computer *device_id* keeps: each thread's that works there, whichever project's.
+
+    A live thread's branch and base, and those of one resolved within the
+    window, as :func:`kept_refs` names a project's.  A folder has one
+    history on its computer for every project that uses it, and a thread
+    is of it by the computer and the folder the server stamped on it.  The
+    computer keeps besides the refs of every thread whose repository it holds.
+    """
+    ended = WorkstreamThread.resolved_at > func.now() - timedelta(days=PRUNE_DAYS)
+    async with session_factory() as db:
+        threads = await db.execute(
+            select(WorkstreamThread.session_id)
+            .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
+            .where(
+                SessionRow.config["execution"]["device_id"].astext == str(device_id),
+                SessionRow.config["workspace_path"].astext == folder,
+                or_(WorkstreamThread.resolved_at.is_(None), ended),
+            )
+            .order_by(WorkstreamThread.session_id)
+        )
+        return [ref for thread in threads.scalars() for ref in (f"refs/heads/threads/{thread}", f"refs/bases/{thread}")]
+
+
 #: What a project over the file cap answers wherever its history is asked for.
 HISTORY_OFF = "History is off: this project has more than 50,000 files."
+#: What a folder on a computer answers where its history is asked for and it has none, by the reason its computer gave.
+FOLDER_HISTORY_OFF = {
+    "cap": "History is off: this folder has more than 50,000 files.",
+    "names": "History is off: a file in this folder has a name that is not UTF-8.",
+}
+#: How many of the latest opens the project's threads asked of a computer are read for what it last said of its folder.
+_OPENS_READ = 20
+# What the computer :device answered the latest opens of the project's threads with, newest first: each outcome as
+# it was recorded, with the thread whose copy it was asked about.
+_FOLDER_OPENS = text("""
+    SELECT o.outcome, o.calling_session_id FROM device_operations o
+      JOIN workstream_threads t ON t.session_id = o.calling_session_id
+     WHERE t.workstream_id = :project AND o.device_id = :device AND o.kind = 'history'
+       AND o.args->>'action' = 'open' AND o.outcome->'ok' IS NOT NULL
+     ORDER BY o.created_at DESC
+     LIMIT :most
+""")
 #: The kinds of row whose files a person can undo: each a landing on ``main``.
 UNDOABLE = ("landing", "restore", "undo")
 #: A row's id as a version or a landing names it: digits the column holds, never what a guess could overflow.
@@ -501,6 +543,26 @@ _NEWEST = 2**62
 def row_id(value: str) -> int | None:
     """*value* as a row's id, None when it is none."""
     return int(value) if _ROW_ID.fullmatch(value) else None
+
+
+async def folder_history_off(session_factory: Any, workstream_id: UUID | str, device_id: UUID) -> str | None:
+    """Why the folder the project's threads work in on the computer *device_id* has no history, in the Library's words; None when it has one.
+
+    As that computer last answered a turn's open of one of those threads.
+    The journal holds each outcome as its computer gave it: each is checked
+    as an answer given now, and one that is none says nothing, so the last
+    answer stands.
+    """
+    # Imported here: that module reaches this package through the computer's binding.
+    from surogates.devices.history import answered
+
+    async with session_factory() as db:
+        outcomes = (await db.execute(_FOLDER_OPENS, {"project": workstream_id, "device": device_id, "most": _OPENS_READ})).all()
+    for outcome, thread in outcomes:
+        last = answered("history", "open", outcome, thread=str(thread))
+        if last is not None:
+            return FOLDER_HISTORY_OFF[last["reason"]] if last.get("history") == "off" else None
+    return None
 
 
 def _by(author: dict | None) -> dict:

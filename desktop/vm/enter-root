@@ -41,8 +41,8 @@ new=$layers/root
 
 mount -t proc -o nosuid,nodev,noexec proc "$new/proc"
 mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$new/sys"
-# The root's cgroup, as this cgroup namespace shows it, which the agent delegated
-# to the root's user. This and all it starts, the runner among them, go into its
+# The root's cgroup, as this cgroup namespace shows it, whose run folder the agent
+# gave the root's user. This and all it starts, the runner among them, go into its
 # leaf for the runner, so each command can have a cgroup of its own beside it.
 mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 "$new/sys/fs/cgroup"
 echo $$ > "$new/sys/fs/cgroup/init/cgroup.procs"

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from aioboto3.s3 import inject
+from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
 
 from surogates.storage.backend import (
     Changed,
@@ -395,3 +396,156 @@ class TestS3BackendUpload:
         source.write_bytes(b"a small file")
         await backend.upload("bucket", "key.bin", source)
         assert (client.whole, client.parts) == (12, [])
+
+
+class _Saved(_Bucket):
+    """An S3 client as a conditional upload sees one: the object's ETag as the store answers it, which a save
+    landing while the parts go up changes, and what was asked of it, in order."""
+
+    def __init__(self, etag: str | None, *, saved_meanwhile: str | None = None, deleted_meanwhile: bool = False) -> None:
+        super().__init__()
+        self.etag, self.saved_meanwhile, self.deleted_meanwhile, self.asked = etag, saved_meanwhile, deleted_meanwhile, []
+
+    async def head_object(self, *, Bucket: str, Key: str) -> dict:
+        self.asked.append("head")
+        if self.etag is None:
+            # A head has no body: the store's answer is its status, which the client names the error by.
+            raise ClientError(
+                {"Error": {"Code": "404", "Message": "Not Found"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject",
+            )
+        return {"ETag": self.etag, "ContentLength": 1}
+
+    async def upload_part(self, **part) -> dict:
+        self.asked.append("part")
+        if self.saved_meanwhile is not None:
+            # The user's save lands while the upload is under way.
+            self.etag, self.saved_meanwhile = self.saved_meanwhile, None
+        if self.deleted_meanwhile:
+            self.etag = None
+        return await super().upload_part(**part)
+
+    async def put_object(self, **whole) -> dict:
+        self.asked.append("put")
+        return await super().put_object(**whole)
+
+    async def complete_multipart_upload(self, **whole) -> dict:
+        self.asked.append("complete")
+        return await super().complete_multipart_upload(**whole)
+
+    async def abort_multipart_upload(self, **whole) -> dict:
+        self.asked.append("abort")
+        return {}
+
+
+class TestS3BackendUploadIf:
+    """A write for the object its writer saw: one saved since, while its parts went up, is left as it is."""
+
+    def backend(self, monkeypatch, client: _Saved) -> S3Backend:
+        backend = S3Backend("http://s3.invalid")
+        client.upload_file = functools.partial(inject.upload_file, client)
+
+        @contextlib.asynccontextmanager
+        async def the_client():
+            yield client
+
+        monkeypatch.setattr(backend, "_client", the_client)
+        return backend
+
+    @pytest.fixture()
+    def source(self, tmp_path: Path) -> Path:
+        source = tmp_path / "source.bin"
+        with open(source, "wb") as out:
+            out.truncate(20 * 2**20)
+        return source
+
+    async def test_a_save_that_lands_while_the_parts_go_up_is_not_written_over(self, monkeypatch, source):
+        client = _Saved('"tag-1"', saved_meanwhile='"tag-2"')
+        with pytest.raises(Changed):
+            await self.backend(monkeypatch, client).upload("bucket", "key.bin", source, if_tag='"tag-1"')
+        # Asked of after the last part, right before the parts are put together: never put together, and let go.
+        assert not client.done and client.asked[-2:] == ["head", "abort"]
+
+    async def test_a_file_made_while_the_parts_go_up_is_not_written_over(self, monkeypatch, source):
+        client = _Saved(None, saved_meanwhile='"tag-1"')
+        with pytest.raises(Changed):
+            await self.backend(monkeypatch, client).upload("bucket", "new.bin", source, if_absent=True)
+        assert not client.done and client.asked[-2:] == ["head", "abort"]
+
+    @pytest.mark.parametrize(("etag", "condition"), [('"tag-1"', {"if_tag": '"tag-1"'}), (None, {"if_absent": True})])
+    async def test_an_object_as_its_writer_saw_it_is_written_whole_in_parts(self, monkeypatch, source, etag, condition):
+        client = _Saved(etag)
+        await self.backend(monkeypatch, client).upload("bucket", "key.bin", source, **condition)
+        assert (client.done, sum(client.parts), max(client.parts)) == (True, 20 * 2**20, 8 * 2**20)
+        assert client.asked == ["part", "part", "part", "head", "complete"]
+
+    async def test_an_object_deleted_while_the_parts_go_up_is_not_written_again(self, monkeypatch, source):
+        client = _Saved('"tag-1"', deleted_meanwhile=True)
+        with pytest.raises(Changed):
+            await self.backend(monkeypatch, client).upload("bucket", "key.bin", source, if_tag='"tag-1"')
+        assert not client.done and client.asked[-2:] == ["head", "abort"]
+
+    @pytest.mark.parametrize(("unanswered", "key", "size"), [
+        # A client's own error names the request's address, and so the key: one holding 404 is no answer that it is absent.
+        (lambda key: ReadTimeoutError(endpoint_url=f"http://garage:3900/bucket/{key}", error="no answer"), "photos/IMG_4040.jpg", 1),
+        (lambda key: EndpointConnectionError(endpoint_url=f"http://garage:3900/bucket/{key}"), "reports/20250404.docx", 20 * 2**20),
+        (lambda key: ConnectionError(f"the store did not answer for {key}: NoSuchKey"), "new.bin", 20 * 2**20),
+        # The store answered, and said something other than that there is no such object.
+        (lambda key: ClientError(
+            {"Error": {"Code": "NoSuchBucket", "Message": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject",
+        ), "new.bin", 1),
+        (lambda key: ClientError(
+            {"Error": {"Code": "SlowDown", "Message": f"{key} 404"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "HeadObject",
+        ), "IMG_4040.jpg", 1),
+    ], ids=["timed out", "no connection", "words alone", "no such bucket", "slow down"])
+    async def test_a_head_the_store_did_not_answer_as_absent_is_not_taken_for_absent(
+        self, monkeypatch, tmp_path: Path, unanswered, key, size,
+    ):
+        source = tmp_path / "source.bin"
+        with open(source, "wb") as out:
+            out.truncate(size)
+        client = _Saved(None)
+        raised = unanswered(key)
+
+        async def head_object(*, Bucket: str, Key: str) -> dict:
+            client.asked.append("head")
+            raise raised
+
+        client.head_object = head_object
+        with pytest.raises(type(raised)):
+            await self.backend(monkeypatch, client).upload("bucket", key, source, if_absent=True)
+        assert (client.done, client.whole) == (False, None)
+        # Nothing written: a file of one part asked for alone, a larger one's parts let go.
+        assert client.asked == ["head"] if size < 8 * 2**20 else client.asked[-2:] == ["head", "abort"]
+
+    @pytest.mark.parametrize("answer", [
+        {"Error": {"Code": "404", "Message": "Not Found"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+        {"Error": {"Code": "NoSuchKey", "Message": "The specified key does not exist."}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+        {"Error": {"Code": "NotFound", "Message": "Not Found"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+        # No code in the answer: its status names it.
+        {"Error": {}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+    ], ids=["404", "NoSuchKey", "NotFound", "status alone"])
+    async def test_a_store_that_answers_there_is_no_object_lets_a_new_one_be_written(self, monkeypatch, tmp_path: Path, answer):
+        source = tmp_path / "small.bin"
+        source.write_bytes(b"x")
+        client = _Saved(None)
+
+        async def head_object(*, Bucket: str, Key: str) -> dict:
+            client.asked.append("head")
+            raise ClientError(answer, "HeadObject")
+
+        client.head_object = head_object
+        await self.backend(monkeypatch, client).upload("bucket", "photos/IMG_4040.jpg", source, if_absent=True)
+        assert (client.whole, client.asked) == (1, ["head", "put"])
+
+    @pytest.mark.parametrize("size", [0, 12, 8 * 2**20 - 1])
+    async def test_a_file_of_one_part_is_asked_for_then_written_whole(self, monkeypatch, tmp_path: Path, size):
+        source = tmp_path / "small.bin"
+        source.write_bytes(b"x" * size)
+        client = _Saved('"tag-1"')
+        await self.backend(monkeypatch, client).upload("bucket", "key.bin", source, if_tag='"tag-1"')
+        assert (client.whole, client.parts, client.asked) == (size, [], ["head", "put"])
+        # Saved since it was seen: nothing is written.
+        changed = _Saved('"tag-2"')
+        with pytest.raises(Changed):
+            await self.backend(monkeypatch, changed).upload("bucket", "key.bin", source, if_tag='"tag-1"')
+        assert (changed.whole, changed.asked) == (None, ["head"])

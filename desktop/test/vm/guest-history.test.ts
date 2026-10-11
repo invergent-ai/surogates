@@ -3,7 +3,6 @@
 // built by images/guest/build.sh, the agent disk from this package (npm run build first).
 // Behind SUROGATE_VM_TESTS=1.
 
-import { spawnSync } from "node:child_process";
 import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
@@ -17,10 +16,9 @@ import { type Context, perform } from "../../src/files/operations.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { Outcome } from "../../src/link/protocol.js";
 import { checked, forgettable, type HistoryRequest } from "../../src/vm/history.js";
-import { bootLinux, readonlyFlag } from "../../src/vm/linux.js";
+import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
-import { VIRTIOFSD } from "../../src/vm/qemu.js";
-import { agentDisk, folderOf, IMAGE, KVM, median, needsKvm, signal, until, USER, withHistory } from "./guest-support.js";
+import { agentDisk, DAEMON, folderOf, IMAGE, KVM, median, needsKvm, signal, until, USER, withHistory } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -150,7 +148,7 @@ function world(prefix: string) {
   // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
   const disks = (at: string, disk = agentDisk(at)): VmOptions => ({
     kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: disk, sessions: join(at, "sessions.img"),
-    run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(at, "console.log"), user: USER, kvm: KVM,
+    run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(at, "console.log"), user: USER, kvm: KVM, ...DAEMON,
   });
   const place: Place = { key: KEY, history: join(dir, "store"), real: folderOf(folder) };
   return { dir, folder, place, disks, copyOf: (thread: string) => join(dir, "store", "threads", thread) };
@@ -301,18 +299,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Report.docx", "notes"]);
   });
 
-  it("refuses the guest's own root every write to the folder, a remount aside where this computer's virtiofsd cannot", async () => {
+  it("refuses the guest's own root every write to the folder, a remount of it too, whatever this computer's virtiofsd", async () => {
     try {
       // A guest whose agent runs this in place of the history: what a guest that is not ours could try.
       const answer = await subverted(PROBE);
-      const refuses = readonlyFlag(spawnSync(VIRTIOFSD, ["--help"], { encoding: "utf8" }).stdout);
       expect(answer.excluded).toEqual([
         "make: EROFS", "replace: EROFS", "remove: EROFS", "remount: 0",
-        // Past the guest's own mount option, only the daemon on this computer refuses: 1.11 and later.
-        `make again: ${refuses ? "EROFS" : "done"}`,
+        // Past the guest's own mount option, the folder is read-only on this computer too.
+        "make again: EROFS",
         "history: done",
       ]);
-      expect(existsSync(join(folder, "planted.txt"))).toBe(!refuses);
+      expect(existsSync(join(folder, "planted.txt"))).toBe(false);
       expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe("A's report\n");
       expect(existsSync(join(dir, "store", "probe.txt"))).toBe(true);
     } finally {
@@ -609,6 +606,35 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
       rmSync(join(dir, "store", "history.git", "planted"));
     }
     expect(await said(ONE, "changed")).toEqual({ paths: ["Kept.md"] });
+  });
+
+  it("answers a copy's letting go, each as this computer knows it", async () => {
+    // One that holds work no snapshot has stays; one whose branch holds all of it goes, and is made again from it.
+    writeFileSync(join(copyOf(TWO), "Unsaved.md"), "in no snapshot\n");
+    expect(await said(TWO, "close")).toEqual({ copy: "kept" });
+    expect(readFileSync(join(copyOf(TWO), "Unsaved.md"), "utf8")).toBe("in no snapshot\n");
+    expect(await said(ONE, "close")).toEqual({ copy: "removed" });
+    expect([existsSync(copyOf(ONE)), await said(ONE, "close")]).toEqual([false, { copy: "gone" }]);
+    expect(await said(ONE, "open", { moves: false })).toEqual({ copy: "kept" });
+    expect(readFileSync(join(copyOf(ONE), "Kept.md"), "utf8")).toBe("kept\n");
+    // It is asked with nothing: anything more is no request of the history's.
+    expect(await code(ONE, "close", { force: true })).toBe("not_a_request");
+  });
+
+  it("answers a pruning once a day by the clock that asks, each copy as it was after it, and refuses one that names another ref or no time", async () => {
+    const keep = [ONE, TWO].flatMap((thread) => [`refs/heads/threads/${thread}`, `refs/bases/${thread}`]);
+    const later = Math.floor(Date.now() / 1000) + 100 * 86_400;
+    const before = [await said(ONE, "changed"), await said(TWO, "changed")];
+    expect(await said(ONE, "prune", { keep, now: later })).toMatchObject({ pruned: true });
+    // The history is one pack now, and each thread's copy reads as it did.
+    expect(readdirSync(join(dir, "store", "history.git", "objects", "pack")).filter((name) => name.endsWith(".pack"))).toHaveLength(1);
+    expect([await said(ONE, "changed"), await said(TWO, "changed")]).toEqual(before);
+    // Once a day by that clock: an hour on, it does nothing.
+    expect(await said(TWO, "prune", { keep, now: later + 3_600 })).toEqual({ pruned: false });
+    // It keeps a thread's branch and its base and no other ref, and is told the time.
+    expect(await code(ONE, "prune", { keep: ["refs/heads/main"], now: later })).toBe("not_a_request");
+    expect(await code(ONE, "prune", { keep, now: "today" })).toBe("not_a_request");
+    expect(await code(ONE, "prune")).toBe("not_a_request");
   });
 
   it("was asked every action a folder's history takes, and refused with each code a test can bring about", () => {

@@ -19,7 +19,7 @@ import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
 import { THREAD } from "../vm/history.js";
 import { type ApprovalPrompts, Approvals, type DownloadBy } from "./approvals.js";
-import { BOOT_ID, checkFolder, confirmedFolder, type FolderGuards } from "./folder.js";
+import { BOOT_ID, checkFolder, confirmedFolder, type FolderCheck, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
 // How long a confirmed folder waits for its chat's bind operation.
@@ -117,6 +117,9 @@ export interface BinderOptions {
   // How Show folder looks at a folder, and how long it waits; node:fs's lstat and LOOK_MS unless a test says.
   look?: (path: string) => Promise<FolderLook>;
   lookMs?: number;
+  // Whether a folder for a new chat is there and answered a look off this thread in time (FolderLooks): its checks
+  // look at it on this thread, which one on a mount that has stopped answering would stop. Without it, each is taken as answering.
+  answers?: (folder: string) => Promise<boolean>;
   // A binding, a "Stop asking" or a host allowed for the session that could not be recorded,
   // or a network prompt that failed, and why.
   onError?: (error: unknown) => void;
@@ -215,7 +218,7 @@ export class Binder implements Executor {
   ): Promise<Prepared | null> {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
-    const usable = choice === "last" && last !== undefined && checkFolder(last, guards).ok ? last : null;
+    const usable = choice === "last" && last !== undefined && (await this.answers(last)) && checkFolder(last, guards).ok ? last : null;
     // Made for this chat, and gone again unless the user takes it, even when the sheet fails.
     const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     let prepared: Prepared | null = null;
@@ -228,6 +231,10 @@ export class Binder implements Executor {
       if (preparation) preparation.made = true;
       else if (made !== null) this.release(made);
     }
+  }
+
+  private answers(folder: string): Promise<boolean> {
+    return this.options.answers?.(folder) ?? Promise.resolve(true);
   }
 
   /** What the page may know of a chat's folder here: where it is, and whether it asks; null for a chat with none on this computer. */
@@ -310,7 +317,10 @@ export class Binder implements Executor {
     // A page that has gone gets no prompt: the signal is looked at before each one.
     let folder = offered ?? (signal.aborted ? null : await prompts.pickFolder(startIn, signal));
     while (folder !== null && !signal.aborted) {
-      const checked = checkFolder(folder, guards);
+      const checked: FolderCheck = (await this.answers(folder))
+        ? checkFolder(folder, guards)
+        : { ok: false, missing: true, message: `the folder ${folder} did not answer` };
+      if (signal.aborted) return null;
       const links = checked.ok ? await scanLinks(checked.path) : null;
       if (signal.aborted) return null;
       const sheet: FolderSheet = {

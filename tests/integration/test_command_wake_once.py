@@ -20,9 +20,10 @@ from sqlalchemy import select, text
 import surogates.api.routes.openai as openai_route
 import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
-from surogates.config import SHARED_WORK_QUEUE_KEY
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY
 from surogates.db.models import Mission as MissionRow
 from surogates.db.models import Session as SessionRow
+from surogates.db.models import Task
 from surogates.devices.browser import BROWSER_HAND_BACK
 from surogates.harness.budget import IterationBudget
 from surogates.harness.cost_tracker import SessionCostTracker
@@ -32,6 +33,8 @@ from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
+from surogates.missions.evaluator import apply_verdict
+from surogates.missions.store import MissionStore
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SLASH_COMMAND_IDS, SlashCommandConfig
 from surogates.scheduled.materialize import materialize_scheduled_run
@@ -1539,6 +1542,191 @@ async def test_a_mission_command_that_took_effect_as_its_worker_died_is_answered
     assert (await workers.said(chat))[-1] == answer
     assert (await workers.log(chat)).count(done.value) == 1
     assert workers.ran == ["_handle_mission_command"] * 2
+
+
+#: The judge's verdict on a mission whose rubric asks for what the work cannot show, with a rubric in its place.
+PROPOSAL = {
+    "result": "blocked", "explanation": "the rubric asks for every figure; the report gives only the totals", "feedback": "",
+    "proposed_rubric": "- every quarterly total is sourced", "refinement_evidence": "the report holds four totals and no other figure",
+}
+
+
+async def a_proposal_waits(workers: Workers, chat: UUID) -> None:
+    """The judge proposes a new rubric: the chat's mission waits, paused, for its user's word."""
+    [mission] = await workers.missions(chat)
+    await apply_verdict(
+        mission_id=mission.id, verdict=dict(PROPOSAL), coordinator_session_id=chat, session_store=workers.store,
+        mission_store=MissionStore(workers.api.app.state.session_factory), trigger="completion_claim",
+    )
+
+
+#: Where the worker that runs ``/mission accept`` dies, by the event it writes; None: once the rubric is amended.
+ACCEPT_DIES = {
+    "as it records the amendment": lambda kind, data: kind == EventType.MISSION_AMENDED,
+    "once it has amended the rubric": None,
+    "as it writes the mission's next message": lambda kind, data: data.get("synthetic") == "mission_amended",
+    "as it answers": lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" in data,
+}
+
+
+@pytest.mark.parametrize("dies", list(ACCEPT_DIES))
+async def test_a_mission_accept_whose_worker_died_is_finished_by_the_wake_that_runs_it_again(workers, monkeypatch, dies):
+    chat = await a_coordinator(workers)
+    await a_proposal_waits(workers, chat)
+    [mission] = await workers.missions(chat)
+    await workers.says(chat, "/mission accept")
+    typed = await workers.typed(chat)
+    with monkeypatch.context() as dying, pytest.raises(asyncio.CancelledError):
+        if ACCEPT_DIES[dies] is None:
+            amend = MissionStore.amend_rubric
+
+            async def then_the_worker_dies(self, *args, **kwargs):
+                await amend(self, *args, **kwargs)
+                raise asyncio.CancelledError
+
+            dying.setattr(MissionStore, "amend_rubric", then_the_worker_dies)
+            await workers.wake(chat)
+        else:
+            await workers.worker(store=DiesWriting(workers.store, ACCEPT_DIES[dies])).wake(chat)
+
+    await workers.wake(chat)
+
+    # Run again, it finishes what its first run began: the rubric amended and recorded once, the mission told
+    # once to go on from it, and the command answered as done.
+    events = await workers.store.get_events(chat, after=typed)
+    answers = [e.data["message"]["content"] for e in events if e.type == EventType.LLM_RESPONSE.value and e.data.get("answers") == typed]
+    told = [e for e in events if e.type == EventType.USER_MESSAGE.value and e.data.get("synthetic") == "mission_amended"]
+    assert (answers, len(told), [e.type for e in events].count(EventType.MISSION_AMENDED.value)) == (
+        ["Rubric amended; mission resumed."], 1, 1,
+    )
+    [mission] = await workers.missions(chat, mission.id)
+    assert (mission.rubric, mission.status, mission.paused_reason) == (PROPOSAL["proposed_rubric"], "active", None)
+    assert workers.ran == ["_handle_mission_command"] * 2
+    # And the coordinator's next turn goes on from the new rubric.
+    await workers.wake(chat)
+    assert workers.requests[-1][-1] == {"role": "user", "content": told[0].data["content"]}
+    # The command typed again is another: nothing awaits its user's decision now.
+    assert await workers.types(chat, "/mission accept") == "No rubric refinement is awaiting your decision."
+    assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
+
+
+def answers_to(events: list, typed: list) -> list[list[str]]:
+    """The answers in *events* to each of the commands typed at the events *typed*, in order."""
+    return [
+        [e.data["message"]["content"] for e in events if e.type == EventType.LLM_RESPONSE.value and e.data.get("answers") == at]
+        for at in typed
+    ]
+
+
+@pytest.mark.parametrize("between", [None, "/mission pause hold on"])
+async def test_a_mission_accept_typed_before_an_earlier_one_ran_is_refused_once_that_one_has_amended_the_rubric(workers, between):
+    chat = await a_coordinator(workers)
+    await a_proposal_waits(workers, chat)
+    [mission] = await workers.missions(chat)
+    typed = []
+    # Typed one after the other, before any wake has run the first.
+    for command in ["/mission accept", *([between] if between else []), "/mission accept"]:
+        await workers.says(chat, command)
+        typed.append(await workers.typed(chat))
+    for _ in range(5):
+        await workers.wake(chat)
+
+    events = await workers.store.get_events(chat)
+    assert answers_to(events, typed) == [
+        ["Rubric amended; mission resumed."], *([["Mission paused."]] if between else []),
+        ["No rubric refinement is awaiting your decision."],
+    ]
+    [mission] = await workers.missions(chat, mission.id)
+    # The pause typed between the two stands, and the rubric was amended once.
+    assert (mission.status, mission.paused_reason) == (("paused", "hold on") if between else ("active", None))
+    assert [e.type for e in events].count(EventType.MISSION_AMENDED.value) == 1
+
+
+async def test_an_amendment_whose_write_failed_after_its_record_is_applied_by_the_next_accept_and_counted_once(workers, monkeypatch):
+    chat = await a_coordinator(workers)
+    await a_proposal_waits(workers, chat)
+    [mission] = await workers.missions(chat)
+    amend = MissionStore.amend_rubric
+    failed = []
+
+    async def fails_once(self, *args, **kwargs):
+        if not failed:
+            failed.append(True)
+            raise ConnectionError("the database did not answer")
+        return await amend(self, *args, **kwargs)
+
+    monkeypatch.setattr(MissionStore, "amend_rubric", fails_once)
+    assert (await workers.types(chat, "/mission accept")).startswith("/mission was cut off before it could answer.")
+    assert await workers.types(chat, "/mission accept") == "Rubric amended; mission resumed."
+
+    [mission] = await workers.missions(chat, mission.id)
+    assert (mission.rubric, mission.status) == (PROPOSAL["proposed_rubric"], "active")
+    # One amendment applied is one counted against the mission's allowance, and told it once.
+    assert await workers.store.count_mission_amendments(chat, mission.id) == 1
+    assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
+
+
+async def a_task_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID:
+    """A task of the chat's mission whose helper is at work, a worker holding its session: the helper's session."""
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        db.add(Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Source the totals.", status="running",
+            mission_id=mission_id, current_session_id=helper.id, attempt_count=1,
+        ))
+        await db.commit()
+    assert await workers.store.try_acquire_lease(helper.id, "the helper's worker", ttl_seconds=60) is not None
+    return helper.id
+
+
+@pytest.mark.parametrize("dies", ["once the mission's status is written", "as it stops the mission's helper"])
+async def test_a_mission_cancelled_with_its_helpers_whose_worker_died_has_its_helpers_stopped_by_the_wake_that_runs_it_again(
+    workers, monkeypatch, dies,
+):
+    chat = await a_coordinator(workers)
+    [mission] = await workers.missions(chat)
+    helper = await a_task_at_work(workers, chat, mission.id)
+    redis = workers.api.app.state.redis
+    publish, stopped = redis.publish, []
+
+    async def published(channel, message, *args, **kwargs):
+        if channel == f"{INTERRUPT_CHANNEL_PREFIX}:{helper}":
+            if dying:
+                raise asyncio.CancelledError
+            stopped.append(message)
+        return await publish(channel, message, *args, **kwargs)
+
+    monkeypatch.setattr(redis, "publish", published)
+    await workers.says(chat, "/mission cancel --cascade")
+    typed = await workers.typed(chat)
+    dying = dies == "as it stops the mission's helper"
+    with monkeypatch.context() as dies_there, pytest.raises(asyncio.CancelledError):
+        if not dying:
+            set_status = MissionStore.set_status
+
+            async def then_the_worker_dies(self, mission_id, status, **kwargs):
+                await set_status(self, mission_id, status, **kwargs)
+                raise asyncio.CancelledError
+
+            dies_there.setattr(MissionStore, "set_status", then_the_worker_dies)
+        await workers.wake(chat)
+    dying = False
+
+    await workers.wake(chat)
+
+    # Run again, it finishes the cancel: the helper is told to stop, its task and the mission are cancelled,
+    # and the chat has no mission in flight.
+    assert stopped and set(stopped) == {"mission_cancel_cascade"}
+    async with workers.api.app.state.session_factory() as db:
+        [task] = (await db.execute(select(Task).where(Task.mission_id == mission.id))).scalars().all()
+    [mission] = await workers.missions(chat, mission.id)
+    assert (task.status, mission.status) == ("cancelled", "cancelled")
+    assert "active_mission_id" not in (await workers.session(chat)).config
+    answers = [
+        e.data["message"]["content"] for e in await workers.store.get_events(chat, after=typed, types=[EventType.LLM_RESPONSE])
+        if e.data.get("answers") == typed
+    ]
+    assert len(answers) == 1 and workers.ran == ["_handle_mission_command"] * 2
 
 
 async def its_worker_dies():

@@ -4,8 +4,8 @@
 // types and copied field by field before the shell uses it.
 
 import type {
-  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace,
-  ThreadRow, UndoResult,
+  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, SetAside,
+  SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
 } from "../../../web/src/lib/projects-contract.js";
 
 // How long the page has to answer a call.
@@ -86,9 +86,26 @@ function fileOf(value: unknown): ProducedFile {
   return { kind, label, ref, threadId, landing: one(landing, MARKS) ? landing : null } as ProducedFile;
 }
 
-// A row of an agent older than this app names no landing for its card's Undo: that is none.
+// What a thread's computer set aside of its work, as a row says it. Taken as a file's mark is: an entry the app
+// does not know, or whose time is none, is left out, never a row refused; with nothing left, none. A row says
+// at most as many of each as its computer names.
+const ASIDE_KINDS = ["copy", "repository"] as const;
+const ASIDE_MOST = 64;
+function setAsideOf(value: unknown): SetAside | null {
+  const { kept, snapshots, gone } = fields(value);
+  const wholes = (list: unknown): SetAsideWhole[] => (Array.isArray(list) ? list.slice(0, ASIDE_MOST) : []).flatMap((entry) => {
+    const { kind, at } = fields(entry);
+    return one(kind, ASIDE_KINDS) && time(at) ? [{ kind, at }] : [];
+  });
+  const found = { kept: wholes(kept), snapshots: count(snapshots) ? snapshots : 0, gone: wholes(gone) };
+  return found.kept.length > 0 || found.snapshots > 0 || found.gone.length > 0 ? found : null;
+}
+
+// A row of an agent older than this app names no landing for its card's Undo, and nothing set aside: that is none.
 function threadOf(value: unknown): ThreadRow {
-  const { id, title, group, reason, statusLine, progress, files, landingId = null, place, createdAt, updatedAt, resolvedAt } = fields(value);
+  const {
+    id, title, group, reason, statusLine, progress, files, landingId = null, setAside = null, place, createdAt, updatedAt, resolvedAt,
+  } = fields(value);
   const { done, total } = fields(progress);
   need(named(id) && text(title, 500) && one(group, ["waiting", "working", "idle", "resolved"])
     && one(reason, ["question", "approval", "failed", "computer", "files", null]) && (statusLine === null || text(statusLine, 2_000))
@@ -96,7 +113,7 @@ function threadOf(value: unknown): ThreadRow {
     && time(createdAt) && time(updatedAt) && (resolvedAt === null || time(resolvedAt)));
   return {
     id, title, group, reason, statusLine, progress: progress === null ? null : { done, total }, files: listOf(files, 200, fileOf),
-    landingId, place: placeOf(place), createdAt, updatedAt, resolvedAt,
+    landingId, setAside: setAsideOf(setAside), place: placeOf(place), createdAt, updatedAt, resolvedAt,
   } as ThreadRow;
 }
 

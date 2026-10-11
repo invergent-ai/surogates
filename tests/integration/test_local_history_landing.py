@@ -210,10 +210,10 @@ async def test_a_turn_lands_in_its_folder_as_one_saga_in_its_computers_order_its
     # After the turn's open and the snapshot before each of its steps, one saga, its steps device operations under the
     # turn's own name, in the computer's order: the folder held and put right first; the copy's files looked at in the
     # folder before your edits are picked up and the turn committed; each file by the land kind; the record; and the
-    # forgetting of what the landing kept, which lets the folder go.
+    # forgetting of what the landing kept, which lets the folder go.  Then, the turn ended, the folder's history pruned.
     assert [entry[1:] for entry in log if entry[0] == "op"] == [
         ("open:0", "open"), ("checkpoint:0:0:call_0_write_file", "take"), ("checkpoint:0:1:call_1_terminal", "take"),
-        ("land:0:hold", "recover"), *(("land:0", action) for action in LANDED),
+        ("land:0:hold", "recover"), *(("land:0", action) for action in LANDED), ("land:0:prune", "prune"),
     ]
     # Its row held every apply, none done, before the first was sent; and its record before the record was sent.
     first = log.index(("op", "land:0", "apply"))

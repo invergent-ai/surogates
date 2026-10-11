@@ -43,7 +43,15 @@ from surogates.workstreams import master_config
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, Busy, NotKept, Staged, landable, said
 from surogates.workstreams.derive import SHELL_LIMITS, aware, derive_thread, place_of, units, utc
-from surogates.workstreams.history import HISTORY_OFF, deleted_files, over_history_cap, row_id, version_of, versions
+from surogates.workstreams.history import (
+    HISTORY_OFF,
+    deleted_files,
+    folder_history_off,
+    over_history_cap,
+    row_id,
+    version_of,
+    versions,
+)
 from surogates.workstreams.store import WorkstreamStore
 from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
 from surogates.workstreams.undo import NO_CHANGE, UNLANDED, Refused, restore, undo
@@ -392,12 +400,15 @@ async def file_history(
     pruned one is listed, as no longer kept.  A folder on a computer
     (*device_id*) has records of its own, and its computer holds its
     versions: none of them can be had from here, and none names a landing
-    to undo, which nothing here undoes on a computer."""
+    to undo, which nothing here undoes on a computer.  A folder whose
+    computer last said it has no history says why."""
     project = await _project(request, workstream_id, tenant, ctx)
     state = request.app.state
     master = await state.session_store.get_session(project.master_session_id)
     if device_id is None and await over_history_cap(state.storage, master):
         raise HTTPException(status.HTTP_409_CONFLICT, HISTORY_OFF)
+    if device_id is not None and (off := await folder_history_off(state.session_factory, project.id, device_id)):
+        raise HTTPException(status.HTTP_409_CONFLICT, off)
     found = await versions(state.session_factory, project.id, path, device_id=device_id, limit=SHELL_LIMITS["versions"])
     if device_id is not None:
         for version in found:
@@ -677,8 +688,7 @@ async def resolve_thread(
     thread = await _thread(request, project, thread_id)
     state = request.app.state
     await stop_thread(
-        thread, reason=_RESOLVED_BY_USER, interrupt=_RESOLVED_BY_USER, session_store=state.session_store,
-        session_factory=state.session_factory, redis=state.redis,
+        thread, reason=_RESOLVED_BY_USER, interrupt=_RESOLVED_BY_USER, session_store=state.session_store, redis=state.redis,
     )
     await _store(request).resolve_thread(thread.id)
     await project_stream.publish(state.redis, project.id, thread.id, project_stream.RESOLVED)

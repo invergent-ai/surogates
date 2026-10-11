@@ -20,14 +20,15 @@
 // through a link has its places where the link leads: resolved here, once for every path of a place.
 //
 // Another folder at the same path starts a new history: the place that was there, its record and
-// what its landings kept are renamed <key>.was-<time>, each where it lies, and never removed.
-// Only for the folder that is at the path now, and only once the sandbox has let the place go: a
-// thread bound to a folder that is no longer the one at its path sets nothing aside, has no place
-// made for it, and is given none but the one that is its own folder's history.
+// what its landings kept are renamed <key>.was-<time>, each where it lies. Only for the folder that
+// is at the path now, and only once the sandbox has let the place go: a thread bound to a folder
+// that is no longer the one at its path sets nothing aside, has no place made for it, and is given
+// none but the one that is its own folder's history. What is set aside under a key takes 10 GiB of
+// the disk at most: past that the oldest goes, and never the newest.
 
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, sep } from "node:path";
 
 import { confirmedFolder } from "../binding/folder.js";
@@ -43,6 +44,11 @@ const NOT_THE_APPS = "This folder's history is not a folder of the app's own";
 // How often one ask looks again at a place that was changed while it waited for the folder's look or for the
 // sandbox: another thread's ask changes it once, and then it is the folder's own.
 const TURNS = 8;
+// What the places set aside under one key take of the disk at most, each with its record and what its landings kept,
+// as the copies a place sets aside do (surogates/sandbox/local_history.py, _ASIDE_BYTES).
+export const ASIDE_BYTES = 10 * 1024 ** 3;
+// A name of what was set aside under a key: its history, its record, or what its landings kept; or one that is going.
+const ASIDE = /^([0-9a-f]{16})\.was-([0-9]+)(\.json|\.gone)?$/;
 
 // The folder is not the one its thread was bound to: another folder, a link, or nothing is at its path now.
 export class FolderReplaced extends Error {}
@@ -64,6 +70,11 @@ export interface PlaceOptions {
   // How a folder is looked at, and how long the look may take; node's lstat and LOOK_MS unless a test says.
   look?(path: string): Promise<Looked>;
   lookMs?: number;
+  // ASIDE_BYTES unless a test says.
+  asideBytes?: number;
+  // Told, once this ask has set a place aside, of the bound's run on what is set aside under the folder's path, which
+  // goes on behind the ask's answer: it settles once that has run.
+  bounded?(run: Promise<void>): void;
 }
 
 export interface Placed {
@@ -222,12 +233,108 @@ async function live(bound: BoundFolder, options: PlaceOptions): Promise<boolean>
   return looked.found !== null && looked.found.directory && confirmedFolder(bound, looked.found) && looked.real === bound.folder;
 }
 
-// A name beside *paths* that none of them has yet with it: <path>.was-<time>.
-function stamped(paths: string[]): string {
-  for (let time = Date.now(); ; time += 1) {
+// A name beside *paths* that none of them has yet with it, <path>.was-<time>, its time *after* or later: what is set
+// aside is stamped in the order it was, whatever the clock says, as the newest is told by its stamp.
+function stamped(paths: string[], after: number): string {
+  for (let time = Math.max(Date.now(), after); ; time += 1) {
     const stamp = `.was-${time}`;
     if (paths.every((path) => lstatSync(`${path}${stamp}`, { throwIfNoEntry: false }) === undefined)) return stamp;
   }
+}
+
+// The latest stamp of what is set aside under *key* in the app's data *data*, kept or going; 0 where there is none.
+function latestAside(data: string, key: string): number {
+  let latest = 0;
+  for (const folder of [join(data, "history"), join(data, "landings")]) {
+    let names: string[] = [];
+    try {
+      names = readdirSync(folder);
+    } catch {
+      // Nothing was ever kept there.
+    }
+    for (const named of names.map((name) => ASIDE.exec(name))) if (named?.[1] === key) latest = Math.max(latest, Number(named[2]));
+  }
+  return latest;
+}
+
+// What *path* and all it holds take of the disk, in bytes, no link followed: what may not be looked at, or listed, counts as nothing more.
+async function onDisk(path: string): Promise<number> {
+  const found = await lstat(path).catch(() => null);
+  if (found === null) return 0;
+  if (!found.isDirectory()) return found.blocks * 512;
+  let taken = found.blocks * 512;
+  for (const name of await readdir(path).catch(() => [])) taken += await onDisk(join(path, name));
+  return taken;
+}
+
+// Give each folder under *path*, *path* among them, all of its owner's rights, no link followed: the app's own, let go,
+// so that a folder a thread's command made one nobody may change, or list, keeps nothing from going.
+async function changeable(path: string): Promise<void> {
+  const found = await lstat(path);
+  if (!found.isDirectory()) return;
+  await chmod(path, (found.mode & 0o7777) | 0o700);
+  for (const name of await readdir(path)) await changeable(join(path, name)).catch(() => {});
+}
+
+/**
+ * Let go of the oldest of what was set aside under *key* in the app's data *data*, until what is kept takes *most*
+ * bytes of the disk at most: each place set aside goes with its record and its landings' folder, as one, and the
+ * newest never, however much it holds. Nor one whose landings still keep anything: a landing cut short there may
+ * keep the only copy of a file of the user's it replaced, which no recovery could put back once it went. It counts,
+ * and is passed over; where none other can go, none does. The oldest is the one set aside first, by its stamp, which
+ * goes in the order they were set aside in (stamped). Each is renamed to go first, where it lies (<name>.gone), its
+ * record removed, and then it is, its folders made its owner's to change first: cut anywhere, none is kept with part of
+ * it gone, and the next set-aside removes what is left. None of it is the sandbox's: a place is set aside only once the
+ * sandbox has let it go, and none of it is anybody's but the app's.
+ */
+async function keptWithin(data: string, key: string, most: number): Promise<void> {
+  const times = new Map<string, string[]>();
+  const going: string[] = [];
+  for (const folder of [join(data, "history"), join(data, "landings")]) {
+    for (const name of await readdir(folder).catch(() => [])) {
+      const named = ASIDE.exec(name);
+      if (named?.[1] !== key) continue;
+      if (named[3] === ".gone") going.push(join(folder, name));
+      else times.set(named[2]!, [...(times.get(named[2]!) ?? []), join(folder, name)]);
+    }
+  }
+  const oldest = [...times.keys()].sort((a, b) => Number(a) - Number(b));
+  const taken = new Map<string, number>();
+  for (const time of oldest) taken.set(time, (await Promise.all(times.get(time)!.map(onDisk))).reduce((sum, bytes) => sum + bytes, 0));
+  let held = [...taken.values()].reduce((sum, bytes) => sum + bytes, 0);
+  for (const time of oldest.slice(0, -1)) {
+    if (held <= most) break;
+    // Anything at all in its landings' folder: a step's record, a file it kept, or what a put-back has not told yet.
+    const landings = join(data, "landings", `${key}.was-${time}`);
+    if (times.get(time)!.includes(landings) && (await readdir(landings)).length > 0) continue;
+    // Its folders first, then its record: none is left set aside with no record of which folder's it was.
+    const [folders, records] = [times.get(time)!.filter((path) => !path.endsWith(".json")), times.get(time)!.filter((path) => path.endsWith(".json"))];
+    for (const path of folders) {
+      await rename(path, `${path}.gone`);
+      going.push(`${path}.gone`);
+    }
+    for (const path of records) await rm(path, { force: true });
+    held -= taken.get(time)!;
+  }
+  // Each on its own: one that cannot be removed whole now keeps none after it, and is tried again at the next set-aside.
+  for (const path of going) {
+    await changeable(path).catch(() => {});
+    await rm(path, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Each key's bound on what is set aside under it, one run after another, behind the asks that set places aside.
+const bounding = new Map<string, Promise<void>>();
+
+// The bound on what is set aside under *key* run once those asked before it have: never on an ask's way. Never rejects.
+function keepWithin(data: string, key: string, most: number): Promise<void> {
+  const at = `${data}\0${key}`;
+  const run = (bounding.get(at) ?? Promise.resolve()).then(() => keptWithin(data, key, most)).catch(() => {});
+  bounding.set(at, run);
+  void run.then(() => {
+    if (bounding.get(at) === run) bounding.delete(at);
+  });
+  return run;
 }
 
 /**
@@ -285,18 +392,21 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     // Looked at again: while the folder was looked at and the sandbox let the place go, another thread of the
     // folder may have done all of this. From here to the place's making nothing waits.
     if ((lstatSync(history, { throwIfNoEntry: false })?.ino ?? null) !== there || textOf(record) !== text) continue;
-    const stamp = stamped([history, kept]);
+    const stamp = stamped([history, kept], latestAside(data, key) + 1);
     let aside: Placed["aside"];
+    let setAside = false;
     if (there !== null) {
       renameSync(history, `${history}${stamp}`);
       if (text !== null) renameSync(record, `${history}${stamp}.json`);
       aside = { place: was, history: `${history}${stamp}`, kept: null };
+      setAside = true;
     }
     // What the landings of a place before this one kept is that folder's, and goes aside with it. Where only the
     // place's own folder was lost, its record still names this folder, and what its landings kept is its own.
     if (!lost && lstatSync(kept, { throwIfNoEntry: false }) !== undefined) {
       renameSync(kept, `${kept}${stamp}`);
       if (aside) aside.kept = `${kept}${stamp}`;
+      setAside = true;
     }
     if (there === null && !own(histories)) mkdirSync(histories, { mode: 0o700 });
     // The record first: cut between the two, the place is made at the next ask, and none is ever found without its record.
@@ -304,7 +414,11 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     mkdirSync(history, { mode: 0o700 });
     // Read as the next ask will read it. This ask has made its one place: one that is not found to be this
     // folder's is left as it is, and nothing more is renamed for it.
-    if (read().found) return { place, ...(aside ? { aside } : {}) };
+    if (read().found) {
+      // Upkeep, behind the answer: the place is made whatever comes of it, and what could not go goes at the next set-aside.
+      if (setAside) options.bounded?.(keepWithin(data, key, options.asideBytes ?? ASIDE_BYTES));
+      return { place, ...(aside ? { aside } : {}) };
+    }
     throw new Error(`This computer could not record which folder the history of ${bound.folder} belongs to, so it was not used`);
   }
   throw new Error(`The history of the folder ${bound.folder} was changed each time it was looked at, so it was not found`);

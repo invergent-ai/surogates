@@ -18,6 +18,7 @@ from surogates.governance.saga.state_machine import (
 from surogates.governance.saga.orchestrator import (
     SagaOrchestrator,
     SagaTimeoutError,
+    StepRefused,
 )
 
 
@@ -335,6 +336,22 @@ class TestRetryAllExhausted:
         assert call_count == 3  # 1 initial + 2 retries
         assert step.state == StepState.FAILED
         assert step.retry_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_step_refused_for_good_is_not_tried_again(self):
+        orch = SagaOrchestrator(retry_delay=0.01)
+        saga = orch.create_saga(uuid4())
+        step = orch.add_step(saga.saga_id, tool_name="history.pickup", tool_call_id="", arguments={}, max_retries=2)
+        tries = 0
+
+        async def refused():
+            nonlocal tries
+            tries += 1
+            raise StepRefused("no such step")
+
+        with pytest.raises(StepRefused):
+            await orch.execute_step(saga.saga_id, step.step_id, refused)
+        assert (tries, step.state, step.error) == (1, StepState.FAILED, "no such step")
 
 
 class TestAttempt:

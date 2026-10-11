@@ -20,6 +20,7 @@ from surogates.db.models import InboxItem, WorkstreamHistory
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_context_replay import news, unread_reports, worker_note
+from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_pending import NAMES_ANSWERS
 from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -430,6 +431,70 @@ async def test_a_redo_turn_cut_off_before_its_first_request_is_still_the_redos(w
     [request] = workers.requests
     assert request[-1] == {"role": "user", "content": REDO_OF_THE_REPORT}
     assert (await workers.said(thread.id)).count(REFUSED) == 1 and workers.ran == []
+
+
+MISSION = "/mission Audit the Q3 figures\n\nRubric:\n- every figure is sourced"
+
+
+#: What reaches a thread whose mission is in flight, and when, as its coordinator's turn runs or after it.
+MISSION_NEWS = [
+    "a helper's report", "a helper's report as the model answers", "a helper's report during a tool call",
+    "a message typed as the turn's request is made ready", "a redo", "nothing",
+]
+
+
+@pytest.mark.parametrize("news", MISSION_NEWS)
+async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_news_and_not_for_nothing(workers, monkeypatch, pods, news):
+    api, store = workers.api, workers.store
+    thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
+    workers.sandbox_pool = SandboxPool(pods)
+    await its_first_turn_was_taken(store, thread)
+    helpers: list = []
+
+    async def a_helper_reports():
+        helpers.append(await workers.a_helper_reports(thread.id))
+
+    # The mission's command, then the turn on its first message: the turn ends with the mission in flight.
+    await workers.types(thread.id, MISSION, SlashCommandConfig())
+    with monkeypatch.context() as during:
+        if news == "a helper's report as the model answers":
+            workers.during_the_request = a_helper_reports
+        elif news == "a helper's report during a tool call":
+            workers.replies = [calling(("memory", {"action": "add", "content": "The figures are in Q3.xlsx."}))]
+            workers.during_the_tool_call = a_helper_reports
+        elif news == "a message typed as the turn's request is made ready":
+            harvest = AgentHarness.maybe_harvest_research
+
+            async def the_user_types_meanwhile(harness, session, messages):
+                during.setattr(AgentHarness, "maybe_harvest_research", harvest)
+                await workers.says(thread.id, "And Q1?")
+                return await harvest(harness, session, messages)
+
+            during.setattr(AgentHarness, "maybe_harvest_research", the_user_types_meanwhile)
+        await workers.wake(thread.id, SlashCommandConfig())
+    assert (len(workers.requests), await workers.status(thread.id)) == (
+        2 if news == "a helper's report during a tool call" else 1, "active",
+    )
+    workers.requests.clear()
+    if news == "a helper's report":
+        await a_helper_reports()
+    elif news == "a redo":
+        await store.emit_event(thread.id, EventType.HISTORY_REDO, {
+            "saga": "saga:1", "files": [{"path": "Report.docx", "reason": "changed", "by": {"kind": "you"}}],
+        })
+    for _ in range(3):
+        await workers.wake(thread.id, SlashCommandConfig())
+    # Once for what no request of the turn read, and never again: a wake with nothing new asks nothing.
+    told = [{"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} for helper in helpers]
+    if news == "a redo":
+        told = [{"role": "user", "content": REDO_OF_THE_REPORT}]
+    elif news == "a message typed as the turn's request is made ready":
+        told = [{"role": "user", "content": "And Q1?"}]
+    assert [[message in request for message in told] for request in workers.requests] == [[True]] * len(told)
+    if news in ("a helper's report", "a helper's report as the model answers", "a redo"):
+        # What came after the turn's last request is the next request's last word.
+        assert [request[-1] for request in workers.requests] == told
+    assert await workers.status(thread.id) == "active"
 
 
 async def test_a_message_typed_after_a_redo_has_the_turn_and_its_skill_runs_once(workers, monkeypatch, pods):

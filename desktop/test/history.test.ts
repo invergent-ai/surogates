@@ -494,6 +494,7 @@ describe("what the guest answered, checked on this computer", () => {
   // Each action's answers, as the history gives them (local_history.py, _ACTIONS).
   const answers: Record<string, unknown[]> = {
     open: [{ copy: "made" }, { copy: "moved" }, { copy: "kept" }, { copy: "kept", set_asides: [BLOB, ID] }],
+    close: [{ copy: "removed" }, { copy: "kept" }, { copy: "gone" }],
     changed: [{ paths: ["Report.docx", "new folder/a b.md"] }, { paths: [] }],
     snapshot: [{ hash: ID }],
     restore: [{}],
@@ -520,6 +521,8 @@ describe("what the guest answered, checked on this computer", () => {
     record: [{ commit: ID, set_aside: null }, { commit: ID, set_aside: BLOB }],
     keep: [{ commit: ID, not_taken: [] }, { commit: ID, not_taken: ["helpers.md"] }],
     forget: [{ landing: ID }, { landing: null }],
+    // Pruned already within the day; or cut, to the commits of main it keeps, its one pack's bytes and those of main's files.
+    prune: [{ pruned: false }, { pruned: true, commits: 20, size: 9_689, files: 40 }],
   };
   const source = (name: string) => readFileSync(new URL(`../../surogates/sandbox/${name}`, import.meta.url), "utf8");
 
@@ -535,6 +538,20 @@ describe("what the guest answered, checked on this computer", () => {
     expect(checked("fetch", { ok: { main: ID, landing: null, hidden: false, packs: 0, missing: [], has_saga: true } }))
       .toEqual({ ok: { main: ID, landing: null, hidden: false, packs: 0, missing: [] } });
     expect(checked("restore", { ok: { commit: ID } })).toEqual({ ok: {} });
+  });
+
+  it("takes what a pruning did, and nothing else of it", () => {
+    expect(checked("prune", { ok: { pruned: false, marker: "/x", commits: 3 } })).toEqual({ ok: { pruned: false } });
+    expect(checked("prune", { ok: { pruned: true, commits: 20, size: 9_689, files: 40, refs: ["refs/heads/main"] } })).toEqual({
+      ok: { pruned: true, commits: 20, size: 9_689, files: 40 },
+    });
+  });
+
+  it("takes what became of a copy its root let go, and nothing else for it", () => {
+    expect(checked("close", { ok: { copy: "removed", set_aside_folders: [ID], planted: "x" } }, THREAD)).toEqual({ ok: { copy: "removed" } });
+    for (const answer of [{ copy: "made" }, { copy: "moved" }, { copy: "REMOVED" }, { copy: null }, {}, { removed: true }, null, "removed"]) {
+      expect(checked("close", { ok: answer }), JSON.stringify(answer)).toEqual(NOT_AN_ANSWER);
+    }
   });
 
   // What of a thread's own the place keeps set aside whole, each by its folder's name there: the order it was set
@@ -603,7 +620,7 @@ describe("what the guest answered, checked on this computer", () => {
   it("knows every action a folder's history takes, and no other", () => {
     const actions = /^_ACTIONS[^]*?^\}/m.exec(source("local_history.py"))![0];
     expect([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort()).toEqual(Object.keys(answers).sort());
-    for (const action of ["apply", "unapply", "prune", "take_up", "opened", "hand_off", "hand_back", "keep_apart", "drop_hand_off", "constructor", "__proto__", "toString", ""]) {
+    for (const action of ["apply", "unapply", "take_up", "opened", "hand_off", "hand_back", "keep_apart", "drop_hand_off", "constructor", "__proto__", "toString", ""]) {
       expect(checked(action, { ok: {} })).toEqual(NOT_AN_ANSWER);
     }
   });
@@ -749,8 +766,17 @@ describe("what the guest answered, checked on this computer", () => {
     ["commit", { ...turn, changes: Array<unknown>(50_001).fill({ path: "a.txt", before: null, after: ID }) }],
     ["picked", { picked_up: Array<unknown>(50_001).fill({ path: "a.txt", before: null, after: ID }), more: 0 }],
     ["open", { copy: "kept", set_asides: Array<string>(50_001).fill(ID) }],
-    // An action that is none of this computer's history.
+    // A pruning that is none, or that cut the history and does not say by how much.
+    ["prune", { pruned: "yes" }],
+    ["prune", { pruned: 1, commits: 20, size: 9_689, files: 40 }],
+    ["prune", { pruned: true, commits: -1, size: 9_689, files: 40 }],
+    ["prune", { pruned: true, commits: 20, size: 1.5, files: 40 }],
+    ["prune", { pruned: true, commits: 20, size: 2 ** 60, files: 40 }],
     ["prune", { pruned: true }],
+    ["prune", { pruned: true, commits: 20, size: 9_689 }],
+    ["prune", {}],
+    // An action that is none of this computer's history.
+    ["hand_off", { commit: ID }],
     ["apply", { path: "a.txt" }],
   ])("refuses %s's answer %j", (action, answer) => {
     expect(checked(action, { ok: answer })).toEqual(NOT_AN_ANSWER);

@@ -18,10 +18,12 @@ import { findOnPath } from "../files/operations.js";
 import type { Share } from "../guest/protocol.js";
 import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
-import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
+import { Qmp, qemuArgs, readOnlyDaemon, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const RETRY_MS = 5;
+// util-linux's, as setpriv is.
+const PRLIMIT = "/usr/bin/prlimit";
 
 // Settles with "late" at *deadline* (performance.now()), its timer not holding the process.
 const late = (deadline: number) => new Promise<"late">((resolve) => {
@@ -31,11 +33,12 @@ const late = (deadline: number) => new Promise<"late">((resolve) => {
 /**
  * What a manager that died left running, where its pdeathsig did not reach. Each
  * pidfile this backend writes in *run* names a process, killed only when it is that
- * QEMU or that virtiofsd: its program, and an argument that names its own file in
- * *run*, never a part of its command line. A pid used again since is left alone.
+ * QEMU or that virtiofsd: its program, one of *daemons* for a folder's (virtiofsd, or
+ * the bwrap a folder read alone has it run in), and an argument that names its own
+ * file in *run*, never a part of its command line. A pid used again since is left alone.
  * The folder is then emptied for the next guest's sockets.
  */
-export function sweep(run: string): void {
+export function sweep(run: string, daemons: string[] = [VIRTIOFSD]): void {
   let names: string[] = [];
   try {
     names = readdirSync(run);
@@ -52,7 +55,7 @@ export function sweep(run: string): void {
       const program = readlinkSync(`/proc/${pid}/exe`);
       const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
       const ours = share
-        ? program === VIRTIOFSD && argv.includes(`--socket-path=${join(run, `vfs-${share[1]}.sock`)}`)
+        ? daemons.includes(program) && argv.includes(`--socket-path=${join(run, `vfs-${share[1]}.sock`)}`)
         : basename(program) === "qemu-system-x86_64" && argv.includes(join(run, "qemu.pid"));
       if (ours) process.kill(pid, "SIGKILL");
     } catch {
@@ -65,14 +68,15 @@ export function sweep(run: string): void {
 
 // Where the VM's tools are looked for: where the file helper's are, by the one rule (pathOutside).
 // The app's PATH without its relative entries, and without any entry in one of *held*, the folders
-// a chat is bound to, where a command may have written a program. The app's check holds them all.
-// This process, which starts the VM, knows none of them: it drops the relative entries.
-const toolPath = (held: Held = []) => pathOutside(process.env.PATH, held);
+// a chat is bound to, where a command may have written a program. The app's check holds them all,
+// on the app's PATH less any entry that did not answer (FolderLooks). This process, which starts
+// the VM, knows none of them: it drops the relative entries.
+const toolPath = (held: Held = [], path = process.env.PATH) => pathOutside(path, held);
 type Held = Array<{ dev: number; ino: number }>;
 // What QEMU and virtiofsd are given of the app's environment: that PATH, where virtiofsd finds
 // newuidmap and newgidmap, and nothing else: the user's shell may export what either acts on,
 // OPENSSL_CONF and the loader's variables among them.
-const toolEnv = (held: Held = []) => ({ PATH: toolPath(held) });
+const toolEnv = () => ({ PATH: toolPath() });
 // QEMU by its whole path, as that PATH finds it, or null: it is run by that path and no other.
 const qemuOn = (path: string) => findOnPath("qemu-system-x86_64", path, "/");
 
@@ -87,14 +91,17 @@ function launch(argv: string[]): { child: ChildProcess; said: () => string } {
   return { child, said: () => said.trim() };
 }
 
+// The bwrap a folder the guest reads alone is shared through: the app's own copy, else the PATH's.
+const bwrapOf = (options: VmOptions): string | null => options.bwrap ?? findOnPath("bwrap", toolPath(), "/");
+
 // Whether *name* is a program on *path*, where virtiofsd looks for newuidmap and newgidmap.
 const onPath = (name: string, path = toolPath()) => findOnPath(name, path, "/") !== null;
 
-// The major and minor version *program* says it is, as `--version` prints it, or null: one that has
-// not answered in 5 s is killed, as a SIGTERM may be ignored.
-const versionOf = (program: string | null, args: string[], held: Held = []) => new Promise<[number, number] | null>((resolve) => {
+// The major and minor version *program* says it is, as `--version` prints it, run on *path*, or null:
+// one that has not answered in 5 s is killed, as a SIGTERM may be ignored.
+const versionOf = (program: string | null, args: string[], path: string) => new Promise<[number, number] | null>((resolve) => {
   if (program === null) return resolve(null);
-  execFile(...cleanly(program, args), { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv(held) }, (error, stdout) => {
+  execFile(...cleanly(program, args), { timeout: 5_000, killSignal: "SIGKILL", env: { PATH: path } }, (error, stdout) => {
     const found = error ? null : /(\d+)\.(\d+)/.exec(stdout);
     resolve(found ? [Number(found[1]), Number(found[2])] : null);
   });
@@ -108,13 +115,16 @@ const atLeast = (version: [number, number] | null, [major, minor]: [number, numb
  * later; newuidmap and newgidmap, which virtiofsd runs for its id maps; and, while the image
  * has something left to unpack (*unpacking*), zstd, which unpacks its download. Checked at
  * the app's start, and at the status line's Check again. QEMU and the two id-map tools are looked
- * for by the PATH rule of the file helper's tools, with *held* the folders chats are bound to.
+ * for by the PATH rule of the file helper's tools, with *held* the folders chats are bound to, on
+ * *on*, the app's PATH as it was looked at.
  */
-export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true, held: Held = []): Promise<string[]> {
-  const path = toolPath(held);
+export async function missingTools(
+  paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true, held: Held = [], on = process.env.PATH,
+): Promise<string[]> {
+  const path = toolPath(held, on);
   const [qemu, virtiofsd] = await Promise.all([
-    versionOf(qemuOn(path), ["--version"], held),
-    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"], held),
+    versionOf(qemuOn(path), ["--version"], path),
+    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"], path),
   ]);
   let zstd = true;
   try {
@@ -224,7 +234,7 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
   if (signal?.aborted) throw new Error("The boot was stopped");
   // Its uid and gid maps: without them no folder could be shared, and virtiofsd's own words would not reach the user.
   if (!onPath("newuidmap") || !onPath("newgidmap")) throw new Error("virtiofsd needs newuidmap and newgidmap (the uidmap package)");
-  sweep(options.run);
+  sweep(options.run, [options.virtiofsd ?? VIRTIOFSD, ...[bwrapOf(options)].filter((bwrap) => bwrap !== null)]);
   if (!existsSync(options.sessions)) {
     mkdirSync(dirname(options.sessions), { recursive: true, mode: 0o700 });
     // Sparse: the guest formats it at its first boot, and it grows as it is used.
@@ -235,7 +245,10 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
   mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
   const program = qemuOn(toolPath());
   if (program === null) throw new Error("QEMU is not on the PATH (the qemu-system-x86 package)");
-  const { child: qemu, said } = launch([program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
+  // With no locked memory allowed. QEMU 10.2 gives each of its event loops an io_uring ring, counted
+  // against the locked memory of all the user's processes together, and exits when a later loop's is
+  // refused; with none allowed, its first loop's is refused, and none of them uses io_uring.
+  const { child: qemu, said } = launch([PRLIMIT, "--memlock=0:0", "--", program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
   const halt = () => qemu.kill("SIGKILL");
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;
@@ -297,12 +310,17 @@ class LinuxVm implements VmBackend {
   /**
    * *folder* on a free root port, by *deadline*: its virtiofsd, which maps the host user
    * to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
-   * A share not added gives its port back. *readonly*: its virtiofsd refuses every write, where it
-   * has the option; the guest mounts it read-only either way (guest/places.ts). Where it cannot be
-   * told whether it has, the folder is not shared.
+   * A share not added gives its port back. *readonly*, for the guest's root (*uid* 0): its virtiofsd
+   * serves it from bwrap's namespaces, where it is read-only on this computer, as it was mounted
+   * when the share began, so no write of the guest's reaches it, through a remount of the guest's
+   * read-only mount (guest/places.ts) neither; and it refuses every write itself too, where it has
+   * the option. Where it cannot be told whether it has, the folder is not shared.
    */
   async share(folder: string, uid: number, deadline: number, readonly = false): Promise<Share> {
-    const refusing = readonly && (await refusesWrites());
+    const program = this.options.virtiofsd ?? VIRTIOFSD;
+    const bwrap = readonly ? bwrapOf(this.options) : null;
+    if (readonly && bwrap === null) throw new Error("the folder could not be shared read-only: bubblewrap is not on the PATH");
+    const refusing = readonly && (await refusesWrites(program));
     if (this.killed) throw new Error("the VM has gone");
     const port = Math.min(...this.free);
     if (port === Infinity) throw new Error(`it holds ${ROOT_PORTS} folders already, each of a chat at work`);
@@ -310,7 +328,7 @@ class LinuxVm implements VmBackend {
     const n = (this.made += 1);
     const socket = join(this.options.run, `vfs-${n}.sock`);
     const pidfile = join(this.options.run, `vfs-${n}.pid`);
-    const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user, refusing)]);
+    const { child: daemon, said } = launch(readonly ? readOnlyDaemon(bwrap!, program, folder, socket, refusing) : [program, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
     this.daemons.push(daemon);
     writeFileSync(pidfile, String(daemon.pid ?? ""));
     try {

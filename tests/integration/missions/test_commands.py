@@ -371,6 +371,57 @@ async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
             assert t.status == expected
 
 
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cancel_with_cascade_interrupts_a_cancelled_tasks_session_only_while_a_turn_runs_for_it(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """A task already cancelled is interrupted again only where a worker still
+    holds its session: a cascade cut off after marking it may never have told
+    it.  One cancelled long ago, its session at rest, is not told again."""
+    from surogates.config import INTERRUPT_CHANNEL_PREFIX
+    from surogates.db.models import Task
+    from surogates.missions.commands import (
+        handle_mission_create, handle_mission_cancel,
+    )
+    from surogates.missions.store import MissionStore
+
+    store = MissionStore(session_factory)
+    redis = AsyncMock(zadd=AsyncMock(), publish=AsyncMock())
+    created = await handle_mission_create(
+        description="d", rubric="r",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store,
+    )
+    at_work, at_rest = uuid.uuid4(), uuid.uuid4()
+    async with session_factory() as db:
+        for sid in (at_work, at_rest):
+            db.add(ORMSession(
+                id=sid, org_id=org_id, user_id=user_id,
+                agent_id="orchestrator", channel="task", status="active",
+            ))
+        await db.flush()
+        db.add_all([
+            Task(
+                org_id=org_id, parent_session_id=chat_session.id, goal=goal,
+                status="cancelled", mission_id=created.mission_id,
+                current_session_id=sid, attempt_count=1,
+            )
+            for goal, sid in (("train", at_work), ("eval", at_rest))
+        ])
+        await db.commit()
+    assert await session_store.try_acquire_lease(at_work, "a worker", ttl_seconds=60) is not None
+
+    res = await handle_mission_cancel(
+        session_id=chat_session.id, reason="abort", cascade_to_workers=True,
+        session_store=session_store, session_factory=session_factory,
+        mission_store=store, redis=redis,
+    )
+    assert res.ok is True
+    assert [c.args[0] for c in redis.publish.call_args_list] == [f"{INTERRUPT_CHANNEL_PREFIX}:{at_work}"]
+
+
 # ---------------------------------------------------------------------------
 # Service-account principal
 # ---------------------------------------------------------------------------
