@@ -139,20 +139,6 @@ class WorkstreamStore:
             await db.execute(update(SessionRow).where(SessionRow.id == session_id).values(updated_at=func.now()))
             await db.commit()
 
-    async def pause_thread(self, session_id: UUID) -> bool:
-        """Pause *session_id* if it is working; whether it was.
-
-        Conditional, so a stop that lands as the thread's turn ends leaves
-        the thread as its turn left it.
-        """
-        async with self._sf() as db:
-            result = await db.execute(
-                update(SessionRow).where(SessionRow.id == session_id, SessionRow.status == "active")
-                .values(status="paused", updated_at=func.now())
-            )
-            await db.commit()
-            return result.rowcount == 1
-
     async def resolve_thread(self, session_id: UUID) -> None:
         """Move the thread to Resolved; one already there keeps the moment it got there."""
         async with self._sf() as db:

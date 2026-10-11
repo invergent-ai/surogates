@@ -702,16 +702,19 @@ async def handle_mission_cancel(
             ok=False, mission_id=active.id,
             error=f"Mission already terminal (status={active.status}).",
         )
-    await mission_store.set_status(
-        active.id, "cancelled", cancelled_reason=reason,
-    )
-    await session_store.clear_session_config_key(session_id, "active_mission_id")
+    # The mission's status is written last, and every step before it can be
+    # taken again: a run cut off before it leaves the mission in flight, and
+    # the command run again takes each step again, its helpers' stop with them.
     if cascade_to_workers:
         await _cascade_cancel_workers(
             mission_id=active.id,
             session_factory=session_factory,
             redis=redis,
         )
+    await session_store.clear_session_config_key(session_id, "active_mission_id")
+    await mission_store.set_status(
+        active.id, "cancelled", cancelled_reason=reason,
+    )
     await session_store.emit_event(
         session_id, EventType.MISSION_CANCELLED,
         {
@@ -730,6 +733,7 @@ async def handle_mission_accept(
     session_id: UUID,
     session_store: Any,
     mission_store: MissionStore,
+    typed_at: int | None = None,
 ) -> MissionHandlerResult:
     """Apply the judge's proposed rubric. This is the authority act.
 
@@ -742,40 +746,62 @@ async def handle_mission_accept(
     The continuation is returned as ``kickoff_content`` rather than emitted
     here: the slash dispatcher advances the harness cursor past its own
     reply, so an inline emit would be skipped on the next wake.
+
+    The amendment is recorded before it is applied: a rubric amended and
+    not recorded is one a second run of the command could not tell for its
+    own.  *typed_at* is the id of the event the command was typed in, where
+    a command is what calls this, and the record names it.  The record of
+    the mission's amendment that names it is the one a run of this very
+    command made before its worker died: it is applied again, which changes
+    nothing applied already, and answered, its continuation with it, as that
+    run would have.  Another accept's record is never this one's.  Nor is an
+    amendment recorded twice: one recorded since the mission's latest
+    proposal, by an accept whose amendment then failed, is the one applied.
     """
     active = await mission_store.get_active_for_session(session_id)
-    if active is None or active.paused_reason != "awaiting_refinement":
-        return MissionHandlerResult(
-            ok=False,
-            error="No rubric refinement is awaiting your decision.",
+    mine = await session_store.last_event(
+        session_id, EventType.MISSION_AMENDED, containing={"mission_id": str(active.id), "typed_at": typed_at},
+    ) if active is not None and typed_at is not None else None
+    amended = mine.data if mine is not None else None
+    if amended is None:
+        if active is None or active.paused_reason != "awaiting_refinement":
+            return MissionHandlerResult(
+                ok=False,
+                error="No rubric refinement is awaiting your decision.",
+            )
+        proposal = await session_store.last_event(
+            session_id, EventType.MISSION_REFINEMENT_PROPOSED, containing={"mission_id": str(active.id)},
         )
-    proposal = await session_store.latest_mission_proposal(session_id, active.id)
-    new_rubric = str((proposal or {}).get("proposed_rubric") or "").strip()
-    if not new_rubric:
-        return MissionHandlerResult(
-            ok=False, mission_id=active.id,
-            error=(
-                "The recorded proposal is missing or empty; use "
-                "/mission reject or /mission cancel."
-            ),
+        proposed = proposal.data if proposal is not None else {}
+        new_rubric = str(proposed.get("proposed_rubric") or "").strip()
+        if not new_rubric:
+            return MissionHandlerResult(
+                ok=False, mission_id=active.id,
+                error=(
+                    "The recorded proposal is missing or empty; use "
+                    "/mission reject or /mission cancel."
+                ),
+            )
+        earlier = await session_store.last_event(
+            session_id, EventType.MISSION_AMENDED, containing={"mission_id": str(active.id)},
         )
-
-    old_rubric = active.rubric
-    await mission_store.amend_rubric(active.id, new_rubric=new_rubric)
-    await session_store.emit_event(
-        session_id, EventType.MISSION_AMENDED,
-        {
-            "mission_id": str(active.id),
-            "old_rubric": old_rubric,
-            "new_rubric": new_rubric,
-            "evidence": str((proposal or {}).get("evidence") or ""),
-        },
-    )
+        if earlier is not None and earlier.id > proposal.id:
+            amended = earlier.data
+        else:
+            amended = {
+                "mission_id": str(active.id),
+                "old_rubric": active.rubric,
+                "new_rubric": new_rubric,
+                "evidence": str(proposed.get("evidence") or ""),
+                "typed_at": typed_at,
+            }
+            await session_store.emit_event(session_id, EventType.MISSION_AMENDED, amended)
+    await mission_store.amend_rubric(active.id, new_rubric=amended["new_rubric"])
     return MissionHandlerResult(
         ok=True, mission_id=active.id,
         message="Rubric amended; mission resumed.",
         kickoff_content=_AMENDED_CONTINUATION_TEMPLATE.format(
-            old_rubric=old_rubric, new_rubric=new_rubric,
+            old_rubric=amended["old_rubric"], new_rubric=amended["new_rubric"],
         ),
         kickoff_synthetic="mission_amended",
     )
@@ -844,17 +870,26 @@ async def _cascade_cancel_workers(
     rows then transition to ``cancelled`` in a single UPDATE so we do
     not leave a window in which the dispatcher could re-claim a ready
     task while we are still iterating.
+
+    A task already ``cancelled`` has its session interrupted too while a
+    worker still holds it: a cascade cut off after its UPDATE marked it
+    never told it, and the run that takes the cascade again is the one that
+    does.  One whose session is at rest, cancelled long since, is not told
+    again.
     """
-    from sqlalchemy import func as _func, select as _sel, update as _upd
+    from sqlalchemy import and_ as _and, exists as _exists, func as _func, or_ as _or, select as _sel, update as _upd
 
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.db.models import Task
+    from surogates.db.models import SessionLease, Task
 
+    held = _exists().where(
+        SessionLease.session_id == Task.current_session_id, SessionLease.expires_at > _func.now(),
+    )
     async with session_factory() as db:
         running_session_ids = (await db.execute(
             _sel(Task.current_session_id).where(
                 Task.mission_id == mission_id,
-                Task.status == "running",
+                _or(Task.status == "running", _and(Task.status == "cancelled", held)),
                 Task.current_session_id.isnot(None),
             )
         )).scalars().all()

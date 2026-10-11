@@ -688,8 +688,7 @@ async def resolve_thread(
     thread = await _thread(request, project, thread_id)
     state = request.app.state
     await stop_thread(
-        thread, reason=_RESOLVED_BY_USER, interrupt=_RESOLVED_BY_USER, session_store=state.session_store,
-        session_factory=state.session_factory, redis=state.redis,
+        thread, reason=_RESOLVED_BY_USER, interrupt=_RESOLVED_BY_USER, session_store=state.session_store, redis=state.redis,
     )
     await _store(request).resolve_thread(thread.id)
     await project_stream.publish(state.redis, project.id, thread.id, project_stream.RESOLVED)

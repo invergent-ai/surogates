@@ -665,6 +665,27 @@ class SessionStore:
             await db.commit()
             return result.rowcount == 1
 
+    async def pause_if_active(self, session_id: UUID, data: dict) -> bool:
+        """Pause *session_id* if it is still active, with a ``session.pause``
+        whose data is *data*; whether it was.
+
+        The status and its event are one transaction: both there or neither.
+        One no longer active gets neither, and stays as it is.
+        """
+        pause = await self._ready_event(session_id, EventType.SESSION_PAUSE, data)
+        async with self._sf() as db:
+            paused = (await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(status="paused", updated_at=func.now())
+            )).rowcount == 1
+            if paused:
+                await self._write_event(db, pause)
+            await db.commit()
+        if paused:
+            await self._announce_event(pause)
+        return paused
+
     async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
         """Re-activate an idle (completed/paused) session and record the resume.
 
