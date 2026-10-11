@@ -15,7 +15,8 @@
 // moved aside, in its own directory, and looked at again there, where no save by its name can
 // reach it any more: only if it is still the file the landing's look saw does the new file take
 // its name, by a link, which fails where a name was taken meanwhile. The file moved aside is
-// kept, in the app's data, until the landing is recorded (forget) or put back (unapply).
+// kept, in the app's data, until the landing is recorded (forget) or put back (unapply); one a
+// program that held it open wrote into since goes beside its name as the landing is forgotten.
 //
 // These are the user's files, so a step can be cut at any point, by a kill too, and lose none.
 // What a step is about to do is written down before it does it, each name it uses beside the
