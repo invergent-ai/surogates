@@ -116,6 +116,7 @@ async def notify_parent_on_completion(
     files: list[dict[str, Any]] | None = None,
     landing: dict[str, Any] | None = None,
     unkept: dict[str, Any] | None = None,
+    set_aside: dict[str, Any] | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -151,7 +152,9 @@ async def notify_parent_on_completion(
     complete.  A landing on the user's computer also says why it did not
     land, with its computer's word for a refusal, what its folder's helper
     found there, left by a landing cut short, and whether its thread was
-    stopped once it was under way.
+    stopped once it was under way.  A thread on the user's computer reports
+    what its computer set aside of its work since its last report
+    (*set_aside*, ``local_landing.set_aside_of``).
 
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
@@ -221,6 +224,9 @@ async def notify_parent_on_completion(
             if landing is not None and landing.get("recovery"):
                 # What its folder's helper found, left there by a landing cut short: told whatever came of this one.
                 payload["recovery"] = {key: found[:_MAX_LEFT_OUT_NAMED] for key, found in landing["recovery"].items()}
+            if set_aside is not None:
+                # What its computer set aside of its work, out of its copy there, since its last report: told once.
+                payload["set_aside"] = set_aside
 
         await session_store.emit_event(
             parent_session_id,
@@ -257,6 +263,7 @@ async def notify_parent_on_failure(
     task_id: UUID | None = None,
     session_factory: Any | None = None,
     not_taken: list[str] | None = None,
+    set_aside: dict[str, Any] | None = None,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
@@ -268,7 +275,8 @@ async def notify_parent_on_failure(
 
     A project's thread whose failed turn was kept also reports
     *not_taken*, the helpers' files its copy did not take up, as a landing
-    reports them.
+    reports them; and a thread on the user's computer what its computer set
+    aside of its work since its last report, as a completed turn reports it.
     """
     try:
         payload: dict[str, Any] = {
@@ -285,6 +293,8 @@ async def notify_parent_on_failure(
                 payload["not_taken"] = not_taken[:_MAX_LEFT_OUT_NAMED]
                 if len(not_taken) > _MAX_LEFT_OUT_NAMED:
                     payload["not_taken_count"] = len(not_taken)
+            if set_aside is not None:
+                payload["set_aside"] = set_aside
 
         await session_store.emit_event(
             parent_session_id,

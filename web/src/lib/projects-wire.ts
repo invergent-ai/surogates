@@ -6,8 +6,8 @@
 // desktop's ProjectsSource maps the same way, and a test can run it.
 
 import type {
-  ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, ThreadPlace, ThreadRow,
-  UndoResult,
+  ChangedBy, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, SetAside, SetAsideWhole,
+  ThreadPlace, ThreadRow, UndoResult,
 } from "./projects-contract";
 
 /** A thread's row as GET /v1/workstreams/{id}/threads answers it. */
@@ -21,6 +21,8 @@ export interface ThreadRowResponse {
   // A server from before file history sends a file with no landing, and a later one may send a mark not known here.
   files: { kind: "file" | "artifact"; label: string; ref: string; thread_id: string; landing?: ProducedFile["landing"] }[];
   landing_id?: string | null;
+  // A server from before set-asides were told sends none.
+  set_aside?: { kept: SetAsideWhole[]; snapshots: number; gone: SetAsideWhole[] } | null;
   place: { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean };
   created_at: string;
   updated_at: string;
@@ -32,6 +34,27 @@ const MARKS: readonly unknown[] = ["landed", "redoing", "not_merged", "undone"];
 /** A file's mark when it is one the page knows, else none: the file is served either way. */
 function markOf(landing: unknown): NonNullable<ProducedFile["landing"]> | null {
   return MARKS.includes(landing) ? (landing as NonNullable<ProducedFile["landing"]>) : null;
+}
+
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/** What a thread's computer set aside, each entry taken only where it is one the page knows; none where it holds none. */
+function setAsideOf(aside: unknown): SetAside | null {
+  if (typeof aside !== "object" || aside === null) return null;
+  const { kept, snapshots, gone } = aside as Record<string, unknown>;
+  const wholes = (value: unknown): SetAsideWhole[] => (Array.isArray(value) ? value : []).flatMap((entry) => {
+    const { kind, at } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+    // A time whose digits make none is none: the moment they parse to is written with the same digits.
+    const moment = typeof at === "string" && ISO_UTC.test(at) ? Date.parse(at) : NaN;
+    const timed = !Number.isNaN(moment) && new Date(moment).toISOString().replace(".000Z", "Z") === at;
+    return (kind === "copy" || kind === "repository") && timed ? [{ kind, at: at as string }] : [];
+  });
+  const found = {
+    kept: wholes(kept),
+    snapshots: Number.isSafeInteger(snapshots) && (snapshots as number) > 0 ? (snapshots as number) : 0,
+    gone: wholes(gone),
+  };
+  return found.kept.length > 0 || found.snapshots > 0 || found.gone.length > 0 ? found : null;
 }
 
 function placeOf(place: ThreadRowResponse["place"]): ThreadPlace {
@@ -51,6 +74,7 @@ export function threadRowOf(row: ThreadRowResponse): ThreadRow {
     files: row.files.map(({ kind, label, ref, thread_id, landing }) => ({ kind, label, ref, threadId: thread_id, landing: markOf(landing) })),
     // A landing that is no id the routes give is none: the card offers no Undo of it.
     landingId: typeof row.landing_id === "string" && row.landing_id !== "" ? row.landing_id : null,
+    setAside: setAsideOf(row.set_aside),
     place: placeOf(row.place),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

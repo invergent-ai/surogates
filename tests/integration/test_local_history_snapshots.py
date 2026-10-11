@@ -477,8 +477,7 @@ async def test_a_step_with_no_snapshot_that_a_stop_cuts_short_is_named_as_not_ta
     await eventually(runs, timeout=10)
     if how == "by its master":
         await stop_thread(
-            thread, reason="Stopped by its master.", interrupt="stopped by the master", session_store=state.session_store,
-            session_factory=state.session_factory, redis=None,
+            thread, reason="Stopped by its master.", interrupt="stopped by the master", session_store=state.session_store, redis=None,
         )
     else:
         assert (await api.client.post(f"/v1/sessions/{thread.id}/pause", headers=api.auth())).status_code == 200

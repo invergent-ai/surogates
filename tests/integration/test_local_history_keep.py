@@ -340,8 +340,7 @@ async def test_what_a_helper_made_before_its_thread_was_stopped_lands_with_the_t
     await woken(api, monkeypatch, helper, [BUDGET, _final_response("Done.")], said="Write the budget.")
     # The thread is stopped before its turn ends: nothing lands, and the turn after it has a name of its own.
     await stop_thread(
-        thread, reason="Stopped by you.", interrupt="stopped by the user", session_store=store,
-        session_factory=api.app.state.session_factory, redis=None,
+        thread, reason="Stopped by you.", interrupt="stopped by the user", session_store=store, redis=None,
     )
     assert asked(here, "land") == [] and not (here.folder / "Budget.xlsx").exists()
     # A stopped turn landed nothing, so the copy's work is still to land when the thread is sent on, the helper's with it.
