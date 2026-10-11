@@ -2570,8 +2570,10 @@ async def test_an_undo_of_more_files_than_one_undo_puts_back_is_refused_in_words
 
 async def test_an_undo_of_more_bytes_than_one_undo_moves_in_its_time_is_refused_in_words_and_writes_nothing(api, monkeypatch, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "head -c 3000000 /dev/zero > big.bin && printf ' by A' >> Report.docx")
-    # A store this slow moves the large file, read twice and taken away, in more than an Undo's time under the lock.
-    monkeypatch.setattr(undo_module, "STORE_RATE", 100_000)
+    # A store this slow, as a deployment names it, moves the large file, read twice and taken away, in more than an
+    # Undo's time under the lock.
+    planned = api.app.state.settings.history.store_rate
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", 100_000)
     assert (await undone(api, project, status=409, landing=str(row.id)))["detail"] == (
         "This change's files are too large to put back in one Undo. Restore each file from its History."
     )
@@ -2581,8 +2583,23 @@ async def test_an_undo_of_more_bytes_than_one_undo_moves_in_its_time_is_refused_
     assert (pods.project / "big.bin").stat().st_size == 3_000_000 and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
     assert undos_on_main(pods) == 0
     # Through a store as fast as an Undo is planned for, the same Undo puts both back.
-    monkeypatch.undo()
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", planned)
     assert (await undone(api, project, landing=str(row.id)))["applied"] == ["Report.docx", "big.bin"]
+
+
+async def test_a_restore_of_more_bytes_than_a_change_moves_in_its_time_is_refused_in_words_and_writes_nothing(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "head -c 3000000 /dev/zero > big.bin")
+    [landed_version, *_] = await history_of(api, project, "big.bin")
+    yours = b"y" * 3_000_000
+    (pods.project / "big.bin").write_bytes(yours)
+    planned = api.app.state.settings.history.store_rate
+    # Your edit read twice and the version written once, through a store this slow: more than a change's time.
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", 100_000)
+    assert (await restored(api, project, landed_version, status=409))["detail"] == "This version is too large to restore here."
+    assert (pods.project / "big.bin").read_bytes() == yours and restores_on_main(pods) == 0
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", planned)
+    assert (await restored(api, project, landed_version))["applied"] == ["big.bin"]
+    assert (pods.project / "big.bin").read_bytes() == bytes(3_000_000)
 
 
 async def test_a_restore_that_meets_an_undo_holding_the_projects_lock_is_told_to_try_again(api, monkeypatch, tmp_path):
