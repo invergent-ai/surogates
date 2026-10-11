@@ -254,7 +254,7 @@ async def test_each_of_a_threads_kinds_is_asked_only_under_its_turns_own_invocat
                 pytest.fail(f"{kind} {action} under {other!r}")
     # An action no kind has is no thread's either.
     for kind in sorted(THREAD_KINDS):
-        for action in (None, "prune", "close", "drop", "OPEN", 7):
+        for action in (None, "hand_off", "close", "drop", "OPEN", 7):
             with pytest.raises(ValueError, match=NOT_ITS_OWN):
                 await journal(api)._record(asked(device, thread, kind, action, invocation=own(kind, "x")))
                 pytest.fail(f"{kind} {action!r}")
