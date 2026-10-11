@@ -20,9 +20,10 @@ from sqlalchemy import select, text
 import surogates.api.routes.openai as openai_route
 import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
-from surogates.config import SHARED_WORK_QUEUE_KEY
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY
 from surogates.db.models import Mission as MissionRow
 from surogates.db.models import Session as SessionRow
+from surogates.db.models import Task
 from surogates.devices.browser import BROWSER_HAND_BACK
 from surogates.harness.budget import IterationBudget
 from surogates.harness.cost_tracker import SessionCostTracker
@@ -1607,6 +1608,68 @@ async def test_a_mission_accept_whose_worker_died_is_finished_by_the_wake_that_r
     # The command typed again is another: nothing awaits its user's decision now.
     assert await workers.types(chat, "/mission accept") == "No rubric refinement is awaiting your decision."
     assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
+
+
+async def a_task_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID:
+    """A task of the chat's mission whose helper is at work: the helper's session."""
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        db.add(Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Source the totals.", status="running",
+            mission_id=mission_id, current_session_id=helper.id, attempt_count=1,
+        ))
+        await db.commit()
+    return helper.id
+
+
+@pytest.mark.parametrize("dies", ["once the mission's status is written", "as it stops the mission's helper"])
+async def test_a_mission_cancelled_with_its_helpers_whose_worker_died_has_its_helpers_stopped_by_the_wake_that_runs_it_again(
+    workers, monkeypatch, dies,
+):
+    chat = await a_coordinator(workers)
+    [mission] = await workers.missions(chat)
+    helper = await a_task_at_work(workers, chat, mission.id)
+    redis = workers.api.app.state.redis
+    publish, stopped = redis.publish, []
+
+    async def published(channel, message, *args, **kwargs):
+        if channel == f"{INTERRUPT_CHANNEL_PREFIX}:{helper}":
+            if dying:
+                raise asyncio.CancelledError
+            stopped.append(message)
+        return await publish(channel, message, *args, **kwargs)
+
+    monkeypatch.setattr(redis, "publish", published)
+    await workers.says(chat, "/mission cancel --cascade")
+    typed = await workers.typed(chat)
+    dying = dies == "as it stops the mission's helper"
+    with monkeypatch.context() as dies_there, pytest.raises(asyncio.CancelledError):
+        if not dying:
+            set_status = MissionStore.set_status
+
+            async def then_the_worker_dies(self, mission_id, status, **kwargs):
+                await set_status(self, mission_id, status, **kwargs)
+                raise asyncio.CancelledError
+
+            dies_there.setattr(MissionStore, "set_status", then_the_worker_dies)
+        await workers.wake(chat)
+    dying = False
+
+    await workers.wake(chat)
+
+    # Run again, it finishes the cancel: the helper is told to stop, its task and the mission are cancelled,
+    # and the chat has no mission in flight.
+    assert stopped and set(stopped) == {"mission_cancel_cascade"}
+    async with workers.api.app.state.session_factory() as db:
+        [task] = (await db.execute(select(Task).where(Task.mission_id == mission.id))).scalars().all()
+    [mission] = await workers.missions(chat, mission.id)
+    assert (task.status, mission.status) == ("cancelled", "cancelled")
+    assert "active_mission_id" not in (await workers.session(chat)).config
+    answers = [
+        e.data["message"]["content"] for e in await workers.store.get_events(chat, after=typed, types=[EventType.LLM_RESPONSE])
+        if e.data.get("answers") == typed
+    ]
+    assert len(answers) == 1 and workers.ran == ["_handle_mission_command"] * 2
 
 
 async def its_worker_dies():

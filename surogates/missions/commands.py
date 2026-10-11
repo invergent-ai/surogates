@@ -702,16 +702,19 @@ async def handle_mission_cancel(
             ok=False, mission_id=active.id,
             error=f"Mission already terminal (status={active.status}).",
         )
-    await mission_store.set_status(
-        active.id, "cancelled", cancelled_reason=reason,
-    )
-    await session_store.clear_session_config_key(session_id, "active_mission_id")
+    # The mission's status is written last, and every step before it can be
+    # taken again: a run cut off before it leaves the mission in flight, and
+    # the command run again takes each step again, its helpers' stop with them.
     if cascade_to_workers:
         await _cascade_cancel_workers(
             mission_id=active.id,
             session_factory=session_factory,
             redis=redis,
         )
+    await session_store.clear_session_config_key(session_id, "active_mission_id")
+    await mission_store.set_status(
+        active.id, "cancelled", cancelled_reason=reason,
+    )
     await session_store.emit_event(
         session_id, EventType.MISSION_CANCELLED,
         {
@@ -854,6 +857,11 @@ async def _cascade_cancel_workers(
     rows then transition to ``cancelled`` in a single UPDATE so we do
     not leave a window in which the dispatcher could re-claim a ready
     task while we are still iterating.
+
+    A task already ``cancelled`` has its session interrupted too: a cascade
+    cut off after its UPDATE marked it never told it, and the run that
+    takes the cascade again is the one that does.  A session no turn runs
+    for hears nothing.
     """
     from sqlalchemy import func as _func, select as _sel, update as _upd
 
@@ -864,7 +872,7 @@ async def _cascade_cancel_workers(
         running_session_ids = (await db.execute(
             _sel(Task.current_session_id).where(
                 Task.mission_id == mission_id,
-                Task.status == "running",
+                Task.status.in_(("running", "cancelled")),
                 Task.current_session_id.isnot(None),
             )
         )).scalars().all()
