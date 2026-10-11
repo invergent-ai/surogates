@@ -179,12 +179,25 @@ class WorkstreamStore:
             await db.commit()
 
     async def resolve_thread(self, session_id: UUID) -> None:
-        """Move the thread to Resolved; one already there keeps the moment it got there."""
+        """Move the thread to Resolved; one already there keeps the moment it got there.
+
+        Its waits on you over its files are over with it: expired, never
+        answered.  One it is given since, by a settle of its landing, the
+        inbox's sweep ends (``jobs.inbox_expire``).
+        """
         async with self._sf() as db:
             await db.execute(
                 update(WorkstreamThread)
                 .where(WorkstreamThread.session_id == session_id, WorkstreamThread.resolved_at.is_(None))
                 .values(resolved_at=func.now())
+            )
+            await db.execute(
+                update(InboxItem)
+                .where(
+                    InboxItem.session_id == session_id, InboxItem.kind == "action_required",
+                    InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files"}),
+                )
+                .values(status="expired", updated_at=func.now())
             )
             await db.commit()
 

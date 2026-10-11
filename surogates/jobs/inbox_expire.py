@@ -20,7 +20,7 @@ from datetime import timedelta
 from sqlalchemy import and_, func, not_, or_, select, update
 from sqlalchemy.orm import aliased
 
-from surogates.db.models import InboxItem, Session
+from surogates.db.models import InboxItem, Session, WorkstreamThread
 from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
 from surogates.tools.builtin.ask_user_question import (
     ASK_USER_QUESTION_MAX_WAIT_SECONDS,
@@ -45,10 +45,11 @@ async def expire_inbox_items(session_store) -> int:
     terminal_sessions = select(Session.id).where(
         Session.status.in_(_TERMINAL_SESSION_STATUSES)
     )
+    owner = aliased(Session)
+    files = InboxItem.payload.contains({"action_type": "files"})
     answer_window = timedelta(
         seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS + _ANSWER_WINDOW_GRACE_SECONDS
     )
-    owner = aliased(Session)
     async with session_store._sf() as db:
         result = await db.execute(
             update(InboxItem)
@@ -64,7 +65,19 @@ async def expire_inbox_items(session_store) -> int:
                         InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
                         # A thread's wait on you over its files outlives its
                         # turn: your next message to it answers it.
-                        not_(InboxItem.payload.contains({"action_type": "files"})),
+                        not_(files),
+                    ),
+                    # Until there is no thread to send one to: it was
+                    # deleted, or resolved, and the wait was raised after,
+                    # as a settle of its landing raises one.
+                    and_(
+                        files,
+                        or_(
+                            owner.status == "archived",
+                            select(WorkstreamThread.session_id)
+                            .where(WorkstreamThread.session_id == owner.id, WorkstreamThread.resolved_at.is_not(None))
+                            .exists(),
+                        ),
                     ),
                     # The backstop for a question whose tool never got to
                     # retire its own row — a worker killed mid-wait leaves

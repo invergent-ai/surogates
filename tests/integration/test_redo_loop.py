@@ -61,6 +61,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
     reports,
 )
 from .test_turn_sagas import a_turn, calling, stop
+from .test_workstream_overview import act_on
 from .test_workstream_overview import rows as thread_rows
 from .test_workstream_threads import call_tool, harness_of, queued
 from .test_workstream_threads import turn_ends as a_turn_ends
@@ -850,6 +851,52 @@ async def test_a_second_clash_puts_the_thread_in_waiting_on_you(api, monkeypatch
     # The thread's turn has ended, and the sweeper leaves its wait.
     await expire_inbox_items(store)
     assert (await row_of(api, project, thread))["reason"] == "files"
+
+
+async def pending_in_the_inbox(api) -> set[str]:
+    """The sessions of the items ``GET /v1/inbox`` lists pending."""
+    listed = await api.client.get("/v1/inbox", headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    return {item["session_id"] for item in listed.json()["items"] if item["status"] == "pending"}
+
+
+async def test_a_threads_waits_over_files_end_when_it_is_resolved_by_you_or_its_coordinator(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    store = api.app.state.session_store
+    yours, its_coordinators = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    for thread in (yours, its_coordinators):
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["a.md"], escalated=True))
+    approval = {"title": "Send it?", "instructions": "", "context": "", "action_type": "approval", "target": "the memo"}
+    await store.emit_event(yours.id, EventType.INBOX_ACTION_REQUIRED, approval)
+    assert await pending_in_the_inbox(api) == {str(yours.id), str(its_coordinators.id)}
+    assert (await act_on(api, project, yours, "resolve")).status_code == 200
+    await call_tool(api, master, "resolve_thread", thread_id=str(its_coordinators.id))
+    # Over: expired, never answered.  Another kind of wait is not one over its files.
+    assert sorted((w.payload["action_type"], w.status) for w in await waits_of(api, yours)) == [
+        ("approval", "pending"), ("files", "expired"), ("files", "expired"),
+    ]
+    assert [w.status for w in await waits_of(api, its_coordinators)] == ["expired", "expired"]
+    assert await pending_in_the_inbox(api) == {str(yours.id)}
+
+
+async def test_a_wait_over_files_of_a_deleted_thread_or_one_given_a_resolved_thread_ends_at_the_inboxs_sweep(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    store = api.app.state.session_store
+    deleted, resolved, live = [await a_thread(api, title, master) for title in ("Draft A", "Draft B", "Draft C")]
+    await store.emit_event(deleted.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    assert (await api.client.delete(f"/v1/sessions/{deleted.id}", headers=api.auth())).status_code == 204
+    assert (await act_on(api, project, resolved, "resolve")).status_code == 200
+    # As another lock holder's settle tells a resolved thread of its landing left escalated.
+    for thread in (resolved, live):
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["a.md"], escalated=True))
+    await expire_inbox_items(store)
+    assert [[w.status for w in await waits_of(api, thread)] for thread in (deleted, resolved, live)] == [
+        ["expired"], ["expired"], ["pending"],
+    ]
+    assert await pending_in_the_inbox(api) == {str(live.id)}
 
 
 async def test_a_wait_over_a_second_clash_names_the_stuck_file_and_none_the_redo_turn_landed(api, monkeypatch, pods):
