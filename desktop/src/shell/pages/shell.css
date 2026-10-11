@@ -1550,7 +1550,8 @@ body.about-page {
   overflow-wrap: anywhere;
 }
 
-/* Empty, the waiting quit's line and the update's take no room, and stay live regions. */
+/* Empty, the waiting quit's line, the update's and the copies' take no room, and stay live regions. */
+#copying:empty,
 #quitting:has(#quitting-text:empty),
 #update:has(#update-text:empty) {
   margin: 0;
