@@ -175,6 +175,29 @@ describe("the host's side of the control port", () => {
     link.close();
   });
 
+  it("answers hello with the company's CA certificates the app trusts, as data, and with none unless given them", async () => {
+    // Hello's answer, as each connection's agent reads it.
+    let answered = (_answer: unknown) => {};
+    server = createServer((socket) => {
+      sockets.push(socket);
+      socket.write('{"type":"hello","id":0}\n');
+      createInterface({ input: socket }).once("line", (line) => answered(JSON.parse(line)));
+    });
+    await new Promise<void>((resolve) => server?.listen(path, resolve));
+    const ca = ["-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"];
+    const answer = async (...given: [] | [string[]]) => {
+      const read = new Promise((resolve) => {
+        answered = resolve;
+      });
+      const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never, ...given);
+      const said = await read;
+      link.close();
+      return said;
+    };
+    expect(await answer(ca)).toEqual({ type: "done", id: 0, user: USER, ca });
+    expect(await answer()).toEqual({ type: "done", id: 0, user: USER, ca: [] });
+  });
+
   it("fails when no hello comes by the deadline, or the VM goes first", async () => {
     await agent(false);
     await expect(ControlLink.open(connect(path), USER, performance.now() + 300, never)).rejects.toThrow("The guest's agent did not say hello");

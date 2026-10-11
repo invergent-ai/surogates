@@ -248,7 +248,7 @@ describe("a thread's operations, through the app's executor", { timeout: 10_000 
         pause: () => {}, show: async () => true, onDownload: () => {}, forwards: () => {},
       },
       bindingOf: (root) => bindings.get(root), launch: () => ({ executable: "/usr/bin/true", profile: join(dir, "profile") }),
-      staging: join(dir, "staging"), ports: () => [], vm: { forwards: () => {}, listening: async () => false, door: join(dir, "door") },
+      staging: join(dir, "staging"), ports: () => [], turns: () => [], vm: { forwards: () => {}, listening: async () => false, door: join(dir, "door") },
     });
     expect(await browsing.run(op("browser.navigate", { url: "https://example.com/" }), signal())).toEqual({ ok: null });
     expect(await browsing.run(op("browser.set_input_files", { paths: [join(folder, "a.txt")] }), signal())).toEqual({ ok: null });
@@ -277,7 +277,7 @@ describe("a thread's operations, through the app's executor", { timeout: 10_000 
         perform: async () => ({ ok: null }), forget: () => {}, stop: async () => {}, end: async () => {}, address: async () => "https://example.com/",
         notComing: () => {}, pause: () => {}, show: async () => true, onDownload: () => {}, forwards: () => {},
       },
-      bindingOf: (root) => bindings.get(root), launch: () => null, staging: join(dir, "staging"), ports: () => [],
+      bindingOf: (root) => bindings.get(root), launch: () => null, staging: join(dir, "staging"), ports: () => [], turns: () => [],
       vm: { forwards: () => {}, listening: async () => false, door: join(dir, "door") },
     });
     expect([executor.keepsCopies(), browsing.keepsCopies()]).toEqual([true, true]);
@@ -652,7 +652,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
         perform: async () => ({ ok: null }), forget: () => {}, stop: async () => {}, end: async () => {}, address: async () => "https://example.com/",
         notComing: () => {}, pause: () => {}, show: async () => true, onDownload: () => {}, forwards: () => {},
       },
-      bindingOf: (root) => bindings.get(root), launch: () => null, staging: join(dir, "staging"), ports: () => [],
+      bindingOf: (root) => bindings.get(root), launch: () => null, staging: join(dir, "staging"), ports: () => [], turns: () => [],
       vm: { forwards: () => {}, listening: async () => false, door: join(dir, "door") },
     });
     expect(browsing.refusal(land({ action: "recover" }, { sessionId: CHAT, callingSessionId: CHAT }))).toEqual(NOT_A_THREAD);

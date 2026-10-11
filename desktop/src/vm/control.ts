@@ -1,8 +1,8 @@
 // The host's side of the guest's control port (spec, Section 11, Transport), on
 // the byte stream the OS's backend opens for ai.surogate.control: on Linux, the
 // Unix socket QEMU makes for it. The agent says hello and the host answers with its
-// user; from then on the host asks, each request with an id of its own, and the
-// agent answers each once (guest/protocol.ts).
+// user and the company's CA; from then on the host asks, each request with an id of
+// its own, and the agent answers each once (guest/protocol.ts).
 
 import { createInterface } from "node:readline";
 import type { Duplex } from "node:stream";
@@ -44,11 +44,11 @@ export class ControlLink {
   }
 
   /**
-   * The link on *channel*, once the agent has said hello on it and been told
-   * *user*. Rejects at *deadline* (performance.now()), or when *gone* settles
-   * first: the VM exited.
+   * The link on *channel*, once the agent has said hello on it and been told *user*
+   * and *ca*, the company's CA certificates the guest trusts: none unless given. Rejects at
+   * *deadline* (performance.now()), or when *gone* settles first: the VM exited.
    */
-  static async open(channel: Duplex, user: HostUser, deadline: number, gone: Promise<unknown>): Promise<ControlLink> {
+  static async open(channel: Duplex, user: HostUser, deadline: number, gone: Promise<unknown>, ca: string[] = []): Promise<ControlLink> {
     let exited = false;
     void gone.then(() => {
       exited = true;
@@ -98,7 +98,7 @@ export class ControlLink {
       throw late();
     }
     const link = new ControlLink(channel, lines);
-    link.write({ type: "done", id: 0, user });
+    link.write({ type: "done", id: 0, user, ca });
     return link;
   }
 

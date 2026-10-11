@@ -124,6 +124,9 @@ else:
     time.sleep(3600)
 `;
 const author = (thread: string) => ({ name: thread === ONE ? "Draft A" : "Draft B", email: `thread:${thread}@surogate` });
+// The bytes of the files under *at*, no link followed.
+const bytes = (at: string): number => (readdirSync(at, { recursive: true }) as string[])
+  .map((name) => lstatSync(join(at, name))).reduce((sum, found) => sum + (found.isFile() ? found.size : 0), 0);
 const ok = (outcome: Outcome) => {
   expect(outcome).toHaveProperty("ok");
   return (outcome as { ok: Record<string, unknown> }).ok;
@@ -219,7 +222,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
   it("makes each thread's copy in the app's data, as this user's files, and leaves the folder as it was", async () => {
     expect(await history(ONE, "open")).toEqual({ copy: "made" });
     expect(await history(TWO, "open")).toEqual({ copy: "made" });
-    expect(readdirSync(join(dir, "store")).sort()).toEqual(["clones", "threads"]);
+    // The folder's first commit is its history's first, from the first copy's making on.
+    expect(readdirSync(join(dir, "store")).sort()).toEqual(["clones", "history.git", "threads"]);
     expect(readdirSync(copyOf(ONE)).sort()).toEqual(["Report.docx", "notes"]);
     expect(readFileSync(join(copyOf(TWO), "notes", "todo.txt"), "utf8")).toBe("one\n");
     // Written by the guest's root, they are this user's here; and no git state reaches the copy or the folder.
@@ -247,7 +251,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     expect(readdirSync(folder).sort()).toEqual(["Report.docx", "notes"]);
     const first = await land(ONE, "saga-1");
     expect(first.changes.map((change) => change.path)).toEqual(["A.md", "Report.docx"]);
-    expect(first.picked).toMatchObject({ main: null, commit: null, picked_up: [] });
+    expect(first.picked).toMatchObject({ main: expect.stringMatching(/^[0-9a-f]{40}$/), commit: null, picked_up: [] });
     expect(first.recorded).toEqual({ commit: first.landing, set_aside: null });
     const second = await land(TWO, "saga-2");
     expect(second.changes.map((change) => change.path)).toEqual(["B.md"]);
@@ -324,6 +328,13 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
     const began = performance.now();
     expect(await ask("open")).toEqual({ copy: "made" });
     const opened = performance.now() - began;
+    // The folder's files are in its history once, which the thread's repository borrows: its objects are none of them.
+    const repository = join(dir, "big-store", "clones", ONE);
+    const held = {
+      history: bytes(join(dir, "big-store", "history.git")), repository: bytes(repository), objects: bytes(join(repository, "objects")),
+      copy: bytes(join(dir, "big-store", "threads", ONE)),
+    };
+    expect(held.objects).toBeLessThan(held.history / 4);
     const times: number[] = [];
     for (let n = 0; n < 5; n += 1) {
       writeFileSync(join(dir, "big-store", "threads", ONE, "data", `${n}.txt`), `changed ${n}\n`);
@@ -332,6 +343,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
       times.push(performance.now() - start);
     }
     console.log(`a copy of 5,000 files made in ${Math.round(opened)} ms; a snapshot of it, one file changed: median ${Math.round(median(times))} ms (${times.map(Math.round).join(", ")})`);
+    console.log(`its files: the history ${held.history} bytes, the thread's repository ${held.repository} (its objects ${held.objects}), its copy ${held.copy}`);
     // Loose bounds, for a loaded computer: the numbers are the log's.
     expect(opened).toBeLessThan(90_000);
     expect(median(times)).toBeLessThan(5_000);
@@ -487,7 +499,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     rmSync(join(folder, "notes", "old.txt"));
     const picked = await said(ONE, "pickup", { author: YOU, trailers });
     expect(picked).toEqual({
-      main: null, commit: expect.stringMatching(/^[0-9a-f]{40}$/), packs: expect.any(Number),
+      main: expect.stringMatching(/^[0-9a-f]{40}$/), commit: expect.stringMatching(/^[0-9a-f]{40}$/), packs: expect.any(Number),
       picked_up: [{ path: "notes/old.txt", before: expect.stringMatching(/^[0-9a-f]{40}$/), after: null }],
     });
     const turn = await said(ONE, "commit", { author: author(ONE), trailers, pickup: picked.commit });

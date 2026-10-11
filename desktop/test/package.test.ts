@@ -126,9 +126,12 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
     expect(existsSync(join(top, "electron")) || existsSync(join(top, "resources", "default_app.asar"))).toBe(false);
     expect(readdirSync(join(top, "resources")).sort()).toEqual(["app", "surogate.svg", "vm"]);
     const app = join(top, "resources", "app");
-    expect(readdirSync(app).sort()).toEqual(["assets", "bin", "dist", "node_modules", "package.json"]);
+    expect(readdirSync(app).sort()).toEqual(["assets", "bin", "dictionaries", "dist", "node_modules", "package.json"]);
     expect((JSON.parse(readFileSync(join(app, "package.json"), "utf8")) as { version: string }).version).toBe(VERSION);
     expect(spawnSync(join(app, "bin", "node"), ["--version"], { encoding: "utf8" }).stdout).toBe("v22.23.3\n");
+    // The spelling dictionary the app ships, as the build fetched it, and nothing beside it.
+    expect(readdirSync(join(app, "dictionaries"))).toEqual(["en-US-10-1.bdic"]);
+    expect(readFileSync(join(app, "dictionaries", "en-US-10-1.bdic")).equals(readFileSync(join(DESKTOP, "dictionaries", "en-US-10-1.bdic")))).toBe(true);
     // The production dependencies alone, and no test of the app's, its echo client among them.
     expect(readdirSync(join(app, "node_modules"))).not.toContain("electron");
     expect(readdirSync(join(app, "node_modules"))).not.toContain("vitest");

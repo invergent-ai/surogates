@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { FIXTURE_IDS, projectFixtures } from "../../web/src/lib/projects.js";
-import { ANSWER_TIMEOUT_MS, LONG_ANSWER_TIMEOUT_MS, PageProjects, TimedOut, type ToPage } from "../src/shell/projects.js";
+import { ANSWER_TIMEOUT_MS, HISTORY_ANSWER_TIMEOUT_MS, LONG_ANSWER_TIMEOUT_MS, PageProjects, TimedOut, type ToPage } from "../src/shell/projects.js";
 
 const { projects, threads, history, deleted } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
 const REPORT = FIXTURE_IDS.report;
@@ -267,18 +267,32 @@ describe("the projects the page serves", () => {
     ]);
   });
 
-  it("give a History the plain bound of a read, and say the agent's own refusal of one", async () => {
+  it("give a History thirty seconds, past a plain read's bound, and say the agent's own refusal of one", async () => {
     vi.useFakeTimers({ now: 1_000 });
     try {
       const { source, last } = page();
       const off = source.history(REPORT, REVENUE, { kind: "cloud" });
-      expect(last()).toMatchObject({ method: "history", deadline: 1_000 + ANSWER_TIMEOUT_MS });
+      expect(last()).toMatchObject({ method: "history", deadline: 1_000 + HISTORY_ANSWER_TIMEOUT_MS });
+      expect(HISTORY_ANSWER_TIMEOUT_MS).toBe(30_000);
       source.answered(1, { error: "History is off: this project has more than 50,000 files." });
       await expect(off).rejects.toThrow("History is off: this project has more than 50,000 files.");
+      // A first read of a large history the agent has not pruned yet takes more than a plain read's ten seconds.
+      const large = source.history(REPORT, REVENUE, { kind: "cloud" });
+      await vi.advanceTimersByTimeAsync(13_600);
+      source.answered(2, { ok: history[REPORT]![REVENUE]! });
+      expect(await large).toHaveLength(history[REPORT]![REVENUE]!.length);
+      // Thirty seconds, and no longer.
       const slow = source.history(REPORT, REVENUE, { kind: "cloud" });
-      vi.advanceTimersByTime(ANSWER_TIMEOUT_MS);
+      let settled = false;
+      void slow.catch(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(HISTORY_ANSWER_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
       await expect(slow).rejects.toBeInstanceOf(TimedOut);
       await expect(slow).rejects.toThrow("The agent's page did not answer history in time");
+      // The other reads keep the plain bound.
+      void source.library(REPORT).catch(() => {});
+      expect(last()).toMatchObject({ method: "library", deadline: Date.now() + ANSWER_TIMEOUT_MS });
     } finally {
       vi.useRealTimers();
     }
