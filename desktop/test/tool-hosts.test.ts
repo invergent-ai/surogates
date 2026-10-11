@@ -1891,6 +1891,70 @@ describe("what landings cut short in this computer's folders, put back by a host
     expect(recoveries()).toHaveLength(2);
   });
 
+  it("names what holds the folder where a recovery waits for it in vain: a thread's landing there, or what the app ran before its last connection", async () => {
+    left();
+    says = (nth) => (nth < 3 ? BUSY : ready);
+    // The folder's thread, with its copy to land from.
+    const place = { key: keyOf(folder()), history: join(realpathSync(data()), "history", keyOf(folder())), real: { path: folder(), ...identities.get(folder())! } };
+    const lands = (host: FakeHost) => (host.sent[0] as HostStart).landing !== undefined;
+    const executor = recovering({
+      bindingOf: (root) => (root === ROOT_A ? { folder: folder(), ...identities.get(folder())!, history: root } : undefined),
+      copies: {
+        open: async (root) => ({ copy: { place, folder: { path: join(place.history, "threads", root), dev: 7, ino: 70, boot: BOOT_ID }, at: folder() }, handle: Object.freeze({ root }) }),
+        close: () => {},
+        ask: forgets,
+      },
+      // A landing's host is ready when the test says, and answers its steps.
+      spawnHost: () => {
+        const host = new FakeHost((one, message) => {
+          if (!lands(one)) return behave(one, message);
+          if (message.type === "op") one.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+          onStop(one, message);
+        });
+        fakes.push(host);
+        return host;
+      },
+    });
+    // Nothing of this computer's tools holds it: what the app ran before it connected again does, as its hosts stop.
+    executor.recoverLeft();
+    const earlier = `What the app ran on this computer before its last connection to the server is still working in ${folder()}`;
+    const held = (holder: string) => ({ folder: folder(), state: "left", why: `${holder}, so what a landing cut short there is not put back yet. It is put back once that one is done` });
+    expect(await executor.recoverBefore(folder(), signal())).toEqual({
+      error: { type: "busy", message: `${earlier}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+    });
+    expect(told[1]).toEqual(held(earlier));
+    // A thread's landing whose host still waits for the folder holds nothing of it.
+    const look = { ...op("land", { action: "revisions", paths: [] }), invocationId: "land:7" };
+    const looking = executor.land(look, signal());
+    await until(() => fakes.some(lands));
+    executor.recoverLeft();
+    await until(() => told.length === 4);
+    expect(told[3]).toEqual(held(earlier));
+    // Once it holds the folder, it is what holds it.
+    fakes.find(lands)?.say({ type: "ready", processes: [] });
+    expect(await looking).toEqual({ ok: look.id });
+    executor.recoverLeft();
+    await until(() => told.length === 6);
+    expect(told[5]).toEqual(held(`A thread's landing on this computer is working in ${folder()}`));
+  });
+
+  it("names a put-back of what another landing cut short, where that holds the folder a recovery waits for in vain", async () => {
+    left();
+    left(folder(), `${keyOf(folder())}.was-1700000000000`);
+    // The first holds the folder, and puts back until the test says.
+    holds = true;
+    says = (nth) => (nth === 0 ? ready : BUSY);
+    const executor = recovering();
+    executor.recoverLeft();
+    await until(() => told.some(({ state }) => state === "left"));
+    expect(told.find(({ state }) => state === "left")).toEqual({
+      folder: folder(), state: "left",
+      why: `This computer is putting back in ${folder()} what another landing there cut short, so what a landing cut short there is not put back yet. It is put back once that one is done`,
+    });
+    const step = recoveries()[0]?.sent.find((message) => message.type === "op") as Extract<ToHost, { type: "op" }>;
+    recoveries()[0]?.say({ type: "result", id: step.id, outcome: { ok: found } });
+  });
+
   it("starts a chat's host on a folder only once that folder's recovery holds it, and waits for that no longer than a chat waits for its folder", async () => {
     left();
     let go = () => {};
@@ -2417,7 +2481,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     const hosts = spawned.length;
     const landing = executor.land(step("recover"), signal());
     await until(() => spawned.length === hosts + 1, 5_000);
-    expect(await executor.recoverBefore(folder, signal())).toEqual(stillCutShort(folder));
+    expect(await executor.recoverBefore(folder, signal())).toEqual(stillCutShort(folder, "chat"));
     expect(await landing).toEqual(folderBusy(folder));
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
     // Once the chat lets the folder go, the landing's host puts the file back, and the folder may be read.

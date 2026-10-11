@@ -98,25 +98,38 @@ const NOT_BEGUN = unavailable("the host of this landing was stopping, so this st
 // What waited for a host that stopped, or was never made, before it was ready.
 const STOPPED_STARTING = unavailable("its tool host stopped while it was starting");
 // A landing's host asked for itself while its landing's last step runs alone: asked again once it has ended.
-const BUSY_ALONE: Outcome = { error: { type: "busy", message: "the landing in this folder is ending a step it runs alone" } };
+const ENDING_ALONE = "the landing in this folder is ending a step it runs alone";
+const BUSY_ALONE: Outcome = { error: { type: "busy", message: ENDING_ALONE } };
 
 /** Another held *folder* for as long as a landing waits for it: nothing of the landing began, and it can be asked again. */
 export const folderBusy = (folder: string): Outcome => ({
   error: { type: "busy", message: `Another chat on this computer is working in ${folder}, so nothing of this landing was done. It can land once that one is done` },
 });
 /**
- * A read of *folder* for a thread, refused: what a landing cut short there is not put back yet, as another held the
+ * What held a folder for as long as a put-back there waited for it, as this computer's tools know it: a chat's host on
+ * it, a thread's landing's, a put-back's of what another landing cut short; or none of theirs, where what the app ran
+ * before its link to the server was made again still holds it, as its hosts stop.
+ */
+export type Holder = "chat" | "landing" | "putBack" | "earlier";
+const holding = (holder: Holder, folder: string): string => ({
+  chat: `Another chat on this computer is working in ${folder}`,
+  landing: `A thread's landing on this computer is working in ${folder}`,
+  putBack: `This computer is putting back in ${folder} what another landing there cut short`,
+  earlier: `What the app ran on this computer before its last connection to the server is still working in ${folder}`,
+})[holder];
+/**
+ * A read of *folder* for a thread, refused: what a landing cut short there is not put back yet, as *holder* held the
  * folder for as long as the put-back waited for it. Nothing was done, and it can be asked again.
  */
-export const stillCutShort = (folder: string): Outcome => ({
+export const stillCutShort = (folder: string, holder: Holder): Outcome => ({
   error: {
     type: "busy",
-    message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done`,
+    message: `${holding(holder, folder)}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done`,
   },
 });
-// What is said of what a landing cut short in *folder* where another held the folder for as long as the put-back waited.
-const heldElsewhere = (folder: string): string =>
-  `Another chat on this computer is working in ${folder}, so what a landing cut short there is not put back yet. It is put back once that one is done`;
+// What is said of what a landing cut short in *folder* where *holder* held the folder for as long as the put-back waited.
+const heldElsewhere = (folder: string, holder: Holder): string =>
+  `${holding(holder, folder)}, so what a landing cut short there is not put back yet. It is put back once that one is done`;
 // A read of *folder* for a thread, refused: what a landing cut short there could not be put back, for *why*.
 const notRead = (folder: string, why: string): Outcome => ({
   error: { type: "unavailable", message: `What a landing cut short in ${folder} could not be put back, so the folder was not read: ${why}` },
@@ -490,9 +503,20 @@ export class ToolHosts implements Executor {
     if ("ok" in outcome) return null;
     const { type, message } = outcome.error;
     if (type === "cancelled") return CANCELLED;
-    // Its host still waits for the folder, has gone, or is going, or ends a step alone: nothing is known put back.
-    if (type === "busy" || type === "unavailable" || type === "interrupted") return stillCutShort(folder);
+    // Its host still waits for the folder, which another holds; or it has gone, or is going, or ends a step alone,
+    // holding the folder itself: nothing is known put back.
+    if (type === "busy" && message !== ENDING_ALONE) return stillCutShort(folder, this.holderOf(folder, lander));
+    if (type === "busy" || type === "unavailable" || type === "interrupted") return stillCutShort(folder, "landing");
     return notRead(folder, message);
+  }
+
+  // What holds *folder* of this computer's tools: one of their hosts on the folder itself that holds it, but *waited*,
+  // the one that waited for it in vain; or none of theirs.
+  private holderOf(folder: string, waited: Host): Holder {
+    const on = [...this.live].filter((host) => host !== waited && host.holds && host.works.at === undefined && host.works.folder.path === folder);
+    if (on.some((host) => host.recovers)) return "putBack";
+    if (on.some((host) => host.kept !== undefined)) return "landing";
+    return on.length > 0 ? "chat" : "earlier";
   }
 
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
@@ -835,8 +859,9 @@ export class ToolHosts implements Executor {
     const { path } = folder;
     this.tell(name, { folder: path, state: "begun" });
     let outcome: Outcome;
+    let host: Host | undefined;
     try {
-      const host = this.recoverer(folder, join(landings, name), name);
+      host = this.recoverer(folder, join(landings, name), name);
       void host.started.then(holds);
       outcome = await host.run({ id: randomUUID(), kind: "land", args: { action: "recover" } }, this.halt.signal);
       host.finish();
@@ -851,9 +876,10 @@ export class ToolHosts implements Executor {
     const { type, message } = outcome.error;
     // Not there, or another than the one recorded: what is kept is no folder's at that path to put back, and stays.
     if (type === "folder_unavailable") return ended({ folder: path, state: "left", why: message });
-    if (type === "busy") {
+    if (type === "busy" && host) {
+      const holder = this.holderOf(path, host);
       this.waiting.set(name, path);
-      return ended({ folder: path, state: "left", why: heldElsewhere(path) }, stillCutShort(path));
+      return ended({ folder: path, state: "left", why: heldElsewhere(path, holder) }, stillCutShort(path, holder));
     }
     return ended({ folder: path, state: "left", why: message }, notRead(path, message));
   }
@@ -1128,6 +1154,11 @@ class Host {
   // Whether a background process of its root lives in the VM.
   get lives(): boolean {
     return this.live > 0 && !this.gone;
+  }
+
+  // Whether it holds its folder: it said ready, which it does once it has the folder's lock, and has not gone.
+  get holds(): boolean {
+    return this.readied && !this.gone;
   }
 
   // Counted while it runs: a host with work is never idle.
