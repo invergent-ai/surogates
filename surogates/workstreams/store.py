@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, any_, bindparam, func, or_, select, text, update
+from sqlalchemy import and_, any_, bindparam, func, not_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -181,10 +181,11 @@ class WorkstreamStore:
     async def resolve_thread(self, session_id: UUID) -> None:
         """Move the thread to Resolved; one already there keeps the moment it got there.
 
-        Its waits on you over its files are over with it: expired, never
-        answered.  One over a clash it is given since is ended by the
-        inbox's sweep (``jobs.inbox_expire``); one over a landing a settle
-        left half-done stays until you answer or dismiss it.
+        Its waits on you over a clash of its files are over with it:
+        expired, never answered.  One it is given since is ended by the
+        inbox's sweep (``jobs.inbox_expire``).  One over a landing a settle
+        left half-done in the folder is your only notice of it, and stays,
+        before the resolve or after it, until you answer or dismiss it.
         """
         async with self._sf() as db:
             await db.execute(
@@ -197,6 +198,7 @@ class WorkstreamStore:
                 .where(
                     InboxItem.session_id == session_id, InboxItem.kind == "action_required",
                     InboxItem.status == "pending", InboxItem.payload.contains({"action_type": "files"}),
+                    not_(InboxItem.payload.contains({"escalated": True})),
                 )
                 .values(status="expired", updated_at=func.now())
             )

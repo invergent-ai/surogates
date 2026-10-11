@@ -969,7 +969,7 @@ async def pending_in_the_inbox(api) -> set[str]:
     return {item["session_id"] for item in listed.json()["items"] if item["status"] == "pending"}
 
 
-async def test_a_threads_waits_over_files_end_when_it_is_resolved_by_you_or_its_coordinator(api):
+async def test_a_threads_waits_over_a_clash_end_when_it_is_resolved_by_you_or_its_coordinator_and_one_over_a_half_done_landing_stays(api):
     project = await create(api)
     master = await master_of(api, project)
     store = api.app.state.session_store
@@ -982,12 +982,15 @@ async def test_a_threads_waits_over_files_end_when_it_is_resolved_by_you_or_its_
     assert await pending_in_the_inbox(api) == {str(yours.id), str(its_coordinators.id)}
     assert (await act_on(api, project, yours, "resolve")).status_code == 200
     await call_tool(api, master, "resolve_thread", thread_id=str(its_coordinators.id))
-    # Over: expired, never answered.  Another kind of wait is not one over its files.
-    assert sorted((w.payload["action_type"], w.status) for w in await waits_of(api, yours)) == [
-        ("approval", "pending"), ("files", "expired"), ("files", "expired"),
+    # A clash's is over: expired, never answered.  One over a landing left half-done in your folder is your only
+    # notice of it, and stays until you answer or dismiss it.  Another kind of wait is not one over its files.
+    assert sorted((w.payload["action_type"], w.payload.get("escalated"), w.status) for w in await waits_of(api, yours)) == [
+        ("approval", None, "pending"), ("files", False, "expired"), ("files", True, "pending"),
     ]
-    assert [w.status for w in await waits_of(api, its_coordinators)] == ["expired", "expired"]
-    assert await pending_in_the_inbox(api) == {str(yours.id)}
+    assert sorted((w.payload["escalated"], w.status) for w in await waits_of(api, its_coordinators)) == [
+        (False, "expired"), (True, "pending"),
+    ]
+    assert await pending_in_the_inbox(api) == {str(yours.id), str(its_coordinators.id)}
 
 
 async def test_a_clash_wait_of_a_deleted_thread_or_one_given_a_resolved_thread_ends_at_the_inboxs_sweep_and_one_over_a_half_done_landing_stays(api):
