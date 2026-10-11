@@ -532,20 +532,14 @@ async def test_the_masters_stop_of_a_thread_is_its_status_and_its_event_together
     thread = await start(api, master)
     state = api.app.state
     store = state.session_store
-    sessions = store._sf
 
-    def a_database_that_goes_before_the_commit():
-        db = sessions()
+    async def the_event_is_not_written(*args, **kwargs):
+        raise ConnectionError("the database went away")
 
-        async def gone():
-            raise ConnectionError("the database went away")
-
-        db.commit = gone
-        return db
-
-    # A thread left paused with no turn-ending event would have its next turn named as the stopped one.
+    # A thread left paused with no turn-ending event would have its next turn named as the stopped one.  The
+    # status is written before the event: with the event's write failing, the status goes with it.
     with monkeypatch.context() as down:
-        down.setattr(store, "_sf", a_database_that_goes_before_the_commit)
+        down.setattr(store, "_write_event", the_event_is_not_written)
         with pytest.raises(ConnectionError):
             await threads_module.stop_thread(
                 thread, reason="The brief changed.", interrupt="stopped by the coordinator",
