@@ -25,7 +25,7 @@ from surogates.db.models import Workstream, WorkstreamHistory
 from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
 from surogates.sandbox.history import HistoryError
-from surogates.session.store import SessionStore
+from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import bucket as bucket_module
@@ -2343,6 +2343,48 @@ async def test_undo_answers_409_while_its_thread_works_and_writes_nothing(api, t
     for target in ({"landing": str(row.id)}, {"thread": str(thread.id)}):
         assert (await undone(api, project, status=409, **target))["detail"] == "Stop the thread to undo its changes."
     assert (pods.project / "Report.docx").read_bytes() == REPORT_BY_A and len(await rows_of(api, project)) == len(before)
+
+
+async def test_undo_of_a_landing_whose_thread_is_gone_puts_its_files_back(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    store, get = api.app.state.session_store, api.app.state.session_store.get_session
+
+    async def gone(session_id):
+        # Deleted as the Undo began: no thread of that id works, or ever will.
+        if session_id == thread.id:
+            raise SessionNotFoundError(f"session {session_id} not found")
+        return await get(session_id)
+
+    monkeypatch.setattr(store, "get_session", gone)
+    assert await undone(api, project, landing=str(row.id)) == {"applied": ["Report.docx"], "skipped": [], "picked_up": []}
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and undos_on_main(pods) == 1
+
+
+async def test_undo_leaves_a_file_whose_name_a_folder_holds_now_and_names_who(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "rm notes.txt && printf ' by A' >> Report.docx")
+    # A folder of the deleted file's name since, with a file of yours in it: no file can be put back there.
+    (pods.project / "notes.txt").mkdir()
+    (pods.project / "notes.txt" / "inside.md").write_text("yours\n")
+    assert await undone(api, project, landing=str(row.id)) == {
+        "applied": ["Report.docx"], "skipped": [{"path": "notes.txt", "by": {"kind": "you"}}], "picked_up": [],
+    }
+    assert (pods.project / "notes.txt" / "inside.md").read_text() == "yours\n"
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and undos_on_main(pods) == 1
+
+
+async def test_undo_of_a_threads_changes_names_a_file_you_set_back_to_what_another_left_between_them(api, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    await ends(api, pool, second)
+    await edited(pool, first, "printf ' and A again' >> Report.docx")
+    await ends(api, pool, first)
+    # You set the report back as B left it: where the Undo would put it back to, were B's change not between A's two.
+    by_b = b"PK\x03\x04 report v1 by A by B"
+    (pods.project / "Report.docx").write_bytes(by_b)
+    assert await undone(api, project, thread=str(first.id)) == {
+        "applied": [], "skipped": [{"path": "Report.docx", "by": {"kind": "you"}}], "picked_up": ["Report.docx"],
+    }
+    assert (pods.project / "Report.docx").read_bytes() == by_b and undos_on_main(pods) == 0
 
 
 async def test_undo_names_a_file_whose_version_from_before_was_pruned(api, tmp_path):
