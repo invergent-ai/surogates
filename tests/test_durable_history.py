@@ -2683,6 +2683,54 @@ def test_an_overlap_is_by_the_newest_of_those_who_changed_the_file(tmp_path, pro
     assert held(turn) == {"notes.txt": {"kind": "thread", "id": "t2", "title": "Draft B"}}
 
 
+def landed_on_main(durable: Path, commits: list[tuple[str, dict[str, str]]]) -> None:
+    """*commits*, each ``(thread, {path: text})``, landed on the durable history's ``main`` in order, as packs and packed-refs."""
+    main = git(durable, "rev-parse", "refs/heads/main")
+    stream = []
+    for n, (thread, files) in enumerate(commits):
+        stream.append(
+            f"commit refs/heads/main\nauthor {thread} <thread:{thread}@surogate> {1_700_000_000 + n} +0000\n"
+            f"committer {thread} <thread:{thread}@surogate> {1_700_000_000 + n} +0000\ndata 7\nLanding\n"
+            + (f"from {main}\n" if n == 0 else "")
+            + "".join(f"M 100644 inline {path}\ndata {len(text.encode())}\n{text}\n" for path, text in files.items())
+            + "\n"
+        )
+    git(durable, "fast-import", "--quiet", input="".join(stream))
+    git(durable, "pack-refs", "--all")
+
+
+def test_who_changed_the_files_a_landing_holds_is_read_once_a_commit_however_many_it_holds(tmp_path, project, monkeypatch):
+    a_history(tmp_path, project)
+    pod = a_pod(tmp_path, project, "t1")
+    paths = [f"docs/part{n % 40}/file{n}.md" for n in range(2000)]
+    # Long ago B changed them all; five hundred landings since changed other files.
+    landed_on_main(project / "_history", [
+        ("t2", {path: f"by B {path}" for path in paths}),
+        *((f"t{n}", {f"other/{n}/{k}.md": "other" for k in range(20)}) for n in range(3, 502)),
+    ])
+    for path in paths:
+        (project / path).parent.mkdir(parents=True, exist_ok=True)
+        (project / path).write_text(f"by B {path}")
+        (pod.copy / path).parent.mkdir(parents=True, exist_ok=True)
+        (pod.copy / path).write_text(f"by A {path}")
+    looked: list[float] = []
+    changed_by = History._changed_by
+
+    def timed(self, *args):
+        began = time.monotonic()
+        try:
+            return changed_by(self, *args)
+        finally:
+            looked.append(time.monotonic() - began)
+
+    monkeypatch.setattr(History, "_changed_by", timed)
+    turn = pod.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:a"], ["Surogate-Kind", "turn"]])
+    assert held(turn) == {path: {"kind": "thread", "id": "t2", "title": "t2"} for path in paths}
+    # Under the project's lock: the log's length, not the held files times the commits times what each touched.
+    [took] = looked
+    assert took < 1.5
+
+
 def test_a_pushed_pickup_keeps_the_index_and_the_next_pod_reads_no_file_again(tmp_path, project, monkeypatch):
     first = a_pod(tmp_path, project)
     (first.copy / "a.md").write_text("a")

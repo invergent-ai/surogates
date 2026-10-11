@@ -1627,10 +1627,19 @@ class History:
         Not whole where the base is behind a pruning's cut.  The cut's commit
         has no parent for git, which lists its whole tree as its change: it
         names no one, and neither does what was changed behind it.
+
+        It runs under the project's lock, so each path a commit touched is
+        looked up once, with each folder above it, never against every path
+        still wanted: the work is the log's length, however many are held.
         """
         wanted = set(paths)
         if not wanted:
             return {}, True
+        # Each wanted path under each folder above it: a file a commit made of that folder's name touches them all.
+        under: dict[str, set[str]] = {}
+        for path in wanted:
+            for folder in _folders(path):
+                under.setdefault(folder, set()).add(path)
         log = ["log", "--no-renames", "--raw", "--no-abbrev", "-z", "--format=%x01%H%x00%an%x00%ae"]
         commits = []
         if pickup is not None:
@@ -1648,9 +1657,12 @@ class History:
             if commit in cut:
                 whole = False
                 continue
-            for path in wanted - set(found):
-                if any(t == path or t.startswith(f"{path}/") or path.startswith(f"{t}/") for t in touched):
-                    found[path] = _who(name, email)
+            who = _who(name, email)
+            for t in touched:
+                # The path itself, a folder above it, and those under it: once touched, found, and never looked through again.
+                for path in (t, *_folders(t), *under.pop(t, ())):
+                    if path in wanted:
+                        found.setdefault(path, who)
         return found, whole
 
     def _in_durable(self, commit: str) -> bool:
@@ -2220,6 +2232,13 @@ def _together(held: set[str], links: list[tuple[str, str]]) -> set[str]:
     while more := ({b for a, b in links if a in held} | {a for a, b in links if b in held}) - held:
         held |= more
     return held
+
+
+def _folders(path: str) -> Iterator[str]:
+    """The folders above *path*, nearest first: ``a/b`` and ``a`` for ``a/b/c``."""
+    while (cut := path.rfind("/")) > 0:
+        path = path[:cut]
+        yield path
 
 
 def _as(author: dict[str, str]) -> list[str]:
