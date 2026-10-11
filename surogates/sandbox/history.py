@@ -1798,21 +1798,45 @@ class History:
         return folder.is_dir() and not target.is_dir()
 
     def _add_all(self, git: Callable[..., str]) -> None:
-        """``git add -A``, leaving out every folder that holds a git repository.
+        """``git add -A``, leaving out what history leaves out and every folder that holds a git repository.
 
-        Git takes such a folder for a submodule: a link to a commit, not
-        its files, and an add that fails while it has none.  Each one is
-        written to the excludes, which ``main`` and every copy share.  The
-        real files are looked at and read several at once, by no git alone.
+        A ``.gitignore`` in the files outranks every ignore file of the
+        repository's, and with a ``!`` takes back a ``.env`` or the
+        platform's own folders: what the add took that the excludes name,
+        and the index did not hold before it, is taken out of the index
+        again, and no listing of the files names it (:attr:`_listing`).
+        Git takes a folder that holds a repository for a submodule: a link
+        to a commit, not its files, and an add that fails while it has none.
+        Each one is written to ``info/exclude``, which ``main`` and every
+        copy share.  The real files are looked at and read several at once,
+        by no git alone.
         """
         # Listed file by file, git names a folder only for a repository it will not go into.
-        new = [n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n]
+        new = [n for n in git("ls-files", "-z", "--others", *self._listing).split("\0") if n]
         found = [n for n in new if n.endswith("/")]
         if found:
             with open(self.repo / "info" / "exclude", "a") as out:
                 out.writelines(f"/{_pattern(n)}\n" for n in found)
-        if git != self._main or not self._read_at_once([n for n in new if not n.endswith("/")]):
-            git("add", "-A")
+        if git == self._main and self._read_at_once([n for n in new if not n.endswith("/")]):
+            return
+
+        def excluded() -> set[str]:
+            return {n for n in git("ls-files", "-z", "--cached", "--ignored", *self._excluding).split("\0") if n}
+
+        held = excluded()
+        git("add", "-A")
+        if taken := sorted(excluded() - held):
+            git("update-index", "--force-remove", "-z", "--stdin", input="".join(f"{n}\0" for n in taken))
+
+    @property
+    def _excluding(self) -> list[str]:
+        """The excludes on a git's command line, where no ``.gitignore`` of the files outranks them as one outranks ``info/exclude``."""
+        return [f"--exclude={pattern}" for pattern in self.excludes]
+
+    @property
+    def _listing(self) -> list[str]:
+        """What a git that lists the files leaves out: the excludes (:attr:`_excluding`), then git's own ignores."""
+        return [*self._excluding, "--exclude-standard"]
 
     def _read_at_once(self, new: list[str]) -> bool:
         """Make ``main``'s index the real files as ``git add -A`` would, with no git reading them alone; whether it did.
@@ -1965,12 +1989,12 @@ class History:
         A copy starts with none, so the turn made them.  The platform's own
         folders are left out.
         """
-        out = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+        out = self._copy("ls-files", "-z", "--others", "--ignored", *self._listing, "--directory")
         ignored = {n for n in out.split("\0") if n}
         # After an add, what is left untracked is the folders with no file in
         # them: history has none, so they are not saved.  A folder the real
         # files have is one the turn emptied, not made.
-        empty = self._copy("ls-files", "-z", "--others", "--exclude-standard", "--directory").split("\0")
+        empty = self._copy("ls-files", "-z", "--others", *self._listing, "--directory").split("\0")
         made = {n for n in empty if n and not (self.project / n).is_dir()}
         names = sorted(ignored | made)
         names = [n for n in names if not n.startswith(self.platform)]
@@ -2079,13 +2103,13 @@ class History:
     def _admin(self) -> Path:
         return self.repo / "worktrees" / self.copy.name
 
-    def _main(self, *args: str) -> str:
+    def _main(self, *args: str, input: str | None = None) -> str:
         """Git on ``main``, the real files its work tree."""
-        return self._git(list(args), env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project)
+        return self._git(list(args), env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project, input=input)
 
-    def _copy(self, *args: str) -> str:
+    def _copy(self, *args: str, input: str | None = None) -> str:
         """Git in the copy, on the thread's branch."""
-        return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy)
+        return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy, input=input)
 
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         timeout = _TIMEOUT.get() or _GIT_TIMEOUT

@@ -75,6 +75,23 @@ def test_a_copy_is_the_real_files_less_the_excludes(tmp_path, project):
     assert git(history, "rev-parse", "refs/bases/t1") == main
 
 
+def test_a_gitignore_in_the_real_files_that_takes_back_what_history_leaves_out_brings_none_of_it_in(tmp_path, project):
+    # The project's own ignores, as a repository's may be: each line takes back what history leaves out.
+    (project / ".gitignore").write_text("!node_modules/\n!~$*\n!.threads/\n!.env\n!*.tmp\n")
+    (project / ".env").write_text("SECRET=1\n")
+    history = opened(tmp_path, project)
+    copied = sorted(str(p.relative_to(history.copy)) for p in history.copy.rglob("*") if p.is_file())
+    assert copied == [".gitignore", "Report.docx", "server.log", "uploads/brief.pdf"]
+    assert git(history, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == copied
+    # A turn's write there is no file of history's either, and is said to be unsaved.
+    (history.copy / ".env").write_text("SECRET=2\n")
+    (history.copy / "notes.tmp").write_text("scratch")
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    turn = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))
+    assert [c["path"] for c in turn["changes"]] == ["Report.docx"] and turn["excluded"] == [".env", "notes.tmp"]
+    assert git(history, "ls-tree", "-r", "--name-only", turn["commit"]).splitlines() == copied
+
+
 def test_a_snapshot_is_the_branchs_tip_and_a_restore_brings_it_back_whole(tmp_path, project):
     history = opened(tmp_path, project)
     first = history.snapshot("before write_file")

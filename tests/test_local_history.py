@@ -642,6 +642,29 @@ def test_the_harness_folder_and_the_whiteboard_stay_out_and_a_users_own_artifact
     assert not (folder / ".surogates-results" / "artifacts").exists()
 
 
+def test_a_gitignore_of_the_folders_that_takes_back_what_history_leaves_out_brings_none_of_it_in(tmp_path, folder):
+    # The folder's own ignores, as a repository of yours may have them: each line takes back what history leaves out.
+    (folder / ".gitignore").write_text("!.env\n!*.tmp\n!_whiteboard/\n!.threads/\n!node_modules/\n")
+    (folder / ".env").write_text("SECRET=1\n")
+    (folder / ".surogate-0123abcd-0000-4000-8000-000000000000.tmp").write_text("the file helper's own, half written\n")
+    for name, file in (("_whiteboard", "canvas.json"), (".threads", "old.txt"), ("node_modules", "left.js")):
+        (folder / name).mkdir()
+        (folder / name / file).write_text("none of the folder's files\n")
+    one = a_copy(tmp_path, folder)
+    store = tmp_path / "store" / "history.git"
+    tracked = [".gitignore", "Report.docx", "notes.txt"]
+    assert git(store, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == tracked
+    assert sorted(p.name for p in one.copy.iterdir()) == tracked
+    # A turn's write there, and your save there, are none of history's either.
+    (one.copy / ".env").write_text("SECRET=2\n")
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (folder / "node_modules" / "left.js").write_text("saved by you\n")
+    landed = land(one, "saga:1")
+    assert [c["path"] for c in landed["changes"]] == ["notes.txt"] and landed["excluded"] == [".env"]
+    assert git(store, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == tracked
+    assert (folder / ".env").read_text() == "SECRET=1\n"
+
+
 def test_a_file_under_the_coding_tools_folder_never_lands(tmp_path, folder):
     (folder / ".threads").mkdir()
     (folder / ".threads" / "old.txt").write_text("left by an earlier checkout\n")

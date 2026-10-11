@@ -1325,7 +1325,7 @@ class LocalHistory(History):
         without following a link.
         """
         found: dict[str, str] = {}
-        listed = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory").split("\0")
+        listed = self._copy("ls-files", "-z", "--others", "--ignored", *self._listing, "--directory").split("\0")
         copy = os.open(self.copy, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             for name in listed:
