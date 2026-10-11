@@ -7,7 +7,9 @@ and provides async engine, session factory, and store fixtures.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
+import shutil
 import tempfile
 import uuid
 from uuid import UUID
@@ -40,11 +42,14 @@ os.environ.setdefault("SUROGATES_JWT_SECRET", "integration-test-secret-key-1234"
 # container path. Every fixture that builds a LocalBackend failed on the
 # filesystem before reaching an assertion, so those suites only ever ran
 # inside the image. Set once here rather than per fixture — the copy-paste
-# version reached 4 of the 9 modules that call create_backend.
-os.environ.setdefault(
-    "SUROGATES_STORAGE_BASE_PATH",
-    tempfile.mkdtemp(prefix="surogates-tenant-assets-"),
-)
+# version reached 4 of the 9 modules that call create_backend. Made only
+# where nothing names one yet (an xdist worker may inherit its controller's),
+# and removed when the process that made it ends: a folder left by every run
+# filled the test host's /tmp.
+if "SUROGATES_STORAGE_BASE_PATH" not in os.environ:
+    _storage = tempfile.mkdtemp(prefix="surogates-tenant-assets-")
+    atexit.register(shutil.rmtree, _storage, ignore_errors=True)
+    os.environ["SUROGATES_STORAGE_BASE_PATH"] = _storage
 
 
 # ---------------------------------------------------------------------------
