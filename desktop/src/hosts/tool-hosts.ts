@@ -55,17 +55,22 @@ export const IDLE_MS = 120_000;
 // How long a landing's host waits for the folder (spec, Section 13, "Waits"): a chat's host lets it go IDLE_MS after
 // its last operation, and another landing's once that landing is forgotten, or IDLE_MS after its last step.
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
-// How long the app's quit waits for a step a landing's helper runs (files/land.ts); every other stop of its host waits
-// for the step whole. Past it the host is stopped: the step's record, written before each of its moves, names what it
-// was doing, and it is put back as this computer's tools next start, or by the first step of the next landing's helper
-// in that folder. A step stages a file of at most a GiB, about ten seconds on a disk that writes 100 MiB a second; one
-// that copies a replaced file of several GiB between two filesystems can run past it, and its copy goes on from there.
+// How long the app's quit waits for a step a landing's helper runs (files/land.ts). Past it the host is stopped: the
+// step's record, written before each of its moves, names what it was doing, and it is put back as this computer's tools
+// next start, or by the first step of the next landing's helper in that folder. A step stages a file of at most a GiB,
+// about ten seconds on a disk that writes 100 MiB a second; one that copies a replaced file of several GiB between two
+// filesystems can run past it, and its copy goes on from there.
 export const QUIT_STEP_MS = 30_000;
 // How long a deleted thread's landing's host that has written nothing in the folder is given for the step its helper
 // runs, a look or a forgetting, before it is stopped: the deletion is answered at once, and its folder held no longer
 // than this past it. Past it, what the step was doing is named by its record, and is put back as the quit's is. A
 // landing that has written is never stopped for its thread's deletion.
 export const RETIRE_STEP_MS = QUIT_STEP_MS;
+// How long every other stop of a landing's or a recovery's host waits for the steps its helper runs, and a step sent
+// alone for those sent before it: one hung on a dead mount never ends, and would hold the folder, and whatever waits for
+// that host, for ever. Past it the host is stopped as at the quit. A put-back that copies the most a folder's landings
+// keep, 4 GiB, between two filesystems at 10 MB a second ends within it.
+export const STEP_MS = 10 * 60_000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A step a turn's landing asks for a landing it only settles, one another left running in the folder: named so by the
 // server, under the turn's own name, and none of the turn's own landing.
@@ -570,7 +575,7 @@ export class ToolHosts implements Executor {
 
   // The device's access ended: every host stops, and its background processes with it.
   // The next operation for a root starts a new host, which answers for them from the record.
-  // A landing's host first ends the steps its helper runs.
+  // A landing's host first ends the steps its helper runs, for STEP_MS at most.
   end(): Promise<void> {
     return this.stopHosts();
   }
@@ -1062,9 +1067,9 @@ class Host {
       this.aloneNow = true;
       try {
         if (await aborts(before, signal)) return CANCELLED;
-        while (this.unanswered.size > 0 && !this.gone) {
-          if (await aborts(this.stepsEnded(), signal)) return CANCELLED;
-        }
+        if (await aborts(this.stepsEnded(STEP_MS), signal)) return CANCELLED;
+        // A step sent before it hung: the host goes, and the step's record names what it was doing.
+        if (this.unanswered.size > 0 && !this.gone) this.finish(0);
         if (this.finished || this.closing) return NOT_BEGUN;
         const refused = await gate(signal);
         if (refused) return refused;
@@ -1105,7 +1110,7 @@ class Host {
   }
 
   // Its work is over before it has been idle: out of the list first, so the next operation starts a new host, then
-  // its folder's other holders let it go, and it stops, a landing's once its steps have ended, within *stepMs* if given. Once.
+  // its folder's other holders let it go, and it stops, a landing's once its steps have ended, within *stepMs*. Once.
   finish(stepMs?: number): void {
     if (this.finished) return;
     this.finished = true;
@@ -1188,7 +1193,12 @@ class Host {
   // Never while it starts: its start is bounded by its own time.
   private idle(): void {
     clearTimeout(this.idleTimer);
-    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished || this.unanswered.size > 0) return;
+    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished) return;
+    // A landing's steps that nothing waits for any more, a cancelled one: given STEP_MS to end, then the host goes.
+    if (this.unanswered.size > 0) {
+      this.idleTimer = setTimeout(() => this.finish(0), STEP_MS).unref();
+      return;
+    }
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
@@ -1255,10 +1265,10 @@ class Host {
   }
 
   // Once its helper has answered every step it was sent, or it has gone; or once *ms* have passed.
-  private stepsEnded(ms?: number): Promise<void> {
+  private stepsEnded(ms: number): Promise<void> {
     if (this.unanswered.size === 0 || this.gone) return Promise.resolve();
     return new Promise((resolve) => {
-      const timer = ms === undefined ? undefined : setTimeout(resolve, ms);
+      const timer = setTimeout(resolve, ms);
       this.quiet.push(() => {
         clearTimeout(timer);
         resolve();
@@ -1268,9 +1278,9 @@ class Host {
 
   /**
    * A landing's host first lets its helper end every step it was sent, each of which writes the user's folder, and
-   * sends it none after; at the app's quit, for *stepMs* at most. Then it stops.
+   * sends it none after; for *stepMs* at most, STEP_MS unless told. Then it stops.
    */
-  async stop(stepMs?: number): Promise<void> {
+  async stop(stepMs = STEP_MS): Promise<void> {
     clearTimeout(this.idleTimer);
     this.closing = true;
     if (this.lands) await this.stepsEnded(stepMs);

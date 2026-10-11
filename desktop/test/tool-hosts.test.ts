@@ -21,7 +21,7 @@ import { LOCK_WAIT_MS } from "../src/hosts/folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
   APP_DIRS, type BoundFolder, CANCELLED, folderBusy, forkHost, type Guard, HOST_STOPPED, type HostProcess, LAND_WAIT_MS, NODE, NOT_BOUND, nothingToLand, QUIT_STEP_MS,
-  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions,
+  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, STEP_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 import { asItLies } from "./as-it-lies.js";
 
@@ -1499,6 +1499,53 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(await looking).toEqual({ ok: "looked" });
   });
 
+  it.each([
+    ["this computer's access ending", (executor: ToolHosts): Promise<unknown> => executor.end(), undefined],
+    // A forgetting that waited for the step is not sent: it can be asked again of the next landing's host.
+    ["its landing forgotten", (executor: ToolHosts): Promise<unknown> => executor.land(landing("forget", { saga: "s1", applied: [] }), signal()), NOT_BEGUN],
+  ])("gives a landing's step hung on a dead mount STEP_MS, %s, and then stops its host: what the step left, the next landing's helper puts back", async (_, going, answered) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const executor = threads({ spawnHost: spawnHost(readyOnly) });
+      const hung = landing("apply", { saga: "s1", step: 0, path: "a.txt" });
+      const applying = executor.land(hung, signal());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fakes[0]?.count("op")).toBe(1);
+      let over: { outcome: unknown } | null = null;
+      void going(executor).then((outcome) => {
+        over = { outcome };
+      });
+      await vi.advanceTimersByTimeAsync(STEP_MS - 1);
+      expect([fakes[0]?.count("stop"), fakes[0]?.count("op"), over]).toEqual([0, 1, null]);
+      // Its host is stopped then: a forgetting that gave the step up stops it at once.
+      await vi.advanceTimersByTimeAsync(2);
+      expect(fakes[0]?.count("stop")).toBe(1);
+      expect(await applying).toEqual(HOST_STOPPED);
+      await vi.advanceTimersByTimeAsync(0);
+      expect([over, fakes[0]?.count("op")]).toEqual([{ outcome: answered }, 1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives a landing's step hung on a dead mount STEP_MS once no step of it is waited for, a cancelled one, and then stops its host", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const executor = threads({ spawnHost: spawnHost(readyOnly) });
+      const cancel = new AbortController();
+      const applying = executor.land(landing("apply", { saga: "s1", step: 0, path: "a.txt" }), cancel.signal);
+      await vi.advanceTimersByTimeAsync(1);
+      cancel.abort();
+      expect(await applying).toEqual(CANCELLED);
+      await vi.advanceTimersByTimeAsync(STEP_MS - 1);
+      expect(fakes[0]?.count("stop")).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(fakes[0]?.count("stop")).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gives a landing's step QUIT_STEP_MS at the app's quit, and then stops its host: what the step left, the next landing's helper puts back", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -1991,7 +2038,7 @@ describe("what landings cut short in this computer's folders, put back by a host
     }
   });
 
-  it("never stops a recovery's host inside its put-back: this computer's access ending waits for it, and the app's quit gives it QUIT_STEP_MS", async () => {
+  it("never stops a recovery's host inside its put-back but past a bound: this computer's access ending waits STEP_MS for it, and the app's quit QUIT_STEP_MS", async () => {
     left();
     holds = true;
     const executor = recovering();
