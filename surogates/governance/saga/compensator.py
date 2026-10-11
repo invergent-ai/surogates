@@ -145,16 +145,29 @@ async def compensate_history(
 
 #: What its person reads where a Stop of a thread on their computer did not take all of the turn back: some
 #: of it stays in the thread's copy, or had already landed in the folder.  The owner's words, and these alone.
-STOP_LEFT_IN_COPY = (
-    "Stopped, but not all of this turn could be taken back. What the steps below changed stays in this "
-    "thread's copy, and lands in your folder with the thread's next turn."
+_STAYS_IN_COPY = (
+    "What the steps below changed stays in this thread's copy, and lands in your folder with the thread's next turn."
 )
+STOP_LEFT_IN_COPY = f"Stopped, but not all of this turn could be taken back. {_STAYS_IN_COPY}"
 STOP_LEFT_LANDED = "Stopped, but part of this turn had already landed in your folder, so it was not taken back."
-#: What its person reads where a Stop's undo was left for the thread's next turn (``UndoOwed``).
+#: What its person reads where a Stop's undo was left for the thread's next turn (``UndoOwed``).  Where a step no
+#: undo can take back is among the rest, the take-back is promised to the steps owed alone, and the others' said:
+#: they stay in the copy, or had already landed.
 STOP_NOT_YET = (
     "Stopped, but this turn is not taken back yet. It is taken back before the thread's next turn starts, once your "
     "computer answers."
 )
+_OWED_ALONE = (
+    "Stopped, but this turn is not all taken back yet. The steps below not taken back yet are taken back before the "
+    "thread's next turn starts, once your computer answers."
+)
+STOP_NOT_YET_LEFT_IN_COPY = (
+    f"{_OWED_ALONE} What the others changed stays in this thread's copy, and lands in your folder with the thread's "
+    "next turn."
+)
+STOP_NOT_YET_LANDED = f"{_OWED_ALONE} The others had already landed in your folder."
+#: What its master hears where the thread's next turn took all of a turn back that its Stop left not taken back yet.
+STOP_TAKEN_BACK = "Stopped, and all of this turn is taken back now."
 #: Why a step was not taken back, as its person reads it.
 WHY_NOT_TAKEN_BACK = {
     "no_snapshot": "no snapshot of the copy was taken before it",
@@ -172,8 +185,9 @@ class UndoOwed(Exception):
     the thread now.  The saga stays open in the log, the put-back asked
     stays open in the journal for its computer to run once it is back, and
     the thread's next turn finishes the undo before it opens the copy.
-    *left* names each step that ran and is not taken back yet, as
-    :func:`undo_on_computer` names one, ``why`` ``owed``.
+    *left* names each step that ran and is not taken back, as
+    :func:`undo_on_computer` names one: ``why`` ``owed`` where the
+    thread's next turn may still take it back.
     """
 
     def __init__(self, left: list[dict]) -> None:
@@ -234,7 +248,12 @@ async def undo_on_computer(
         try:
             await asyncio.wait_for(copy.restore(turn, step.checkpoint_hash), timeout=step.timeout_seconds if bounded else None)
         except (TimeoutError, LeaseLost):
-            raise UndoOwed([_not_taken_back(s, "owed") for s in began[:back_from] if ran(s)]) from None
+            # Owed, but what this undo was refused, and a step older than every snapshot, which none can take back.
+            oldest = next(at for at, s in enumerate(began) if s.checkpoint_hash is not None)
+            raise UndoOwed([
+                _not_taken_back(s, *why.get(s.step_id, ("no_snapshot" if at < oldest else "owed", None)))
+                for at, s in enumerate(began[:back_from]) if ran(s)
+            ]) from None
         except ComputerRefused as refused:
             # The folder's history's refusal of a snapshot that is not built on the copy's base as it stands.
             why[step.step_id] = ("landed", None) if refused.code == "not_on_base" else ("refused", code_of(refused))
@@ -271,8 +290,11 @@ def stop_left(left: list[dict]) -> dict:
     staying = any(entry["why"] != "landed" for entry in left)
     named = [f"{entry['tool']} ({entry['path']})" if "path" in entry else entry["tool"] for entry in left]
     lines = [f"{step}: {WHY_NOT_TAKEN_BACK[entry['why']]}" for step, entry in zip(named, left)]
+    owed = [entry["why"] == "owed" for entry in left]
+    in_copy = any(entry["why"] not in ("owed", "landed") for entry in left)
     title = (
-        STOP_NOT_YET if any(entry["why"] == "owed" for entry in left) else STOP_LEFT_IN_COPY if staying else STOP_LEFT_LANDED
+        (STOP_NOT_YET if all(owed) else STOP_NOT_YET_LEFT_IN_COPY if in_copy else STOP_NOT_YET_LANDED) if any(owed)
+        else STOP_LEFT_IN_COPY if staying else STOP_LEFT_LANDED
     )
     return {
         "error_title": title, "error_detail": "\n".join(lines),

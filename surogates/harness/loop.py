@@ -1227,7 +1227,7 @@ class AgentHarness(
                 },
             )
         if said:
-            await self._tell_what_the_stop_left(session, said)
+            await self._tell_what_the_stop_left(session, left)
         # A channel /stop aborts out-of-band and leaves the session 'active'
         # (so the SESSION_PAUSE above never fires). The inbound handler only
         # posted an optimistic "Stopping…" ack, so emit a deliverable
@@ -1241,23 +1241,39 @@ class AgentHarness(
             )
         self._clear_interrupt()
 
-    async def _tell_what_the_stop_left(self, session: Session, said: dict[str, Any]) -> None:
+    async def _tell_what_the_stop_left(self, session: Session, left: list[dict]) -> None:
         """Tell a thread's master what its user's stop did not take back, as a thread's news reaches it: a report.
 
-        The harness alone speaks in it: no turn of the thread ended.  The
+        With nothing *left*, where the thread's next turn finished an undo
+        its Stop left owed, the master is told in a line that all of the
+        turn is taken back now, and only where the last it heard of the
+        thread's Stop was that some of it is not taken back yet.  The
+        harness alone speaks in it: no turn of the thread ended.  The
         master reads it at its next wake, and its card of the thread shows
         it.  As best it can: the thread's own pause says it whatever comes
         of this.
         """
+        from surogates.governance.saga.compensator import STOP_TAKEN_BACK, stop_left
         from surogates.workstreams.store import WorkstreamStore
 
         try:
             named = await WorkstreamStore(self._session_factory).get_thread(session.id)
             if session.parent_id is None or named is None:
                 return
+            if left:
+                said = stop_left(left)
+                result = f"{said['error_title']}\n{said['error_detail']}"
+            else:
+                heard = [
+                    e.data for e in await self._store.get_events(session.parent_id, types=[EventType.WORKER_COMPLETE])
+                    if e.data.get("worker_id") == str(session.id) and e.data.get("stopped") is True
+                ]
+                if not heard or not any(entry.get("why") == "owed" for entry in heard[-1].get("not_taken_back", ())):
+                    return
+                result = STOP_TAKEN_BACK
             await self._store.emit_event(session.parent_id, EventType.WORKER_COMPLETE, {
                 "worker_id": str(session.id), "title": named.title, "stopped": True,
-                "result": f"{said['error_title']}\n{said['error_detail']}", "not_taken_back": said["not_taken_back"],
+                "result": result, "not_taken_back": left,
             })
         except Exception:
             logger.warning(
@@ -1353,13 +1369,13 @@ class AgentHarness(
         asked under that name (``tool_exec._open_local_copy``).  An undo a
         Stop of the thread's left owed is finished before it
         (:meth:`_undo_what_a_stop_left`), and *events*, the wake's, gain
-        what that wrote.  A Stop ends the open wherever it is, before it is
-        asked, while it or that undo waits, or once a Stop's pause closed
-        it: its operation is closed, a put-back left open, and the turn ends
-        stopped.  Nowhere to work ends the turn failed, saying why, before
-        its prompt is built.  An open or an undo the journal itself refused,
-        the thread held by another worker now or deleted, ends this wake
-        with nothing sent.
+        the saga events that undo wrote, and nothing else.  A Stop ends
+        the open wherever it is, before it is asked, while it or that undo
+        waits, or once a Stop's pause closed it: its operation is closed, a
+        put-back left open, and the turn ends stopped.  Nowhere to work
+        ends the turn failed, saying why, before its prompt is built.  An
+        open or an undo the journal itself refused, the thread held by
+        another worker now or deleted, ends this wake with nothing sent.
         """
         from surogates.governance.saga.compensator import UndoOwed
 
@@ -1367,9 +1383,11 @@ class AgentHarness(
 
         async def open_after_its_stop() -> Any:
             if await self._undo_what_a_stop_left(session, lease):
-                # The stopped turn's saga is over: the turn's own loop starts its own, and closes nothing more.
+                # The stopped turn's saga is over: the turn's own loop starts its own, and closes nothing more.  Only
+                # what the undo wrote: this wake's own ``harness.wake`` would say this worker woke the thread last.
                 events.extend(await self._store.get_events(
-                    session.id, after=max((e.id for e in events), default=0), exclude_types=[EventType.LLM_DELTA],
+                    session.id, after=max((e.id for e in events), default=0),
+                    types=[EventType.SAGA_COMPENSATE, EventType.SAGA_COMPLETE],
                 ))
             # Its first copy is said in its chat while it is made: the turn waits for it, minutes for a large folder.
             return await _open_local_copy(
@@ -4424,11 +4442,11 @@ class AgentHarness(
         as long as its computer takes, as the open itself waits.  So the open
         that follows moves the copy on from where the stopped turn started,
         and nothing of that turn lands.  Its master hears what was not taken
-        back, as a Stop's own undo tells it.  Raises ``UndoOwed`` where
-        another worker has the thread now.
+        back, as a Stop's own undo tells it, or, told at the Stop that it was
+        not yet, that all of it is now.  Raises ``UndoOwed`` where another
+        worker has the thread now.
         """
         from surogates.governance.saga import SagaOrchestrator
-        from surogates.governance.saga.compensator import stop_left
         from surogates.governance.saga.state_machine import SagaState
 
         stops = (EventType.SESSION_PAUSE.value, EventType.SESSION_STOPPED.value)
@@ -4451,8 +4469,7 @@ class AgentHarness(
             turn = max((e.id for e in ends if e.id < start), default=0)
             left = await self._undo_on_computer(owed, session, "interrupt", lease=lease, turn=turn, bounded=False)
             undid = True
-            if left:
-                await self._tell_what_the_stop_left(session, stop_left(left))
+            await self._tell_what_the_stop_left(session, left)
         return undid
 
     # ------------------------------------------------------------------
