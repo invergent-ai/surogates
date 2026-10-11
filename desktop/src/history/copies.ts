@@ -133,11 +133,11 @@ const AS_IT_WAS: ReadonlySet<unknown> = new Set<HistoryCode>(["not_a_request", "
 const asItWas = (outcome: Outcome): boolean =>
   "error" in outcome && (outcome.error.type === "value" || (outcome.error.type === "history" && AS_IT_WAS.has(outcome.error.code)));
 
-// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, and a copy's letting go, in the
-// copy and the history alone; and a landing's forgetting, which refuses where a file is not what was there before, as one
-// moved aside is not, and which is asked from inside its landing's last step, where waiting for that landing would wait
-// for itself.
-const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "close", "forget"]);
+// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, a copy's letting go and a
+// deleted thread's dropping, in the copy and the history alone; and a landing's forgetting, which refuses where a file is
+// not what was there before, as one moved aside is not, and which is asked from inside its landing's last step, where
+// waiting for that landing would wait for itself.
+const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "close", "drop", "forget"]);
 // What the guest says of a copy it was asked to let go that is not there any more: removed by it, or gone before.
 const letGone = (outcome: Outcome): boolean => "ok" in outcome && ["removed", "gone"].includes(String((outcome.ok as { copy?: unknown } | null)?.copy));
 

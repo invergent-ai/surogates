@@ -734,6 +734,24 @@ describe("a deleted thread", () => {
     expect(existsSync(join(place(), "clones", ROOT))).toBe(false);
   });
 
+  it("is dropped with no wait for its folder, which its dropping reads not, whoever holds the folder", async () => {
+    let held = false;
+    const looked: string[] = [];
+    const busy: Outcome = { error: { type: "busy", message: "Another chat holds this folder" } };
+    const one = copies(dropping, {
+      readable: async (at) => {
+        looked.push(at);
+        return held ? busy : null;
+      },
+    });
+    await one.open(ROOT, bound(), signal());
+    held = true;
+    await one.copies.drop(ROOT, bound());
+    one.close(ROOT);
+    await vi.waitFor(() => expect(existsSync(copy())).toBe(false));
+    expect([asked.map((request) => request.action), looked]).toEqual([["open", "drop"], [folder]]);
+  });
+
   it("asks the guest nothing, and makes no place, for a thread that has neither a copy nor a repository here", async () => {
     mkdirSync(dataDir);
     const one = copies(dropping);
