@@ -188,6 +188,8 @@ describe("one agent's device", () => {
       if (answer) expect(results("bind-1")[0]?.outcome).toEqual(answer);
       else expect(results("bind-1")[0]?.outcome).toMatchObject({ error: { type: "binding" } });
       expect(tools.bindings?.get(ROOT)?.history).toBe(copies ? ROOT : undefined);
+      // Its hello said whether it keeps copies: the server sends a thread's bind to no app that does not.
+      expect(server.hellos.map((hello) => hello.copies)).toEqual([copies ? true : undefined]);
     },
   );
 

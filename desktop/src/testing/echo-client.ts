@@ -6,7 +6,9 @@
 // does: before it connects it confirms that folder, as a user accepting the sheet
 // would, and says the sheet ("sheet") and the folder and nonce the page would send
 // ("prepared"); then it answers a chat's bind operation against that confirmation,
-// and runs the chat's other operations through the VmExecutor. With --ask
+// and runs the chat's other operations through the VmExecutor. With --times N it
+// confirms that folder N times, one confirmation for each chat or thread to bind
+// there, and says each. With --ask
 // WORD as well, those chats ask every time: each approval is said ("approval"),
 // and denied when what it asks about names WORD, allowed otherwise. A command's
 // connection to a host off the package list, other than this computer's own or one
@@ -39,14 +41,17 @@ const { values } = parseArgs({
     hold: { type: "boolean", default: false },
     folder: { type: "string" },
     confirm: { type: "string" },
+    times: { type: "string" },
     ask: { type: "string" },
   },
 });
+const times = Number(values.times ?? "1");
 // --folder binds every root by itself, so it cannot stand beside a confirmed folder; only a confirmed one asks.
-const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm);
+const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm)
+  || !Number.isInteger(times) || times < 1 || (values.times !== undefined && !values.confirm);
 if (!values.url || !values.token || !values.journal || usage) {
   process.stderr.write(
-    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--ask WORD]]\n",
+    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--times N] [--ask WORD]]\n",
   );
   process.exit(2);
 }
@@ -114,7 +119,7 @@ const binder = confirm && hosts
     onError: sayError,
   })
   : null;
-if (binder) {
+for (let time = 0; binder && time < times; time++) {
   const prepared = await binder.prepareFolder("pick", "cross-check", new AbortController().signal);
   if (!prepared) {
     say({ event: "error", message: `the folder was refused: ${refusal ?? "the sheet was not accepted"}` });
@@ -127,6 +132,8 @@ const { link } = connectDevice({
   url: values.url,
   token: values.token,
   journal,
+  // Only its binder binds a project's thread to a copy of the folder: with --confirm, where its hosts keep one.
+  copies: binder !== null && hosts?.keepsCopies() === true,
   onStatus: (status) => say({ event: "status", status }),
   onError: sayError,
   executor: binder ?? hosts ?? {

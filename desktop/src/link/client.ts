@@ -50,6 +50,8 @@ export interface DeviceLinkOptions {
   handlers: LinkHandlers;
   // What the hello reports as held unfinished, read at each connect.
   openIds: () => string[];
+  // Whether the hello says this app keeps a copy of a folder for a project's thread (protocol.ts, hello).
+  copies?: boolean;
   welcomeTimeoutMs?: number;
   delay?: (attempt: number) => number;
 }
@@ -166,7 +168,7 @@ export class DeviceLink {
         void this.stop();
         return;
       }
-      socket.send(JSON.stringify(hello(open)));
+      socket.send(JSON.stringify(hello(open, this.options.copies === true)));
     });
 
     socket.on("message", (data, isBinary) => {

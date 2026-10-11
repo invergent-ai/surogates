@@ -552,6 +552,7 @@ describe("applyAgentChatEvent", () => {
       deviceId: "dev-1",
       deviceName: "Flavius's ThinkPad",
       reason: "offline",
+      folder: "",
     });
     expect(waiting.messages).toEqual(initial.messages);
 
@@ -561,6 +562,22 @@ describe("applyAgentChatEvent", () => {
       data: { device_id: "dev-1" },
     });
     expect(resumed.deviceWait).toBeNull();
+  });
+
+  it("tracks a thread's first copy of its folder being made, which its turn waits for", () => {
+    const making = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "device.waiting",
+      eventId: 33,
+      data: { device_id: "dev-1", device_name: "Flavius's ThinkPad", reason: "copying", folder: "/home/flavius/Reports" },
+    });
+    expect(making.deviceWait).toEqual({
+      deviceId: "dev-1",
+      deviceName: "Flavius's ThinkPad",
+      reason: "copying",
+      folder: "/home/flavius/Reports",
+    });
+    const made = applyAgentChatEvent(making, { type: "device.resumed", eventId: 34, data: { device_id: "dev-1" } });
+    expect(made.deviceWait).toBeNull();
   });
 
   it("forgets a wait when the session wakes again", () => {

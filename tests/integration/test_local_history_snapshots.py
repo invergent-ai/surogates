@@ -38,7 +38,7 @@ from .test_devices import FOLDER, api, builtin_tools, eventually, link_url  # no
 from .test_local_history_open import a_worker, asked, begun_with_copy, status_of, woken
 from .test_local_history_threads import asked as request_of
 from .test_local_history_threads import bound_with_copy, computer, picture, recorded  # noqa: F401  (computer is a fixture)
-from .test_local_threads import begun_local, confirmed, journal, laptop  # noqa: F401  (laptop is a fixture)
+from .test_local_threads import confirmed, journal, laptop  # noqa: F401  (laptop is a fixture)
 from .test_turn_sagas import calling, saga_events
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -548,22 +548,21 @@ async def test_only_a_threads_own_turn_takes_snapshots_and_one_that_is_no_commit
     assert await calls_of(api, helper) == [("write_file", None)] and asked(computer, "checkpoint") == taken
 
 
-async def test_a_thread_or_a_chat_on_its_folder_itself_takes_no_snapshot_and_its_steps_are_as_before(api, laptop, monkeypatch):
-    _, _, thread = await begun_local(api, laptop)
-    await woken(api, monkeypatch, thread, [WRITE, _final_response("Done.")])
+async def test_a_chat_on_its_folder_itself_takes_no_snapshot_and_its_steps_are_as_before(api, laptop, monkeypatch):
+    # A thread on its folder itself, made before threads had copies, runs no step at all (test_local_history_open.py).
     laptop.app.prepare("chat-binding-nonce-0001", FOLDER)
     created = await api.client.post(
         "/v1/sessions", json={"execution": confirmed(laptop.device_id, nonce="chat-binding-nonce-0001")}, headers=api.auth(),
     )
     assert created.status_code == 201, created.text
+    await laptop.app.connect()
     await eventually(lambda: is_bound(api, created.json()["id"]))
     chat = await api.app.state.session_store.get_session(UUID(created.json()["id"]))
     await woken(api, monkeypatch, chat, [calling(("write_file", {"path": "Notes.md", "content": "notes\n"})), _final_response("Noted.")], said="Note it.")
-    for session in (thread, chat):
-        assert [hash_ for _, hash_ in await calls_of(api, session)] == [None]
-        assert [hash_ for _, hash_ in (await steps_of(api, session)).values()] in ([None], [])
+    assert [hash_ for _, hash_ in await calls_of(api, chat)] == [None]
+    assert [hash_ for _, hash_ in (await steps_of(api, chat)).values()] in ([None], [])
     assert "checkpoint" not in laptop.app.ran
-    assert (laptop.folder / "Budget.xlsx").read_text() == "Total,42\n" and (laptop.folder / "Notes.md").read_text() == "notes\n"
+    assert (laptop.folder / "Notes.md").read_text() == "notes\n"
 
 
 # -- the journal --------------------------------------------------------------------------------------------------

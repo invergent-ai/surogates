@@ -272,7 +272,9 @@ describe("the desktop's release manifest", () => {
 
   it("names the state schema of this package in each release it makes", () => {
     const { stateSchema } = JSON.parse(readFileSync(join(RELEASE, "..", "package.json"), "utf8")) as { stateSchema: unknown };
-    expect(Number.isInteger(stateSchema) && (stateSchema as number) >= 1).toBe(true);
+    // From 2 its journal may bind a project's thread to a copy of its folder, which a release of 1 would read as bound to
+    // the folder itself, and run the thread there: no install goes back across it.
+    expect(Number.isInteger(stateSchema) && (stateSchema as number) >= 2).toBe(true);
   });
 
   it("writes the state schemas the install script's own check takes, and no other: to the last below 10^15, and none that reads as below it only as it is written", () => {

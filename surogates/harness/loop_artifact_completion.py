@@ -1107,7 +1107,8 @@ class ArtifactCompletionMixin:
             except Exception:
                 logger.exception("Landing failed for %s on its computer", session.id)
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
-        elif is_project_thread(session.config) and self._sandbox_pool is not None:
+        elif is_project_thread(session.config) and device_of(session.config) is None and self._sandbox_pool is not None:
+            # A thread on its user's computer with no copy there, made before threads had them, lands nothing anywhere.
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
             try:
                 await self._open_copy_to_land(session)
@@ -1458,14 +1459,8 @@ class ArtifactCompletionMixin:
         return {"kept": False, "left": left} if left else {}
 
     async def _open_copy_to_land(self, session: Session) -> None:
-        """Give a thread's turn that never used its pod one, when its end lands all the same.
-
-        Never for a thread on the user's computer: it works in the folder there,
-        and has no copy in the cloud to land.
-        """
+        """Give a cloud thread's turn that never used its pod one, when its end lands all the same."""
         owner = sandbox_session_key(session)
-        if device_of(session.config) is not None:
-            return
         if self._sandbox_pool.holds_copy(owner) or self._storage is None or session.config.get("history_off"):
             return
         if await waits_to_land(self._session_factory, self._storage, session, fence=_fence(self._saga_settings)):

@@ -184,13 +184,15 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     },
     end: () => tools.end?.() ?? Promise.resolve(),
   };
+  // Whether a project's thread is given a copy of its folder here: the binder binds one to it, and the hello says so.
+  const keepsCopies = tools.keepsCopies?.() === true;
   const binder: Binder = new Binder({
     bindings: journal.bindings,
     prompts: options.prompts,
     guards: tools.guards(),
     agent: options.agent,
     hosts: counted,
-    keepsCopies: tools.keepsCopies?.() === true,
+    keepsCopies,
     refusal: (operation) => tools.refusal?.(operation) ?? null,
     retired: (root) => tools.retired?.(root),
     address: tools.address?.bind(tools),
@@ -210,6 +212,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     token: options.token,
     journal,
     executor: binder,
+    copies: keepsCopies,
     onStatus: (status) => {
       if (ENDED.includes(status)) ended.resolve();
       options.onStatus(status);

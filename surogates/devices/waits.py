@@ -4,6 +4,12 @@
 of a session's operations finds its computer away, and ``device.resumed
 {device_id}`` once none of them does.  The count is per calling session and
 lives in this process: a session's turn runs in one worker at a time.
+
+A thread's turn also waits while its computer makes the thread's first copy
+of its folder, which can take minutes: ``device.waiting`` says so with the
+reason ``copying`` and the ``folder``, until the copy's making ends.  The
+computer going away meanwhile is said as ever, and once it is back the
+copy's making is said again.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 # Calling session -> how many of its operations wait on an absent computer.
 _away: Counter[UUID] = Counter()
+# Calling session -> what its viewers are told while its thread's first copy is being made.
+_copying: dict[UUID, dict[str, Any]] = {}
 
 
 class DeviceWaitNotice:
@@ -52,9 +60,23 @@ class DeviceWaitNotice:
         if _away[request.calling_session_id] <= 0:
             del _away[request.calling_session_id]
             if announce:
-                await self._emit(request.calling_session_id, EventType.DEVICE_RESUMED, {
-                    "device_id": str(request.device_id),
-                })
+                making = _copying.get(request.calling_session_id)
+                await self._emit(request.calling_session_id, *(
+                    (EventType.DEVICE_WAITING, making) if making is not None
+                    else (EventType.DEVICE_RESUMED, {"device_id": str(request.device_id)})
+                ))
+
+    async def copying(self, session_id: UUID, device_id: UUID, folder: str) -> None:
+        """*session_id*'s turn waits while its computer makes the thread's first copy of *folder*."""
+        making = {"device_id": str(device_id), "device_name": await self._name(device_id), "reason": "copying", "folder": folder}
+        _copying[session_id] = making
+        if not _away.get(session_id):
+            await self._emit(session_id, EventType.DEVICE_WAITING, making)
+
+    async def copied(self, session_id: UUID, device_id: UUID) -> None:
+        """The copy's making ended, the copy made or not: the turn waits for it no more."""
+        if _copying.pop(session_id, None) is not None and not _away.get(session_id):
+            await self._emit(session_id, EventType.DEVICE_RESUMED, {"device_id": str(device_id)})
 
     async def _name(self, device_id: UUID) -> str:
         # The name is a nicety: a database that cannot give it must not fail the wait.

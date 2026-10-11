@@ -250,8 +250,10 @@ async def create_child_session(
     # A project thread's helper, and a helper's helper, works on a copy of
     # its own, of the thread's work, in a pod of its own on whichever worker
     # takes it: what it keeps there lands with the thread's next landing.
-    # A helper of a thread on the user's computer works in the thread's
-    # folder there, through its binding, as a local chat's helper does.
+    # A helper of a thread on the user's computer works in the thread's own
+    # copy there, through the thread's binding, as its ``execution`` says:
+    # a thread on a computer has one copy, and what its helpers write in it
+    # lands with the thread's next turn end.
     merged_config.pop("history_thread", None)
     merged_config.pop("history_project", None)
     # Every session under a thread says which, on the user's computer too, where it has no copy:
@@ -313,8 +315,10 @@ async def create_thread_session(
     fields and boundaries, so every pod mounts the project's one workspace,
     the master's identity and the user's package.  It runs in the cloud
     whatever the master does, unless *device_id* names the user's computer:
-    then it works in *folder* there, as its own root, so that computer binds
-    it as it binds a new chat.
+    then it works on *folder* there, as its own root, in a copy of the folder
+    of its own that the computer keeps (``execution.history``), never in the
+    folder itself.  Its bind names that copy, so that computer binds it as it
+    binds a new chat, to the copy.
     """
     session_id = uuid4()
     merged_config = dict(config)
@@ -333,8 +337,13 @@ async def create_thread_session(
     if device_id is not None:
         # After the master's fields, so the folder on the computer is the
         # workspace.  The storage fields stay for create_child_session;
-        # nothing may read or write them for a session on a device.
-        merged_config["execution"] = {"kind": "device", "device_id": str(device_id), "device_name": device_name}
+        # nothing may read or write them for a session on a device.  The
+        # copy is the thread's own, stamped here once and never changed, so
+        # every session made under it names it too.
+        merged_config["execution"] = {
+            "kind": "device", "device_id": str(device_id), "device_name": device_name,
+            "history": {"thread": str(session_id)},
+        }
         merged_config["workspace_path"] = folder
     return await store.create_session(
         session_id=session_id,

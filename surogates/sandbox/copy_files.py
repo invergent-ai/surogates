@@ -34,8 +34,10 @@ def writes_to_copy(sandbox_pool: Any, owner: Any, session_config: dict[str, Any]
     thread's helper, with a storage bucket.  A thread with none has the
     real files for its workspace, as any other session.  So has a thread
     of a project too large for history: it works on the real files, and
-    what a tool makes for it is saved there.  And so has a thread on the
-    user's computer, in its folder there, with its helpers.
+    what a tool makes for it is saved there.  A thread on the user's
+    computer, with its helpers, has its copy there: a tool writes it
+    through each call's own ``workspace_io``, by the computer, never
+    through a pod.
     """
     config = session_config or {}
     works_on_a_copy = (

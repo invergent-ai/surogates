@@ -31,7 +31,16 @@ from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceR
 from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
-from surogates.devices.history import ComputerRefused, NowhereToWork, opens_its_copy, thread_copy
+from surogates.devices.history import (
+    MADE_BEFORE_COPIES,
+    NOWHERE,
+    ComputerRefused,
+    NowhereToWork,
+    bound_to_its_folder,
+    opens_its_copy,
+    thread_copy,
+)
+from surogates.devices.operations import DeviceOperations
 from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.agent_resolver import (
@@ -1343,8 +1352,9 @@ class AgentHarness(
         sent.
         """
         await self._name_the_turn(session)
+        # Its first copy is said in its chat while it is made: the turn waits for it, minutes for a large folder.
         opening = asyncio.ensure_future(_open_local_copy(
-            session, self._store, lease, session_factory=self._session_factory, redis=self._redis,
+            session, self._store, lease, session_factory=self._session_factory, redis=self._redis, telling=True,
         ))
         # A Stop cancels it, as it cancels a resumed call: the cancel closes its operation in the journal.
         self._active_executor = SimpleNamespace(discard=opening.cancel)
@@ -1513,7 +1523,9 @@ class AgentHarness(
         A thread's pod then has the plain layout, the real files at
         ``/workspace``: it works on them, as before projects had history, and
         lands nothing.  A routine run's end then records nothing.
-        A thread on the user's computer is never counted: it works in the folder there.
+        A thread on the user's computer is never counted here: its folder's
+        history there says, at each of its turns' opens, whether it can keep
+        that folder, and a folder it cannot has the thread work nowhere.
         """
         config = session.config or {}
         if self._storage is None or not config.get("storage_bucket") or device_of(config) is not None or not (
@@ -1905,6 +1917,19 @@ class AgentHarness(
             # step, the turn's mark, an artifact.  One with nowhere to work,
             # or stopped meanwhile, ends its turn here.
             if opens_its_copy(session) and not await self._opened_for_the_turn(session, lease):
+                return
+            # A thread made on its computer before threads worked in copies, or a session under one, is bound to
+            # the folder itself: its turn sends that computer nothing, and ends saying why.  What a worker before
+            # this one left open of it is closed first, before anything could ask it again: run, it would write
+            # the folder itself.
+            if bound_to_its_folder(session):
+                await DeviceOperations(self._session_factory, self._redis).cancel([session.id])
+                await self._name_the_turn(session)
+                await self._fail_session(
+                    session, [], lease, reason="nowhere_to_work", cost_tracker=SessionCostTracker(),
+                    why=MADE_BEFORE_COPIES, error_title=NOWHERE[MADE_BEFORE_COPIES],
+                    error_category="storage_error", retryable=False,
+                )
                 return
 
             # 5'. Another worker woke a local-folder session since this one

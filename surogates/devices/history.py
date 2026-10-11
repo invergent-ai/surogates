@@ -60,11 +60,12 @@ from surogates.devices.binding import copy_of, device_of
 from surogates.devices.operations import DeviceOperations, JournalRunner
 from surogates.devices.workspace import DeviceOperationError, OperationRunner
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.workstreams import is_project_thread
+from surogates.workstreams import is_project_thread, under_a_thread
 
 __all__ = [
-    "ACTIONS", "HISTORY_CODES", "NO_COPY", "NOWHERE", "OPEN_TRIES", "REFUSALS", "ComputerRefused", "NotAnAnswer",
-    "NowhereToWork", "Steps", "ThreadCopy", "answered", "checked", "code_of", "opens_its_copy", "refused", "thread_copy",
+    "ACTIONS", "HISTORY_CODES", "MADE_BEFORE_COPIES", "NO_COPY", "NOWHERE", "OPEN_TRIES", "REFUSALS", "ComputerRefused",
+    "NotAnAnswer", "NowhereToWork", "Steps", "ThreadCopy", "answered", "bound_to_its_folder", "checked", "code_of",
+    "opens_its_copy", "refused", "thread_copy",
 ]
 
 #: The most entries one answer may list, the most files one look answers for, and the most
@@ -118,6 +119,9 @@ _AGAIN = "again"
 _LATER = _PASSING_CODES | _PASSING_KINDS | {"busy", "failed"}
 #: Why a thread has nowhere to work where its copy could not be opened, and asking again gives the same.
 _REFUSED = "refused"
+#: Why a thread on its computer has nowhere to work where it was made before threads worked in copies:
+#: bound to the folder itself, it would write the user's files with nothing kept.
+MADE_BEFORE_COPIES = "made_before_copies"
 #: The refusal of a computer whose app gives the thread no copy of a folder too large to copy in
 #: the time a copy may take, its making cut short by that bound twice: until the app starts again.
 _TOO_LARGE = "history_off"
@@ -128,8 +132,9 @@ _NOWHERE_BY = {
 #: What a person reads where a thread has nowhere to work on its computer, by why: its folder has
 #: more files than its history keeps, or a name its history cannot keep, or is too large for its
 #: computer's app to copy; its app keeps no copy of the folder for it; the folder is no longer
-#: where it was; the computer's access was revoked; its copy could not be opened just now; or it
-#: cannot be opened there.  Said as its turn's failure.  The owner's words, and these alone.
+#: where it was; the computer's access was revoked; its copy could not be opened just now; it
+#: cannot be opened there; or the thread was made before threads worked in copies.  Said as its
+#: turn's failure, in these words alone.
 NOWHERE: dict[str, str] = {
     "cap": "This folder has more files than its history can keep, so this thread cannot work there. Choose a folder inside it.",
     "names": "A file in this folder has a name its history cannot keep, so this thread cannot work there. Choose a folder inside it.",
@@ -150,6 +155,10 @@ NOWHERE: dict[str, str] = {
     _REFUSED: (
         "Surogate Desktop could not open this thread's copy of the folder, so it cannot work there. "
         "Update Surogate Desktop, or choose another folder."
+    ),
+    MADE_BEFORE_COPIES: (
+        "This thread was made before each thread worked in a copy of its folder, so it cannot work there. "
+        "Start a new thread."
     ),
 }
 
@@ -208,6 +217,17 @@ def opens_its_copy(session: Any) -> bool:
     as the journal takes a thread's open from the thread alone.
     """
     return copy_of(session.config) == session.id and is_project_thread(session.config)
+
+
+def bound_to_its_folder(session: Any) -> bool:
+    """Whether *session* is a project's thread on its user's computer, or works under one, that has no copy there.
+
+    Such a thread was made before threads worked in copies of their own,
+    and its computer bound it to the folder itself.  It works nowhere: a
+    turn of it would write the user's files with nothing kept.
+    """
+    config = session.config
+    return device_of(config) is not None and copy_of(config) is None and under_a_thread(config)
 
 
 class _No(Exception):
@@ -565,7 +585,7 @@ class Steps:
 class ThreadCopy:
     """What a worker asks of the computer about one thread's copy, as the session that asks."""
 
-    def __init__(self, operations: DeviceOperations, session: Any, *, lease_token: str | None) -> None:
+    def __init__(self, operations: DeviceOperations, session: Any, *, lease_token: str | None, notice: Any = None) -> None:
         thread = copy_of(session.config)
         if thread is None or str(thread) != sandbox_session_key(session):
             # From the session the server stamped, never from an answer or a tool's input.
@@ -573,6 +593,8 @@ class ThreadCopy:
         self.operations = operations
         self._session = session
         self._lease_token = lease_token
+        # Who tells the thread's chat what its turn waits for on its computer (surogates.devices.waits).
+        self._notice = notice
         #: The thread whose copy it is: the root every operation is asked for.
         self.thread: UUID = thread
         self.device_id: UUID = device_of(session.config)
@@ -602,7 +624,7 @@ class ThreadCopy:
         """
         return await self.steps(f"open:{turn}:{again}" if again else f"open:{turn}").history("open")
 
-    async def opened(self, turn: int) -> dict[str, Any]:
+    async def opened(self, turn: int, *, telling: bool = False) -> dict[str, Any]:
         """The copy brought to the turn *turn*: the open's answer, which every step of the turn works from.
 
         The journal holds each asking of the turn's.  An answer is the
@@ -610,6 +632,11 @@ class ThreadCopy:
         the computer hears nothing.  An asking still open is waited for.  A
         refusal the next asking may pass is asked again at once, under the
         turn's next name, up to :data:`OPEN_TRIES` askings.
+
+        With *telling*, as at the turn's start, a thread whose copy no open
+        has answered yet has its chat told that the copy is being made, for
+        as long as the askings run: its first copy of a large folder takes
+        minutes.
 
         Raises :class:`NowhereToWork` where the thread has nowhere to work:
         its folder has no history, its computer's app keeps no copy for it
@@ -621,6 +648,19 @@ class ThreadCopy:
         hears nothing.  The journal's own refusals pass through as they are.
         """
         number = max(await self.operations.opens(self._session.id, turn) - 1, 0)
+        making = telling and self._notice is not None and "copy" not in (
+            answered("history", "open", await self.operations.last_opened(self._session.id), thread=str(self.thread)) or {}
+        )
+        if making:
+            await self._notice.copying(self._session.id, self.device_id, self.folder)
+        try:
+            return await self._opened(turn, number)
+        finally:
+            if making:
+                await self._notice.copied(self._session.id, self.device_id)
+
+    async def _opened(self, turn: int, number: int) -> dict[str, Any]:
+        """The turn's askings of its open, from its asking *number*, as :meth:`opened` has them."""
         while True:
             try:
                 answer = await self.open(turn, again=number)
@@ -658,4 +698,4 @@ def thread_copy(session: Any, *, session_factory: Any, redis: Any, lease_token: 
     from surogates.session.store import SessionStore
 
     notice = DeviceWaitNotice(SessionStore(session_factory, redis), session_factory)
-    return ThreadCopy(DeviceOperations(session_factory, redis, notice=notice), session, lease_token=lease_token)
+    return ThreadCopy(DeviceOperations(session_factory, redis, notice=notice), session, lease_token=lease_token, notice=notice)

@@ -111,6 +111,11 @@ describe("app frames", () => {
     expect(hello(["a", "b"])).toEqual({ type: "hello", protocols: [1], open: ["a", "b"] });
   });
 
+  it("says in its hello that it keeps a copy of a folder for a project's thread, where it does", () => {
+    expect(hello(["a"], true)).toEqual({ type: "hello", protocols: [1], open: ["a"], copies: true });
+    expect(hello(["a"], false)).toEqual({ type: "hello", protocols: [1], open: ["a"] });
+  });
+
   it("answers an operation by id and digest", () => {
     expect(opResult({ id: "x", digest: "d" }, { ok: null })).toEqual({
       type: "op_result", id: "x", digest: "d", outcome: { ok: null },

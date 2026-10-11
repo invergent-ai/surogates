@@ -252,6 +252,7 @@ export function applyAgentChatEvent(
           deviceId: stringValue(event.data.device_id),
           deviceName: stringValue(event.data.device_name),
           reason: stringValue(event.data.reason) || "offline",
+          folder: stringValue(event.data.folder),
         },
       };
 
