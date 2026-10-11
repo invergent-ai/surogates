@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.devices.history import ComputerRefused
 from surogates.governance.saga.compensator import UndoOwed, compensate_step, undo_on_computer
 from surogates.governance.saga.state_machine import (
     Saga,
@@ -465,6 +466,29 @@ class TestUndoOnComputer:
         # Nothing more is asked once one put-back went unanswered: each step that ran is owed, oldest first.
         assert asked == ["1" * 40]
         assert [(entry["path"], entry["why"]) for entry in owed.value.left] == [("a.md", "owed"), ("b.md", "owed")]
+
+    @pytest.mark.asyncio
+    async def test_at_the_stop_a_step_its_undo_can_never_take_back_is_named_why_and_only_the_rest_owed(self):
+        orch = SagaOrchestrator(default_step_timeout=1)
+        saga = orch.create_saga(uuid4())
+        # a.md had no snapshot, before every step that has one; c.md had none either, after b.md's.
+        for n, (path, taken) in enumerate((("a.md", None), ("b.md", "1" * 40), ("c.md", None), ("d.md", "3" * 40))):
+            step = orch.add_step(saga.saga_id, tool_name="write_file", tool_call_id=f"tc{n}", arguments={"path": path},
+                                 checkpoint_hash=taken)
+            step.transition(StepState.EXECUTING)
+            step.transition(StepState.COMMITTED)
+
+        async def restore(turn, commit) -> None:
+            if commit == "3" * 40:
+                raise ComputerRefused("history", "The folder's history failed", "failed")
+            await asyncio.Event().wait()
+
+        with pytest.raises(UndoOwed) as owed:
+            await undo_on_computer(saga, copy=SimpleNamespace(restore=restore), turn=0, ran=lambda step: True)
+        # d.md's put-back was refused already, and no snapshot is older than a.md: only b.md's snapshot can take back the rest.
+        assert [(entry["path"], entry["why"], entry.get("code")) for entry in owed.value.left] == [
+            ("a.md", "no_snapshot", None), ("b.md", "owed", None), ("c.md", "owed", None), ("d.md", "refused", "failed"),
+        ]
 
     @pytest.mark.asyncio
     async def test_at_the_threads_next_turn_each_put_back_waits_for_its_computer_as_long_as_it_takes(self):
