@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { BrowserProxy, notOpenPage, ownRequest, SITE_SIGN_IN, unsigned } from "../src/browser/proxy.js";
+import { BrowserProxy, notOpenPage, ownRequest, SENT_PAGE, SITE_SIGN_IN, unsigned } from "../src/browser/proxy.js";
 
 // What a name leads to, and how often it was looked up: rebinding.example leads elsewhere, then here.
 let lookups: Record<string, number>;
@@ -304,6 +304,21 @@ describe("the browser's proxy", () => {
     } finally {
       await fresh.close();
     }
+  });
+
+  it("takes its launch's sign-in no more once signed out, as at a launch refused or a browser gone, until the next launch makes one", async () => {
+    proxy.signOut();
+    proxy.expect("0123abcd");
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid")).status).toBe(407);
+    expect((await connect("localhost:3000")).status).toBe(407);
+    expect(proxy.checked("0123abcd")).toBe(false);
+    // The next launch's own is taken, and the one before it still not.
+    const before = signed;
+    signed = signIn(proxy.signIn());
+    proxy.expect("0123abcd");
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid", before)).status).toBe(407);
+    expect((await get("http://0123abcd.proxy-check.invalid/", "0123abcd.proxy-check.invalid")).status).toBe(204);
+    expect([proxy.checked("0123abcd"), dialed]).toEqual([true, []]);
   });
 
   it("keeps a launch's secret nowhere: what it holds of it tells nobody the sign-in", () => {
@@ -935,12 +950,13 @@ describe("a chat's own servers, through the browser's proxy", () => {
     await vi.waitFor(() => expect(behind.size).toBe(0));
   });
 
-  it("answers a tab's navigation to a port not allowed with a page of its own, which holds nothing the request chose", async () => {
+  it("answers a tab's navigation to a port not allowed with a page of its own, which holds nothing the request chose, and no port where another site sent it", async () => {
     const MARK = "<script>MARKER</script>";
-    // The proxy's whole answer to what a tab's navigation sends, each part a site or a page could choose made hostile.
-    const navigated = async (to: string, more = "", method = "GET") => {
+    // The proxy's whole answer to what a tab's navigation sends, each part a site or a page could choose made hostile; from
+    // *site*, as the browser says where it comes from: its user's or its agent's own navigation unless told.
+    const navigated = async (to: string, more = "", method = "GET", site = "none") => {
       const answer = await raw(
-        `${method} http://${to}/${MARK}?${MARK}#${MARK} HTTP/1.1\r\nHost: MARKER.example\r\nProxy-Authorization: ${signed}\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n`
+        `${method} http://${to}/${MARK}?${MARK}#${MARK} HTTP/1.1\r\nHost: MARKER.example\r\nProxy-Authorization: ${signed}\r\nSec-Fetch-Site: ${site}\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n`
           + `Referer: http://evil.example/${MARK}\r\nOrigin: http://MARKER.example\r\nUser-Agent: ${MARK}\r\nAccept-Language: ${MARK}\r\nCookie: MARKER=${MARK}\r\n${more}\r\n`,
       );
       const [head = "", body = ""] = [answer.slice(0, answer.indexOf("\r\n\r\n")), answer.slice(answer.indexOf("\r\n\r\n") + 4)];
@@ -951,13 +967,16 @@ describe("a chat's own servers, through the browser's proxy", () => {
     const PAGE = (at: number) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Port ${at} is not open</title></head>`
       + `<body><h1>Port ${at} of a chat's servers is not open in this browser</h1><p>It opens when that chat's agent navigates to it and the chat's user allows it.</p>`
       + `<p>The ports allowed now are listed in Surogate's Settings, under Folders and permissions.</p></body></html>`;
+    const HEADERS = ["cache-control: no-store", "content-security-policy: default-src 'none'; frame-ancestors 'none'", "content-type: text/html; charset=utf-8", "x-content-type-options: nosniff"];
+    // Another site's page sent the tab there, a redirect or a link: the port is that site's choice, and the page names none.
+    const SENT = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Not opened</title></head>`
+      + "<body><h1>A site tried to open a chat's local server, and was refused</h1></body></html>";
     for (const [to, at] of [["localhost:3003", 3003], ["127.0.0.1:65535", 65_535], ["[::1]:1", 1], ["LOCALHOST:03003", 3003], ["127.1", 80]] as const) {
-      expect(await navigated(to), to).toEqual({
-        status: "HTTP/1.1 403 Forbidden", body: PAGE(at),
-        headers: ["cache-control: no-store", "content-security-policy: default-src 'none'", "content-type: text/html; charset=utf-8", "x-content-type-options: nosniff"],
-      });
+      // Its user's or its agent's own, or a page of the same name's at another port: a chat's own server's.
+      for (const site of ["none", "same-site"]) expect(await navigated(to, "", "GET", site), `${to} ${site}`).toEqual({ status: "HTTP/1.1 403 Forbidden", body: PAGE(at), headers: HEADERS });
+      expect(await navigated(to, "", "GET", "cross-site"), to).toEqual({ status: "HTTP/1.1 403 Forbidden", body: SENT, headers: HEADERS });
     }
-    expect(notOpenPage(3003)).toBe(PAGE(3003));
+    expect([notOpenPage(3003), SENT_PAGE]).toEqual([PAGE(3003), SENT]);
     // The page's own part of a tab only: a HEAD has its headers; a frame, an image, a fetch and a tunnel keep the bare refusal.
     expect(await navigated("localhost:3003", "", "HEAD")).toMatchObject({ status: "HTTP/1.1 403 Forbidden", body: "" });
     const BARE = { status: "HTTP/1.1 403 Forbidden", headers: [], body: "" };
@@ -965,10 +984,12 @@ describe("a chat's own servers, through the browser's proxy", () => {
       const said = await raw(`GET http://localhost:3003/ HTTP/1.1\r\nHost: localhost:3003\r\nProxy-Authorization: ${signed}\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: ${mode}\r\nSec-Fetch-Dest: ${dest}\r\n\r\n`);
       expect(said, `${mode} ${dest}`).toMatch(/^HTTP\/1\.1 403 Forbidden\r\n(?:(?:Date|Connection|Keep-Alive|Transfer-Encoding): [^\r]+\r\n)*\r\n(?:0\r\n\r\n)?$/);
     }
+    // Nor for a page the browser loads ahead of any visit, which no tab shows yet.
+    for (const purpose of ["prefetch", "prefetch;prerender"]) expect(await navigated("localhost:3003", `Sec-Purpose: ${purpose}\r\n`), purpose).toEqual(BARE);
     expect((await fetched("http://localhost:3003/", {})).body).toBe("");
     expect((await connect("localhost:3003")).status).toBe(403);
     // Not for one of the sandbox's own proxies' ports, which no agent's navigation opens; nor for an allowed port whose request is not carried.
-    expect([await navigated("localhost:3128"), await navigated("127.0.0.1:1080"), await navigated("localhost:3000", "", "POST")]).toEqual([BARE, BARE, BARE]);
+    expect([await navigated("localhost:3128"), await navigated("127.0.0.1:1080"), await navigated("localhost:3000", "", "POST", "cross-site")]).toEqual([BARE, BARE, BARE]);
     // Nor for another spelling of this computer, which is no chat's server; nor for another program, which is told nothing.
     expect([await navigated("0.0.0.0:3003"), await navigated("app.localhost:3003"), await navigated("localhost.:3003")]).toEqual([BARE, BARE, BARE]);
     expect(await raw(`GET http://localhost:3003/ HTTP/1.1\r\nHost: localhost:3003\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\r\n`)).toMatch(CHALLENGED);

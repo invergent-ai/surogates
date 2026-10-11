@@ -8,8 +8,10 @@ saga, as a thread's turn's is in its pod
 project's history (:class:`~surogates.workstreams.bucket.BucketHistory`),
 and by a landing's own rules:
 
-- it runs under the project's lock, waited for a while at most: a person
-  waits on it, and is told to try again in a moment past that;
+- it runs under the project's lock, waited for a while at most, and in
+  one of the few turns the api gives landings by you at once, each
+  holding a connection of its pool: a person waits on both, and is told to
+  try again in a moment past that;
 - the landings left running are settled first, a thread's or another
   landing by you, as every lock holder settles them; one that may still be
   alive is not waited out, and the person is told to try again;
@@ -30,14 +32,21 @@ since by you, by another thread or by a routine, is left as it is and named,
 with who changed it: never written over.
 
 A Restore or an Undo runs to its end, though who asked for it leaves: a
-landing is never left half made for a request's sake.
+landing is never left half made for a request's sake, and the api's
+shutdown waits for it, as long as one is planned to take.  Each action
+on the api's copy of the history ends with the try of the step it is,
+as the fence another lock holder waits out takes it to, once a write it
+had begun has ended: its put-back never reads a file a write it cut
+lands on after.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
@@ -54,6 +63,7 @@ from surogates.workstreams import stream as project_stream
 from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, said
 from surogates.workstreams.history import (
     HISTORY_OFF,
+    LOCK_POLL,
     UNDOABLE,
     ProjectBusy,
     changed_since,
@@ -77,8 +87,8 @@ HALF = "Some files could not be put back as they were. Open a file's History to 
 WORKING = "Stop the thread to undo its changes."
 UNDONE = "This change was undone already."
 NO_CHANGE = "No such change."
-#: How long an Undo may hold the project's lock, in ms: a person waits on it, and the page gives a landing two
-#: minutes, the wait for the lock among them; what is left is room for the files' bytes.
+#: How long a Restore or an Undo may hold the project's lock, in ms: a person waits on it, and the page gives a
+#: landing two minutes, the wait for the lock among them; what is left is room for the files' bytes.
 LOCK_BUDGET_MS = 60_000
 #: A call of the cloud's store at its slowest that an Undo is planned for, and what else each file costs it under
 #: the lock (its version written out by git, its row marked alive), as measured on node1; in ms.
@@ -91,6 +101,10 @@ CALLS_AN_ACT = 30
 CALLS_A_FILE = 7
 #: The most files one Undo puts back: all it does under the lock, at that call, within its time.
 UNDO_MOST = (LOCK_BUDGET_MS - CALLS_AN_ACT * CALL_MS) // (CALLS_A_FILE * CALL_MS + FILE_MS)
+#: Under the lock each file is read twice, by the look and by the check, as the version it is to be found as, and
+#: written once, as the version it goes back to, at the store's rate its settings name (``HistorySettings.store_rate``):
+#: a Restore or an Undo whose files' bytes would pass its time with its calls writes none of them.
+TOO_LARGE_TO_RESTORE = "This version is too large to restore here."
 #: The most files a refusal names: the rest it counts.
 _NAMED_MOST = 3
 CUT_SHORT = "This was cut short: the files are put back as they were when the project's files are next saved. Try again in a moment."
@@ -98,6 +112,18 @@ UNLANDED = "This file cannot be restored: the project's history keeps no file of
 UNTAKEN = "This file cannot be restored here: a folder of its name is there, or a file where its folder would be."
 #: The landings by you under way, each kept until done: none is cut short with the request that began it.
 _ACTS: set[asyncio.Future] = set()
+#: The landings by you this process runs at once: each holds one of the api's pooled connections, its project's
+#: lock's, for its whole run, of the ten the api keeps by default.  So a turn is held with the lock alone: one past
+#: them waits as for its project's lock, within the same patience, then is told to try again.
+ACTS_AT_ONCE = 4
+CROWDED = "Other changes are being restored or undone right now. Try again in a moment."
+#: The landings by you that have one of those turns now.
+_TURNS: set[object] = set()
+#: How long the api's shutdown waits for the landings by you under way: the most one is planned to take, its wait
+#: for the lock and its time under it.  One still under way past that is cut as a kill cuts it, and the next lock
+#: holder settles what it left.  The api's deployment bounds the wait too: its pod is killed at the end of its grace,
+#: Kubernetes' 30 seconds where it names none, and uvicorn's wait for the requests in flight counts against it.
+ENDING_PATIENCE = LOCK_PATIENCE + LOCK_BUDGET_MS / 1000
 
 #: What a landing by you lands, once your edits are picked up: given the copy and ``main`` as the pickup
 #: left it, the applies, each ``{path, before, after}``; the files it leaves as they are, each ``{path, by}``;
@@ -118,8 +144,9 @@ async def restore(state: Any, project: Any, user_id: UUID, *, path: str, blob: s
 
     It replaces whatever the file is now, which your edits' pickup records
     first (``picked_up``).  A file the version already is lands nothing.
-    Refused in words for a version the history keeps no more, and a file
-    the real files cannot take where a folder holds its name.  *path* is
+    Refused in words for a version the history keeps no more, a file the
+    real files cannot take where a folder holds its name, and one whose
+    bytes would pass a landing's time under the lock, as an Undo's would.  *path* is
     one a landing writes: the copy refuses any other before it reaches the
     storage, and the route says so first (:data:`UNLANDED`).
     """
@@ -129,10 +156,13 @@ async def restore(state: Any, project: Any, user_id: UUID, *, path: str, blob: s
         recorded = (await place.recorded(main, [path]))[path]
         if recorded == blob:
             return [], [], {}
-        if not await place.held([blob]):
+        kept = await place.sizes([blob, recorded])
+        if blob not in kept:
             raise Refused(NOT_KEPT, status=410)
         if recorded is None and not await place.takes(path):
             raise Refused(UNTAKEN)
+        if _planned_ms(1, 2 * kept.get(recorded, 0) + kept[blob], state.settings.history.store_rate) > LOCK_BUDGET_MS:
+            raise Refused(TOO_LARGE_TO_RESTORE)
         return [{"path": path, "before": recorded, "after": blob}], [], {}
 
     return await _by_you(state, project, user_id, kind="restore", paths=[path], decide=decide, announce=project.master_session_id)
@@ -201,8 +231,9 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
     changed it; one whose version from before is no longer kept is named,
     ``pruned``.  Raises :class:`LookupError` for no such change among the
     project's cloud records; and :class:`Refused` for one undone already,
-    for more files than one Undo puts back, and while a thread whose
-    changes these are is working: its next landing would land on top.
+    for more files than one Undo puts back, or more bytes than it moves in
+    its time, and while a thread whose changes these are is working: its
+    next landing would land on top.
     """
     landed = await _undoable(state.session_factory, project, landing=landing, thread=thread)
     threads = {row.thread_id for row in landed if row.thread_id is not None} | ({thread} if thread is not None else set())
@@ -213,7 +244,8 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
             working = False
         if working:
             raise Refused(WORKING)
-    plan = _plan(landed, await undone_of(state.session_factory, project.id))
+    rows = [row.id for row in landed]
+    plan = _plan(landed, await undone_of(state.session_factory, project.id, rows))
     if not plan:
         # Nothing of it is left to put back: no landing is made, and the project's files are not waited for.
         if landing is not None:
@@ -228,14 +260,14 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
 
     async def decide(place: BucketHistory, main: str | None) -> tuple[list[dict], list[dict], dict[str, list[Any]]]:
         # Under the project's lock: what an Undo since put back is not undone twice.
-        fresh = _plan(landed, await undone_of(state.session_factory, project.id))
+        fresh = _plan(landed, await undone_of(state.session_factory, project.id, rows))
         backs = [fresh[path] for path in plan if path in fresh]
         if landing is not None and not backs:
             # Another lock holder's settle, or another Undo, put it back while this one waited.
             raise Refused(UNDONE)
         # Each file as the pickup recorded it, never a fresh read: your edit to it is a version by now.
         now = await place.recorded(main, [back.path for back in backs])
-        kept = await place.held(back.to for back in backs)
+        kept = await place.sizes(blob for back in backs for blob in (back.to, back.expected))
         by_id = {row.id: row for row in landed}
         applies, skipped, undoes = [], [], {}
         for back in backs:
@@ -255,11 +287,24 @@ async def undo(state: Any, project: Any, user_id: UUID, *, landing: int | None =
             else:
                 applies.append({"path": back.path, "before": back.expected, "after": back.to})
                 undoes[back.path] = [by_id[row] for row in back.rows]
+        moved = sum(2 * kept.get(a["before"], 0) + kept.get(a["after"], 0) for a in applies)
+        if _planned_ms(len(applies), moved, state.settings.history.store_rate) > LOCK_BUDGET_MS:
+            raise Refused(
+                "This change's files are too large to put back in one Undo. Restore each file from its History."
+                if landing is not None else
+                "This thread's files are too large to put back in one Undo. Undo its landings one at a time from its card."
+            )
         return applies, skipped, undoes
 
     # One thread's changes are that thread's to tell of; any other Undo, of a landing by you, is the master's.
     announce = next(iter(threads)) if len(threads) == 1 else project.master_session_id
     return await _by_you(state, project, user_id, kind="undo", paths=list(plan), decide=decide, announce=announce)
+
+
+def _planned_ms(files: int, moved: int, rate: int) -> float:
+    """What a landing by you of *files* files, *moved* bytes of them read and written at *rate* bytes a second,
+    holds the lock for at most, in ms."""
+    return CALLS_AN_ACT * CALL_MS + files * (CALLS_A_FILE * CALL_MS + FILE_MS) + moved * 1000 / rate
 
 
 async def _undoable(session_factory: Any, project: Any, *, landing: int | None, thread: UUID | None) -> list[_Landed]:
@@ -325,6 +370,50 @@ async def _by_you(
     return await asyncio.shield(acting)
 
 
+async def acts_ended() -> None:
+    """Wait for the landings by you under way to end, for :data:`ENDING_PATIENCE` at most: what the api's shutdown waits for."""
+    if _ACTS:
+        await asyncio.wait(set(_ACTS), timeout=ENDING_PATIENCE)
+
+
+@contextlib.asynccontextmanager
+async def _turn(until: float) -> AsyncIterator[None]:
+    """One of this process's turns for a landing by you, waited for until *until*, by the clock that keeps it: refused after."""
+    while len(_TURNS) >= ACTS_AT_ONCE:
+        if time.monotonic() >= until:
+            raise Refused(CROWDED)
+        await asyncio.sleep(LOCK_POLL)
+    turn = object()
+    _TURNS.add(turn)
+    try:
+        yield
+    finally:
+        _TURNS.discard(turn)
+
+
+@contextlib.asynccontextmanager
+async def _locked(session_factory: Any, project_id: UUID, until: float) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+    """The project's lock, held in one of this process's turns, both waited for until *until*: a check that it is still held.
+
+    A turn is taken to try the lock, and kept only with it: an act that
+    waits for its project's lock holds none of the turns between its
+    tries, as it holds no pooled connection.  :class:`ProjectBusy` once
+    the lock was not had by *until*, :class:`Refused` once no turn was.
+    """
+    while True:
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(_turn(until))
+            try:
+                held = await stack.enter_async_context(project_lock(session_factory, project_id, patience=0))
+            except ProjectBusy:
+                if time.monotonic() >= until:
+                    raise
+            else:
+                yield held
+                return
+        await asyncio.sleep(LOCK_POLL)
+
+
 async def _act(
     state: Any, project: Any, user_id: UUID, *, kind: str, paths: list[str], decide: Decide, announce: UUID,
 ) -> dict:
@@ -332,14 +421,17 @@ async def _act(
     master = await state.session_store.get_session(project.master_session_id)
     if await over_history_cap(state.storage, master):
         raise Refused(HISTORY_OFF)
-    place = BucketHistory.of(state.storage, master, state.settings.history)
+    # Each action on the copy ends with its try: the fence another lock holder waits out takes a try to end there.
+    place = BucketHistory.of(state.storage, master, state.settings.history, within=state.settings.saga.default_step_timeout)
     you = {"name": str(user_id), "email": f"user:{user_id}@surogate"}
     audit = [["Surogate-Project", str(project.id)], ["Surogate-Agent", str(project.agent_id)], ["Surogate-User", str(user_id)]]
     picked: list[str] = []
     answer: dict | None = None
     refused: Refused | None = None
+    # A turn of this process's, then the project's lock, both within one patience: a person waits on them.
+    until = time.monotonic() + LOCK_PATIENCE
     try:
-        async with project_lock(session_factory, project.id, patience=LOCK_PATIENCE) as held:
+        async with _locked(session_factory, project.id, until) as held:
             # The lock's holder alone moves the history: the copy is brought to it once, not once a file.
             with place.steady():
                 try:
@@ -350,6 +442,8 @@ async def _act(
                     refused = exc
     except ProjectBusy as exc:
         raise Refused(BUSY) from exc
+    except Refused:
+        raise
     except Exception as exc:
         if answer is None and refused is None:
             logger.warning("A %s by you in project %s did not start", kind, project.id, exc_info=True)
@@ -389,8 +483,7 @@ async def _landed(
     for tried in range(2):
         if not applies:
             break
-        undid = sorted({row.id: row for a in applies for row in undoes.get(a["path"], ())}.values(), key=lambda row: row.id)
-        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undid)
+        left = await _land(session_factory, place, project, user_id, you, audit, settings, held, kind=kind, main=main, applies=applies, undoes=undoes)
         if not left:
             break
         if tried:
@@ -451,32 +544,36 @@ async def _pick_up(
 
 async def _land(
     session_factory: Any, place: BucketHistory, project: Any, user_id: UUID, you: dict, audit: list, settings: Any,
-    held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: list[Any],
+    held: Any, *, kind: str, main: str | None, applies: list[dict], undoes: dict[str, list[Any]],
 ) -> list[dict]:
     """The saga of a landing by you: one apply a file, then the record; put back whole if a step fails.
 
     The files it left as they are, each ``{path, by}``: none when it
     landed.  Put back, a file saved since the pickup is one, by you, and
-    nothing of the landing is written.
+    nothing of the landing is written.  *undoes* are, by an apply's path,
+    the landings it goes back over: its row names them all, and its record
+    step each file's own, which its row's files are written from.
 
     Its row is written running with its steps fixed, the record among
     them, before the first apply: all a put-back by another lock holder
     needs.  It is written again before the record's first try, with what
     each apply did, so that a push is one its row can list.
     """
+    undid = sorted({row.id: row for a in applies for row in undoes.get(a["path"], ())}.values(), key=lambda row: row.id)
     orchestrator = _orchestrator(settings)
     saga = orchestrator.create_saga(project.master_session_id, kind="landing")
     steps = [orchestrator.add_step(saga.saga_id, tool_name="history.apply", tool_call_id="", arguments=a) for a in applies]
     record = orchestrator.add_step(saga.saga_id, tool_name="history.record", tool_call_id="", arguments={
-        "applied": applies, "author": you, "main": main,
+        "applied": [{**a, "undoes": [r.id for r in undoes[a["path"]]]} if a["path"] in undoes else a for a in applies],
+        "author": you, "main": main,
         "trailers": [
-            *audit, ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", kind], *(["Surogate-Undoes", r.commit] for r in undoes),
+            *audit, ["Surogate-Saga", saga.saga_id], ["Surogate-Kind", kind], *(["Surogate-Undoes", r.commit] for r in undid),
         ],
     })
     try:
         row = _Row(session_factory, await start_landing(
             session_factory, saga, workstream_id=project.id, thread_id=None, agent_id=str(project.agent_id),
-            user_id=user_id, tool_saga_id=None, events=None, kind=kind, undoes=[r.id for r in undoes] or None,
+            user_id=user_id, tool_saga_id=None, events=None, kind=kind, undoes=[r.id for r in undid] or None,
         ), saga)
     except Exception as exc:
         logger.warning("A %s by you in project %s did not start", kind, project.id, exc_info=True)

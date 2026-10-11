@@ -85,9 +85,12 @@ const copy = (root = ROOT, at = folder) => join(place(at), "threads", root);
 const WORDS = "refused the request: this thread has no whole copy, and its next open makes one";
 // Its refusal, as this computer's check passes it on: known by its code, under words that are not the history's.
 const NOT_WHOLE: Outcome = { error: { type: "history", code: "no_whole_copy", message: "said some other way, as its words may come to be" } };
-const NOT_OWN: Outcome = {
-  error: { type: "unavailable", message: "This computer could not make this thread's copy of its folder: what its sandbox left at its path is not a folder of the app's own" },
-};
+const notOwn = (): Outcome => ({
+  error: {
+    type: "unavailable",
+    message: `This computer could not make this thread's copy of ${folder}: what its sandbox left at the copy's path is not a folder of the app's own. Ask again; if this goes on, start a new thread on the folder`,
+  },
+});
 // Another folder at the folder's path: the one that was there is moved away, as its user would.
 const replace = () => {
   renameSync(folder, `${folder}.old`);
@@ -337,10 +340,10 @@ describe("a thread's copy of its folder", () => {
       leave(at);
       return { ok: { copy: "made" } };
     });
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: NOT_OWN });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: notOwn() });
     // A turn's own open is answered the same: what the guest says it made is taken only as it is found.
-    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(NOT_OWN);
-    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(NOT_OWN);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(notOwn());
+    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(notOwn());
     expect(asked.map((request) => request.action)).toEqual(["open", "open", "open"]);
   });
 
@@ -354,7 +357,7 @@ describe("a thread's copy of its folder", () => {
     });
     await one.open(ROOT, bound(), signal());
     leave = true;
-    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(NOT_OWN);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(notOwn());
     expect(replaced).toEqual([ROOT]);
   });
 
@@ -366,7 +369,7 @@ describe("a thread's copy of its folder", () => {
       return { ok: { copy: "made" } };
     });
     expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: NOT_OWN });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: notOwn() });
   });
 
   it("is in the app's data by its real path, where the data is reached through a link", async () => {
@@ -405,12 +408,53 @@ describe("a thread's copy of its folder", () => {
   it("is made for no root bound to another thread's copy", async () => {
     const one = copies();
     const refused = {
-      error: { type: "unavailable", message: "This computer could not make this thread's copy of its folder: this chat is bound to another thread's copy" },
+      error: { type: "unavailable", message: `This computer could not make this thread's copy of ${folder}: this chat is bound to another thread's copy` },
     };
     expect(await one.open(ROOT, bound(OTHER), signal())).toEqual({ failed: refused });
     expect(await one.ask(ROOT, bound(OTHER), "snapshot", STEP, signal())).toEqual(refused);
     expect(await one.ask(ROOT, { ...bound(), history: undefined }, "open", {}, signal())).toEqual(refused);
     expect(asked).toEqual([]);
+  });
+
+  it("is refused in the system's words where the app's data cannot be written, which name none of the app's paths", async () => {
+    const one = copies();
+    chmodSync(dir, 0o500);
+    try {
+      expect(await one.open(ROOT, bound(), signal())).toEqual({
+        failed: {
+          error: {
+            type: "unavailable",
+            message: `This computer could not make this thread's copy of ${folder}: the app's data could not be read or written (Permission denied). Once it can, ask again`,
+          },
+        },
+      });
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(asked).toEqual([]);
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+  });
+
+  it("is refused, and the person told to ask again, where the folder's place in the app's data is not a folder of the app's own once found", async () => {
+    const one = copies();
+    // Found by its record, and looked at once it is no folder, as for a moment it may not be.
+    const look = hold(place(), false);
+    const opening = one.open(ROOT, bound(), signal());
+    await look.reached;
+    renameSync(place(), `${place()}.away`);
+    writeFileSync(place(), "");
+    look.release();
+    expect(await opening).toEqual({
+      failed: {
+        error: {
+          type: "unavailable",
+          message: `This computer could not make this thread's copy of ${folder}: its place in the app's data is not a folder of the app's own. Ask again`,
+        },
+      },
+    });
+    rmSync(place());
+    renameSync(`${place()}.away`, place());
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
   });
 
   it("is not cut short in its making by a cancel of the operation that asked for it, and a cancelled open holds nothing", async () => {
@@ -707,7 +751,7 @@ describe("a request to the history of a thread's folder", () => {
     expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual({
       error: {
         type: "history", code: "no_whole_copy",
-        message: "This computer made this thread's copy of its folder again, and its history still found it not whole, so this was not done: said some other way, as its words may come to be",
+        message: `This computer opened this thread's copy of ${folder} again, and its history still found it not whole, so this was not done. Ask again; if this goes on, start a new thread on the folder. The history said: said some other way, as its words may come to be`,
       },
     });
     expect(asked.slice(4).map((request) => request.action)).toEqual(["snapshot", "open", "snapshot"]);
@@ -1424,6 +1468,28 @@ describe("a place another folder at the path takes", () => {
     expect(await second).toEqual({ failed: FOLDER_UNAVAILABLE });
   });
 
+  it("gives no host a copy the app's own open made where the place was let go before the open was answered", async () => {
+    let answer: () => void = () => {};
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const was = bound();
+    // The old folder's thread's first open is answered only once the new folder's thread has let its place go.
+    const one = copies(async (request) => {
+      if (request.thread === ROOT) await answered;
+      return undefined;
+    });
+    const first = one.open(ROOT, was, signal());
+    await vi.waitFor(() => expect(events).toEqual([`${ROOT}:open`]));
+    replace();
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+    expect(unplaced.map((given) => given.real.ino)).toEqual([was.ino]);
+    // Answered as made, at the path where the new folder's place is now: no host of the old folder's thread works there.
+    answer();
+    expect(await first).toEqual({ failed: FOLDER_UNAVAILABLE });
+    expect(events).toEqual([`${ROOT}:open`, `unplace:${was.ino}`, `${OTHER}:open`]);
+  });
+
   it("tells a host that takes a copy of the place while it is let go, and waits for it too", async () => {
     const was = bound();
     const one = copies();
@@ -1486,7 +1552,7 @@ describe("a place another folder at the path takes", () => {
       failed: {
         error: {
           type: "unavailable",
-          message: "This computer could not make this thread's copy of its folder: a thread still works in the history of the folder that was at this path, and did not let it go within 0.05 s",
+          message: `This computer could not make this thread's copy of ${folder}: a thread still works in the history of the folder that was at this path, and did not let it go within 0.05 s. Ask again once that thread has stopped`,
         },
       },
     });

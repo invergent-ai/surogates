@@ -937,13 +937,23 @@ def _row_picked_up(saga: Any) -> list[dict]:
 
 
 def _row_files(saga: Any, state: str) -> list[dict]:
-    """A landing row's files: each it landed, and each it left out, with its two versions; none unless it completed."""
+    """A landing row's files: each it landed, and each it left out, with its two versions; none unless it completed.
+
+    A file an Undo put back names the rows it went back over, as the
+    Undo's record step was told them.
+    """
     if state != "completed":
         return []
     commit = next((s.execute_result for s in saga.steps if s.tool_name == "history.commit"), None) or {}
+    record = next((s.arguments for s in saga.steps if s.tool_name == "history.record"), None) or {}
+    undid = {a["path"]: a["undoes"] for a in record.get("applied", []) if "undoes" in a}
     landed = [s.execute_result for s in saga.steps if s.tool_name == "history.apply" and s.state is StepState.COMMITTED]
     return [
-        *({"path": c["path"], "before": c["before"], "after": c["after"], "merged": True} for c in landed),
+        *(
+            {"path": c["path"], "before": c["before"], "after": c["after"], "merged": True,
+             **({"undoes": undid[c["path"]]} if c["path"] in undid else {})}
+            for c in landed
+        ),
         *({"path": o["path"], "before": o["before"], "after": o["after"], "merged": False} for o in commit.get("overlapped", [])),
     ]
 
@@ -1026,7 +1036,10 @@ async def _settle(
             f"lacks {', '.join(gone)}" if gone else "is cut above where it began",
         )
         for it in saga.steps:
-            if it.tool_name == "history.apply" and it.state is not StepState.COMPENSATED:
+            # Each apply that may have written its file: its own landing's still pending never began, a recovered
+            # one's may have, its row behind it.
+            began = it.state is not StepState.PENDING or recovered
+            if it.tool_name == "history.apply" and it.state is not StepState.COMPENSATED and began:
                 it.state, it.error = StepState.COMPENSATION_FAILED, _GONE
                 if at_issue is not None:
                     at_issue.append(it.arguments["path"])
@@ -1253,6 +1266,8 @@ async def _put_back(
                 await asyncio.wait_for(compensate_history(it, sandbox_pool, owner, ran=False), it.timeout_seconds)
             except Exception:
                 logger.warning("Could not put back %s", it.arguments.get("path"), exc_info=True)
+                # Its row says so: the file may be as that apply wrote it.
+                it.state = StepState.COMPENSATION_FAILED
                 failed.append(it)
 
     async def compensate(it: SagaStep) -> Any:

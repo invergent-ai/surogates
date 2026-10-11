@@ -14,7 +14,8 @@ import type { HostStart } from "../src/hosts/messages.js";
 import { sandboxPolicy } from "../src/hosts/policy.js";
 import { noCopyAt, READY_MS, type Start, startOn } from "../src/hosts/start.js";
 
-const KEY = "0123456789abcdef";
+// The folder's key, as the app names its place by (history/place.ts).
+let KEY: string;
 const THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 
@@ -46,6 +47,12 @@ const is = (path: string) => {
   const { dev, ino } = statSync(path);
   return `${dev}:${ino}`;
 };
+// The thread's copy of the folder at *at*, under that folder's key, as the app makes it.
+const copyFor = (at: string): string => {
+  const path = join(dataDir, "history", keyOf(at), "threads", THREAD);
+  mkdirSync(path, { recursive: true });
+  return path;
+};
 const refused = (more: Partial<HostStart>, why: RegExp, named = JSON.stringify(more)) => {
   const checked = on(more);
   expect(checked, named).toMatchObject({ ok: false, missing: false });
@@ -58,6 +65,7 @@ beforeEach(() => {
   dataDir = join(home, ".local", "share", "surogate");
   cacheDir = join(home, ".cache", "surogate");
   folder = join(home, "Reports");
+  KEY = keyOf(folder);
   copy = join(dataDir, "history", KEY, "threads", THREAD);
   kept = join(dataDir, "landings", KEY);
   for (const dir of [folder, copy, join(base, "app")]) mkdirSync(dir, { recursive: true });
@@ -192,7 +200,7 @@ describe("the folder a tool host holds", () => {
     for (const at of [join(base, "cache-link"), join(base, "cache-link", "updates"), join(cacheDir, "updates")]) {
       refused({ folder: copy, at, cacheDir: join(base, "cache-link") }, /is no path a thread's copy can stand for$/, at);
     }
-    expect(held({ folder: copy, at: join(home, "Other folder") })).toMatchObject({ ok: true });
+    expect(held({ folder: copyFor(join(home, "Other folder")), at: join(home, "Other folder") })).toMatchObject({ ok: true });
     for (const at of [7, null, { path: folder }]) {
       expect(on({ folder: copy, at: at as unknown as string }), String(at)).toMatchObject({ ok: false, missing: false });
     }
@@ -204,13 +212,14 @@ describe("the folder a tool host holds", () => {
       refused({ folder: copy, at }, /is no path a thread's copy can stand for$/, JSON.stringify(at));
     }
     // A space inside a name is a name's own.
-    expect(held({ folder: copy, at: join(home, "My Reports", " drafts") })).toMatchObject({ ok: true });
+    expect(held({ folder: copyFor(join(home, "My Reports", " drafts")), at: join(home, "My Reports", " drafts") })).toMatchObject({ ok: true });
     // Longer than a path may be, or with a name longer than a name may be.
     const long = (bytes: number) => `/${"a".repeat(bytes)}`;
-    expect(held({ folder: copy, at: `/home${long(255)}` })).toMatchObject({ ok: true });
+    expect(held({ folder: copyFor(`/home${long(255)}`), at: `/home${long(255)}` })).toMatchObject({ ok: true });
     expect(held({ folder: copy, at: `/home${long(254)}é` })).toMatchObject({ ok: false, missing: false });
     expect(held({ folder: copy, at: `/home${long(256)}` })).toMatchObject({ ok: false, missing: false });
-    expect(held({ folder: copy, at: `/h${long(200).repeat(21)}`.slice(0, 4095) })).toMatchObject({ ok: true });
+    const longest = `/h${long(200).repeat(21)}`.slice(0, 4095);
+    expect(held({ folder: copyFor(longest), at: longest })).toMatchObject({ ok: true });
     expect(held({ folder: copy, at: `/h${long(200).repeat(21)}`.slice(0, 4096) })).toMatchObject({ ok: false, missing: false });
     // What is said of one names it no further than a line goes.
     const said = on({ folder: copy, at: `/h${long(200).repeat(40)}` });
@@ -230,7 +239,7 @@ describe("the folder a tool host holds", () => {
       [folder, [join(base, "app"), home]], [join(base, "app", "work"), [join(base, "app")]],
     ];
     for (const [at, appDirs] of cases) {
-      const started = startOn(start({ folder: copy, at, appDirs }), home, appDirs);
+      const started = startOn(start({ folder: copyFor(at), at, appDirs }), home, appDirs);
       const what = JSON.stringify([at, appDirs]);
       expect(started.ok || started.missing, what).toBe(noCopyAt(at, guards(appDirs)) === null);
     }
@@ -391,6 +400,18 @@ describe("what a landing's host is given beside the folder", () => {
     rmSync(copy, { recursive: true });
     symlinkSync(home, copy);
     no({ copy, kept });
+  });
+
+  it("is refused for a copy of another folder, and its kept folder, however it stands for this one", () => {
+    // Another folder's place and copy, as the app makes them for it, and what its landings keep.
+    const other = join(home, "Other");
+    const theirs = join(dataDir, "history", keyOf(other), "threads", THREAD);
+    for (const dir of [other, theirs]) mkdirSync(dir, { recursive: true });
+    refused({ landing: { copy: theirs, kept: join(dataDir, "landings", keyOf(other)) } }, /^this landing's copy is not a thread's copy of the folder: the copy of .* this thread works in is a copy of another folder$/);
+    refused({ folder: theirs, at: folder }, /^the copy of .* this thread works in is a copy of another folder$/);
+    // Each is the copy of its own.
+    expect(held({ folder: theirs, at: other })).toMatchObject({ ok: true, path: theirs });
+    expect(started({ folder: other, landing: { copy: theirs, kept: join(dataDir, "landings", keyOf(other)) } })).toMatchObject({ path: other, reads: [theirs] });
   });
 
   it("makes no kept folder through a link put at its name, or above it, since it was checked", () => {

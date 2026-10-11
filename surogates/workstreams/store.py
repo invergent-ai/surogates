@@ -17,7 +17,8 @@ from surogates.db.models import Event, InboxItem, SessionLease, Workstream, Work
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import master_instructions
-from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of, undone_files
+from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of
+from surogates.workstreams.history import undone_of
 
 
 def _any(ids: Any) -> Any:
@@ -202,21 +203,14 @@ class WorkstreamStore:
             summaries = await db.scalars(select(Event).where(
                 Event.session_id == _any(ids), Event.type == EventType.TURN_SUMMARY.value,
             )) if with_files else ()
-            # The files each landing recorded, and the project's Undos, which mark a
-            # row's: asked by project, which the table's index is on.  A thread's
-            # landings are its own wherever it works, in the cloud or in a folder on
-            # a computer; an Undo is of the cloud's files.
+            # The files each landing recorded: asked by project, which the table's
+            # index is on.  A thread's landings are its own wherever it works, in the
+            # cloud or in a folder on a computer.
             landings = (await db.execute(
                 select(WorkstreamHistory.thread_id, WorkstreamHistory.id, WorkstreamHistory.files, WorkstreamHistory.device_id).where(
                     WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.thread_id == _any(ids),
                     WorkstreamHistory.kind == "landing", WorkstreamHistory.saga_state == "completed",
                     func.jsonb_array_length(WorkstreamHistory.files) > 0,
-                )
-            )).all() if with_files else ()
-            undos = (await db.execute(
-                select(WorkstreamHistory.id, WorkstreamHistory.undoes, WorkstreamHistory.files).where(
-                    WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.device_id.is_(None),
-                    WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
                 )
             )).all() if with_files else ()
             # A landing left running in a folder on a computer, whose thread's turn no worker holds.
@@ -242,7 +236,8 @@ class WorkstreamStore:
                 events_of[event.session_id].append(event)
             for landed_by, row_id, files, device_id in landings:
                 landings_of[landed_by].append({"id": row_id, "files": files, "on_computer": device_id is not None})
-        undone = undone_files({"id": row_id, "undoes": undoes, "files": files} for row_id, undoes, files in undos)
+        # The Undos that mark those landings' files: an Undo is of the cloud's files.
+        undone = await undone_of(self._sf, workstream_id, [row_id for _, row_id, _, device_id in landings if device_id is None])
         redoing = await self._redoing(landings_of)
         return [
             ThreadFacts(

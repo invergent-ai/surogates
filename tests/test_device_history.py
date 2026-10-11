@@ -477,8 +477,8 @@ def test_every_type_and_code_a_refusal_may_have_is_a_word_of_the_servers_own():
         "cancelled", "interrupted", "unavailable", "folder_unavailable", "revoked", "other",
     }
     assert HISTORY_CODES == {
-        "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "not_a_request", "record_unfinished",
-        "move_unfinished", "landing_unsettled", "not_on_base", "no_answer", "not_an_answer",
+        "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "file_unreadable", "not_a_request",
+        "record_unfinished", "move_unfinished", "landing_unsettled", "not_on_base", "no_answer", "not_an_answer",
     }
     for kind in sorted(REFUSALS - {"history"}):
         assert refusal({"type": kind, "message": "no"})[:2] == (kind, None)
@@ -740,6 +740,8 @@ def test_an_open_a_stop_closed_ends_the_turns_askings_and_is_no_reason_of_the_fo
     ({"ok": {"history": "off", "reason": "names"}}, "names"),
     # A name history cannot keep, found by a later open.
     ({"error": {"type": "history", "code": "name_not_utf8", "message": "a file's name is not UTF-8"}}, "names"),
+    # A file of the folder's this computer cannot read: a build of yours left it another user's.
+    ({"error": {"type": "history", "code": "file_unreadable", "message": 'the file "secret.key" cannot be read'}}, "unreadable"),
     # Its computer's app keeps no copy of the folder for the thread: it bound it to the folder itself.
     ({"error": {"type": "unsupported", "message": "This chat works in its folder itself"}}, NO_COPY),
     # Its computer's app gives the thread no copy: the folder is too large to copy in the time a copy may take.
@@ -763,7 +765,7 @@ def test_a_thread_whose_folder_or_computer_is_no_place_for_it_has_nowhere_to_wor
 #: The refusals of an open that last: asking again gives the same.
 LASTING = [
     *({"error": {"type": "history", "code": code, "message": "no"}} for code in sorted(
-        HISTORY_CODES - {"no_whole_copy", "move_unfinished", "record_unfinished", "no_answer", "name_not_utf8", "failed"},
+        HISTORY_CODES - {"no_whole_copy", "move_unfinished", "record_unfinished", "no_answer", "name_not_utf8", "file_unreadable", "failed"},
     )),
     *({"error": {"type": kind, "message": "no"}} for kind in sorted(
         REFUSALS - {"history", NO_COPY, "history_off", "folder_unavailable", "revoked", "cancelled", "interrupted", "unavailable", "busy"},
@@ -828,13 +830,16 @@ def test_an_asking_a_worker_left_unanswered_is_waited_for_and_is_not_asked_again
 
 
 def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_what_to_do():
-    assert set(NOWHERE) == {"cap", "names", "history_off", NO_COPY, "gone", "revoked", "again", "refused", MADE_BEFORE_COPIES}
+    assert set(NOWHERE) == {
+        "cap", "names", "unreadable", "history_off", NO_COPY, "gone", "revoked", "again", "refused", MADE_BEFORE_COPIES,
+    }
     for why, words in NOWHERE.items():
         assert str(NowhereToWork(why)) == words and len(words) <= 200, why
         # A Retry only where asking again can pass, and where its computer's app tries again as its person asks.
         assert NowhereToWork(why).retryable == (why in ("again", "history_off")), why
     assert all("Choose a folder inside it" in NOWHERE[why] for why in ("cap", "names", "history_off"))
     assert NOWHERE["history_off"].endswith("or try again.")
+    assert NOWHERE["unreadable"].endswith("Let it be read, as by chmod a+r, or move it out of the folder.")
     assert NOWHERE[NO_COPY].endswith("Update Surogate Desktop.")
     assert "choose it again" in NOWHERE["gone"] and "Sign this computer in again" in NOWHERE["revoked"]
     assert NOWHERE["again"].endswith("Try again.") and "Try again" not in NOWHERE["refused"]

@@ -452,8 +452,8 @@ def test_a_threads_landing_on_a_computer_marks_its_files_and_is_none_for_its_car
 
 
 def undo_row(row_id: int, undoes: list[int], *paths: str) -> dict:
-    """An Undo's row as the store reads it: the rows it undid, and each file it put back."""
-    return {"id": row_id, "undoes": undoes, "files": [{"path": p, "before": "x", "after": "y", "merged": True} for p in paths]}
+    """An Undo's row as the store reads it: each file it put back, over the rows *undoes* each."""
+    return {"id": row_id, "files": [{"path": p, "before": "x", "after": "y", "merged": True, "undoes": undoes} for p in paths]}
 
 
 def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_undo_is_undone_itself():
@@ -462,6 +462,20 @@ def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_und
     assert undone_files([second, first]) == {(50, "plan.md")}
     # A third undoes the second: the first stands again, and what it put back is undone again.
     assert undone_files([first, second, undo_row(52, [51], "plan.md")]) == {(51, "plan.md"), (40, "plan.md"), (41, "plan.md")}
+
+
+def test_an_undo_marks_each_file_undone_only_in_the_landings_it_went_back_over_at_that_file():
+    # Landing 40 changed a.md and b.md, and 41 changed b.md after the Undo 50 had put back 40's b.md alone.  The
+    # thread's Undo 60 then put a.md back over 40, and b.md over 41: 40's b.md was put back already.
+    first = {"id": 50, "files": [{"path": "b.md", "before": "b1", "after": "b0", "merged": True, "undoes": [40]}]}
+    thread = {"id": 60, "files": [
+        {"path": "a.md", "before": "a1", "after": "a0", "merged": True, "undoes": [40]},
+        {"path": "b.md", "before": "b2", "after": "b0", "merged": True, "undoes": [41]},
+    ]}
+    assert undone_files([first, thread]) == {(40, "a.md"), (40, "b.md"), (41, "b.md")}
+    # An Undo of the first brings 40's b.md back: no Undo that went back over it stands.
+    again = {"id": 70, "files": [{"path": "b.md", "before": "b0", "after": "b1", "merged": True, "undoes": [50]}]}
+    assert undone_files([first, thread, again]) == {(50, "b.md"), (40, "a.md"), (41, "b.md")}
 
 
 def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
