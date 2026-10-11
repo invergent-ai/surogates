@@ -22,6 +22,8 @@ import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const RETRY_MS = 5;
+// util-linux's, as setpriv is.
+const PRLIMIT = "/usr/bin/prlimit";
 
 // Settles with "late" at *deadline* (performance.now()), its timer not holding the process.
 const late = (deadline: number) => new Promise<"late">((resolve) => {
@@ -235,7 +237,10 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
   mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
   const program = qemuOn(toolPath());
   if (program === null) throw new Error("QEMU is not on the PATH (the qemu-system-x86 package)");
-  const { child: qemu, said } = launch([program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
+  // With no locked memory allowed. QEMU 10.2 gives each of its event loops an io_uring ring, counted
+  // against the locked memory of all the user's processes together, and exits when a later loop's is
+  // refused; with none allowed, its first loop's is refused, and none of them uses io_uring.
+  const { child: qemu, said } = launch([PRLIMIT, "--memlock=0:0", "--", program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
   const halt = () => qemu.kill("SIGKILL");
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;
