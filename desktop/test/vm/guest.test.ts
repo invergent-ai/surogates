@@ -187,7 +187,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
   });
 
-  it("makes each background process's cgroup itself, counting no memory, which the root's user can enter and end but not make, and removes it once the process ends", async () => {
+  it("makes each background process's cgroup itself, counting no memory, which the root's user can end but neither make nor enter, and removes it once the process ends", async () => {
     const started = await guest.op(ROOT, "start", background("sleep 310"), signal()) as { ok: { session_id: string } };
     const { session_id } = started.ok;
     const cgroup = `/sys/fs/cgroup/proc/${session_id}`;
@@ -198,12 +198,29 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       "(mkdir /sys/fs/cgroup/proc/mine) 2>&1 | sed 's/.*: //'",
       `(mkdir ${cgroup}/below) 2>&1 | sed 's/.*: //'`,
       `(rmdir ${cgroup}) 2>&1 | sed 's/.*: //'`,
-      `sh -c 'echo $$ > ${cgroup}/cgroup.procs && cut -d: -f3 /proc/self/cgroup'`,
+      // Its process is in it, moved there by the agent.
+      `cat ${cgroup}/cgroup.procs | wc -l`,
     ].join("; "))).toEqual({
-      ok: { output: `0 ${FIRST_UID} ${FIRST_UID} \nuncounted\nPermission denied\nPermission denied\nPermission denied\n/proc/${session_id}\n`, returncode: 0, timed_out: false },
+      ok: { output: `0 0 ${FIRST_UID} \nuncounted\nPermission denied\nPermission denied\nPermission denied\n1\n`, returncode: 0, timed_out: false },
     });
     expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
     expect(await run("find /sys/fs/cgroup/proc -mindepth 1 -type d | wc -l")).toMatchObject({ ok: { output: "0\n" } });
+  });
+
+  it("keeps all a command starts in its cgroup, none moving itself to another of the root's, so the command's end ends them all", async () => {
+    const started = await guest.op(ROOT, "start", background("sleep 312"), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    // Every cgroup of the root's but the command's own: the root's, its runner's, its runs', its background processes' and one of those.
+    const away = ["", "/init", "/run", "/proc", `/proc/${session_id}`].map((to) => `/sys/fs/cgroup${to}`);
+    expect(await run(away.map((to) => `(sh -c 'echo $$ > ${to}/cgroup.procs && echo left for ${to}') 2>&1 | sed 's/.*: //'`).join("; "))).toEqual({
+      ok: { output: "Permission denied\n".repeat(away.length), returncode: 0, timed_out: false },
+    });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    // What a command leaves, moving itself to the root's cgroup, and writing in the folder once the command has ended.
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c 'echo $$ > /sys/fs/cgroup/cgroup.procs; sleep 1; echo late > late.txt' < /dev/null > /dev/null 2>&1 & sleep 0.2; echo started";
+    expect(await run(leaver)).toEqual({ ok: { output: "started\n", returncode: 0, timed_out: false } });
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(existsSync(join(folder, "late.txt"))).toBe(false);
   });
 
   it("stops a command that makes cgroups at its root's bound, none below a command's, and the guest keeps its memory", async () => {

@@ -100,6 +100,8 @@ export type ToRunner =
   | { type: "spawn"; id: string; command: string; cwd: string; env: Record<string, string>; pty: boolean; stdin: boolean }
   // To everything of the command: its cgroup in the guest, its process group without one.
   | { type: "signal"; id: string; signal: NodeJS.Signals }
+  // In the guest, once the agent has moved the command's shell from the runner's cgroup into the command's (root.ts, admit).
+  | { type: "entered"; id: string }
   | { type: "stdin"; id: string; data: string } // base64; answered written, or error with stdin
   // Where a command would run, looked up in the runner's own view and as its user: run's workdir checks.
   | { type: "place"; id: string; folder: string; home: string; workdir: string | null }

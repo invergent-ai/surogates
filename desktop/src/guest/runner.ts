@@ -3,9 +3,9 @@
 // starts is reachable from the next (spec, Section 11). The agent speaks
 // ToRunner on stdin and reads FromRunner on stdout, after a first
 // {"ready":true}; it ends the runner by ending its stdin, and the namespaces go
-// with it. In the guest, enter-root gives it the root's cgroup, delegated to it
-// (--cgroups <folder>): each command gets a cgroup of its own there, which ends it
-// with everything it started; and the root's socket to the host proxy (--tunnel
+// with it. In the guest, enter-root gives it the root's cgroup (--cgroups <folder>):
+// each command gets a cgroup of its own there, which ends it with everything it
+// started, and which nothing of it can leave; and the root's socket to the host proxy (--tunnel
 // <socket>), for the proxies it listens on before any command runs (listeners.ts),
 // and for each connection into the root it is asked to bring (dial).
 // The host's tests start it bare, without either: a command's process group is then all it signals.
@@ -31,6 +31,11 @@ const { cgroups: CGROUPS = null, tunnel: TUNNEL = null } = parseArgs({ options: 
 const ended = new Set<string>();
 // What waits for a process that does not read its input stays in the runner's memory: this much, at most.
 const MAX_STDIN_BYTES = 1024 * 1024;
+// A command's shell, given a cgroup: it waits until its fd 3 ends, which the agent's entered lets it, then
+// runs the command only if it is in that cgroup by then, as /proc/self/cgroup names it in the root's
+// cgroup namespace ($0). The root's user moves no process between the root's cgroups: the agent moves
+// the shell, as the guest's root (root.ts, admit), so nothing the command starts can leave its cgroup.
+const ENTER = 'read -r go <&3; exec 3<&-; read -r at < /proc/self/cgroup; [ "$at" = "$0" ] || { echo "surogate: this command could not be given its cgroup, so it did not run" >&2; exit 126; }; exec "$@"';
 
 interface Child {
   proc: ChildProcess;
@@ -39,6 +44,8 @@ interface Child {
   cgroup: string | null;
   // A command with no stdin is a foreground run: what it leaves running ends with it.
   foreground: boolean;
+  // Its shell has been let go into its cgroup (ENTER); true without one.
+  entered: boolean;
   killed: boolean;
   exited: boolean;
   done: boolean;
@@ -88,6 +95,11 @@ function signalAll(child: Child, signal: NodeJS.Signals): void {
     } catch {
       // The group has gone.
     }
+    return;
+  }
+  // A shell that still waits to be moved into its cgroup has started nothing: it alone is signalled.
+  if (!child.entered) {
+    child.proc.kill(signal);
     return;
   }
   try {
@@ -157,25 +169,28 @@ function start(request: SpawnRequest): void {
   }
   const env = { ...process.env, ...request.env };
   let [file, args] = argv(request, env);
-  const cgroup = CGROUPS && join(CGROUPS, request.stdin ? "proc" : "run", id);
+  const leaf = request.stdin ? "proc" : "run";
+  const cgroup = CGROUPS && join(CGROUPS, leaf, id);
   const own = request.stdin ? null : cgroup;
   let proc: ChildProcess;
   try {
     if (cgroup) {
       tidy();
       if (own) mkdirSync(own);
-      // Its shell enters the command's cgroup before it runs the command, so all the command starts is there.
-      [file, args] = ["/bin/sh", ["-c", 'echo $$ > "$0" && exec "$@"', join(cgroup, "cgroup.procs"), file, ...args]];
+      // Its shell runs the command from the command's cgroup, once the agent has moved it there, so all the command starts is there.
+      [file, args] = ["/bin/sh", ["-c", ENTER, `0::/${leaf}/${id}`, file, ...args]];
     }
     // Its own process group, so one signal reaches what it started too.
-    proc = spawn(file, args, { cwd: request.cwd, env, detached: true, stdio: [request.stdin ? "pipe" : "ignore", "pipe", "pipe"] });
+    proc = spawn(file, args, {
+      cwd: request.cwd, env, detached: true, stdio: [request.stdin ? "pipe" : "ignore", "pipe", "pipe", ...(cgroup ? ["pipe" as const] : [])],
+    });
   } catch (error) {
     // A command past Linux's 128 KiB for one argument throws E2BIG here, its cgroup made.
     retire(own);
     say({ type: "error", id, message: error instanceof Error ? error.message : String(error) });
     return;
   }
-  const child: Child = { proc, cgroup, foreground: !request.stdin, killed: false, exited: false, done: false, ooms: oomKills() };
+  const child: Child = { proc, cgroup, foreground: !request.stdin, entered: !cgroup, killed: false, exited: false, done: false, ooms: oomKills() };
   children.set(id, child);
   let started = false;
   // A command that stops reading its stdin is not an error of the runner's.
@@ -234,6 +249,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     start(request);
   } else if (message.type === "signal") {
     signal(message.id, message.signal);
+  } else if (message.type === "entered") {
+    // The agent has moved its shell into its cgroup, or could not: the shell goes on, and looks.
+    const child = children.get(message.id);
+    if (child && !child.entered) {
+      child.entered = true;
+      child.proc.stdio[3]?.destroy();
+    }
   } else if (message.type === "place") {
     // In this view and as this user: what the command will see.
     try {
