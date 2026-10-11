@@ -1266,6 +1266,35 @@ def test_a_threads_repository_borrows_the_historys_objects_and_holds_only_what_i
     connected(tmp_path / "store")
 
 
+def test_a_push_notes_its_pack_before_the_repack_lets_go_of_what_the_pack_holds(tmp_path, folder, monkeypatch):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    one.snapshot("before a step")
+    pack = LocalHistory._pack
+
+    def killed_after_it(self, **kwargs):
+        pack(self, **kwargs)
+        raise KeyboardInterrupt
+
+    # Killed right after the repack that follows the turn's push: the turn's objects are the history's alone now.
+    with monkeypatch.context() as cut:
+        cut.setattr(LocalHistory, "_pack", killed_after_it)
+        with pytest.raises(KeyboardInterrupt):
+            one.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    turn = git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/threads/t1")
+    assert turn not in held_here(one.repo)
+    # Each object the repository reaches it holds, or reads from a pack its note names: a history that no longer
+    # holds that pack is known by the note.
+    lent = set()
+    for pack_id in noted(one.repo):
+        with open(tmp_path / "store" / "history.git" / "objects" / "pack" / f"pack-{pack_id}.idx", "rb") as listed:
+            shown = subprocess.run(["git", "show-index"], stdin=listed, capture_output=True, text=True, check=True, env=HERMETIC).stdout
+        lent |= {line.split()[1] for line in shown.splitlines()}
+    reached = {line[:40] for line in git(one.repo, "rev-list", "--objects", "--all").splitlines()}
+    assert turn in reached and reached <= held_here(one.repo) | lent
+    connected(tmp_path / "store")
+
+
 def test_a_copys_repository_packed_again_takes_none_of_the_historys_objects(tmp_path, film, monkeypatch):
     monkeypatch.setattr(local_history, "_PACKS", 2)
     one = a_copy(tmp_path, film)
@@ -1475,6 +1504,10 @@ ASTRAY = {
     "another store in the history's stead": lambda one, other: (one.repo / "objects" / "info" / "alternates").write_text(f"{other / 'objects'}\n"),
     "the history by another path": lambda one, other: (one.repo / "objects" / "info" / "alternates").write_text(f"{one.store / 'objects'}\n"),
     "a pack it read from gone from the history": lambda one, other: (one.repo / "borrowed").write_text(f"{(one.repo / 'borrowed').read_text()}{'0' * 40}\n"),
+    "a pack it read from left there without its index": lambda one, other: (
+        shutil.copyfile(sorted((one.store / "objects" / "pack").glob("pack-*.pack"))[0], one.store / "objects" / "pack" / f"pack-{'e' * 40}.pack"),
+        (one.repo / "borrowed").write_text(f"{(one.repo / 'borrowed').read_text()}{'e' * 40}\n"),
+    ),
     "its note of the packs it reads gone": lambda one, other: (one.repo / "borrowed").unlink(),
     "its note of the packs it reads no note": lambda one, other: (one.repo / "borrowed").write_text("not a pack\n"),
 }
