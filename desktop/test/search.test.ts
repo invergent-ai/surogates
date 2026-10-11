@@ -75,6 +75,18 @@ describe("ripgrep, with the cloud's arguments", () => {
     ]);
   });
 
+  it("never lists or searches a file a landing keeps beside a real one under a name of its own, whatever the glob; one of the user's of a like name is theirs", async () => {
+    writeFileSync(join(folder, ".surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp"), "beta, the file a landing replaced\n");
+    writeFileSync(join(folder, ".surogate-notes.tmp"), "beta, yours\n");
+    for (const pattern of ["*", "**", "**/*", "*.tmp", ".surogate-*"]) {
+      expect(lines(await search({ key: folder, mode: "files", pattern })), pattern).not.toContain(`${folder}/.surogate-0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f.tmp`);
+    }
+    expect(lines(await search({ key: folder, mode: "files", pattern: "*.tmp" }))).toEqual([`${folder}/.surogate-notes.tmp`]);
+    const counted = lines(await search({ key: folder, mode: "count", pattern: "beta", glob: "*" }));
+    expect([counted.includes(`${folder}/.surogate-notes.tmp:1`), counted.some((line) => line.includes("0f6d1c5e"))]).toEqual([true, false]);
+    expect(lines(await search({ key: folder, mode: "json", pattern: "beta", glob: "*.tmp" })).filter((line) => line.includes("0f6d1c5e"))).toEqual([]);
+  });
+
   it("counts matches per file", async () => {
     expect(lines(await search({ key: folder, mode: "count", pattern: "beta", glob: "*.txt" }))).toEqual([
       `${folder}/a.txt:1`, `${folder}/sub/b.txt:1`,

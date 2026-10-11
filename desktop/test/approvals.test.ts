@@ -210,6 +210,21 @@ describe("a chat that asks every time", () => {
     expect(user.asked).toHaveLength(6);
   });
 
+  it("lets a thread's snapshots, its history's steps and its landing through before it reads the chat's binding, which a deleted thread's landing no longer has", async () => {
+    const own = () => [
+      op("land", { action: "unapply", saga: "s", step: 0, path: "a.txt" }), op("land", { action: "forget", saga: "s", applied: [] }),
+      op("history", { action: "commit", author: {}, trailers: [] }), op("checkpoint", { action: "take", reason: "before write_file" }),
+    ];
+    // No binding: the thread was deleted, and the landing's host it kept finishes its landing.
+    for (const operation of own()) expect(await approvals.admit(operation, never()), operation.kind).toBeNull();
+    // Nor where the journal cannot be read.
+    vi.spyOn(journal.bindings, "get").mockImplementation(() => {
+      throw new Error("database disk image is malformed");
+    });
+    for (const operation of own()) expect(await approvals.admit(operation, never()), operation.kind).toBeNull();
+    expect(user.asked).toEqual([]);
+  });
+
   it("never asks about the harness's own spilled output, and asks about anything else there", async () => {
     bind(ROOT, "ask");
     user.auto = "deny";

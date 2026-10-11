@@ -791,7 +791,8 @@ class _Landing:
                 source = self._source(theirs, name, path)
             if found is not None and self._kept_bytes() + found.st_size > _MAX_KEPT_BYTES:
                 raise _Refused("os", (
-                    f"{path} was not replaced: more than {_MAX_KEPT_BYTES >> 30} GiB would be kept of the files this folder's landings replaced"
+                    f"{path} was not replaced: more than {_MAX_KEPT_BYTES >> 30} GiB would be kept of the files this folder's landings replaced."
+                    " It can land once an earlier landing in this folder is recorded or put back, which lets go of what that one kept"
                 ), "EDQUOT")
             made = ["/".join(folders[:at + 1]) for at in range(depth, len(folders))][::-1]
             record = {

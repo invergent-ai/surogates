@@ -99,14 +99,16 @@ logger = logging.getLogger(__name__)
 
 #: Why a request was not answered, beside the cloud's two codes (history.py): a thread with no
 #: whole copy, which its next open makes; a file whose name history cannot record, which
-#: nothing lands past until it is renamed; a request that is none this history takes; and a
-#: landing the history holds whose copy could not be made its files, or a move of the copy to
-#: ``main`` that could not be finished, so that nothing is read from the copy; a landing
-#: neither recorded nor put back whole, whose kept files are not to be forgotten; and a
+#: nothing lands past until it is renamed; a file this computer cannot read, which nothing
+#: lands past until it can be read or is left out; a request that is none this history takes;
+#: and a landing the history holds whose copy could not be made its files, or a move of the
+#: copy to ``main`` that could not be finished, so that nothing is read from the copy; a
+#: landing neither recorded nor put back whole, whose kept files are not to be forgotten; and a
 #: snapshot the copy is not put back to, taken on another base than the copy's is now.
 #: Whoever asked goes by the code, never by the words.
 NO_WHOLE_COPY = "no_whole_copy"
 NAME_NOT_UTF8 = "name_not_utf8"
+FILE_UNREADABLE = "file_unreadable"
 NOT_A_REQUEST = "not_a_request"
 RECORD_UNFINISHED = "record_unfinished"
 MOVE_UNFINISHED = "move_unfinished"
@@ -415,6 +417,48 @@ class LocalHistory(History):
             raise HistoryError(
                 "refused the request: a file's name is not UTF-8, which history cannot record", code=NAME_NOT_UTF8,
             ) from None
+
+    def _add_all(self, git: Callable[..., str]) -> None:
+        """The cloud's, and a file of the folder's git could not read refused by its name, with what to do: one a build of yours left another user's, say.
+
+        Asked again, it is refused the same until the file can be read, or,
+        where history holds none of it yet, the folder's ``.gitignore``
+        leaves it out.  A file of the thread's copy that cannot be read is
+        the thread's own doing, which no person sees: git's failure, as any.
+        """
+        try:
+            super()._add_all(git)
+        except HistoryError as failed:
+            unread = None
+            if failed.code == FAILED and git == self._main:
+                with contextlib.suppress(HistoryError):
+                    unread = self._unreadable()
+            if unread is None:
+                raise
+            name, new = unread
+            raise HistoryError(
+                f"refused the request: the file {json.dumps(name, ensure_ascii=False)} cannot be read on this computer, so history "
+                + ("cannot record it: let it be read, as by chmod a+r, or add it to the folder's .gitignore" if new else
+                   "cannot record its change: let it be read, as by chmod a+r, or move it out of the folder"),
+                code=FILE_UNREADABLE,
+            ) from None
+
+    def _unreadable(self) -> tuple[str, bool] | None:
+        """A file of the folder's git reads to add it that this computer cannot open to read, and whether history holds none of it yet; None for none.
+
+        Of those git reads: the new files as a listing names them, and the
+        changed ones ``main``'s index holds.  No link is followed.
+        """
+        new = {n for n in self._main("ls-files", "-z", "--others", *self._listing).split("\0") if n and not n.endswith("/")}
+        changed = {n for n in self._main("ls-files", "-z", "--modified").split("\0") if n}
+        for name in sorted(new | changed):
+            try:
+                os.close(os.open(self.project / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC))
+            except PermissionError:
+                return name, name in new
+            except OSError:
+                pass  # gone since, or a link: none this computer was refused
+        return None
 
     def open(self, moves: bool = True) -> dict:
         """Make the thread's copy, or bring the one it has to its next turn.
@@ -1325,7 +1369,7 @@ class LocalHistory(History):
         without following a link.
         """
         found: dict[str, str] = {}
-        listed = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory").split("\0")
+        listed = self._copy("ls-files", "-z", "--others", "--ignored", *self._listing, "--directory").split("\0")
         copy = os.open(self.copy, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             for name in listed:

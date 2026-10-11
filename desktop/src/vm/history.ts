@@ -33,6 +33,7 @@ export const USER = /^[A-Za-z0-9_.@-]{1,128}$/;
 //   conflict           main, or a ref, moved in the history since the landing began
 //   no_whole_copy      the thread's copy is gone, or its making was cut short: its next open makes it
 //   name_not_utf8      a file's name is not UTF-8: nothing lands until the file is renamed
+//   file_unreadable    a file this computer cannot read: nothing lands until it can be read, or is left out
 //   not_a_request      the request is none the history takes
 //   record_unfinished  a landing of the thread's is in the history, and its copy could not be made the landing's files
 //   move_unfinished    the copy's move to main was cut, and could not be finished
@@ -41,8 +42,8 @@ export const USER = /^[A-Za-z0-9_.@-]{1,128}$/;
 // and the agent's (guest/places.ts):
 //   no_answer          the history ended without an answer: its bound passed, its place was let go, or it wrote none
 const SAID = [
-  "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "not_a_request", "record_unfinished", "move_unfinished",
-  "landing_unsettled", "not_on_base", "no_answer",
+  "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "file_unreadable", "not_a_request", "record_unfinished",
+  "move_unfinished", "landing_unsettled", "not_on_base", "no_answer",
 ] as const;
 // And this computer's own, for what the guest sent in an answer's place and it would not take.
 export type HistoryCode = (typeof SAID)[number] | "not_an_answer";
