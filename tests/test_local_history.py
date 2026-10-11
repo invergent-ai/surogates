@@ -824,6 +824,25 @@ def test_a_folder_an_earlier_guest_left_where_the_repository_keeps_a_file_of_its
     assert held_open(attributes) == []
 
 
+def test_a_file_that_a_folder_takes_the_place_of_as_it_is_read_is_left_open_nowhere(tmp_path, monkeypatch):
+    file = tmp_path / "notes.txt"
+    file.write_text("v1 notes\n")
+    real = os.open
+
+    def swapped(path, *args, **kwargs):
+        # Between the look at it and the open, a folder takes the file's place.
+        if path == str(file):
+            file.unlink()
+            file.mkdir()
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(local_history.os, "open", swapped)
+    with pytest.raises(IsADirectoryError):
+        local_history._recorded(str(file))
+    monkeypatch.undo()
+    assert held_open(file) == []
+
+
 def test_a_deletion_waits_while_the_turn_itself_writes_where_history_leaves_out_however_old_that_place_is(tmp_path, folder):
     one = a_copy(tmp_path, folder)
     (one.copy / "build").mkdir()

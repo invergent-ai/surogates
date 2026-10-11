@@ -1731,11 +1731,16 @@ def _recorded(name: str | Path, *, dir_fd: int | None = None) -> tuple[str, str]
         return "120000", hashlib.sha1(b"blob %d\0" % len(target) + target).hexdigest()
     if not stat.S_ISREG(info.st_mode):
         return None
-    # Non-blocking, so whatever took the file's place since the look answers at once.
-    with open(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd), "rb") as file:
-        blob = hashlib.sha1(b"blob %d\0" % os.fstat(file.fileno()).st_size)
-        while chunk := file.read(1 << 20):
-            blob.update(chunk)
+    # Non-blocking, so whatever took the file's place since the look answers at once; and closed here, as a folder
+    # there is refused by open() without its handle closed.
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    try:
+        with open(fd, "rb", closefd=False) as file:
+            blob = hashlib.sha1(b"blob %d\0" % os.fstat(fd).st_size)
+            while chunk := file.read(1 << 20):
+                blob.update(chunk)
+    finally:
+        os.close(fd)
     return "100755" if info.st_mode & stat.S_IXUSR else "100644", blob.hexdigest()
 
 
