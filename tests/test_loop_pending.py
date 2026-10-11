@@ -229,6 +229,33 @@ def test_a_commands_answer_after_a_turn_that_was_stopped_in_a_call_is_replayed_b
     assert [(m["role"], m["content"]) for m in replayed[-2:]] == [("user", "/goal status"), ("assistant", "No active outcome.")]
 
 
+@pytest.mark.parametrize("before, ended, compacted", [
+    (1, (1, 2), False), (2, (1, 2), False), (2, (2, 1), False), (2, (1, 2), True),
+], ids=["one result", "both results", "both results, the second ended first", "both results, after a compaction in the request"])
+def test_a_result_written_before_the_response_that_made_its_call_is_replayed_after_that_response(before, ended, compacted):
+    # A call starts while its response still streams, and can end before the response is written.
+    calls = [{"id": f"call_{n}", "type": "function", "function": {"name": "todo", "arguments": "{}"}} for n in (1, 2)]
+    asked = {"role": "assistant", "content": "", "tool_calls": calls}
+    results = [[event(10 + 2 * n, EventType.TOOL_CALL, tool_call_id=f"call_{n}"), event(11 + 2 * n, EventType.TOOL_RESULT, tool_call_id=f"call_{n}", content=f"r{n}")] for n in ended]
+    events = [
+        event(1, EventType.USER_MESSAGE, content="Go on."), event(2, EventType.LLM_REQUEST),
+        # A request too large for the model's context is compacted and asked again, in the same request.
+        *([event(3, EventType.CONTEXT_COMPACT, compacted_messages=[{"role": "user", "content": "Go on."}])] if compacted else []),
+        *(e for result in results[:before] for e in result),
+        event(20, EventType.LLM_RESPONSE, message=asked),
+        event(21, EventType.USER_MESSAGE, content="And Q4?"),
+        *(e for result in results[before:] for e in result),
+    ]
+    for each in events:
+        each.type = each.type.value
+    replayed = ContextReplayMixin._rebuild_messages(SimpleNamespace(), events)
+    # As the live turn asked it: the results right after the response, in the order of its calls, and what was said meanwhile after them.
+    assert [(m["role"], m.get("tool_call_id")) for m in replayed] == [
+        ("user", None), ("assistant", None), ("tool", "call_1"), ("tool", "call_2"), ("user", None),
+    ]
+    assert replayed[-1]["content"] == "And Q4?"
+
+
 def test_where_a_turn_was_cut_off():
     asked = event(2, EventType.LLM_REQUEST)
     calls = event(3, EventType.LLM_RESPONSE, message={"tool_calls": [{"id": "call_1"}]})

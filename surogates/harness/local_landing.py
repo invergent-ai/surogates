@@ -67,6 +67,9 @@ thread's branch in the folder's history, its base and all, so its work is
 in the history and not in the copy alone.  A keep touches nothing of the
 folder, asks the app for no hold, and is recorded in no History: nothing of
 it landed.
+
+A turn whose landing recorded asks, last, for the folder's history to be
+pruned on its computer, which does so at most once a day.
 """
 
 from __future__ import annotations
@@ -115,7 +118,7 @@ from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
 from surogates.workstreams.derive import UNFINISHED, set_aside_said
-from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
+from surogates.workstreams.history import kept_refs_in, landing_row, running_in, saga_of, start_landing, unforgotten_in
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,9 @@ SETTLE_LEASE = 60
 SETTLE_RENEW = 20.0
 #: How many landings ended in a folder whose forgetting never let go of what they kept a landing asks it again for.
 FORGET_AGAIN = 16
+#: How long a turn's end waits for its folder's history to be pruned on its computer: a request of the history is cut
+#: off at ten minutes there.  The landing stands either way, and the history is pruned on a later day.
+PRUNE_WAIT = 660.0
 #: A landing put back whole is tried once more, as a new saga: its look and its pickup see what the first ran into.
 #: What a turn taken up again did after its landing began lands after it, as a landing of its own (``land:<turn>:3``).
 TRIES = 2
@@ -444,6 +450,8 @@ async def land_local_turn(
     if ending.heard() and ending.wrote and outcome.get("reason") not in ("stopped", "deleted") and not await ending.deleted():
         # Stopped once its landing had written a file: it was not interrupted, and whoever stopped it is told so.
         outcome["stopped"] = True
+    # The turn it was: a pruning after it is asked under its name, once the turn has ended (prune_local_history).
+    outcome["turn"] = turn
     return _heard(outcome, ending)
 
 
@@ -452,6 +460,30 @@ def _heard(outcome: dict, ending: _Ending) -> dict:
     if ending.heard():
         outcome["stop_heard"] = True
     return outcome
+
+
+async def prune_local_history(*, session_factory: Any, redis: Any, session: Any, lease_token: str | None, landing: dict) -> None:
+    """Prune the folder's history on *session*'s computer after *landing*, its turn's, where it recorded: its computer prunes at most once a day.
+
+    Asked once the turn has ended and reported, so neither waits for a
+    pruning, nor for a computer that went away before one; under the
+    turn's own name, ``land:<turn>:prune``.  The day is the server's: the
+    pruning is told this worker's time.  Told the refs to keep, the branch
+    and the base of every thread that works in the folder, whichever
+    project's; what each repository on that computer reads is the
+    computer's to keep besides, which alone can read it.  As best it can,
+    and for :data:`PRUNE_WAIT` at most: the landing stands, and the
+    history is pruned on a later day.
+    """
+    if landing.get("state") != "completed" or not landing.get("commit") or landing.get("turn") is None:
+        return
+    copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=lease_token)
+    try:
+        keep = await kept_refs_in(session_factory, copy.device_id, copy.folder)
+        pruning = copy.steps(f"land:{landing['turn']}:prune").history("prune", keep=keep, now=int(time.time()))
+        await asyncio.wait_for(pruning, PRUNE_WAIT)
+    except Exception:
+        logger.warning("The history of the folder of thread %s on its computer was not pruned", session.id, exc_info=True)
 
 
 async def keep_local_turn(*, store: Any, session_factory: Any, redis: Any, session: Any, lease_token: str | None) -> list[str]:
@@ -490,12 +522,16 @@ async def set_aside_of(
     repository set aside whole took with it no open names, and are kept
     while it is.  A landing's record names its own snapshot at once
     (*landing*'s ``set_aside``); one whose answer was lost, or a turn's end
-    taken up again, has the next open name it.
+    taken up again, has the next open name it.  A place of the folder's
+    its app set aside, its history and every thread's copy in it, is named
+    by one open alone, the thread's that set it aside, and stays recorded:
+    the latest as many as an open names.
 
     A turn's end records all of it by the computer's names,
-    ``{copies, snapshots, gone}``, and its report tells what no earlier end
-    recorded, as a person is told it (``derive.set_aside_said``): so each is
-    told once, and the master hears what each is and when, not its names.
+    ``{copies, snapshots, gone}`` and ``places`` where it has any, and its
+    report tells what no earlier end recorded, as a person is told it
+    (``derive.set_aside_said``): so each is told once, and the master hears
+    what each is and when, not its names.
     The open is read from the journal and checked as an answer given now:
     one that is none says nothing, and the last word stands.  None for
     either where it holds nothing: nothing was ever set aside, or nothing
@@ -503,7 +539,10 @@ async def set_aside_of(
     """
     before = await store.last_event(session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="set_aside")
     told = _set_aside_told(before.data["set_aside"] if before is not None else None)
-    opened = answered("history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id), thread=str(session.id))
+    opened = answered(
+        "history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id),
+        thread=str(session.id), folder=session.config.get("workspace_path"),
+    )
     now = dict(told)
     if opened is not None:
         now.update(copies=opened.get("set_aside_folders", []), gone=opened.get("set_aside_gone", []))
@@ -513,15 +552,14 @@ async def set_aside_of(
             # A repository set aside whole holds those told before: no open names them, and they are kept with it.
             held = any(name.endswith(".repository") for name in now["copies"])
             now["snapshots"] = [*(aside for aside in told["snapshots"] if held and aside not in named), *named]
+        # Named by one open alone: what it names is added to what was told before.
+        places = [name for name in dict.fromkeys(opened.get("set_aside_places", [])) if name not in told["places"]]
+        now["places"] = [*told["places"], *places][-MAX_ASIDE:]
     recorded = [aside for aside in (landing or {}).get("set_aside", []) if aside not in now["snapshots"]]
     # Its computer keeps the latest sixteen: a word of more is kept to as many as an open names of what is set aside whole.
     now["snapshots"] = [*now["snapshots"], *recorded][-MAX_ASIDE:]
-    new = {
-        "copies": [name for name in now["copies"] if name not in told["copies"]],
-        "snapshots": [aside for aside in now["snapshots"] if aside not in told["snapshots"]],
-        "gone": [name for name in now["gone"] if name not in told["gone"]],
-    }
-    kept = now if before is not None or any(now.values()) else None
+    new = {key: [name for name in now[key] if name not in told[key]] for key in ("copies", "snapshots", "gone", "places")}
+    kept = {key: names for key, names in now.items() if key != "places" or names} if before is not None or any(now.values()) else None
     return kept, set_aside_said(new)
 
 
@@ -530,7 +568,7 @@ def _set_aside_told(told: Any) -> dict[str, list[str]]:
     told = told if isinstance(told, dict) else {}
     return {
         key: [name for name in told.get(key) or () if isinstance(name, str)] if isinstance(told.get(key), list) else []
-        for key in ("copies", "snapshots", "gone")
+        for key in ("copies", "snapshots", "gone", "places")
     }
 
 

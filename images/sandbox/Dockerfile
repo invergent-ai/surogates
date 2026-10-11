@@ -202,13 +202,13 @@ COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
 # loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
 # The check reads the BPF_PROG( line after each SEC, so it misjudges a declaration split
 # across lines, or one that also takes the optional trailing int ret: keep each on one line, without ret.
-# ctype names a BTF type as C writes it, for the pointers, qualifiers and types the hooks take.
+# ctype names a BTF type as C writes it, for the pointers, qualifiers and types the hooks take; type 0 is void.
 RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
     && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
     && { test -s /vmlinux || { echo "no vmlinux decompressed from /vmlinuz" >&2; exit 1; }; } \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
     && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
-        function ctype(id,   k, t) { k = kind[id]; t = target[id]; if (k == "PTR") return ctype(t) " *"; \
+        function ctype(id,   k, t) { if (id == 0) return "void"; k = kind[id]; t = target[id]; if (k == "PTR") return ctype(t) " *"; \
           if (k == "CONST" || k == "VOLATILE") return kind[t] == "PTR" ? ctype(t) " " tolower(k) : tolower(k) " " ctype(t); \
           if (k == "STRUCT" || k == "UNION" || k == "ENUM") return tolower(k) " " name[id]; return name[id]; } \
         BEGIN { q = sprintf("%c", 39); } \

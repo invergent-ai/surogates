@@ -15,6 +15,8 @@ import type { Folder } from "../../src/vm/manager.js";
 export const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 // The device each guest opens for KVM: /dev/kvm, unless the job hides it.
 export const KVM = process.env.SUROGATE_VM_KVM;
+// Each folder's daemon, where a job names another than Ubuntu's: another release's, say.
+export const DAEMON = process.env.SUROGATE_VM_VIRTIOFSD ? { virtiofsd: process.env.SUROGATE_VM_VIRTIOFSD } : {};
 // Each file's beforeAll. Without KVM they fail, as Section 11 has a VM job do: a job runs them
 // emulated only by naming a device that does not exist in SUROGATE_VM_KVM, as the app takes it.
 export function needsKvm(): void {

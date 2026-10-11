@@ -66,9 +66,11 @@ export interface ThreadRow {
   resolvedAt: string | null;
 }
 
-// A copy or a repository of a thread's that its computer kept whole when it made it again, and when that was.
+// A copy or a repository of a thread's that its computer kept whole when it made it again, or a place of its folder's
+// (its folder's earlier history, with the copies in it) that its computer's app set aside when the folder at its path
+// was another, or its record could not be read; and when that was.
 export interface SetAsideWhole {
-  kind: "copy" | "repository";
+  kind: "copy" | "repository" | "place";
   at: string; // UTC, ISO 8601 with Z
 }
 

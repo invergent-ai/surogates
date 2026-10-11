@@ -7,7 +7,8 @@
 //               thread's asks it, under checkpoint:<turn>:…, as each takes one before its step.
 //   history     a step of the folder's history that git in the guest runs for the thread's copy
 //               (surogates/sandbox/local_history.py): {action, ...its arguments}. The thread itself asks it, under
-//               land:<turn>…; a turn's open also under open:<turn>….
+//               land:<turn>…; a turn's open also under open:<turn>…. A pruning is one of them: the history's own,
+//               cut after a landing, at most once a day.
 //   land        a landing's look at the folder, its writes into it and their put-back, what a landing cut short left
 //               put back, and its forgetting: the file helper's land kind (files/land.ts), in the landing's own host on
 //               the folder (hosts/tool-hosts.ts). The thread itself asks it, under land:<turn>….
@@ -22,10 +23,10 @@ import type { BoundFolder } from "../hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
 // The actions each kind takes over the device link. The history's own close and drop are the app's to ask, and a
-// snapshot's listing, a pruning and the file helper's other kinds are none of them.
+// snapshot's listing and the file helper's other kinds are none of them.
 export const THREAD_ACTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["checkpoint", new Set(["take", "restore"])],
-  ["history", new Set(["open", "changed", "fetch", "pickup", "picked", "commit", "record", "keep", "forget"])],
+  ["history", new Set(["open", "changed", "fetch", "pickup", "picked", "commit", "record", "keep", "forget", "prune"])],
   ["land", new Set(["recover", "revisions", "apply", "unapply", "forget"])],
 ]);
 export const THREAD_KINDS: ReadonlySet<string> = new Set(THREAD_ACTIONS.keys());

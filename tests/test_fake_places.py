@@ -68,7 +68,8 @@ def test_the_tests_computer_refuses_a_threads_kind_as_the_apps_gate_does(tmp_pat
     # A session under the thread asks its snapshots, and nothing else of the thread's.
     under = places.run(frame(kind, action, own(kind, action), calling=HELPER_SESSION))
     assert (under == NOT_ITS_TURN) == (kind != "checkpoint")
-    assert places.run(frame(kind, "prune", own(kind, action))) == NOT_ITS_TURN
+    # An action no kind has: a pruning is a step of the history's now, and a hand-off is none on a computer.
+    assert places.run(frame(kind, "hand_off", own(kind, action))) == NOT_ITS_TURN
     # A chat bound to the folder itself has none of them.
     assert places.run(frame(kind, action, own(kind, action), root=str(uuid4()))) == NOT_A_THREAD
 

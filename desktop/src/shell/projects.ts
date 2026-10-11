@@ -100,7 +100,7 @@ function fileOf(value: unknown): ProducedFile[] {
 // What a thread's computer set aside of its work, as a row says it. Taken as a file's mark is: an entry the app
 // does not know, or whose time is none, is left out, never a row refused; with nothing left, none. A row says
 // at most as many of each as its computer names.
-const ASIDE_KINDS = ["copy", "repository"] as const;
+const ASIDE_KINDS = ["copy", "repository", "place"] as const;
 const ASIDE_MOST = 64;
 function setAsideOf(value: unknown): SetAside | null {
   const { kept, snapshots, gone } = fields(value);

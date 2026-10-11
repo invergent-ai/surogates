@@ -57,7 +57,7 @@ def scenario(place: Path) -> None:
             looked = git(store / "clones" / thread, "fsck", "--connectivity-only", "--no-dangling", "--cache")
             assert looked.returncode == 0 and not looked.stdout, (thread, looked)
 
-    assert ask(ONE, "prune") == {"error": {"code": "not_a_request", "message": "refused the request: it names no action this computer's history takes"}}
+    assert ask(ONE, "hand_off") == {"error": {"code": "not_a_request", "message": "refused the request: it names no action this computer's history takes"}}
     assert ask(ONE, "open") == {"copy": "made"} == ask(TWO, "open")
     one, two = store / "threads" / ONE, store / "threads" / TWO
     assert files(one) == files(folder) and not (one / ".git").exists()
@@ -207,6 +207,27 @@ def scenario(place: Path) -> None:
     print("what a landing left out stays in the copy as the thread left it, by the guest's git, and so when its record is cut after its push")
     connected()
     print("no thread's repository names what neither it nor the history holds, by the guest's git")
+
+    # The history pruned, a hundred days on by the server's clock: one pack, which every repository notes, and none of
+    # the old ones; every repository whole, by the guest's git; and nothing more the same day.
+    kept = [f"refs/{kind}/{thread}" for thread in (ONE, TWO) for kind in ("heads/threads", "bases")]
+    later = time.time() + 100 * 86_400
+    old = {p.name for p in (store / "history.git" / "objects" / "pack").iterdir()}
+    pruned = ask(ONE, "prune", keep=kept, now=later)
+    assert pruned["pruned"] is True and pruned["commits"] > 1, pruned
+    [pack] = {p.name[5:-5] for p in (store / "history.git" / "objects" / "pack").glob("pack-*.pack")}
+    assert {p.name for p in (store / "history.git" / "objects" / "pack").iterdir()} == {f"pack-{pack}.pack", f"pack-{pack}.idx"} and len(old) > 2
+    for thread in (ONE, TWO):
+        assert (store / "clones" / thread / "borrowed").read_text() == f"{pack}\n", thread
+    assert not (store / "pruning.git").exists()
+    connected()
+    assert ask(TWO, "prune", keep=kept, now=later + 3_600) == {"pruned": False}
+    # Each thread works on after it, and a new one's copy is the folder's files.
+    assert ask(ONE, "changed") == {"paths": [".vscode/tasks.json", "notes.txt"]} and ask(TWO, "changed") == {"paths": [".vscode/launch.json"]}
+    three = "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b"
+    assert ask(three, "open") == {"copy": "made"} and files(store / "threads" / three) == files(folder)
+    connected()
+    print("a pruning leaves the history one pack, which every repository notes, and each whole and at work, by the guest's git")
 
 
 def a_large_folder_left_out(place: Path) -> str:

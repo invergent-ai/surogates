@@ -263,9 +263,10 @@ test("what a thread's computer set aside maps to the row's, each entry taken onl
     created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }).setAside;
   const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+  const place = { kind: "place", at: "2026-10-09T08:00:00Z" };
   assert.deepEqual(
-    asideOf({ kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] }),
-    { kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] },
+    asideOf({ kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] }),
+    { kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] },
   );
   // A kind or a time the page does not know, or a count that is none, is left out; and with nothing left, none.
   assert.deepEqual(

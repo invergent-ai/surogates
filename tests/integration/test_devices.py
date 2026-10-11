@@ -1873,7 +1873,8 @@ async def test_large_and_binary_output_crosses_the_link(laptop_rig):
         wio.run("head -c 3000000 /dev/zero | tr '\\000' x", workdir=None, timeout=30), 10.0,
     )
     assert "chars omitted by the computer" in big.output
-    assert rig.laptop.connected
+    # On the one connection: none was dropped and made again.
+    assert (rig.laptop.connected, rig.laptop.connections) == (True, 1)
 
 
 async def test_a_screenshot_over_a_mebibyte_comes_back_whole_from_the_computer(laptop_rig):
@@ -1904,8 +1905,8 @@ async def test_a_scripts_value_shaped_as_a_transfer_comes_back_as_its_value_with
     ))
 
     assert await asyncio.wait_for(client.evaluate("return await (await fetch('/api/transfers/1')).json();"), 10.0) == returned
-    # Never read as the link's own framing: the computer stays connected.
-    assert rig.laptop.connected
+    # Never read as the link's own framing: the computer stays on its one connection.
+    assert (rig.laptop.connected, rig.laptop.connections) == (True, 1)
     assert rig.laptop.ran == ["browser.evaluate"]
 
 
@@ -2702,7 +2703,7 @@ async def test_a_refused_operation_does_not_wedge_the_link(laptop_rig):
         await asyncio.wait_for(wio.which("sh\ud83d"), 2.0)
     assert await asyncio.wait_for(wio.which("sh"), 5.0) is True
     assert rig.laptop.ran == ["which"]
-    assert rig.laptop.connected
+    assert (rig.laptop.connected, rig.laptop.connections) == (True, 1)
 
 
 async def test_a_result_that_is_not_valid_unicode_is_recorded_as_an_error(laptop_rig, link_url):

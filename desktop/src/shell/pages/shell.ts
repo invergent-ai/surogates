@@ -27,7 +27,8 @@ interface ThreadRow {
   files: Array<{ kind: "file" | "artifact"; label: string; ref: string; landing: "landed" | "redoing" | "not_merged" | "undone" | null }>;
   // What its computer set aside of its work, out of its copy there: none for a thread in the cloud.
   setAside?: {
-    kept: Array<{ kind: "copy" | "repository"; at: string }>; snapshots: number; gone: Array<{ kind: "copy" | "repository"; at: string }>;
+    kept: Array<{ kind: "copy" | "repository" | "place"; at: string }>; snapshots: number;
+    gone: Array<{ kind: "copy" | "repository" | "place"; at: string }>;
   } | null;
   place: { kind: "cloud" } | { kind: "device"; deviceName: string; online: boolean } | null;
   updatedAt: string;

@@ -339,11 +339,16 @@ def _found(key: str, entry: list) -> str:
 #: longer keeps: each once, in the report of the turn whose end first heard of it.
 _SET_ASIDE = {
     "copies": "Set aside whole on its computer, as its copy there had to be made again",
+    "places": "Set aside on its computer, as what it kept at its folder's path was another folder's history or could not be read",
     "snapshots": "Set aside on its computer, as its copy there was made other files",
     "gone": "No longer kept on its computer, which keeps only the latest of what it set aside",
 }
 #: Where what is set aside is, and that nothing here brings it back.
 _SET_ASIDE_WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
+#: What each kind of what was set aside is, as a report names it.
+_SET_ASIDE_KINDS = {
+    "copy": "its copy", "repository": "its repository", "place": "the earlier history at its folder's path, with its threads' copies",
+}
 
 
 def _set_aside_lines(data: dict) -> str:
@@ -356,29 +361,32 @@ def _set_aside_lines(data: dict) -> str:
     if not isinstance(told, dict):
         return ""
 
-    def when(entry: object, how: str) -> str | None:
+    def when(entry: object, how: str, kinds: tuple[str, ...]) -> str | None:
         kind, at = (entry.get("kind"), entry.get("at")) if isinstance(entry, dict) else (None, None)
         try:
             moment = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ") if isinstance(at, str) else None
         except ValueError:
             moment = None
-        return None if kind not in ("copy", "repository") or moment is None else f"its {kind} {how} {moment:%Y-%m-%d %H:%M} UTC"
+        return None if kind not in kinds or moment is None else f"{_SET_ASIDE_KINDS[kind]} {how} {moment:%Y-%m-%d %H:%M} UTC"
 
-    def said(key: str, how: str) -> list[str]:
+    def said(key: str, how: str, kinds: tuple[str, ...] = ("copy", "repository")) -> list[str]:
         entries = told[key] if isinstance(told.get(key), list) else []
-        return [found for found in (when(entry, how) for entry in entries) if found]
+        return [found for found in (when(entry, how, kinds) for entry in entries) if found]
 
     copies, gone = said("kept", "as it was at"), said("gone", "set aside at")
+    places = said("kept", "as they were at", ("place",))
     snapshots = told["snapshots"] if type(told.get("snapshots")) is int and told["snapshots"] > 0 else 0
     lines = ""
     if copies:
         lines += f"\n{_SET_ASIDE['copies']}: {_listed([{'label': found} for found in copies], limit=_MAX_LISTED_LEFT_OUT)}"
+    if places:
+        lines += f"\n{_SET_ASIDE['places']}: {_listed([{'label': found} for found in places], limit=_MAX_LISTED_LEFT_OUT)}"
     if snapshots:
         counted = f"{snapshots} snapshot{'s' if snapshots > 1 else ''}"
         lines += f"\n{_SET_ASIDE['snapshots']}: what the copy held of the thread's own, in {counted}"
     if gone:
         lines += f"\n{_SET_ASIDE['gone']}: {_listed([{'label': found} for found in gone], limit=_MAX_LISTED_LEFT_OUT)}"
-    return lines + (f"\n{_SET_ASIDE_WHERE}" if copies or snapshots else "")
+    return lines + (f"\n{_SET_ASIDE_WHERE}" if copies or places or snapshots else "")
 
 
 #: What a report says of the files a turn made that are in no landing, by where they were left.
@@ -688,6 +696,14 @@ class ContextReplayMixin:
         so an open tool-calling iteration is closed by tracking the
         ``tool_calls[*].id`` set from its ``llm.response`` until every id
         has a matching result.
+
+        A call can also end before its ``llm.response`` is written: the
+        streaming executor starts it while the response still streams.  Its
+        ``tool.result`` is held from the request to its response, through a
+        compaction that has the request asked again, and stands right after
+        the response that made the call, in the order of its calls, as the
+        live turn asked it; one whose call no response made is no part of
+        the conversation.
         """
         # Exact inverse of ``_sanitize_paths``, which replaces
         # ``workspace_path.rstrip("/")``.
@@ -696,6 +712,11 @@ class ContextReplayMixin:
         messages: list[dict] = []
         iteration_open = False
         awaiting_tool_ids: set[str] = set()
+        # Each call a response has made, and the results written before the response that made their call;
+        # whether the model was asked and has not answered yet.
+        made_calls: set[str] = set()
+        early_results: dict[str, dict] = {}
+        asked = False
         deferred_users: list[dict] = []
         deferred_advisors: list[dict] = []
         # Worker reports wait for the next model request, which is where the
@@ -723,6 +744,8 @@ class ContextReplayMixin:
                 held_reports = []
                 iteration_open = True
                 awaiting_tool_ids = set()
+                early_results = {}
+                asked = True
 
             elif etype in MESSAGE_TYPES:
                 # A coordinator's follow-up is read as a typed message is: its marked content.
@@ -744,6 +767,13 @@ class ContextReplayMixin:
                     messages.append(stored_message)
                 tool_calls = (stored_message or {}).get("tool_calls") or []
                 ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
+                made_calls |= ids
+                if "answers" not in event.data:
+                    asked = False
+                for call_id in dict.fromkeys(tc.get("id") for tc in tool_calls):
+                    if call_id in early_results:
+                        messages.append(early_results.pop(call_id))
+                        ids.discard(call_id)
                 if ids:
                     awaiting_tool_ids = ids
                 else:
@@ -755,16 +785,20 @@ class ContextReplayMixin:
                 content = event.data.get("content", "")
                 if workspace_root and _WORKSPACE_TOKEN in content:
                     content = content.replace(_WORKSPACE_TOKEN, workspace_root)
-                messages.append({
+                result = {
                     "role": "tool",
                     "tool_call_id": event.data.get("tool_call_id", ""),
                     "content": content,
-                })
-                if awaiting_tool_ids:
-                    awaiting_tool_ids.discard(event.data.get("tool_call_id"))
-                    if not awaiting_tool_ids:
-                        iteration_open = False
-                        _flush_deferred()
+                }
+                if asked and result["tool_call_id"] not in made_calls:
+                    early_results[result["tool_call_id"]] = result
+                else:
+                    messages.append(result)
+                    if awaiting_tool_ids:
+                        awaiting_tool_ids.discard(event.data.get("tool_call_id"))
+                        if not awaiting_tool_ids:
+                            iteration_open = False
+                            _flush_deferred()
 
             elif (
                 etype == EventType.BOARD_UPDATE.value

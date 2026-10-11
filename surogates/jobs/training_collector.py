@@ -413,6 +413,12 @@ class TrainingDataCollector:
         The trajectory ends at the first of: next ``user.message``,
         next ``skill.invoked``, ``session.complete`` or
         ``session.fail``.
+
+        A call can end before the ``llm.response`` that made it is written
+        (the streaming executor starts it while the response streams): its
+        ``tool.result`` is held and stands right after that response, in
+        the order of its calls, as replay puts it.  One whose call no
+        response made is left out.
         """
         raw_message = skill_event.data.get("raw_message", "")
         user_text = _strip_skill_prefix(raw_message, skill_name)
@@ -423,6 +429,9 @@ class TrainingDataCollector:
             {"role": "user", "content": user_text},
         ]
         has_final_assistant_content = False
+        # Each call a response has made, and the results written before the response that made their call.
+        made_calls: set[str] = set()
+        early_results: dict[str, dict[str, Any]] = {}
 
         for i in range(start_idx + 1, len(events)):
             event = events[i]
@@ -447,13 +456,21 @@ class TrainingDataCollector:
                 messages.append(dict(msg))
                 if msg.get("content"):
                     has_final_assistant_content = True
+                for call_id in dict.fromkeys(call.get("id") for call in msg.get("tool_calls") or []):
+                    made_calls.add(call_id)
+                    if call_id in early_results:
+                        messages.append(early_results.pop(call_id))
 
             elif etype == EventType.TOOL_RESULT.value:
-                messages.append({
+                result = {
                     "role": "tool",
                     "tool_call_id": event.data.get("tool_call_id", ""),
                     "content": str(event.data.get("content", ""))[:10_000],
-                })
+                }
+                if result["tool_call_id"] in made_calls:
+                    messages.append(result)
+                else:
+                    early_results[result["tool_call_id"]] = result
             # ``tool.call`` is intentionally skipped — the same tool
             # call is already present inline on the preceding
             # ``llm.response`` message's ``tool_calls`` field.
