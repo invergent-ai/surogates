@@ -1,5 +1,6 @@
 // The folders this computer's chats are bound to, as the app holds them for its PATH rule
-// (pathOutside): each by what it is now, looked at off the main process's own thread.
+// (pathOutside), the PATH's own entries, and a new chat's folder: each by what it is now, looked
+// at off the main process's own thread.
 //
 // A look into a network or FUSE mount whose server has gone does not return until the mount does.
 // On the main thread it would stop the tray, the pages and the device's link for as long. So each
@@ -38,6 +39,22 @@ export class FolderLooks {
   async held(folders: string[]): Promise<Array<{ dev: number; ino: number }>> {
     const found = await Promise.all([...new Set(folders)].map((folder) => this.one(folder)));
     return found.filter((id) => id !== null);
+  }
+
+  /** Whether *folder* is there and answered, by the same looks: a new chat's folder is checked on the main thread only once it has. */
+  async answers(folder: string): Promise<boolean> {
+    return (await this.one(folder)) !== null;
+  }
+
+  /**
+   * *path*, a PATH, with only its absolute entries that are there and answered, in their order: the app
+   * looks for its tools on it (pathOutside, findOnPath), on the main thread, which an entry on a mount
+   * that has stopped answering would stop. A program in one could not be run anyway.
+   */
+  async path(path: string | undefined): Promise<string> {
+    const entries = (path ?? "").split(":").filter((entry) => entry.startsWith("/"));
+    const answering = await Promise.all(entries.map((entry) => this.answers(entry)));
+    return entries.filter((_entry, n) => answering[n]).join(":");
   }
 
   // What *folder* is, by the look at it that runs, or by one begun once there is room for it.

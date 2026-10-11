@@ -398,18 +398,21 @@ function startDelivery(check = false): void {
 // has something left to unpack.
 function lookForTools(): void {
   const unpacking = delivery !== null && delivery.state.state !== "ready";
-  // The folders are taken once, for the VM's tools and for the file helper's: the two looks then
-  // hold the same folders, and the line and a file tool name the same tools.
+  // The folders and the PATH are taken once, for the VM's tools and for the file helper's: the two
+  // looks then hold the same folders, and the line and a file tool name the same tools.
   const held = boundFolders();
-  vmLacking = held.then((folders) => missingTools({}, unpacking, folders));
-  lookForFileTools(true, held);
+  const path = toolsPath();
+  vmLacking = Promise.all([held, path]).then(([folders, on]) => missingTools({}, unpacking, folders, on));
+  lookForFileTools(true, held, path);
 }
 
 // Each folder this computer's chats are bound to, as its file host holds it: by what it is now. One
 // that is not there or cannot be read has no file host, and none starts once the journal is closed.
 // Never looked at on this thread: a folder on a mount that has stopped answering would stop the app
 // with it. One that does not answer in time is not held (FolderLooks).
-const folderLooks = new FolderLooks(undefined, undefined, (folder) => report(new Error(`${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
+const folderLooks = new FolderLooks(undefined, undefined, (folder) => report(new Error((process.env.PATH ?? "").split(":").includes(folder)
+  ? `${folder}, on the app's PATH, did not answer in ${LOOK_MS / 1000} s: no tool is looked for there until it answers`
+  : `${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
 function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
   let folders: string[] = [];
   try {
@@ -420,6 +423,10 @@ function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
   return folderLooks.held(folders);
 }
 
+// The app's PATH, as the tools are looked for on it: its entries that answered, each looked at off
+// this thread, as the folders are (FolderLooks). One on a mount that has stopped answering is left out.
+const toolsPath = (): Promise<string> => folderLooks.path(process.env.PATH);
+
 // The file helper's tools, looked for again beside what the VM was last found to lack: with each
 // look, once the device's folders are known, and at each change of them. They are looked for where
 // the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
@@ -427,10 +434,10 @@ function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
 // written a program. So the line and a file tool's answer name the same tools. *said*: tell the
 // pages even when nothing changed, as Check again asks.
 let toolsOwedSaid = false;
-function lookForFileTools(said = false, folders = boundFolders()): void {
+function lookForFileTools(said = false, folders = boundFolders(), path = toolsPath()): void {
   toolsOwedSaid ||= said;
-  const look: Promise<string[]> = Promise.all([vmLacking, folders]).then(([vm, held]) => {
-    const found = [...fileToolsMissing(BWRAP, pathOutside(process.env.PATH, held)), ...vm];
+  const look: Promise<string[]> = Promise.all([vmLacking, folders, path]).then(([vm, held, on]) => {
+    const found = [...fileToolsMissing(BWRAP, pathOutside(on, held)), ...vm];
     // A look that a later one has overtaken says nothing: the later one's folders are the newer,
     // and it tells the pages what this one owed them.
     if (lackingFound !== look) return lackingFound;
@@ -819,6 +826,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     }),
     prompts,
     approvalPrompts: prompts,
+    answers: (folder) => folderLooks.answers(folder),
     // The page hears which of this account's chats changed on this computer, while it is this account's page.
     onBindingChanged: (root) => {
       // Settings → Folders and permissions draws the chat's folder, mode and hosts again.

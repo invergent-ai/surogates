@@ -67,14 +67,15 @@ export function sweep(run: string): void {
 
 // Where the VM's tools are looked for: where the file helper's are, by the one rule (pathOutside).
 // The app's PATH without its relative entries, and without any entry in one of *held*, the folders
-// a chat is bound to, where a command may have written a program. The app's check holds them all.
-// This process, which starts the VM, knows none of them: it drops the relative entries.
-const toolPath = (held: Held = []) => pathOutside(process.env.PATH, held);
+// a chat is bound to, where a command may have written a program. The app's check holds them all,
+// on the app's PATH less any entry that did not answer (FolderLooks). This process, which starts
+// the VM, knows none of them: it drops the relative entries.
+const toolPath = (held: Held = [], path = process.env.PATH) => pathOutside(path, held);
 type Held = Array<{ dev: number; ino: number }>;
 // What QEMU and virtiofsd are given of the app's environment: that PATH, where virtiofsd finds
 // newuidmap and newgidmap, and nothing else: the user's shell may export what either acts on,
 // OPENSSL_CONF and the loader's variables among them.
-const toolEnv = (held: Held = []) => ({ PATH: toolPath(held) });
+const toolEnv = () => ({ PATH: toolPath() });
 // QEMU by its whole path, as that PATH finds it, or null: it is run by that path and no other.
 const qemuOn = (path: string) => findOnPath("qemu-system-x86_64", path, "/");
 
@@ -92,11 +93,11 @@ function launch(argv: string[]): { child: ChildProcess; said: () => string } {
 // Whether *name* is a program on *path*, where virtiofsd looks for newuidmap and newgidmap.
 const onPath = (name: string, path = toolPath()) => findOnPath(name, path, "/") !== null;
 
-// The major and minor version *program* says it is, as `--version` prints it, or null: one that has
-// not answered in 5 s is killed, as a SIGTERM may be ignored.
-const versionOf = (program: string | null, args: string[], held: Held = []) => new Promise<[number, number] | null>((resolve) => {
+// The major and minor version *program* says it is, as `--version` prints it, run on *path*, or null:
+// one that has not answered in 5 s is killed, as a SIGTERM may be ignored.
+const versionOf = (program: string | null, args: string[], path: string) => new Promise<[number, number] | null>((resolve) => {
   if (program === null) return resolve(null);
-  execFile(...cleanly(program, args), { timeout: 5_000, killSignal: "SIGKILL", env: toolEnv(held) }, (error, stdout) => {
+  execFile(...cleanly(program, args), { timeout: 5_000, killSignal: "SIGKILL", env: { PATH: path } }, (error, stdout) => {
     const found = error ? null : /(\d+)\.(\d+)/.exec(stdout);
     resolve(found ? [Number(found[1]), Number(found[2])] : null);
   });
@@ -110,13 +111,16 @@ const atLeast = (version: [number, number] | null, [major, minor]: [number, numb
  * later; newuidmap and newgidmap, which virtiofsd runs for its id maps; and, while the image
  * has something left to unpack (*unpacking*), zstd, which unpacks its download. Checked at
  * the app's start, and at the status line's Check again. QEMU and the two id-map tools are looked
- * for by the PATH rule of the file helper's tools, with *held* the folders chats are bound to.
+ * for by the PATH rule of the file helper's tools, with *held* the folders chats are bound to, on
+ * *on*, the app's PATH as it was looked at.
  */
-export async function missingTools(paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true, held: Held = []): Promise<string[]> {
-  const path = toolPath(held);
+export async function missingTools(
+  paths: { virtiofsd?: string; zstd?: string } = {}, unpacking = true, held: Held = [], on = process.env.PATH,
+): Promise<string[]> {
+  const path = toolPath(held, on);
   const [qemu, virtiofsd] = await Promise.all([
-    versionOf(qemuOn(path), ["--version"], held),
-    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"], held),
+    versionOf(qemuOn(path), ["--version"], path),
+    versionOf(paths.virtiofsd ?? VIRTIOFSD, ["--version"], path),
   ]);
   let zstd = true;
   try {
