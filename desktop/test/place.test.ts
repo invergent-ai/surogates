@@ -666,6 +666,25 @@ describe("another folder at the path of one that has a place", () => {
     for (const one of asked) expect(one.status === "rejected" && one.reason).not.toBeInstanceOf(FolderReplaced);
     expect([looks, histories(), readdirSync(first.history), letGo]).toEqual([1, [first.key, `${first.key}.json`], ["history.git"], []]);
   });
+
+  it("is not set aside while the folder cannot be read, and that is said in its own words, not as a folder replaced", async () => {
+    // A folder whose way is shut to this user: it may be the one bound, or not, and that cannot be told.
+    const shut = join(base, "Shut");
+    const inside = join(shut, "Documents");
+    mkdirSync(inside, { recursive: true });
+    const binding = bound(inside);
+    chmodSync(shut, 0o000);
+    try {
+      const refused = await placeOf(data, binding, sandbox).catch((error: unknown) => error);
+      expect(refused).not.toBeInstanceOf(FolderReplaced);
+      expect(String(refused)).toBe(`Error: The folder ${inside} could not be read (Permission denied), so whether it is the one this thread was bound to cannot be told. Once it can be read, ask again`);
+    } finally {
+      chmodSync(shut, 0o700);
+    }
+    expect([histories().filter((name) => name.startsWith(keyOf(inside))), letGo]).toEqual([[], []]);
+    // Readable again, it has its place.
+    expect(await placed(binding)).toMatchObject({ key: keyOf(inside), real: { path: inside } });
+  });
 });
 
 describe("the places set aside under a folder's path", () => {
