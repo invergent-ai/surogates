@@ -406,7 +406,7 @@ def turn_ended(session: Any) -> None:
 
 
 #: The events that end a thread's turn: a landing or its failure, a failed turn, a stop.
-_TURN_ENDS = (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED)
+TURN_ENDS = (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED)
 
 
 async def last_turn_end(store: Any, session_id: Any) -> Any | None:
@@ -416,7 +416,7 @@ async def last_turn_end(store: Any, session_id: Any) -> Any | None:
     message): a command lands nothing, and the thread's next turn goes on
     from the end before it.
     """
-    return await store.last_event(session_id, *_TURN_ENDS, without_key="answers")
+    return await store.last_event(session_id, *TURN_ENDS, without_key="answers")
 
 
 async def name_turn(store: Any, session: Any) -> None:
