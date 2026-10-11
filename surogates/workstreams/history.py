@@ -30,6 +30,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import Range
 
+from surogates.db.models import Session as SessionRow
 from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
 from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, YOU, _who, tracked
@@ -399,6 +400,30 @@ async def kept_refs(session_factory: Any, workstream_id: UUID | str) -> list[str
                 f"refs/handoff/{thread}", f"refs/handoff-from/{thread}", f"refs/helpers/{thread}/",
             )
         ]
+
+
+async def kept_refs_in(session_factory: Any, device_id: UUID, folder: str) -> list[str]:
+    """The refs a pruning of *folder*'s history on the computer *device_id* keeps: each thread's that works there, whichever project's.
+
+    A live thread's branch and base, and those of one resolved within the
+    window, as :func:`kept_refs` names a project's.  A folder has one
+    history on its computer for every project that uses it, and a thread
+    is of it by the computer and the folder the server stamped on it.  The
+    computer keeps besides the refs of every thread whose repository it holds.
+    """
+    ended = WorkstreamThread.resolved_at > func.now() - timedelta(days=PRUNE_DAYS)
+    async with session_factory() as db:
+        threads = await db.execute(
+            select(WorkstreamThread.session_id)
+            .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
+            .where(
+                SessionRow.config["execution"]["device_id"].astext == str(device_id),
+                SessionRow.config["workspace_path"].astext == folder,
+                or_(WorkstreamThread.resolved_at.is_(None), ended),
+            )
+            .order_by(WorkstreamThread.session_id)
+        )
+        return [ref for thread in threads.scalars() for ref in (f"refs/heads/threads/{thread}", f"refs/bases/{thread}")]
 
 
 #: What a project over the file cap answers wherever its history is asked for.

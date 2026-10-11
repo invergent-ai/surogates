@@ -4,13 +4,15 @@
 
 import type { Socket } from "node:net";
 import { availableParallelism } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
 
 // Ubuntu's, whose AppArmor profile lets its namespace sandbox work under 24.04's restriction.
 export const VIRTIOFSD = "/usr/libexec/virtiofsd";
+// util-linux's, as bwrap runs it for a read-only folder's daemon.
+const UNSHARE = "/usr/bin/unshare";
 // The guest's empty PCIe slots: one for each folder added while it runs.
 export const ROOT_PORTS = MAX_SHARES;
 const MEMORY = "2G";
@@ -77,13 +79,30 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
 // with. Unprivileged, the daemon holds a descriptor for each file the guest keeps, up to
 // the user's hard limit; with cache=auto the guest kept every file it had looked at, and a
 // 150 000-file node_modules ran it out of them.
-// *guestUid* 0: the guest's root, for the agent's own git on a folder's place. *readonly*: the
-// daemon refuses every write, whatever the guest mounts (a virtiofsd that has the option).
-export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }, readonly = false): string[] {
+// *guestUid* 0: the guest's root, for the agent's own git on a folder's place.
+export function virtiofsdArgs(folder: string, socket: string, guestUid: number, host: { uid: number; gid: number }): string[] {
   return [
     `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never",
     `--uid-map=:${guestUid}:${host.uid}:1:`, `--gid-map=:${guestUid}:${host.gid}:1:`,
-    ...(readonly ? ["--readonly"] : []),
+  ];
+}
+
+// A folder the guest's root reads alone: *daemon*, a virtiofsd, in a user namespace of *bwrap*'s, where the
+// host user is root, as the guest's root is to the guest, and a mount namespace that holds the system's
+// programs, the run folder for its socket, and the folder bound read-only over itself, mounts in it as well.
+// Then in a mount namespace of its own, private, so a mount made in the folder after the share began, a
+// drive or a network folder, never reaches it: the folder stays as it was, read-only. So nothing of the
+// guest's writes it, whatever the guest mounts, on a virtiofsd that cannot refuse writes itself too
+// (Ubuntu 24.04's 1.10); *refusing*, one that can, is told to as well. Root there, the daemon makes no user
+// namespace of its own, and maps no ids: its PID, mount and network namespaces alone. bwrap's own child
+// dies with it, as the daemon with the manager.
+export function readOnlyDaemon(bwrap: string, daemon: string, folder: string, socket: string, refusing = false): string[] {
+  return [
+    bwrap, "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "ALL", "--unshare-pid", "--proc", "/proc", "--dev", "/dev",
+    "--ro-bind", "/usr", "/usr", "--ro-bind-try", "/lib", "/lib", "--ro-bind-try", "/lib64", "/lib64", "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache",
+    "--ro-bind", daemon, daemon, "--bind", dirname(socket), dirname(socket), "--ro-bind", folder, folder, "--die-with-parent", "--",
+    UNSHARE, "--mount", "--propagation", "private", "--",
+    daemon, `--shared-dir=${folder}`, `--socket-path=${socket}`, "--sandbox=namespace", "--cache=never", ...(refusing ? ["--readonly"] : []),
   ];
 }
 

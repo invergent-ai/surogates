@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from surogates.devices.link import TRANSFER_WINDOW
+from surogates.devices.link import CLOSE_REVOKED, CLOSE_SUPERSEDED, CLOSE_UNAUTHENTICATED, TRANSFER_WINDOW
 from surogates.devices.workspace import (
     CHUNK_BYTES,
     MAX_MESSAGE_CHARS,
@@ -420,6 +420,10 @@ class InProcessRunner:
         return json.loads(wire)
 
 
+#: The server's closes after which the app does not connect again (desktop/src/link/client.ts, ``FINAL``).
+FINAL = frozenset({CLOSE_UNAUTHENTICATED, CLOSE_REVOKED, CLOSE_SUPERSEDED})
+
+
 class FakeLaptop:
     """Surogate Desktop's side of the device link, in a test.
 
@@ -431,7 +435,12 @@ class FakeLaptop:
     from chunk 0 again whenever the operation is delivered again, until the
     server acknowledges it or does not want it.  A write whose data comes as a
     transfer runs once that data is whole; every chunk is acknowledged, and a
-    new connection starts each one over.
+    new connection starts each one over.  A link the server closes is made
+    again, as the app makes it again, but where the app may not make it again
+    (``FINAL``): a scene that holds the event loop past the server's bounds,
+    which close the link as silent or as failed, has its computer back, and
+    what was open on it is sent again.  A link it ends itself, as a computer
+    that drops off, stays away until a scene connects it.
 
     With *data*, the app's data, it keeps a copy of the folder for a
     project's thread whose bind names one (``tests.fake_places``): the
@@ -482,7 +491,11 @@ class FakeLaptop:
         # The type of every frame received after welcome, in order.
         self.frames: list[str] = []
         self.connected = False
+        # How many connections were welcomed: one made again after a drop counts too.
+        self.connections = 0
         self._ws: ClientConnection | None = None
+        # The connection it ended itself, which it does not make again.
+        self._left: ClientConnection | None = None
         self._tasks: list[asyncio.Task] = []
         self._sending = asyncio.Lock()
         # On this connection: chunks acknowledged per transfer, and transfers that ended.
@@ -493,6 +506,7 @@ class FakeLaptop:
         self._incoming: dict[str, tuple[dict[str, Any], bytearray]] = {}
 
     async def connect(self) -> None:
+        self._left = None
         # The link's frames may be up to 2 MiB: one operation's 1 MiB of file
         # data, base64-encoded, plus its envelope.
         ws = await connect(
@@ -508,6 +522,7 @@ class FakeLaptop:
         welcome = json.loads(await ws.recv())
         assert welcome["type"] == "welcome", welcome
         self.connected = True
+        self.connections += 1
         self._chunk_acks, self._ended, self._incoming = {}, set(), {}
         # Each task works on its own connection's socket. Added to, not replaced: an earlier
         # connection's tasks still end at disconnect().
@@ -529,6 +544,7 @@ class FakeLaptop:
         self.prepared[nonce] = folder
 
     async def disconnect(self) -> None:
+        self._left = self._ws
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -570,7 +586,20 @@ class FakeLaptop:
             if self._ws is ws:
                 self.connected = False
                 self._dropped()
+                if ws is not self._left and ws.close_code not in FINAL:
+                    self._tasks.append(asyncio.create_task(self._back()))
             self._heard.set()
+
+    async def _back(self) -> None:
+        """Connect again after the server closed the link, as the app does: whatever ended a try, before its
+        welcome or at its handshake, but a close the app may not try again after or a scene's own disconnect."""
+        while not self.connected and self._left is None:
+            await asyncio.sleep(self.ping_interval_s)
+            try:
+                await self.connect()
+            except (OSError, ConnectionClosed, InvalidHandshake):
+                if self._ws is not None and self._ws.close_code in FINAL:
+                    return
 
     def _dropped(self) -> None:
         """As the app when its link ends: the user's own requests still asked about, or waiting for their
@@ -677,6 +706,7 @@ class FakeLaptop:
                 outcome = await perform(self.folder, frame["kind"], frame["args"])
             self.outcomes[operation_id] = self._carried(operation_id, frame["kind"], outcome)
         if not self.reply:
+            self._left = ws
             await ws.close()
             return
         result = {

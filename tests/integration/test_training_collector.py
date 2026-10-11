@@ -31,8 +31,13 @@ async def _seed_skill_invocation(
     assistant_content: str | None = "SELECT * FROM users WHERE active = true;",
     tool_call: tuple[str, str] | None = None,
     tool_result: str | None = None,
+    result_first: bool = False,
 ) -> None:
-    """Emit a realistic skill.invoked trajectory into the event log."""
+    """Emit a realistic skill.invoked trajectory into the event log.
+
+    With *result_first*, the call's result is written before the response
+    that made it, as a call the response started while it streamed.
+    """
     await session_store.emit_event(
         session_id, EventType.USER_MESSAGE,
         {"content": raw_message},
@@ -44,32 +49,31 @@ async def _seed_skill_invocation(
 
     if tool_call is not None:
         tool_call_id, tool_name = tool_call
-        await session_store.emit_event(
-            session_id, EventType.LLM_RESPONSE,
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {"name": tool_name, "arguments": "{}"},
-                    }],
-                },
-                "model": "gpt-4o",
-                "input_tokens": 1,
-                "output_tokens": 1,
+        response = {
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }],
             },
-        )
-        await session_store.emit_event(
-            session_id, EventType.TOOL_RESULT,
-            {
-                "tool_call_id": tool_call_id,
-                "name": tool_name,
-                "content": tool_result or "",
-                "elapsed_ms": 10,
-            },
-        )
+            "model": "gpt-4o",
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+        result = {
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": tool_result or "",
+            "elapsed_ms": 10,
+        }
+        for event_type, data in (
+            [(EventType.TOOL_RESULT, result), (EventType.LLM_RESPONSE, response)] if result_first
+            else [(EventType.LLM_RESPONSE, response), (EventType.TOOL_RESULT, result)]
+        ):
+            await session_store.emit_event(session_id, event_type, data)
 
     if assistant_content is not None:
         await session_store.emit_event(
@@ -111,10 +115,15 @@ async def test_collect_for_skill_extracts_user_and_final_assistant(
     assert examples[0].session_id == session.id
 
 
+@pytest.mark.parametrize("result_first", [False, True], ids=["in order", "the result written first"])
 async def test_collect_for_skill_includes_tool_trajectory(
-    session_store, session_factory,
+    session_store, session_factory, result_first,
 ):
-    """Assistant → tool_call → tool → assistant is preserved in order."""
+    """Assistant → tool_call → tool → assistant is preserved in order.
+
+    So it is where the call ended before its response was written: the
+    result stands after the response that made the call.
+    """
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await session_store.create_session(
@@ -127,6 +136,7 @@ async def test_collect_for_skill_includes_tool_trajectory(
         tool_call=("tc_1", "terminal"),
         tool_result="(0 rows)",
         assistant_content="Done — 0 rows matched.",
+        result_first=result_first,
     )
 
     collector = TrainingDataCollector(session_store=session_store)

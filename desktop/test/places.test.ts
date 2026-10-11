@@ -13,7 +13,7 @@ import type { FromAgent, Share } from "../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { readonlyFlag, refusesWrites } from "../src/vm/linux.js";
 import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
-import { virtiofsdArgs } from "../src/vm/qemu.js";
+import { readOnlyDaemon, virtiofsdArgs } from "../src/vm/qemu.js";
 
 const KEY = "0123456789abcdef";
 const R1: Share = { kind: "virtiofs", tag: "r1" };
@@ -78,12 +78,24 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
 };
 
 describe("a folder's virtiofsd for the agent's own git", () => {
-  it("maps the host user to the guest's root, and refuses every write where the folder is shared read-only", () => {
-    expect(virtiofsdArgs("/home/ana/Documents", "/run/vm/vfs-2.sock", 0, { uid: 1000, gid: 1001 }, true)).toEqual([
-      "--shared-dir=/home/ana/Documents", "--socket-path=/run/vm/vfs-2.sock", "--sandbox=namespace", "--cache=never",
-      "--uid-map=:0:1000:1:", "--gid-map=:0:1001:1:", "--readonly",
+  it("maps the host user to the guest's root, for its history", () => {
+    expect(virtiofsdArgs("/d/history/k", "/run/vm/vfs-1.sock", 0, { uid: 1000, gid: 1001 })).toEqual([
+      "--shared-dir=/d/history/k", "--socket-path=/run/vm/vfs-1.sock", "--sandbox=namespace", "--cache=never",
+      "--uid-map=:0:1000:1:", "--gid-map=:0:1001:1:",
     ]);
-    expect(virtiofsdArgs("/d/history/k", "/run/vm/vfs-1.sock", 0, { uid: 1000, gid: 1001 })).not.toContain("--readonly");
+  });
+
+  it("serves the folder read-only from bwrap's namespaces, where the host user is root, with the system's programs, the socket's folder and the folder alone, in a private mount namespace", () => {
+    const line = (refusing: boolean) => readOnlyDaemon("/opt/surogate/versions/1/bin/bwrap", "/usr/libexec/virtiofsd", "/home/ana/My Documents", "/run/vm/vfs-2.sock", refusing);
+    expect(line(false)).toEqual([
+      "/opt/surogate/versions/1/bin/bwrap", "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "ALL", "--unshare-pid", "--proc", "/proc", "--dev", "/dev",
+      "--ro-bind", "/usr", "/usr", "--ro-bind-try", "/lib", "/lib", "--ro-bind-try", "/lib64", "/lib64", "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache",
+      "--ro-bind", "/usr/libexec/virtiofsd", "/usr/libexec/virtiofsd", "--bind", "/run/vm", "/run/vm",
+      "--ro-bind", "/home/ana/My Documents", "/home/ana/My Documents", "--die-with-parent", "--",
+      "/usr/bin/unshare", "--mount", "--propagation", "private", "--",
+      "/usr/libexec/virtiofsd", "--shared-dir=/home/ana/My Documents", "--socket-path=/run/vm/vfs-2.sock", "--sandbox=namespace", "--cache=never",
+    ]);
+    expect(line(true)).toEqual([...line(false), "--readonly"]);
   });
 
   it("is given --readonly only by a virtiofsd that has it", () => {

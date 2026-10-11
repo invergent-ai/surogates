@@ -52,7 +52,7 @@ from surogates.harness.landing import (
     turn_ended,
     waiting_on_you,
 )
-from surogates.harness.local_landing import keep_local_turn, land_local_turn, set_aside_of, waiting_on_you_here
+from surogates.harness.local_landing import keep_local_turn, land_local_turn, prune_local_history, set_aside_of, waiting_on_you_here
 from surogates.harness.loop_context_replay import _listed
 from surogates.runtime.turn_slots import detach_turn
 from surogates.sandbox.pool import sandbox_session_key
@@ -1450,6 +1450,15 @@ class ArtifactCompletionMixin:
                 # The bucket itself says which packs are old: no pod's clock, and not the worker's.
                 storage=self._storage, bucket=session.config.get("storage_bucket"),
                 prefix=boundary_workspace_prefix(session.config, session, session.id), redis=self._redis,
+            )
+
+        if landing is not None and opens_its_copy(session):
+            # Last too, on its computer: the turn ended and reported, nothing waits on the folder's history being
+            # pruned there, which its computer does at most once a day.  The turn's lease is held meanwhile, for a
+            # while at most: that computer runs the folder's next request after the pruning all the same.
+            await prune_local_history(
+                session_factory=self._session_factory, redis=self._redis, session=session,
+                lease_token=str(lease.lease_token), landing=landing,
             )
 
     async def _kept_apart(self, session: Any) -> dict[str, Any]:

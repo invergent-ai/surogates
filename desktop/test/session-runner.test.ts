@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -169,6 +169,42 @@ describe("the session runner", { timeout: 20_000 }, () => {
     await child.started;
     child.write(Buffer.from("hello\nnot this\n"));
     expect(await ended).toEqual({ out: "hello\n", err: "", end: { code: 0, signal: null } });
+  });
+
+  // A runner as in the guest, its cgroups in a folder of *base*'s, whose agent moves a command's shell into its cgroup by *admit*.
+  async function inCgroups(admit: (id: string, pid: number, stdin: boolean) => Promise<void>): Promise<SessionRunner> {
+    const cgroups = join(base, "cgroups");
+    mkdirSync(join(cgroups, "run"), { recursive: true });
+    const started = new SessionRunner(bare([RUNNER, "--cgroups", cgroups]), undefined, undefined, admit);
+    runners.push(started);
+    await started.ready;
+    return started;
+  }
+
+  it("runs a command given a cgroup once the agent has moved its shell there, and nothing of one its shell finds outside it", async () => {
+    const moved: Array<[string, number, boolean]> = [];
+    const started = await inCgroups(async (id, pid, stdin) => void moved.push([id, pid, stdin]));
+    const child = started.spawn(request("echo ran"));
+    // On this computer no shell is ever in the cgroup its command was given.
+    expect(await collect(child)).toEqual({
+      out: "", err: "surogate: this command could not be given its cgroup, so it did not run\n", end: { code: 126, signal: null },
+    });
+    expect(moved).toEqual([[child.id, child.pid, false]]);
+  });
+
+  it("kills a command whose shell still waits to be moved into its cgroup, and the cgroup too, whatever the agent moved there", async () => {
+    const started = await inCgroups(() => new Promise(() => {}));
+    for (const background of [false, true]) {
+      const asked = request("echo ran", background);
+      // A background process's cgroup is the agent's to make.
+      if (background) mkdirSync(join(base, "cgroups", "proc", asked.id), { recursive: true });
+      const child = started.spawn(asked);
+      const ended = collect(child);
+      await child.started;
+      child.kill();
+      expect(await ended).toEqual({ out: "", err: "", end: { code: null, signal: "SIGKILL" } });
+      expect(readFileSync(join(base, "cgroups", background ? "proc" : "run", asked.id, "cgroup.kill"), "utf8")).toBe("1");
+    }
   });
 
   it("answers a command it cannot start", async () => {

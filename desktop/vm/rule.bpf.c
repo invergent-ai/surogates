@@ -182,3 +182,31 @@ int BPF_PROG(on_setattr, struct mnt_idmap *idmap, struct dentry *dentry, struct 
 		return 0;
 	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
 }
+
+// An extended attribute set or removed on a protected path: a POSIX ACL there would widen who may write
+// it, and reach the host's file where the folder's daemon keeps attributes. Every name is refused there:
+// git and the editors keep none on what they read.
+SEC("lsm/inode_setxattr")
+int BPF_PROG(on_setxattr, struct mnt_idmap *idmap, struct dentry *dentry, const char *name, const void *value, size_t size, int flags)
+{
+	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+}
+
+SEC("lsm/inode_removexattr")
+int BPF_PROG(on_removexattr, struct mnt_idmap *idmap, struct dentry *dentry, const char *name)
+{
+	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+}
+
+// A POSIX ACL set or removed, by setxattr and removexattr too: the kernel asks these hooks for it, not the two above.
+SEC("lsm/inode_set_acl")
+int BPF_PROG(on_set_acl, struct mnt_idmap *idmap, struct dentry *dentry, const char *acl_name, struct posix_acl *kacl)
+{
+	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+}
+
+SEC("lsm/inode_remove_acl")
+int BPF_PROG(on_remove_acl, struct mnt_idmap *idmap, struct dentry *dentry, const char *acl_name)
+{
+	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+}

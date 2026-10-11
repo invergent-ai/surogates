@@ -443,6 +443,13 @@ def _forgettable(answer: dict[str, Any]) -> dict[str, Any]:
     return {"landing": _id_or_none(answer["landing"])}
 
 
+def _pruned(answer: dict[str, Any]) -> dict[str, Any]:
+    """A pruning: done already within the day; or the history cut, to the commits of ``main`` it keeps, its one pack's bytes after and those of ``main``'s files."""
+    if not _flag(answer.get("pruned")):
+        return {"pruned": False}
+    return {"pruned": True, **{key: _count(answer.get(key)) for key in ("commits", "size", "files")}}
+
+
 def _snapshot(answer: dict[str, Any]) -> dict[str, Any]:
     return {"hash": _id(answer.get("hash"))}
 
@@ -516,7 +523,7 @@ _ANSWERS: dict[str, dict[str, Callable[..., dict[str, Any]]]] = {
     "checkpoint": {"take": _snapshot, "restore": _done},
     "history": {
         "open": _opened, "changed": _changed, "fetch": _fetched, "pickup": _picked_up, "picked": _picked, "commit": _committed,
-        "record": _recorded, "keep": _kept, "forget": _forgettable,
+        "record": _recorded, "keep": _kept, "forget": _forgettable, "prune": _pruned,
     },
     "land": {"recover": _recovered, "revisions": _looked, "apply": _applied, "unapply": _unapplied, "forget": _forgotten},
 }

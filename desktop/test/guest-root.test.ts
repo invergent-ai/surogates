@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,7 @@ import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
-import { boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor } from "../src/guest/root.js";
+import { admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor } from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
 
@@ -762,6 +762,25 @@ describe("a root's inputs", () => {
     ["root-1", { ...place, home: "/home/ana/" }, "r1", ana, "not a home folder: /home/ana/"],
   ])("refuses %s %j %s %j before anything is given", async (root, at, tag, user, message) => {
     await expect(enter(root, at, { kind: "virtiofs", tag }, user)).rejects.toThrow(message);
+  });
+});
+
+describe("a command's shell, moved into its cgroup by the agent", () => {
+  const ROOT_ID = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
+  it("is the process of the runner's cgroup with that pid in the root's PID namespace, never the root's unshare, whose one pid it is too", async () => {
+    const cgroups = join(base, "cgroups");
+    const proc = join(base, "proc");
+    mkdirSync(join(cgroups, ROOT_ID, "init"), { recursive: true });
+    mkdirSync(join(cgroups, ROOT_ID, "run", "op-7"), { recursive: true });
+    // The runner's cgroup, as the guest shows it: unshare, outside the root's namespaces, at the pid the shell has in
+    // them; the runner; and the shell.
+    writeFileSync(join(cgroups, ROOT_ID, "init", "cgroup.procs"), "300\n450\n500\n");
+    for (const [pid, nspid] of [["300", "300"], ["450", "450\t2"], ["500", "500\t300"]]) {
+      mkdirSync(join(proc, pid!), { recursive: true });
+      writeFileSync(join(proc, pid!, "status"), `Name:\tx\nNSpid:\t${nspid}\nState:\tS\n`);
+    }
+    await admit(ROOT_ID, "run", "op-7", 300, cgroups, proc);
+    expect(readFileSync(join(cgroups, ROOT_ID, "run", "op-7", "cgroup.procs"), "utf8")).toBe("500");
   });
 });
 

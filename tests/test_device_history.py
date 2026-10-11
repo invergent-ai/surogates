@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -106,6 +107,8 @@ HONEST: dict[tuple[str, str], list[dict[str, Any]]] = {
     ("history", "record"): [{"commit": A, "set_aside": None}, {"commit": A, "set_aside": B}],
     ("history", "keep"): [{"commit": A, "not_taken": []}, {"commit": A, "not_taken": ["notes.txt"]}],
     ("history", "forget"): [{"landing": None}, {"landing": A}],
+    # Pruned already within the day; or cut, to main's commits it keeps, the bytes of its one pack and the bytes of main's files.
+    ("history", "prune"): [{"pruned": False}, {"pruned": True, "commits": 20, "size": 9_689, "files": 40}],
     ("land", "recover"): [
         {"restored": [], "beside": [], "lost": [], "unread": []},
         {
@@ -131,7 +134,7 @@ def test_every_action_a_thread_asks_has_one_shape_of_answer_and_nothing_else_has
     # The journal's list of what a thread asks, and this one's of what it takes for an answer, are one.
     assert ACTIONS == THREAD_ACTIONS and set(ACTIONS) == THREAD_KINDS
     assert {(kind, action) for kind, actions in ACTIONS.items() for action in actions} == set(HONEST)
-    for kind, action in [("history", "prune"), ("history", "close"), ("history", "drop"), ("land", "open"), ("write", "open"), ("bind", "bind")]:
+    for kind, action in [("history", "hand_off"), ("history", "close"), ("history", "drop"), ("land", "open"), ("write", "open"), ("bind", "bind")]:
         with pytest.raises(NotAnAnswer):
             checked(kind, action, {"copy": "made", "commit": A, "hash": A})
 
@@ -241,6 +244,15 @@ def test_an_answer_is_built_again_from_its_own_fields_and_nothing_else_of_it_is_
     ("history", "fetch", {**HONEST["history", "fetch"][0], "hidden": 0}),
     ("land", "unapply", {"path": "a.txt", "put_back": "yes"}),
     ("land", "unapply", {"path": "a.txt", "put_back": 1}),
+    ("history", "prune", {"pruned": "yes"}),
+    ("history", "prune", {"pruned": 1, "commits": 20, "size": 9_689, "files": 40}),
+    ("history", "prune", {"pruned": True, "commits": 20, "size": -1, "files": 40}),
+    ("history", "prune", {"pruned": True, "commits": 1.5, "size": 9_689, "files": 40}),
+    ("history", "prune", {"pruned": True, "commits": 20, "size": 2**80, "files": 40}),
+    # A pruning that cut the history says by how much.
+    ("history", "prune", {"pruned": True}),
+    ("history", "prune", {"pruned": True, "commits": 20, "size": 9_689}),
+    ("history", "prune", {}),
     # A look that is none.
     ("land", "revisions", {"revisions": [["a.txt", "1:2:3"]]}),
     ("land", "revisions", {"revisions": [["a.txt"]]}),
@@ -388,6 +400,7 @@ def test_an_answer_read_from_the_journal_is_checked_as_one_given_now():
     for none in (None, "ok", [], {}, {"ok": None}, {"okay": {"commit": A}}, {"ok": {"commit": A, "set_aside": None}, "error": {}}):
         assert answered("history", "record", none) is None, none
     assert answered("history", "prune", {"ok": {"pruned": True}}) is None
+    assert answered("history", "prune", {"ok": {"pruned": False, "refs": ["refs/heads/main"]}}) == {"pruned": False}
 
 
 class Runner:
@@ -962,6 +975,10 @@ def test_what_the_folders_own_history_answers_a_thread_is_taken_whole_and_each_r
     (folder.copy(two) / "Report.docx").write_bytes(b"PK a step's change")
     assert folder.taken(two, "checkpoint", "restore", hash=taken) == {}
     assert (folder.copy(two) / "Report.docx").read_bytes() == b"PK report v2, by B"
+    # The folder's history pruned after a landing, and asked again within the day.
+    kept = [f"refs/{kind}/{thread}" for thread in (one, two) for kind in ("heads/threads", "bases")]
+    assert folder.taken(two, "history", "prune", keep=kept, now=time.time())["pruned"] is True
+    assert folder.taken(two, "history", "prune", keep=kept, now=time.time()) == {"pruned": False}
     # What is no request, and a copy that is not whole.
     assert folder.refused(two, "prune") == "not_a_request"
     assert folder.refused(two, "restore", commit="f" * 40) == "failed"
@@ -1063,6 +1080,9 @@ def test_what_the_app_passes_on_of_the_folders_own_history_is_taken_whole_and_ea
     ask(two, "history", "keep", author=a, trailers=trailers, base=False)
     ask(two, "history", "open")
     ask(one, "history", "open")
+    kept = [f"refs/{kind}/{thread}" for thread in (one, two) for kind in ("heads/threads", "bases")]
+    ask(two, "history", "prune", keep=kept, now=time.time())
+    ask(two, "history", "prune", keep=kept, now=time.time())
     ask(two, "history", "prune")
     shutil.rmtree(folder.copy(two))
     ask(two, "history", "changed")
