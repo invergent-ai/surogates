@@ -14,6 +14,7 @@ mode, time and bytes.
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID, uuid5
 
 import pytest
@@ -418,6 +419,130 @@ async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_work
     # The lease it took is given back: the lost thread's next turn is nobody's but its own.
     async with api.app.state.session_factory() as db:
         assert (await db.execute(text("SELECT count(*) FROM session_leases WHERE session_id = :id"), {"id": lost.id})).scalar() == 0
+
+
+async def test_a_landing_that_gives_up_waiting_for_a_workers_half_landing_gives_the_folder_back_for_that_worker(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 1)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    store = api.app.state.session_store
+    still = await store.try_acquire_lease(lost.id, "worker-still-there", ttl_seconds=120)
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
+    monkeypatch.setattr(local_landing, "BUSY_PATIENCE", 1.0)
+    await lands_next(api, monkeypatch, here, next_)
+    # It waited as long as a landing waits, then gave up, landing nothing: the folder is given back as it gives up.
+    [report] = await told(api, next_master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "busy")
+    assert asked_by(here, next_, "land:0") == [] and asked_by(here, next_, "land:0:hold")[-1] == "forget"
+    assert here.app.places.holder is None
+    # So the worker that holds the half landing's turn finishes it at once, answered busy by nobody.
+    await store.release_lease(lost.id, still.lease_token)
+    asked = len(here.app.places.asked)
+    await woken(api, monkeypatch, lost, [_final_response("Done.")])
+    [row] = await records(api, lost)
+    assert row.saga_state == "completed" and [action for under, _, _, action in here.app.places.asked[asked:] if under == "land:0"] == [
+        "apply", "record", "forget",
+    ]
+    assert kept(here) == {} and here.app.places.holder is None
+
+
+async def test_a_lost_landing_left_escalated_is_told_before_its_row_says_so(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 2)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    # You save the report again, over the lost landing's: its put-back leaves yours.
+    (here.folder / "Report.docx").write_bytes(b"PK report v3, by you")
+    [row] = await records(api, lost)
+    save = landing_module.save_landing
+
+    async def killed_once_written(session_factory, row_id, saga, **values):
+        written = await save(session_factory, row_id, saga, **values)
+        if row_id == row.id and values.get("state") == "escalated":
+            # The settling worker is killed as it has written the row escalated.
+            raise Lost
+        return written
+
+    with monkeypatch.context() as dying:
+        dying.setattr(landing_module, "save_landing", killed_once_written)
+        with pytest.raises(Lost):
+            await lands_next(api, monkeypatch, here, next_)
+    [settled] = await records(api, lost)
+    assert settled.saga_state == "escalated"
+    # The half landing it left in your folder was told before its row said so: its thread waits on you, and its master heard.
+    [waits] = await events_of(api, lost.id, EventType.INBOX_ACTION_REQUIRED)
+    assert (waits.data["files"], waits.data["escalated"]) == (["Report.docx"], True)
+    [report] = await told(api, lost_master)
+    assert (report.data["landing"], report.data["recovered"], report.data["saga"]) == ("escalated", True, settled.saga_id)
+
+
+async def test_a_settle_keeps_no_answer_of_an_apply_that_names_another_file_than_it_asked_to_write(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    before = seen(here.folder)
+    # Its computer wrote the budget, and answered as if it had written another file: the lost worker never checked it.
+    here.app.lie = lambda frame, outcome: (
+        {"ok": {"path": "Payroll.xlsx", "before": None, "after": "c" * 40, "made": []}}
+        if (frame["session_id"], frame["args"].get("action")) == (str(lost.id), "apply") else outcome
+    )
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 1)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    here.app.lie = None
+    await lands_next(api, monkeypatch, here, next_)
+    # The settle read that answer from the journal, as no answer to the step: it put the landing back whole, and its row
+    # holds what the landing asked to write, never what its computer said it wrote.
+    [settled] = await records(api, lost)
+    assert settled.saga_state == "compensated" and "Payroll.xlsx" not in json.dumps([settled.steps, settled.files])
+    assert asked_by(here, next_, settles(lost)) == ["unapply", "unapply", "forget"]
+    assert but(seen(here.folder), "Y.md") == before and kept(here) == {}
+
+
+async def test_a_settler_that_loses_the_lost_threads_lease_partway_stops_there_and_settles_once_the_lease_is_free(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    before = seen(here.folder)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 2)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
+    ask, taken = Steps.ask, []
+
+    async def asking(self, kind, action, **arguments):
+        answer = await ask(self, kind, action, **arguments)
+        if (self._runner._invocation_id, action) == (settles(lost), "unapply") and not taken:
+            # Its first put-back answered, another worker takes the lost thread's turn: the lease is that worker's now.
+            taken.append(action)
+            async with api.app.state.session_factory() as db:
+                await db.execute(text(
+                    "UPDATE session_leases SET lease_token = gen_random_uuid(), owner_id = 'worker-two' WHERE session_id = :id"
+                ), {"id": lost.id})
+                await db.commit()
+        return answer
+
+    monkeypatch.setattr(Steps, "ask", asking)
+    here.app.places.holder = None
+    waiting = asyncio.create_task(woken(api, monkeypatch, next_, NEXT))
+
+    async def gave_the_folder_back() -> bool:
+        return "forget" in asked_by(here, next_, "land:0:hold")
+
+    # It stopped where it stood, wrote nothing more of that landing, and waits for that worker, the folder given back.
+    await eventually(gave_the_folder_back, timeout=20.0)
+    assert not waiting.done() and asked_by(here, next_, settles(lost)) == ["unapply"] and asked_by(here, next_, "land:0") == []
+    assert (await records(api, lost))[0].saga_state == "running"
+    # That worker is gone: the lease is free, and the settle goes on where it stopped, then the next thread lands.
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": lost.id})
+        await db.commit()
+    await asyncio.wait_for(waiting, 30.0)
+    [settled], [own] = await records(api, lost), await records(api, next_)
+    assert (settled.saga_state, own.saga_state) == ("compensated", "completed")
+    assert asked_by(here, next_, settles(lost)) == ["unapply", "unapply", "forget"]
+    assert but(seen(here.folder), "Y.md") == before and kept(here) == {}
 
 
 def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") -> None:

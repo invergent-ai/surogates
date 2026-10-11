@@ -208,6 +208,8 @@ const unmeasured = (name: string): string => `The page downloaded ${quoted(name)
 const failed = (message: string): Outcome => ({ error: { type: "browser", message } });
 // Why a navigation to a port of a chat's own servers that is not allowed did not open.
 const NOT_ALLOWED = (port: number): string => `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${port})`;
+/** Why a navigation that its address sent on to a port of a chat's servers that is not allowed did not open: the port is the site's choice, and not named. */
+export const REDIRECTED_TO_A_CHAT = "The address sent the agent's browser on to a server a chat started, on a port that is not allowed, so it did not open";
 const DELETED = failed("The chat was deleted, and its tabs closed with it");
 const ANOTHER_CHATS = failed("This session's tab in the agent's browser on this computer is another chat's");
 // True of an operation that still runs, and of one that was answered already and still acts in its page: one
@@ -1082,7 +1084,13 @@ export class BrowserHost {
       // At a chat's port that is not allowed its tab shows the proxy's own page, which is no page of the chat's:
       // the navigation did not open, and its answer says why.
       const shut = kind === "browser.navigate" ? chatPortOf(page.url()) : null;
-      if (shut !== null && !this.forwarded?.ports.includes(shut)) return failed(NOT_ALLOWED(shut));
+      if (shut !== null && !this.forwarded?.ports.includes(shut)) {
+        if (chatPortOf(String(args.url)) === shut) return failed(NOT_ALLOWED(shut));
+        // Sent there by the address it opened, the port is that site's choice: named to nobody, nor left in the tab, whose
+        // address and page say it. The browser says such a navigation is its agent's own, so the proxy cannot tell.
+        await page.goto("about:blank").catch(() => {});
+        return failed(REDIRECTED_TO_A_CHAT);
+      }
       const notices = this.took(session, id);
       return { ok: { ...value, ...(kind === "browser.navigate" ? { opened: this.untold.delete(session) } : {}), notices } };
     } catch (error) {
@@ -2107,7 +2115,9 @@ export class BrowserHost {
   }
 
   // *context*'s browser has closed: none of its requests is answered now, and the next browser starts with none.
+  // Its launch's sign-in opens nothing from now on: a launch begins only once the browser before it has closed.
   private closed(context: BrowserContext): void {
+    this.proxy?.server.signOut();
     this.open.clear();
     this.retire(context);
   }
@@ -2281,6 +2291,7 @@ export class BrowserHost {
     await page.goto(`http://${token}${CHECK_DOMAIN}/`, { timeout: CHECK_MS }).catch(() => {});
     await line.send("Fetch.disable").catch(() => {});
     await line.detach().catch(() => {});
+    // A check that fails closes its browser at once (launch), and its sign-in with it.
     if (!proxy.checked(token)) throw new Error(PROXY_BYPASSED);
     await page.goto("about:blank").catch(() => {});
     return page;

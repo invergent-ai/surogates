@@ -1112,7 +1112,8 @@ class ArtifactCompletionMixin:
                 raise asyncio.CancelledError("another worker runs this session now") from None
             except Exception:
                 logger.exception("Landing failed for %s on its computer", session.id)
-                landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
+                # Its copy there outlives it: the report says the work is in it, and lands with the thread's next turn.
+                landing = {"state": "failed", "reason": "failed", "files": [], "excluded": [], "repositories": []}
         elif is_project_thread(session.config) and device_of(session.config) is None and self._sandbox_pool is not None:
             # A thread on its user's computer with no copy there, made before threads had them, lands nothing anywhere.
             tool_saga = self._turn_saga.current_saga if self._turn_saga is not None else None
@@ -1239,8 +1240,10 @@ class ArtifactCompletionMixin:
         if landing is not None:
             # A thread's files are its landing's; artifacts still come from its summary.
             landed = landing["files"]
-            if not landed and landing["state"] != "completed":
-                # A landing that never knew its files: the turn's own list names them, none landed.
+            if not landed and landing["state"] != "completed" and not opens_its_copy(session):
+                # A landing that never knew its files: the turn's own list names them, none landed.  On a computer
+                # it names none: the turn's open may have brought your edits into its copy, which only its landing's
+                # ``changed`` tells apart.
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
         elif is_project_thread(session.config) and (alone := await redo_files(self._store, session.id)):
@@ -1656,7 +1659,9 @@ class ArtifactCompletionMixin:
         )
         error = f"{reason}: {data}" if data else reason
         if left:
-            error += f". Its changes to {', '.join(left)} were kept apart, not brought into the thread's copy"
+            # A helper's: each name on its thread's one line, as a report names a thread's files: the pod's names are data.
+            named = _listed([{"label": path} for path in left])
+            error += f". Its changes to {named} were kept apart, not brought into the thread's copy"
         elif kept_there:
             # Each name on the master's one line, as a report names a thread's files: the computer's names are data.
             named = _listed([{"label": path} for path in kept_there])
@@ -1668,6 +1673,9 @@ class ArtifactCompletionMixin:
         elif saved and is_project_thread(session.config):
             # Said as a landing that did not finish says it: nothing of the turn is lost.
             error += ". Its work is kept, and lands with the thread's next turn"
+        elif saved is False and opens_its_copy(session):
+            # Not kept, its computer away or its keep refused: its copy there holds the work all the same.
+            error += ". Its work is in its copy on its computer, and the thread's next turn lands it, but for any file a landing never writes"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )

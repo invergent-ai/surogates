@@ -322,6 +322,11 @@ def test_a_row_has_the_shells_fields_and_values():
     aside = derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=SET_ASIDE_TOLD), now=NOW)["set_aside"]
     assert list(aside) == [_snake(field) for field in aside_fields]
     assert aside["kept"] and aside["gone"] and all(list(whole) == whole_fields for whole in (*aside["kept"], *aside["gone"]))
+    # Each of the kinds the shell takes, and none other.
+    kinds = re.findall(r'"(\w+)"', re.search(r"^\s*kind: ([^;]+);", _interface(source, "SetAsideWhole"), re.M).group(1))
+    every = {"copies": [REPOSITORY_NAME, COPY_NAME], "snapshots": [], "gone": [], "places": [PLACE_NAME]}
+    placed = derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=every), now=NOW)
+    assert sorted({whole["kind"] for whole in placed["set_aside"]["kept"]}) == sorted(kinds) == ["copy", "place", "repository"]
 
 
 def test_a_thread_whose_files_did_not_merge_waits_on_you_with_the_reason_files():
@@ -447,8 +452,8 @@ def test_a_threads_landing_on_a_computer_marks_its_files_and_is_none_for_its_car
 
 
 def undo_row(row_id: int, undoes: list[int], *paths: str) -> dict:
-    """An Undo's row as the store reads it: the rows it undid, and each file it put back."""
-    return {"id": row_id, "undoes": undoes, "files": [{"path": p, "before": "x", "after": "y", "merged": True} for p in paths]}
+    """An Undo's row as the store reads it: each file it put back, over the rows *undoes* each."""
+    return {"id": row_id, "files": [{"path": p, "before": "x", "after": "y", "merged": True, "undoes": undoes} for p in paths]}
 
 
 def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_undo_is_undone_itself():
@@ -457,6 +462,20 @@ def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_und
     assert undone_files([second, first]) == {(50, "plan.md")}
     # A third undoes the second: the first stands again, and what it put back is undone again.
     assert undone_files([first, second, undo_row(52, [51], "plan.md")]) == {(51, "plan.md"), (40, "plan.md"), (41, "plan.md")}
+
+
+def test_an_undo_marks_each_file_undone_only_in_the_landings_it_went_back_over_at_that_file():
+    # Landing 40 changed a.md and b.md, and 41 changed b.md after the Undo 50 had put back 40's b.md alone.  The
+    # thread's Undo 60 then put a.md back over 40, and b.md over 41: 40's b.md was put back already.
+    first = {"id": 50, "files": [{"path": "b.md", "before": "b1", "after": "b0", "merged": True, "undoes": [40]}]}
+    thread = {"id": 60, "files": [
+        {"path": "a.md", "before": "a1", "after": "a0", "merged": True, "undoes": [40]},
+        {"path": "b.md", "before": "b2", "after": "b0", "merged": True, "undoes": [41]},
+    ]}
+    assert undone_files([first, thread]) == {(40, "a.md"), (40, "b.md"), (41, "b.md")}
+    # An Undo of the first brings 40's b.md back: no Undo that went back over it stands.
+    again = {"id": 70, "files": [{"path": "b.md", "before": "b0", "after": "b1", "merged": True, "undoes": [50]}]}
+    assert undone_files([first, thread, again]) == {(50, "b.md"), (40, "a.md"), (41, "b.md")}
 
 
 def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
@@ -469,6 +488,8 @@ def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
 #: The names its computer gives what it set aside whole of a thread's: the order, when, whose, and which.
 COPY_NAME = f"00000001-20261010T101500Z-{COMPUTER}.copy"
 REPOSITORY_NAME = f"00000002-20261010T101501Z-{COMPUTER}.repository"
+#: A place of the thread's folder its computer's app set aside, by its name there: the folder's key, and when.
+PLACE_NAME = "fcb59ee0818a927a.was-1791532800000"
 #: What the newest of a thread's turn ends to record it recorded its computer keeping set aside of the thread's work.
 SET_ASIDE_TOLD = {"copies": [REPOSITORY_NAME], "snapshots": ["a" * 40, "b" * 40], "gone": [COPY_NAME]}
 
@@ -499,3 +520,18 @@ def test_a_row_says_nothing_set_aside_where_its_turn_ends_recorded_none_or_none_
         assert derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=told), now=NOW)["set_aside"] is None, told
     assert set_aside_name(COPY_NAME) == {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
     assert set_aside_name(f"00000001-20261010T246000Z-{COMPUTER}.copy") is None
+
+
+def test_a_row_says_each_place_of_its_folder_its_computer_set_aside_among_what_it_keeps_by_when():
+    given = replace(SHELL_FIXTURES["computer"][0], set_aside={"copies": [COPY_NAME], "snapshots": [], "gone": [], "places": [
+        "0123456789abcdef.was-1791627301500", PLACE_NAME,
+    ]})
+    # Oldest first: a place by when it was set aside, to the second.
+    assert derive_thread(given, now=NOW)["set_aside"] == {"kept": [
+        {"kind": "place", "at": "2026-10-09T08:00:00Z"}, {"kind": "copy", "at": "2026-10-10T10:15:00Z"},
+        {"kind": "place", "at": "2026-10-10T10:15:01Z"},
+    ], "snapshots": 0, "gone": []}
+    # A name that is no place's is left out, as is a place's among the copies; and with nothing left, nothing is said.
+    for places in ([f"{PLACE_NAME}.json", f"../{PLACE_NAME}", "fcb59ee0818a927a.was-", f"fcb59ee0818a927a.was-{'9' * 16}", 7], "all"):
+        told = {"copies": [PLACE_NAME], "snapshots": [], "gone": [], "places": places}
+        assert derive_thread(replace(given, set_aside=told), now=NOW)["set_aside"] is None, places

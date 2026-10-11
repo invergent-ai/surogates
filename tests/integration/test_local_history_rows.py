@@ -13,6 +13,7 @@ row.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 
@@ -98,11 +99,14 @@ async def test_a_folder_whose_history_is_off_on_its_computer_says_so_where_its_h
     await woken(api, monkeypatch, thread, [EDITS, _final_response("Edited the report.")])
     assert [v["change"] for v in (await history_on(api, project, computer, "Report.docx")).json()] == ["changed", "added"]
     # The folder now holds a file whose name its history cannot keep: the thread's next open finds it has none, and
-    # names a copy of the thread's it set aside, which only a check that knows whose copy was asked about takes.
+    # names a copy of the thread's it set aside and a place of its folder's, which only a check that knows whose copy
+    # and which folder was asked about takes.
     computer.app.places.off = "names"
     aside = f"00000001-20261010T101500Z-{thread.id}.copy"
+    place = f"{hashlib.sha256(thread.config['workspace_path'].encode()).hexdigest()[:16]}.was-1791532800000"
     computer.app.lie = lambda frame, outcome: (
-        {"ok": {**outcome["ok"], "set_aside_folders": [aside]}} if frame["args"].get("action") == "open" and "ok" in outcome else outcome
+        {"ok": {**outcome["ok"], "set_aside_folders": [aside], "set_aside_places": [place]}}
+        if frame["args"].get("action") == "open" and "ok" in outcome else outcome
     )
     await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
     off = await history_on(api, project, computer, "Report.docx")

@@ -55,17 +55,25 @@ export const IDLE_MS = 120_000;
 // How long a landing's host waits for the folder (spec, Section 13, "Waits"): a chat's host lets it go IDLE_MS after
 // its last operation, and another landing's once that landing is forgotten, or IDLE_MS after its last step.
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
-// How long the app's quit waits for a step a landing's helper runs (files/land.ts); every other stop of its host waits
-// for the step whole. Past it the host is stopped: the step's record, written before each of its moves, names what it
-// was doing, and it is put back as this computer's tools next start, or by the first step of the next landing's helper
-// in that folder. A step stages a file of at most a GiB, about ten seconds on a disk that writes 100 MiB a second; one
-// that copies a replaced file of several GiB between two filesystems can run past it, and its copy goes on from there.
+// How long the app's quit waits for a step a landing's helper runs (files/land.ts). Past it the host is stopped: the
+// step's record, written before each of its moves, names what it was doing, and it is put back as this computer's tools
+// next start, or by the first step of the next landing's helper in that folder. A step stages a file of at most a GiB,
+// about ten seconds on a disk that writes 100 MiB a second; one that copies a replaced file of several GiB between two
+// filesystems can run past it, and its copy goes on from there.
 export const QUIT_STEP_MS = 30_000;
 // How long a deleted thread's landing's host that has written nothing in the folder is given for the step its helper
 // runs, a look or a forgetting, before it is stopped: the deletion is answered at once, and its folder held no longer
 // than this past it. Past it, what the step was doing is named by its record, and is put back as the quit's is. A
 // landing that has written is never stopped for its thread's deletion.
 export const RETIRE_STEP_MS = QUIT_STEP_MS;
+// How long every other stop of a landing's or a recovery's host waits for the steps its helper runs, and a step sent
+// alone for those sent before it: one hung on a dead mount never ends, and would hold the folder, and whatever waits for
+// that host, for ever. Past it the host is stopped as at the quit. The longest steps move about twice 4 GiB, the most a
+// folder's landings keep, through the folder's disk: a put-back that copies a kept file back reads its copy again whole
+// before it takes the name, and an apply stages up to a GiB and copies a replaced file of up to 4 GiB. That is some
+// 14 minutes at 10 MB a second: on a disk that slow such a step is cut, put back by its record as a quit's is, and cut
+// again each time it is asked there; nothing of the user's is lost.
+export const STEP_MS = 10 * 60_000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A step a turn's landing asks for a landing it only settles, one another left running in the folder: named so by the
 // server, under the turn's own name, and none of the turn's own landing.
@@ -98,25 +106,38 @@ const NOT_BEGUN = unavailable("the host of this landing was stopping, so this st
 // What waited for a host that stopped, or was never made, before it was ready.
 const STOPPED_STARTING = unavailable("its tool host stopped while it was starting");
 // A landing's host asked for itself while its landing's last step runs alone: asked again once it has ended.
-const BUSY_ALONE: Outcome = { error: { type: "busy", message: "the landing in this folder is ending a step it runs alone" } };
+const ENDING_ALONE = "the landing in this folder is ending a step it runs alone";
+const BUSY_ALONE: Outcome = { error: { type: "busy", message: ENDING_ALONE } };
 
 /** Another held *folder* for as long as a landing waits for it: nothing of the landing began, and it can be asked again. */
 export const folderBusy = (folder: string): Outcome => ({
   error: { type: "busy", message: `Another chat on this computer is working in ${folder}, so nothing of this landing was done. It can land once that one is done` },
 });
 /**
- * A read of *folder* for a thread, refused: what a landing cut short there is not put back yet, as another held the
+ * What held a folder for as long as a put-back there waited for it, as this computer's tools know it: a chat's host on
+ * it, a thread's landing's, a put-back's of what another landing cut short; or none of theirs, where what the app ran
+ * before its link to the server was made again still holds it, as its hosts stop.
+ */
+export type Holder = "chat" | "landing" | "putBack" | "earlier";
+const holding = (holder: Holder, folder: string): string => ({
+  chat: `Another chat on this computer is working in ${folder}`,
+  landing: `A thread's landing on this computer is working in ${folder}`,
+  putBack: `This computer is putting back in ${folder} what another landing there cut short`,
+  earlier: `What the app ran on this computer before its last connection to the server is still working in ${folder}`,
+})[holder];
+/**
+ * A read of *folder* for a thread, refused: what a landing cut short there is not put back yet, as *holder* held the
  * folder for as long as the put-back waited for it. Nothing was done, and it can be asked again.
  */
-export const stillCutShort = (folder: string): Outcome => ({
+export const stillCutShort = (folder: string, holder: Holder): Outcome => ({
   error: {
     type: "busy",
-    message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done`,
+    message: `${holding(holder, folder)}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done`,
   },
 });
-// What is said of what a landing cut short in *folder* where another held the folder for as long as the put-back waited.
-const heldElsewhere = (folder: string): string =>
-  `Another chat on this computer is working in ${folder}, so what a landing cut short there is not put back yet. It is put back once that one is done`;
+// What is said of what a landing cut short in *folder* where *holder* held the folder for as long as the put-back waited.
+const heldElsewhere = (folder: string, holder: Holder): string =>
+  `${holding(holder, folder)}, so what a landing cut short there is not put back yet. It is put back once that one is done`;
 // A read of *folder* for a thread, refused: what a landing cut short there could not be put back, for *why*.
 const notRead = (folder: string, why: string): Outcome => ({
   error: { type: "unavailable", message: `What a landing cut short in ${folder} could not be put back, so the folder was not read: ${why}` },
@@ -265,7 +286,8 @@ export interface ToolHostsOptions {
   // Waited for before a root's host lets its folder go, so what else holds the folder
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
-  // Told each time a root's processes in the VM change, or a host goes: what liveRoots() names may have changed.
+  // Told each time a root's processes in the VM change, a landing's host comes or goes, or a host goes: what liveRoots()
+  // names may have changed.
   changed?(): void;
   // Told as what a landing cut short in a folder is being put back, and as that ends, with what it came to.
   recovered?(recovery: Recovery): void;
@@ -389,16 +411,6 @@ export class ToolHosts implements Executor {
   }
 
   /**
-   * *root*'s hosts go now rather than once idle, each letting go of what it holds, and so do those its operations are
-   * starting: what they hold is no longer what the root works in, as when its chat is deleted. Its landing's host
-   * begins no step after, and goes once its helper has ended the ones it runs. Settles once every one of them has
-   * gone. Never rejects.
-   */
-  dismiss(root: string): Promise<void> {
-    return this.going(root);
-  }
-
-  /**
    * *root*'s chat was deleted, and its binding *bound* is forgotten next (binding/binder.ts). Its hosts on its copy go,
    * and so does its landing's, given RETIRE_STEP_MS for the step its helper runs; its copy stays, with what it did not
    * land. Answered at once: nothing waits for them. But a landing's host that has written in the folder, an apply or a
@@ -423,7 +435,7 @@ export class ToolHosts implements Executor {
   }
 
   // *root*'s hosts and those its operations are starting go, but *kept*; a landing's given *stepMs* for its step.
-  private async going(root: string, kept?: Host, stepMs?: number): Promise<void> {
+  private async going(root: string, kept: Host | undefined, stepMs: number): Promise<void> {
     const going = new Set<Host>();
     const go = (host: Host | Outcome | undefined) => {
       if (!(host instanceof Host) || host === kept || going.has(host)) return;
@@ -499,9 +511,20 @@ export class ToolHosts implements Executor {
     if ("ok" in outcome) return null;
     const { type, message } = outcome.error;
     if (type === "cancelled") return CANCELLED;
-    // Its host still waits for the folder, has gone, or is going, or ends a step alone: nothing is known put back.
-    if (type === "busy" || type === "unavailable" || type === "interrupted") return stillCutShort(folder);
+    // Its host still waits for the folder, which another holds; or it has gone, or is going, or ends a step alone,
+    // holding the folder itself: nothing is known put back.
+    if (type === "busy" && message !== ENDING_ALONE) return stillCutShort(folder, this.holderOf(folder, lander));
+    if (type === "busy" || type === "unavailable" || type === "interrupted") return stillCutShort(folder, "landing");
     return notRead(folder, message);
+  }
+
+  // What holds *folder* of this computer's tools: one of their hosts on the folder itself that holds it, but *waited*,
+  // the one that waited for it in vain; or none of theirs.
+  private holderOf(folder: string, waited: Host): Holder {
+    const on = [...this.live].filter((host) => host !== waited && host.holds && host.works.at === undefined && host.works.folder.path === folder);
+    if (on.some((host) => host.recovers)) return "putBack";
+    if (on.some((host) => host.kept !== undefined)) return "landing";
+    return on.length > 0 ? "chat" : "earlier";
   }
 
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
@@ -528,9 +551,12 @@ export class ToolHosts implements Executor {
     this.options.changed?.();
   }
 
-  /** The roots with a background process alive in the VM, whose work a quit would end. */
+  /**
+   * The roots whose work a quit would end: with a background process alive in the VM, or with a landing's host on their
+   * folder, which holds it from the landing's first step until it is forgotten, between its steps too.
+   */
   liveRoots(): string[] {
-    return [...this.hosts].filter(([, host]) => host.lives).map(([root]) => root);
+    return [...new Set([...[...this.hosts].filter(([, host]) => host.lives).map(([root]) => root), ...this.landers.keys()])];
   }
 
   // The guards each host checks its folder against: the binder's must be these, or the
@@ -552,7 +578,7 @@ export class ToolHosts implements Executor {
 
   // The device's access ended: every host stops, and its background processes with it.
   // The next operation for a root starts a new host, which answers for them from the record.
-  // A landing's host first ends the steps its helper runs.
+  // A landing's host first ends the steps its helper runs, for STEP_MS at most.
   end(): Promise<void> {
     return this.stopHosts();
   }
@@ -723,12 +749,15 @@ export class ToolHosts implements Executor {
     const startMs = lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS);
     const host = new Host(
       (this.options.spawnHost ?? forkHost)(), start, works, startMs, this.options.idleMs ?? IDLE_MS, () => {
-        if (this.landers.get(root) === host) this.landers.delete(root);
+        if (this.landers.get(root) !== host) return;
+        this.landers.delete(root);
+        this.options.changed?.();
       },
       () => Promise.resolve("deny"),
       () => Promise.resolve(),
     );
     this.landers.set(root, host);
+    this.options.changed?.();
     this.keep(host);
     return host;
   }
@@ -838,8 +867,9 @@ export class ToolHosts implements Executor {
     const { path } = folder;
     this.tell(name, { folder: path, state: "begun" });
     let outcome: Outcome;
+    let host: Host | undefined;
     try {
-      const host = this.recoverer(folder, join(landings, name), name);
+      host = this.recoverer(folder, join(landings, name), name);
       void host.started.then(holds);
       outcome = await host.run({ id: randomUUID(), kind: "land", args: { action: "recover" } }, this.halt.signal);
       host.finish();
@@ -854,9 +884,10 @@ export class ToolHosts implements Executor {
     const { type, message } = outcome.error;
     // Not there, or another than the one recorded: what is kept is no folder's at that path to put back, and stays.
     if (type === "folder_unavailable") return ended({ folder: path, state: "left", why: message });
-    if (type === "busy") {
+    if (type === "busy" && host) {
+      const holder = this.holderOf(path, host);
       this.waiting.set(name, path);
-      return ended({ folder: path, state: "left", why: heldElsewhere(path) }, stillCutShort(path));
+      return ended({ folder: path, state: "left", why: heldElsewhere(path, holder) }, stillCutShort(path, holder));
     }
     return ended({ folder: path, state: "left", why: message }, notRead(path, message));
   }
@@ -1039,9 +1070,9 @@ class Host {
       this.aloneNow = true;
       try {
         if (await aborts(before, signal)) return CANCELLED;
-        while (this.unanswered.size > 0 && !this.gone) {
-          if (await aborts(this.stepsEnded(), signal)) return CANCELLED;
-        }
+        if (await aborts(this.stepsEnded(STEP_MS), signal)) return CANCELLED;
+        // A step sent before it hung: the host goes, and the step's record names what it was doing.
+        if (this.unanswered.size > 0 && !this.gone) this.finish(0);
         if (this.finished || this.closing) return NOT_BEGUN;
         const refused = await gate(signal);
         if (refused) return refused;
@@ -1082,7 +1113,7 @@ class Host {
   }
 
   // Its work is over before it has been idle: out of the list first, so the next operation starts a new host, then
-  // its folder's other holders let it go, and it stops, a landing's once its steps have ended, within *stepMs* if given. Once.
+  // its folder's other holders let it go, and it stops, a landing's once its steps have ended, within *stepMs*. Once.
   finish(stepMs?: number): void {
     if (this.finished) return;
     this.finished = true;
@@ -1133,6 +1164,11 @@ class Host {
     return this.live > 0 && !this.gone;
   }
 
+  // Whether it holds its folder: it said ready, which it does once it has the folder's lock, and has not gone.
+  get holds(): boolean {
+    return this.readied && !this.gone;
+  }
+
   // Counted while it runs: a host with work is never idle.
   private async busy(work: () => Promise<Outcome>): Promise<Outcome> {
     this.running += 1;
@@ -1160,7 +1196,12 @@ class Host {
   // Never while it starts: its start is bounded by its own time.
   private idle(): void {
     clearTimeout(this.idleTimer);
-    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished || this.unanswered.size > 0) return;
+    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished) return;
+    // A landing's steps that nothing waits for any more, a cancelled one: given STEP_MS to end, then the host goes.
+    if (this.unanswered.size > 0) {
+      this.idleTimer = setTimeout(() => this.finish(0), STEP_MS).unref();
+      return;
+    }
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
@@ -1227,10 +1268,10 @@ class Host {
   }
 
   // Once its helper has answered every step it was sent, or it has gone; or once *ms* have passed.
-  private stepsEnded(ms?: number): Promise<void> {
+  private stepsEnded(ms: number): Promise<void> {
     if (this.unanswered.size === 0 || this.gone) return Promise.resolve();
     return new Promise((resolve) => {
-      const timer = ms === undefined ? undefined : setTimeout(resolve, ms);
+      const timer = setTimeout(resolve, ms);
       this.quiet.push(() => {
         clearTimeout(timer);
         resolve();
@@ -1240,9 +1281,9 @@ class Host {
 
   /**
    * A landing's host first lets its helper end every step it was sent, each of which writes the user's folder, and
-   * sends it none after; at the app's quit, for *stepMs* at most. Then it stops.
+   * sends it none after; for *stepMs* at most, STEP_MS unless told. Then it stops.
    */
-  async stop(stepMs?: number): Promise<void> {
+  async stop(stepMs = STEP_MS): Promise<void> {
     clearTimeout(this.idleTimer);
     this.closing = true;
     if (this.lands) await this.stepsEnded(stepMs);

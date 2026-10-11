@@ -362,6 +362,63 @@ class TestS3BackendDelete:
         assert gone.asked == [("head", "key.bin"), ("delete", {"Bucket": "bucket", "Key": "key.bin"})]
 
 
+async def _there(backend: S3Backend) -> None:
+    """Whether the object exists, as a look tells it: KeyError where it does not."""
+    if not await backend.exists("bucket", "photos/IMG_4040.jpg"):
+        raise KeyError("photos/IMG_4040.jpg")
+
+
+#: A look at an object, whether it exists, and a read of it whole or to a file: each tells an object absent by a KeyError.
+_LOOKS = {
+    "stat": lambda backend, tmp_path: backend.stat("bucket", "photos/IMG_4040.jpg"),
+    "exists": lambda backend, tmp_path: _there(backend),
+    "read": lambda backend, tmp_path: backend.read("bucket", "photos/IMG_4040.jpg"),
+    "download": lambda backend, tmp_path: backend.download("bucket", "photos/IMG_4040.jpg", tmp_path / "out.bin"),
+}
+
+
+@pytest.mark.parametrize("look", list(_LOOKS))
+class TestS3BackendAbsent:
+    """What a look at an object answers: absent only where the store said so, by its code or its status."""
+
+    def backend(self, monkeypatch, raised: BaseException) -> S3Backend:
+        backend = S3Backend("http://s3.invalid")
+
+        class Asked:
+            async def head_object(self, *, Bucket: str, Key: str) -> dict:
+                raise raised
+
+            async def get_object(self, *, Bucket: str, Key: str) -> dict:
+                raise raised
+
+        @contextlib.asynccontextmanager
+        async def the_client():
+            yield Asked()
+
+        monkeypatch.setattr(backend, "_client", the_client)
+        return backend
+
+    @pytest.mark.parametrize("unanswered", [
+        # A client's own error names the request's address, and so the key: one holding 404 is no answer that it is absent.
+        ReadTimeoutError(endpoint_url="http://garage:3900/bucket/photos/IMG_4040.jpg", error="no answer"),
+        EndpointConnectionError(endpoint_url="http://garage:3900/bucket/reports/20250404.docx"),
+        ClientError({"Error": {"Code": "SlowDown", "Message": "IMG_4040.jpg 404"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "HeadObject"),
+        ClientError({"Error": {"Code": "NoSuchBucket", "Message": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject"),
+    ], ids=["timed out", "no connection", "slow down", "no such bucket"])
+    async def test_an_object_the_store_did_not_answer_as_absent_is_not_taken_for_absent(self, monkeypatch, tmp_path, look, unanswered):
+        with pytest.raises(type(unanswered)):
+            await _LOOKS[look](self.backend(monkeypatch, unanswered), tmp_path)
+
+    @pytest.mark.parametrize("answer", [
+        {"Error": {"Code": "404", "Message": "Not Found"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+        {"Error": {"Code": "NoSuchKey", "Message": "The specified key does not exist."}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+        {"Error": {}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+    ], ids=["404", "NoSuchKey", "status alone"])
+    async def test_an_object_the_store_answers_there_is_none_of_is_told_absent(self, monkeypatch, tmp_path, look, answer):
+        with pytest.raises(KeyError):
+            await _LOOKS[look](self.backend(monkeypatch, ClientError(answer, "HeadObject")), tmp_path)
+
+
 class TestS3BackendUpload:
     """An object written from a file through the S3 client's own upload, with a client that stores nothing."""
 
