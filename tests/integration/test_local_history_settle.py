@@ -501,6 +501,50 @@ async def test_a_settle_keeps_no_answer_of_an_apply_that_names_another_file_than
     assert but(seen(here.folder), "Y.md") == before and kept(here) == {}
 
 
+async def test_a_settler_that_loses_the_lost_threads_lease_partway_stops_there_and_settles_once_the_lease_is_free(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    before = seen(here.folder)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 2)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
+    ask, taken = Steps.ask, []
+
+    async def asking(self, kind, action, **arguments):
+        answer = await ask(self, kind, action, **arguments)
+        if (self._runner._invocation_id, action) == (settles(lost), "unapply") and not taken:
+            # Its first put-back answered, another worker takes the lost thread's turn: the lease is that worker's now.
+            taken.append(action)
+            async with api.app.state.session_factory() as db:
+                await db.execute(text(
+                    "UPDATE session_leases SET lease_token = gen_random_uuid(), owner_id = 'worker-two' WHERE session_id = :id"
+                ), {"id": lost.id})
+                await db.commit()
+        return answer
+
+    monkeypatch.setattr(Steps, "ask", asking)
+    here.app.places.holder = None
+    waiting = asyncio.create_task(woken(api, monkeypatch, next_, NEXT))
+
+    async def gave_the_folder_back() -> bool:
+        return "forget" in asked_by(here, next_, "land:0:hold")
+
+    # It stopped where it stood, wrote nothing more of that landing, and waits for that worker, the folder given back.
+    await eventually(gave_the_folder_back, timeout=20.0)
+    assert not waiting.done() and asked_by(here, next_, settles(lost)) == ["unapply"] and asked_by(here, next_, "land:0") == []
+    assert (await records(api, lost))[0].saga_state == "running"
+    # That worker is gone: the lease is free, and the settle goes on where it stopped, then the next thread lands.
+    async with api.app.state.session_factory() as db:
+        await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": lost.id})
+        await db.commit()
+    await asyncio.wait_for(waiting, 30.0)
+    [settled], [own] = await records(api, lost), await records(api, next_)
+    assert (settled.saga_state, own.saga_state) == ("compensated", "completed")
+    assert asked_by(here, next_, settles(lost)) == ["unapply", "unapply", "forget"]
+    assert but(seen(here.folder), "Y.md") == before and kept(here) == {}
+
+
 def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") -> None:
     """*thread*'s worker is lost just before it would ask *action* under *invocation*."""
     ask = Steps.ask
