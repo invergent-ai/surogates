@@ -1205,7 +1205,8 @@ async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_thr
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
 
 
-async def test_a_stop_its_worker_could_not_write_down_is_written_before_the_threads_next_turn_on_another_worker(api, monkeypatch, tmp_path):
+@pytest.mark.parametrize("read", ["at once", "after a read that failed"])
+async def test_a_stop_its_worker_could_not_write_down_is_written_before_the_threads_next_turn_on_another_worker(api, monkeypatch, tmp_path, read):
     master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
     store = api.app.state.session_store
     emit = store.emit_event
@@ -1229,13 +1230,33 @@ async def test_a_stop_its_worker_could_not_write_down_is_written_before_the_thre
     monkeypatch.setattr(store, "emit_event", emit)
     assert await store.get_events(thread.id, types=[EventType.SESSION_PAUSE]) == []
     # Kept where every worker reads it, in Redis, through which the interrupt came: its worker goes, and all it knew with it.
+    redis = api.app.state.redis
     kept = f"{loop_module._STOP_NOT_WRITTEN_PREFIX}{thread.id}"
-    assert await api.app.state.redis.get(kept) is not None
+    assert await redis.get(kept) is not None
+    if read == "after a read that failed":
+        get, made = redis.get, dict(pods.pods)
+
+        async def not_read(name, *args, **kwargs):
+            if name == kept:
+                raise ConnectionError("Redis did not answer")
+            return await get(name, *args, **kwargs)
+
+        with monkeypatch.context() as away:
+            away.setattr(redis, "get", not_read)
+            looping = a_looping_harness(api, away, thread, [], pool=SandboxPool(pods))
+            # The turn's start fails, for its wake to be tried again: no pod is made, and nothing is written for it.
+            with pytest.raises(ConnectionError):
+                await the_loop_runs(api, looping, thread)
+        assert (pods.pods, await store.get_events(thread.id, types=[EventType.SESSION_PAUSE])) == (made, [])
+        assert await redis.get(kept) is not None
+        async with api.app.state.session_factory() as db:
+            await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": thread.id})
+            await db.commit()
     # The thread's next turn, on another worker, writes it first, and so is another turn: the stopped file stays out.
     await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
     assert len(await store.get_events(thread.id, types=[EventType.SESSION_PAUSE])) == 1
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
-    assert await api.app.state.redis.get(kept) is None
+    assert await redis.get(kept) is None
 
 
 async def test_a_stop_that_can_be_neither_written_down_nor_kept_still_ends_its_turn_and_says_so(api, monkeypatch, pods, caplog):
