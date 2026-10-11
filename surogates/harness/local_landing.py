@@ -67,6 +67,9 @@ thread's branch in the folder's history, its base and all, so its work is
 in the history and not in the copy alone.  A keep touches nothing of the
 folder, asks the app for no hold, and is recorded in no History: nothing of
 it landed.
+
+A turn whose landing recorded asks, last, for the folder's history to be
+pruned on its computer, which does so at most once a day.
 """
 
 from __future__ import annotations
@@ -115,7 +118,7 @@ from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
 from surogates.workstreams.derive import UNFINISHED, set_aside_said
-from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
+from surogates.workstreams.history import kept_refs_in, landing_row, running_in, saga_of, start_landing, unforgotten_in
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,9 @@ SETTLE_LEASE = 60
 SETTLE_RENEW = 20.0
 #: How many landings ended in a folder whose forgetting never let go of what they kept a landing asks it again for.
 FORGET_AGAIN = 16
+#: How long a turn's end waits for its folder's history to be pruned on its computer: a request of the history is cut
+#: off at ten minutes there.  The landing stands either way, and the history is pruned on a later day.
+PRUNE_WAIT = 660.0
 #: A landing put back whole is tried once more, as a new saga: its look and its pickup see what the first ran into.
 #: What a turn taken up again did after its landing began lands after it, as a landing of its own (``land:<turn>:3``).
 TRIES = 2
@@ -444,6 +450,8 @@ async def land_local_turn(
     if ending.heard() and ending.wrote and outcome.get("reason") not in ("stopped", "deleted") and not await ending.deleted():
         # Stopped once its landing had written a file: it was not interrupted, and whoever stopped it is told so.
         outcome["stopped"] = True
+    # The turn it was: a pruning after it is asked under its name, once the turn has ended (prune_local_history).
+    outcome["turn"] = turn
     return _heard(outcome, ending)
 
 
@@ -452,6 +460,30 @@ def _heard(outcome: dict, ending: _Ending) -> dict:
     if ending.heard():
         outcome["stop_heard"] = True
     return outcome
+
+
+async def prune_local_history(*, session_factory: Any, redis: Any, session: Any, lease_token: str | None, landing: dict) -> None:
+    """Prune the folder's history on *session*'s computer after *landing*, its turn's, where it recorded: its computer prunes at most once a day.
+
+    Asked once the turn has ended and reported, so neither waits for a
+    pruning, nor for a computer that went away before one; under the
+    turn's own name, ``land:<turn>:prune``.  The day is the server's: the
+    pruning is told this worker's time.  Told the refs to keep, the branch
+    and the base of every thread that works in the folder, whichever
+    project's; what each repository on that computer reads is the
+    computer's to keep besides, which alone can read it.  As best it can,
+    and for :data:`PRUNE_WAIT` at most: the landing stands, and the
+    history is pruned on a later day.
+    """
+    if landing.get("state") != "completed" or not landing.get("commit") or landing.get("turn") is None:
+        return
+    copy = thread_copy(session, session_factory=session_factory, redis=redis, lease_token=lease_token)
+    try:
+        keep = await kept_refs_in(session_factory, copy.device_id, copy.folder)
+        pruning = copy.steps(f"land:{landing['turn']}:prune").history("prune", keep=keep, now=int(time.time()))
+        await asyncio.wait_for(pruning, PRUNE_WAIT)
+    except Exception:
+        logger.warning("The history of the folder of thread %s on its computer was not pruned", session.id, exc_info=True)
 
 
 async def keep_local_turn(*, store: Any, session_factory: Any, redis: Any, session: Any, lease_token: str | None) -> list[str]:

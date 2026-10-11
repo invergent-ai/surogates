@@ -359,6 +359,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
       ["picked", { pickup: HASH, after: "Photos/2026/IMG_009445.jpg" }],
       ["commit", { author, trailers, pickup: null }], ["record", { turn: HASH, applied: [], author, trailers, main: HASH, pickup: null, left: [] }],
       ["keep", { author, trailers, base: true }], ["forget", { saga: "saga-1", applied: [] }],
+      ["prune", { keep: [`refs/heads/threads/${THREAD}`, `refs/bases/${THREAD}`], now: 1_791_480_000 }],
     ];
     for (const [action, args] of steps) {
       expect(await executor.run(history({ action, ...args }), signal()), action).toEqual({ ok: action === "forget" ? { landing: null } : {} });
@@ -595,7 +596,10 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     ["a copy's removal, which is the app's own to ask", () => history({ action: "close" })],
     ["a thread's dropping, which is the app's own to ask", () => history({ action: "drop" })],
     ["a snapshot as a step of the history", () => history({ action: "snapshot", reason: "x" })],
-    ["a pruning, which this computer's history does not take", () => history({ action: "prune" })],
+    ["a pruning under a turn's open", () => history({ action: "prune", keep: [], now: 1 }, { invocationId: "open:turn-1" })],
+    ["a pruning asked by a session under the thread", () => history({ action: "prune", keep: [], now: 1 }, { callingSessionId: HELPER })],
+    ["a pruning under a checkpoint's invocation", () => history({ action: "prune", keep: [], now: 1 }, { invocationId: "checkpoint:turn-1:3:call-7" })],
+    ["a hand-off, which this computer's history does not take", () => history({ action: "hand_off" })],
     ["a step with no action", () => history({})],
     ["a step whose action is no word", () => land({ action: ["recover"] })],
     ["a file kind as a landing's", () => land({ action: "write", key: "a.txt" })],
@@ -731,7 +735,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     for (const operation of [
       apply(1, "b.txt", null, B), land({ action: "revisions", paths: ["b.txt"] }), history({ action: "open" }), history({ action: "changed" }),
       history({ action: "pickup", author: {}, trailers: [] }), history({ action: "commit", author: {}, trailers: [], pickup: null }),
-      history({ action: "keep", author: {}, trailers: [], base: true }),
+      history({ action: "keep", author: {}, trailers: [], base: true }), history({ action: "prune", keep: [], now: 1 }),
     ]) {
       expect(executor.refusal(operation), String(operation.args.action)).toEqual(DELETED_THREAD);
       expect(await executor.run(operation, signal()), String(operation.args.action)).toEqual(DELETED_THREAD);

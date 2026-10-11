@@ -624,6 +624,22 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     expect(await code(ONE, "close", { force: true })).toBe("not_a_request");
   });
 
+  it("answers a pruning once a day by the clock that asks, each copy as it was after it, and refuses one that names another ref or no time", async () => {
+    const keep = [ONE, TWO].flatMap((thread) => [`refs/heads/threads/${thread}`, `refs/bases/${thread}`]);
+    const later = Math.floor(Date.now() / 1000) + 100 * 86_400;
+    const before = [await said(ONE, "changed"), await said(TWO, "changed")];
+    expect(await said(ONE, "prune", { keep, now: later })).toMatchObject({ pruned: true });
+    // The history is one pack now, and each thread's copy reads as it did.
+    expect(readdirSync(join(dir, "store", "history.git", "objects", "pack")).filter((name) => name.endsWith(".pack"))).toHaveLength(1);
+    expect([await said(ONE, "changed"), await said(TWO, "changed")]).toEqual(before);
+    // Once a day by that clock: an hour on, it does nothing.
+    expect(await said(TWO, "prune", { keep, now: later + 3_600 })).toEqual({ pruned: false });
+    // It keeps a thread's branch and its base and no other ref, and is told the time.
+    expect(await code(ONE, "prune", { keep: ["refs/heads/main"], now: later })).toBe("not_a_request");
+    expect(await code(ONE, "prune", { keep, now: "today" })).toBe("not_a_request");
+    expect(await code(ONE, "prune")).toBe("not_a_request");
+  });
+
   it("was asked every action a folder's history takes, and refused with each code a test can bring about", () => {
     const actions = /^_ACTIONS[^]*?^\}/m.exec(readFileSync(new URL("../../../surogates/sandbox/local_history.py", import.meta.url), "utf8"))![0];
     expect([...answered.keys()].sort()).toEqual([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort());

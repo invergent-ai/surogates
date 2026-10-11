@@ -11,6 +11,7 @@ pod sees a project:
     <store>/threads/<thread>.making   there while that copy is being made, and gone once its making has ended
     <store>/waiting/<thread>/  the platform's own folders of a copy that was let go, until the copy is made again
     <store>/set-aside/         a copy or a repository that was made again, as it was, under a name no thread has
+    <store>/pruning.git/       the history as a pruning cuts it, its files linked, there while the pruning runs
 
 and the folder itself, shared read-only, is the real files.  Git reads the
 history where it lies: it is on this computer's disk, and no thread's
@@ -20,6 +21,12 @@ is the history's first, pushed with the folder's first copy, and a push is
 followed by a repack that lets go of what the history now holds.  A
 landing's applies are not git's here: the desktop's file helper writes the
 folder, and the record takes what it applied.
+
+The history is pruned as the cloud's is, once a day by the day of whoever
+asks, after a landing.  Every repository in the place reads it, a thread's
+and one set aside whole alike, so a pruning cuts it only to what each of
+them still reads, and lets an old pack go only once each reads all it names
+without it.
 
 A place outlives the guest that wrote it, and nothing one boot's guest left
 there is trusted by the next.  Before its first git, each run puts right
@@ -60,7 +67,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import takewhile
 from pathlib import Path, PurePosixPath
@@ -187,6 +194,13 @@ _ASIDE_BYTES = 10 << 30
 _ASIDE_GONE = 16
 #: Where a place keeps what a thread's copy that was let go held of the platform's own, under the thread's name.
 _WAITING = "waiting"
+#: Where a pruning cuts the folder's history, in the place beside it: a copy of it whose files are the history's own,
+#: linked.  One a cut pruning left links packs the history may have let go, and the next request removes it.
+_PRUNING = "pruning.git"
+#: Where the cut's copy of the history names each commit a repository in the place reaches, while it is cut.
+_READ_THERE = "refs/kept"
+#: A pruning's day is told by a time of the asker's clock, in seconds: none for centuries is this or more.
+_LATEST = 1 << 33
 _PINNED = {
     "GIT_CONFIG_COUNT": str(len(_OVERRIDES)), "GIT_ALLOW_PROTOCOL": "file",
     **{f"GIT_CONFIG_KEY_{n}": key for n, key in enumerate(_OVERRIDES)},
@@ -200,6 +214,8 @@ _EXCLUDED = re.compile("|".join(
 ))
 
 _THREAD = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: A ref a pruning may be told to keep: a thread's branch, or its base.
+_KEPT = re.compile(rf"refs/(?:heads/threads|bases)/{_THREAD.pattern}")
 _USER = re.compile(r"[A-Za-z0-9_.@-]{1,128}")
 #: Each action a request may name, the method it runs and the arguments it takes.
 _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
@@ -215,6 +231,7 @@ _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "record": ("record", frozenset({"turn", "applied", "author", "trailers", "main", "pickup", "left"})),
     "keep": ("keep", frozenset({"author", "trailers", "base"})),
     "forget": ("forget", frozenset({"saga", "applied"})),
+    "prune": ("prune", frozenset({"keep", "now"})),
 }
 #: Why a folder's history takes no part in what the cloud's does besides.
 _NO_WRITER = "a folder's history writes no file of the folder: the desktop's file helper lands a turn's files"
@@ -229,6 +246,9 @@ class LocalHistory(History):
     #: Holds one entry where this request found the thread's repository not borrowing the folder's
     #: history as it must (:meth:`_borrows`): no git runs in it, and the thread's next open makes it again.
     astray: list[bool] = field(default_factory=list, init=False, repr=False, compare=False)
+    #: Holds, once a pruning has read them, the history's commits every repository in the place reaches from its refs,
+    #: which the cut keeps (:meth:`_cut`), and those the history was cut at before.  It lasts one pruning.
+    reached: list[set[str]] = field(default_factory=list, init=False, repr=False, compare=False)
 
     excludes: ClassVar[list[str]] = LOCAL_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = LOCAL_PLATFORM
@@ -297,6 +317,11 @@ class LocalHistory(History):
     def _taken(self) -> Path:
         """Git reads the folder's history in place: nothing is copied."""
         return self.store
+
+    @property
+    def _pruning(self) -> Path:
+        """In the place, beside the history: where a thread's repository's files are, nothing of a pruning's is."""
+        return self.store.parent / _PRUNING
 
     def _take(self) -> dict[str, str]:
         """The history's refs now, each checked as one of its own."""
@@ -1481,8 +1506,217 @@ class LocalHistory(History):
     def _remove(self, *args: Any, **kwargs: Any) -> None:
         _refuse(_NO_WRITER)
 
-    def prune(self, **kwargs: Any) -> dict:
-        _refuse("a folder's history is not pruned: nothing on this computer cuts it back yet")
+    def prune(self, *, keep: list[str], now: float) -> dict:
+        """The cloud's pruning, keeping besides the branch and the base of every thread that has a repository in the place.
+
+        A thread's repository outlives a pruning, with the branch it last
+        pushed, and its next push expects the history's branch to be that.
+        The server names the threads it knows to work in the folder; one
+        resolved longer ago than the window and then reopened is none of
+        them, and has its repository here all the same.  A pruning that
+        deleted its refs would refuse every landing it tries from then on.
+        Its repository's name is what is read of it here.
+
+        At most once a day by *now*, the asker's clock (:meth:`_mark_pruned`).
+        Every pack the cut leaves out goes: one request runs on a place at a
+        time, so no push is under way beside the pruning, as one can be in the
+        cloud.  What each repository in the place reads is kept as the cut
+        goes (:meth:`_cut`, :meth:`_letting_go`).
+        """
+        self._pin()
+        clones = self.repo.parent
+        here = [
+            name for name in (sorted(os.listdir(clones)) if clones.is_dir() else [])
+            if re.fullmatch(_NAMED, name) and (clones / name).is_dir() and not (clones / name).is_symlink()
+        ]
+        theirs = [ref for thread in here for ref in (f"refs/heads/threads/{thread}", f"refs/bases/{thread}")]
+        try:
+            return super().prune(keep=sorted({*keep, *theirs}), now=now, spare=0.0)
+        finally:
+            self.reached.clear()
+
+    def _mark_pruned(self, now: float) -> None:
+        """The cloud's mark, dated by the clock that asked for the pruning: the server's alone says when a day has passed.
+
+        This computer's clock may be a day from the server's, either way: by
+        its own, a history would be pruned at every landing, or never.
+        """
+        super()._mark_pruned(now)
+        with self._folder() as history:
+            os.utime("pruned", (now, now), dir_fd=history, follow_symlinks=False)
+
+    def _cut(self, git: Callable[..., str], work: Path, *, mains: list[str], kept: int) -> int:
+        """The cloud's cut, every commit a repository in the place reaches from its refs kept as a tip.
+
+        A thread's repository here borrows the history's objects, and one
+        set aside whole does too: the base it is on, ``main`` as it last
+        read it and the commits its own snapshots stand on are in the
+        history's packs alone.  A cut that let one go would leave that
+        repository without its objects, whichever thread asked for the
+        pruning.  So each is named in the cut's copy of the history while it
+        is cut, and nowhere after: the history's refs stay its own.
+        """
+        if not self.reached:
+            self.reached[:] = [self._reached(work), set((_read_as_data(work / "shallow", _SEEN_BYTES) or b"").decode(errors="replace").split())]
+        tips = sorted(self.reached[0])
+        held = {"GIT_DIR": str(work)}
+        if tips:
+            self._git(["update-ref", "--stdin"], env=held, cwd=work, input="".join(f"create {_READ_THERE}/{n} {c}\n" for n, c in enumerate(tips)))
+        try:
+            return super()._cut(git, work, mains=mains, kept=kept)
+        finally:
+            if tips:
+                self._git(["update-ref", "--stdin"], env=held, cwd=work, input="".join(f"delete {_READ_THERE}/{n}\n" for n in range(len(tips))))
+
+    def _readers(self) -> list[tuple[Path, bool]]:
+        """Every repository in the place that reads the folder's history's objects as its own, and whether it reads them as it must.
+
+        A thread's, under ``clones/``, and each repository the place keeps
+        set aside whole, which is at the same depth: the one line of either
+        names this history.  One reads them as it must where the history
+        holds every pack its note names and it holds no link: it is whole,
+        and a pruning keeps it so.  Any other is astray already, or none git
+        may read: of it, the history keeps what its refs name, read as data,
+        and nothing of it is touched.  Each is read as data, following no
+        link.
+        """
+        lent = self._lent()
+        found = []
+        for folder in (self.repo.parent, self.aside_whole):
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            for name in sorted(os.listdir(folder)):
+                ours = re.fullmatch(_NAMED, name) if folder == self.repo.parent else _WHOLE.fullmatch(name) and name.endswith(".repository")
+                repo = folder / name
+                if not ours or repo.is_symlink() or not repo.is_dir() or not _reads_the_history(repo):
+                    continue
+                noted = _read_as_data(repo / _BORROWED, _SEEN_BYTES)
+                packs = noted.decode(errors="replace").split() if noted is not None else None
+                whole = packs is not None and all(_ID.fullmatch(pack) for pack in packs) and set(packs) <= lent and not _linked(repo)
+                found.append((repo, whole))
+        return found
+
+    def _reached(self, work: Path) -> set[str]:
+        """The history's commits each repository in the place reaches from its refs, read in *work*, the history before its cut.
+
+        Its refs, its ``HEAD`` and its copy's name some.  Its own commits
+        lead to others: the base a snapshot was taken on, the turn a
+        set-aside snapshot was written after, ``main`` with your edits on it
+        as it last read them.  Each is kept as the cut keeps a tip, with its
+        files.  What only a reflog names is the window's to keep or let go
+        (:meth:`_letting_go`).
+        """
+        refs = sorted(set(self._durable_refs().values()))
+        found: set[str] = set()
+        for repo, whole in self._readers():
+            named = _named_by(repo)
+            found |= named.refs
+            if not whole:
+                continue
+            seen = _seen_from(repo, work)
+            commits = [commit for commit, kind in self._kinds(seen, named.refs).items() if kind == "commit"]
+            if commits:
+                walked = self._git(
+                    ["rev-list", "--parents", "--stdin"], env=seen, cwd=work,
+                    input="".join(f"{commit}\n" for commit in commits) + "".join(f"^{ref}\n" for ref in refs),
+                )
+                found |= set(walked.split())
+        return {commit for commit, kind in self._kinds({"GIT_DIR": str(work)}, found).items() if kind == "commit"}
+
+    def _kinds(self, env: dict[str, str], ids: set[str]) -> dict[str, str]:
+        """Of *ids*, those git finds in the objects *env* reads, each with its kind."""
+        if not ids:
+            return {}
+        said = self._git(["cat-file", "--batch-check"], env=env, cwd=Path(env["GIT_DIR"]), input="".join(f"{i}\n" for i in sorted(ids)))
+        return {line[:40]: line.split()[1] for line in said.splitlines() if not line.endswith(" missing")}
+
+    def _letting_go(self, work: Path, new: str, gone: set[str]) -> None:
+        """Have each repository in the place that reads the history as it must read all it names without the packs *gone*; then they go.
+
+        Each in turn, and each step safe to cut, since every pack is still
+        there until the last repository has done (:meth:`_made_whole`).
+        Then the history's ``shallow``, the cut's, is the repository's own,
+        and its note names the new pack and none of *gone*: at no point does
+        it name a pack the history no longer holds, nor read one it does not
+        name.  Each written whole, and on the disk before the packs go.
+
+        Each is read with the history cut where this cut cuts it and where
+        the last one did: a commit that was cut stays cut, its parents gone
+        with that pruning, though this cut keeps nothing that leads to it.
+        """
+        cut = (work / "shallow").read_bytes() if (work / "shallow").is_file() else b""
+        tips = set(self._git(["for-each-ref", "--format=%(objectname)"], env={"GIT_DIR": str(work)}, cwd=work).split())
+        kept, before = (self.reached[0], self.reached[1]) if self.reached else (set(), set())
+        kept = tips | kept
+        if before - set(cut.decode().split()):
+            _replace(work / "shallow", "".join(f"{commit}\n" for commit in sorted({*before, *cut.decode().split()})).encode())
+        fresh, going = new.removeprefix("pack-"), {name.removeprefix("pack-") for name in gone}
+        for repo, whole in self._readers():
+            if not whole:
+                continue
+            self._made_whole(repo, work, kept)
+            if cut:
+                _durably(repo / "shallow", cut)
+            elif os.path.lexists(repo / "shallow"):
+                _removed(repo / "shallow")
+            noted = set((_read_as_data(repo / _BORROWED, _SEEN_BYTES) or b"").decode(errors="replace").split())
+            _durably(repo / _BORROWED, "".join(f"{pack}\n" for pack in sorted({*noted, fresh} - going)).encode())
+
+    def _made_whole(self, repo: Path, work: Path, kept: set[str]) -> None:
+        """Have *repo* read all it names from its own objects and the history's as cut in *work*, before the old packs go.
+
+        Its refs reach nothing the cut let go: it kept what they reach
+        (:meth:`_reached`).  A reflog names every commit a ref of the
+        repository's ever was, its branch's every landing and snapshot among
+        them, and nothing reads it but git: an entry whose commit, or a
+        commit it leads to, is neither the repository's own nor the cut's is
+        let go, as the window let go of it, so git packs the repository
+        again whole.  Of what its refs, its other reflog entries and its
+        indexes lead to, whatever is neither its own nor the cut's it takes
+        back, in a pack of its own: a file only an old commit held, which
+        its copy's index or a snapshot of its own names.  *kept* are the
+        cut's tips.
+        """
+        named = _named_by(repo)
+        if None in named.logs.values():
+            raise HistoryError(f"a repository in the place holds a reflog longer than a pruning reads: {repo.name}")
+        own = _held_in(repo / "objects")
+        seen = _seen_from(repo, work)
+        logs = {log: lines for log, lines in named.logs.items() if lines is not None}
+        logged = {i for lines in logs.values() for line in lines for i in _logged(line)}
+        kinds = self._kinds(seen, named.refs | logged)
+        broken: set[str] = set()
+        walked = [c for c in sorted(logged) if kinds.get(c) == "commit"]
+        if walked:
+            listed = self._git(
+                ["rev-list", "--parents", "--topo-order", "--stdin"], env=seen, cwd=work,
+                input="".join(f"{c}\n" for c in walked) + "".join(f"^{c}\n" for c in sorted(kept)),
+            ).splitlines()
+            parents = {line[:40]: line.split()[1:] for line in listed}
+            # Not reached from the cut's tips: the repository's own, or what the cut let go; and what leads to that.
+            broken = set(parents) - own
+            for commit in reversed(listed):
+                if any(parent in broken for parent in parents[commit[:40]]):
+                    broken.add(commit[:40])
+        for log, lines in logs.items():
+            left = [line for line in lines if not set(_logged(line)) & broken]
+            if len(left) != len(lines):
+                _durably(log, b"".join(line + b"\n" for line in left))
+        tips = sorted(i for i in kinds if i not in broken)
+        listed = set()
+        if tips:
+            listed |= {line[:40] for line in self._git(
+                ["rev-list", "--objects", "--stdin"], env=seen, cwd=work,
+                input="".join(f"{i}\n" for i in tips) + "".join(f"^{c}\n" for c in sorted(kept)),
+            ).splitlines()}
+        for index in named.indexes:
+            listed |= {line[:40] for line in self._git(
+                ["rev-list", "--objects", "--indexed-objects"], env={**seen, "GIT_INDEX_FILE": str(index)}, cwd=work,
+            ).splitlines()}
+        missing = sorted(set(self._kinds(seen, listed - own)) - set(self._kinds({"GIT_DIR": str(work)}, listed - own)))
+        if missing:
+            self._git(["pack-objects", "-q", str(repo / "objects" / "pack" / "pack")], env=seen, cwd=work, input="".join(f"{i}\n" for i in missing))
+            logger.warning("A repository in the place took back %d objects a pruning let go of in the history: %s", len(missing), repo.name)
 
     def hand_off(self, **kwargs: Any) -> dict:
         _refuse(_NO_HELPER)
@@ -1597,6 +1831,9 @@ class LocalHistory(History):
         for left in (self.repo, self.copy):
             if os.path.lexists(going := left.with_name(f"{left.name}{_GOING}")):
                 _removed(going)
+        if os.path.lexists(self._pruning):
+            # A pruning's work that was cut: it links packs the history may have let go, which it would keep on the disk.
+            _removed(self._pruning)
         if os.path.lexists(self.store) and (self.store.is_symlink() or not self.store.is_dir() or _linked(self.store)):
             raise HistoryError(
                 "refused the project's history: something in it is neither a file nor a folder", code=HISTORY_REFUSED,
@@ -1785,6 +2022,137 @@ def _packs_alone(objects: Path) -> None:
                 _removed(entry)
 
 
+def _reads_the_history(repo: Path) -> bool:
+    """Whether the repository *repo* reads the folder's history's objects as its own: its alternates are the one line, read as data."""
+    return _read_as_data(repo / _BORROWS, len(_ALTERNATES) + 1) == _ALTERNATES.encode()
+
+
+@dataclass(frozen=True)
+class _Named:
+    """What a repository names, read as data: the objects its refs and ``HEAD`` name, each reflog's lines, and its indexes.
+
+    A reflog is None where it is longer than a request reads.
+    """
+
+    refs: set[str]
+    logs: dict[Path, list[bytes] | None]
+    indexes: list[Path]
+
+
+def _named_by(repo: Path) -> _Named:
+    """What the repository *repo* names, its copy's own among it, read where it lies as data and following no link.
+
+    Its packed refs, peeled ones too, each loose ref and each ``HEAD`` that
+    names an object and not another ref; each reflog, a line an entry,
+    which names the object a ref was and the one it became; and its main
+    index and its copy's.  What a write killed part way left staged beside
+    a file is none of git's.
+    """
+    refs: set[str] = set()
+    logs: dict[Path, list[bytes] | None] = {}
+    indexes: list[Path] = []
+    tops = [repo]
+    if (repo / "worktrees").is_dir() and not (repo / "worktrees").is_symlink():
+        tops += [at for at in sorted((repo / "worktrees").iterdir()) if at.is_dir() and not at.is_symlink()]
+    for top in tops:
+        files = [top / "HEAD", *([top / "packed-refs"] if top == repo else [])]
+        for at, _, names in os.walk(top / "refs"):
+            files += [Path(at, name) for name in names if not name.startswith(".~")]
+        for file in files:
+            for line in (_read_as_data(file, _SEEN_BYTES) or b"").decode(errors="replace").splitlines():
+                if _ID.fullmatch(said := line.removeprefix("^").partition(" ")[0]):
+                    refs.add(said)
+        for at, _, names in os.walk(top / "logs"):
+            for name in names:
+                if not name.startswith(".~"):
+                    held = _read_as_data(Path(at, name), _SEEN_BYTES + 1)
+                    logs[Path(at, name)] = None if held is not None and len(held) > _SEEN_BYTES else (held or b"").splitlines()
+        found = _looked_at(top / "index")
+        if found is not None and stat.S_ISREG(found.st_mode):
+            indexes.append(top / "index")
+    return _Named(refs, logs, indexes)
+
+
+def _logged(line: bytes) -> list[str]:
+    """The objects a reflog's entry names: the one its ref was and the one it became, but none for a ref made or deleted."""
+    return [said for field in line.split(b" ", 2)[:2] if _ID.fullmatch(said := field.decode(errors="replace")) and said != _ZERO]
+
+
+def _looked_at(path: Path) -> os.stat_result | None:
+    """What *path* is, not following a link; None where there is nothing."""
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _seen_from(repo: Path, work: Path) -> dict[str, str]:
+    """A git's view of the objects *repo* reads, its own and the history's through its one line, in the repository *work*.
+
+    Nothing of *repo*'s but its objects is read: no config of its, no
+    hook, no ``shallow``.  Git reads *work*'s instead, the history's as
+    a pruning has it.
+    """
+    return {"GIT_DIR": str(work), "GIT_OBJECT_DIRECTORY": str(repo / "objects")}
+
+
+def _held_in(objects: Path) -> set[str]:
+    """The objects the store *objects* holds itself, loose and in its packs, by their ids: none it reads through its alternates.
+
+    Read as data.  A pack's index that is none git writes names nothing:
+    what it holds is then counted as held elsewhere, which errs on the side
+    of taking it back.
+    """
+    held: set[str] = set()
+    try:
+        with os.scandir(objects) as entries:
+            for entry in entries:
+                if re.fullmatch(r"[0-9a-f]{2}", entry.name) and entry.is_dir(follow_symlinks=False):
+                    held |= {f"{entry.name}{name}" for name in os.listdir(entry.path) if re.fullmatch(r"[0-9a-f]{38}", name)}
+        names = set(os.listdir(objects / "pack"))
+    except (FileNotFoundError, NotADirectoryError):
+        return held
+    for name in names:
+        if (found := _PACK.fullmatch(name)) and found[2] == "idx" and f"pack-{found[1]}.pack" in names:
+            held |= _in_index(objects / "pack" / name)
+    return held
+
+
+def _in_index(path: Path) -> set[str]:
+    """The objects a pack's index of git's second kind names, read as data and following no link; none for any other file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return set()
+    with open(fd, "rb") as file:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return set()
+        # Its kind, then how many objects it names below each first byte: the last is all of them.
+        head = file.read(8 + 256 * 4)
+        if len(head) != 8 + 256 * 4 or head[:8] != b"\xfftOc\x00\x00\x00\x02":
+            return set()
+        names = file.read(20 * int.from_bytes(head[-4:], "big"))
+    return {names[at:at + 20].hex() for at in range(0, len(names) - 19, 20)}
+
+
+def _durably(path: Path, data: bytes) -> None:
+    """Write *path* anew holding *data*, beside it and then renamed over it, and on the disk with its folder's entry before it returns."""
+    staged = path.with_name(f".~{path.name}")
+    staged.write_bytes(data)
+    _synced(staged)
+    os.replace(staged, path)
+    _synced(path.parent)
+
+
+def _synced(path: Path) -> None:
+    """fsync the file or the folder *path*, following no link."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _read_as_data(path: Path, most: int) -> bytes | None:
     """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read."""
     try:
@@ -1928,6 +2296,12 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(change, dict) or not isinstance(change.get("path"), str) or "\0" in change["path"]:
             raise HistoryError("refused the request: a file it applied has no path", code=NOT_A_REQUEST)
         _ids([change.get("before"), change.get("after")], "a file it applied")
+    if action == "prune":
+        keep, now = args.get("keep"), args.get("now")
+        if not isinstance(keep, list) or type(now) not in (int, float) or not 0 <= now < _LATEST:
+            _refuse("a pruning takes the refs it keeps, and the time")
+        if not all(isinstance(ref, str) and _KEPT.fullmatch(ref) for ref in keep):
+            _refuse("a pruning keeps a thread's branch and its base, and no other ref")
     history = LocalHistory.at(Path(store), Path(folder), thread=thread, user=user)
     answer = getattr(history, method)(**args)
     if action == "snapshot":

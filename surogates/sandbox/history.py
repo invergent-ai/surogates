@@ -1130,11 +1130,11 @@ class History:
             marked = _looked(history, "pruned", self.durable) if history is not None else None
         if MAIN not in refs or marked and stat.S_ISREG(marked.st_mode) and now - marked.st_mtime < _PRUNE_EVERY:
             return {"pruned": False}
-        self._put_durable("pruned", b"")
+        self._mark_pruned(now)
         self._sweep()
         refs = self._take()
         packs = [p.name for p in (self._taken / "objects" / "pack").iterdir()]
-        work = self.repo / "pruning.git"
+        work = self._pruning
         shutil.rmtree(work, ignore_errors=True)
         try:
             # Linked, not copied: git never writes a file in place, and the cut writes its shallow anew.
@@ -1179,7 +1179,8 @@ class History:
                     # The packs as they were told a little less than the one pack made of them.
                     kept -= 1
                     packed = self._cut(git, work, mains=ids, kept=kept)
-            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack")}
+            # The cut's own pack, with its index: one a write cut short left alone is no pack git reads, and goes below.
+            [name] = {p.stem for p in (work / "objects" / "pack").glob("pack-*.pack") if p.with_suffix(".idx").is_file()}
             for kind in ("pack", "idx"):
                 self._put_durable(f"objects/pack/{name}.{kind}", work / "objects" / "pack" / f"{name}.{kind}")
             if (work / "shallow").is_file():
@@ -1199,14 +1200,32 @@ class History:
                     listed.rpartition(".")[0] for listed in packs
                     if (seen := _looked(folder, listed)) is not None and (written is None or written.st_mtime - seen.st_mtime < spare)
                 } if old is None else {listed.rpartition(".")[0] for listed in packs} - set(old)
-                for listed in packs:
-                    if listed not in (f"{name}.pack", f"{name}.idx") and listed.rpartition(".")[0] not in young:
-                        with contextlib.suppress(FileNotFoundError):
-                            os.unlink(listed, dir_fd=folder)
+                gone = [listed for listed in packs if listed not in (f"{name}.pack", f"{name}.idx") and listed.rpartition(".")[0] not in young]
+                self._letting_go(work, name, {listed.rpartition(".")[0] for listed in gone})
+                for listed in gone:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(listed, dir_fd=folder)
                 os.fsync(folder)
             return {"pruned": True, "commits": min(kept, len(mains)), "size": packed, "files": size}
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    @property
+    def _pruning(self) -> Path:
+        """Where the history is cut: a copy of it on the pod's disk, its files linked, which goes once the cut has."""
+        return self.repo / "pruning.git"
+
+    def _mark_pruned(self, now: float) -> None:
+        """Mark the history pruned, before it is cut: one cut off by its bound is tried again the next day, by the disk's date."""
+        self._put_durable("pruned", b"")
+
+    def _letting_go(self, work: Path, new: str, gone: set[str]) -> None:
+        """Whatever reads the history's objects besides its own refs, before the packs *gone* go: nothing does in the cloud.
+
+        *work* is the history as it was cut, the one pack *new* its own, and
+        each pack is named without its ending.  The history's refs and
+        ``shallow`` are the cut's already.
+        """
 
     def _cut(self, git: Callable[..., str], work: Path, *, mains: list[str], kept: int) -> int:
         """Cut *work*'s history to *mains*' newest *kept* and what only they reach; the size of its one pack after.

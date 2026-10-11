@@ -164,6 +164,11 @@ const turn: Parse<unknown> = (value) => {
 // The landing where main holds it, recorded; null where each file it applied is in the folder as it was before.
 const forgetting = fields({ landing: idOrNull });
 
+// A pruning: done already within the day; or the history cut, to the commits of main it keeps, its one pack's bytes
+// after and those of main's files.
+const exactly = <T>(known: T): Parse<T> => (value) => (value === known ? known : undefined);
+const pruned = either(fields({ pruned: exactly(true), commits: count, size: count, files: count }), fields({ pruned: exactly(false) }));
+
 // A copy or a repository of *thread*'s own that an open made again and the place keeps set aside whole, by its
 // folder's name there (local_history.py): the order it was set aside in, when, whose, and which of the two. A
 // name of any other thread's, or told to a check that was not told whose request it was, is none.
@@ -210,6 +215,7 @@ const ANSWERS: Record<string, Parse<unknown>> = {
   // A kept turn: its commit, and the helpers' files its copy left as it had them, as a turn's commit names them.
   keep: fields({ commit: id, not_taken: list(path) }),
   forget: forgetting,
+  prune: pruned,
 };
 
 function taken(action: string, outcome: unknown, thread: string | undefined): Outcome {

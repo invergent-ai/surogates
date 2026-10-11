@@ -1837,7 +1837,8 @@ def test_the_agent_disk_carries_the_history_and_one_request_runs_it(tmp_path, fo
     ({"user": "u1; rm -rf /"}, "it names no user"),
     ({"store": "relative/place"}, "it names no place"),
     ({"action": "apply"}, "it names no action this computer's history takes"),
-    ({"action": "prune"}, "it names no action this computer's history takes"),
+    ({"action": "hand_off"}, "it names no action this computer's history takes"),
+    ({"action": "prune"}, "a pruning takes the refs it keeps, and the time"),
     ({"action": "pickup", "args": {"author": YOURS, "trailers": [], "push": True}}, "it names no action this computer's history takes"),
     ({"action": "open", "args": {"moves": "no"}}, "whether it moves the copy is neither true nor false"),
     ({"action": "open", "args": {"moves": 0}}, "whether it moves the copy is neither true nor false"),
@@ -1891,7 +1892,7 @@ def test_a_request_not_answered_says_which_way_by_its_code_and_to_a_person_by_it
     snapshot = {**place, "action": "snapshot", "args": {"reason": "before a step"}}
     assert ask(tree, {**place, "action": "open", "args": {}}) == {"copy": "made"}
     # The request is none this history takes.
-    assert ask(tree, {**place, "action": "prune", "args": {}}) == {"error": {
+    assert ask(tree, {**place, "action": "hand_off", "args": {}}) == {"error": {
         "code": "not_a_request", "message": "refused the request: it names no action this computer's history takes",
     }}
     # Git could not do what was asked: a snapshot the repository does not hold.
@@ -2337,7 +2338,6 @@ def test_a_request_to_forget_is_one_the_agent_runs_and_names_a_saga(tmp_path, fo
     (lambda h: h._put("notes.txt", "0" * 40), "a folder's history writes no file of the folder"),
     (lambda h: h._remove("notes.txt", []), "a folder's history writes no file of the folder"),
     (lambda h: h.pickup(author=YOURS, trailers=[], push=True), "a folder's history records no routine's run"),
-    (lambda h: h.prune(keep=[], now=time.time()), "a folder's history is not pruned"),
     (lambda h: h.hand_off(author=A, trailers=[]), "a thread on a computer has no helper with a copy of its own"),
     (lambda h: h.hand_back(author=A, trailers=[]), "a thread on a computer has no helper with a copy of its own"),
     (lambda h: h.keep_apart(author=A, trailers=[]), "a thread on a computer has no helper with a copy of its own"),
@@ -2489,6 +2489,308 @@ def test_a_thread_whose_repository_cannot_be_packed_again_still_opens(tmp_path, 
     assert again.open() == {"copy": "kept"}
     assert "could not be packed again" in caplog.text
     assert [c["path"] for c in land(again, "saga:4")["changes"]] == ["notes.txt"]
+
+
+# -- a pruning on the computer -----------------------------------------------------------------------------------------
+
+
+#: A hundred days on: the window is main's last twenty commits.
+LATER = 100 * 86_400
+
+
+def lands_often(history: LocalHistory, path: str, times: int, author: dict = B) -> None:
+    """*history*'s thread lands a new version of *path* *times* times, as a busy thread does: a commit of main's each."""
+    for _ in range(times):
+        stamp = time.monotonic_ns()
+        (history.copy / path).write_bytes(b"PK version %d of %s" % (stamp, path.encode()))
+        assert land(history, f"saga:{history.thread}-{stamp}", author)["landing"] is not None
+
+
+def packs_of(place: Path) -> set[str]:
+    """The packs of the folder's history in *place*, each by its id: a pack whose index is there too."""
+    found = {p.name for p in (place / "history.git" / "objects" / "pack").iterdir()}
+    return {name[5:-5] for name in found if name.endswith(".pack") and f"{name[:-5]}.idx" in found}
+
+
+def noted(repo: Path) -> set[str]:
+    """The history's packs a thread's repository notes it may read objects from."""
+    return set((repo / "borrowed").read_text().split())
+
+
+def refs_of(store: Path) -> list[str]:
+    return sorted(git(store, "for-each-ref", "--format=%(refname)").split())
+
+
+def test_a_pruning_keeps_what_every_threads_repository_on_the_folder_names(tmp_path, folder):
+    a_copy(tmp_path, folder, "t1")  # the idle thread's: opened on the folder's first commit, it lands nothing for a long while
+    busy = a_copy(tmp_path, folder, "t2")
+    lands_often(busy, "notes.txt", 25)
+    place, store = tmp_path / "store", tmp_path / "store" / "history.git"
+    assert int(git(store, "rev-list", "--count", "--first-parent", "refs/heads/main")) == 26
+    before = packs_of(place)
+    pruned = busy.prune(keep=["refs/heads/threads/t2", "refs/bases/t2"], now=time.time() + LATER)
+    assert (pruned["pruned"], pruned["commits"]) == (True, 20)
+    assert int(git(store, "rev-list", "--count", "--first-parent", "refs/heads/main")) == 20
+    # One pack holds the history now, and each repository that borrows it notes that pack alone.
+    [one] = packs_of(place)
+    assert one not in before and noted(place / "clones" / "t1") == noted(place / "clones" / "t2") == {one}
+    # The history's refs are its own still: what was kept for a thread's repository was a ref only while it was cut.
+    # The idle thread has pushed none, and the history has none of its.
+    assert refs_of(store) == ["refs/bases/t2", "refs/heads/main", "refs/heads/threads/t2"]
+    assert not os.path.lexists(place / "pruning.git")
+    connected(place)
+    # The idle thread's repository borrows the history's objects: its base is still there, and its next turn lands.
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    (again.copy / "Report.docx").write_bytes(b"PK\x03\x04 report by the idle thread")
+    assert again.changed() == {"paths": ["Report.docx"]}
+    landed = land(again, "saga:idle")
+    assert landed["landing"] is not None and [c["path"] for c in landed["changes"]] == ["Report.docx"]
+    assert (folder / "Report.docx").read_bytes() == b"PK\x03\x04 report by the idle thread"
+    # A second pruning within a day of that one does nothing.
+    assert busy.prune(keep=[], now=time.time() + LATER + 3_600) == {"pruned": False}
+
+
+def logged(repo: Path) -> set[str]:
+    """Every commit a reflog of *repo* names, read as git writes them: the repository's own, and its copy's."""
+    named = set()
+    for log in [*(repo / "logs").rglob("*"), *(repo / "worktrees").glob("*/logs/**/*")]:
+        if log.is_file():
+            for line in log.read_text().splitlines():
+                named.update(line.split()[:2])
+    return named - {"0" * 40}
+
+
+def put_back(history: LocalHistory, base: str) -> str:
+    """A step's snapshot of *history*'s copy, its copy then put back to *base* as a Stop puts it back; the snapshot."""
+    taken = history.snapshot("before a step")
+    history.restore(base)
+    return taken
+
+
+def test_a_pruning_leaves_each_repository_in_the_place_whole_by_what_it_names_and_not_by_the_historys_refs(tmp_path, folder):
+    place, store = tmp_path / "store", tmp_path / "store" / "history.git"
+    main = lambda: git(store, "rev-parse", "refs/heads/main")  # noqa: E731
+    # t3's work, a snapshot on the folder's first commit; then its repository is set aside whole and made again.
+    t3 = a_copy(tmp_path, folder, "t3")
+    first = main()
+    (t3.copy / "Plan.md").write_text("t3's plan\n")
+    planned = t3.snapshot("before a step")
+    busy = a_copy(tmp_path, folder, "t2")
+    lands_often(busy, "notes.txt", 1)
+    (t3.repo / "made").unlink()
+    [repository] = [name for name in LocalHistory.at(place, folder, thread="t3", user="u1").open()["set_aside_folders"] if name.endswith(".repository")]
+    aside = place / "set-aside" / repository
+    lands_often(busy, "notes.txt", 1)
+    # t1 drafts on main as it was then, and is put back; again within the window; each time its copy moves to main after.
+    t1 = a_copy(tmp_path, folder, "t1")
+    (t1.copy / "Draft.md").write_text("drafted then\n")
+    drafted = put_back(t1, main())
+    # t4 lands after another landing, and what a command of its turn wrote after its commit is set aside: on the turn,
+    # which only its landing leads to.
+    t4 = a_copy(tmp_path, folder, "t4")
+    lands_often(busy, "notes.txt", 1)
+    (t4.copy / "Plan4.md").write_text("t4's plan\n")
+    step = up_to_its_record(t4, "saga:t4")
+    (t4.copy / "late.md").write_text("written after its turn was committed\n")
+    aside_of_t4 = t4.record(**step)["set_aside"]
+    assert aside_of_t4 is not None
+    lands_often(busy, "notes.txt", 1)
+    untold = git(store, "rev-parse", "refs/heads/main:notes.txt")
+    lands_often(busy, "notes.txt", 15)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {"copy": "moved"}
+    (t1.copy / "Later.md").write_text("drafted within the window\n")
+    later = put_back(LocalHistory.at(place, folder, thread="t1", user="u1"), main())
+    lands_often(busy, "notes.txt", 6)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open() == {"copy": "moved"}
+    # Its index, read before main moved on, names a version of the notes no commit of the window holds.
+    subprocess.run(
+        ["git", f"--git-dir={t1.repo}", f"--work-tree={folder}", "update-index", "--add", "--cacheinfo", f"100644,{untold},then.txt"],
+        check=True, env=HERMETIC,
+    )
+    assert {drafted, later} <= logged(t1.repo) and int(git(store, "rev-list", "--count", "--first-parent", "refs/heads/main")) == 27
+    before = packs_of(place)
+
+    pruned = LocalHistory.at(place, folder, thread="t2", user="u1").prune(keep=["refs/heads/threads/t2", "refs/bases/t2"], now=time.time() + LATER)
+    assert (pruned["pruned"], pruned["commits"]) == (True, 20)
+    # The history is one pack, its old ones gone, and every repository that borrows it, live or set aside, notes that one.
+    [one] = packs_of(place)
+    assert one not in before and {name for name in os.listdir(store / "objects" / "pack")} == {f"pack-{one}.pack", f"pack-{one}.idx"}
+    assert all(noted(repo) == {one} for repo in [*(place / "clones").iterdir(), aside])
+    connected(place)
+    # What the repository set aside names is whole: its snapshot, on a commit no live thread names.
+    assert git(aside, "show", f"{planned}:Plan.md") == "t3's plan" and git(store, "cat-file", "-t", first) == "commit"
+    # So is what t4 set aside, on its turn, which only a landing the window let go leads to.  The history keeps that turn:
+    # t4's repository holds none of it itself.
+    assert git(t4.repo, "show", f"{aside_of_t4}:late.md") == "written after its turn was committed"
+    assert git(store, "cat-file", "-t", step["turn"]) == "commit" and step["turn"] not in held_here(t4.repo)
+    # The version only its index named, t1 holds itself now.
+    assert untold in held_here(t1.repo)
+    assert subprocess.run(["git", f"--git-dir={store}", "cat-file", "-e", untold], env=HERMETIC).returncode != 0
+    # Its reflog keeps what the window keeps, and lets go of what it does not: git packs the repository again.
+    assert later in logged(t1.repo) and drafted not in logged(t1.repo)
+    assert git(t1.repo, "show", f"{later}:Later.md") == "drafted within the window"
+    subprocess.run(["git", f"--git-dir={t1.repo}", "repack", "-a", "-d", "-l", "-q"], check=True, env=HERMETIC)
+    # Each live thread lands again.
+    for name, path in (("t1", "Later.md"), ("t2", "B.md"), ("t3", "Plan.md"), ("t4", "Plan5.md")):
+        again = LocalHistory.at(place, folder, thread=name, user="u1")
+        again.open()
+        (again.copy / path).write_text(f"{name}'s, after the pruning\n")
+        assert [c["path"] for c in land(again, f"saga:{name}-after")["changes"]] == [path], name
+    connected(place)
+
+
+def test_a_pruning_writes_nothing_through_a_link_an_earlier_guest_left_in_a_repository_and_keeps_what_its_refs_name(tmp_path, folder):
+    one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    lands_often(busy, "notes.txt", 22)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("no file of the place's\n")
+    for staged in (".~borrowed", ".~shallow"):
+        (one.repo / staged).symlink_to(outside)
+    assert busy.prune(keep=["refs/heads/threads/t2", "refs/bases/t2"], now=time.time() + LATER)["pruned"] is True
+    assert outside.read_text() == "no file of the place's\n"
+    # Read as data alone: its base, the folder's first commit, is kept.  Its next request sets it aside whole, as before.
+    assert git(tmp_path / "store" / "history.git", "cat-file", "-t", git(one.repo, "rev-parse", "refs/bases/t1")) == "commit"
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
+    assert opened["copy"] == "made" and any(name.endswith("-t1.repository") for name in opened["set_aside_folders"]), opened
+
+
+def test_a_repository_astray_already_is_read_as_data_alone_and_the_pruning_goes_on(tmp_path, folder):
+    one = a_copy(tmp_path, folder, "t1")
+    (one.copy / "Draft.md").write_text("on the history that was\n")
+    one.snapshot("before a step")
+    # The folder's history was taken away by hand, and another thread's first copy made a new one: t1's repository
+    # notes packs the history no longer holds, and its snapshot stands on a commit nobody holds now.
+    shutil.rmtree(tmp_path / "store" / "history.git")
+    # Your save since: the new history's first commit is not the old one's, made again in the same second from the same files.
+    (folder / "notes.txt").write_text("saved by you before the history was made again\n")
+    busy = a_copy(tmp_path, folder, "t2")
+    lands_often(busy, "notes.txt", 3)
+    held = as_it_is(one.repo)
+    assert busy.prune(keep=["refs/heads/threads/t2", "refs/bases/t2"], now=time.time())["pruned"] is True
+    # Nothing of it is touched, and its next request finds it astray as before: made again, its work set aside.
+    assert as_it_is(one.repo) == held
+    opened = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
+    assert opened["copy"] == "made" and any(name.endswith("-t1.repository") for name in opened["set_aside_folders"]), opened
+
+
+@pytest.mark.parametrize("left", [".pack", ".idx"])
+def test_a_pruning_finishes_where_a_write_cut_between_a_pack_and_its_index_left_one_alone_and_takes_it_away(tmp_path, folder, left):
+    one = a_copy(tmp_path, folder)
+    lands_often(one, "notes.txt", 2)
+    pack = tmp_path / "store" / "history.git" / "objects" / "pack"
+    # As a push, or a pruning, killed between a pack and its index leaves it; or a pruning killed between the two it let go.
+    source = sorted(pack.glob(f"pack-*{left}"))[0]
+    shutil.copyfile(source, pack / f"pack-{'f' * 40}{left}")
+    assert one.prune(keep=[], now=time.time())["pruned"] is True
+    [kept] = packs_of(tmp_path / "store")
+    assert sorted(p.name for p in pack.iterdir()) == [f"pack-{kept}.idx", f"pack-{kept}.pack"]
+    assert noted(one.repo) == {kept}
+    connected(tmp_path / "store")
+
+
+def test_what_a_pruning_cut_part_way_left_beside_the_history_is_gone_with_the_next_request(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    work = tmp_path / "store" / "pruning.git"
+    shutil.copytree(tmp_path / "store" / "history.git", work, copy_function=os.link)
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").changed() == {"paths": []}
+    assert not os.path.lexists(work)
+    # A link an earlier guest left at its name goes too, and what it led to stays.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "theirs.txt").write_text("another folder's file\n")
+    work.symlink_to(elsewhere)
+    assert one.copy.exists() and LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").changed() == {"paths": []}
+    assert not os.path.lexists(work) and (elsewhere / "theirs.txt").read_text() == "another folder's file\n"
+
+
+def test_a_pruning_keeps_the_refs_of_every_thread_with_a_repository_on_the_folder_whatever_it_is_told(tmp_path, folder):
+    one = a_copy(tmp_path, folder, "t1")
+    (one.copy / "notes.txt").write_text("t1's notes\n")
+    assert land(one, "saga:t1-first")["landing"] is not None
+    busy = a_copy(tmp_path, folder, "t2")
+    lands_often(busy, "Report.docx", 25)
+    place, store = tmp_path / "store", tmp_path / "store" / "history.git"
+    # t1 was resolved longer ago than the window, so the server names t2's refs alone.  Its repository is still in the place.
+    assert busy.prune(keep=["refs/heads/threads/t2", "refs/bases/t2"], now=time.time() + LATER)["pruned"] is True
+    assert refs_of(store) == ["refs/bases/t1", "refs/bases/t2", "refs/heads/main", "refs/heads/threads/t1", "refs/heads/threads/t2"]
+    # Reopened, its next turn lands: its push finds its branch in the history where its repository left it.
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    assert again.open() == {"copy": "moved"}
+    (again.copy / "notes.txt").write_text("t1's notes, again\n")
+    landed = land(again, "saga:t1-second")
+    assert landed["landing"] is not None and [c["path"] for c in landed["changes"]] == ["notes.txt"]
+    # A thread with no repository in the place any more has its refs go with the next pruning, as the server names it.
+    shutil.rmtree(place / "clones" / "t1")
+    shutil.rmtree(place / "threads" / "t1")
+    assert busy.prune(keep=["refs/heads/threads/t2", "refs/bases/t2"], now=time.time() + 3 * LATER)["pruned"] is True
+    assert refs_of(store) == ["refs/bases/t2", "refs/heads/main", "refs/heads/threads/t2"]
+    connected(place)
+
+
+def test_a_pruning_is_once_a_day_by_the_clock_that_asks_for_it_whatever_this_computers_says(tmp_path, folder):
+    busy = a_copy(tmp_path, folder, "t2")
+    (busy.copy / "notes.txt").write_text("v2 notes\n")
+    assert land(busy, "saga:1", B)["landing"] is not None
+    # The server's clock is five days ahead of this computer's.  Its own two askings, an hour apart, are one day's.
+    ahead = time.time() + 5 * 86_400
+    assert busy.prune(keep=[], now=ahead)["pruned"] is True
+    assert busy.prune(keep=[], now=ahead + 3_600) == {"pruned": False}
+    # A day on by that clock, it prunes again.
+    assert busy.prune(keep=[], now=ahead + 86_400 + 1)["pruned"] is True
+    # And a server whose clock is behind this computer's is not refused for a day it has not had.
+    behind = time.time() - 5 * 86_400
+    assert busy.prune(keep=[], now=behind) == {"pruned": False}
+    assert busy.prune(keep=[], now=ahead + 2 * 86_400 + 2)["pruned"] is True
+
+
+def pruned_size(place: Path) -> int:
+    return sum(p.stat().st_size for p in (place / "history.git" / "objects" / "pack").glob("pack-*.pack"))
+
+
+def test_a_pruning_is_asked_with_the_refs_of_threads_and_no_other(tmp_path, folder):
+    place, thread = tmp_path / "store", "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f"
+    request = {"store": str(place), "folder": str(folder), "thread": thread, "user": "u1"}
+    assert local_history.run({**request, "action": "open", "args": {}}) == {"copy": "made"}
+    asked = {**request, "action": "prune"}
+    kept = [f"refs/heads/threads/{thread}", f"refs/bases/{thread}"]
+    answer = local_history.run({**asked, "args": {"keep": kept, "now": time.time()}})
+    assert (answer["pruned"], answer["commits"], answer["size"]) == (True, 1, pruned_size(place))
+    for args, words in (
+        ({"keep": ["refs/heads/main"], "now": 1.0}, "a pruning keeps a thread's branch and its base, and no other ref"),
+        ({"keep": ["--upload-pack=/x"], "now": 1.0}, "a pruning keeps a thread's branch and its base, and no other ref"),
+        ({"keep": [f"refs/bases/{thread}/../../heads/main"], "now": 1.0}, "a pruning keeps a thread's branch and its base, and no other ref"),
+        ({"keep": [f"refs/bases/{thread}", 7], "now": 1.0}, "a pruning keeps a thread's branch and its base, and no other ref"),
+        ({"keep": "refs/bases/x", "now": 1.0}, "a pruning takes the refs it keeps, and the time"),
+        ({"keep": [], "now": "today"}, "a pruning takes the refs it keeps, and the time"),
+        ({"keep": [], "now": True}, "a pruning takes the refs it keeps, and the time"),
+        ({"keep": [], "now": float("nan")}, "a pruning takes the refs it keeps, and the time"),
+        ({"keep": [], "now": 1e300}, "a pruning takes the refs it keeps, and the time"),
+        ({"keep": [], "now": -1}, "a pruning takes the refs it keeps, and the time"),
+        ({"keep": []}, "a pruning takes the refs it keeps, and the time"),
+    ):
+        with refused("not_a_request", f"refused the request: {words}"):
+            local_history.run({**asked, "args": args})
+
+
+def test_a_pruning_stores_a_large_file_whole_and_a_small_ones_versions_as_changes(tmp_path, folder):
+    rows = [f"{n},{n * 7919 % 10_007},{n * 104_729 % 1_000_003}\n" for n in range(120_000)]
+    notes = [f"line {n} of the notes\n" for n in range(200)]
+    (folder / "ledger.csv").write_text("".join(rows))
+    (folder / "notes.txt").write_text("".join(notes))
+    assert os.path.getsize(folder / "ledger.csv") > 2 * 2**20
+    one = a_copy(tmp_path, folder)
+    (one.copy / "ledger.csv").write_text("".join(rows[:500] + ["500,changed,once\n"] + rows[501:]))
+    (one.copy / "notes.txt").write_text("".join(notes[:7] + ["line seven, changed\n"] + notes[8:]))
+    land(one, "saga:1")
+    store = tmp_path / "store" / "history.git"
+    assert one.prune(keep=[], now=time.time())["pruned"] is True
+    [index] = (store / "objects" / "pack").glob("pack-*.idx")
+    # Each blob of the one pack: one kept as a change of another names that one last.
+    packed = {line.split()[0]: line.split() for line in git(store, "verify-pack", "-v", str(index)).splitlines() if " blob " in line}
+    versions = {name: [git(store, "rev-parse", f"{at}:{name}") for at in ("main", "main~1")] for name in ("ledger.csv", "notes.txt")}
+    # Whole, as the cloud's: a file over a mebibyte is never a change of another.
+    assert [len(packed[blob]) for blob in versions["ledger.csv"]] == [5, 5]
+    assert sorted(len(packed[blob]) for blob in versions["notes.txt"]) == [5, 7]
 
 
 def test_a_repository_whose_first_open_did_not_end_is_set_aside_whole_with_its_copy_and_named_by_every_open(tmp_path, folder):
@@ -4251,6 +4553,94 @@ def test_an_open_after_a_letting_go_killed_at_any_step_loses_nothing_that_waited
         again = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
         assert again.open(moves=False)["copy"] in ("made", "kept"), at
         assert platform_folders(again.copy) == platform and not os.path.lexists(waiting), at
+
+
+IDLE = THREAD.replace("0b6c", "4b6c")
+#: What a pruning a hundred days on is asked: the busy thread's refs alone.
+PRUNED = {"keep": [f"refs/heads/threads/{THEIRS}", f"refs/bases/{THEIRS}"], "now": time.time() + LATER}
+
+
+def a_folder_to_prune(root: Path) -> None:
+    """A folder under *root* whose history a pruning a hundred days on cuts, and every way a repository there reads it.
+
+    Another thread has landed twenty-two times; an idle one's base is the
+    folder's first commit; ours has a snapshot on a base the window lets go,
+    in its reflog alone, and an index naming a version no commit of the window
+    holds; and a repository of a thread's own was set aside whole, its work on
+    the folder's first commit.  The history was pruned once already, on the
+    day it was all within the window: it is one pack.
+    """
+    folder = root / "Documents"
+    folder.mkdir(parents=True)
+    for name, text in (("Report.docx", "report v1"), ("notes.txt", "v1 notes")):
+        (folder / name).write_text(f"{text}\n")
+        os.utime(folder / name, (time.time() - 60, time.time() - 60))
+    place, store = root / "store", root / "store" / "history.git"
+    gone = a_copy(root, folder, NEW)
+    (gone.copy / "Plan.md").write_text("its plan\n")
+    gone.snapshot("before a step")
+    a_copy(root, folder, IDLE)
+    a_copy(root, folder, OURS)
+    theirs = a_copy(root, folder, THEIRS)
+    lands_often(theirs, "notes.txt", 1)
+    ours = LocalHistory.at(place, folder, thread=OURS, user="u1")
+    assert ours.open() == {"copy": "moved"}
+    untold = git(store, "rev-parse", "refs/heads/main:notes.txt")
+    (ours.copy / "Draft.md").write_text("drafted then\n")
+    put_back(ours, git(store, "rev-parse", "refs/heads/main"))
+    lands_often(theirs, "notes.txt", 1)
+    (gone.repo / "made").unlink()
+    LocalHistory.at(place, folder, thread=NEW, user="u1").open()
+    lands_often(theirs, "notes.txt", 20)
+    assert LocalHistory.at(place, folder, thread=OURS, user="u1").open() == {"copy": "moved"}
+    subprocess.run(
+        ["git", f"--git-dir={ours.repo}", f"--work-tree={folder}", "update-index", "--add", "--cacheinfo", f"100644,{untold},then.txt"],
+        check=True, env=HERMETIC,
+    )
+    assert LocalHistory.at(place, folder, thread=THEIRS, user="u1").prune(keep=[], now=time.time())["pruned"] is True
+    assert len(packs_of(place)) == 1 and len(set_aside_whole(place)) == 2
+
+
+def pruned_whole(root: Path, at: object) -> None:
+    """After a pruning cut at *at*: no repository is astray, all read what they name, and the next pruning finishes the cut one.
+
+    Then every repository notes the history's one pack, each live thread's copy opens, and ours lands again.
+    """
+    place, folder = root / "store", root / "Documents"
+    threads = sorted(repo.name for repo in (place / "clones").iterdir())
+    for thread in threads:
+        history = LocalHistory.at(place, folder, thread=thread, user="u1")
+        history._pin()
+        assert not history.astray, (at, thread)
+    # The work a cut pruning left, which links the packs it let go, is gone with the next request.
+    assert not os.path.lexists(place / "pruning.git"), at
+    connected(place)
+    pruned = LocalHistory.at(place, folder, thread=OURS, user="u1").prune(**{**PRUNED, "now": PRUNED["now"] + 2 * 86_400})
+    assert pruned["pruned"] is True, at
+    [one] = packs_of(place)
+    assert all(noted(repo) == {one} for repo in [*(place / "clones").iterdir(), *(place / "set-aside").glob("*.repository")]), at
+    connected(place)
+    for thread in threads:
+        assert LocalHistory.at(place, folder, thread=thread, user="u1").open()["copy"] in ("moved", "kept"), (at, thread)
+    ours = LocalHistory.at(place, folder, thread=OURS, user="u1")
+    (ours.copy / "after.md").write_text("after the pruning\n")
+    assert [c["path"] for c in land(ours, "saga:after")["changes"]] == ["after.md"], at
+    connected(place)
+
+
+@pytest.mark.parametrize("inside", [0, 0.012])
+def test_a_pruning_killed_at_any_step_leaves_every_repository_whole_and_the_next_pruning_finishes_it(tmp_path, inside):
+    a_folder_to_prune(tmp_path / "whole")
+    cuts = 0
+    for at, root in each_cut(tmp_path, THEIRS, "prune", PRUNED, removals=True, inside=inside):
+        pruned_whole(root, at)
+        cuts += 1
+    assert cuts > 10
+    # Run to its end, it prunes, and every repository is whole after it.
+    root = tmp_path / "ended"
+    shutil.copytree(tmp_path / "whole", root, symlinks=True)
+    assert stepped(root, THEIRS, "prune", PRUNED)["answer"]["pruned"] is True
+    connected(root / "store")
 
 
 @pytest.mark.parametrize("broken", [name for name in BROKEN if name != "its copy's index is gone"])
