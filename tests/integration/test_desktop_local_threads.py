@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -29,9 +30,11 @@ from .test_desktop_file_operations import journal_dir  # noqa: F401  (a fixture)
 from .test_desktop_link_client import DESKTOP, built_client, client, connected  # noqa: F401  (built_client is a fixture)
 from .test_device_sessions import is_bound
 from .test_devices import api, eventually, link_url, register  # noqa: F401  (api and link_url are fixtures)
+from .test_local_history_landing import said
 from .test_local_history_open import woken
 from .test_local_threads import begin, device_card, make_local
 from .test_turn_sagas import calling
+from .test_workstream_overview import rows
 from .test_workstream_threads import PROPOSED, call_tool, events_of
 
 pytestmark = [
@@ -246,5 +249,55 @@ async def test_two_threads_on_one_folder_each_land_and_each_names_the_file_the_o
             "Budget.xlsx": b"Total,42\nChecked by two\n", "Notes.md": b"Two's notes\nOne's notes\n", "Report.docx": b"PK report v1",
         }
         assert nothing_kept(journal_dir)
+    finally:
+        await app.close()
+
+
+async def test_a_place_the_app_set_aside_for_another_folder_at_the_path_reaches_the_threads_report_once_and_stands_on_its_row(
+    built_client, agent_disk, apart, journal_dir, api, link_url, tmp_path, monkeypatch,  # noqa: F811
+):
+    folder = tmp_path / "Reports"
+    folder.mkdir()
+    (folder / "Report.docx").write_bytes(b"PK report v1")
+    device = await register(api)
+    journal = journal_dir / "journal.sqlite"
+    app = await client(built_client, link_url, device["token"], journal, confirm=folder)
+    try:
+        [prepared] = await confirmed_on(app)
+        project, master, one = await a_thread_on_the_app(api, device, prepared)
+        await asyncio.wait_for(woken(api, monkeypatch, one, [
+            calling(("write_file", {"path": "Notes.md", "content": "notes\n"})), _final_response("Noted."),
+        ]), TURN_S)
+    finally:
+        await app.close()
+    # Another folder at the path, as its user moves the first away and makes a new one; and a thread on it, from an app
+    # started again, whose turn's open sets the old folder's place aside, its history and the first thread's copy in it.
+    folder.rename(tmp_path / "Reports.old")
+    folder.mkdir()
+    (folder / "Other.md").write_text("the new folder's\n")
+    app = await client(built_client, link_url, device["token"], journal, confirm=folder)
+    try:
+        [prepared] = await confirmed_on(app)
+        _, _, two = await a_thread_on_the_app(api, device, prepared, project, master)
+        await asyncio.wait_for(woken(api, monkeypatch, two, [_final_response("Done.")]), TURN_S)
+        [aside] = [p.name for p in (journal_dir / "data" / "history").iterdir() if ".was-" in p.name and not p.name.endswith(".json")]
+        assert all((journal_dir / "data" / "history" / aside / kept).is_dir() for kept in ("history.git", f"clones/{one.id}"))
+        at = datetime.fromtimestamp(int(aside.rsplit("-", 1)[1]) / 1000, UTC)
+        # Its report says so, once: the next says nothing of it.
+        await asyncio.wait_for(woken(api, monkeypatch, two, [_final_response("Done.")], said="Go on."), TURN_S)
+        first, second = [r for r in await events_of(api, master.id, EventType.WORKER_COMPLETE) if r.data["worker_id"] == str(two.id)]
+        place = {"kind": "place", "at": f"{at:%Y-%m-%dT%H:%M:%S}Z"}
+        assert (first.data["set_aside"], second.data.get("set_aside")) == ({"kept": [place], "snapshots": 0, "gone": []}, None)
+        assert (
+            "\nSet aside on its computer, as what it kept at its folder's path was another folder's history or could not be read: "
+            f"the earlier history at its folder's path, with its threads' copies as they were at {at:%Y-%m-%d %H:%M} UTC\n"
+        ) in said(first)
+        assert "set aside" not in said(second).lower()
+        # Its first copy was said to be made while it was, and only then: the open that named the place says it has one.
+        waits = await events_of(api, two.id, EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED)
+        assert [(e.type, e.data.get("reason")) for e in waits] == [(EventType.DEVICE_WAITING.value, "copying"), (EventType.DEVICE_RESUMED.value, None)]
+        # Its row says what is kept, and the first thread's says nothing of it.
+        found = {row["id"]: row["set_aside"] for row in await rows(api, project)}
+        assert (found[str(two.id)], found[str(one.id)]) == ({"kept": [place], "snapshots": 0, "gone": []}, None)
     finally:
         await app.close()
