@@ -612,8 +612,9 @@ class Opens(DeviceOperations):
     def __init__(self, *outcomes: Any) -> None:
         self.outcomes = list(outcomes)
         self.recorded: dict[str, Any] = {}
-        # Each asking its computer heard, by its name, in order.
+        # Each asking its computer heard, by its name, in order; and what each asked.
         self.heard: list[str] = []
+        self.args: list[tuple[str, dict[str, Any]]] = []
 
     async def opens(self, calling_session_id: UUID, turn: int) -> int:
         return sum(name == f"open:{turn}" or name.startswith(f"open:{turn}:") for name in self.recorded)
@@ -622,6 +623,7 @@ class Opens(DeviceOperations):
         name = request.invocation_id
         if name not in self.recorded:
             self.heard.append(name)
+            self.args.append((name, request.args))
             self.recorded[name] = None
         if self.recorded[name] is None:
             # Its computer answers it: now, or once it is back.
@@ -709,8 +711,9 @@ def test_a_thread_whose_folder_or_computer_is_no_place_for_it_has_nowhere_to_wor
     its = ThreadCopy(journal, a_project_thread(), lease_token=None)
     for _ in range(2):
         stood = nowhere(its)
-        # What the person can do is theirs, never a Retry of the same.
-        assert (stood.why, str(stood), stood.retryable) == (why, NOWHERE[why], False)
+        # What the person can do is theirs, never a Retry of the same: but for a folder too large, which its computer's
+        # app tries again only for one, as its person asks for the turn again.
+        assert (stood.why, str(stood), stood.retryable) == (why, NOWHERE[why], why == "history_off")
     assert journal.heard == ["open:7"]
 
 
@@ -750,15 +753,26 @@ def test_a_refusal_a_later_asking_may_pass_leaves_the_thread_nowhere_to_work_thi
     assert journal.heard == ["open:7"]
 
 
-def test_a_folder_whose_copy_was_cut_twice_by_its_bound_leaves_its_thread_nowhere_to_work_at_the_next_asking():
-    cut = {"error": {"type": "history", "code": "no_answer", "message": "This folder's history did not answer"}}
+def test_a_folder_whose_copy_its_bound_cut_leaves_its_thread_nowhere_to_work_at_once_with_a_retry():
     too_large = {"error": {"type": "history_off", "message": "This folder is too large for a thread of the project to have a copy"}}
-    journal = Opens(cut, cut, too_large)
+    journal = Opens(too_large)
     its = ThreadCopy(journal, a_project_thread(), lease_token=None)
-    # As the app answers: two makings of the copy cut short by their bound, then no copy for the thread.
+    # As the app answers the making its bound cut, and every open after it.
     stood = nowhere(its)
-    assert (stood.why, stood.code, str(stood), stood.retryable) == ("history_off", "history_off", NOWHERE["history_off"], False)
-    assert journal.heard == ["open:7", "open:7:1", "open:7:2"]
+    assert (stood.why, stood.code, str(stood), stood.retryable) == ("history_off", "history_off", NOWHERE["history_off"], True)
+    assert journal.heard == ["open:7"]
+
+
+def test_a_turn_its_person_asked_for_again_says_so_at_its_first_asking_alone():
+    journal = Opens({"error": {"type": "history", "code": "no_answer", "message": "Cut short"}}, MOVED, MOVED)
+    its = ThreadCopy(journal, a_project_thread(), lease_token=None)
+    assert asyncio.run(its.opened(7, retried=True)) == {"copy": "moved"}
+    # Asked again under the turn's next name, it is no asking of the person's: a folder is tried again once for one.
+    assert journal.args == [("open:7", {"action": "open", "retried": True}), ("open:7:1", {"action": "open"})]
+    # Read again, as a later step of the turn reads it, it is the turn's answer; another turn says nothing of it.
+    assert asyncio.run(its.opened(7, retried=True)) == {"copy": "moved"}
+    assert asyncio.run(its.opened(9)) == {"copy": "moved"}
+    assert journal.args[2:] == [("open:9", {"action": "open"})]
 
 
 def test_an_asking_a_worker_left_unanswered_is_waited_for_and_is_not_asked_again():
@@ -774,9 +788,10 @@ def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_
     assert set(NOWHERE) == {"cap", "names", "history_off", NO_COPY, "gone", "revoked", "again", "refused", MADE_BEFORE_COPIES}
     for why, words in NOWHERE.items():
         assert str(NowhereToWork(why)) == words and len(words) <= 200, why
-        # A Retry only where asking again can pass.
-        assert NowhereToWork(why).retryable == (why == "again"), why
+        # A Retry only where asking again can pass, and where its computer's app tries again as its person asks.
+        assert NowhereToWork(why).retryable == (why in ("again", "history_off")), why
     assert all("Choose a folder inside it" in NOWHERE[why] for why in ("cap", "names", "history_off"))
+    assert NOWHERE["history_off"].endswith("or try again.")
     assert NOWHERE[NO_COPY].endswith("Update Surogate Desktop.")
     assert "choose it again" in NOWHERE["gone"] and "Sign this computer in again" in NOWHERE["revoked"]
     assert NOWHERE["again"].endswith("Try again.") and "Try again" not in NOWHERE["refused"]

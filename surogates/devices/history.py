@@ -122,8 +122,9 @@ _REFUSED = "refused"
 #: Why a thread on its computer has nowhere to work where it was made before threads worked in copies:
 #: bound to the folder itself, it would write the user's files with nothing kept.
 MADE_BEFORE_COPIES = "made_before_copies"
-#: The refusal of a computer whose app gives the thread no copy of a folder too large to copy in
-#: the time a copy may take, its making cut short by that bound twice: until the app starts again.
+#: The refusal of a computer whose app gives no thread a copy of a folder too large to copy in the
+#: time a copy may take, a making of one cut short by that bound: until the folder holds other files,
+#: or its person asks for the turn again, which the app then tries once more (:meth:`ThreadCopy.open`).
 _TOO_LARGE = "history_off"
 #: Why a thread has nowhere to work, by its open's refusal: its type, else its code.
 _NOWHERE_BY = {
@@ -140,7 +141,7 @@ NOWHERE: dict[str, str] = {
     "names": "A file in this folder has a name its history cannot keep, so this thread cannot work there. Choose a folder inside it.",
     _TOO_LARGE: (
         "This folder is too large for this thread to have a copy of its own on this computer, so it cannot work there. "
-        "Choose a folder inside it that holds less."
+        "Choose a folder inside it that holds less, or try again."
     ),
     NO_COPY: (
         "Surogate Desktop on this computer keeps no copy of the folder for this thread, so it cannot work there. "
@@ -206,8 +207,9 @@ class NowhereToWork(Exception):
         super().__init__(NOWHERE[why])
         self.why = why
         self.code = code
-        #: Whether a later turn may find otherwise, its turn asked again: only one whose copy could not be opened just now.
-        self.retryable = why == _AGAIN
+        #: Whether a later turn may find otherwise, its turn asked again: one whose copy could not be opened just now, and
+        #: one of a folder too large, which its computer's app tries once more for its person's asking.
+        self.retryable = why in (_AGAIN, _TOO_LARGE)
 
 
 def opens_its_copy(session: Any) -> bool:
@@ -607,14 +609,15 @@ class ThreadCopy:
             calling_session_id=self._session.id, invocation_id=invocation, lease_token=self._lease_token,
         ), thread=self.thread)
 
-    async def open(self, turn: int, *, again: int = 0) -> dict[str, Any]:
+    async def open(self, turn: int, *, again: int = 0, retried: bool = False) -> dict[str, Any]:
         """Bring the copy to the turn *turn*: ``{copy, …}``, or ``{history: "off", reason, …}`` for a folder with no history.
 
         Journaled under the turn, so an answer is the turn's: asked again,
         it is given as it was, and the computer hears of it once.  A refusal
         is recorded the same way, so whoever asks again after one asks under
         the turn's next name: *again* counts the refusals before this
-        asking.
+        asking.  *retried*: the turn is one its person asked for again, and
+        its computer's app tries again a folder it refused as too large.
 
         A thread with nowhere to work never works in the folder.  A folder
         with no history answers so, with its reason.  A computer that keeps
@@ -622,9 +625,10 @@ class ThreadCopy:
         again does not change.  Every other refusal may have done part of
         the work, and says nothing of where the thread works.
         """
-        return await self.steps(f"open:{turn}:{again}" if again else f"open:{turn}").history("open")
+        steps = self.steps(f"open:{turn}:{again}" if again else f"open:{turn}")
+        return await steps.history("open", **({"retried": True} if retried else {}))
 
-    async def opened(self, turn: int, *, telling: bool = False) -> dict[str, Any]:
+    async def opened(self, turn: int, *, telling: bool = False, retried: bool = False) -> dict[str, Any]:
         """The copy brought to the turn *turn*: the open's answer, which every step of the turn works from.
 
         The journal holds each asking of the turn's.  An answer is the
@@ -636,7 +640,10 @@ class ThreadCopy:
         With *telling*, as at the turn's start, a thread whose copy no open
         has answered yet has its chat told that the copy is being made, for
         as long as the askings run: its first copy of a large folder takes
-        minutes.
+        minutes.  With *retried*, the turn's person asked for it again, and
+        its first asking says so (:meth:`open`): a folder its computer's app
+        refused as too large is tried again once for the asking, not at each
+        of the turn's askings after it.
 
         Raises :class:`NowhereToWork` where the thread has nowhere to work:
         its folder has no history, its computer's app keeps no copy for it
@@ -654,16 +661,16 @@ class ThreadCopy:
         if making:
             await self._notice.copying(self._session.id, self.device_id, self.folder)
         try:
-            return await self._opened(turn, number)
+            return await self._opened(turn, number, retried)
         finally:
             if making:
                 await self._notice.copied(self._session.id, self.device_id)
 
-    async def _opened(self, turn: int, number: int) -> dict[str, Any]:
+    async def _opened(self, turn: int, number: int, retried: bool) -> dict[str, Any]:
         """The turn's askings of its open, from its asking *number*, as :meth:`opened` has them."""
         while True:
             try:
-                answer = await self.open(turn, again=number)
+                answer = await self.open(turn, again=number, retried=retried and number == 0)
             except ComputerRefused as refusal:
                 if refusal.kind == _STOPPED:
                     raise

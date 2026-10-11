@@ -61,6 +61,9 @@ settles one otherwise changes this file with it.
   among them, ``history_off``.  The thread works nowhere.
 - A step the history refuses ``no_whole_copy`` is asked again once, after
   the app opens the copy; only a second refusal reaches the worker.
+- A turn's open asked as ``retried`` (its person asked for the turn again)
+  is asked of the history without it.  The app's refusal of a folder too
+  large to copy in time, which that tries again, is not stood in for.
 - The app's check of its guest's answers (``desktop/src/vm/history.ts``) is
   the server's own: what the history answers is passed on as it came, but for
   a commit's changes to a name whose change could run code on the computer,
@@ -240,6 +243,8 @@ class Places:
             if action == "take":
                 return self._ask(thread, "snapshot", {"reason": args.get("reason")})
             return self._ask(thread, "restore", {"commit": args.get("hash")})
+        if action == "open" and args.get("retried") is True:
+            del args["retried"]
         answer = self._ask(thread, action, args)
         if "ok" in answer and action == "open" and answer["ok"].get("history") == "off":
             self.off = answer["ok"]["reason"]
