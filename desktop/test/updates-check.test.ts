@@ -216,6 +216,19 @@ describe("a release that no key this computer trusts has signed", () => {
     expect(found.state).toEqual({ state: "unsigned" });
   });
 
+  it("takes the line down at a newer release that a trusted key signed, though its download then fails: what stood was its signature", async () => {
+    base.publish("1.2.4", {}, next.privateKey);
+    const now = Date.UTC(2026, 0, 3);
+    writeFileSync(standing(), JSON.stringify({ since: now - 24 * HOUR, count: 7 }));
+    const found = base.updates({ standing: standing(), now: () => now });
+    await expect(found.check()).rejects.toThrow(UNSIGNED);
+    expect(found.state).toEqual({ state: "unsigned" });
+    base.publish("1.2.4");
+    base.served.delete(base.tarballAt("1.2.4"));
+    await expect(found.check()).rejects.toThrow("answered 404 for Surogate 1.2.4");
+    expect([found.state, updateLine(found.state), kept()]).toEqual([{ state: "none" }, null, null]);
+  });
+
   it("leaves the line of an update that is here: one downloaded and offered stays offered", async () => {
     base.publish("1.2.4");
     const found = base.updates();
@@ -436,6 +449,32 @@ describe("a check", () => {
       cut(new Error("Surogate quit"));
       stops();
       expect([await after(360), await after(360), said.length]).toEqual([11, 11, before]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is one at a time where the computer wakes while one runs, with one wait after it; and none begins at a wake after the quit", async () => {
+    vi.useFakeTimers();
+    try {
+      let checks = 0;
+      let end = () => {};
+      const quit = new AbortController();
+      const now = keepChecked({ check: () => (checks += 1, new Promise<void>((resolve) => (end = resolve))) }, quit.signal, () => {});
+      const after = async (ms: number) => (await vi.advanceTimersByTimeAsync(ms), checks);
+      expect(checks).toBe(1);
+      // Awake twice while it runs: the check that runs is the one, and once it ends one check follows six hours on.
+      now();
+      now();
+      expect(await after(0)).toBe(1);
+      end();
+      expect([await after(CHECK_MS - 1), await after(1), await after(CHECK_MS - 1)]).toEqual([1, 2, 2]);
+      // Ended, and the app quit since: a wake checks nothing, nor does any wait.
+      end();
+      await after(0);
+      quit.abort(new Error("Surogate quit"));
+      now();
+      expect([await after(0), await after(CHECK_MS * 2)]).toEqual([2, 2]);
     } finally {
       vi.useRealTimers();
     }
