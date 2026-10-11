@@ -143,12 +143,25 @@ function look(path: string): BigIntStats | null {
   }
 }
 
-// The refusal of a file where the folder gives none a second name: a landing takes a name only by a link, which
-// fails where another file took it meanwhile, and gives a file its own name back the same way.
+// Why a step's link failed, by its code: a landing takes a name only by a link, which fails where another file took it
+// meanwhile, and gives a file its own name back the same way, so a folder that gives no file a second name takes none.
+const NO_SECOND_NAME = "this folder cannot give a file a second name, which a landing needs to put back what it replaces";
+const UNLINKED: Record<string, string> = {
+  EPERM: NO_SECOND_NAME,
+  ENOTSUP: NO_SECOND_NAME,
+  EOPNOTSUPP: NO_SECOND_NAME,
+  EACCES: "this user may not write in its folder",
+  EROFS: "its folder is on a disk that cannot be written",
+  ENOSPC: "the disk it is on is full",
+  EDQUOT: "this user's disk quota there is used up",
+};
+
+// The refusal of a file whose step's link failed: said by its code, or as the system says it.
 function unlinkable(path: string, error: unknown): unknown {
   const { code } = error as NodeJS.ErrnoException;
   if (typeof code !== "string" || code === "ENOENT") return code === "ENOENT" ? conflict(path) : error;
-  return new Failure({ type: "os", code, message: `${path} was not written: this folder cannot give a file a second name, which a landing needs to put back what it replaces` });
+  const why = UNLINKED[code];
+  return why === undefined ? fromNode(error, path) : new Failure({ type: "os", code, message: `${path} was not written: ${why}` });
 }
 
 function conflict(path: string): Failure {
@@ -644,7 +657,7 @@ class Landing {
       if (found !== null && keptBytes(this.store) + Number(found.size) > MAX_KEPT_BYTES) {
         throw new Failure({
           type: "os", code: "EDQUOT",
-          message: `${path} was not replaced: more than ${MAX_KEPT_BYTES / 2 ** 30} GiB would be kept of the files this folder's landings replaced`,
+          message: `${path} was not replaced: more than ${MAX_KEPT_BYTES / 2 ** 30} GiB would be kept of the files this folder's landings replaced. It can land once an earlier landing in this folder is recorded or put back, which lets go of what that one kept`,
         });
       }
       const pathTo = (count: number) => folders.slice(0, count).join("/");

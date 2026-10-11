@@ -1198,6 +1198,26 @@ describe("a landing's step, when it fails or is asked again", () => {
     expect(existsSync(join(kept, SAGA))).toBe(false);
   });
 
+  it("says by its code why a step's link failed for anything but a folder that gives no second name: a full disk, a quota, a permission, a disk that cannot be written, or as the system says it", { timeout: 60_000 }, async () => {
+    writeFileSync(join(folder, "Report.docx"), "the report, v1");
+    const after = turn("Report.docx", "the report, by the thread");
+    const fresh = turn("new.md", "new\n");
+    const seen = await looked("Report.docx");
+    for (const [code, said] of [
+      ["ENOSPC", "was not written: the disk it is on is full"], ["EDQUOT", "was not written: this user's disk quota there is used up"],
+      ["EACCES", "was not written: this user may not write in its folder"], ["EROFS", "was not written: its folder is on a disk that cannot be written"],
+    ]) {
+      const { answers } = await helper([
+        apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!), apply(2, "new.md", null, fresh, "absent"),
+      ], ["linkSync", 0, ".", 0, `refuse(${JSON.stringify(code)})`]);
+      expect(answers, code).toEqual(["Report.docx", "new.md"].map((path) => ({ error: { type: "os", code, message: `${path} ${said}` } })));
+    }
+    const { answers } = await helper([apply(1, "Report.docx", blob("the report, v1"), after, seen["Report.docx"]!)], ["linkSync", 0, ".", 0, 'refuse("EIO")']);
+    expect(answers).toEqual([{ error: { type: "os", code: "EIO", message: "Input/output error: 'Report.docx'" } }]);
+    expect(readdirSync(folder)).toEqual(["Report.docx"]);
+    expect(readFileSync(join(folder, "Report.docx"), "utf8")).toBe("the report, v1");
+  });
+
   it("gives the replaced file its name back when the step fails after it was kept: what it kept is never dropped with its record", { timeout: 60_000 }, async () => {
     const target = join(folder, "Report.docx");
     writeFileSync(target, "the report, v1");
@@ -1298,7 +1318,8 @@ describe("what a landing keeps, and how much", () => {
     // Whichever landing asks: the bound is the folder's.
     const third = { ...apply(1, "c.bin", any, after, seen["c.bin"]!), saga: other };
     expect(await refused(third)).toEqual({
-      type: "os", code: "EDQUOT", message: "c.bin was not replaced: more than 4 GiB would be kept of the files this folder's landings replaced",
+      type: "os", code: "EDQUOT",
+      message: "c.bin was not replaced: more than 4 GiB would be kept of the files this folder's landings replaced. It can land once an earlier landing in this folder is recorded or put back, which lets go of what that one kept",
     });
     expect(statSync(join(folder, "c.bin")).size).toBe(1.5 * GIB);
     expect(revisionOf(statSync(join(folder, "c.bin"), { bigint: true }))).toBe(seen["c.bin"]);
