@@ -109,7 +109,8 @@ interface Hosted {
   stop(): void;
 }
 
-// A guest whose history makes a copy's folder as the real one does; *answers* says otherwise for a request.
+// A guest whose history makes a copy's folder as the real one does, and keeps one its root let go, as the real one
+// does that holds more than its branch; *answers* says otherwise for a request.
 function copies(
   answers: (request: HistoryRequest, signal: AbortSignal) => Outcome | undefined | Promise<Outcome | undefined> = () => undefined,
   options: Partial<CopiesOptions> = {},
@@ -126,6 +127,7 @@ function copies(
         mkdirSync(at, { recursive: true });
         return { ok: { copy: there ? "kept" : "made" } };
       }
+      if (request.action === "close") return { ok: { copy: "kept" } };
       return HASH;
     },
     unplace: async (given: Place) => {
@@ -468,6 +470,196 @@ describe("a host's hold on its root's copy", () => {
     expect(unplaced).toEqual([]);
     one.copies.close(b.handle);
     await vi.waitFor(() => expect(unplaced).toHaveLength(1));
+  });
+});
+
+// As the guest's history lets a copy go where its branch holds all of it: it is removed.
+const removing = (request: HistoryRequest): Outcome | undefined => {
+  if (request.action !== "close") return undefined;
+  rmSync(join(request.place.history, "threads", request.thread), { recursive: true, force: true });
+  return { ok: { copy: "removed" } };
+};
+// What the app keeps for the hosts of *root* that worked in *copy*: the folder's record, its sandbox's folder, and the
+// root's working folder; and which of them are still there.
+function keptFor(copy: Copy, root = ROOT): () => string[] {
+  const key = `${copy.folder.dev}-${copy.folder.ino}`;
+  const [record, ...folders] = [join(dataDir, "folders", `${key}.json`), join(dataDir, "srt", key), join(dataDir, "tmp", root)];
+  mkdirSync(join(dataDir, "folders"), { recursive: true });
+  writeFileSync(record!, "{}");
+  for (const made of folders) mkdirSync(made, { recursive: true });
+  return () => [record!, ...folders].filter((path) => existsSync(path));
+}
+
+describe("a copy its root let go", () => {
+  it("is removed by the guest once the last host on it has gone, where its branch holds all of it, with what the app kept for its hosts", async () => {
+    const one = copies(removing);
+    const opened = await one.open(ROOT, bound(), signal());
+    await one.open(ROOT, bound(), signal());
+    if (!("copy" in opened)) throw new Error("no copy");
+    const left = keptFor(opened.copy);
+    one.close(ROOT);
+    // Another host still works in it.
+    await pause(40);
+    expect(asked.map((request) => request.action)).toEqual(["open"]);
+    expect(left()).toHaveLength(3);
+    one.close(ROOT);
+    await vi.waitFor(() => expect(left()).toEqual([]));
+    expect(asked.at(-1)).toMatchObject({ thread: ROOT, action: "close", args: {}, place: opened.copy.place });
+    expect(existsSync(copy())).toBe(false);
+    // Its next operation has the guest make it again, from its branch.
+    expect(await one.open(ROOT, bound(), signal())).toMatchObject({ copy: { folder: { path: copy() } } });
+    expect(asked.map((request) => [request.action, request.args])).toEqual([["open", { moves: false }], ["close", {}], ["open", { moves: false }]]);
+  });
+
+  it("stays, with what the app kept for it, where the guest keeps it as it holds more than its branch, and is worked in again with no request", async () => {
+    const one = copies();
+    const opened = await one.open(ROOT, bound(), signal());
+    if (!("copy" in opened)) throw new Error("no copy");
+    const left = keptFor(opened.copy);
+    one.close(ROOT);
+    await vi.waitFor(() => expect(asked.at(-1)?.action).toBe("close"));
+    await pause(20);
+    expect(left()).toHaveLength(3);
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ copy: opened.copy });
+    expect(asked.map((request) => request.action)).toEqual(["open", "close"]);
+  });
+
+  it("is let go only once its removal has ended: an operation that comes meanwhile waits, then has it made again", async () => {
+    let finish: () => void = () => {};
+    const one = copies((request) => {
+      if (request.action !== "close") return undefined;
+      return new Promise<Outcome | undefined>((resolve) => {
+        finish = () => resolve(removing(request));
+      });
+    });
+    await one.open(ROOT, bound(), signal());
+    one.close(ROOT);
+    await vi.waitFor(() => expect(asked.at(-1)?.action).toBe("close"));
+    const again = one.ask(ROOT, bound(), "snapshot", STEP, signal());
+    await pause(50);
+    expect(asked.at(-1)?.action).toBe("close");
+    finish();
+    expect(await again).toEqual(HASH);
+    expect(asked.map((request) => request.action)).toEqual(["open", "close", "open", "snapshot"]);
+  });
+
+  it("is the guest's no more to remove once it was made again under its host: what the app kept for that host goes, and the copy there now stays", async () => {
+    let again = false;
+    const one = copies((request) => {
+      if (request.action === "close") return removing(request);
+      if (request.action !== "open" || !again) return undefined;
+      again = false;
+      rmSync(copy(), { recursive: true, force: true });
+      mkdirSync(join(dir, "held"));
+      mkdirSync(copy());
+      return { ok: { copy: "made" } };
+    });
+    const opened = await one.open(ROOT, bound(), signal());
+    if (!("copy" in opened)) throw new Error("no copy");
+    const left = keptFor(opened.copy);
+    again = true;
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "made" } });
+    expect(replaced).toEqual([ROOT]);
+    one.close(ROOT);
+    await vi.waitFor(() => expect(left()).toEqual([]));
+    expect(asked.map((request) => request.action)).toEqual(["open", "open"]);
+    expect(existsSync(copy())).toBe(true);
+  });
+
+  it("keeps what the app kept for a copy it vouches for no more while that copy is still at its path: the guest's next open says what it is", async () => {
+    const one = copies((request) => (request.action === "record" ? SANDBOX_STOPPED : removing(request)));
+    const opened = await one.open(ROOT, bound(), signal());
+    if (!("copy" in opened)) throw new Error("no copy");
+    const left = keptFor(opened.copy);
+    expect(await one.ask(ROOT, bound(), "record", {}, signal())).toEqual(SANDBOX_STOPPED);
+    expect(replaced).toEqual([ROOT]);
+    one.close(ROOT);
+    await pause(40);
+    expect(asked.map((request) => request.action)).toEqual(["open", "record"]);
+    expect(left()).toHaveLength(3);
+    expect(existsSync(copy())).toBe(true);
+  });
+
+  it("is let go with no wait for its folder, which its letting go reads not, whoever holds the folder", async () => {
+    let held = false;
+    const looked: string[] = [];
+    const busy: Outcome = { error: { type: "busy", message: "Another chat holds this folder" } };
+    const one = copies(removing, {
+      readable: async (at) => {
+        looked.push(at);
+        return held ? busy : null;
+      },
+    });
+    await one.open(ROOT, bound(), signal());
+    held = true;
+    one.close(ROOT);
+    await vi.waitFor(() => expect(existsSync(copy())).toBe(false));
+    expect([asked.map((request) => request.action), looked]).toEqual([["open", "close"], [folder]]);
+  });
+
+  it("is not let go where a host took it again before its letting go came: the host works in it", async () => {
+    let finish: () => void = () => {};
+    const one = copies((request) => {
+      if (request.action !== "commit") return removing(request);
+      return new Promise<Outcome>((resolve) => {
+        finish = () => resolve({ ok: {} });
+      });
+    });
+    await one.open(ROOT, bound(), signal());
+    const committing = one.ask(ROOT, bound(), "commit", {}, signal());
+    await vi.waitFor(() => expect(asked.at(-1)?.action).toBe("commit"));
+    // A host starts on the copy, behind the step that runs; the one before goes meanwhile.
+    const taking = one.open(ROOT, bound(), signal());
+    one.close(ROOT);
+    finish();
+    await committing;
+    expect(await taking).toHaveProperty("copy");
+    await pause(40);
+    expect([asked.map((request) => request.action), existsSync(copy())]).toEqual([["open", "commit"], true]);
+  });
+
+  it("is let go no more once the app stops: the copy stays as it is for the app's next start, a deleted thread's too", async () => {
+    const one = copies(removing);
+    await one.open(ROOT, bound(), signal());
+    one.stop();
+    one.close(ROOT);
+    await one.copies.drop(ROOT, bound());
+    await pause(40);
+    expect(asked.map((request) => request.action)).toEqual(["open"]);
+    expect(existsSync(copy())).toBe(true);
+  });
+});
+
+describe("a deleted thread", () => {
+  it("has its copy let go as an idle one is where no host holds it, though no host of the app's run worked in it", async () => {
+    // As a run before left it, which quit with a host on the copy.
+    await copies().open(ROOT, bound(), signal());
+    const one = copies(removing);
+    await one.copies.drop(ROOT, bound());
+    expect(asked.slice(1).map((request) => [request.thread, request.action, request.args])).toEqual([[ROOT, "close", {}]]);
+    expect(existsSync(copy())).toBe(false);
+    // The folder itself is never touched, and the thread's place stays: its repository and what it set aside are the guest's.
+    expect(existsSync(folder) && existsSync(place())).toBe(true);
+  });
+
+  it("has its copy let go by the hosts on it as they go, and the guest is asked nothing more for it", async () => {
+    const one = copies(removing);
+    await one.open(ROOT, bound(), signal());
+    await one.copies.drop(ROOT, bound());
+    expect(asked.map((request) => request.action)).toEqual(["open"]);
+    one.close(ROOT);
+    await vi.waitFor(() => expect(asked.map((request) => request.action)).toEqual(["open", "close"]));
+    expect(existsSync(copy())).toBe(false);
+  });
+
+  it("asks the guest nothing, and makes no place, for a thread that has no copy here", async () => {
+    mkdirSync(dataDir);
+    const one = copies(removing);
+    await one.copies.drop(OTHER, bound(OTHER));
+    // Nor where the app's data was never made.
+    rmSync(dataDir, { recursive: true });
+    await one.copies.drop(ROOT, bound());
+    expect([asked, existsSync(dataDir)]).toEqual([[], false]);
   });
 });
 
@@ -851,16 +1043,18 @@ describe("a folder's place in the guest", () => {
     letting = new Promise<void>((resolve) => {
       gone = resolve;
     });
-    const one = copies(undefined, { idleMs: 20 });
+    const one = copies(undefined, { idleMs: 200 });
     await one.open(ROOT, bound(), signal());
     one.close(ROOT);
     await vi.waitFor(() => expect(unplaced).toHaveLength(1));
-    // While the guest lets it go, a host takes the copy and lets it go again, and then another takes it.
+    // While the guest lets it go, a host takes the copy and lets it go again, and then another takes it: the copy is let
+    // go by the guest once the place has gone, and the host after waits for that.
     await one.open(ROOT, bound(), signal());
     one.close(ROOT);
     await pause(60);
-    await one.open(ROOT, bound(), signal());
+    const taking = one.open(ROOT, bound(), signal());
     gone();
+    await taking;
     await pause(60);
     expect(unplaced).toHaveLength(1);
     one.close(ROOT);
@@ -1076,7 +1270,7 @@ describe("a place another folder at the path takes", () => {
     expect(await opening).toHaveProperty("copy");
     expect(setAside()).toHaveLength(1);
     expect(await stale).toEqual(FOLDER_UNAVAILABLE);
-    expect(events).toEqual([`${ROOT}:open`, `unplace:${was.ino}`, `${OTHER}:open`]);
+    expect(events).toEqual([`${ROOT}:open`, `${ROOT}:close`, `unplace:${was.ino}`, `${OTHER}:open`]);
   });
 
   it("is let go by the place the app gave, whichever folder's place the sandbox is asked to let go", async () => {
