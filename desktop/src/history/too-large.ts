@@ -7,12 +7,12 @@
 // when its person asks.
 
 import { randomUUID } from "node:crypto";
-import { lstat, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { confirmedFolder } from "../binding/folder.js";
 import type { Place } from "../vm/manager.js";
-import { digitsOf, numberOf } from "./place.js";
+import { digitsOf, keyOf, numberOf } from "./place.js";
 
 // How long a count of a folder's files may take: a dead mount, or a stalled disk, never answers.
 export const COUNT_MS = 5_000;
@@ -77,6 +77,8 @@ async function filesIn(folder: string, ms: number): Promise<number | null> {
 
 // The record of *place*'s folder as too large: beside the place's own record, outside the place.
 const recordOf = (place: Place) => join(dirname(place.history), `${place.key}.too-large.json`);
+// The record's path by the folder's key, in the app's data *dataDir* by its real path, as a place's is.
+const recordAt = async (dataDir: string, folder: string) => join(await realpath(dataDir), "history", `${keyOf(folder)}.too-large.json`);
 
 /**
  * Whether *place*'s folder is refused as too large to copy in time: its record names that folder, and the folder holds
@@ -91,7 +93,7 @@ export async function tooLargeFor(place: Place, ms = COUNT_MS): Promise<boolean>
   if (said.files === null) return true;
   const files = await filesIn(real.path, ms);
   if (files === null || files === said.files) return true;
-  await forgetTooLarge(place);
+  await rm(recordOf(place), { force: true }).catch(() => {});
   return false;
 }
 
@@ -110,9 +112,13 @@ export async function rememberTooLarge(place: Place, ms = COUNT_MS): Promise<voi
   }
 }
 
-/** *place*'s folder is no longer remembered as too large: it is tried at the next operation. Never rejects. */
-export async function forgetTooLarge(place: Place): Promise<void> {
-  await rm(recordOf(place), { force: true }).catch(() => {});
+/**
+ * The folder at *folder*'s path, in the app's data *dataDir*, is no longer remembered as too large: it is tried at the
+ * next operation. By the path's key alone, before its place is found. Never rejects.
+ */
+export async function forgetTooLarge(dataDir: string, folder: string): Promise<void> {
+  // Where the app's data is not there, nothing of it is remembered.
+  await recordAt(dataDir, folder).then((record) => rm(record, { force: true })).catch(() => {});
 }
 
 // A record as it was written, or null for one that names no folder. Its count is as it lies: one that is none equals

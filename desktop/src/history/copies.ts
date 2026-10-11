@@ -19,9 +19,10 @@
 //
 // A thread whose folder has no history works nowhere: no copy is made, and it is told why. The
 // guest's word can deny a thread its copy; nothing it says gives a thread the folder itself. Nor
-// does a thread of a folder too large to copy in the time a copy may take: once the history's bound
-// has cut a copy of it, the folder is refused at once until it holds other files or its person asks
-// again (history/too-large.ts).
+// is a thread's copy made of a folder too large to copy in the time a copy may take: once the
+// history's bound has cut a copy of it, an operation that would make one is refused at once, until
+// the folder holds other files or a person asks again (history/too-large.ts). A thread whose copy
+// is there works on in it.
 
 import { lstat, realpath, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -93,6 +94,8 @@ export const CLOSE_MS = 30_000;
 const LOOK_MS = 5_000;
 // How often one operation asks again for its copy where the folder's place was let go under it.
 const TURNS = 4;
+// The most places one open names as set aside, as the server takes them (surogates/devices/history.py, MAX_ASIDE).
+const ASIDES = 64;
 // The history ends an open at its bound: its git calls at 570 s, the guest's agent the request at 600 s (and
 // this computer one the agent does not answer at 1,215 s). An open that ran this long and made no copy was cut.
 export const CUT_MS = 500_000;
@@ -109,11 +112,11 @@ const OFF: Record<Reason, string> = {
 /** What every operation of a thread whose *folder* has no history is answered, but its turn's own open. */
 export const historyOff = (reason: Reason, folder: string): Outcome => ({ error: { type: "history_off", message: `The folder ${folder} ${OFF[reason]}` } });
 
-// What every operation of every thread on *folder* is answered once a copy of it could not be made within the history's bound.
+// What an operation of a thread on *folder* that would make its copy is answered once a copy of it could not be made within the history's bound.
 const tooLarge = (folder: string): Outcome => ({
   error: {
     type: "history_off",
-    message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take. Choose a folder inside it that holds less, or try again`,
+    message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take. Choose a folder inside it that holds less`,
   },
 });
 
@@ -213,7 +216,7 @@ export class Copies {
   // How often each key's place was let go for another: a place found before one is found again.
   private readonly lettings = new Map<string, number>();
   // The places each root's operations set aside, by their names in the app's data, oldest first, until its next turn's
-  // open names them: no other answer the server gets does.
+  // open names them: no other answer the server gets does. The latest ASIDES of them.
   private readonly asides = new Map<string, string[]>();
   // Told at each take and each close of a copy: a letting go waits for the hosts on its place's copies.
   private readonly changes = new Set<() => void>();
@@ -312,11 +315,12 @@ export class Copies {
   }
 
   private async turnOpen(root: string, bound: BoundFolder, args: Record<string, unknown>, retried: boolean, signal: AbortSignal): Promise<Outcome> {
+    // Before anything that may refuse the open: a Retry refused on its way would leave the folder refused untried.
+    if (retried) await forgetTooLarge(this.options.dataDir, bound.folder);
     for (let turn = 0; turn < TURNS; turn += 1) {
       const found = await this.found(root, bound);
       if ("failed" in found) return found.failed;
-      if (retried) await forgetTooLarge(found.place);
-      else if (await tooLargeFor(found.place, this.options.countMs)) return tooLarge(bound.folder);
+      if (await this.refusedMaking(found.place, root)) return tooLarge(bound.folder);
       if (signal.aborted) return CANCELLED;
       const outcome = await this.opened(found.known, found.place, root, args, signal);
       if (outcome !== STALE) return this.named(root, outcome);
@@ -364,7 +368,6 @@ export class Copies {
       const found = await this.found(root, bound);
       if ("failed" in found) return found;
       const { known, place } = found;
-      if (await tooLargeFor(place, this.options.countMs)) return { failed: tooLarge(bound.folder) };
       const whole = known.copies.get(root);
       if (whole) {
         const there = await look(copyOf(place, root));
@@ -372,6 +375,7 @@ export class Copies {
         if (there !== null && there !== "other" && same(there, whole)) return this.made(root, copyIn(place, root, whole, bound), known, take);
         known.copies.delete(root);
       }
+      if (await this.refusedMaking(place, root)) return { failed: tooLarge(bound.folder) };
       // The app's own open, which whoever asked does not cut short.
       const outcome = await this.opened(known, place, root, { moves: false }, this.halt.signal);
       if (outcome === STALE) continue;
@@ -383,6 +387,15 @@ export class Copies {
       return this.made(root, copyIn(place, root, made, bound), known, take);
     }
     return { failed: unavailable(CHANGED) };
+  }
+
+  // Whether an open of *root*'s copy in *place* would make it, there being no folder of the app's own at its path or its
+  // making marked as cut there, where the folder is refused as too large to copy in time: then it is not asked.
+  private async refusedMaking(place: Place, root: string): Promise<boolean> {
+    const at = copyOf(place, root);
+    const [copy, cut] = await Promise.all([look(at), look(`${at}.making`)]);
+    if (copy !== null && copy !== "other" && cut === null) return false;
+    return tooLargeFor(place, this.options.countMs);
   }
 
   private made(root: string, copy: Copy, known: Known, take: boolean): Made {
@@ -400,7 +413,7 @@ export class Copies {
       const lettings = this.lettings.get(key) ?? 0;
       try {
         const { place, aside } = await placeOf(this.options.dataDir, bound, { letGo: (was, store) => this.letGo(was, store) });
-        if (aside) this.asides.set(root, [...(this.asides.get(root) ?? []), basename(aside.history)]);
+        if (aside) this.asides.set(root, [...(this.asides.get(root) ?? []), basename(aside.history)].slice(-ASIDES));
         const store = await look(place.history);
         if (store === null || store === "other") return { failed: unavailable("its place in the app's data is not a folder of the app's own") };
         if ((this.lettings.get(key) ?? 0) !== lettings) continue;
