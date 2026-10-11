@@ -397,6 +397,22 @@ async def test_a_paused_or_failed_threads_own_kind_is_still_asked_and_a_deleted_
     assert len(await ops.pending(UUID(device["id"]), 1)) == 2
 
 
+async def test_a_deleted_session_under_a_thread_at_work_asks_neither_a_snapshot_nor_a_put_back_of_its_copy(api):
+    device, _, thread = await bound_with_copy(api)
+    store, ops = api.app.state.session_store, journal(api)
+    helper = await create_child_session(store=store, parent=thread, channel="worker")
+    await store.update_session_status(helper.id, "archived")
+    for action, invocation in (("take", "checkpoint:0:0:call_1"), ("restore", f"checkpoint:0:restore:{'a' * 40}")):
+        with pytest.raises(DeviceOperationError, match="This session was stopped"):
+            await ops._record(asked(device, thread, "checkpoint", action, invocation=invocation, calling=helper))
+            pytest.fail(f"{action} from a deleted helper")
+    assert await ops.pending(UUID(device["id"]), 1) == []
+    # The thread itself, at work, still asks both of its copy.
+    for action, invocation in (("take", "checkpoint:0:1:call_2"), ("restore", f"checkpoint:0:restore:{'b' * 40}")):
+        await recorded(api, asked(device, thread, "checkpoint", action, invocation=invocation))
+    assert len(await ops.pending(UUID(device["id"]), 1)) == 2
+
+
 @pytest.mark.parametrize("status", ["paused", "failed"])
 async def test_a_stopped_threads_open_is_refused_as_new_work_so_no_open_outlives_the_stop(api, status):
     device, _, thread = await bound_with_copy(api)
