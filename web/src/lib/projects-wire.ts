@@ -47,7 +47,7 @@ function setAsideOf(aside: unknown): SetAside | null {
     // A time whose digits make none is none: the moment they parse to is written with the same digits.
     const moment = typeof at === "string" && ISO_UTC.test(at) ? Date.parse(at) : NaN;
     const timed = !Number.isNaN(moment) && new Date(moment).toISOString().replace(".000Z", "Z") === at;
-    return (kind === "copy" || kind === "repository") && timed ? [{ kind, at: at as string }] : [];
+    return (kind === "copy" || kind === "repository" || kind === "place") && timed ? [{ kind, at: at as string }] : [];
   });
   const found = {
     kept: wholes(kept),

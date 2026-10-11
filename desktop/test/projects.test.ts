@@ -194,9 +194,10 @@ describe("the projects the page serves", () => {
     const { source } = page();
     const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.computer)!;
     const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+    const place = { kind: "place", at: "2026-10-09T08:00:00Z" };
     const asked = source.threads(REPORT);
-    source.answered(1, { ok: [{ ...row, setAside: { kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] } }] });
-    expect((await asked)[0]!.setAside).toEqual({ kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] });
+    source.answered(1, { ok: [{ ...row, setAside: { kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] } }] });
+    expect((await asked)[0]!.setAside).toEqual({ kept: [place, copy, { kind: "repository", at: "2026-10-10T10:15:01.5Z" }], snapshots: 2, gone: [copy] });
     // A kind or a time the app does not know, a time whose digits make none, a count that is none: left out, the row taken.
     const odd = source.threads(REPORT);
     source.answered(2, { ok: [{ ...row, setAside: {

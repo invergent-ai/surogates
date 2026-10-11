@@ -71,6 +71,11 @@ function undoLines(result: AgentChatUndoResult): string[] {
   return lines.length > 0 ? lines : ["Nothing to put back: the files are as they were."];
 }
 
+// What each kind of what a thread's computer set aside is, as its card names it.
+const ASIDE_WHAT: Record<string, string> = {
+  copy: "its copy", repository: "its repository", place: "the earlier history at its folder's path, with its threads' copies",
+};
+
 // When a thread's work was set aside on its computer, in this computer's time: "10 Oct, 10:15".
 function setAsideWhen(at: number): string {
   const parts = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
@@ -88,7 +93,8 @@ function setAsideLines(aside: AgentChatThreadRow["setAside"]): string[] {
   const each = (entries: unknown): string[] => (Array.isArray(entries) ? entries : []).flatMap((entry) => {
     const { kind, at } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
     const moment = typeof at === "string" ? Date.parse(at) : NaN;
-    return (kind === "copy" || kind === "repository") && !Number.isNaN(moment) ? [`its ${kind} from ${setAsideWhen(moment)}`] : [];
+    const what = typeof kind === "string" && Object.hasOwn(ASIDE_WHAT, kind) ? ASIDE_WHAT[kind] : undefined;
+    return what !== undefined && !Number.isNaN(moment) ? [`${what} from ${setAsideWhen(moment)}`] : [];
   });
   if (!aside) return [];
   const count = Number.isSafeInteger(aside.snapshots) && aside.snapshots > 0 ? aside.snapshots : 0;
