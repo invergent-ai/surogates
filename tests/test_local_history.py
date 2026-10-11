@@ -100,9 +100,12 @@ def files_of(folder: Path) -> list[tuple[str, bytes]]:
 
 
 def as_it_is(top: Path) -> list[tuple[str, int, int, bytes]]:
-    """Every name under *top* with its mode, its time and what it holds, no link followed: a request that
+    """*top* and every name under it with its mode, its time and what it holds, no link followed: a request that
     leaves *top* alone leaves all of it the same, and a folder renamed whole takes all of it along."""
-    seen = []
+    if not os.path.lexists(top):
+        return []
+    itself = top.lstat()
+    seen = [(".", itself.st_mode, itself.st_mtime_ns, b"")]
     for at, folders, files in os.walk(top):
         for name in (*folders, *files):
             path = Path(at, name)
@@ -639,6 +642,65 @@ def test_the_harness_folder_and_the_whiteboard_stay_out_and_a_users_own_artifact
     assert not (folder / ".surogates-results" / "artifacts").exists()
 
 
+def test_a_gitignore_of_the_folders_that_takes_back_what_history_leaves_out_brings_none_of_it_in(tmp_path, folder):
+    # The folder's own ignores, as a repository of yours may have them: each line takes back what history leaves out.
+    (folder / ".gitignore").write_text("!.env\n!*.tmp\n!_whiteboard/\n!.threads/\n!node_modules/\n")
+    (folder / ".env").write_text("SECRET=1\n")
+    (folder / ".surogate-0123abcd-0000-4000-8000-000000000000.tmp").write_text("the file helper's own, half written\n")
+    for name, file in (("_whiteboard", "canvas.json"), (".threads", "old.txt"), ("node_modules", "left.js")):
+        (folder / name).mkdir()
+        (folder / name / file).write_text("none of the folder's files\n")
+    one = a_copy(tmp_path, folder)
+    store = tmp_path / "store" / "history.git"
+    tracked = [".gitignore", "Report.docx", "notes.txt"]
+    assert git(store, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == tracked
+    assert sorted(p.name for p in one.copy.iterdir()) == tracked
+    # A turn's write there, and your save there, are none of history's either.
+    (one.copy / ".env").write_text("SECRET=2\n")
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (folder / "node_modules" / "left.js").write_text("saved by you\n")
+    landed = land(one, "saga:1")
+    assert [c["path"] for c in landed["changes"]] == ["notes.txt"] and landed["excluded"] == [".env"]
+    assert git(store, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == tracked
+    assert (folder / ".env").read_text() == "SECRET=1\n"
+
+
+@pytest.mark.parametrize("read", ["several at once", "by one git"])
+def test_a_request_cut_as_it_first_made_a_threads_repository_leaves_out_what_history_leaves_out_all_the_same(tmp_path, folder, monkeypatch, read):
+    (folder / ".env").write_text("SECRET=1\n")
+    (folder / "build").mkdir()
+    (folder / "build" / "out.bin").write_bytes(b"\0")
+    # And a package's own repository, with nothing committed in it, where history leaves out.
+    subprocess.run(["git", "init", "-q", str(folder / "node_modules" / "pkg")], check=True, env=HERMETIC)
+    (folder / "node_modules" / "pkg" / "index.js").write_text("// a package\n")
+    one = a_copy(tmp_path, folder)
+    if read == "by one git":
+        # As where a reader fails twice: one git reads the folder, as it finds it.
+        monkeypatch.setattr(History, "_read_at_once", lambda self, new: False)
+    (one.copy / "A.md").write_text("A\n")
+    land(one, "saga:1")
+    main = History._main
+
+    def cut(self, *args, **kwargs):
+        # Killed right after git made the repository, before its first config was set.
+        if args[0] == "config":
+            raise KeyboardInterrupt
+        return main(self, *args, **kwargs)
+
+    yours = [["Surogate-Saga", "saga:2"], ["Surogate-Kind", "pickup"]]
+    with monkeypatch.context() as patch:
+        patch.setattr(History, "_main", cut)
+        with pytest.raises(KeyboardInterrupt):
+            LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").pickup(author=YOURS, trailers=yours)
+    assert (tmp_path / "store" / "clones" / "t2" / "HEAD").is_file()
+    # The next request finds the repository there, and names nothing history leaves out as yours.
+    picked = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").pickup(author=YOURS, trailers=yours)
+    assert (picked["commit"], picked["picked_up"]) == (None, [])
+    (folder / "notes.txt").write_text("v2 notes, saved by you\n")
+    picked = LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").pickup(author=YOURS, trailers=yours)
+    assert [p["path"] for p in picked["picked_up"]] == ["notes.txt"]
+
+
 def test_a_file_under_the_coding_tools_folder_never_lands(tmp_path, folder):
     (folder / ".threads").mkdir()
     (folder / ".threads" / "old.txt").write_text("left by an earlier checkout\n")
@@ -999,6 +1061,46 @@ def test_a_folder_holding_a_name_that_is_not_utf8_has_no_history(tmp_path, folde
     assert not other.repo.exists() and not other.copy.exists()
 
 
+def test_a_new_file_this_computer_cannot_read_is_refused_by_its_name_until_it_is_left_out(tmp_path, folder):
+    (folder / "build out").mkdir()
+    secret = folder / "build out" / "secret.key"
+    # As a docker build leaves one of yours: another user's, which git cannot read.
+    secret.write_text("a key\n")
+    secret.chmod(0)
+    try:
+        for _ in range(2):
+            with refused("file_unreadable", (
+                '^refused the request: the file "build out/secret.key" cannot be read on this computer, so history cannot '
+                "record it: let it be read, as by chmod a\\+r, or add it to the folder's .gitignore$"
+            )):
+                a_copy(tmp_path, folder)
+        # Left out by the folder's own ignores, it is none of history's to read.
+        (folder / ".gitignore").write_text("secret.key\n")
+        one = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+        assert one.open() == {"copy": "made"} and not (one.copy / "build out").exists()
+    finally:
+        secret.chmod(0o644)
+
+
+def test_a_file_of_historys_this_computer_cannot_read_since_is_refused_by_its_name_until_it_is_read(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (folder / "Report.docx").write_bytes(b"PK\x03\x04 report v2, saved by you")
+    (folder / "Report.docx").chmod(0)
+    try:
+        for _ in range(2):
+            with refused("file_unreadable", (
+                '^refused the request: the file "Report.docx" cannot be read on this computer, so history cannot record '
+                "its change: let it be read, as by chmod a\\+r, or move it out of the folder$"
+            )):
+                land(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"), "saga:1")
+    finally:
+        (folder / "Report.docx").chmod(0o644)
+    landed = land(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"), "saga:1")
+    assert [c["path"] for c in landed["changes"]] == ["notes.txt"]
+    assert git(tmp_path / "store" / "history.git", "show", "refs/heads/main:Report.docx") == "PK\x03\x04 report v2, saved by you"
+
+
 def test_what_an_earlier_guest_planted_in_the_history_runs_nothing(tmp_path, folder):
     one = a_copy(tmp_path, folder)
     (one.copy / "A.md").write_text("A\n")
@@ -1266,6 +1368,35 @@ def test_a_threads_repository_borrows_the_historys_objects_and_holds_only_what_i
     connected(tmp_path / "store")
 
 
+def test_a_push_notes_its_pack_before_the_repack_lets_go_of_what_the_pack_holds(tmp_path, folder, monkeypatch):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    one.snapshot("before a step")
+    pack = LocalHistory._pack
+
+    def killed_after_it(self, **kwargs):
+        pack(self, **kwargs)
+        raise KeyboardInterrupt
+
+    # Killed right after the repack that follows the turn's push: the turn's objects are the history's alone now.
+    with monkeypatch.context() as cut:
+        cut.setattr(LocalHistory, "_pack", killed_after_it)
+        with pytest.raises(KeyboardInterrupt):
+            one.commit_turn(author=A, trailers=[["Surogate-Saga", "saga:1"], ["Surogate-Kind", "turn"]])
+    turn = git(tmp_path / "store" / "history.git", "rev-parse", "refs/heads/threads/t1")
+    assert turn not in held_here(one.repo)
+    # Each object the repository reaches it holds, or reads from a pack its note names: a history that no longer
+    # holds that pack is known by the note.
+    lent = set()
+    for pack_id in noted(one.repo):
+        with open(tmp_path / "store" / "history.git" / "objects" / "pack" / f"pack-{pack_id}.idx", "rb") as listed:
+            shown = subprocess.run(["git", "show-index"], stdin=listed, capture_output=True, text=True, check=True, env=HERMETIC).stdout
+        lent |= {line.split()[1] for line in shown.splitlines()}
+    reached = {line[:40] for line in git(one.repo, "rev-list", "--objects", "--all").splitlines()}
+    assert turn in reached and reached <= held_here(one.repo) | lent
+    connected(tmp_path / "store")
+
+
 def test_a_copys_repository_packed_again_takes_none_of_the_historys_objects(tmp_path, film, monkeypatch):
     monkeypatch.setattr(local_history, "_PACKS", 2)
     one = a_copy(tmp_path, film)
@@ -1475,6 +1606,10 @@ ASTRAY = {
     "another store in the history's stead": lambda one, other: (one.repo / "objects" / "info" / "alternates").write_text(f"{other / 'objects'}\n"),
     "the history by another path": lambda one, other: (one.repo / "objects" / "info" / "alternates").write_text(f"{one.store / 'objects'}\n"),
     "a pack it read from gone from the history": lambda one, other: (one.repo / "borrowed").write_text(f"{(one.repo / 'borrowed').read_text()}{'0' * 40}\n"),
+    "a pack it read from left there without its index": lambda one, other: (
+        shutil.copyfile(sorted((one.store / "objects" / "pack").glob("pack-*.pack"))[0], one.store / "objects" / "pack" / f"pack-{'e' * 40}.pack"),
+        (one.repo / "borrowed").write_text(f"{(one.repo / 'borrowed').read_text()}{'e' * 40}\n"),
+    ),
     "its note of the packs it reads gone": lambda one, other: (one.repo / "borrowed").unlink(),
     "its note of the packs it reads no note": lambda one, other: (one.repo / "borrowed").write_text("not a pack\n"),
 }
@@ -1818,10 +1953,10 @@ def test_a_stop_puts_the_copy_back_and_takes_away_what_the_turn_made(tmp_path, f
     with refused("failed", "git read-tree failed"):
         one.restore("f" * 40)
     assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
-    # And it is named by the git that failed, whatever options it was run with: a file it may not read.
+    # And a file git may not read is refused by its name.
     (one.copy / "locked.txt").write_text("not to be read\n")
     (one.copy / "locked.txt").chmod(0)
-    with refused("failed", "^git add failed: "):
+    with refused("file_unreadable", '^refused the request: the file "locked.txt" cannot be read on this computer'):
         one.snapshot("before a step")
 
 
@@ -2681,6 +2816,34 @@ def test_a_pruning_leaves_each_repository_in_the_place_whole_by_what_it_names_an
     connected(place)
 
 
+def test_a_pruning_leaves_a_threads_copy_whole_by_what_its_index_names_where_no_kept_commit_holds_it(tmp_path, folder, monkeypatch):
+    place, store = tmp_path / "store", tmp_path / "store" / "history.git"
+    one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
+    # t1's turn writes the notes, and a landing's first look adds them to its copy's index: in no commit yet.
+    (one.copy / "notes.txt").write_text("the notes, as both threads wrote them\n")
+    assert one.changed() == {"paths": ["notes.txt"]}
+    staged = subprocess.run(
+        ["git", f"--git-dir={one.repo / 'worktrees' / 't1'}", "rev-parse", ":notes.txt"], capture_output=True, text=True, check=True, env=HERMETIC,
+    ).stdout.strip()
+    # t2 lands the same notes, and t1's repository, packed again at its next turn's start, lets go of them: the history holds them.
+    (busy.copy / "notes.txt").write_text("the notes, as both threads wrote them\n")
+    land(busy, "saga:same", B)
+    monkeypatch.setattr(local_history, "_PACKS", 0)
+    assert LocalHistory.at(place, folder, thread="t1", user="u1").open(moves=False)["copy"] == "kept"
+    monkeypatch.undo()
+    assert staged not in held_here(one.repo)
+    # Main moves on past the window, and only the landing the pruning lets go of held those notes.
+    lands_often(busy, "notes.txt", 21)
+    assert LocalHistory.at(place, folder, thread="t2", user="u1").prune(keep=[], now=time.time() + LATER)["pruned"] is True
+    assert subprocess.run(["git", f"--git-dir={store}", "cat-file", "-e", staged], env=HERMETIC).returncode != 0
+    # The version only t1's copy's index named, t1 holds itself now: its next snapshot commits it.
+    assert staged in held_here(one.repo)
+    again = LocalHistory.at(place, folder, thread="t1", user="u1")
+    tip = again.snapshot("before a step")
+    assert git(one.repo, "rev-parse", f"{tip}:notes.txt") == staged
+    connected(place)
+
+
 def test_a_pruning_writes_nothing_through_a_link_an_earlier_guest_left_in_a_repository_and_keeps_what_its_refs_name(tmp_path, folder):
     one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
     lands_often(busy, "notes.txt", 22)
@@ -2870,6 +3033,27 @@ def test_a_repository_whose_first_open_did_not_end_is_set_aside_whole_with_its_c
             "copy": "moved", "set_aside_folders": [copy, repository],
         }
     assert (as_it_is(aside / copy), as_it_is(aside / repository)) == (held, kept)
+
+
+@pytest.mark.parametrize("theirs", ["a tag of a repository of your own", "a HEAD on no branch"])
+def test_a_history_not_the_platforms_own_refuses_the_open_before_a_repository_or_a_copy_is_set_aside(tmp_path, folder, theirs):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "Draft.md").write_text("in a snapshot\n")
+    # A request after the first open's: the place is put right already, as every later request finds it.
+    tip = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").snapshot("before a step")
+    (one.copy / "notes.txt").write_text("the thread's notes, in no snapshot\n")
+    # The repository's first open did not end, so the next sets it aside with its copy: unless the history refuses first.
+    (one.repo / "made").unlink()
+    store = tmp_path / "store" / "history.git"
+    if theirs == "a tag of a repository of your own":
+        (store / "packed-refs").write_text(f"{(store / 'packed-refs').read_text()}{tip} refs/tags/v1.0\n")
+    else:
+        (store / "HEAD").write_text(f"{tip}\n")
+    place = as_it_is(tmp_path / "store")
+    with refused("history_refused", "^refused the project's history: "):
+        LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
+    # Nothing of the place was renamed, made or written: every name, mode, time and byte, the place's own folder too.
+    assert as_it_is(tmp_path / "store") == place and set_aside_whole(tmp_path / "store") == []
 
 
 def test_a_copy_whose_index_is_gone_is_set_aside_whole_and_made_again_from_its_branch(tmp_path, folder):
@@ -3257,8 +3441,8 @@ def test_no_name_an_earlier_guest_left_among_what_is_set_aside_is_gone_through_w
     # Its own is one more than any name there has, whatever that name is of: nothing was at its name before.
     [copy] = opened["set_aside_folders"]
     assert re.fullmatch(r"00000010-[0-9]{8}T[0-9]{6}Z-t1\.copy", copy) and as_it_is(aside / copy) == held
-    # And nothing left there was gone through, written over or taken away.
-    assert [entry for entry in as_it_is(aside) if entry[0].split("/")[0] != copy] == left
+    # And nothing left there was gone through, written over or taken away: the folder itself holds one more.
+    assert [entry for entry in as_it_is(aside) if entry[0].split("/")[0] not in (copy, ".")] == [entry for entry in left if entry[0] != "."]
     assert as_it_is(elsewhere) == theirs
     assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == {
         "copy": "made", "set_aside_folders": ["00000007-20260101T000000Z-t2.copy"],
@@ -4567,12 +4751,13 @@ def made_whole_again(root: Path, kept: dict, files: list[tuple[str, bytes]], at:
 
 def test_a_letting_go_killed_at_any_step_leaves_the_whole_copy_at_its_name_or_nothing_and_its_next_open_makes_it_whole(tmp_path):
     kept, files, platform = a_copy_to_let_go(tmp_path / "whole")
-    held = [entry for entry in as_it_is(tmp_path / "whole" / "store" / "threads" / OURS) if entry not in platform]
+    # Every name of the copy but the platform's folders, and the copy's own folder, whose time their leaving changes.
+    held = [entry for entry in as_it_is(tmp_path / "whole" / "store" / "threads" / OURS) if entry not in platform and entry[0] != "."]
     for at, root in each_cut(tmp_path, OURS, "close", {}, removals=True):
         copy, waiting = root / "store" / "threads" / OURS, root / "store" / "waiting" / OURS
         # Cut anywhere: at the copy's name is the whole copy, but the platform's folders, or nothing; and each of those
         # is whole, in the copy or beside the copies.
-        assert not os.path.lexists(copy) or [entry for entry in as_it_is(copy) if entry not in platform] == held, at
+        assert not os.path.lexists(copy) or [entry for entry in as_it_is(copy) if entry not in platform and entry[0] != "."] == held, at
         assert sorted([*platform_folders(copy), *platform_folders(waiting)]) == platform, at
         made_whole_again(root, kept, files, at)
 

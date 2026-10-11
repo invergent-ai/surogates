@@ -699,8 +699,8 @@ describe("what the guest answered, checked on this computer", () => {
 
   // The history's own codes, in history.py and local_history.py: each name a refusal is raised with, by its word.
   const HISTORYS = [
-    "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "not_a_request", "record_unfinished", "move_unfinished",
-    "landing_unsettled", "not_on_base",
+    "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "file_unreadable", "not_a_request", "record_unfinished",
+    "move_unfinished", "landing_unsettled", "not_on_base",
   ];
 
   it("knows every code a folder's history refuses with, and the agent's own for a history that wrote no answer", () => {

@@ -195,8 +195,8 @@ def a_messy_project(project: Path) -> None:
     for n in range(80):
         (project / "uploads" / f"scan {n:02}.pdf").write_bytes(b"%PDF " + bytes([n]) * 100)
     for file in project.rglob("*"):
-        if "vendor" not in file.parts and not file.is_symlink():
-            os.utime(file, (time.time() - 60, time.time() - 60))
+        if "vendor" not in file.parts:
+            os.utime(file, (time.time() - 60, time.time() - 60), follow_symlinks=False)
 
 
 def changed_since(project: Path) -> None:
@@ -915,6 +915,33 @@ def test_a_save_in_the_second_a_pod_read_the_file_reaches_the_next_copy(tmp_path
     assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
 
 
+def test_a_save_in_the_second_a_landings_pickup_read_the_file_reaches_the_next_copy_however_late_the_bucket_dates_the_index(
+    tmp_path, project, monkeypatch,
+):
+    pod = a_pod(tmp_path, project)
+    (pod.copy / "A.md").write_text("by A")
+    time.sleep(1.1)
+    time.sleep(1 - time.time() % 1)  # the start of a second
+    second = int(time.time())
+    (project / "notes.txt").write_text("v2 notes\n")  # your save, which the landing's pickup reads in that second
+    os.utime(project / "notes.txt", (second, second))  # geesefs shows whole seconds
+    put = History._put_durable
+
+    def saved_again_as_the_index_goes_up(self, name, source):
+        if name == "index":
+            (project / "notes.txt").write_text("v9 notes\n")  # saved again in that second, the same size
+            os.utime(project / "notes.txt", (second, second))
+            time.sleep(1.1)  # a large index goes up through geesefs: the bucket dates it seconds later
+        put(self, name, source)
+
+    monkeypatch.setattr(History, "_put_durable", saved_again_as_the_index_goes_up)
+    land(pod, "saga:a")
+    monkeypatch.undo()
+    assert (project / "notes.txt").read_text() == "v9 notes\n"
+    # The kept index came seconds after the second notes.txt was read in: by its date alone it would vouch for notes.txt.
+    assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v9 notes\n"
+
+
 def test_a_kept_index_git_cannot_read_is_left_out_and_the_pod_opens(tmp_path, project):
     first = a_pod(tmp_path, project)
     (first.copy / "A.md").write_text("by A")
@@ -1096,6 +1123,23 @@ def test_a_pod_open_across_a_pruning_lands_and_the_history_stays_whole(tmp_path,
     assert git(durable, "fsck", "--no-dangling") == ""
     assert a_pod(tmp_path, project, "p3").prune(keep=[], now=time.time() + LATER + 3 * 86_400, spare=0)["pruned"] is True
     assert git(durable, "fsck", "--no-dangling") == ""
+
+
+@pytest.mark.parametrize("left", [".pack", ".idx"])
+def test_a_pruning_finishes_where_a_write_cut_between_a_pack_and_its_index_left_one_alone_and_takes_it_away(tmp_path, project, left):
+    for n in range(2):
+        pod = a_pod(tmp_path, project)
+        (pod.copy / "notes.txt").write_text(f"v{n + 2} notes\n")
+        land(pod, f"saga:{n}")
+    durable = project / "_history"
+    pack = durable / "objects" / "pack"
+    # As a push, or a pruning, killed between a pack and its index leaves it; or a pruning killed between the two it let go.
+    shutil.copyfile(sorted(pack.glob(f"pack-*{left}"))[0], pack / f"pack-{'f' * 40}{left}")
+    assert a_pod(tmp_path, project).prune(keep=[], now=time.time(), spare=0)["pruned"] is True
+    [kept] = {p.stem for p in pack.glob("pack-*.idx")}
+    assert sorted(p.name for p in pack.iterdir()) == [f"{kept}.idx", f"{kept}.pack"]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v3 notes\n"
 
 
 def test_a_pruning_cut_off_waits_a_day_and_writes_cut_off_are_swept(tmp_path, project, monkeypatch):
