@@ -137,7 +137,8 @@ export interface AgentChatThreadProposal {
 export interface AgentChatThreadRow {
   id: string;
   title: string;
-  group: "waiting" | "working" | "idle" | "resolved";
+  /** null: a group the adapter does not know, as a later server may send. The card says nothing of a group it does not know. */
+  group: "waiting" | "working" | "idle" | "resolved" | null;
   reason: "question" | "approval" | "failed" | "computer" | "files" | null;
   statusLine: string | null;
   progress: { done: number; total: number } | null;
@@ -147,12 +148,13 @@ export interface AgentChatThreadRow {
   landingId?: string | null;
   /**
    * What its computer set aside of a thread's work there, out of its copy, and what of that it no longer keeps: each
-   * copy or repository kept whole by what it is and when (UTC), and the snapshots counted. None for a thread in the cloud.
+   * copy or repository kept whole, and each place of its folder's (its earlier history), by what it is and when (UTC),
+   * and the snapshots counted. None for a thread in the cloud.
    */
   setAside?: {
-    kept: { kind: "copy" | "repository"; at: string }[];
+    kept: { kind: "copy" | "repository" | "place"; at: string }[];
     snapshots: number;
-    gone: { kind: "copy" | "repository"; at: string }[];
+    gone: { kind: "copy" | "repository" | "place"; at: string }[];
   } | null;
 }
 

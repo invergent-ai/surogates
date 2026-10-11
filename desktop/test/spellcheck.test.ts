@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -73,10 +73,18 @@ describe("the app's dictionary", () => {
     placeDictionary(SHIPPED, userData);
     expect(readFileSync(placed).equals(readFileSync(join(SHIPPED, DICTIONARY)))).toBe(true);
     expect(readdirSync(join(userData, "Dictionaries"))).toEqual([DICTIONARY]);
-    // A copy that is not the app's own, as a broken write left one, is put right.
+    // The same bytes again: the file is not written again.
+    const first = statSync(placed);
+    placeDictionary(SHIPPED, userData);
+    expect([statSync(placed).ino, statSync(placed).mtimeMs]).toEqual([first.ino, first.mtimeMs]);
+    // A copy that is not the app's own, as a broken write left one, is put right: replaced whole, never written over,
+    // so Chromium never reads it half written. What held the broken copy holds it still.
     writeFileSync(placed, "not a dictionary");
+    const broken = join(userData, "broken.bdic");
+    linkSync(placed, broken);
     placeDictionary(SHIPPED, userData);
     expect(readFileSync(placed).equals(readFileSync(join(SHIPPED, DICTIONARY)))).toBe(true);
+    expect(readFileSync(broken, "utf8")).toBe("not a dictionary");
     expect(readdirSync(join(userData, "Dictionaries"))).toEqual([DICTIONARY]);
     // At a first run it is the first to make the app's data folders: each is the user's alone, as the app's others are.
     const fresh = join(mkdtempSync(join(dir, "data-home-")), "surogate");

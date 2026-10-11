@@ -1,4 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // A look in the app's data, held where a test says: before it is made (its lstat), or once it has seen what is
 // there (its realpath, which comes last).
-const looks = vi.hoisted(() => ({ held: null as null | { path: string; seen: boolean; reached(): void; gate: Promise<void> } }));
+// Each folder listed, by its path, as a count of a folder's files lists them.
+const looks = vi.hoisted(() => ({ held: null as null | { path: string; seen: boolean; reached(): void; gate: Promise<void> }, listed: [] as string[] }));
 vi.mock("node:fs/promises", async (original) => {
   const real = await original<typeof import("node:fs/promises")>();
   const held = (path: unknown, seen: boolean) => {
@@ -32,7 +36,11 @@ vi.mock("node:fs/promises", async (original) => {
     }
     return found;
   };
-  return { ...real, lstat, realpath, default: { ...real, lstat, realpath } };
+  const readdir = ((...args: Parameters<typeof real.readdir>) => {
+    looks.listed.push(String(args[0]));
+    return real.readdir(...args);
+  }) as typeof real.readdir;
+  return { ...real, lstat, realpath, readdir, default: { ...real, lstat, realpath, readdir } };
 });
 
 import { BOOT_ID } from "../src/binding/folder.js";
@@ -66,6 +74,8 @@ let letting: Promise<void>;
 // The roots told that the copy their host works in is no longer their copy.
 let replaced: string[];
 let made: Copies[];
+// What a test asks to be done before its folders are removed.
+let afterThis: Array<() => void>;
 
 const identity = (path: string) => (({ dev, ino }) => ({ dev, ino }))(statSync(path));
 const bound = (root = ROOT, at = folder): BoundFolder => ({ folder: at, ...identity(at), boot: BOOT_ID, history: root });
@@ -75,9 +85,12 @@ const copy = (root = ROOT, at = folder) => join(place(at), "threads", root);
 const WORDS = "refused the request: this thread has no whole copy, and its next open makes one";
 // Its refusal, as this computer's check passes it on: known by its code, under words that are not the history's.
 const NOT_WHOLE: Outcome = { error: { type: "history", code: "no_whole_copy", message: "said some other way, as its words may come to be" } };
-const NOT_OWN: Outcome = {
-  error: { type: "unavailable", message: "This computer could not make this thread's copy of its folder: what its sandbox left at its path is not a folder of the app's own" },
-};
+const notOwn = (): Outcome => ({
+  error: {
+    type: "unavailable",
+    message: `This computer could not make this thread's copy of ${folder}: what its sandbox left at the copy's path is not a folder of the app's own. Ask again; if this goes on, start a new thread on the folder`,
+  },
+});
 // Another folder at the folder's path: the one that was there is moved away, as its user would.
 const replace = () => {
   renameSync(folder, `${folder}.old`);
@@ -160,6 +173,7 @@ function copies(
 
 beforeEach(() => {
   looks.held = null;
+  looks.listed = [];
   dir = realpathSync(mkdtempSync(join(tmpdir(), "copies-")));
   dataDir = join(dir, "data");
   folder = join(dir, "Reports");
@@ -170,10 +184,12 @@ beforeEach(() => {
   replaced = [];
   letting = Promise.resolve();
   made = [];
+  afterThis = [];
 });
 
 afterEach(() => {
   for (const one of made) one.stop();
+  for (const done of afterThis) done();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -324,10 +340,10 @@ describe("a thread's copy of its folder", () => {
       leave(at);
       return { ok: { copy: "made" } };
     });
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: NOT_OWN });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: notOwn() });
     // A turn's own open is answered the same: what the guest says it made is taken only as it is found.
-    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(NOT_OWN);
-    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(NOT_OWN);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(notOwn());
+    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(notOwn());
     expect(asked.map((request) => request.action)).toEqual(["open", "open", "open"]);
   });
 
@@ -341,7 +357,7 @@ describe("a thread's copy of its folder", () => {
     });
     await one.open(ROOT, bound(), signal());
     leave = true;
-    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(NOT_OWN);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(notOwn());
     expect(replaced).toEqual([ROOT]);
   });
 
@@ -353,7 +369,7 @@ describe("a thread's copy of its folder", () => {
       return { ok: { copy: "made" } };
     });
     expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: NOT_OWN });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: notOwn() });
   });
 
   it("is in the app's data by its real path, where the data is reached through a link", async () => {
@@ -392,12 +408,53 @@ describe("a thread's copy of its folder", () => {
   it("is made for no root bound to another thread's copy", async () => {
     const one = copies();
     const refused = {
-      error: { type: "unavailable", message: "This computer could not make this thread's copy of its folder: this chat is bound to another thread's copy" },
+      error: { type: "unavailable", message: `This computer could not make this thread's copy of ${folder}: this chat is bound to another thread's copy` },
     };
     expect(await one.open(ROOT, bound(OTHER), signal())).toEqual({ failed: refused });
     expect(await one.ask(ROOT, bound(OTHER), "snapshot", STEP, signal())).toEqual(refused);
     expect(await one.ask(ROOT, { ...bound(), history: undefined }, "open", {}, signal())).toEqual(refused);
     expect(asked).toEqual([]);
+  });
+
+  it("is refused in the system's words where the app's data cannot be written, which name none of the app's paths", async () => {
+    const one = copies();
+    chmodSync(dir, 0o500);
+    try {
+      expect(await one.open(ROOT, bound(), signal())).toEqual({
+        failed: {
+          error: {
+            type: "unavailable",
+            message: `This computer could not make this thread's copy of ${folder}: the app's data could not be read or written (Permission denied). Once it can, ask again`,
+          },
+        },
+      });
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(asked).toEqual([]);
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+  });
+
+  it("is refused, and the person told to ask again, where the folder's place in the app's data is not a folder of the app's own once found", async () => {
+    const one = copies();
+    // Found by its record, and looked at once it is no folder, as for a moment it may not be.
+    const look = hold(place(), false);
+    const opening = one.open(ROOT, bound(), signal());
+    await look.reached;
+    renameSync(place(), `${place()}.away`);
+    writeFileSync(place(), "");
+    look.release();
+    expect(await opening).toEqual({
+      failed: {
+        error: {
+          type: "unavailable",
+          message: `This computer could not make this thread's copy of ${folder}: its place in the app's data is not a folder of the app's own. Ask again`,
+        },
+      },
+    });
+    rmSync(place());
+    renameSync(`${place()}.away`, place());
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
   });
 
   it("is not cut short in its making by a cancel of the operation that asked for it, and a cancelled open holds nothing", async () => {
@@ -694,7 +751,7 @@ describe("a request to the history of a thread's folder", () => {
     expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual({
       error: {
         type: "history", code: "no_whole_copy",
-        message: "This computer made this thread's copy of its folder again, and its history still found it not whole, so this was not done: said some other way, as its words may come to be",
+        message: `This computer opened this thread's copy of ${folder} again, and its history still found it not whole, so this was not done. Ask again; if this goes on, start a new thread on the folder. The history said: said some other way, as its words may come to be`,
       },
     });
     expect(asked.slice(4).map((request) => request.action)).toEqual(["snapshot", "open", "snapshot"]);
@@ -869,62 +926,241 @@ describe("a copy being made", () => {
     await turn;
     expect(told.slice(4)).toEqual([{ root: OTHER, folder, state: "begun" }, { root: OTHER, folder, state: "ended" }]);
   });
+});
 
-  it("is tried no more for a thread its bound cut twice: the thread is told the folder is too large, until the app starts again", async () => {
+// The history's bound cutting an open: an answer that is no copy, past cutMs. Another that fails, and soon, is no cut.
+const CUT: Outcome = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
+const QUICK: Outcome = { error: { type: "history", code: "failed", message: "git worktree failed" } };
+// What every operation of every thread on a folder too large to copy in time is answered.
+const large = (at = folder): Outcome => ({
+  error: {
+    type: "history_off",
+    message: `The folder ${at} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take. Choose a folder inside it that holds less`,
+  },
+});
+// A guest whose opens are cut by the history's bound while *slow* says so, and answer as a whole copy's otherwise.
+const cutting = (slow: () => boolean) => async (request: HistoryRequest, aborted: AbortSignal): Promise<Outcome | undefined> => {
+  if (request.action !== "open" || !slow()) return undefined;
+  await pause(80);
+  // As the client answers a request whose caller cancelled it.
+  return aborted.aborted ? CANCELLED : CUT;
+};
+
+describe("a folder too large to copy in time", () => {
+  it("is refused at once from its first copy the history's bound cut: every operation of every thread on it, after the app starts again too", async () => {
     let slow = true;
-    const cut: Outcome = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
-    const quick: Outcome = { error: { type: "history", code: "failed", message: "git worktree failed" } };
-    let fail: Outcome = cut;
+    const one = copies(cutting(() => slow), { cutMs: 60 });
+    // The cut itself is answered so.
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(large());
+    slow = false;
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(large());
+    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(large());
+    expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
+    expect(await copies().ask(THIRD, bound(THIRD), "open", {}, signal())).toEqual(large());
+    expect(asked).toHaveLength(1);
+    // Another folder is tried, and another folder at its path: the refusal is the folder's, by its identity.
+    const elsewhere = join(dir, "Elsewhere");
+    mkdirSync(elsewhere);
+    expect(await one.open(THIRD, bound(THIRD, elsewhere), signal())).toHaveProperty("copy");
+    replace();
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+  });
+
+  it("is not refused for an open that failed soon, nor for one its caller cancelled", async () => {
+    let fail: Outcome | undefined = QUICK;
     const one = copies(async (request, aborted) => {
-      if (request.action !== "open" || !slow) return undefined;
-      if (fail === cut) await pause(80);
-      // As the client answers a request whose caller cancelled it.
+      if (request.action !== "open" || fail === undefined) return undefined;
+      if (fail === CUT) await pause(80);
       return aborted.aborted ? CANCELLED : fail;
     }, { cutMs: 60 });
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: cut });
-    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(cut);
-    const large = {
-      error: {
-        type: "history_off",
-        message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less`,
-      },
-    };
-    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large });
-    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual(large);
-    expect(await one.ask(ROOT, bound(), "snapshot", STEP, signal())).toEqual(large);
-    expect(asked.filter((request) => request.thread === ROOT)).toHaveLength(2);
-    // Each thread's own: another thread of the folder is tried. A failure that comes soon is no cut, nor a cancel.
-    fail = quick;
-    for (let n = 0; n < 3; n += 1) expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: quick });
-    fail = cut;
+    for (let n = 0; n < 3; n += 1) expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: QUICK });
+    fail = CUT;
     const cancel = new AbortController();
-    const turn = one.ask(OTHER, bound(OTHER), "open", {}, cancel.signal);
+    const turn = one.ask(ROOT, bound(), "open", {}, cancel.signal);
     await pause(70);
     cancel.abort();
     expect(await turn).toEqual(CANCELLED);
-    expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: cut });
-    slow = false;
-    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
-    // The app started again tries once more.
-    expect(await copies().open(ROOT, bound(), signal())).toHaveProperty("copy");
+    fail = undefined;
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
   });
 
-  it("is tried again once the folder's place is another than the one whose copy was cut", async () => {
+  it("is tried again once it holds another number of the files its history takes, and refused again with them where it is cut again", async () => {
     let slow = true;
-    const cut: Outcome = { error: { type: "history", code: "no_answer", message: "This folder's history did not answer" } };
-    const one = copies(async (request) => {
-      if (request.action !== "open" || !slow) return undefined;
-      await pause(80);
-      return cut;
-    }, { cutMs: 60 });
-    await one.open(ROOT, bound(), signal());
-    await one.open(ROOT, bound(), signal());
-    expect(await one.open(ROOT, bound(), signal())).toMatchObject({ failed: { error: { type: "history_off" } } });
-    // The place's folder in the app's data made anew, as for another folder at the path.
-    renameSync(place(), `${place()}.moved`);
-    mkdirSync(place(), { mode: 0o700 });
+    const one = copies(cutting(() => slow), { cutMs: 60 });
+    writeFileSync(join(folder, "Report.docx"), "the report\n");
+    // A folder in it that cannot be listed, and one whose files cannot be looked at: counted as nothing, the rest counted.
+    mkdirSync(join(folder, "Unlisted"));
+    mkdirSync(join(folder, "Unlooked"));
+    writeFileSync(join(folder, "Unlooked", "Hidden.md"), "");
+    chmodSync(join(folder, "Unlisted"), 0o000);
+    chmodSync(join(folder, "Unlooked"), 0o400);
+    // Given back before the test's folder is removed.
+    afterThis.push(() => {
+      chmodSync(join(folder, "Unlisted"), 0o700);
+      chmodSync(join(folder, "Unlooked"), 0o700);
+    });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    // What its history leaves out comes and goes, and a file it takes changes: still refused, and the guest asked nothing.
+    for (const left of ["node_modules/left-pad/index.js", ".git/HEAD", "app/build/out.o", "~$Report.docx", "Report.docx.tmp", ".env", "x.pyc"]) {
+      mkdirSync(join(folder, left, ".."), { recursive: true });
+      writeFileSync(join(folder, left), "");
+    }
+    writeFileSync(join(folder, "Report.docx"), "the report, v2\n");
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(asked).toHaveLength(1);
+    // A folder history leaves out is not even listed.
+    expect(looks.listed.filter((path) => /node_modules|\.git|build/.test(path))).toEqual([]);
+    // One more file it takes: tried again, cut again, and refused again with it.
+    writeFileSync(join(folder, "app", "Notes.md"), "notes\n");
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
+    expect(asked).toHaveLength(2);
+    // It goes: tried again, and made this time.
+    rmSync(join(folder, "app", "Notes.md"));
     slow = false;
     expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+  });
+
+  it("is tried again when its person asks: a turn's open asked as retried, and that alone, its asking no history's", async () => {
+    let slow = true;
+    const one = copies(cutting(() => slow), { cutMs: 60 });
+    await one.open(ROOT, bound(), signal());
+    slow = false;
+    expect(await one.ask(ROOT, bound(), "snapshot", { ...STEP, retried: true }, signal())).toEqual(large());
+    expect(await one.ask(ROOT, bound(), "open", { retried: "yes" }, signal())).toEqual(large());
+    expect(asked).toHaveLength(1);
+    expect(await one.ask(ROOT, bound(), "open", { retried: true }, signal())).toEqual({ ok: { copy: "made" } });
+    expect(asked.map((request) => [request.thread, request.action, request.args])).toEqual([[ROOT, "open", { moves: false }], [ROOT, "open", {}]]);
+    // Asked again and cut again by another thread of the folder: refused again, for every thread with no copy of it.
+    slow = true;
+    expect(await one.ask(OTHER, bound(OTHER), "open", { retried: true }, signal())).toEqual(large());
+    slow = false;
+    expect(await one.ask(THIRD, bound(THIRD), "open", {}, signal())).toEqual(large());
+    expect(asked).toHaveLength(3);
+  });
+
+  it("takes a retried open where the app's data was never made as any first open", async () => {
+    expect(existsSync(dataDir)).toBe(false);
+    expect(await copies().ask(ROOT, bound(), "open", { retried: true }, signal())).toEqual({ ok: { copy: "made" } });
+  });
+
+  it("spends no Retry on a retried open refused before its folder is found: the folder is tried at the next asking", async () => {
+    let slow = true;
+    const one = copies(cutting(() => slow), { cutMs: 60 });
+    await one.open(ROOT, bound(), signal());
+    slow = false;
+    // The folder's place in the app's data is not a folder of the app's own, for a moment.
+    renameSync(place(), `${place()}.away`);
+    writeFileSync(place(), "");
+    expect(await one.ask(ROOT, bound(), "open", { retried: true }, signal())).toMatchObject({ error: { type: "unavailable" } });
+    rmSync(place());
+    renameSync(`${place()}.away`, place());
+    // The server asks again, as its turn's next asking, which says nothing of the Retry.
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "made" } });
+  });
+
+  it("refuses only what would make a thread's copy: one whose copy is whole goes on working and landing, after the app starts again too", async () => {
+    let slow = false;
+    const one = copies(cutting(() => slow), { cutMs: 60 });
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept" } });
+    slow = true;
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual(large());
+    slow = false;
+    // The thread whose copy its host holds: each step of its turn and of its landing, and its next turn's open.
+    const before = asked.length;
+    for (const action of ["changed", "snapshot", "commit", "record", "forget"]) {
+      expect(await one.ask(ROOT, bound(), action, {}, signal()), action).toEqual(HASH);
+    }
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept" } });
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+    expect(asked.length - before).toBe(6);
+    // The other is refused at once, and so is one whose copy's making was cut, its mark beside what it left.
+    expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
+    mkdirSync(copy(THIRD), { recursive: true });
+    writeFileSync(`${copy(THIRD)}.making`, "");
+    expect(await one.ask(THIRD, bound(THIRD), "open", {}, signal())).toEqual(large());
+    expect(await one.open(THIRD, bound(THIRD), signal())).toEqual({ failed: large() });
+    expect(asked.length - before).toBe(6);
+    // The app started again knows no copy as whole: the one at the thread's path is opened, and worked in.
+    const again = copies(undefined, { cutMs: 60 });
+    expect(await again.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept" } });
+    expect(await again.open(ROOT, bound(), signal())).toHaveProperty("copy");
+    expect(await again.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
+    expect(asked.length - before).toBe(7);
+  });
+
+  it("is asked again only when its person asks where its files could not be counted in time, then or later", async () => {
+    let slow = true;
+    const one = copies(cutting(() => slow), { cutMs: 60, countMs: 50 });
+    writeFileSync(join(folder, "Report.docx"), "the report\n");
+    // A count that does not answer in time, as on a stalled disk, says nothing of whether the folder changed.
+    const stalled = hold(join(folder, "Report.docx"), false);
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    stalled.release();
+    writeFileSync(join(folder, "Notes.md"), "notes\n");
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(asked).toHaveLength(1);
+    expect(await one.ask(ROOT, bound(), "open", { retried: true }, signal())).toEqual(large());
+    // Counted then, the folder's count now is not had in time: it stays refused.
+    rmSync(join(folder, "Notes.md"));
+    const again = hold(join(folder, "Report.docx"), false);
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(asked).toHaveLength(2);
+    // A count still waiting is not asked again: the next waits for it, and is answered at its own bound.
+    expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
+    expect(looks.listed.filter((path) => path === folder)).toHaveLength(3);
+    again.release();
+    slow = false;
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+  });
+
+  it("is its folder's by the folder's identity as each boot read it, and a record that is none refuses nothing", async () => {
+    let slow = true;
+    const one = copies(cutting(() => slow), { cutMs: 60 });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    slow = false;
+    // A binding made in an earlier boot, when the folder's mount had another number, is of the same folder.
+    expect(await one.open(OTHER, { ...bound(OTHER), dev: bound().dev + 1, boot: "an earlier boot" }, signal())).toEqual({ failed: large() });
+    const record = join(dataDir, "history", `${keyOf(folder)}.too-large.json`);
+    const said = JSON.parse(readFileSync(record, "utf8")) as Record<string, unknown>;
+    expect(said).toEqual({ path: folder, dev: String(bound().dev), ino: String(bound().ino), boot: BOOT_ID, files: 0 });
+    // So is a record written in an earlier boot; in this one, another device's number is another folder's.
+    writeFileSync(record, JSON.stringify({ ...said, dev: String(bound().dev + 1), boot: "an earlier boot" }));
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    writeFileSync(record, JSON.stringify({ ...said, dev: String(bound().dev + 1) }));
+    expect(await one.open(ROOT, bound(), signal())).toHaveProperty("copy");
+    // Each looked at by a thread with no copy yet, whose open would make one.
+    for (const none of [
+      "{", JSON.stringify({ ...said, files: -1 }), JSON.stringify({ ...said, files: "0" }), JSON.stringify({ ...said, ino: 7.5 }),
+      JSON.stringify({ ...said, path: join(dir, "Elsewhere") }),
+    ]) {
+      writeFileSync(record, none);
+      const root = randomUUID();
+      expect(await one.open(root, bound(root), signal()), none).toHaveProperty("copy");
+    }
+  });
+
+  it("is said so at its cut where it cannot be remembered, and tried again at the next operation, nothing of the record left", async () => {
+    const one = copies(cutting(() => true), { cutMs: 60 });
+    const record = join(dataDir, "history", `${keyOf(folder)}.too-large.json`);
+    mkdirSync(record, { recursive: true });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(await one.open(ROOT, bound(), signal())).toEqual({ failed: large() });
+    expect(asked).toHaveLength(2);
+    expect(readdirSync(join(dataDir, "history")).filter((name) => name.includes(".too-large.json."))).toEqual([]);
+  });
+
+  it("lets a deleted thread's copy go all the same", async () => {
+    // As a run before left it, which quit with a host on the copy.
+    await copies().open(ROOT, bound(), signal());
+    const one = copies(async (request, aborted) => (request.action === "close" ? removing(request) : cutting(() => true)(request, aborted)), { cutMs: 60 });
+    expect(await one.open(OTHER, bound(OTHER), signal())).toEqual({ failed: large() });
+    await one.copies.drop(ROOT, bound());
+    expect(asked.slice(1).map((request) => [request.thread, request.action])).toEqual([[OTHER, "open"], [ROOT, "close"]]);
+    expect(existsSync(copy())).toBe(false);
   });
 });
 
@@ -1232,6 +1468,28 @@ describe("a place another folder at the path takes", () => {
     expect(await second).toEqual({ failed: FOLDER_UNAVAILABLE });
   });
 
+  it("gives no host a copy the app's own open made where the place was let go before the open was answered", async () => {
+    let answer: () => void = () => {};
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const was = bound();
+    // The old folder's thread's first open is answered only once the new folder's thread has let its place go.
+    const one = copies(async (request) => {
+      if (request.thread === ROOT) await answered;
+      return undefined;
+    });
+    const first = one.open(ROOT, was, signal());
+    await vi.waitFor(() => expect(events).toEqual([`${ROOT}:open`]));
+    replace();
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+    expect(unplaced.map((given) => given.real.ino)).toEqual([was.ino]);
+    // Answered as made, at the path where the new folder's place is now: no host of the old folder's thread works there.
+    answer();
+    expect(await first).toEqual({ failed: FOLDER_UNAVAILABLE });
+    expect(events).toEqual([`${ROOT}:open`, `unplace:${was.ino}`, `${OTHER}:open`]);
+  });
+
   it("tells a host that takes a copy of the place while it is let go, and waits for it too", async () => {
     const was = bound();
     const one = copies();
@@ -1294,7 +1552,7 @@ describe("a place another folder at the path takes", () => {
       failed: {
         error: {
           type: "unavailable",
-          message: "This computer could not make this thread's copy of its folder: a thread still works in the history of the folder that was at this path, and did not let it go within 0.05 s",
+          message: `This computer could not make this thread's copy of ${folder}: a thread still works in the history of the folder that was at this path, and did not let it go within 0.05 s. Ask again once that thread has stopped`,
         },
       },
     });
@@ -1306,6 +1564,61 @@ describe("a place another folder at the path takes", () => {
     one.close(ROOT);
     expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
     expect(setAside()).toHaveLength(1);
+  });
+
+  it("is named once, on the next answer of a turn's open that the thread whose operation set it aside gets", async () => {
+    let refusing = false;
+    const one = copies((request) => (request.action === "open" && refusing ? QUICK : undefined));
+    await one.open(ROOT, bound(), signal());
+    one.close(ROOT);
+    replace();
+    // A host's start sets it aside: no answer the server gets says so, and another thread's open names nothing.
+    expect(await one.open(OTHER, bound(OTHER), signal())).toHaveProperty("copy");
+    const [aside] = setAside();
+    expect(aside).toMatch(new RegExp(`^${keyOf(folder)}\\.was-[0-9]+$`));
+    expect(await one.ask(THIRD, bound(THIRD), "open", {}, signal())).toEqual({ ok: { copy: "made" } });
+    // A refusal names nothing, and keeps it for the next.
+    refusing = true;
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual(QUICK);
+    refusing = false;
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places: [aside] } });
+    expect(await one.ask(OTHER, bound(OTHER), "open", {}, signal())).toEqual({ ok: { copy: "kept" } });
+  });
+
+  it("is named on the answer of the turn's open that set it aside, on either of its forms, each place set aside once, oldest first", async () => {
+    const off: Outcome = { ok: { history: "off", reason: "cap" } };
+    let answer: Outcome | undefined = off;
+    const one = copies((request) => (request.action === "open" ? answer : undefined));
+    // A record that cannot be read: the place is set aside, the thread's own as it may be, and a new one made.
+    await one.open(ROOT, bound(), signal());
+    writeFileSync(join(dataDir, "history", `${keyOf(folder)}.json`), "{");
+    const first = await one.ask(ROOT, bound(), "open", {}, signal());
+    expect(first).toEqual({ ok: { ...(off as { ok: object }).ok, set_aside_places: setAside() } });
+    // Twice before a turn's open: both, in the order they were set aside.
+    answer = undefined;
+    for (let time = 0; time < 2; time += 1) {
+      writeFileSync(join(dataDir, "history", `${keyOf(folder)}.json`), "{");
+      await one.open(ROOT, bound(), signal());
+      one.close(ROOT);
+    }
+    const names = setAside().sort((a, b) => Number(a.split("-").at(-1)) - Number(b.split("-").at(-1)));
+    expect(names).toHaveLength(3);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places: names.slice(1) } });
+  });
+
+  it("is named among the latest as many as one answer may name, where more were set aside before a turn's open", async () => {
+    const one = copies();
+    await one.open(ROOT, bound(), signal());
+    one.close(ROOT);
+    // Each a host's start of the thread's, the place's record unreadable before it.
+    for (let time = 0; time < 65; time += 1) {
+      writeFileSync(join(dataDir, "history", `${keyOf(folder)}.json`), "{");
+      await one.open(ROOT, bound(), signal());
+      one.close(ROOT);
+    }
+    const names = setAside().sort((a, b) => Number(a.split("-").at(-1)) - Number(b.split("-").at(-1)));
+    expect(names).toHaveLength(65);
+    expect(await one.ask(ROOT, bound(), "open", {}, signal())).toEqual({ ok: { copy: "kept", set_aside_places: names.slice(-64) } });
   });
 
   it("is let go, and what the app knew of its copies with it, once the place's folder is not the one it knew", async () => {

@@ -522,12 +522,16 @@ async def set_aside_of(
     repository set aside whole took with it no open names, and are kept
     while it is.  A landing's record names its own snapshot at once
     (*landing*'s ``set_aside``); one whose answer was lost, or a turn's end
-    taken up again, has the next open name it.
+    taken up again, has the next open name it.  A place of the folder's
+    its app set aside, its history and every thread's copy in it, is named
+    by one open alone, the thread's that set it aside, and stays recorded:
+    the latest as many as an open names.
 
     A turn's end records all of it by the computer's names,
-    ``{copies, snapshots, gone}``, and its report tells what no earlier end
-    recorded, as a person is told it (``derive.set_aside_said``): so each is
-    told once, and the master hears what each is and when, not its names.
+    ``{copies, snapshots, gone}`` and ``places`` where it has any, and its
+    report tells what no earlier end recorded, as a person is told it
+    (``derive.set_aside_said``): so each is told once, and the master hears
+    what each is and when, not its names.
     The open is read from the journal and checked as an answer given now:
     one that is none says nothing, and the last word stands.  None for
     either where it holds nothing: nothing was ever set aside, or nothing
@@ -535,7 +539,10 @@ async def set_aside_of(
     """
     before = await store.last_event(session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="set_aside")
     told = _set_aside_told(before.data["set_aside"] if before is not None else None)
-    opened = answered("history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id), thread=str(session.id))
+    opened = answered(
+        "history", "open", await DeviceOperations(session_factory, redis).last_opened(session.id),
+        thread=str(session.id), folder=session.config.get("workspace_path"),
+    )
     now = dict(told)
     if opened is not None:
         now.update(copies=opened.get("set_aside_folders", []), gone=opened.get("set_aside_gone", []))
@@ -545,15 +552,14 @@ async def set_aside_of(
             # A repository set aside whole holds those told before: no open names them, and they are kept with it.
             held = any(name.endswith(".repository") for name in now["copies"])
             now["snapshots"] = [*(aside for aside in told["snapshots"] if held and aside not in named), *named]
+        # Named by one open alone: what it names is added to what was told before.
+        places = [name for name in dict.fromkeys(opened.get("set_aside_places", [])) if name not in told["places"]]
+        now["places"] = [*told["places"], *places][-MAX_ASIDE:]
     recorded = [aside for aside in (landing or {}).get("set_aside", []) if aside not in now["snapshots"]]
     # Its computer keeps the latest sixteen: a word of more is kept to as many as an open names of what is set aside whole.
     now["snapshots"] = [*now["snapshots"], *recorded][-MAX_ASIDE:]
-    new = {
-        "copies": [name for name in now["copies"] if name not in told["copies"]],
-        "snapshots": [aside for aside in now["snapshots"] if aside not in told["snapshots"]],
-        "gone": [name for name in now["gone"] if name not in told["gone"]],
-    }
-    kept = now if before is not None or any(now.values()) else None
+    new = {key: [name for name in now[key] if name not in told[key]] for key in ("copies", "snapshots", "gone", "places")}
+    kept = {key: names for key, names in now.items() if key != "places" or names} if before is not None or any(now.values()) else None
     return kept, set_aside_said(new)
 
 
@@ -562,7 +568,7 @@ def _set_aside_told(told: Any) -> dict[str, list[str]]:
     told = told if isinstance(told, dict) else {}
     return {
         key: [name for name in told.get(key) or () if isinstance(name, str)] if isinstance(told.get(key), list) else []
-        for key in ("copies", "snapshots", "gone")
+        for key in ("copies", "snapshots", "gone", "places")
     }
 
 

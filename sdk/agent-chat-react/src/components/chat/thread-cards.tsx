@@ -16,7 +16,7 @@ import type {
 import { Button } from "../ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 
-const GROUP_LABEL: Record<AgentChatThreadRow["group"], string> = {
+const GROUP_LABEL: Record<NonNullable<AgentChatThreadRow["group"]>, string> = {
   waiting: "Waiting on you",
   working: "Working",
   idle: "Idle",
@@ -71,6 +71,11 @@ function undoLines(result: AgentChatUndoResult): string[] {
   return lines.length > 0 ? lines : ["Nothing to put back: the files are as they were."];
 }
 
+// What each kind of what a thread's computer set aside is, as its card names it.
+const ASIDE_WHAT: Record<string, string> = {
+  copy: "its copy", repository: "its repository", place: "the earlier history at its folder's path, with its threads' copies",
+};
+
 // When a thread's work was set aside on its computer, in this computer's time: "10 Oct, 10:15".
 function setAsideWhen(at: number): string {
   const parts = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
@@ -88,7 +93,8 @@ function setAsideLines(aside: AgentChatThreadRow["setAside"]): string[] {
   const each = (entries: unknown): string[] => (Array.isArray(entries) ? entries : []).flatMap((entry) => {
     const { kind, at } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
     const moment = typeof at === "string" ? Date.parse(at) : NaN;
-    return (kind === "copy" || kind === "repository") && !Number.isNaN(moment) ? [`its ${kind} from ${setAsideWhen(moment)}`] : [];
+    const what = typeof kind === "string" && Object.hasOwn(ASIDE_WHAT, kind) ? ASIDE_WHAT[kind] : undefined;
+    return what !== undefined && !Number.isNaN(moment) ? [`${what} from ${setAsideWhen(moment)}`] : [];
   });
   if (!aside) return [];
   const count = Number.isSafeInteger(aside.snapshots) && aside.snapshots > 0 ? aside.snapshots : 0;
@@ -164,13 +170,15 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
   const { adapter, projectId, onFileSelect, onOpenSession, threadRows } = useAgentChatAdapterContext();
   const undoKey = `undo:${worker.id}`;
   const undone = useCardStarts(adapter).get(undoKey);
-  // A project's thread shows its row, live; any other worker what its reports said.
+  // A project's thread shows its row, live; any other worker what its reports said. A group this card has no
+  // words for, as a later server or another adapter may send, is no word, and a row with no files names none.
   const live = threadRows?.[worker.id];
+  const group = live?.group && Object.hasOwn(GROUP_LABEL, live.group) ? live.group : undefined;
   const status = live
-    ? GROUP_LABEL[live.group] + (live.progress ? ` · ${live.progress.done}/${live.progress.total}` : "")
+    ? [group && GROUP_LABEL[group], live.progress && `${live.progress.done}/${live.progress.total}`].filter(Boolean).join(" · ")
     : STATE_LABEL[worker.state];
   const statusLine = live ? live.statusLine : statusLineOf(worker.report);
-  const files = live ? live.files : worker.files;
+  const files = live ? (Array.isArray(live.files) ? live.files : []) : worker.files;
   // What its computer set aside of its work: nothing brings it back yet, so it is said, with no button.
   const setAside = setAsideLines(live?.setAside);
   const name = worker.title ?? firstLine(worker.goal);
@@ -189,7 +197,7 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
     }
   };
   return (
-    <div data-testid="worker-card" data-group={live?.group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
+    <div data-testid="worker-card" data-group={group} className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-medium text-foreground" title={name ?? undefined}>
           <bdi>{name}</bdi>

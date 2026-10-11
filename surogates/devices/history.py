@@ -26,10 +26,13 @@ and by whoever reads an outcome out of the journal later.
   absolute, no empty, ``.`` or ``..`` part.  A word is one of the few its
   answer may say.  A count is a whole number from 0 to 2**53 - 1.  A list
   holds at most 50,000 entries; a look at most 2,000 files; an open at most
-  64 names of what was set aside, each the asking thread's own.  Who changed
-  a file is one of three shapes, each word text of a path's length.  So an
-  answer holds nothing that names a session, a project, a computer or a
-  folder: those are the session's own, which the server stamped.
+  64 names of each of what was set aside: a copy or a repository, each the
+  asking thread's own, and a place, by its folder's key, as the app keys a
+  place by the folder's path, and when.
+  Who changed a file is one of three shapes, each word text of a path's
+  length.  So an answer holds nothing that names a session, a project, a
+  computer or a folder: those are the session's own, which the server
+  stamped.
 - A refusal is read by its type and its code, each taken only from the
   server's own list of them, never by its words.  Its words are for a
   person: at most 2,000 characters are kept, and nothing is looked up by
@@ -51,6 +54,7 @@ words of :data:`NOWHERE`.
 from __future__ import annotations
 
 import errno
+import hashlib
 import re
 from collections.abc import Callable
 from typing import Any
@@ -122,8 +126,9 @@ _REFUSED = "refused"
 #: Why a thread on its computer has nowhere to work where it was made before threads worked in copies:
 #: bound to the folder itself, it would write the user's files with nothing kept.
 MADE_BEFORE_COPIES = "made_before_copies"
-#: The refusal of a computer whose app gives the thread no copy of a folder too large to copy in
-#: the time a copy may take, its making cut short by that bound twice: until the app starts again.
+#: The refusal of a computer whose app gives no thread a copy of a folder too large to copy in the
+#: time a copy may take, a making of one cut short by that bound: until the folder holds other files,
+#: or its person asks for the turn again, which the app then tries once more (:meth:`ThreadCopy.open`).
 _TOO_LARGE = "history_off"
 #: Why a thread has nowhere to work, by its open's refusal: its type, else its code.
 _NOWHERE_BY = {
@@ -145,7 +150,7 @@ NOWHERE: dict[str, str] = {
     ),
     _TOO_LARGE: (
         "This folder is too large for this thread to have a copy of its own on this computer, so it cannot work there. "
-        "Choose a folder inside it that holds less."
+        "Choose a folder inside it that holds less, or try again."
     ),
     NO_COPY: (
         "Surogate Desktop on this computer keeps no copy of the folder for this thread, so it cannot work there. "
@@ -176,6 +181,9 @@ _SAGA = re.compile(r"[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}")
 _OWN_FILE = re.compile(r"\.surogate-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp")
 #: When a copy or a repository was set aside, and which in its place's order: what its name starts with.
 _ASIDE = re.compile(r"[0-9]{8}-[0-9]{8}T[0-9]{6}Z-")
+#: A place of the folder's its computer's app set aside, by its name in the app's data (``desktop/src/history/place.ts``):
+#: the folder's key, and when, in milliseconds.
+_PLACE_ASIDE = re.compile(r"[0-9a-f]{16}\.was-[0-9]{1,16}")
 _COPIES = ("made", "moved", "kept")
 _OFF = ("cap", "names")
 _REASONS = ("changed", "shape", "with", "protected")
@@ -211,8 +219,9 @@ class NowhereToWork(Exception):
         super().__init__(NOWHERE[why])
         self.why = why
         self.code = code
-        #: Whether a later turn may find otherwise, its turn asked again: only one whose copy could not be opened just now.
-        self.retryable = why == _AGAIN
+        #: Whether a later turn may find otherwise, its turn asked again: one whose copy could not be opened just now, and
+        #: one of a folder too large, which its computer's app tries once more for its person's asking.
+        self.retryable = why in (_AGAIN, _TOO_LARGE)
 
 
 def opens_its_copy(session: Any) -> bool:
@@ -347,12 +356,25 @@ def _aside(value: Any, thread: str | None) -> str:
     return value
 
 
-def _opened(answer: dict[str, Any], thread: str | None) -> dict[str, Any]:
+def _place_aside(value: Any, folder: str | None) -> str:
+    """A place its computer's app set aside, by its name there: the asking thread's folder's, by its key, or none.
+
+    The app keys a place by the first 16 hex digits of the SHA-256 of the
+    folder's path (``desktop/src/history/place.ts``, ``keyOf``).
+    """
+    _need(isinstance(value, str) and _PLACE_ASIDE.fullmatch(value) is not None and folder is not None and _well_formed(folder))
+    _need(value[:16] == hashlib.sha256(folder.encode()).hexdigest()[:16])
+    return value
+
+
+def _opened(answer: dict[str, Any], thread: str | None, folder: str | None) -> dict[str, Any]:
     """A turn's open: the thread's copy, made, moved to the folder as it is or kept as it was; or why the folder has no history.
 
     On either, what the place keeps set aside whole of the thread's own,
-    and what of it went at the place's bound.  The first form that holds,
-    as the app takes them.
+    and what of it went at the place's bound; and the places of the
+    folder's the app set aside, which one open names, the first since the
+    thread's operation that set it aside, each its folder's, *folder*.  The
+    first form that holds, as the app takes them.
     """
     for form in (_with_copy, _with_no_history):
         try:
@@ -360,6 +382,8 @@ def _opened(answer: dict[str, Any], thread: str | None) -> dict[str, Any]:
             for names in ("set_aside_folders", "set_aside_gone"):
                 if names in answer:
                     opened[names] = _listed(answer[names], lambda name: _aside(name, thread), MAX_ASIDE)
+            if "set_aside_places" in answer:
+                opened["set_aside_places"] = _listed(answer["set_aside_places"], lambda name: _place_aside(name, folder), MAX_ASIDE)
             return opened
         except _No:
             continue
@@ -511,24 +535,25 @@ _ANSWERS: dict[str, dict[str, Callable[..., dict[str, Any]]]] = {
 ACTIONS = {kind: frozenset(actions) for kind, actions in _ANSWERS.items()}
 
 
-def checked(kind: str, action: str, answer: Any, *, thread: str | None = None) -> dict[str, Any]:
+def checked(kind: str, action: str, answer: Any, *, thread: str | None = None, folder: str | None = None) -> dict[str, Any]:
     """*answer* to *action* of *kind*, built again from its own fields; :class:`NotAnAnswer` when it is none.
 
-    *thread* is the thread whose copy was asked about, where the caller
-    knows it: what an open names as set aside is taken only as that
-    thread's own.
+    *thread* is the thread whose copy was asked about, and *folder* the
+    folder it works in as the session holds it, where the caller knows
+    them: what an open names as set aside is taken only as that thread's
+    own, and a place only as that folder's.
     """
     shape = _ANSWERS.get(kind, {}).get(action)
     if shape is None:
         raise NotAnAnswer(f"This computer was asked nothing called '{action}'")
     try:
         _need(isinstance(answer, dict))
-        return _opened(answer, None if thread is None else str(thread)) if shape is _opened else shape(answer)
+        return _opened(answer, None if thread is None else str(thread), folder) if shape is _opened else shape(answer)
     except _No:
         raise NotAnAnswer(f"This computer's answer to '{action}' was not one") from None
 
 
-def answered(kind: str, action: str, outcome: Any, *, thread: str | None = None) -> dict[str, Any] | None:
+def answered(kind: str, action: str, outcome: Any, *, thread: str | None = None, folder: str | None = None) -> dict[str, Any] | None:
     """What the journal holds as a computer's answer to *action*, checked as one given now; None for a refusal, or for no answer.
 
     Whatever reads an outcome out of the journal, and not as the step that
@@ -538,7 +563,7 @@ def answered(kind: str, action: str, outcome: Any, *, thread: str | None = None)
     if not isinstance(outcome, dict) or "error" in outcome or "ok" not in outcome:
         return None
     try:
-        return checked(kind, action, outcome["ok"], thread=thread)
+        return checked(kind, action, outcome["ok"], thread=thread, folder=folder)
     except NotAnAnswer:
         return None
 
@@ -575,9 +600,10 @@ class Steps:
     :class:`NotAnAnswer`.
     """
 
-    def __init__(self, runner: OperationRunner, *, thread: UUID | None = None) -> None:
+    def __init__(self, runner: OperationRunner, *, thread: UUID | None = None, folder: str | None = None) -> None:
         self._runner = runner
         self._thread = None if thread is None else str(thread)
+        self._folder = folder
 
     async def ask(self, kind: str, action: str, **arguments: Any) -> dict[str, Any]:
         outcome = await self._runner.run(kind, {"action": action, **arguments})
@@ -585,7 +611,7 @@ class Steps:
             raise _refusal(outcome["error"])
         if not isinstance(outcome, dict) or "ok" not in outcome:
             raise NotAnAnswer(f"This computer's answer to '{action}' was not one")
-        return checked(kind, action, outcome["ok"], thread=self._thread)
+        return checked(kind, action, outcome["ok"], thread=self._thread, folder=self._folder)
 
     async def history(self, action: str, **arguments: Any) -> dict[str, Any]:
         return await self.ask("history", action, **arguments)
@@ -617,16 +643,17 @@ class ThreadCopy:
         return Steps(JournalRunner(
             self.operations, device_id=self.device_id, root_session_id=self.thread,
             calling_session_id=self._session.id, invocation_id=invocation, lease_token=self._lease_token,
-        ), thread=self.thread)
+        ), thread=self.thread, folder=self.folder)
 
-    async def open(self, turn: int, *, again: int = 0) -> dict[str, Any]:
+    async def open(self, turn: int, *, again: int = 0, retried: bool = False) -> dict[str, Any]:
         """Bring the copy to the turn *turn*: ``{copy, …}``, or ``{history: "off", reason, …}`` for a folder with no history.
 
         Journaled under the turn, so an answer is the turn's: asked again,
         it is given as it was, and the computer hears of it once.  A refusal
         is recorded the same way, so whoever asks again after one asks under
         the turn's next name: *again* counts the refusals before this
-        asking.
+        asking.  *retried*: the turn is one its person asked for again, and
+        its computer's app tries again a folder it refused as too large.
 
         A thread with nowhere to work never works in the folder.  A folder
         with no history answers so, with its reason.  A computer that keeps
@@ -634,9 +661,10 @@ class ThreadCopy:
         again does not change.  Every other refusal may have done part of
         the work, and says nothing of where the thread works.
         """
-        return await self.steps(f"open:{turn}:{again}" if again else f"open:{turn}").history("open")
+        steps = self.steps(f"open:{turn}:{again}" if again else f"open:{turn}")
+        return await steps.history("open", **({"retried": True} if retried else {}))
 
-    async def opened(self, turn: int, *, telling: bool = False) -> dict[str, Any]:
+    async def opened(self, turn: int, *, telling: bool = False, retried: bool = False) -> dict[str, Any]:
         """The copy brought to the turn *turn*: the open's answer, which every step of the turn works from.
 
         The journal holds each asking of the turn's.  An answer is the
@@ -648,7 +676,10 @@ class ThreadCopy:
         With *telling*, as at the turn's start, a thread whose copy no open
         has answered yet has its chat told that the copy is being made, for
         as long as the askings run: its first copy of a large folder takes
-        minutes.
+        minutes.  With *retried*, the turn's person asked for it again, and
+        its first asking says so (:meth:`open`): a folder its computer's app
+        refused as too large is tried again once for the asking, not at each
+        of the turn's askings after it.
 
         Raises :class:`NowhereToWork` where the thread has nowhere to work:
         its folder has no history, its computer's app keeps no copy for it
@@ -661,21 +692,22 @@ class ThreadCopy:
         """
         number = max(await self.operations.opens(self._session.id, turn) - 1, 0)
         making = telling and self._notice is not None and "copy" not in (
-            answered("history", "open", await self.operations.last_opened(self._session.id), thread=str(self.thread)) or {}
+            answered("history", "open", await self.operations.last_opened(self._session.id), thread=str(self.thread), folder=self.folder)
+            or {}
         )
         if making:
             await self._notice.copying(self._session.id, self.device_id, self.folder)
         try:
-            return await self._opened(turn, number)
+            return await self._opened(turn, number, retried)
         finally:
             if making:
                 await self._notice.copied(self._session.id, self.device_id)
 
-    async def _opened(self, turn: int, number: int) -> dict[str, Any]:
+    async def _opened(self, turn: int, number: int, retried: bool) -> dict[str, Any]:
         """The turn's askings of its open, from its asking *number*, as :meth:`opened` has them."""
         while True:
             try:
-                answer = await self.open(turn, again=number)
+                answer = await self.open(turn, again=number, retried=retried and number == 0)
             except ComputerRefused as refusal:
                 if refusal.kind == _STOPPED:
                     raise

@@ -322,6 +322,11 @@ def test_a_row_has_the_shells_fields_and_values():
     aside = derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=SET_ASIDE_TOLD), now=NOW)["set_aside"]
     assert list(aside) == [_snake(field) for field in aside_fields]
     assert aside["kept"] and aside["gone"] and all(list(whole) == whole_fields for whole in (*aside["kept"], *aside["gone"]))
+    # Each of the kinds the shell takes, and none other.
+    kinds = re.findall(r'"(\w+)"', re.search(r"^\s*kind: ([^;]+);", _interface(source, "SetAsideWhole"), re.M).group(1))
+    every = {"copies": [REPOSITORY_NAME, COPY_NAME], "snapshots": [], "gone": [], "places": [PLACE_NAME]}
+    placed = derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=every), now=NOW)
+    assert sorted({whole["kind"] for whole in placed["set_aside"]["kept"]}) == sorted(kinds) == ["copy", "place", "repository"]
 
 
 def test_a_thread_whose_files_did_not_merge_waits_on_you_with_the_reason_files():
@@ -469,6 +474,8 @@ def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
 #: The names its computer gives what it set aside whole of a thread's: the order, when, whose, and which.
 COPY_NAME = f"00000001-20261010T101500Z-{COMPUTER}.copy"
 REPOSITORY_NAME = f"00000002-20261010T101501Z-{COMPUTER}.repository"
+#: A place of the thread's folder its computer's app set aside, by its name there: the folder's key, and when.
+PLACE_NAME = "fcb59ee0818a927a.was-1791532800000"
 #: What the newest of a thread's turn ends to record it recorded its computer keeping set aside of the thread's work.
 SET_ASIDE_TOLD = {"copies": [REPOSITORY_NAME], "snapshots": ["a" * 40, "b" * 40], "gone": [COPY_NAME]}
 
@@ -499,3 +506,18 @@ def test_a_row_says_nothing_set_aside_where_its_turn_ends_recorded_none_or_none_
         assert derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=told), now=NOW)["set_aside"] is None, told
     assert set_aside_name(COPY_NAME) == {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
     assert set_aside_name(f"00000001-20261010T246000Z-{COMPUTER}.copy") is None
+
+
+def test_a_row_says_each_place_of_its_folder_its_computer_set_aside_among_what_it_keeps_by_when():
+    given = replace(SHELL_FIXTURES["computer"][0], set_aside={"copies": [COPY_NAME], "snapshots": [], "gone": [], "places": [
+        "0123456789abcdef.was-1791627301500", PLACE_NAME,
+    ]})
+    # Oldest first: a place by when it was set aside, to the second.
+    assert derive_thread(given, now=NOW)["set_aside"] == {"kept": [
+        {"kind": "place", "at": "2026-10-09T08:00:00Z"}, {"kind": "copy", "at": "2026-10-10T10:15:00Z"},
+        {"kind": "place", "at": "2026-10-10T10:15:01Z"},
+    ], "snapshots": 0, "gone": []}
+    # A name that is no place's is left out, as is a place's among the copies; and with nothing left, nothing is said.
+    for places in ([f"{PLACE_NAME}.json", f"../{PLACE_NAME}", "fcb59ee0818a927a.was-", f"fcb59ee0818a927a.was-{'9' * 16}", 7], "all"):
+        told = {"copies": [PLACE_NAME], "snapshots": [], "gone": [], "places": places}
+        assert derive_thread(replace(given, set_aside=told), now=NOW)["set_aside"] is None, places
