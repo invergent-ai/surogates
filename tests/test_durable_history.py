@@ -1125,6 +1125,23 @@ def test_a_pod_open_across_a_pruning_lands_and_the_history_stays_whole(tmp_path,
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+@pytest.mark.parametrize("left", [".pack", ".idx"])
+def test_a_pruning_finishes_where_a_write_cut_between_a_pack_and_its_index_left_one_alone_and_takes_it_away(tmp_path, project, left):
+    for n in range(2):
+        pod = a_pod(tmp_path, project)
+        (pod.copy / "notes.txt").write_text(f"v{n + 2} notes\n")
+        land(pod, f"saga:{n}")
+    durable = project / "_history"
+    pack = durable / "objects" / "pack"
+    # As a push, or a pruning, killed between a pack and its index leaves it; or a pruning killed between the two it let go.
+    shutil.copyfile(sorted(pack.glob(f"pack-*{left}"))[0], pack / f"pack-{'f' * 40}{left}")
+    assert a_pod(tmp_path, project).prune(keep=[], now=time.time(), spare=0)["pruned"] is True
+    [kept] = {p.stem for p in pack.glob("pack-*.idx")}
+    assert sorted(p.name for p in pack.iterdir()) == [f"{kept}.idx", f"{kept}.pack"]
+    assert git(durable, "fsck", "--no-dangling") == ""
+    assert (a_pod(tmp_path, project).copy / "notes.txt").read_text() == "v3 notes\n"
+
+
 def test_a_pruning_cut_off_waits_a_day_and_writes_cut_off_are_swept(tmp_path, project, monkeypatch):
     history = a_pod(tmp_path, project)
     (history.copy / "a.md").write_text("a")
