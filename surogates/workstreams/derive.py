@@ -28,11 +28,11 @@ WAITING_KINDS = {"input_required": "question", "action_required": "approval", "g
 LATEST_TYPES = tuple(t.value for t in (
     *MESSAGE_TYPES, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
-    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE, EventType.SESSION_COMPLETE,
+    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
 ))
 #: A copy or a repository of a thread's that its computer set aside whole, by its folder's name there
 #: (``surogates.sandbox.local_history``): the order it was set aside in, when, in UTC, whose, and which of the two.
-_SET_ASIDE = re.compile(r"[0-9]{8}-([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f-]{36}\.(copy|repository)")
+_SET_ASIDE = re.compile(r"[0-9]{8}-([0-9]{8}T[0-9]{6}Z)-[0-9a-f-]{36}\.(copy|repository)")
 #: What a thread waits on you with over a landing of its that could not be finished: one that could not be put back
 #: whole, or one left running in its folder on its computer with no worker on its turn.
 UNFINISHED = "Couldn't finish landing my changes"
@@ -74,6 +74,9 @@ class ThreadFacts:
     undone: frozenset[tuple[int, str]] = frozenset()
     #: Whether a landing of its is left running in its folder on its computer with no worker holding its turn.
     half_landed: bool = False
+    #: What its computer keeps set aside of its work, as the newest of its turn ends to record it recorded it
+    #: (``local_landing.set_aside_of``); None where none did.
+    set_aside: Any = None
 
 
 def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
@@ -89,7 +92,7 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "progress": _progress(todos.data if todos else {}),
         "files": _files(facts, group),
         "landing_id": _landing_id(facts),
-        "set_aside": _set_aside(latest),
+        "set_aside": set_aside_said(facts.set_aside),
         "place": facts.place,
         "created_at": utc(facts.created_at),
         "updated_at": utc(facts.updated_at),
@@ -263,22 +266,17 @@ def _landing_id(facts: ThreadFacts) -> str | None:
     return None
 
 
-def _set_aside(latest: dict[str, Any]) -> dict[str, Any] | None:
-    """What a thread's computer keeps set aside of its work, and what of that went at its bound; None with none.
+def set_aside_said(told: Any) -> dict[str, Any] | None:
+    """What a thread's computer keeps set aside of its work, and what of that went at its bound, as a person is told it; None with none.
 
-    As the newest of its turn ends to record it has it
-    (``local_landing.set_aside_of``): each copy or repository of the
-    thread's kept whole, ``{kind, at}``, and each that went, oldest first;
-    and how many snapshots of what its copy held of its own.  Only a thread
-    on a computer has any.
+    *told* is a turn end's record of it (``local_landing.set_aside_of``),
+    which names each by the computer's names for it.  Here each copy or
+    repository of the thread's kept whole is ``{kind, at}``, as is each that
+    went, oldest first; and the snapshots of what its copy held of its own
+    are counted.  A name that is none is left out.
     """
-    ended = [
-        latest[t.value] for t in (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL)
-        if t.value in latest and isinstance(latest[t.value].data.get("set_aside"), dict)
-    ]
-    if not ended:
+    if not isinstance(told, dict):
         return None
-    told = max(ended, key=lambda e: e.id).data["set_aside"]
 
     def listed(key: str) -> list[Any]:
         return told[key] if isinstance(told.get(key), list) else []
@@ -290,12 +288,17 @@ def _set_aside(latest: dict[str, Any]) -> dict[str, Any] | None:
 
 def set_aside_name(name: Any) -> dict[str, str] | None:
     """What its computer set aside whole of a thread's by the folder's name *name*: ``{kind, at}``, a copy or a repository,
-    and when, in UTC; None for a name that is none."""
+    and when, in UTC; None for a name that is none, its time among it."""
     found = _SET_ASIDE.fullmatch(name) if isinstance(name, str) else None
     if found is None:
         return None
-    year, month, day, hour, minute, second, kind = found.groups()
-    return {"kind": kind, "at": f"{year}-{month}-{day}T{hour}:{minute}:{second}Z"}
+    moment, kind = found.groups()
+    try:
+        at = datetime.strptime(moment, "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        return None
+    # Each of its digits where the time's own are: a parse may take a month or a day of one digit.
+    return {"kind": kind, "at": at.strftime("%Y-%m-%dT%H:%M:%SZ")} if at.strftime("%Y%m%dT%H%M%SZ") == moment else None
 
 
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:

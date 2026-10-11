@@ -13,10 +13,12 @@ row.
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
 
+from surogates.harness import loop_artifact_completion as completion
 from surogates.sandbox import local_history
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
@@ -95,8 +97,13 @@ async def test_a_folder_whose_history_is_off_on_its_computer_says_so_where_its_h
     project, _, thread = await begun_with_copy(api, computer)
     await woken(api, monkeypatch, thread, [EDITS, _final_response("Edited the report.")])
     assert [v["change"] for v in (await history_on(api, project, computer, "Report.docx")).json()] == ["changed", "added"]
-    # The folder now holds a file whose name its history cannot keep: the thread's next open finds it has none.
+    # The folder now holds a file whose name its history cannot keep: the thread's next open finds it has none, and
+    # names a copy of the thread's it set aside, which only a check that knows whose copy was asked about takes.
     computer.app.places.off = "names"
+    aside = f"00000001-20261010T101500Z-{thread.id}.copy"
+    computer.app.lie = lambda frame, outcome: (
+        {"ok": {**outcome["ok"], "set_aside_folders": [aside]}} if frame["args"].get("action") == "open" and "ok" in outcome else outcome
+    )
     await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
     off = await history_on(api, project, computer, "Report.docx")
     assert (off.status_code, off.json()["detail"]) == (409, "History is off: a file in this folder has a name that is not UTF-8.")
@@ -187,7 +194,7 @@ async def test_a_copy_its_computer_set_aside_and_one_that_went_at_its_bound_each
     landed, failed, again, more = await reports(api, master)
     assert (landed.type, failed.type) == (EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value)
     assert [report.data.get("set_aside") for report in (landed, failed, again, more)] == [
-        None, {"copies": [first], "snapshots": [], "gone": []}, None, None,
+        None, {"kept": [{"kind": "copy", "at": when(first)[1]}], "snapshots": 0, "gone": []}, None, None,
     ]
     assert f"\n{WHOLE}: its copy as it was at {when(first)[0]}\n{WHERE}" in said(failed)
     assert all("set aside" not in said(report).lower() for report in (landed, again, more))
@@ -198,13 +205,21 @@ async def test_a_copy_its_computer_set_aside_and_one_that_went_at_its_bound_each
     second = next(name for name in set_aside_on(computer) if name.endswith(".copy"))
     assert set_aside_on(computer) == [f"{first}.gone", second]
     *_, gone, after = await reports(api, master)
-    assert (gone.data["set_aside"], after.data.get("set_aside")) == ({"copies": [second], "snapshots": [], "gone": [first]}, None)
+    assert (gone.data["set_aside"], after.data.get("set_aside")) == (
+        {"kept": [{"kind": "copy", "at": when(second)[1]}], "snapshots": 0, "gone": [{"kind": "copy", "at": when(first)[1]}]}, None,
+    )
     assert f"\n{WHOLE}: its copy as it was at {when(second)[0]}\n{GONE}: its copy set aside at {when(first)[0]}\n{WHERE}" in said(gone)
     # Its row says what its computer keeps set aside of its work, and what went.
     [found] = await rows(api, project)
     assert found["set_aside"] == {
         "kept": [{"kind": "copy", "at": when(second)[1]}], "snapshots": 0, "gone": [{"kind": "copy", "at": when(first)[1]}],
     }
+    # A command typed in the thread ends a turn of its own, which says nothing of it: the row still says what is kept,
+    # and not what an older failure recorded.
+    await woken(api, monkeypatch, thread, said="/goal status")
+    *_, command = await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])
+    assert "answers" in command.data and "set_aside" not in command.data
+    assert [row["set_aside"] for row in await rows(api, project)] == [found["set_aside"]]
 
 
 async def test_what_a_landing_set_aside_of_its_copy_reaches_the_threads_report_once_and_stands_on_its_row(api, computer, monkeypatch):
@@ -236,14 +251,26 @@ async def test_what_a_landing_set_aside_of_its_copy_reaches_the_threads_report_o
     # The turn's report says so, once: the thread's next open names it, and its report says nothing of it.
     await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
     first, second = await told(api, master)
-    assert (first.data["set_aside"], second.data.get("set_aside")) == ({"copies": [], "snapshots": [aside], "gone": []}, None)
+    assert (first.data["set_aside"], second.data.get("set_aside")) == ({"kept": [], "snapshots": 1, "gone": []}, None)
+    # Only the thread's own end keeps the snapshot's id, for the next end to read.
+    *_, end = await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])
+    assert end.data["set_aside"]["snapshots"] == [aside] and aside not in json.dumps([first.data, second.data])
     assert f"\n{SNAPSHOTS}: what the copy held of the thread's own, in 1 snapshot\n{WHERE}" in said(first)
     assert "set aside" not in said(second).lower()
     [found] = await rows(api, project)
     assert found["set_aside"] == {"kept": [], "snapshots": 1, "gone": []}
+    # A turn's end that cannot read what was set aside records nothing of it: the row says what the last end that did recorded.
+    async def unread(**_):
+        raise ConnectionError("the database went away")
+
+    monkeypatch.setattr(completion, "set_aside_of", unread)
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
+    *_, end = await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])
+    assert "set_aside" not in end.data
+    assert [row["set_aside"] for row in await rows(api, project)] == [found["set_aside"]]
 
 
-async def test_a_thread_on_a_computer_that_set_nothing_aside_and_a_thread_in_the_cloud_say_nothing_of_it(api, computer, monkeypatch):
+async def test_a_thread_on_a_computer_that_set_nothing_aside_says_nothing_of_it(api, computer, monkeypatch):
     project, master, thread = await begun_with_copy(api, computer)
     await woken(api, monkeypatch, thread, [NOTES, _final_response("Noted.")])
     [report] = await told(api, master)

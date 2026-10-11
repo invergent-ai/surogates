@@ -272,6 +272,8 @@ test("what a thread's computer set aside maps to the row's, each entry taken onl
     asideOf({ kept: [{ kind: "history", at: copy.at }, { kind: "copy", at: "yesterday" }, copy, 7], snapshots: -1, gone: "all" }),
     { kept: [copy], snapshots: 0, gone: [] },
   );
+  // Digits in a time's places that make no time are none.
+  assert.deepEqual(asideOf({ kept: [{ kind: "copy", at: "2026-13-99T25:61:99Z" }], snapshots: 0, gone: [] }), null);
   assert.deepEqual(
     [undefined, null, {}, { kept: [], snapshots: 0, gone: [] }, "aside", { snapshots: 1.5 }].map(asideOf),
     [null, null, null, null, null, null],

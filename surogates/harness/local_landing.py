@@ -114,7 +114,7 @@ from surogates.harness.landing import (
 from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _turn_now
 from surogates.sandbox.history import HISTORY_CAP
 from surogates.session.events import EventType
-from surogates.workstreams.derive import UNFINISHED
+from surogates.workstreams.derive import UNFINISHED, set_aside_said
 from surogates.workstreams.history import landing_row, running_in, saga_of, start_landing, unforgotten_in
 
 logger = logging.getLogger(__name__)
@@ -486,14 +486,20 @@ async def set_aside_of(
     repositories of the thread's it kept whole where it made them again, and
     those of them that went at its bound, each by its folder's name there;
     and, where the open found a copy, the snapshots of what the copy held of
-    the thread's own when it was made other files.  A landing's record names
-    its own snapshot at once (*landing*'s ``set_aside``); one whose answer
-    was lost, or a turn's end taken up again, has the next open name it.
-    Each is ``{copies, snapshots, gone}``.  A turn's end records all of it, and its
-    report tells what no earlier end recorded, so each is told once.  The
-    open is read from the journal and checked as an answer given now: one
-    that is none says nothing, and the last word stands.  None for either
-    where it holds nothing: nothing was ever set aside, or nothing is new.
+    the thread's own when it was made other files; those of them a
+    repository set aside whole took with it no open names, and are kept
+    while it is.  A landing's record names its own snapshot at once
+    (*landing*'s ``set_aside``); one whose answer was lost, or a turn's end
+    taken up again, has the next open name it.
+
+    A turn's end records all of it by the computer's names,
+    ``{copies, snapshots, gone}``, and its report tells what no earlier end
+    recorded, as a person is told it (``derive.set_aside_said``): so each is
+    told once, and the master hears what each is and when, not its names.
+    The open is read from the journal and checked as an answer given now:
+    one that is none says nothing, and the last word stands.  None for
+    either where it holds nothing: nothing was ever set aside, or nothing
+    is new.
     """
     before = await store.last_event(session.id, EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, with_key="set_aside")
     told = _set_aside_told(before.data["set_aside"] if before is not None else None)
@@ -503,7 +509,10 @@ async def set_aside_of(
         now.update(copies=opened.get("set_aside_folders", []), gone=opened.get("set_aside_gone", []))
         if "copy" in opened:
             # An open that found the folder's history off says nothing of the snapshots in the thread's repository.
-            now["snapshots"] = opened.get("set_asides", [])
+            named = opened.get("set_asides", [])
+            # A repository set aside whole holds those told before: no open names them, and they are kept with it.
+            held = any(name.endswith(".repository") for name in now["copies"])
+            now["snapshots"] = [*(aside for aside in told["snapshots"] if held and aside not in named), *named]
     recorded = [aside for aside in (landing or {}).get("set_aside", []) if aside not in now["snapshots"]]
     # Its computer keeps the latest sixteen: a word of more is kept to as many as an open names of what is set aside whole.
     now["snapshots"] = [*now["snapshots"], *recorded][-MAX_ASIDE:]
@@ -513,7 +522,7 @@ async def set_aside_of(
         "gone": [name for name in now["gone"] if name not in told["gone"]],
     }
     kept = now if before is not None or any(now.values()) else None
-    return kept, new if any(new.values()) else None
+    return kept, set_aside_said(new)
 
 
 def _set_aside_told(told: Any) -> dict[str, list[str]]:

@@ -44,7 +44,10 @@ function setAsideOf(aside: unknown): SetAside | null {
   const { kept, snapshots, gone } = aside as Record<string, unknown>;
   const wholes = (value: unknown): SetAsideWhole[] => (Array.isArray(value) ? value : []).flatMap((entry) => {
     const { kind, at } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
-    return (kind === "copy" || kind === "repository") && typeof at === "string" && ISO_UTC.test(at) ? [{ kind, at }] : [];
+    // A time whose digits make none is none: the moment they parse to is written with the same digits.
+    const moment = typeof at === "string" && ISO_UTC.test(at) ? Date.parse(at) : NaN;
+    const timed = !Number.isNaN(moment) && new Date(moment).toISOString().replace(".000Z", "Z") === at;
+    return (kind === "copy" || kind === "repository") && timed ? [{ kind, at: at as string }] : [];
   });
   const found = {
     kept: wholes(kept),

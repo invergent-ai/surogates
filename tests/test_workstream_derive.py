@@ -17,7 +17,7 @@ from uuid import UUID
 import pytest
 
 from surogates.workstreams.derive import (
-    GROUPS, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of, undone_files,
+    GROUPS, LATEST_TYPES, REASONS, SHELL_LIMITS, ThreadFacts, derive_thread, question_of, set_aside_name, undone_files,
 )
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -319,7 +319,7 @@ def test_a_row_has_the_shells_fields_and_values():
         assert all(list(f) == [_snake(field) for field in file_fields] for f in derived["files"])
         assert all(derived[key] is None or derived[key].endswith("Z") for key in ("created_at", "updated_at", "resolved_at"))
     # What a thread's computer set aside, where it set any aside.
-    aside = derive_thread(replace(SHELL_FIXTURES["computer"][0], events=(SET_ASIDE_TOLD,)), now=NOW)["set_aside"]
+    aside = derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=SET_ASIDE_TOLD), now=NOW)["set_aside"]
     assert list(aside) == [_snake(field) for field in aside_fields]
     assert aside["kept"] and aside["gone"] and all(list(whole) == whole_fields for whole in (*aside["kept"], *aside["gone"]))
 
@@ -469,34 +469,31 @@ def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():
 #: The names its computer gives what it set aside whole of a thread's: the order, when, whose, and which.
 COPY_NAME = f"00000001-20261010T101500Z-{COMPUTER}.copy"
 REPOSITORY_NAME = f"00000002-20261010T101501Z-{COMPUTER}.repository"
-#: A turn's end that recorded what its computer keeps set aside of the thread's work.
-SET_ASIDE_TOLD = event(30, "session.complete", reason="stop", set_aside={
-    "copies": [REPOSITORY_NAME], "snapshots": ["a" * 40, "b" * 40], "gone": [COPY_NAME],
-})
+#: What the newest of a thread's turn ends to record it recorded its computer keeping set aside of the thread's work.
+SET_ASIDE_TOLD = {"copies": [REPOSITORY_NAME], "snapshots": ["a" * 40, "b" * 40], "gone": [COPY_NAME]}
 
 
-def test_a_threads_row_says_what_its_computer_keeps_set_aside_of_its_work_as_its_newest_turn_end_recorded_it():
-    given = replace(SHELL_FIXTURES["computer"][0], events=(SET_ASIDE_TOLD,))
+def test_a_threads_row_says_what_its_computer_keeps_set_aside_of_its_work_as_its_newest_turn_end_to_record_it_did():
+    given = replace(SHELL_FIXTURES["computer"][0], set_aside=SET_ASIDE_TOLD)
     assert derive_thread(given, now=NOW)["set_aside"] == {
         "kept": [{"kind": "repository", "at": "2026-10-10T10:15:01Z"}], "snapshots": 2,
         "gone": [{"kind": "copy", "at": "2026-10-10T10:15:00Z"}],
     }
-    # A newer failure that recorded it too is the word: the newest of the two ends.
-    failed = event(31, "session.fail", reason="llm_error", set_aside={"copies": [COPY_NAME], "snapshots": [], "gone": []})
-    assert derive_thread(replace(given, events=(SET_ASIDE_TOLD, failed)), now=NOW)["set_aside"] == {
-        "kept": [{"kind": "copy", "at": "2026-10-10T10:15:00Z"}], "snapshots": 0, "gone": [],
-    }
-    # One that recorded none of it says nothing of it, and an older end's word stands.
-    plain = event(32, "session.fail", reason="llm_error")
-    assert derive_thread(replace(given, events=(SET_ASIDE_TOLD, plain)), now=NOW)["set_aside"]["snapshots"] == 2
+    # It is a fact of its own: no event the row reads of its state says it, a command's end among them.
+    command = event(31, "session.complete", reason="stop", answers=40)
+    assert derive_thread(replace(given, events=(command,)), now=NOW)["set_aside"] == derive_thread(given, now=NOW)["set_aside"]
+    assert "session.complete" not in LATEST_TYPES
 
 
-def test_a_row_says_nothing_set_aside_where_its_turn_ends_recorded_none_or_none_of_it_is_a_name():
+def test_a_row_says_nothing_set_aside_where_its_turn_ends_recorded_none_or_none_of_it_is_a_name_or_a_time():
     assert all(derive_thread(given, now=NOW)["set_aside"] is None for given, _ in SHELL_FIXTURES.values())
     for told in (
         {"copies": [], "snapshots": [], "gone": []},
         {"copies": ["../../etc", f"00000001-20261010T101500Z-{COMPUTER}.history", 7], "snapshots": "all", "gone": None},
+        # Digits in a time's places that make no time.
+        {"copies": [f"00000001-20261399T256199Z-{COMPUTER}.copy"], "snapshots": [], "gone": [f"00000002-20260230T101500Z-{COMPUTER}.copy"]},
         "everything",
     ):
-        given = replace(SHELL_FIXTURES["computer"][0], events=(event(30, "session.complete", reason="stop", set_aside=told),))
-        assert derive_thread(given, now=NOW)["set_aside"] is None, told
+        assert derive_thread(replace(SHELL_FIXTURES["computer"][0], set_aside=told), now=NOW)["set_aside"] is None, told
+    assert set_aside_name(COPY_NAME) == {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
+    assert set_aside_name(f"00000001-20261010T246000Z-{COMPUTER}.copy") is None

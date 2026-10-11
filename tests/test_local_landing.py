@@ -190,11 +190,14 @@ def test_a_report_says_why_a_landing_on_a_computer_left_a_file_out_that_nothing_
 THREAD = "3e9b6f4b-bd5a-4f8b-8c43-4d5e6f708192"
 COPY = f"00000001-20261010T101500Z-{THREAD}.copy"
 REPOSITORY = f"00000002-20261011T090000Z-{THREAD}.repository"
+#: Each as a person is told it: what it is, and when.
+A_COPY = {"kind": "copy", "at": "2026-10-10T10:15:00Z"}
+A_REPOSITORY = {"kind": "repository", "at": "2026-10-11T09:00:00Z"}
 WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
 
 
 def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went_and_where_it_is():
-    said = report(set_aside={"copies": [REPOSITORY], "snapshots": [ID, "b" * 40], "gone": [COPY]})
+    said = report(set_aside={"kept": [A_REPOSITORY], "snapshots": 2, "gone": [A_COPY]})
     assert said.endswith(
         "\nSet aside whole on its computer, as its copy there had to be made again: its repository as it was at 2026-10-11 09:00 UTC"
         "\nSet aside on its computer, as its copy there was made other files: what the copy held of the thread's own, in 2 snapshots"
@@ -203,15 +206,18 @@ def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went
     )
     # A failed turn's report says it the same; one snapshot is one; what went alone is nowhere to be found.
     failed = worker_note(EventType.WORKER_FAILED.value, {
-        "worker_id": "t", "title": "Check the totals", "error": "llm_error", "set_aside": {"copies": [], "snapshots": [ID], "gone": []},
+        "worker_id": "t", "title": "Check the totals", "error": "llm_error", "set_aside": {"kept": [], "snapshots": 1, "gone": []},
     })["content"]
     assert failed.endswith(f"in 1 snapshot\n{WHERE}")
-    assert report(set_aside={"copies": [], "snapshots": [], "gone": [COPY]}).endswith("its copy set aside at 2026-10-10 10:15 UTC")
+    assert report(set_aside={"kept": [], "snapshots": 0, "gone": [A_COPY]}).endswith("its copy set aside at 2026-10-10 10:15 UTC")
 
 
-def test_a_report_says_nothing_set_aside_where_its_payload_names_nothing_that_is_a_name():
+def test_a_report_says_nothing_set_aside_where_its_payload_names_nothing_that_is_one():
     plain = report()
-    for told in (None, "everything", {"copies": ["../etc/passwd", 7], "snapshots": "all", "gone": [f"{COPY}.gone"]}):
+    for told in (
+        None, "everything", {"kept": [COPY, {"kind": "history", "at": A_COPY["at"]}], "snapshots": "all", "gone": [7]},
+        {"kept": [{"kind": "copy", "at": "2026-13-99T25:61:99Z"}], "snapshots": -1, "gone": [{"kind": "copy"}]},
+    ):
         assert report(set_aside=told) == plain, told
 
 
@@ -241,16 +247,15 @@ async def test_a_turns_end_records_what_its_computer_keeps_set_aside_and_tells_o
     # Nothing ever set aside: nothing recorded, nothing told.
     assert await told_at_its_end(monkeypatch, {"copy": "kept"}) == (None, None)
     assert await told_at_its_end(monkeypatch, None) == (None, None)
-    # A copy set aside, and a landing's own snapshot, which no open has named yet.
+    # A copy set aside, and a landing's own snapshot, which no open has named yet: recorded by their names, and told
+    # by what each is and when.
     kept, new = await told_at_its_end(monkeypatch, {"copy": "made", "set_aside_folders": [COPY]}, landing={"set_aside": [ID]})
-    assert kept == new == {"copies": [COPY], "snapshots": [ID], "gone": []}
+    assert (kept, new) == ({"copies": [COPY], "snapshots": [ID], "gone": []}, {"kept": [A_COPY], "snapshots": 1, "gone": []})
     # Named again by the next open, nothing is new; and gone at the bound, it is told once more, as gone.
     assert await told_at_its_end(monkeypatch, {"copy": "moved", "set_asides": [ID], "set_aside_folders": [COPY]}, told=kept) == (kept, None)
     gone = {"copy": "moved", "set_asides": [ID], "set_aside_folders": [REPOSITORY], "set_aside_gone": [COPY]}
-    assert await told_at_its_end(monkeypatch, gone, told=kept) == (
-        {"copies": [REPOSITORY], "snapshots": [ID], "gone": [COPY]}, {"copies": [REPOSITORY], "snapshots": [], "gone": [COPY]},
-    )
     went = {"copies": [REPOSITORY], "snapshots": [ID], "gone": [COPY]}
+    assert await told_at_its_end(monkeypatch, gone, told=kept) == (went, {"kept": [A_REPOSITORY], "snapshots": 0, "gone": [A_COPY]})
     assert await told_at_its_end(monkeypatch, gone, told=went) == (went, None)
     # An open that found the folder's history off names no snapshot, and says nothing of those its repository holds.
     off = {"history": "off", "reason": "cap", "set_aside_folders": [COPY]}
@@ -262,7 +267,23 @@ async def test_a_turns_end_records_what_its_computer_keeps_set_aside_and_tells_o
     # A computer that names more snapshots than it keeps is taken at its latest few.
     many = [f"{n:040x}" for n in range(local_landing.MAX_ASIDE + 5)]
     kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_asides": many})
-    assert kept["snapshots"] == new["snapshots"] == many[-local_landing.MAX_ASIDE:]
+    assert (kept["snapshots"], new["snapshots"]) == (many[-local_landing.MAX_ASIDE:], local_landing.MAX_ASIDE)
+
+
+async def test_the_snapshots_told_before_a_repository_was_set_aside_whole_stay_counted_while_it_is_kept(monkeypatch):
+    told = {"copies": [], "snapshots": [ID, "b" * 40], "gone": []}
+    # Set aside whole, the thread's repository holds them: no open names them now, and they are kept all the same.
+    aside = {"copy": "made", "set_aside_folders": [REPOSITORY]}
+    kept, new = await told_at_its_end(monkeypatch, aside, told=told)
+    assert (kept, new) == ({"copies": [REPOSITORY], "snapshots": [ID, "b" * 40], "gone": []}, {"kept": [A_REPOSITORY], "snapshots": 0, "gone": []})
+    # The new repository's own are named, and counted beside them.
+    later = {"copy": "kept", "set_asides": ["c" * 40], "set_aside_folders": [REPOSITORY]}
+    assert (await told_at_its_end(monkeypatch, later, told=kept))[0]["snapshots"] == [ID, "b" * 40, "c" * 40]
+    # Gone at the bound, it takes them with it.
+    gone = {"copy": "kept", "set_aside_gone": [REPOSITORY]}
+    assert await told_at_its_end(monkeypatch, gone, told=kept) == (
+        {"copies": [], "snapshots": [], "gone": [REPOSITORY]}, {"kept": [], "snapshots": 0, "gone": [A_REPOSITORY]},
+    )
 
 
 class Unread:

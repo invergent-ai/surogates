@@ -237,6 +237,18 @@ class WorkstreamStore:
             half = set(await db.scalars(_half_landed(
                 WorkstreamHistory.workstream_id == workstream_id, WorkstreamHistory.thread_id == _any(ids),
             )))
+            # What each thread's computer keeps set aside of its work, as the newest of its turn ends to record it
+            # did: a command's end, or one that could not read it, records none, and hides none.
+            local = [thread.session_id for thread, _, _, execution in threads if place_of(execution)["kind"] == "device"]
+            set_aside = dict((await db.execute(
+                select(Event.session_id, Event.data["set_aside"])
+                .distinct(Event.session_id)
+                .where(
+                    Event.session_id == _any(local), Event.data.has_key("set_aside"),
+                    Event.type.in_((EventType.SESSION_COMPLETE.value, EventType.SESSION_FAIL.value)),
+                )
+                .order_by(Event.session_id, Event.id.desc())
+            )).all()) if local else {}
             items_of, events_of, landings_of = defaultdict(list), defaultdict(list), defaultdict(list)
             for item in items:
                 items_of[thread_of[item.session_id]].append(item)
@@ -253,7 +265,7 @@ class WorkstreamStore:
                 place=place_of(execution),
                 items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
                 landings=tuple(landings_of[thread.session_id]), redoing=redoing.get(thread.session_id, frozenset()),
-                undone=undone, half_landed=thread.session_id in half,
+                undone=undone, half_landed=thread.session_id in half, set_aside=set_aside.get(thread.session_id),
             )
             for thread, status, updated_at, execution in sorted(threads, key=lambda found: found[2], reverse=True)
         ]

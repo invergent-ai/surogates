@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 from uuid import UUID
 
 from surogates.devices.binding import device_of
@@ -25,7 +26,6 @@ from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
-from surogates.workstreams.derive import set_aside_name
 
 logger = logging.getLogger(__name__)
 
@@ -347,29 +347,37 @@ _SET_ASIDE_WHERE = "What is set aside is in Surogate Desktop's data on that comp
 
 
 def _set_aside_lines(data: dict) -> str:
-    """A report's lines on what its computer set aside of the thread's work since its last report: a line for each kind it names."""
+    """A report's lines on what its computer set aside of the thread's work since its last report: a line for each kind it names.
+
+    Each as the turn's end gave it (``derive.set_aside_said``): what it is
+    and when, and how many snapshots.  An entry that is none is left out.
+    """
     told = data.get("set_aside")
     if not isinstance(told, dict):
         return ""
 
-    def named(key: str) -> list:
-        return told[key] if isinstance(told.get(key), list) else []
+    def when(entry: object, how: str) -> str | None:
+        kind, at = (entry.get("kind"), entry.get("at")) if isinstance(entry, dict) else (None, None)
+        try:
+            moment = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ") if isinstance(at, str) else None
+        except ValueError:
+            moment = None
+        return None if kind not in ("copy", "repository") or moment is None else f"its {kind} {how} {moment:%Y-%m-%d %H:%M} UTC"
 
-    def when(name: object, how: str) -> str | None:
-        found = set_aside_name(name)
-        return None if found is None else f"its {found['kind']} {how} {found['at'][:10]} {found['at'][11:16]} UTC"
+    def said(key: str, how: str) -> list[str]:
+        entries = told[key] if isinstance(told.get(key), list) else []
+        return [found for found in (when(entry, how) for entry in entries) if found]
 
-    copies = [said for said in (when(name, "as it was at") for name in named("copies")) if said]
-    snapshots = sum(isinstance(aside, str) for aside in named("snapshots"))
-    gone = [said for said in (when(name, "set aside at") for name in named("gone")) if said]
+    copies, gone = said("kept", "as it was at"), said("gone", "set aside at")
+    snapshots = told["snapshots"] if type(told.get("snapshots")) is int and told["snapshots"] > 0 else 0
     lines = ""
     if copies:
-        lines += f"\n{_SET_ASIDE['copies']}: {_listed([{'label': said} for said in copies], limit=_MAX_LISTED_LEFT_OUT)}"
+        lines += f"\n{_SET_ASIDE['copies']}: {_listed([{'label': found} for found in copies], limit=_MAX_LISTED_LEFT_OUT)}"
     if snapshots:
         counted = f"{snapshots} snapshot{'s' if snapshots > 1 else ''}"
         lines += f"\n{_SET_ASIDE['snapshots']}: what the copy held of the thread's own, in {counted}"
     if gone:
-        lines += f"\n{_SET_ASIDE['gone']}: {_listed([{'label': said} for said in gone], limit=_MAX_LISTED_LEFT_OUT)}"
+        lines += f"\n{_SET_ASIDE['gone']}: {_listed([{'label': found} for found in gone], limit=_MAX_LISTED_LEFT_OUT)}"
     return lines + (f"\n{_SET_ASIDE_WHERE}" if copies or snapshots else "")
 
 
