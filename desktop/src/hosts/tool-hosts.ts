@@ -265,7 +265,8 @@ export interface ToolHostsOptions {
   // Waited for before a root's host lets its folder go, so what else holds the folder
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
-  // Told each time a root's processes in the VM change, or a host goes: what liveRoots() names may have changed.
+  // Told each time a root's processes in the VM change, a landing's host comes or goes, or a host goes: what liveRoots()
+  // names may have changed.
   changed?(): void;
   // Told as what a landing cut short in a folder is being put back, and as that ends, with what it came to.
   recovered?(recovery: Recovery): void;
@@ -518,9 +519,12 @@ export class ToolHosts implements Executor {
     this.options.changed?.();
   }
 
-  /** The roots with a background process alive in the VM, whose work a quit would end. */
+  /**
+   * The roots whose work a quit would end: with a background process alive in the VM, or with a landing's host on their
+   * folder, which holds it from the landing's first step until it is forgotten, between its steps too.
+   */
   liveRoots(): string[] {
-    return [...this.hosts].filter(([, host]) => host.lives).map(([root]) => root);
+    return [...new Set([...[...this.hosts].filter(([, host]) => host.lives).map(([root]) => root), ...this.landers.keys()])];
   }
 
   // The guards each host checks its folder against: the binder's must be these, or the
@@ -713,12 +717,15 @@ export class ToolHosts implements Executor {
     const startMs = lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS);
     const host = new Host(
       (this.options.spawnHost ?? forkHost)(), start, works, startMs, this.options.idleMs ?? IDLE_MS, () => {
-        if (this.landers.get(root) === host) this.landers.delete(root);
+        if (this.landers.get(root) !== host) return;
+        this.landers.delete(root);
+        this.options.changed?.();
       },
       () => Promise.resolve("deny"),
       () => Promise.resolve(),
     );
     this.landers.set(root, host);
+    this.options.changed?.();
     this.keep(host);
     return host;
   }

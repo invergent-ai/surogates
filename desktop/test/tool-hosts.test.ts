@@ -1315,6 +1315,20 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(fakes).toHaveLength(2);
   });
 
+  it("names a thread among those working from its landing's first step until the landing is forgotten, between its steps too, and says each time that changes", async () => {
+    let changes = 0;
+    const executor = threads({ changed: () => void (changes += 1) });
+    const step = landing("apply", { saga: "s1", step: 0, path: "a.txt" });
+    expect(await executor.land(step, signal())).toEqual({ ok: step.id });
+    // No step of it runs now, and its next is still to come: a quit now would cut the landing in the folder.
+    expect([executor.liveRoots(), changes]).toEqual([[ROOT_A], 1]);
+    const forget = landing("forget", { saga: "s1", applied: [] });
+    expect(await executor.land(forget, signal())).toEqual({ ok: forget.id });
+    await until(() => gone === 1);
+    expect(executor.liveRoots()).toEqual([]);
+    expect(changes).toBeGreaterThan(1);
+  });
+
   it("keeps the folder held through the forgetting of a landing its turn only settled, and starts no host for a hold's forgetting where the thread holds nothing", async () => {
     const executor = threads();
     // Its turn gives back a hold it never took: nothing is let go, nothing waits for the folder, and its copy is not opened.
