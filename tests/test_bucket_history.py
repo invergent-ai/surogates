@@ -400,6 +400,26 @@ async def test_a_copy_not_used_for_a_while_is_removed_and_the_copies_stay_within
     assert await old.sync() == await idle.sync() is not None
 
 
+async def test_a_folder_beside_the_copies_that_is_no_copy_is_never_removed_or_counted(tmp_path, storage, project):
+    landed(tmp_path, project, "saga:1", {"Report.docx": os.urandom(2**20)})
+    copies = tmp_path / "api"
+    # Where the setting names a folder of other things too: a person's folders, and a dotted one, long untouched.
+    theirs = {name: copies / name for name in ("Documents", ".cache", ".gone-folder", "0123456789abcdef")}
+    for folder in theirs.values():
+        (folder / "inside").mkdir(parents=True)
+        (folder / "inside" / "kept.bin").write_bytes(os.urandom(2**20))
+        os.utime(folder, (time.time() - 7000, time.time() - 7000))
+    idle = BucketHistory(storage, "agent", PREFIX, copies / "idle")
+    await idle.sync()
+    os.utime(idle.clone / "HEAD", (time.time() - 700, time.time() - 700))
+    # And a copy a removal renamed, then died before it took it away.
+    (copies / ".gone-0a1b2c3d" / "objects").mkdir(parents=True)
+    # A copy and its room: the copy long unused goes, and the others are neither removed nor counted against the bound.
+    await BucketHistory(storage, "agent", PREFIX, copies / "one", Bounds(copies=3 * 2**20)).sync()
+    assert all((folder / "inside" / "kept.bin").is_file() for folder in theirs.values())
+    assert not idle.clone.exists() and not (copies / ".gone-0a1b2c3d").exists()
+
+
 async def test_a_copy_asked_again_was_used_just_now_however_long_ago_it_was_made(tmp_path, storage, project):
     landed(tmp_path, project, "saga:1", {"Report.docx": b"PK\x03\x04 report v2"})
     copies = tmp_path / "api"

@@ -156,6 +156,8 @@ _PATIENCE = 8.0
 _LOCK_POLL = 0.05
 #: A copy used this recently is never removed to make room: a request may be reading it.
 _GRACE = 60.0
+#: A copy a removal renamed and had not yet taken away, by the name it gave it.
+_GOING = re.compile(r"\.gone-[0-9a-f]{8}")
 #: How a bound's refusal ends: said to the user as it is.
 _HERE = "than Surogate can read here."
 TOO_LARGE = f"This project's history is larger {_HERE}"
@@ -1547,11 +1549,12 @@ def _others(mine: Path, bounds: Bounds, *, measured: bool = True) -> list[tuple[
 
     Those not used for a while are removed.  Never one this process is
     using: a request may be reading it.  Without *measured*, what each
-    holds is not reckoned.
+    holds is not reckoned.  A folder beside them that is no copy is
+    neither: the setting may name a folder that holds others.
     """
     now, others = time.time(), []
     for clone in mine.parent.iterdir():
-        if clone == mine or _USING.get(clone) or not clone.is_dir():
+        if clone == mine or _USING.get(clone) or not _a_copy(clone):
             continue
         try:
             used = (clone / "HEAD").stat().st_mtime
@@ -1588,6 +1591,12 @@ def _size(folder: Path) -> int:
             with contextlib.suppress(OSError):
                 total += _size(Path(entry.path)) if entry.is_dir(follow_symlinks=False) else entry.stat(follow_symlinks=False).st_size
     return total
+
+
+def _a_copy(folder: Path) -> bool:
+    """Whether *folder* is a copy of a history's: a folder held by a lock beside it, as every copy is from before it is
+    made, or one a removal renamed."""
+    return folder.is_dir() and (_GOING.fullmatch(folder.name) is not None or _lock_of(folder).is_file())
 
 
 def _remove(clone: Path) -> bool:
