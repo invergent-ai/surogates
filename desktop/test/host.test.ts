@@ -730,7 +730,8 @@ describe("a tool host's record of its folder", { timeout: 30_000 }, () => {
 
 // A folder of the user's with a project's thread on it, as the app lays it out: the folder itself in the user's home,
 // and in the app's data the folder's place, with its history, each thread's repository and copy, and what its landings keep.
-const KEY = "0123456789abcdef";
+// The folder's key, as the app names its place by (history/place.ts).
+let KEY: string;
 const THREAD = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 const SAGA = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f";
@@ -747,6 +748,7 @@ function lay(): void {
   home = join(base, "home");
   reports = join(home, "Reports");
   data = start.dataDir;
+  KEY = keyOf(reports);
   place = join(data, "history", KEY);
   copy = join(place, "threads", THREAD);
   other = join(place, "threads", OTHER);
@@ -1798,7 +1800,7 @@ describe("a tool host whose folder is another's by the time its sandbox binds it
       });
       // The kept folder it made for itself is taken away with the start, where its path still leads to it; the other folder's is as it was.
       const stays = swap.at === kept && !back;
-      expect(readdirSync(join(data, "landings"))).toEqual(stays ? [KEY, "decoy"] : ["decoy"]);
+      expect(readdirSync(join(data, "landings")).sort()).toEqual(stays ? [KEY, "decoy"].sort() : ["decoy"]);
       if (stays) expect(readdirSync(kept)).toEqual([]);
     },
   );
