@@ -2122,13 +2122,14 @@ function changedFrom(shown: Project, fields: ProjectFields): Partial<ProjectFiel
 }
 
 // The archive asks under the project's name as the app's prompts show text: a control, bidi or invisible
-// character as its code point (U+202E), so none reorders or hides the question around it.
+// character as its code point (U+202E), so none reorders or hides the question around it. Its threads go
+// as a deleted chat's do, so what their copies on this computer held unlanded goes with them.
 async function confirmArchive(name: string): Promise<boolean> {
   if (!main) return false;
   const response = await messageBox({
     type: "warning",
     message: `Archive ${asShown(name)}?`,
-    detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept.",
+    detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept. What its threads did not land in your folders is removed from this computer.",
     buttons: ["Archive", "Cancel"],
     defaultId: 1,
     cancelId: 1,
