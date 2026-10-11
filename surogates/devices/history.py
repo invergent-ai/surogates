@@ -207,6 +207,11 @@ class ComputerRefused(DeviceOperationError):
         self.code = code
 
 
+def passes_later(error: BaseException) -> bool:
+    """Whether *error* is a refusal of its computer's that a later turn's asking may pass (:data:`_LATER`)."""
+    return isinstance(error, ComputerRefused) and (error.code in _LATER or error.kind in _LATER)
+
+
 class NotAnAnswer(DeviceOperationError):
     """The computer answered one of a thread's kinds with what is no answer to it."""
 
@@ -719,8 +724,7 @@ class ThreadCopy:
                 if number + 1 < OPEN_TRIES and (refusal.code in _PASSING_CODES or refusal.kind in _PASSING_KINDS):
                     number += 1
                     continue
-                later = refusal.code in _LATER or refusal.kind in _LATER
-                why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or (_AGAIN if later else _REFUSED)
+                why = _NOWHERE_BY.get(refusal.kind) or _NOWHERE_BY.get(refusal.code) or (_AGAIN if passes_later(refusal) else _REFUSED)
                 raise NowhereToWork(why, code=code_of(refusal)) from None
             except NotAnAnswer as refusal:
                 raise NowhereToWork(_REFUSED, code=code_of(refusal)) from None

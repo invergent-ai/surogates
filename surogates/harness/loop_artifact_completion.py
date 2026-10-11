@@ -11,7 +11,7 @@ from uuid import UUID
 from surogates.artifacts.store import FolderArtifacts
 from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
 from surogates.devices.binding import device_of
-from surogates.devices.history import opens_its_copy
+from surogates.devices.history import opens_its_copy, passes_later
 from surogates.devices.operations import LeaseLost
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
@@ -1595,6 +1595,8 @@ class ArtifactCompletionMixin:
         not_taken: list[str] = []
         # A thread's files kept on its branch on its user's computer: named here, as no History lists them.
         kept_there: list[str] = []
+        # Whether the thread's next turn lands what its keep did not: no refusal of its computer's that comes again then.
+        lands_next = True
         owner = sandbox_session_key(session)
         # The turn is over, kept or not: what it handed on is no later Stop's to drop.
         turn_ended(session)
@@ -1614,9 +1616,10 @@ class ArtifactCompletionMixin:
                 # Its computer is away: what was not kept is in its copy there, and lands with the next turn all the same.
                 logger.warning("The turn of thread %s was not kept on its branch: its computer did not answer in time", session.id)
                 saved = False
-            except Exception:
+            except Exception as refusal:
                 logger.exception("Could not keep the copy of %s on its computer", session.id)
                 saved = False
+                lands_next = passes_later(refusal)
         elif self._sandbox_pool is not None and self._sandbox_pool.holds_copy(owner):
             helper = bool(session.config.get("history_thread"))
             try:
@@ -1684,7 +1687,9 @@ class ArtifactCompletionMixin:
             error += ". Its work is kept, and lands with the thread's next turn"
         elif saved is False and opens_its_copy(session):
             # Not kept, its computer away or its keep refused: its copy there holds the work all the same.
-            error += ". Its work is in its copy on its computer, and the thread's next turn lands it, but for any file a landing never writes"
+            error += ". Its work is in its copy on its computer"
+            if lands_next:
+                error += ", and the thread's next turn lands it, but for any file a landing never writes"
         await announce_failure(
             self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
         )
