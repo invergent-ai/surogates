@@ -100,20 +100,37 @@ const DELETED = one([], (body: { files?: unknown; more?: unknown }): DeletedFile
 const ROUTINES = (body: unknown) => many(ROUTINE)((body as { items?: unknown } | null)?.items);
 const PUT_BACK = one([], undoResultOf);
 
+// An Undo whose answer never came back whole: the network cut it, or a gateway stopped waiting for the agent, which
+// goes on with it all the same once it has it.
+const UNDO_UNANSWERED = "The connection was lost before the agent answered: the undo may still finish.";
+const GATEWAY_GAVE_UP = [502, 504];
+
 export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFile: SaveFile): WorkstreamRoutes {
   // A body that is no JSON, or not the route's shape, is the route's own failure: never an
-  // engine's words, and never a success with nothing in it.
-  async function read<T>(url: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T): Promise<T> {
-    const response = await fetchFn(url, init);
-    if (!response.ok) return parseError(response, failure);
+  // engine's words, and never a success with nothing in it. With *unanswered*, what is said of
+  // a request whose answer never came back whole, its answer cut on its way or a gateway's.
+  async function read<T>(
+    url: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T, unanswered?: string,
+  ): Promise<T> {
+    let response: Response;
     try {
-      return shape(response.status === 204 ? undefined : await response.json());
+      response = await fetchFn(url, init);
+    } catch (error) {
+      if (unanswered === undefined) throw error;
+      throw new Error(unanswered);
+    }
+    if (!response.ok) return parseError(response, unanswered !== undefined && GATEWAY_GAVE_UP.includes(response.status) ? unanswered : failure);
+    const body = response.status === 204 ? undefined : await response.text().catch(() => {
+      throw new Error(unanswered ?? failure);
+    });
+    try {
+      return shape(body === undefined ? undefined : JSON.parse(body));
     } catch {
       throw new Error(failure);
     }
   }
-  const asked = <T>(path: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T) =>
-    read(`${ROUTE}${path}`, init, failure, shape);
+  const asked = <T>(path: string, init: RequestInit | undefined, failure: string, shape: (body: unknown) => T, unanswered?: string) =>
+    read(`${ROUTE}${path}`, init, failure, shape, unanswered);
   const row = (path: string, init: RequestInit, failure: string) => asked(path, init, failure, ROW);
 
   const routes: WorkstreamRoutes = {
@@ -159,7 +176,7 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFil
     // The landing, or the thread, goes in the body, as it is.
     undo: async (projectId, target) => {
       const body = "landingId" in target ? { landing: target.landingId } : { thread: target.threadId };
-      return asked(`${project(projectId)}/history/undo`, sent("POST", body), "The change could not be undone.", PUT_BACK);
+      return asked(`${project(projectId)}/history/undo`, sent("POST", body), "The change could not be undone.", PUT_BACK, UNDO_UNANSWERED);
     },
     deleted: async (projectId) =>
       asked(`${project(projectId)}/history/deleted`, undefined, "Failed to fetch the project's deleted files", DELETED),

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import type { BrowserContext, CDPSession, Download, FileChooser, Frame, JSHandle, Page } from "playwright-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer as createVite } from "vite";
 import { WebSocketServer } from "ws";
 
 import { ADDRESS_MS } from "../src/binding/approvals.js";
@@ -27,7 +28,7 @@ import { CANCELLED, type Launch, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
-  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
+  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, REDIRECTED_TO_A_CHAT, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { BrowserProxy, notOpenPage } from "../src/browser/proxy.js";
@@ -2798,6 +2799,8 @@ new Image().src = "http://" + own("image") + "/";
     let secure: TcpServer;
     // What the site was asked for, a socket's handshake too, and how many tunnels reached its https port.
     let heard: string[];
+    // Each sign-in a request brought the site, its own or a proxy's.
+    let signedTo: string[];
     let tunnels: number;
     // The site's ends of every connection, a socket's too: closed at the test's end.
     let taken: Set<Duplex>;
@@ -2813,8 +2816,10 @@ new Image().src = "http://" + own("image") + "/";
       tunnels = 0;
       asked = [];
       taken = new Set();
+      signedTo = [];
       origin = createServer((req, res) => {
         heard.push(`${req.method} ${req.url}`);
+        for (const name of ["authorization", "proxy-authorization"]) if (req.headers[name] !== undefined) signedTo.push(`${req.url} ${name}: ${req.headers[name]}`);
         if (req.url?.startsWith("/signs/")) return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(SIGNS);
         if (req.url === "/kept.js") return void res.writeHead(200, { "content-type": "text/javascript", "cache-control": "public, max-age=3600" }).end("window.kept = 1;");
         if (req.url?.startsWith("/file.bin")) return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment" }).end("f".repeat(64 * 1024));
@@ -2822,6 +2827,13 @@ new Image().src = "http://" + own("image") + "/";
         if (req.url?.startsWith("/asks/challenge")) return void res.writeHead(407, { "proxy-authenticate": 'Basic realm="site"', "content-type": "text/html" }).end("<title>Asks</title>");
         if (req.url?.startsWith("/asks/")) return void res.writeHead(407, { "content-type": "text/html" }).end("<title>Asks</title>");
         if (req.url === "/asking") return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(`<title>Asking</title><img src="/asks/image"><img src="/asks/challenge-image">`);
+        // A site that wants a sign-in of its own; and its page, which asks for that, and for what the site answers as a proxy
+        // that wants one. The site's own question opens the browser's sign-in dialog, which nobody answers: the page waits on it.
+        if (req.url === "/wants") return void res.writeHead(401, { "www-authenticate": 'Basic realm="site"', "content-type": "text/plain", "cache-control": "no-store" }).end("wants");
+        if (req.url === "/wanting") {
+          return void res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" })
+            .end(`<title>Wanting</title><script>fetch("/wants"); fetch("/asks/challenge").finally(() => fetch("/done/wanting"));</script>`);
+        }
         res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" }).end("ok");
       });
       origin.on("upgrade", (req, socket) => {
@@ -3039,6 +3051,56 @@ new Image().src = "http://" + own("image") + "/";
       expect(folders.flatMap(holding)).toEqual([]);
     }, 240_000 + IDLE_MS);
 
+    it("takes a launch's sign-in no more once the launch is refused or its browser has gone, before any launch after", async () => {
+      // What the proxy answers a request for a name only it answers, made with *secret*'s sign-in: 204 while it is taken.
+      const signedAs = (made: string) => new Promise<number>((answered, fail) => {
+        const headers = { host: "gone.proxy-check.invalid", "proxy-authorization": `Basic ${Buffer.from(`surogate:${made}`).toString("base64")}` };
+        httpRequest({ host: "127.0.0.1", port: at, path: "http://gone.proxy-check.invalid/", headers }, (answer) => answered(answer.resume().statusCode ?? 0)).on("error", fail).end();
+      });
+      // Each host here is given the test's proxy, and lets it be at its close.
+      const withProxy = async (options: BrowserHostOptions = {}) => {
+        Object.assign(host, { proxy: null });
+        await host.close();
+        host = new BrowserHost(options);
+        Object.assign(host, { proxy: { server: proxy, port: at } });
+      };
+      // A launch whose check fails: its browser takes its proxy settings from elsewhere, as a policy can make it.
+      await withProxy({ args: ["--no-proxy-server"] });
+      expect(await op(session(), "browser.evaluate", { code: "return 1;" })).toEqual({ error: { type: "browser", message: PROXY_BYPASSED } });
+      expect(await signedAs(secret)).toBe(407);
+      // A launch that ran, and its browser closed by its user: its sign-in opens nothing from then on, with no browser launched since.
+      await withProxy();
+      expect((await op(session(), "browser.navigate", { url: "http://fixture.test/second" })).ok?.opened).toBe(true);
+      expect(await signedAs(secret)).toBe(204);
+      for (const { pid } of processes().filter(({ args }) => !args.some((arg) => arg.startsWith("--type=")))) process.kill(Number(pid), "SIGTERM");
+      await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+      await expect.poll(() => (host as unknown as { running: unknown }).running, { timeout: 10_000 }).toBeNull();
+      expect(await signedAs(secret)).toBe(407);
+    }, 60_000);
+
+    it("gives a site no sign-in in the first tab, the one its launch's check signed in from: the site's own 401 and its 407 get none, and the browser stays signed in", async () => {
+      const a = session();
+      expected("first");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/first" })).ok?.title).toBe("Signs");
+      await carried("first", 0);
+      // The session's tab is the browser's first, the one its launch's check ran in.
+      expect((await context()).pages()).toHaveLength(1);
+      const mark = asked.length;
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/wanting" })).ok?.title).toBe("Wanting");
+      await done("wanting");
+      // Each asked and answered the site's way: the 401 the site's own, its 407 the proxy's 502 in its place.
+      const site = ["GET http://fixture.test/wants", "GET http://fixture.test/asks/challenge"];
+      expect(asked.slice(mark).filter(({ what }) => site.includes(what)).map(({ what, signed, status }) => [what, signed, status]).sort()).toEqual([
+        [site[1], true, 502], [site[0], true, 401],
+      ]);
+      // And no sign-in came to the site with either, the proxy's nor one of its own, nor with any request since the launch.
+      expect([heard.filter((what) => what === "GET /wants").length, signedTo]).toEqual([1, []]);
+      expected("after");
+      expect((await op(a, "browser.navigate", { url: "http://fixture.test/signs/after" })).ok?.title).toBe("Signs");
+      await carried("after", mark);
+      expect(asked.filter(({ status }) => status === 407)).toHaveLength(1);
+    }, 60_000);
+
     it("stays signed in whatever a site answers: a site's own 407, to an image or to a navigation, with a challenge or with none, is never the proxy's to its browser", async () => {
       const a = session();
       expected("first");
@@ -3116,6 +3178,10 @@ new Image().src = "http://" + own("image") + "/";
     expect(await op(a, "browser.navigate", { url: "https://192.168.1.5/" })).toEqual({
       error: { type: "browser", message: "The agent's browser does not reach private networks (192.168.1.5:443)" },
     });
+    // A site that sends the navigation on to a port of a chat's servers not allowed: refused as its redirect, naming
+    // no port of the site's choosing, so nobody is asked to allow one; nor is the tab left where it names one.
+    expect(await op(a, "browser.navigate", { url: "http://fixture.test/redirect" })).toEqual({ error: { type: "browser", message: REDIRECTED_TO_A_CHAT } });
+    expect(await script(a, "return [location.href, document.title, document.body.innerText];")).toEqual(["about:blank", "", ""]);
     expect(hits).toEqual([]);
   });
 
@@ -3140,6 +3206,8 @@ new Image().src = "http://" + own("image") + "/";
     let second: number;
     // Whose server the chat's answers say they are from: a port's next chat is served by its own.
     let serving: string;
+    // Where the door carries a knock it opens: the chat's server, unless a test runs another there.
+    let server: number;
     const doorPath = () => join(folder, "browser.sock");
     const NOT_ALLOWED = () => ({
       error: { type: "browser", message: `The agent's browser opens a server a chat started only once its user has allowed that port for the chat (port ${at})` },
@@ -3218,7 +3286,7 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
         });
       });
       await new Promise<void>((done) => chat.listen(0, "127.0.0.1", () => done()));
-      const chatPort = (chat.address() as { port: number }).port;
+      server = (chat.address() as { port: number }).port;
       folder = mkdtempSync(join(tmpdir(), "sb-door-"));
       door = createTcp((socket) => {
         socket.on("error", () => {});
@@ -3226,7 +3294,7 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
           const line = chunk.toString().trimEnd();
           knocks.push(line);
           if (![at, second].some((port) => port !== 0 && (line === `${KEY} ${port}` || line === `${KEY} ${port} 6`))) return void socket.end(`${closed}\n`);
-          const upstream = connectTcp({ host: "127.0.0.1", port: chatPort });
+          const upstream = connectTcp({ host: "127.0.0.1", port: server });
           behind.add(upstream.once("close", () => behind.delete(upstream)));
           upstream.on("error", () => socket.destroy());
           upstream.once("connect", () => {
@@ -3400,6 +3468,33 @@ self.addEventListener("fetch", (event) => event.respondWith(new Response("<title
       await live().toEqual([0, 0]);
       expect(await script(b, LIVE())).toBe("no socket");
       expect(hits).toEqual([]);
+    }, 60_000);
+
+    it("carries a real Vite dev server's page and its live socket through the chat's port: a change to its module reaches the page in place, with no reload", async () => {
+      const root = mkdtempSync(join(tmpdir(), "sb-vite-"));
+      const MAIN = (word: string) => `document.title = "Vite ${word}";\nimport.meta.hot.accept();\n`;
+      writeFileSync(join(root, "index.html"), `<!doctype html><title>Vite</title><script type="module" src="/main.js"></script>`);
+      writeFileSync(join(root, "main.js"), MAIN("first"));
+      const vite = await createVite({
+        root, configFile: false, envFile: false, logLevel: "silent", clearScreen: false, cacheDir: join(root, ".vite"), server: { host: "127.0.0.1", port: 0 },
+      });
+      try {
+        await vite.listen();
+        server = (vite.httpServer!.address() as { port: number }).port;
+        host.forwards([at], doorPath(), KEY, []);
+        const a = session();
+        expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` })).ok?.title).toBe("Vite first");
+        // Its client's live socket, to the port the page came from: through the proxy and the door, as the page's own requests.
+        await expect.poll(() => vite.ws.clients.size, { timeout: 10_000 }).toBe(1);
+        const loaded = await script(a, "return performance.timeOrigin;");
+        writeFileSync(join(root, "main.js"), MAIN("changed"));
+        await expect.poll(() => script(a, "return document.title;"), { timeout: 15_000 }).toBe("Vite changed");
+        expect(await script(a, "return performance.timeOrigin;")).toBe(loaded);
+        expect(hits).toEqual([]);
+      } finally {
+        await vite.close();
+        rmSync(root, { recursive: true, force: true });
+      }
     }, 60_000);
 
     it("lets no service worker of a chat's page stand between another page and the port", async () => {
@@ -3579,6 +3674,59 @@ return 1;`, FIRST)).toBe(1);
       expect(hits).toEqual([]);
     }, 60_000);
 
+    it("closes the running browser whole where its clear of a port that turned fails partway: the next chat's tab is in a browser launched after, cleared before anything acted in it", async () => {
+      const [FIRST, NEXT] = ["chat-first", "chat-next"];
+      host.forwards([at], doorPath(), KEY, [[at, "t1"]]);
+      const [a, kept] = [session(), session()];
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` }, FIRST)).ok?.title).toBe("Chat page");
+      expect(await script(a, `localStorage.setItem("kept", "first"); return "written";`, FIRST)).toBe("written");
+      // A tab elsewhere, so the browser runs on once the former page closes, and the clear goes on to the port's storage.
+      expect((await op(kept, "browser.navigate", { url: "http://fixture.test/" }, FIRST)).ok?.title).toBe("Fixture");
+      const context = await (host as unknown as { running: Promise<BrowserContext> }).running;
+      // The clear's line to the browser fails, once: the former page is closed by then, and nothing of the port is cleared.
+      const line = context.newCDPSession.bind(context);
+      Object.assign(context, { newCDPSession: () => {
+        Object.assign(context, { newCDPSession: line });
+        return Promise.reject(new Error("the clear's line failed"));
+      } });
+      host.forwards([at], doorPath(), KEY, [[at, "t2"]]);
+      const b = session();
+      expect((await op(b, "browser.navigate", { url: `http://localhost:${at}/` }, NEXT)).ok?.title).toBe("Chat page");
+      const next = await (host as unknown as { running: Promise<BrowserContext> }).running;
+      expect(next).not.toBe(context);
+      expect(context.pages()).toEqual([]);
+      expect(await script(b, `return localStorage.getItem("kept");`, NEXT)).toBeNull();
+      expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t2" });
+      expect(hits).toEqual([]);
+    }, 60_000);
+
+    it("closes a browser at its launch where its clear of a port that turned fails, before anything acts in it: the next launch clears it", async () => {
+      const [FIRST, NEXT] = ["chat-first", "chat-next"];
+      host.forwards([at], doorPath(), KEY, [[at, "t1"]]);
+      const a = session();
+      expect((await op(a, "browser.navigate", { url: `http://localhost:${at}/` }, FIRST)).ok?.title).toBe("Chat page");
+      expect(await script(a, `localStorage.setItem("kept", "first"); return "written";`, FIRST)).toBe("written");
+      // The port turns while no browser runs; the next launch's clear fails, once.
+      await host.close();
+      host = hostWith();
+      host.forwards([at], doorPath(), KEY, [[at, "t2"]]);
+      const failing = host as unknown as { clearTurned: (...args: unknown[]) => Promise<void> };
+      const clear = failing.clearTurned.bind(host);
+      failing.clearTurned = () => {
+        failing.clearTurned = clear;
+        return Promise.reject(new Error("the clear failed"));
+      };
+      const b = session();
+      expect((await op(b, "browser.evaluate", { code: `return localStorage.getItem("kept");` }, NEXT)).error?.type).toBe("browser");
+      await expect.poll(() => processes().length, { timeout: 10_000 }).toBe(0);
+      expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t1" });
+      // The next launch clears it before its first operation acts.
+      expect((await op(b, "browser.navigate", { url: `http://localhost:${at}/` }, NEXT)).ok?.title).toBe("Chat page");
+      expect(await script(b, `return localStorage.getItem("kept");`, NEXT)).toBeNull();
+      expect(JSON.parse(readFileSync(join(profile, "surogate-ports.json"), "utf8"))).toEqual({ [at]: "t2" });
+      expect(hits).toEqual([]);
+    }, 60_000);
+
     it("asks nobody and carries nothing when its user, holding the browser, goes to a port not allowed: the tab is shown the proxy's own page, which says what the port is", async () => {
       const a = session();
       expect((await op(a, "browser.navigate", { url: "http://fixture.test/t/HELD" }, "chat-1")).ok?.opened).toBe(true);
@@ -3589,18 +3737,19 @@ return 1;`, FIRST)).toBe(1);
       const answer = await theirs.goto(`http://localhost:${at}/theirs/<b>there</b>?"><script>document.title = "theirs"</script>`);
       expect([answer?.status(), await answer?.text()]).toEqual([403, notOpenPage(at)]);
       expect(answer?.headers()).toMatchObject({
-        "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
+        "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
       });
       expect([await theirs.title(), await theirs.locator("body").innerText()]).toEqual([
         `Port ${at} is not open`,
         `Port ${at} of a chat's servers is not open in this browser\n\nIt opens when that chat's agent navigates to it and the chat's user allows it.\n\n`
           + "The ports allowed now are listed in Surogate's Settings, under Folders and permissions.",
       ]);
-      // A page that sends its tab there is shown the same.
+      // A page of another site that sends its tab there is shown a page that names no port: the port is that site's choice.
       const sent = await context.newPage();
       await sent.goto("http://fixture.test/second");
       await sent.evaluate(`location.href = "http://127.0.0.1:${at}/sent"`);
-      await expect.poll(() => sent.title(), { timeout: 10_000 }).toBe(`Port ${at} is not open`);
+      await expect.poll(() => sent.title(), { timeout: 10_000 }).toBe("Not opened");
+      expect(await sent.locator("body").innerText()).toBe("A site tried to open a chat's local server, and was refused");
       // Nothing in that page runs or loads: it asks for nothing of the port.
       expect(await sent.evaluate(`fetch("/fetched", { cache: "no-store" }).then(() => "fetched", () => "nothing")`)).toBe("nothing");
       await sent.close();

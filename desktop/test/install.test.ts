@@ -242,6 +242,10 @@ const PUBLIC = pem(keys.publicKey);
 const UNSIGNED = " is not signed by a release key this computer trusts: nothing was installed, and Surogate Desktop stays at its version";
 const MISSED = `${UNSIGNED}. If Surogate's release key has changed since this computer's last update, run Surogate Desktop's install script with --version of the release that brought the new key`;
 const RETIRED = " is signed by a release key that Surogate has retired, which this computer no longer trusts: nothing was installed, and Surogate Desktop stays at its version";
+// What the script says of an install that apt could not make, where apt did not trust the
+// certificate that the computer's https package sources answered with.
+const UNTRUSTED_SOURCES = "apt does not trust the certificate that this computer's https package sources answer with, as behind a proxy that inspects https, and the CA of --ca-cert is Surogate's alone. "
+  + "Have the system trust the network's CA (its certificate as a .crt file in /usr/local/share/ca-certificates, then update-ca-certificates), or name http package sources, and run this again";
 const withKeys = (script: string, trusted = [PUBLIC]) =>
   script.replace(/RELEASE_KEYS=\(\n[^)]*\)/, `RELEASE_KEYS=(\n${trusted.map((key) => `    '${key}'`).join("\n")}\n  )`);
 
@@ -364,7 +368,7 @@ describe("the install script's packages", () => {
 
   it("names certutil's package in a line of its own, which only a computer that keeps a company's CA runs", () => {
     const lines = readFileSync(SCRIPT, "utf8").split("\n").filter((line) => line.includes("apt-get install"));
-    expect(lines.filter((line) => line.includes("libnss3-tools"))).toEqual(['    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil"']);
+    expect(lines.filter((line) => line.includes("libnss3-tools"))).toEqual(['    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil$certutil"']);
   });
 });
 
@@ -1000,6 +1004,22 @@ exit 0
     expect(current()).toBe("/opt/surogate/versions/1.0.0");
     // And the next apply is not held by what an earlier one left, once that has ended.
     expect(root(`/opt/surogate-test/install.sh --apply ${files()}`)).toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n", stderr: "" });
+  });
+
+  it("starts the asking user's reader with neither of its locks open: nothing that runs as that user can hold up this update or a later one", () => {
+    const tarball = releaseOf("1.0.0");
+    manifestOf("1.0.0", tarball);
+    stage(tarball);
+    expect(root("rm -f /tmp/fds.*").status).toBe(0);
+    // dd, which the reader copies the user's files with: it writes what it holds, then reads as dd does. Asked by
+    // tester, as pkexec names the user.
+    const listing = '#!/bin/sh\nls -l /proc/$$/fd >"/tmp/fds.$$" 2>/dev/null\nexec /opt/hold/dd "$@"\n';
+    expect(swapped("dd", listing, [`PKEXEC_UID=$(id -u tester) /opt/surogate-test/install.sh --apply ${files()}`]))
+      .toMatchObject({ status: 0, stdout: "Surogate Desktop: 1.0.0 is installed\n" });
+    // What the user's reader held, at each of the three it copied.
+    const read = root('for file in /tmp/fds.*; do [ "$(stat -c %U "$file")" = tester ] && { echo copy; cat "$file"; }; done; rm -f /tmp/fds.*').stdout;
+    expect(read.split("\n").filter((line) => line === "copy")).toHaveLength(3);
+    expect(read).not.toContain("/run/surogate-desktop");
   });
 
   it("runs the system's own tools, and no script that its caller's environment names", () => {
@@ -3425,7 +3445,13 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     }
     // More certificates than a process may have files open, behind one that is no CA's.
     writeFileSync(join(certs, "thousand.pem"), readFileSync(site, "utf8") + readFileSync(company, "utf8").repeat(1100));
-    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "megabyte.pem", "megabyte-and-one.pem", "thousand.pem"]) {
+    // Files joined as cat joins files that end with no new line: two CAs' certificates, the second's
+    // key after it, and a third certificate after the key, each on the line where the one before ends.
+    const unended = (file: string) => readFileSync(file, "utf8").trimEnd();
+    writeFileSync(join(certs, "joined.pem"), unended(another) + unended(company) + unended(join(certs, "company.key")) + readFileSync(bare, "utf8"));
+    // The company's CA with a line of its certificate gone, which openssl cannot read.
+    writeFileSync(join(certs, "cut.pem"), readFileSync(company, "utf8").split("\n").filter((_, at) => at !== 2).join("\n"));
+    for (const file of ["company.pem", "company-with-key.pem", "another.pem", "both.pem", "site.pem", "key-and-site.pem", "notes.txt", "it.pem", "signless.pem", "bare-and-company.pem", "wide.pem", "megabyte.pem", "megabyte-and-one.pem", "thousand.pem", "joined.pem", "cut.pem"]) {
       expect(docker(["cp", join(certs, file), `${box.container}:/home/tester/${file}`]).status).toBe(0);
     }
     // The other user's own copy, for a build of their own.
@@ -3586,6 +3612,14 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     expect(leftovers()).toBe("");
   });
 
+  it("takes each certificate of a file that cat joined with no new line between them, a key among them, and says of one that openssl cannot read just that", () => {
+    const taken = alone('company_ca /home/tester/joined.pem; cat "$GIVEN_CA"');
+    expect(taken).toMatchObject({ status: 0, stderr: "", stdout: rewritten(join(certs, "another.pem")) + rewritten(join(certs, "company.pem")) + rewritten(join(certs, "bare.pem")) });
+    expect(appTakes(taken.stdout)).toBe(3);
+    expect(alone("company_ca /home/tester/cut.pem")).toMatchObject({ status: 1, stdout: "", stderr: "Surogate Desktop: /home/tester/cut.pem holds a certificate that openssl cannot read\n" });
+    expect(leftovers()).toBe("");
+  });
+
   it("puts a CA given again in the place of whatever stands there that the app refuses: a link, a folder, a pipe, a file of another's, and one that the app's users cannot read", () => {
     const refusal = "Surogate Desktop: /etc/surogate/ca.pem is not as Surogate Desktop's install leaves it: run its install script again with --ca-cert\n";
     expect(root("cp /home/tester/it.pem /srv/elsewhere.pem").status).toBe(0);
@@ -3661,6 +3695,46 @@ for (const release of RELEASES) describe.skipIf(!ENABLED)(`the install script's 
     for (const given of ["", "GIVEN_CA=/home/tester/company.pem; "]) expect(reached(given), given).toMatchObject({ status: 0, stderr: "" });
     expect(root("rm /usr/local/share/ca-certificates/it.crt && update-ca-certificates --fresh").status).toBe(0);
     expect(reached().stderr).toContain("curl: (60) SSL certificate");
+  });
+
+  it("checks a proxy's own certificate, where the proxy is reached over TLS, as it checks the base's: with the company's CA beside the system's own roots, the CA kept and one given", () => {
+    // A server of the test's serves a proxy's request by its path: here it is the proxy, for an address only it answers.
+    const proxied = (proxy: string, given = "") => alone(`${given}http_proxy=${proxy} fetch -fsS -o /dev/null http://surogate.invalid/desktop/latest.json`);
+    for (const given of ["", "GIVEN_CA=/home/tester/company.pem; "]) expect(proxied(base, given), given).toMatchObject({ status: 0, stderr: "" });
+    expect(proxied(base, "GIVEN_CA=/home/tester/it.pem; ").stderr).toContain("curl: (60) SSL certificate");
+    // A proxy that a root of the system's own signed.
+    expect(root("cp /home/tester/it.pem /usr/local/share/ca-certificates/it.crt && update-ca-certificates").status).toBe(0);
+    for (const given of ["", "GIVEN_CA=/home/tester/company.pem; "]) expect(proxied(publicBase, given), given).toMatchObject({ status: 0, stderr: "" });
+    expect(root("rm /usr/local/share/ca-certificates/it.crt && update-ca-certificates --fresh").status).toBe(0);
+  });
+
+  it("says that apt does not trust what its https package sources answer with, where that is why it cannot install what it needs, certutil among it: and the sources' components where it fails otherwise", () => {
+    const sources = "/etc/apt/sources.list.d/ubuntu.sources";
+    // This computer's package sources at *address*: the base, as a proxy that inspects https answers
+    // for them, with a certificate that the company's CA signed and the system does not trust.
+    const at = (address: string) => expect(root(`sed -i -E 's#^URIs: .*#URIs: ${address}/ubuntu/#' ${sources}`).status).toBe(0);
+    const last = (run: ReturnType<typeof alone>) => run.stderr.trimEnd().split("\n").at(-1);
+    expect(root(`cp ${sources} /root/ubuntu.sources && apt-get remove -y -qq socat libnss3-tools >/dev/null 2>&1`).status).toBe(0);
+    try {
+      at(base);
+      const untrusted = alone("packages");
+      expect(untrusted.status).toBe(1);
+      // apt's own words are said before it.
+      expect(untrusted.stderr).toContain(`Failed to fetch ${base}/ubuntu/`);
+      expect(last(untrusted)).toBe(`Surogate Desktop: could not install the packages it needs: ${UNTRUSTED_SOURCES}`);
+      at("http://127.0.0.1:9");
+      const unreached = alone("packages");
+      expect(unreached.status).toBe(1);
+      expect(last(unreached)).toBe("Surogate Desktop: could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include");
+      // All it needs but certutil, which a CA brings: that alone is downloaded, and fails as the rest would.
+      expect(root(`cp /root/ubuntu.sources ${sources} && apt-get update -qq && apt-get install -y -qq socat >/dev/null`).status).toBe(0);
+      at(base);
+      const certutil = alone("packages /home/tester/company.pem");
+      expect(certutil.status).toBe(1);
+      expect(last(certutil)).toBe(`Surogate Desktop: could not install libnss3-tools, which holds certutil: ${UNTRUSTED_SOURCES}`);
+    } finally {
+      expect(root(`cp /root/ubuntu.sources ${sources} && apt-get update -qq && apt-get install -y -qq socat libnss3-tools >/dev/null`).status).toBe(0);
+    }
   });
 
   it("asks a release's file of an http or https address alone, whatever address it is handed", () => {

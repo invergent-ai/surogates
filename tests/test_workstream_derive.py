@@ -71,6 +71,7 @@ def row(thread_id: str, title: str, minutes: float, *, group: str, reason=None, 
         "status_line": status_line, "progress": progress,
         # A thread with no landing: its files are its turn summaries', with no mark.
         "files": [{"kind": kind, "label": label, "ref": ref, "thread_id": thread_id, "landing": None} for kind, label, ref in files],
+        "more_files": 0,
         "landing_id": None,
         "set_aside": None,
         "place": place, "created_at": wire(ago(minutes + 60)), "updated_at": wire(ago(minutes)),
@@ -393,17 +394,53 @@ def test_a_resolved_threads_file_is_not_being_redone(ended):
     assert (derived["group"], marks(given)) == ("resolved", [("budget.xlsx", "not_merged")])
 
 
+@pytest.mark.parametrize("status, since, mark", [
+    ("completed", (), "redoing"),
+    ("completed", (event(51, "history.redo_held"),), "not_merged"),
+    ("active", (event(51, "history.redo_held"),), "redoing"),
+    # A command answered since asks the model nothing: the thread rests as it did.
+    ("completed", (event(51, "history.redo_held"), event(55, "harness.wake")), "not_merged"),
+    # A turn of the model's ran since, and its landing told the thread to redo again: that redo's wake is to come.
+    ("completed", (event(51, "history.redo_held"), event(58, "llm.response")), "redoing"),
+], ids=["its wake to come", "held back by its user's limit", "sent on since", "a command answered since", "a turn ran since"])
+def test_a_file_whose_redo_its_users_limit_held_back_is_not_being_redone_while_its_thread_rests(status, since, mark):
+    # The turn whose landing left the file out, and told the thread to redo it.
+    given = replace(
+        facts(IDLE, "Draft A", 5, status, events=(event(49, "llm.response"), *since)),
+        landings=(landing(41, ("budget.xlsx", "c1", "c2", False)),), redoing=frozenset({"budget.xlsx"}),
+    )
+    assert marks(given) == [("budget.xlsx", mark)]
+    # The store reads the newest of it.
+    assert "history.redo_held" in LATEST_TYPES
+
+
 def test_a_landing_of_two_thousand_files_lists_the_shells_limit_those_left_out_first():
     changed = [(f"data/part-{i:04}.csv", None, f"v{i}", i % 500 != 499) for i in range(2000)]
     given = replace(facts(IDLE, "Draft A", 5, "completed", events=[
         summary(8, "Done.", ("artifact", "Sales chart", "art-1")),
     ]), landings=(landing(41, *changed),))
-    files = derive_thread(given, now=NOW)["files"]
+    derived = derive_thread(given, now=NOW)
+    files = derived["files"]
     assert len(files) == SHELL_LIMITS["files"]
     assert [f["ref"] for f in files[:5]] == [
         "data/part-0499.csv", "data/part-0999.csv", "data/part-1499.csv", "data/part-1999.csv", "data/part-0000.csv",
     ]
     assert [f["landing"] for f in files[:5]] == ["not_merged"] * 4 + ["landed"]
+    # The row says how many more it changed, and the artifact its summary named.
+    assert derived["more_files"] == 2001 - SHELL_LIMITS["files"]
+
+
+def test_a_row_counts_the_files_its_turn_summaries_named_past_the_shells_limit():
+    named = [("file", f"part-{i:03}.csv", f"data/part-{i:03}.csv") for i in range(250)]
+    given = facts(IDLE, "Draft A", 5, "completed", events=[summary(8, "Done.", *named[:150]), summary(9, "Done.", *named[100:])])
+    derived = derive_thread(given, now=NOW)
+    # Each file once, however many summaries named it.
+    assert (len(derived["files"]), derived["more_files"]) == (SHELL_LIMITS["files"], 50)
+    assert derive_thread(facts(IDLE, "Draft A", 5, "completed", events=[summary(8, "Done.", *named[:3])]), now=NOW)["more_files"] == 0
+    # A file a summary named in words the shell would refuse is no more one, where an earlier summary named it in its own.
+    worded = summary(9, "Done.", ("file", "w" * (SHELL_LIMITS["label"] + 1), "data/part-000.csv"))
+    derived = derive_thread(facts(IDLE, "Draft A", 5, "completed", events=[summary(8, "Done.", *named[:3]), worded]), now=NOW)
+    assert ([f["label"] for f in derived["files"]], derived["more_files"]) == (["part-000.csv", "part-001.csv", "part-002.csv"], 0)
 
 
 def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_it_is():
@@ -412,10 +449,19 @@ def test_a_landed_file_the_shell_would_refuse_is_left_out_and_a_name_is_sent_as_
     given = replace(facts(IDLE, "Draft A", 5, "completed"), landings=(
         landing(41, (longest + "a", None, "v1", True), (markup, None, "v2", False), (longest, None, "v3", True)),
     ))
-    assert derive_thread(given, now=NOW)["files"] == [
+    derived = derive_thread(given, now=NOW)
+    assert derived["files"] == [
         {"kind": "file", "label": markup, "ref": markup, "thread_id": IDLE, "landing": "not_merged"},
         {"kind": "file", "label": longest, "ref": longest, "thread_id": IDLE, "landing": "landed"},
     ]
+    # One it cannot name is one more file it changed all the same.
+    assert derived["more_files"] == 1
+    # As is a file a summary named that the shell would refuse.  A deletion that landed is no file, and a thread
+    # with a landing takes none of its summaries' files.
+    too_long = summary(9, "Done.", ("file", "notes.md", "n" * (SHELL_LIMITS["ref"] + 1)), ("artifact", "Chart", "art-1"))
+    assert derive_thread(replace(facts(IDLE, "Draft A", 5, "completed"), events=(too_long,)), now=NOW)["more_files"] == 1
+    gone = landing(42, ("gone.md", "g1", None, True))
+    assert derive_thread(replace(given, landings=(gone,), events=(too_long,)), now=NOW)["more_files"] == 0
 
 
 def test_a_file_an_undo_put_back_is_undone_and_the_card_undoes_the_newest_landing_still_as_it_landed():
@@ -452,8 +498,8 @@ def test_a_threads_landing_on_a_computer_marks_its_files_and_is_none_for_its_car
 
 
 def undo_row(row_id: int, undoes: list[int], *paths: str) -> dict:
-    """An Undo's row as the store reads it: the rows it undid, and each file it put back."""
-    return {"id": row_id, "undoes": undoes, "files": [{"path": p, "before": "x", "after": "y", "merged": True} for p in paths]}
+    """An Undo's row as the store reads it: each file it put back, over the rows *undoes* each."""
+    return {"id": row_id, "files": [{"path": p, "before": "x", "after": "y", "merged": True, "undoes": undoes} for p in paths]}
 
 
 def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_undo_is_undone_itself():
@@ -462,6 +508,20 @@ def test_an_undo_of_an_undo_brings_back_what_that_one_put_back_and_the_first_und
     assert undone_files([second, first]) == {(50, "plan.md")}
     # A third undoes the second: the first stands again, and what it put back is undone again.
     assert undone_files([first, second, undo_row(52, [51], "plan.md")]) == {(51, "plan.md"), (40, "plan.md"), (41, "plan.md")}
+
+
+def test_an_undo_marks_each_file_undone_only_in_the_landings_it_went_back_over_at_that_file():
+    # Landing 40 changed a.md and b.md, and 41 changed b.md after the Undo 50 had put back 40's b.md alone.  The
+    # thread's Undo 60 then put a.md back over 40, and b.md over 41: 40's b.md was put back already.
+    first = {"id": 50, "files": [{"path": "b.md", "before": "b1", "after": "b0", "merged": True, "undoes": [40]}]}
+    thread = {"id": 60, "files": [
+        {"path": "a.md", "before": "a1", "after": "a0", "merged": True, "undoes": [40]},
+        {"path": "b.md", "before": "b2", "after": "b0", "merged": True, "undoes": [41]},
+    ]}
+    assert undone_files([first, thread]) == {(40, "a.md"), (40, "b.md"), (41, "b.md")}
+    # An Undo of the first brings 40's b.md back: no Undo that went back over it stands.
+    again = {"id": 70, "files": [{"path": "b.md", "before": "b0", "after": "b1", "merged": True, "undoes": [50]}]}
+    assert undone_files([first, thread, again]) == {(50, "b.md"), (40, "a.md"), (41, "b.md")}
 
 
 def test_an_undo_of_an_undo_brings_back_only_the_files_it_put_back():

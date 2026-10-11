@@ -492,7 +492,8 @@ _GONE = text("""
 """)
 # Who last changed :path after the record :after and before the files of the record :until: the newest of the
 # project's cloud records that changed it, its files before its pickup, with who that record's step says it is by.
-# A landing that left the file out did not change it.
+# A landing that left the file out did not change it.  One left escalated changed it where an apply of the file
+# was never put back: its row lists no files, and the file may be as that apply wrote it.
 _SINCE = text("""
     SELECT h.id, changed.side, (
                SELECT s->'arguments'->'author' FROM jsonb_array_elements(h.steps) s
@@ -501,17 +502,38 @@ _SINCE = text("""
            ) AS author
       FROM workstream_history h
      CROSS JOIN LATERAL (
-            SELECT 'f' AS side WHERE h.id < :until AND EXISTS (
-                SELECT 1 FROM jsonb_array_elements(h.files) f
-                 WHERE f->>'path' = :path AND f->'merged' IS DISTINCT FROM 'false'::jsonb
+            SELECT 'f' AS side WHERE h.id < :until AND (
+                EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(h.files) f
+                     WHERE f->>'path' = :path AND f->'merged' IS DISTINCT FROM 'false'::jsonb
+                )
+                OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(h.steps) s
+                     WHERE s->>'tool_name' = 'history.apply' AND s->>'state' = 'compensation_failed' AND s->'arguments'->>'path' = :path
+                )
             )
             UNION ALL
             SELECT 'p' WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(h.picked_up) p WHERE p->>'path' = :path)
            ) changed
-     WHERE h.workstream_id = :project AND h.device_id IS NULL AND h.saga_state = 'completed'
-       AND h.id > :after AND h.id <= :until AND (h.files @> cast(:on AS jsonb) OR h.picked_up @> cast(:on AS jsonb))
+     WHERE h.workstream_id = :project AND h.device_id IS NULL AND h.saga_state IN ('completed', 'escalated')
+       AND h.id > :after AND h.id <= :until
+       AND (h.files @> cast(:on AS jsonb) OR h.picked_up @> cast(:on AS jsonb) OR h.saga_state = 'escalated')
      ORDER BY h.id DESC, changed.side
      LIMIT 1
+""")
+# The project's completed Undos, of its cloud files or of a folder on the computer :device, that name one of the
+# records :rows, and those that name one of these, however far: what tells which of those records' files are undone.
+_UNDOS_OF = text("""
+    WITH RECURSIVE named(id) AS (
+        SELECT id FROM workstream_history
+         WHERE workstream_id = :project AND device_id IS NOT DISTINCT FROM CAST(:device AS uuid)
+           AND kind = 'undo' AND saga_state = 'completed' AND undoes && CAST(:rows AS bigint[])
+        UNION
+        SELECT h.id FROM workstream_history h JOIN named ON h.undoes @> ARRAY[named.id]
+         WHERE h.workstream_id = :project AND h.device_id IS NOT DISTINCT FROM CAST(:device AS uuid)
+           AND h.kind = 'undo' AND h.saga_state = 'completed'
+    )
+    SELECT h.id, h.files FROM workstream_history h JOIN named ON named.id = h.id
 """)
 # :path's entries in the project's :most newest completed records that changed it, of its cloud files or of a folder
 # on the computer :device, each record's files before its pickup and each list in its own order, with who that
@@ -623,7 +645,7 @@ async def versions(
             "pickup": _PICKUP, "commit": _COMMIT, "record": _RECORD,
         })).all()
     # A change an Undo put back already is none to undo again from its History.
-    undone = await undone_of(session_factory, workstream_id, device_id=device_id) if entries else frozenset()
+    undone = await undone_of(session_factory, workstream_id, [entry.id for entry in entries], device_id=device_id)
     found = []
     for entry in entries:
         version = _version(entry, entry.entry, picked=entry.side == "p")
@@ -698,21 +720,23 @@ async def deleted_files(session_factory: Any, workstream_id: UUID | str, *, limi
     ], len(found) > limit or answered[0].records >= _GONE_AMONG
 
 
-async def undone_of(session_factory: Any, workstream_id: UUID | str, *, device_id: UUID | None = None) -> frozenset[tuple[int, str]]:
+async def undone_of(
+    session_factory: Any, workstream_id: UUID | str, rows: Collection[int], *, device_id: UUID | None = None,
+) -> frozenset[tuple[int, str]]:
     """Each ``(row, path)`` of the project's records an Undo put back, and no later Undo brought back (:func:`undone_files`).
 
-    Read from the project's completed Undos of its cloud files, or of a
-    folder on the computer *device_id*.
+    Of the records *rows*, and of the Undos of them.  Read from the
+    project's completed Undos of its cloud files, or of a folder on the
+    computer *device_id*: only those that name one of *rows*, and the
+    Undos of those, each found through the index of the records an Undo
+    undoes.  So what a read costs is what it asks of, and the Undos of
+    those, whatever the project's age.
     """
+    if not rows:
+        return frozenset()
     async with session_factory() as db:
-        undos = (await db.execute(
-            select(WorkstreamHistory.id, WorkstreamHistory.undoes, WorkstreamHistory.files).where(
-                WorkstreamHistory.workstream_id == workstream_id,
-                WorkstreamHistory.device_id == device_id if device_id is not None else WorkstreamHistory.device_id.is_(None),
-                WorkstreamHistory.kind == "undo", WorkstreamHistory.saga_state == "completed",
-            )
-        )).all()
-    return undone_files({"id": found, "undoes": undoes, "files": files} for found, undoes, files in undos)
+        undos = (await db.execute(_UNDOS_OF, {"project": workstream_id, "device": device_id, "rows": list(rows)})).all()
+    return undone_files({"id": found, "files": files} for found, files in undos)
 
 
 async def changed_since(

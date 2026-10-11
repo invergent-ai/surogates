@@ -129,7 +129,8 @@ export class VmExecutor implements Executor {
     return this.files.keepsCopies();
   }
 
-  // The chats with a background process alive in the guest: the quit counts them as working.
+  // The chats with a background process alive in the guest, and the threads with a landing in their folder: the quit
+  // counts them as working.
   live(): string[] {
     return this.files.liveRoots();
   }

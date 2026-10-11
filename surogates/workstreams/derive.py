@@ -28,7 +28,7 @@ WAITING_KINDS = {"input_required": "question", "action_required": "approval", "g
 LATEST_TYPES = tuple(t.value for t in (
     *MESSAGE_TYPES, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
-    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
+    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE, EventType.HISTORY_REDO_HELD,
 ))
 #: A copy or a repository of a thread's that its computer set aside whole, by its folder's name there
 #: (``surogates.sandbox.local_history``): the order it was set aside in, when, in UTC, whose, and which of the two.
@@ -71,7 +71,7 @@ class ThreadFacts:
     #: Its landings that recorded files, wherever it works, each ``{id, files, on_computer}``
     #: as its ``workstream_history`` row has them; none when its files are not read.
     landings: tuple[dict[str, Any], ...] = ()
-    #: The files its next turn is told to redo (``landing.redo_files``).
+    #: The files its next turn is told to redo (``landing.redo_files``), while that turn is under way or to come.
     redoing: frozenset[str] = frozenset()
     #: Each ``(row, path)`` of the project an Undo put back and no later Undo brought back (:func:`undone_files`).
     undone: frozenset[tuple[int, str]] = frozenset()
@@ -86,6 +86,7 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
     latest = _latest(facts)
     group, reason, status_line = _state(facts, latest, now)
     todos = latest.get(EventType.TODO_UPDATED.value)
+    files, more_files = _files(facts, group)
     return {
         "id": str(facts.id),
         "title": facts.title,
@@ -93,7 +94,8 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "reason": reason,
         "status_line": status_line,
         "progress": _progress(todos.data if todos else {}),
-        "files": _files(facts, group),
+        "files": files,
+        "more_files": more_files,
         "landing_id": _landing_id(facts),
         "set_aside": set_aside_said(facts.set_aside),
         "place": facts.place,
@@ -209,19 +211,22 @@ def _progress(data: dict[str, Any]) -> dict[str, int] | None:
     return {"done": sum(t.get("status") == "completed" for t in todos), "total": len(todos)}
 
 
-def _files(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
+def _files(facts: ThreadFacts, group: str) -> tuple[list[dict[str, Any]], int]:
     """The files the thread's landings changed, with their marks, then the
-    artifacts its turn summaries named; at most the shell's limit.
+    artifacts its turn summaries named, at most the shell's limit; and how
+    many more there are, past it or with a name the shell would refuse.
 
     A thread with no landing works on the real files, as one does in a
     project over the file cap: its files are its turn summaries' too, with
     no mark.
     """
     kinds = ("artifact",) if facts.landings else ("file", "artifact")
-    return [*_landed(facts, group), *_summarized(facts, kinds)][: SHELL_LIMITS["files"]]
+    (landed, unnamed), (summarized, refused) = _landed(facts, group), _summarized(facts, kinds)
+    files = [*landed, *summarized]
+    return files[: SHELL_LIMITS["files"]], max(len(files) - SHELL_LIMITS["files"], 0) + unnamed + refused
 
 
-def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
+def _landed(facts: ThreadFacts, group: str) -> tuple[list[dict[str, Any]], int]:
     """Each file the thread's landings changed, once, as its newest landing
     of it left it: those left out first, then those that landed, each
     newest first.
@@ -231,27 +236,33 @@ def _landed(facts: ThreadFacts, group: str) -> list[dict[str, Any]]:
     ``redoing`` while the thread's next turn is to redo it.  A resolved
     thread takes no next turn, so none of its files is being redone.  A
     file a landing deleted is no file to open: it is left out.  So is one
-    whose path the shell would refuse as a label.  An Undo is of the
-    cloud's files: a file landed in a folder on a computer is never undone.
+    whose path the shell would refuse as a label, which is counted.  An
+    Undo is of the cloud's files: a file landed in a folder on a computer
+    is never undone.
     """
-    redoing = facts.redoing if group != "resolved" else frozenset()
+    # Nor has a thread at rest with its redo held back by its user's limit, until it is sent on.
+    redoing = facts.redoing if group != "resolved" and not _redo_held(facts) else frozenset()
     left_out: list[dict[str, Any]] = []
     landed: list[dict[str, Any]] = []
     seen: set[str] = set()
+    unnamed = 0
     for landing in sorted(facts.landings, key=lambda row: row["id"], reverse=True):
         for f in landing["files"]:
             path = f["path"]
             if path in seen:
                 continue
             seen.add(path)
-            if (f["merged"] and f["after"] is None) or units(path) > SHELL_LIMITS["label"]:
+            if f["merged"] and f["after"] is None:
+                continue
+            if units(path) > SHELL_LIMITS["label"]:
+                unnamed += 1
                 continue
             undone = not landing.get("on_computer") and (landing["id"], path) in facts.undone
             mark = ("undone" if undone else "landed") if f["merged"] else ("redoing" if path in redoing else "not_merged")
             (landed if f["merged"] else left_out).append(
                 {"kind": "file", "label": path, "ref": path, "thread_id": str(facts.id), "landing": mark}
             )
-    return [*left_out, *landed]
+    return [*left_out, *landed], unnamed
 
 
 def _landing_id(facts: ThreadFacts) -> str | None:
@@ -324,28 +335,31 @@ def set_aside_place(name: Any) -> dict[str, str] | None:
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:
     """Each ``(row, path)`` of the project an Undo put back, and no later Undo brought back.
 
-    *undos* are the project's Undo rows, each ``{id, undoes, files}``: an
-    Undo puts each of its files back as it was before the rows it
-    *undoes*, a landing, a Restore or another Undo.  An Undo of an Undo
-    brings back what that one put back, file by file: a row's file is
-    undone while an Undo that put it back is not undone itself, at that
-    file.  So the newest are read first.
+    *undos* are the project's Undo rows, each ``{id, files}``: an Undo puts
+    each of its files back as it was before the rows that file ``undoes``,
+    a landing, a Restore or another Undo, which its record names file by
+    file: an Undo of many landings goes back over each file's own.  An
+    Undo of an Undo brings back what that one put back, file by file: a
+    row's file is undone while an Undo that put it back is not undone
+    itself, at that file.  So the newest are read first.
     """
     undone: set[tuple[int, str]] = set()
     for undo in sorted(undos, key=lambda found: found["id"], reverse=True):
         for f in undo["files"]:
             if f.get("merged", True) and (undo["id"], f["path"]) not in undone:
-                undone.update((row, f["path"]) for row in undo["undoes"] or ())
+                undone.update((row, f["path"]) for row in f.get("undoes") or ())
     return frozenset(undone)
 
 
-def _summarized(facts: ThreadFacts, kinds: tuple[str, ...]) -> list[dict[str, Any]]:
+def _summarized(facts: ThreadFacts, kinds: tuple[str, ...]) -> tuple[list[dict[str, Any]], int]:
     """The files of *kinds* every turn summary named, newest first, each
-    once, with no mark.  An entry the shell would refuse (no ref, or a label
-    or ref too long) is left out: the shell refuses every row over one such
-    entry."""
+    once, with no mark; and how many the shell would refuse.  Such an entry
+    (a label or ref too long) is left out, and counted where no other names
+    its file: the shell refuses every row over one.  One with no ref names
+    no file."""
     files: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    refused: set[tuple[str, str]] = set()
     summaries = [e for e in facts.events if e.type == EventType.TURN_SUMMARY.value]
     for summary in sorted(summaries, key=lambda e: e.id, reverse=True):
         for artifact in summary.data.get("artifacts") or []:
@@ -356,12 +370,11 @@ def _summarized(facts: ThreadFacts, kinds: tuple[str, ...]) -> list[dict[str, An
                 continue
             label = label if isinstance(label, str) and label else ref
             if units(ref) > SHELL_LIMITS["ref"] or units(label) > SHELL_LIMITS["label"]:
+                refused.add((kind, ref))
                 continue
             seen.add((kind, ref))
             files.append({"kind": kind, "label": label, "ref": ref, "thread_id": str(facts.id), "landing": None})
-            if len(files) == SHELL_LIMITS["files"]:
-                return files
-    return files
+    return files, len(refused - seen)
 
 
 def place_of(execution: Any) -> dict[str, Any]:
@@ -404,6 +417,18 @@ def _id(event: Any) -> int:
 def _messaged(latest: dict[str, Any]) -> int:
     """The id of the thread's newest message, the user's or its coordinator's follow-up; 0 with none."""
     return max(_id(latest.get(t.value)) for t in MESSAGE_TYPES)
+
+
+def _redo_held(facts: ThreadFacts) -> bool:
+    """Whether the thread rests with its redo's wake held back by its user's limit (``history.redo_held``): until it
+    is sent on, nothing redoes the redo's files.
+
+    Held until a turn of the model's has run since: a later redo comes
+    only at the end of one, and a command's turn asks the model nothing.
+    """
+    latest = _latest(facts)
+    held = latest.get(EventType.HISTORY_REDO_HELD.value)
+    return held is not None and held.id > _id(latest.get(EventType.LLM_RESPONSE.value)) and facts.status != "active"
 
 
 def aware(moment: datetime) -> datetime:

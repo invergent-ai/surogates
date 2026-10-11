@@ -869,13 +869,17 @@ def _format_result_with_trace_summary(
             f"{', '.join(summary_items)}"
         )
     if file_changes:
+        from surogates.harness.loop_context_replay import _listed
+
+        # Each name on the summary's one line, as a report names a thread's files: the paths are the model's own
+        # tool arguments.
         if file_changes.get("written"):
             suffix_parts.append(
-                f"files modified: {', '.join(file_changes['written'])}"
+                f"files modified: {_listed([{'label': path} for path in file_changes['written']])}"
             )
         if file_changes.get("read"):
             suffix_parts.append(
-                f"files read: {', '.join(file_changes['read'])}"
+                f"files read: {_listed([{'label': path} for path in file_changes['read']])}"
             )
     if not suffix_parts:
         return result_text

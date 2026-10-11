@@ -30,7 +30,7 @@ export type Identity = Pick<Welcome, "deviceId" | "orgId" | "agentId" | "userId"
 // may hold: the binder's sheet checks the same ones, or it could accept a folder the tools refuse.
 export interface ToolLayer extends Executor {
   guards(): FolderGuards;
-  // The sessions with a background process alive on the tools: a quit would end their work.
+  // The sessions with a background process alive on the tools, or a landing in their folder: a quit would end their work.
   live(): string[];
   stop(): Promise<void>;
   // What the tools refuse anyway, before the chat's user is asked about it: null to ask as usual.

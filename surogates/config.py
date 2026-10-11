@@ -751,6 +751,9 @@ class HistorySettings(BaseSettings):
     file_bound: int = 2**30  # the largest version of a file a copy writes out, to be sent or restored, and the largest real file it reads
     copies_bound: int = 8 * 2**30  # the copies on the api's disk, every project's together
     copy_idle: int = 600  # seconds a copy stays unused before it is removed
+    # The bytes a second the cloud's store moves at its slowest that a Restore or an Undo is planned for: one whose
+    # files' bytes would pass the time it may hold the project's lock is refused in words.  Name the store's own.
+    store_rate: int = 16 * 2**20
 
 
 class OutcomeSettings(BaseSettings):

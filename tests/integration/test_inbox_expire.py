@@ -143,10 +143,10 @@ async def test_sweeper_expires_questions_past_the_answer_window(
         + 60,
     )
 
-    expired_count = await expire_inbox_items(session_store)
+    # The sweep is the database's: other tests' items may go with it, so this one's is read.
+    await expire_inbox_items(session_store)
     item = await _get_inbox_item_for_session(session_store, session.id)
 
-    assert expired_count == 1
     assert item.status == "expired"
 
 
@@ -172,10 +172,10 @@ async def test_sweeper_keeps_questions_inside_the_answer_window(
         seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60,
     )
 
-    expired_count = await expire_inbox_items(session_store)
+    # The sweep is the database's: other tests' items may go with it, so this one's is read.
+    await expire_inbox_items(session_store)
     item = await _get_inbox_item_for_session(session_store, session.id)
 
-    assert expired_count == 0
     assert item.status == "pending"
 
 
@@ -197,10 +197,10 @@ async def test_answer_window_does_not_expire_other_kinds(
         seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS * 10,
     )
 
-    expired_count = await expire_inbox_items(session_store)
+    # The sweep is the database's: other tests' items may go with it, so this one's is read.
+    await expire_inbox_items(session_store)
     item = await _get_inbox_item_for_session(session_store, session.id)
 
-    assert expired_count == 0
     assert item.status == "pending"
 
 
@@ -219,10 +219,10 @@ async def test_sweeper_does_not_touch_active_sessions(
         },
     )
 
-    expired_count = await expire_inbox_items(session_store)
+    # The sweep is the database's: other tests' items may go with it, so this one's is read.
+    await expire_inbox_items(session_store)
     item = await _get_inbox_item_for_session(session_store, session.id)
 
-    assert expired_count == 0
     assert item.status == "pending"
 
 
@@ -298,8 +298,8 @@ async def test_sweeper_does_not_touch_responded_items(
         )
         await db.commit()
 
-    expired_count = await expire_inbox_items(session_store)
+    # The sweep is the database's: other tests' items may go with it, so this one's is read.
+    await expire_inbox_items(session_store)
     item = await _get_inbox_item_for_session(session_store, session.id)
 
-    assert expired_count == 0
     assert item.status == "responded"

@@ -498,6 +498,162 @@ async def test_a_landing_that_cannot_be_put_back_whole_keeps_what_it_kept_gives_
     assert told_.data["landing"] == "escalated"
 
 
+# -- a landing cut short -------------------------------------------------------------------------------------------
+
+
+def journal_refuses(monkeypatch, thread, action: str, path: str | None = None) -> None:
+    """The journal refuses *thread*'s landing *action*, of *path* if named, as it refuses a step it never sends its computer."""
+    from surogates.devices.history import Steps
+    from surogates.devices.workspace import DeviceOperationError
+
+    ask = Steps.ask
+
+    async def asking(self, kind, asked, **arguments):
+        runner = self._runner
+        if (runner._invocation_id, runner._calling_session_id, asked) == ("land:0", thread.id, action) and path in (None, arguments.get("path")):
+            raise DeviceOperationError("Too many sessions are waiting for Flavius's ThinkPad")
+        return await ask(self, kind, asked, **arguments)
+
+    monkeypatch.setattr(Steps, "ask", asking)
+
+
+@pytest.mark.parametrize("at", ["its look", "its second apply"])
+async def test_a_landing_the_journal_refuses_a_step_of_is_left_unsettled_with_no_row_write_naming_the_files_it_asked_about(
+    api, here, monkeypatch, at,
+):
+    # No row is written for the time that passes: every write here is one the landing made at a turning point.
+    monkeypatch.setattr(landing_module, "_ROW_EVERY", 3600)
+    _, master, thread = await begun_with_copy(api, here)
+    log = watched(monkeypatch, here)
+    with monkeypatch.context() as refused:
+        journal_refuses(refused, thread, *({"its look": ("revisions",), "its second apply": ("apply", "Report.docx")}[at]))
+        await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    # Nothing more was asked, nothing put back, nothing forgotten; and no row was written after the refusal: the row
+    # is as the landing's last turning point left it, for whoever settles it.
+    asked_ = ["changed"] if at == "its look" else LANDED[:5]
+    assert ran(here, "land:0") == asked_ and ran(here, "land:0:2") == []
+    last = max(n for n, entry in enumerate(log) if entry[0] == "op" and entry[1] == "land:0")
+    assert [entry for entry in log[last:] if entry[0] == "row"] == []
+    [row] = await records(api, thread)
+    assert row.saga_state == "running"
+    assert [s["state"] for s in row.steps if s["tool_name"] == "history.apply"] == ([] if at == "its look" else ["pending", "pending"])
+    assert here.app.places.holder == str(thread.id)
+    if at == "its second apply":
+        assert (here.folder / "Budget.xlsx").read_text() == "Total,42\n" and (here.folder / "Report.docx").read_bytes() == b"PK report v1"
+    # Its master hears it is not finished, of the files its landing asked about: the turn's own, none of a list of its own.
+    [report] = await told(api, master)
+    assert report.data["landing"] == "unsettled" and "Not finished landing" in said(report)
+    assert files_of(report) == [("Budget.xlsx", "not_merged", None), ("Report.docx", "not_merged", None)]
+    # The thread's next turn settles it first, then lands the turn's work.
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
+    first, again = await records(api, thread)
+    assert (first.saga_state, again.saga_state) == ("compensated", "completed")
+    assert (here.folder / "Budget.xlsx").read_text() == "Total,42\n" and (here.folder / "Report.docx").read_bytes() == b"PK report v1 edited"
+    assert kept(here) == {} and here.app.places.holder is None
+
+
+@pytest.mark.parametrize("refusal", [
+    {"type": "interrupted", "message": "This computer's app stopped while it ran"},
+    {"type": "cancelled", "message": "Cancelled"},
+], ids=["interrupted", "cancelled"])
+async def test_a_put_back_its_computer_answers_unfinished_leaves_the_landing_unsettled_newest_first_and_asks_nothing_more(
+    api, here, monkeypatch, refusal,
+):
+    _, master, thread = await begun_with_copy(api, here)
+    report = here.folder / "Report.docx"
+    unapplied: list[str] = []
+
+    def you_save_then_unfinished(frame, outcome):
+        action = frame["args"].get("action")
+        if frame["invocation_id"] != "land:0":
+            return outcome
+        if action == "commit":
+            # You save the report after the turn was committed: its apply is refused, and the landing goes back.
+            report.write_bytes(b"PK report v2, by you")
+        elif action == "unapply":
+            unapplied.append(frame["args"]["path"])
+            return {"error": refusal}
+        return outcome
+
+    here.app.lie = you_save_then_unfinished
+    await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    here.app.lie = None
+    # The put-back began with the newest apply, the report's, and stopped there: the budget is still in the folder, what
+    # its apply kept is still kept, and the folder is still held, all as the row says.
+    assert unapplied == ["Report.docx"]
+    assert ran(here, "land:0") == [*LANDED[:6], "unapply"] and ran(here, "land:0:2") == []
+    assert (here.folder / "Budget.xlsx").read_text() == "Total,42\n" and report.read_bytes() == b"PK report v2, by you"
+    assert here.app.places.holder == str(thread.id)
+    [row] = await records(api, thread)
+    assert row.saga_state == "running"
+    [told_] = await told(api, master)
+    assert (told_.data["landing"], told_.data["landing_reason"]) == ("unsettled", "changed")
+    # Whoever lands next in the folder puts it back whole first: the thread's next turn, here.
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
+    first, _ = await records(api, thread)
+    assert first.saga_state == "compensated" and report.read_bytes() == b"PK report v2, by you"
+
+
+async def test_a_commit_naming_a_file_the_landings_look_did_not_see_is_put_back_once_and_lands_with_the_next_turn(api, computer, monkeypatch):
+    _, master, thread = await begun_with_copy(api, computer)
+    copy = computer.app.places.copy(str(thread.id))
+    folder = seen(computer.folder)
+
+    def still_writing(frame, outcome) -> None:
+        # A command still running, or a helper: it makes a file in the copy once the landing has looked.
+        (copy / "Late.md").write_text("late\n")
+
+    lie_at(computer, "revisions", still_writing)
+    await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    computer.app.lie = None
+    # Its commit names the file, which the look never saw: nothing is applied, and the landing is not tried again at once.
+    assert ran(computer, "land:0") == ["changed", "revisions", "pickup", "commit", "forget"] and ran(computer, "land:0:2") == []
+    assert seen(computer.folder) == folder and computer.app.places.holder is None
+    [row] = await records(api, thread)
+    assert (row.saga_state, row.commit) == ("compensated", None)
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "stale")
+    assert "The thread's work is in its copy on its computer, and lands with its next turn" in said(report)
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
+    assert (computer.folder / "Late.md").read_text() == "late\n" and (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
+
+
+async def test_a_landing_that_raises_says_its_work_is_in_its_copy_and_its_next_turn_lands_it(api, computer, monkeypatch):
+    _, master, thread = await begun_with_copy(api, computer)
+    folder = seen(computer.folder)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("the database went away")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(local_landing, "redo_files", broken)
+        await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    assert seen(computer.folder) == folder
+    # Its master hears the landing failed, and where the work is: a computer's copy outlives a landing.
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"]) == ("failed", "failed")
+    words = said(report)
+    assert "\nNot landed, because the landing failed: " in words and "Not saved" not in words
+    assert "\nThe thread's work is in its copy on its computer, and lands with its next turn" in words
+    [end] = await events_of(api, thread.id, EventType.SESSION_COMPLETE)
+    assert end.data["saved"] is False
+    await woken(api, monkeypatch, thread, [_final_response("Done.")], said="Go on.")
+    assert (computer.folder / "Budget.xlsx").read_text() == "Total,42\n" and (computer.folder / "Report.docx").read_bytes() == b"PK report v1 edited"
+
+
+async def test_a_landing_that_never_asked_what_its_copy_changed_names_none_of_the_turns_files(api, computer, monkeypatch):
+    _, master, thread = await begun_with_copy(api, computer)
+    # Its folder's helper refuses the hold, before the landing asks anything of the copy.
+    lie_at(computer, "recover", lambda frame, outcome: {"error": {"type": "os", "code": "EIO", "message": "I/O error"}}, invocation="land:0:hold")
+    await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    computer.app.lie = None
+    assert ran(computer, "land:0") == []
+    # The turn's own list of its files is not its copy's word: none is named, and what is said is that none was read.
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"], report.data["landing_code"]) == ("compensated", "refused", "EIO")
+    assert files_of(report) == [] and "(its computer refused a step of it: EIO): the turn's files could not be read" in said(report)
+
+
 # -- what it leaves out --------------------------------------------------------------------------------------------
 
 

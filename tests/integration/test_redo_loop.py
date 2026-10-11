@@ -61,6 +61,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
     reports,
 )
 from .test_turn_sagas import a_turn, calling, stop
+from .test_workstream_overview import act_on
 from .test_workstream_overview import rows as thread_rows
 from .test_workstream_threads import call_tool, harness_of, queued
 from .test_workstream_threads import turn_ends as a_turn_ends
@@ -246,6 +247,115 @@ async def test_your_edit_then_a_landing_tells_the_thread_to_redo_and_the_redo_la
     assert unread_reports(await store.get_events(thread.id)) == []
 
 
+async def test_a_redo_turn_you_stop_leaves_your_file_as_you_saved_it_puts_no_wait_on_you_and_its_next_turn_is_no_redo(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, YOURS)
+    # Stopped once it has redone the edit in its copy.
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx"})),
+        calling(("memory", {"action": "add", "content": "Redid it."})),
+        _final_response("Redid the edit."),
+    ], pool=pool, during=stop)
+    ended = await landing_module.last_turn_end(store, thread.id)
+    [redo] = await store.get_events(thread.id, types=[EventType.HISTORY_REDO])
+    assert (ended.type, ended.id > redo.id) == (EventType.SESSION_PAUSE.value, True)
+    # Your report stays as you saved it, and nothing waits on you: the stop was yours.
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    assert await waits_of(api, thread) == []
+    # The redo's turn is over: its file is not merged, and the next turn is an ordinary one, told nothing again.
+    assert [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]] == [
+        ("Report.docx", "not_merged"), ("a.md", "landed"),
+    ]
+    assert await landing_module.redo_files(store, thread.id) == set()
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO])) == 1
+    assert unread_reports(await store.get_events(thread.id)) == []
+
+
+async def test_a_redo_turn_whose_landing_lost_the_lock_is_not_tried_again_over_it_and_lands_with_the_next_turn(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, YOURS)
+    call, lost = landing_module._call, []
+
+    async def the_lock_goes_at_the_apply(sandbox_pool, owner, action, **arguments):
+        if owner == str(thread.id) and action == "apply" and not lost:
+            lost.append(arguments["path"])
+            await lose_the_lock(api, thread)
+        return await call(sandbox_pool, owner, action, **arguments)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(landing_module, "_call", the_lock_goes_at_the_apply)
+        await a_turn(api, monkeypatch, thread, [
+            calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Redid the edit."),
+        ], pool=pool)
+    # The landing that lost its lock stopped, and no try ran again over the lock it no longer held.
+    assert lost == ["Report.docx"]
+    # Put back whole, and its turn's copy kept, to land with the thread's next turn: your report stays as you saved it.
+    assert [r.saga_state for r in await rows(api, thread)] == ["completed", "compensated"]
+    assert (pods.project / "Report.docx").read_bytes() == YOURS
+    # Its turn read the redo, which is over: the file is not merged, and nothing waits on you.
+    assert [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]] == [
+        ("Report.docx", "not_merged"), ("a.md", "landed"),
+    ]
+    assert await waits_of(api, thread) == []
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Add a closing line too."})
+    await a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo end >> notes.txt"})), _final_response("Added it."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == YOURS + b" by A"
+    assert [r.saga_state for r in await rows(api, thread)] == ["completed", "compensated", "completed"]
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO])) == 1
+    assert [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]] == [
+        ("Report.docx", "landed"), ("notes.txt", "landed"), ("a.md", "landed"),
+    ]
+
+
+async def test_two_threads_that_each_change_the_report_over_the_others_change_each_redo_once_and_both_changes_land(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await open_pod(pool, second)  # B's copy is made before A lands
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Edited the report."),
+    ], pool=pool)
+    await a_turn(api, monkeypatch, second, [
+        calling(("terminal", {"command": "printf ' by B' >> Report.docx"})), _final_response("Edited the report."),
+    ], pool=pool)
+    # A's next turn starts before B's redo lands, and changes the report again.
+    await store.emit_event(first.id, EventType.USER_MESSAGE, {"content": "Add another line."})
+    await open_pod(pool, first)
+    await a_turn(api, monkeypatch, second, [
+        calling(("terminal", {"command": "printf ' by B' >> Report.docx"})), _final_response("Redid the edit."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B"
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' again by A' >> Report.docx"})), _final_response("Edited it again."),
+    ], pool=pool)
+    # Each is told once, of the other's change; A's redo is under way while B's has landed.
+    [b_redo], [a_redo] = [await store.get_events(t.id, types=[EventType.HISTORY_REDO]) for t in (second, first)]
+    assert [f["by"] for f in b_redo.data["files"]] == [{"kind": "thread", "id": str(first.id), "title": "Draft A"}]
+    assert [f["by"] for f in a_redo.data["files"]] == [{"kind": "thread", "id": str(second.id), "title": "Draft B"}]
+    assert [(await row_of(api, project, t))["files"][0]["landing"] for t in (first, second)] == ["redoing", "landed"]
+    await a_turn(api, monkeypatch, first, [
+        calling(("terminal", {"command": "printf ' again by A' >> Report.docx"})), _final_response("Redid the edit."),
+    ], pool=pool)
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B again by A"
+    assert [(await row_of(api, project, t))["files"][0]["landing"] for t in (first, second)] == ["landed", "landed"]
+    assert [len(await store.get_events(t.id, types=[EventType.HISTORY_REDO])) for t in (first, second)] == [1, 1]
+    for thread in (first, second):
+        assert await waits_of(api, thread) == []
+
+
 async def test_a_redo_wakes_its_finished_thread(api, monkeypatch, pods):
     thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -282,6 +392,42 @@ async def test_a_redo_the_users_limit_holds_back_waits_for_the_next_message(api,
     # No turn, and no failure: the redo waits for the user's next message, as a report does.
     assert ran == [] and (await store.get_session(thread.id)).status == "completed"
     assert await store.get_events(thread.id, types=[EventType.SESSION_FAIL]) == []
+
+
+async def test_a_file_whose_redo_the_users_limit_holds_back_is_not_being_redone_until_its_thread_is_sent_on(api, monkeypatch, pods):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+
+    async def marks() -> list[tuple[str, str | None]]:
+        return [(f["ref"], f["landing"]) for f in (await row_of(api, project, thread))["files"]]
+
+    # Its wake is to come.
+    assert await marks() == [("Report.docx", "redoing"), ("a.md", "landed")]
+    seen: list = []
+
+    async def the_redo_turn(session, *_, **__):
+        seen.append(await marks())
+
+    async def refused(session, content):
+        return "You have used this month's allowance."
+
+    # Held back, and again: the thread rests, and nothing redoes the file meanwhile, though its next turn will.
+    for _ in range(2):
+        harness = a_waking_thread_harness(api, monkeypatch, pool, the_redo_turn)
+        harness._admit_turn = refused
+        await harness.wake(thread.id)
+    assert seen == [] and (await store.get_session(thread.id)).status == "completed"
+    assert await marks() == [("Report.docx", "not_merged"), ("a.md", "landed")]
+    assert await landing_module.redo_files(store, thread.id) == {"Report.docx"}
+    # Marked once, and named on the project's stream, so that a client reads the row again.
+    assert len(await store.get_events(thread.id, types=[EventType.HISTORY_REDO_HELD])) == 1
+    assert EventType.HISTORY_REDO_HELD in STREAM_TYPES
+    # Your next message sends it on: the turn under way is the redo's.
+    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "Go on."})
+    await a_waking_thread_harness(api, monkeypatch, pool, the_redo_turn).wake(thread.id)
+    assert seen == [[("Report.docx", "redoing"), ("a.md", "landed")]]
 
 
 @pytest.mark.parametrize("command, skill", [
@@ -472,10 +618,11 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
 
             during.setattr(AgentHarness, "maybe_harvest_research", the_user_types_meanwhile)
         await workers.wake(thread.id, SlashCommandConfig())
+    # What the turn's last request came after and did not read is read by the turn, which goes on for it.
     assert (len(workers.requests), await workers.status(thread.id)) == (
-        2 if news == "a helper's report during a tool call" else 1, "active",
+        2 if news in ("a helper's report during a tool call", "a message typed as the turn's request is made ready") else 1,
+        "active",
     )
-    workers.requests.clear()
     if news == "a helper's report":
         await a_helper_reports()
     elif news == "a redo":
@@ -484,16 +631,16 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
         })
     for _ in range(3):
         await workers.wake(thread.id, SlashCommandConfig())
-    # Once for what no request of the turn read, and never again: a wake with nothing new asks nothing.
     told = [{"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} for helper in helpers]
     if news == "a redo":
         told = [{"role": "user", "content": REDO_OF_THE_REPORT}]
     elif news == "a message typed as the turn's request is made ready":
         told = [{"role": "user", "content": "And Q1?"}]
-    assert [[message in request for message in told] for request in workers.requests] == [[True]] * len(told)
-    if news in ("a helper's report", "a helper's report as the model answers", "a redo"):
-        # What came after the turn's last request is the next request's last word.
-        assert [request[-1] for request in workers.requests] == told
+    # Once, by one request beyond the turn's first, and never again: a wake with nothing new asks nothing.
+    assert len(workers.requests) == 1 + len(told)
+    # Read as that request's last word, never ahead of the coordinator's own last answer.
+    reading = [request for request in workers.requests if told and told[0] in request]
+    assert [request[-1] for request in reading[:1]] == told
     assert await workers.status(thread.id) == "active"
 
 
@@ -852,6 +999,58 @@ async def test_a_second_clash_puts_the_thread_in_waiting_on_you(api, monkeypatch
     assert (await row_of(api, project, thread))["reason"] == "files"
 
 
+async def pending_in_the_inbox(api) -> set[str]:
+    """The sessions of the items ``GET /v1/inbox`` lists pending."""
+    listed = await api.client.get("/v1/inbox", headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    return {item["session_id"] for item in listed.json()["items"] if item["status"] == "pending"}
+
+
+async def test_a_threads_waits_over_a_clash_end_when_it_is_resolved_by_you_or_its_coordinator_and_one_over_a_half_done_landing_stays(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    store = api.app.state.session_store
+    yours, its_coordinators = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    for thread in (yours, its_coordinators):
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["a.md"], escalated=True))
+    approval = {"title": "Send it?", "instructions": "", "context": "", "action_type": "approval", "target": "the memo"}
+    await store.emit_event(yours.id, EventType.INBOX_ACTION_REQUIRED, approval)
+    assert await pending_in_the_inbox(api) == {str(yours.id), str(its_coordinators.id)}
+    assert (await act_on(api, project, yours, "resolve")).status_code == 200
+    await call_tool(api, master, "resolve_thread", thread_id=str(its_coordinators.id))
+    # A clash's is over: expired, never answered.  One over a landing left half-done in your folder is your only
+    # notice of it, and stays until you answer or dismiss it.  Another kind of wait is not one over its files.
+    assert sorted((w.payload["action_type"], w.payload.get("escalated"), w.status) for w in await waits_of(api, yours)) == [
+        ("approval", None, "pending"), ("files", False, "expired"), ("files", True, "pending"),
+    ]
+    assert sorted((w.payload["escalated"], w.status) for w in await waits_of(api, its_coordinators)) == [
+        (False, "expired"), (True, "pending"),
+    ]
+    assert await pending_in_the_inbox(api) == {str(yours.id), str(its_coordinators.id)}
+
+
+async def test_a_clash_wait_of_a_deleted_thread_or_one_given_a_resolved_thread_ends_at_the_inboxs_sweep_and_one_over_a_half_done_landing_stays(api):
+    project = await create(api)
+    master = await master_of(api, project)
+    store = api.app.state.session_store
+    deleted, resolved, live = [await a_thread(api, title, master) for title in ("Draft A", "Draft B", "Draft C")]
+    await store.emit_event(deleted.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    assert (await api.client.delete(f"/v1/sessions/{deleted.id}", headers=api.auth())).status_code == 204
+    assert (await act_on(api, project, resolved, "resolve")).status_code == 200
+    # A redo's clash waits on you after the resolve, and so does another lock holder's settle, telling of a landing left escalated.
+    await store.emit_event(resolved.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
+    for thread in (deleted, resolved, live):
+        await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["a.md"], escalated=True))
+    await expire_inbox_items(store)
+    # A clash is over with its thread.  A landing left half-done in your folder is not: its wait is your only notice of it,
+    # and stays until you answer or dismiss it.
+    assert [sorted((w.payload["escalated"], w.status) for w in await waits_of(api, thread)) for thread in (deleted, resolved, live)] == [
+        [(False, "expired"), (True, "pending")], [(False, "expired"), (True, "pending")], [(True, "pending")],
+    ]
+    assert await pending_in_the_inbox(api) == {str(deleted.id), str(resolved.id), str(live.id)}
+
+
 async def test_a_wait_over_a_second_clash_names_the_stuck_file_and_none_the_redo_turn_landed(api, monkeypatch, pods):
     thread = await a_thread(api, "Draft A", await master_of(api, await create(api)))
     pool = SandboxPool(pods)
@@ -976,6 +1175,45 @@ async def test_a_landing_settled_as_escalated_puts_its_own_thread_in_waiting_on_
     [wait] = await waits_of(api, first)
     assert wait.title == "Couldn't finish landing my changes"
     assert (await row_of(api, project, first))["reason"] == "files"
+
+
+async def test_a_settled_landing_whose_master_could_not_be_told_is_settled_and_told_once_by_the_next_lock_holder(
+    api, monkeypatch, pods,
+):
+    project = await create(api)
+    master = await master_of(api, project)
+    first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
+    pool = SandboxPool(pods)
+    rows_stand(monkeypatch, "exact")
+    await edited(pool, first, "for f in a b c; do echo $f > $f.md; done")
+    await a_landing_killed(api, monkeypatch, pool, first, after="apply c.md")
+    # Its put-back of b.md finds it changed, before it puts a.md back: the row says so as it goes on.
+    (pods.project / "b.md").write_text("saved by you over the half landing")
+    emit = SessionStore.emit_event
+    refused: list = []
+
+    async def the_report_is_refused_once(store, session_id, event_type, data, *args, **kwargs):
+        if event_type == EventType.WORKER_COMPLETE and data.get("recovered") and not refused:
+            refused.append(data["saga"])
+            raise ConnectionError("the database went away")
+        return await emit(store, session_id, event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(SessionStore, "emit_event", the_report_is_refused_once)
+    await edited(pool, second, "echo by B > B.md")
+    await ends(api, pool, second)
+    # Nobody was told, so the row is not given up as told: it is the next lock holder's, and B's turn landed nothing.
+    [killed] = await rows(api, first)
+    assert (refused, killed.saga_state, await rows(api, second)) == ([killed.saga_id], "running", [])
+    assert not (pods.project / "B.md").exists()
+    await edited(pool, second, "echo by B again > B.md")
+    await ends(api, pool, second)
+    [killed] = await rows(api, first)
+    assert killed.saga_state == "escalated" and (pods.project / "B.md").read_text() == "by B again\n"
+    # Told once, the file that could not be put back named, and one wait on you however many tries it took.
+    [report] = [r for r in await reports(api, master) if r.get("recovered")]
+    assert (report["saga"], [f["ref"] for f in report["files"]]) == (killed.saga_id, ["b.md"])
+    [wait] = await waits_of(api, first)
+    assert (wait.title, wait.payload["files"]) == ("Couldn't finish landing my changes", ["b.md"])
 
 
 async def test_a_redo_turns_files_are_sorted_each_from_its_own_clash():

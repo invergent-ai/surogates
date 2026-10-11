@@ -607,8 +607,9 @@ async function refreshProjects(threadId: string | null = null): Promise<void> {
         } else {
           for (const id of asked) await refreshThread(id!);
         }
-        // A History shown is read again: any change in the project may have changed its file.
-        await fileHistory.read();
+        // A History shown is read again: any change in the project may have changed its file. The rows drawn
+        // below do not wait for it, and it is drawn once read (FileHistory.reread).
+        fileHistory.reread();
         stale = false;
       } catch (error) {
         stale = true;

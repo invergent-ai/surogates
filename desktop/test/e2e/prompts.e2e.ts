@@ -941,15 +941,27 @@ describe("a prompt's answer, with a key or a press behind it and with none", () 
     expect(await prepared).toBeNull();
   });
 
-  it("says so, once, in a line a screen reader reads by itself, where a button pressed with no key and no press comes too soon; the line is empty where nothing was refused", async () => {
+  it("says so, once, in a line beside the buttons that is seen and that a screen reader reads by itself, where a button pressed too soon answers nothing; the line is empty where nothing was refused", async () => {
     const client = await signedIn();
     const prepared = prepare(client);
     const asked = await prompt(app!);
     const said = () => asked.$eval("#prompt-refused", (line) => [line.textContent, line.getAttribute("aria-live"), line.getAttribute("role")]);
+    // Where it is drawn: whole and inside the window, and beside the buttons, on their row or just over it, over none of them.
+    const drawn = () => asked.$eval("#prompt-refused", (line) => {
+      const [box, row] = [line.getBoundingClientRect(), document.getElementById("prompt-buttons")!.getBoundingClientRect()];
+      return {
+        seen: line.checkVisibility() && box.width >= line.scrollWidth && box.height >= 12 && box.top >= 0 && box.bottom <= window.innerHeight,
+        beside: box.bottom <= row.bottom + 1 && box.bottom >= row.top - 40 && (box.right <= row.left || box.bottom <= row.top),
+      };
+    });
+    const buttons = () => asked.$eval("#prompt-buttons", (row) => JSON.stringify(row.getBoundingClientRect()));
     expect(await said()).toEqual(["", "polite", "status"]);
-    // Pressed as it shows: refused, and said.
+    const before = await buttons();
+    // Pressed as it shows: refused, and said; the buttons are where they were, for the press again.
     await activate(asked, "cancel");
     await expect.poll(() => said()).toEqual(["Not yet. Press it again in a moment.", "polite", "status"]);
+    expect(await drawn()).toEqual({ seen: true, beside: true });
+    expect(await buttons()).toBe(before);
     expect(await promptsShown(app!)).toBe(1);
     // A key that is held back says nothing more, and a press that is taken closes the prompt.
     await expect.poll(() => heldBack(asked)).toBe(false);

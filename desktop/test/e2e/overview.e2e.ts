@@ -143,6 +143,8 @@ interface Served {
   unrestored: string | null;
   notUndone: string | null;
   put: { applied: string[]; skipped: Array<{ path: string; by: unknown; pruned?: boolean }>; pickedUp: string[] } | null;
+  historyHeld: Promise<void> | null;
+  letHistory?: () => void;
   changed(id: string, threadId: string | null): void;
   register(lacks?: string[]): void;
 }
@@ -225,6 +227,29 @@ describe("the Overview pane", () => {
       fake.changed(project!, thread!);
     }, [REPORT, FIXTURE_IDS.computer]);
     await expect.poll(() => texts(page, chip)).toEqual([]);
+  });
+
+  it("counts in a row's last chip the files its thread has past those the row lists, as the web client's card does", async () => {
+    const { shell, page } = await opened();
+    // The main process's state as it is, but for rows that count files past their list: the page draws them.
+    const state = await page.evaluate(() => (globalThis as unknown as { surogateShell: { state(): Promise<unknown> } }).surogateShell.state());
+    const more: Record<string, number> = { [IDLE]: 1_800, [FIXTURE_IDS.working]: 4, [APPROVAL]: 2 };
+    await shell.evaluate(({ BrowserWindow }, [asItIs, counts]) => {
+      const given = asItIs as { overview: { threads: Array<{ id: string }> } };
+      const contents = BrowserWindow.getAllWindows()[0]!.webContents;
+      contents.ipc.removeHandler("shell:state");
+      contents.ipc.handle("shell:state", () => ({
+        ...given,
+        overview: { ...given.overview, threads: given.overview.threads.map((thread) => ({ ...thread, moreFiles: counts[thread.id] })) },
+      }));
+      contents.send("shell:changed");
+    }, [state, more] as const);
+    // Past the two it shows, and past its list; a row that lists none of them shows their count alone.
+    await expect.poll(() => texts(page, `[data-thread="${IDLE}"] .chip`)).toEqual(["north.csv", "south.csv", "+1801"]);
+    expect(await texts(page, `[data-thread="${FIXTURE_IDS.working}"] .chip`)).toEqual(["summary.docx · being redone", "Sales chart", "+4"]);
+    expect(await texts(page, `[data-thread="${APPROVAL}"] .chip`)).toEqual(["+2"]);
+    // A row that counts none more is as it was.
+    expect(await texts(page, `[data-thread="${QUESTION}"] .chip`)).toEqual(["revenue.xlsx · not merged"]);
   });
 
   it("shows the project's library, and its routines only when it has some", async () => {
@@ -1188,6 +1213,124 @@ describe("a file's History in the Library", () => {
     await expect.poll(() => page.isVisible("#no-versions")).toBe(true);
     expect(await page.textContent("#no-versions")).toBe("No change to this file is recorded yet.");
     expect(await texts(page, "#versions .version")).toEqual([]);
+  });
+
+  it("leaves the Overview's rows drawn at each change of the project however long the History shown takes to read, and reads it after", async () => {
+    const { page, client } = await opened();
+    await history(page);
+    await page.waitForSelector("#versions .version");
+    // From now on the agent's page holds each read of the History, as a busy server would.
+    await (await served(client)).evaluate((fake) => {
+      fake.historyHeld = new Promise((resolve) => (fake.letHistory = resolve));
+    });
+    await (await served(client)).evaluate((fake, [project, thread, path]) => {
+      fake.data.threads[project!]!.find((found) => found.id === thread)!.statusLine = "Which rate for the second quarter?";
+      fake.data.history[project!]![path!]!.find((version) => version.id === "9:f")!.available = false;
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION, REVENUE]);
+    await expect.poll(() => page.textContent(`[data-thread="${QUESTION}"] .status`), { timeout: 3_000 }).toBe("Question · Which rate for the second quarter?");
+    expect(await texts(page, '[data-version="9:f"] .from')).toEqual([""]);
+    // Its read, let go, is drawn.
+    await (await served(client)).evaluate((fake) => fake.letHistory!());
+    await expect.poll(() => texts(page, '[data-version="9:f"] .from')).toEqual(["No longer kept"]);
+  });
+
+  it("says in the main process's words why it did not open, in its place, with the way back to the files, until another is opened or its project leaves; and leaves no failure unhandled", async () => {
+    // A waiting thread's row opens another file's History.
+    Object.assign(agent.projects!.threads[REPORT]!.find((found) => found.id === QUESTION)!, {
+      reason: "files", files: [{ kind: "file", label: "brief.docx", ref: "brief.docx", threadId: QUESTION, landing: "not_merged" }],
+    });
+    const { shell, page } = await opened();
+    await page.evaluate(() => {
+      const rejections: string[] = [];
+      Object.assign(window, { rejections });
+      window.addEventListener("unhandledrejection", (event) => rejections.push(String(event.reason)));
+    });
+    // The main process refuses this file's, as it refuses one its project no longer lists, and opens any other.
+    await shell.evaluate(({ BrowserWindow }, refusing) => {
+      const ipc = BrowserWindow.getAllWindows()[0]!.webContents.ipc;
+      const asIs = (ipc as unknown as { _invokeHandlers: Map<string, (event: unknown, ...args: unknown[]) => unknown> })._invokeHandlers.get("shell:history")!;
+      ipc.removeHandler("shell:history");
+      ipc.handle("shell:history", (event, path) => {
+        if (path === refusing) throw new Error("No such file in the open project");
+        return asIs(event, path);
+      });
+    }, REVENUE);
+    const refused = async () => {
+      await page.click('[data-tab="library"]');
+      await page.focus(`#files [data-file="${REVENUE}"]`);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => page.textContent("#history-failure")).toBe("No such file in the open project");
+    };
+    await refused();
+    expect([await page.isVisible("#file-history"), await page.isVisible("#files"), await page.textContent("#history-path")]).toEqual([true, false, REVENUE]);
+    expect(await texts(page, "#versions .version")).toEqual([]);
+    expect(await page.isVisible("#no-versions")).toBe(false);
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("history-back");
+    // Its way back goes back to the files, with the keyboard on the row that asked.
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.isVisible("#files")).toBe(true);
+    expect(await page.isVisible("#file-history")).toBe(false);
+    expect(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.focus)).toBe(`file:${REVENUE}`);
+    // Another file's History, opened while the refusal is shown, takes its place.
+    await refused();
+    await page.click('[data-tab="threads"]');
+    await page.click(`[data-thread="${QUESTION}"]`);
+    await expect.poll(() => page.textContent("#history-path")).toBe("brief.docx");
+    await expect.poll(() => page.isVisible("#no-versions")).toBe(true);
+    expect(await page.isVisible("#history-failure")).toBe(false);
+    await page.click("#history-back");
+    // And it goes with its project.
+    await refused();
+    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await expect.poll(() => page.textContent("#greeting-line")).toBe("Nothing is waiting on you.");
+    await page.click('[data-tab="library"]');
+    expect(await page.isVisible("#file-history")).toBe(false);
+    expect(await page.evaluate(() => (window as unknown as { rejections: string[] }).rejections)).toEqual([]);
+  });
+
+  it("closes to the tab it was opened from, with the keyboard on the row that opened it, or on that tab where the row shows no more", async () => {
+    Object.assign(agent.projects!.threads[REPORT]!.find((found) => found.id === QUESTION)!, { reason: "files" });
+    const { page, client } = await opened();
+    const focus = () => page.evaluate(() => {
+      const at = document.activeElement as HTMLElement | null;
+      return at?.dataset.focus ?? (at?.dataset.tab ? `tab:${at.dataset.tab}` : at?.id);
+    });
+    const selected = () => page.$$eval('[data-tab][aria-selected="true"]', (tabs) => tabs.map((found) => (found as HTMLElement).dataset.tab));
+    // Opened from a waiting thread's row, on the Threads tab: closed, the Threads tab shows again, the keyboard on that row.
+    await page.focus(`[data-thread="${QUESTION}"]`);
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#versions .version");
+    expect([await selected(), await focus()]).toEqual([["library"], "history-back"]);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.isVisible("#threads")).toBe(true);
+    expect([await selected(), await focus()]).toEqual([["threads"], `thread:${QUESTION}`]);
+    // Opened again, the keyboard taken from the row as the browser takes it from what it hides: All files has it all
+    // the same. And the row resolved meanwhile, into the folded Resolved group: closed, the keyboard goes to the Threads tab.
+    await page.evaluate((thread) => {
+      const row = document.querySelector<HTMLElement>(`[data-thread="${thread}"]`)!;
+      row.click();
+      row.blur();
+    }, QUESTION);
+    await page.waitForSelector("#versions .version");
+    await expect.poll(() => focus()).toBe("history-back");
+    await (await served(client)).evaluate((fake, [project, thread]) => {
+      Object.assign(fake.data.threads[project!]!.find((found) => found.id === thread)!, { group: "resolved", reason: null });
+      fake.changed(project!, thread!);
+    }, [REPORT, QUESTION]);
+    await expect.poll(() => texts(page, '[data-group="resolved"] .thread .title')).toContain("Check the revenue figures");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.isVisible("#threads")).toBe(true);
+    expect([await selected(), await focus()]).toEqual([["threads"], "tab:threads"]);
+    // Opened from the Library and left for the Threads tab, it goes with its project: the Threads tab stays, and the
+    // keyboard stays on the project chosen in the sidebar.
+    await page.click('[data-tab="library"]');
+    await page.click(`#files [data-file="${REVENUE}"]`);
+    await page.waitForSelector("#versions .version");
+    await page.click('[data-tab="threads"]');
+    await page.click(`#projects [data-project="${BUDGET}"] .project`);
+    await expect.poll(() => page.textContent("#greeting-line")).toBe("Nothing is waiting on you.");
+    expect([await selected(), await focus()]).toEqual([["threads"], `project:${BUDGET}`]);
   });
 
   it("is read again at the project's change, and goes with its project", async () => {

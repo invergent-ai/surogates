@@ -120,6 +120,31 @@ describe("a file's History", () => {
     expect(changed).toHaveBeenCalledTimes(drawn + 1);
   });
 
+  it("is read again at its project's changes one read at a time, waited for by none: the changes while one runs are one read after it", async () => {
+    const answers: Array<(versions: unknown) => void> = [];
+    const { source, changed, files } = shown(() => new Promise((resolve) => answers.push(resolve)));
+    const opening = files.open(REPORT, REVENUE);
+    answers[0]!(VERSIONS);
+    await opening;
+    const drawn = changed.mock.calls.length;
+    // Asked three times while its first read runs: that read, and one more once it ends.
+    files.reread();
+    files.reread();
+    files.reread();
+    expect(source.history).toHaveBeenCalledTimes(2);
+    answers[1]!([VERSIONS[0]]);
+    await vi.waitFor(() => expect(source.history).toHaveBeenCalledTimes(3));
+    expect(files.shown!.versions).toEqual([VERSIONS[0]]);
+    answers[2]!(VERSIONS);
+    await vi.waitFor(() => expect(files.shown!.versions).toEqual(VERSIONS));
+    expect(changed).toHaveBeenCalledTimes(drawn + 2);
+    // Nothing more is asked, and a change after it is a read of its own.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(source.history).toHaveBeenCalledTimes(3);
+    files.reread();
+    expect(source.history).toHaveBeenCalledTimes(4);
+  });
+
   it("hands a version it shows to the page to save, one at a time, and says which is on its way", async () => {
     const answers: Array<() => void> = [];
     const { source, changed, files } = shown(undefined, () => new Promise<void>((resolve) => answers.push(resolve)));

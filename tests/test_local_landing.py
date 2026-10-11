@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.devices.history import ComputerRefused
 from surogates.devices.link import MAX_FRAME_CHARS
 from surogates.harness import local_landing
 from surogates.harness.local_landing import carries, looks, waiting_on_you_here
@@ -152,6 +153,37 @@ def test_a_report_says_a_thread_deleted_before_its_landing_finished_has_no_next_
         said = report(landing=landing, landing_reason="deleted")
         assert "(the thread was deleted before its landing finished): Budget.xlsx" in said, landing
         assert "lands with its next turn" not in said and "Stopped while" not in said
+
+
+def test_a_report_says_a_landing_on_a_computer_that_failed_left_its_work_in_its_copy_for_its_next_turn():
+    said = report(landing="failed", landing_reason="failed")
+    assert "\nNot landed, because the landing failed: Budget.xlsx\nThe thread's work is in its copy on its computer, and lands with its next turn" in said
+    assert "Not saved" not in said
+    # A pod's landing that failed took its work with it, unless the turn was kept.
+    assert "Not saved, because the landing failed: Budget.xlsx" in report(landing="failed")
+    assert "in its copy on its computer" not in report(landing="failed")
+
+
+def test_a_report_says_a_stopped_landings_work_waits_in_its_copy_and_names_apart_what_no_landing_writes():
+    said = report(landing="compensated", landing_reason="stopped", files=[
+        {"kind": "file", "label": "Budget.xlsx", "ref": "Budget.xlsx", "landing": "not_merged"},
+        {"kind": "file", "label": ".vscode/tasks.json", "ref": ".vscode/tasks.json", "landing": "not_merged", "reason": "protected"},
+        {"kind": "file", "label": "Twin.txt", "ref": "Twin.txt", "landing": "not_merged", "reason": "linked"},
+    ])
+    assert "(the thread was stopped before its landing wrote a file): Budget.xlsx\n" in said
+    assert (
+        "\nThe thread was stopped: its work is in its copy on its computer, and lands with its next turn once it is sent on again, "
+        "but for any file a landing never writes"
+    ) in said
+    assert "The thread's work is in its copy on its computer, and lands with its next turn" not in said
+    # What no landing writes lands with no turn: it is said apart, as a landing that finished says it.
+    assert "\nNot merged, because a change to them could run code on the user's computer, which a landing never writes: .vscode/tasks.json" in said
+    assert "\nNot merged, because the folder has a link there, or a file with a second name, which a landing never replaces: Twin.txt" in said
+    # A landing whose every file is one no landing writes did not land any of the thread's work, and says so.
+    alone = report(landing="compensated", landing_reason="stopped", files=[
+        {"kind": "file", "label": "Twin.txt", "ref": "Twin.txt", "landing": "not_merged", "reason": "linked"},
+    ])
+    assert "(the thread was stopped before its landing wrote a file): none\n" in alone
 
 
 def test_a_report_says_what_its_landing_found_left_in_its_folder_by_one_cut_short():
@@ -414,3 +446,88 @@ async def test_a_settle_holds_the_lost_threads_lease_through_a_failed_renewal_an
     async with local_landing._lease_of(store, uuid4(), "settle:t"):
         await asyncio.sleep(0.5)
     assert store.asked == 1
+
+
+class Busy:
+    """A landing's steps on a folder another chat holds: each ``land`` refused ``busy`` *times* times, then answered."""
+
+    def __init__(self, times: int = 1) -> None:
+        self.times, self.asked = times, []
+
+    async def land(self, action, **arguments):
+        self.asked.append(action)
+        if action != "forget" and self.times:
+            self.times -= 1
+            raise ComputerRefused("busy", "Another chat is working in this folder on this computer")
+        return {} if action == "forget" else {"restored": [], "beside": [], "lost": [], "unread": []}
+
+
+class Held:
+    """A session store whose every lease is a worker's: a settle waits for that worker."""
+
+    async def try_acquire_lease(self, session_id, owner, *, ttl_seconds):
+        return None
+
+
+async def a_settle_that_waits(monkeypatch) -> list[str]:
+    """A settle of a folder that holds a landing another worker's lease still holds, which ends after one wait; what it asked."""
+    from surogates.harness.local_landing import settle_folder
+
+    left = [[SimpleNamespace(saga_id="saga:another", thread_id=uuid4())], []]
+
+    async def running_in(session_factory, device_id, folder):
+        return left.pop(0)
+
+    async def unforgotten_in(session_factory, device_id, folder, *, besides, most):
+        return []
+
+    monkeypatch.setattr(local_landing, "running_in", running_in)
+    monkeypatch.setattr(local_landing, "unforgotten_in", unforgotten_in)
+    hold = Busy(times=0)
+    copy = SimpleNamespace(device_id=uuid4(), folder="/home/u/Reports")
+    await settle_folder(Held(), None, copy, SimpleNamespace(id=uuid4()), 0, hold, None, redis=None)
+    return hold.asked
+
+
+async def asked_waiting(monkeypatch, asking) -> tuple[object, list[bool]]:
+    """What *asking* gives, run as a turn's work; and whether, each fiftieth of a second, all of the turn waited resumably."""
+    import asyncio
+
+    from surogates.runtime.turn_slots import TurnSlots, current_turn
+
+    monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.3)
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="org", agent_id="agent", gate_held=False)
+    seen: list[bool] = []
+
+    async def watching() -> None:
+        while True:
+            seen.append(slots.waiting_resumably)
+            await asyncio.sleep(0.02)
+
+    token = current_turn.set(slots)
+    try:
+        async with slots.activity():
+            watcher = asyncio.ensure_future(watching())
+            try:
+                answer = await asking()
+            finally:
+                watcher.cancel()
+    finally:
+        current_turn.reset(token)
+    return answer, seen
+
+
+@pytest.mark.parametrize("where", ["a step answered busy", "a settle waiting for another worker's landing"])
+async def test_a_landings_wait_for_its_folder_is_one_another_worker_can_take_over(monkeypatch, where):
+    # A deploy's drain hands on a turn whose every activity waits resumably: a landing waiting for the folder is one.
+    if where == "a step answered busy":
+        steps = Busy()
+        answer, seen = await asked_waiting(monkeypatch, lambda: local_landing._land_asked(steps, "recover"))
+        assert steps.asked == ["recover", "recover"] and answer["restored"] == []
+    else:
+        answer, seen = await asked_waiting(monkeypatch, lambda: a_settle_that_waits(monkeypatch))
+        # It gave the folder back, waited, and took it again.
+        assert answer == ["forget", "recover"]
+    assert sum(seen) >= 5

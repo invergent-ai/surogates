@@ -839,8 +839,10 @@ def test_why_a_thread_has_nowhere_to_work_is_said_in_a_few_plain_words_that_say_
         # A Retry only where asking again can pass, and where its computer's app tries again as its person asks.
         assert NowhereToWork(why).retryable == (why in ("again", "history_off")), why
     assert all("Choose a folder inside it" in NOWHERE[why] for why in ("cap", "names", "history_off"))
-    assert NOWHERE["history_off"].endswith("or try again.")
+    # A name its history cannot keep is the file's to change, as its computer's app says.
+    assert NOWHERE["names"].endswith("Choose a folder inside it, or rename the file.")
     assert NOWHERE["unreadable"].endswith("Let it be read, as by chmod a+r, or move it out of the folder.")
+    assert NOWHERE["history_off"].endswith("or try again.")
     assert NOWHERE[NO_COPY].endswith("Update Surogate Desktop.")
     assert "choose it again" in NOWHERE["gone"] and "Sign this computer in again" in NOWHERE["revoked"]
     assert NOWHERE["again"].endswith("Try again.") and "Try again" not in NOWHERE["refused"]

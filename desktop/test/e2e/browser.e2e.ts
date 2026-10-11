@@ -632,15 +632,15 @@ server.listen(${canaryPort}, "127.0.0.1");`);
     await press(await prompt(app!), "allow_session");
     await press(await prompted(), "allow_session");
     expect(await first).toMatchObject({ ok: { title: "The first chat's page" } });
-    // The second chat's agent opens the same port: its prompt names its own folder, says which chat has the port now and
-    // that allowing moves it, and draws every note inside its window.
+    // The second chat's agent opens the same port: its prompt names its own folder, says that a chat on another folder has
+    // the port now, names that folder in a field of its own, says that allowing moves it, and draws every note inside its window.
     const other = open(OTHER, "second");
     await press(await prompted(), "allow_session");
     const asked = await prompted();
-    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`], ["Folder", second]]);
+    expect(await fields(asked)).toEqual([["Address", `http://localhost:${canaryPort}/`], ["Folder", second], ["Folder of the chat that has it", folder]]);
     const notes = await asked.$$eval("#prompt-notes > *", (lines) => lines.map((line) => [line.textContent, line.getBoundingClientRect().bottom <= window.innerHeight]));
     expect(notes).toHaveLength(4);
-    expect(notes[0]).toEqual([`A chat on ${folder} has port ${canaryPort} in the browser now. Allowing this moves the port to this chat.`, true]);
+    expect(notes[0]).toEqual([`A chat on another folder has port ${canaryPort} in the browser now. Allowing this moves the port to this chat.`, true]);
     expect(notes.every(([, inside]) => inside)).toBe(true);
     await press(asked, "allow_session");
     expect(await other).toMatchObject({ ok: { title: "The second chat's page" } });
@@ -662,7 +662,8 @@ server.listen(${canaryPort}, "127.0.0.1");`);
     const again = open(CHAT, "again");
     const back = await prompted();
     expect((await back.$$eval("#prompt-notes > *", (lines) => lines.map((line) => line.textContent)))[0])
-      .toBe(`A chat on ${second} has port ${canaryPort} in the browser now. Allowing this moves the port to this chat.`);
+      .toBe(`A chat on another folder has port ${canaryPort} in the browser now. Allowing this moves the port to this chat.`);
+    expect((await fields(back)).at(-1)).toEqual(["Folder of the chat that has it", second]);
     await press(back, "deny");
     expect(await again).toMatchObject({ error: { type: "denied" } });
     expect([await promptsShown(app!), hits]).toEqual([0, []]);
