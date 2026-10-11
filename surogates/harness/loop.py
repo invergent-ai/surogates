@@ -40,6 +40,7 @@ from surogates.devices.history import (
     opens_its_copy,
     thread_copy,
 )
+from surogates.devices.operations import DeviceOperations
 from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.agent_resolver import (
@@ -1918,8 +1919,11 @@ class AgentHarness(
             if opens_its_copy(session) and not await self._opened_for_the_turn(session, lease):
                 return
             # A thread made on its computer before threads worked in copies, or a session under one, is bound to
-            # the folder itself: its turn sends that computer nothing, and ends saying why.
+            # the folder itself: its turn sends that computer nothing, and ends saying why.  What a worker before
+            # this one left open of it is closed first, before anything could ask it again: run, it would write
+            # the folder itself.
             if bound_to_its_folder(session):
+                await DeviceOperations(self._session_factory, self._redis).cancel([session.id])
                 await self._name_the_turn(session)
                 await self._fail_session(
                     session, [], lease, reason="nowhere_to_work", cost_tracker=SessionCostTracker(),
