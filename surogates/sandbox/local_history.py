@@ -175,6 +175,8 @@ _LEFT = "Surogate-Left"
 #: What a thread's copy held of its own when a record or a move made it other files is kept
 #: for the last sixteen times that happened: the oldest goes for one more.
 _ASIDE = 16
+#: Each one's name on its ref: the order it was set aside in, and what the copy was made.
+_ASIDE_REF = re.compile(r"[0-9]{8}-[0-9a-f]{40}")
 #: Where a place keeps a thread's copy and its repository that were made again, each renamed there as it was.
 _SET_ASIDE = "set-aside"
 #: The most one answer names of the files a pickup picked up, in characters of each as JSON spells it, which one
@@ -183,13 +185,14 @@ _SET_ASIDE = "set-aside"
 _PICKED_CHARS = 1 << 20
 #: A thread's name is one name, of these alone: it names a folder of the place's, and none of another's.
 _NAMED = "[A-Za-z0-9_-]{1,64}"
-#: What one is named there: the order it was set aside in, counted over the place; when, by this
-#: computer's clock, in UTC; whose it was; and which of the two it is.
+#: What one is named there: the order it was set aside in, counted over the place, one count for what
+#: one request sets aside of a thread; when, by this computer's clock, in UTC; whose it was; and which
+#: of the two it is.
 _WHOLE = re.compile(rf"([0-9]{{8}})-[0-9]{{8}}T[0-9]{{6}}Z-({_NAMED})\.(?:copy|repository)(\.gone)?")
 #: A thread keeps the last four times a copy or a repository of its own was set aside there, and a
 #: place the last sixteen of all its threads', in this many bytes of its disk at most: the oldest
-#: goes for one more, and never a thread's newest.  Of those of its own that went, a thread is told
-#: the last sixteen.
+#: goes for one more, and never the newest of a thread the place still has.  Of those of its own
+#: that went, a thread is told the last sixteen.
 _ASIDE_WHOLE = 4
 _ASIDE_WHOLE_IN_ALL = 16
 _ASIDE_BYTES = 10 << 30
@@ -223,6 +226,7 @@ _USER = re.compile(r"[A-Za-z0-9_.@-]{1,128}")
 _ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "open": ("open", frozenset({"moves"})),
     "close": ("close", frozenset()),
+    "drop": ("drop", frozenset()),
     "changed": ("changed", frozenset()),
     "snapshot": ("snapshot", frozenset({"reason"})),
     "restore": ("restore", frozenset({"commit"})),
@@ -251,6 +255,9 @@ class LocalHistory(History):
     #: Holds, once a pruning has read them, the history's commits every repository in the place reaches from its refs,
     #: which the cut keeps (:meth:`_cut`), and those the history was cut at before.  It lasts one pruning.
     reached: list[set[str]] = field(default_factory=list, init=False, repr=False, compare=False)
+    #: Holds, once this request has set a folder of the thread's aside whole, the stem of its name there: whatever else
+    #: the request sets aside of the thread is the same time (:meth:`_set_aside_whole`).  It lasts one request.
+    stem: list[str] = field(default_factory=list, init=False, repr=False, compare=False)
 
     excludes: ClassVar[list[str]] = LOCAL_EXCLUDES
     platform: ClassVar[tuple[str, ...]] = LOCAL_PLATFORM
@@ -509,7 +516,10 @@ class LocalHistory(History):
         are the snapshots of what the copy held of its own when that, or a
         record, made it other files, the oldest first: all the thread's
         repository holds, read from its refs at every open, so that one
-        whose answer was lost is told again.
+        whose answer was lost is told again, and before them all each
+        repository of the thread's that the place keeps set aside whole
+        holds (:meth:`_held_aside`).  So one that went, at the thread's
+        bound or with the repository that held it, is named no more.
         """
         budget = _TIMEOUT.set(_OPEN_TIMEOUT)
         try:
@@ -542,7 +552,9 @@ class LocalHistory(History):
                 (self.repo / _MADE).write_bytes(b"")
                 self.making.unlink()
                 self._back()
-                return {"copy": "made", **self._asides_whole()}
+                whole = self._asides_whole()
+                held = self._held_aside(whole.get("set_aside_folders", []))
+                return {"copy": "made", **({"set_asides": held} if held else {}), **whole}
             if os.path.lexists(self.copy) and not (self._admin / "index").is_file():
                 # It was whole once, and its index is gone: git reads no file of it.
                 self._make_way_in_its_repository()
@@ -567,8 +579,9 @@ class LocalHistory(History):
             else:
                 self._catch_up()
                 moved = False
-            asides = [commit for _, commit in sorted(self._asides().values())]
-            return {"copy": "moved" if moved else "kept", **({"set_asides": asides} if asides else {}), **self._asides_whole()}
+            whole = self._asides_whole()
+            asides = [*self._held_aside(whole.get("set_aside_folders", [])), *(commit for _, commit in sorted(self._asides().values()))]
+            return {"copy": "moved" if moved else "kept", **({"set_asides": asides} if asides else {}), **whole}
         finally:
             _TIMEOUT.reset(budget)
 
@@ -628,6 +641,30 @@ class LocalHistory(History):
         _removed(going)
         return {"copy": "removed"}
 
+    def drop(self) -> dict:
+        """Remove what the place keeps of a deleted thread: its copy, what waits beside it, and its repository with the snapshots on its refs.
+
+        The thread's chat was deleted, and its app asks once nothing more of
+        the thread runs on this computer.  Its work in its copy goes with it:
+        its person deleted it.  Each goes as what holds nothing of a
+        thread's goes, renamed first (:data:`_GOING`), and all of it before
+        any is removed: cut anywhere, each is whole under its name or under
+        the name it goes by, and the place's next request, whoever's,
+        removes what goes by it (:meth:`_pin`).  The copy is renamed before
+        its repository: cut between, the repository is whole beside no
+        copy, as one whose copy was let go.  What the place set aside whole
+        stays, under the place's bounds as any other thread's, and so does
+        the folder's history.  ``dropped``; ``gone`` where none of it was
+        there.
+        """
+        self._pin()
+        found = [at for at in (self.copy, self.making, self.waiting, self.repo) if os.path.lexists(at)]
+        for at in found:
+            os.rename(at, at.with_name(f"{at.name}{_GOING}"))
+        for at in found:
+            _removed(at.with_name(f"{at.name}{_GOING}"))
+        return {"thread": "dropped" if found else "gone"}
+
     def _holds_git(self) -> bool:
         """Whether the copy holds a name ``.git`` anywhere, which git never lists and passes over without a word.
 
@@ -669,7 +706,11 @@ class LocalHistory(History):
         repository first, and no git runs in either.  A copy with no
         repository beside it is none a request reads, so a cut between the
         two leaves nothing taken for whole, and the open after it sets the
-        copy aside under a name of its own.
+        copy aside as the same time as the repository, where the thread's
+        newest time there is that repository alone (:meth:`_set_aside_alone`):
+        so it is after a cut between the two, and after a request that set
+        the repository aside for a link in it (:meth:`_pin`) and set no copy
+        aside after it.
 
         The copy was whole once: one whose making did not end has gone by
         now, by its mark.  It is the thread's own unless it is, file for
@@ -686,6 +727,8 @@ class LocalHistory(History):
                 own[self.repo] = self._names_its_own(refs)
             if os.path.lexists(self.copy):
                 own[self.copy] = self._holds_its_own(refs)
+        if own.get(self.copy) and self.repo not in own and not self.stem:
+            self.stem.extend(self._set_aside_alone())
         self._out_of_the_way(own)
 
     def _make_way_in_its_repository(self) -> None:
@@ -740,13 +783,12 @@ class LocalHistory(History):
         The bound is kept at once, and not at the open's end alone: an open
         cut while it makes the copy again leaves no more kept than may be.
         """
-        stem = None
         for left, kept in own.items():
             if kept:
-                stem = self._set_aside_whole(left, stem)
+                self._set_aside_whole(left)
             else:
                 _let_go(left)
-        if stem is not None:
+        if any(own.values()):
             self._asides_whole()
 
     def _names_its_own(self, refs: dict[str, str]) -> bool:
@@ -866,16 +908,20 @@ class LocalHistory(History):
             for fd in opened:
                 os.close(fd)
 
-    def _set_aside_whole(self, left: Path, stem: str | None = None) -> str:
-        """Rename *left*, the thread's repository or its copy, into the place's set-aside folder as it is; the stem of its name there.
+    def _set_aside_whole(self, left: Path) -> None:
+        """Rename *left*, the thread's repository or its copy, into the place's set-aside folder as it is.
 
         The name is this module's own: ``<nth>-<when>-<thread>`` and which
-        of the two it is.  ``<nth>`` is one more than any name there has,
-        whatever that name is of, so nothing is at the name before: a rename
+        of the two it is.  What one request sets aside of the thread is one
+        time, under one stem: the copy set aside after its repository takes
+        the repository's, however the request came to each, and a request
+        sets each of the two aside once at most.  So does a copy whose
+        repository an earlier request set aside alone (:meth:`_make_way`).
+        ``<nth>`` is otherwise one more than any name there has, whatever
+        that name is of, so nothing is at the name before: a rename
         replaces no folder that holds anything, and goes through no link.
-        With *stem*, the repository's just set aside, the copy takes its
-        name.  The folder is opened as a folder, never through a link, and
-        the rename goes by its handle.
+        The folder is opened as a folder, never through a link, and the
+        rename goes by its handle.
 
         A repository is kept borrowing the folder's history by the one line,
         which names the history from the set-aside folder as from the
@@ -898,26 +944,46 @@ class LocalHistory(History):
             _pinned(left / _BORROWS, _ALTERNATES)
         folder = _opened_folder(str(self.aside_whole), None, True)
         try:
-            if stem is None:
+            if not self.stem:
                 last = max((int(named[1]) for named in map(_WHOLE.fullmatch, os.listdir(folder)) if named), default=0)
-                stem = f"{last + 1:08d}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{self.thread}"
-            name = f"{stem}.{'repository' if left == self.repo else 'copy'}"
+                self.stem.append(f"{last + 1:08d}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{self.thread}")
+            name = f"{self.stem[0]}.{'repository' if left == self.repo else 'copy'}"
             if not _WHOLE.fullmatch(name):
                 raise HistoryError("the place has no name left for what is set aside")
-            self._make_room(folder, left, stem[:8])
+            self._make_room(folder, left, self.stem[0][:8])
             os.rename(left, name, dst_dir_fd=folder)
         finally:
             os.close(folder)
         logger.warning("Set aside whole as %s, to be made again: %s", name, left)
-        return stem
+
+    def _set_aside_alone(self) -> list[str]:
+        """The stem of the thread's newest time in the place's set-aside folder where that is its repository alone; none otherwise.
+
+        Every name of the thread's under that count is read, whatever it is:
+        one that is anything but the repository's, gone or kept, keeps the
+        copy from that time, and nothing is at the copy's name there.  Its
+        newest alone: a repository set aside before a later time of the
+        thread's was never beside the copy it has now.
+        """
+        folder = _opened_folder(str(self.aside_whole), None, False)
+        if folder is None:
+            return []
+        try:
+            found = sorted((named[1], name) for name in os.listdir(folder) if (named := _WHOLE.fullmatch(name)) and named[2] == self.thread)
+        finally:
+            os.close(folder)
+        newest = [name for nth, name in found if nth == found[-1][0]] if found else []
+        return [newest[0].removesuffix(".repository")] if len(newest) == 1 and newest[0].endswith(".repository") else []
 
     def _make_room(self, folder: int, left: Path, nth: str) -> None:
         """Let go of the oldest the set-aside folder open as *folder* keeps, until with *left* it holds ``_ASIDE_BYTES`` of the disk at most.
 
         *left* is about to be set aside there as its *nth* time, this
-        thread's newest from then on.  The oldest time goes first, a
-        repository with the copy set aside at the same time, and never a
-        thread's newest: where those hold more, the place keeps more.  What
+        thread's newest from then on.  A time is one thread's, its count and
+        its thread: what one request set aside of it, a repository with its
+        copy.  The oldest time goes first, both its folders, and never the
+        newest of a thread the place still has (:meth:`_lives`): where those
+        hold more, the place keeps more.  What
         each holds is what its files take of the disk, no link followed: a
         file most of which was never written counts for what it holds.  One
         that goes is renamed ``<name>.gone``, and is emptied as those the
@@ -926,12 +992,12 @@ class LocalHistory(History):
         """
         kept, _ = _asides_in(folder)
         taken = {name: _on_disk(name, folder) for _, _, name in kept}
-        newest = {thread: at for at, thread, _ in kept} | {self.thread: nth}
+        newest = {thread: (at, thread) for at, thread, _ in kept if self._lives(thread)} | {self.thread: (nth, self.thread)}
         held = sum(taken.values()) + _on_disk(left)
-        for at in sorted({at for at, _, _ in kept} - set(newest.values())):
+        for at in sorted({(at, thread) for at, thread, _ in kept} - set(newest.values())):
             if held <= _ASIDE_BYTES:
                 return
-            for name in [name for of, _, name in kept if of == at]:
+            for name in [name for of, thread, name in kept if (of, thread) == at]:
                 try:
                     os.rename(name, f"{name}.gone", src_dir_fd=folder, dst_dir_fd=folder)
                 except OSError as why:
@@ -945,10 +1011,12 @@ class LocalHistory(History):
 
         ``set_aside_folders`` are the thread's copies and repositories kept
         there, by name, the oldest first.  A thread keeps the last
-        ``_ASIDE_WHOLE`` times one was set aside, each time one count, and
-        a place the last ``_ASIDE_WHOLE_IN_ALL`` of all its threads': the
-        oldest goes for one more, whoever's it is, and never a thread's
-        newest; and no more of the disk than room was made for as each was
+        ``_ASIDE_WHOLE`` times one was set aside, each time its own count of
+        its own (:meth:`_set_aside_whole`): two threads' under one count are
+        two times.  A place keeps the last ``_ASIDE_WHOLE_IN_ALL`` of all its threads': the
+        oldest goes for one more, whoever's it is, and never the newest of a
+        thread the place still has (:meth:`_lives`), so that a deleted
+        thread's go as any other; and no more of the disk than room was made for as each was
         set aside (:meth:`_make_room`).  The thread's own beyond what it
         keeps go first, and another's only where the place then still keeps
         more than it may.
@@ -966,12 +1034,12 @@ class LocalHistory(History):
             return {}
         try:
             kept, gone = _asides_in(folder)
-            times = list(dict.fromkeys(nth for nth, _, _ in kept))
-            mine = list(dict.fromkeys(nth for nth, thread, _ in kept if thread == self.thread))
-            newest = {thread: nth for nth, thread, _ in kept}.values()
+            times = list(dict.fromkeys((nth, thread) for nth, thread, _ in kept))
+            mine = [at for at in times if at[1] == self.thread]
+            newest = {thread: (nth, thread) for nth, thread, _ in kept if self._lives(thread)}.values()
             going = set(mine[:-_ASIDE_WHOLE])
-            going |= {nth for nth in [nth for nth in times if nth not in going][:-_ASIDE_WHOLE_IN_ALL] if nth not in newest}
-            for name in [name for nth, _, name in kept if nth in going]:
+            going |= {at for at in [at for at in times if at not in going][:-_ASIDE_WHOLE_IN_ALL] if at not in newest}
+            for name in [name for nth, thread, name in kept if (nth, thread) in going]:
                 try:
                     os.rename(name, f"{name}.gone", src_dir_fd=folder, dst_dir_fd=folder)
                     logger.warning("What was set aside as %s is let go, for what was set aside since", name)
@@ -994,6 +1062,32 @@ class LocalHistory(History):
             "set_aside_gone": [name.removesuffix(".gone") for _, thread, name in gone if thread == self.thread],
         }
         return {key: names for key, names in said.items() if names}
+
+    def _lives(self, thread: str) -> bool:
+        """Whether *thread*, one whose copy or repository the place set aside whole, is still the place's.
+
+        It is this request's own, whatever it has set aside so far, or one
+        whose repository or copy is there: a copy whose repository a request
+        cut short set aside, or a repository whose copy was let go.  A
+        deleted thread's went with its drop, and what it set aside has no
+        newest kept for it.  Its name is one :data:`_WHOLE` read: a folder's
+        of the place's, and no other path.
+        """
+        return thread == self.thread or any(os.path.lexists(at / thread) for at in (self.repo.parent, self.copy.parent))
+
+    def _held_aside(self, names: list[str]) -> list[str]:
+        """The snapshots each repository of the thread's that the place keeps set aside whole holds, by *names*, its folders there.
+
+        The oldest first: they went with the repository, and are the
+        thread's while it is kept (:func:`_snapshots_in`).
+        """
+        folder = _opened_folder(str(self.aside_whole), None, False)
+        if folder is None:
+            return []
+        try:
+            return [commit for name in names if name.endswith(".repository") for commit in _snapshots_in(folder, name, self.thread)]
+        finally:
+            os.close(folder)
 
     def changed(self) -> dict:
         """The files the copy changed since its base, committed or not: what a landing looks at in the folder first.
@@ -1326,7 +1420,7 @@ class LocalHistory(History):
         kept = {}
         for line in self._main("for-each-ref", "--format=%(objectname) %(refname)", f"{self.aside}/").splitlines():
             commit, _, ref = line.partition(" ")
-            if re.fullmatch(r"[0-9]{8}-[0-9a-f]{40}", ref.rpartition("/")[2]):
+            if _ASIDE_REF.fullmatch(ref.rpartition("/")[2]):
                 kept[ref[-40:]] = (ref, commit)
         return kept
 
@@ -1841,8 +1935,9 @@ class LocalHistory(History):
           sets aside, or this thread's own: removed;
         - a link, or anything else that is no file, where the making of this
           thread's copy is marked: removed, as no mark of this module's;
-        - what a removal that was cut left of this thread's repository or
-          copy, under the name it was going by: removed;
+        - what a removal that was cut left under the name it was going by,
+          of any thread's, a deleted one's as this one's: removed, for no
+          request names it again;
         - anything but files and folders in the folder's history, in any
           folder of it: the history is refused whole, before a byte is
           written through it;
@@ -1872,9 +1967,10 @@ class LocalHistory(History):
                 _removed(folder)
         if os.path.lexists(self.making) and (self.making.is_symlink() or not self.making.is_file()):
             _removed(self.making)
-        for left in (self.repo, self.copy):
-            if os.path.lexists(going := left.with_name(f"{left.name}{_GOING}")):
-                _removed(going)
+        for folder in (self.repo.parent, self.copy.parent, self.waiting.parent):
+            for name in os.listdir(folder) if folder.is_dir() else ():
+                if name.endswith(_GOING):
+                    _removed(folder / name)
         if os.path.lexists(self._pruning):
             # A pruning's work that was cut: it links packs the history may have let go, which it would keep on the disk.
             _removed(self._pruning)
@@ -2197,10 +2293,13 @@ def _synced(path: Path) -> None:
         os.close(fd)
 
 
-def _read_as_data(path: Path, most: int) -> bytes | None:
-    """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read."""
+def _read_as_data(path: str | Path, most: int, *, dir_fd: int | None = None) -> bytes | None:
+    """At most *most* bytes of the file at *path*, following no link; None where it is no file, or cannot be read.
+
+    With *dir_fd*, *path* is a name in the folder open as it.
+    """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
     except OSError:
         return None
     try:
@@ -2249,6 +2348,35 @@ def _asides_in(folder: int) -> tuple[list[tuple[str, str, str]], list[tuple[str,
         if (named := _WHOLE.fullmatch(name)) and stat.S_ISDIR(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
     )
     return [aside for aside in found if not aside[2].endswith(".gone")], [aside for aside in found if aside[2].endswith(".gone")]
+
+
+def _snapshots_in(folder: int, name: str, thread: str) -> list[str]:
+    """What the repository set aside whole as *name*, in the folder open as *folder*, kept of *thread*'s copy: the latest ``_ASIDE``.
+
+    The snapshots on its refs as the thread's repository kept them
+    (:meth:`LocalHistory._set_aside`), packed and loose, the oldest first by
+    the count in each one's name: read as data, through no link, and never
+    by git.  What cannot be read names nothing.
+    """
+    under = ("refs", "set-aside", thread)
+    found: dict[str, str] = {}
+    opened: list[int] = []
+    try:
+        opened.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=folder))
+        for line in (_read_as_data("packed-refs", _SEEN_BYTES, dir_fd=opened[0]) or b"").decode(errors="replace").splitlines():
+            commit, _, ref = line.partition(" ")
+            found[ref] = commit
+        for part in under:
+            opened.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=opened[-1]))
+        for leaf in os.listdir(opened[-1]):
+            found["/".join((*under, leaf))] = (_read_as_data(leaf, 64, dir_fd=opened[-1]) or b"").decode(errors="replace").strip()
+    except OSError:
+        pass  # what is not there, or is no folder, holds none
+    finally:
+        for fd in opened:
+            os.close(fd)
+    named = re.compile(rf"refs/set-aside/{re.escape(thread)}/{_ASIDE_REF.pattern}")
+    return [found[ref] for ref in sorted(found) if named.fullmatch(ref) and _ID.fullmatch(found[ref])][-_ASIDE:]
 
 
 def _on_disk(top: str | Path, inside: int | None = None) -> int:

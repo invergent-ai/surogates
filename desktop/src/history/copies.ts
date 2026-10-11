@@ -9,9 +9,9 @@
 // One thing at a time on a root's copy: its making, each request to its history, and its letting
 // go. Once the last host on a copy has gone, its root idle, the guest removes the copy where the
 // thread's branch holds all of it, and the root's next operation has it made again; a deleted
-// thread's copy is let go the same way, and its repository stays. A folder's place stays in the
-// guest while a copy on it is open or a request runs, and is let go a while after the last of
-// them, so a guest that holds nothing else can stop; the next request adds it again. Before
+// thread's copy and its repository are dropped once no host holds the copy. A folder's place
+// stays in the guest while a copy on it is open or a request runs, and is let go a while after
+// the last of them, so a guest that holds nothing else can stop; the next request adds it again. Before
 // another folder's place is made under its key, and whenever the place's folder in the app's data
 // is not the one the app knew, the place is let go: each host on its copies first, then the guest,
 // by the place it was given. What the app knew of its copies goes with it. A place set aside for
@@ -36,7 +36,7 @@ import type { Outcome } from "../link/protocol.js";
 import type { VmClient } from "../vm/client.js";
 import type { HistoryCode } from "../vm/history.js";
 import { type Folder, late, type Place } from "../vm/manager.js";
-import { copyOf, FolderReplaced, keyOf, placeOf } from "./place.js";
+import { copyOf, FolderReplaced, keyOf, placeOf, placesGone } from "./place.js";
 import { forgetTooLarge, rememberTooLarge, tooLargeFor } from "./too-large.js";
 
 // A thread's copy as the guest left it: the folder's place, the copy's folder with its identity, and
@@ -133,11 +133,11 @@ const AS_IT_WAS: ReadonlySet<unknown> = new Set<HistoryCode>(["not_a_request", "
 const asItWas = (outcome: Outcome): boolean =>
   "error" in outcome && (outcome.error.type === "value" || (outcome.error.type === "history" && AS_IT_WAS.has(outcome.error.code)));
 
-// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, and a copy's letting go, in the
-// copy and the history alone; and a landing's forgetting, which refuses where a file is not what was there before, as one
-// moved aside is not, and which is asked from inside its landing's last step, where waiting for that landing would wait
-// for itself.
-const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "close", "forget"]);
+// The requests that read the folder itself not at all, or only to refuse: a checkpoint's, a copy's letting go and a
+// deleted thread's dropping, in the copy and the history alone; and a landing's forgetting, which refuses where a file is
+// not what was there before, as one moved aside is not, and which is asked from inside its landing's last step, where
+// waiting for that landing would wait for itself.
+const NOT_READING: ReadonlySet<string> = new Set(["snapshot", "restore", "close", "drop", "forget"]);
 // What the guest says of a copy it was asked to let go that is not there any more: removed by it, or gone before.
 const letGone = (outcome: Outcome): boolean => "ok" in outcome && ["removed", "gone"].includes(String((outcome.ok as { copy?: unknown } | null)?.copy));
 
@@ -227,6 +227,8 @@ export class Copies {
   // The places each root's operations set aside, by their names in the app's data, oldest first, until its next turn's
   // open names them: no other answer the server gets does. The latest ASIDES of them.
   private readonly asides = new Map<string, string[]>();
+  // Each deleted thread's binding, by its root, while hosts still hold its copy: it is dropped as the last lets it go.
+  private readonly dropping = new Map<string, BoundFolder>();
   // Told at each take and each close of a copy: a letting go waits for the hosts on its place's copies.
   private readonly changes = new Set<() => void>();
   // Aborted at the app's stop: a copy's making is stopped by nothing else.
@@ -290,30 +292,39 @@ export class Copies {
     if (!open?.handles.delete(handle)) return;
     if (open.handles.size > 0) return;
     this.opens.delete(root);
-    void this.inTurn(root, () => this.letCopyGo(root, open.copy)).catch(() => {});
+    const deleted = this.dropping.get(root);
+    this.dropping.delete(root);
+    if (deleted) void this.drop(root, deleted);
+    else void this.inTurn(root, () => this.letCopyGo(root, open.copy)).catch(() => {});
     this.release(open.held);
     this.changed();
   }
 
   /**
-   * *root*'s chat was deleted, and *bound* is its binding: its copy is let go as an idle one is, once no
-   * host holds it, where the thread's branch holds all of it. Its repository, what was set aside of it and
-   * what waits beside its copy stay, until this computer can show a person what was set aside. A thread
-   * with no copy here asks the guest nothing. Never rejects.
+   * *root*'s chat was deleted, and *bound* is its binding: once no host holds its copy, the guest drops what the
+   * folder's place keeps of the thread (local_history.py, drop), its copy with whatever is in it, what waits beside
+   * it, and its repository with the snapshots in it, and what the app kept for its hosts goes. Where a host holds it,
+   * a landing's that finishes what the thread began among them, it is dropped as the last of them lets it go. What the
+   * place set aside whole stays, under the place's bound. A thread with neither a copy nor a repository here asks the
+   * guest nothing. Never rejects.
    */
   drop(root: string, bound: BoundFolder): Promise<void> {
     return this.inTurn(root, async () => {
-      // A host on it lets it go as it goes.
-      if (this.halt.signal.aborted || this.opens.has(root)) return;
-      // By the data's real path, as a place is (history/place.ts): where there is no copy, no place is made for it.
-      const there = await look(join(await realpath(this.options.dataDir), "history", keyOf(bound.folder), "threads", root));
-      if (there === null || there === "other") return;
+      if (this.halt.signal.aborted) return;
+      if (this.opens.has(root)) {
+        this.dropping.set(root, bound);
+        return;
+      }
+      // By the data's real path, as a place is (history/place.ts): where there is nothing of the thread's, no place is made for it.
+      const at = join(await realpath(this.options.dataDir), "history", keyOf(bound.folder));
+      const [there, repository] = await Promise.all([look(join(at, "threads", root)), look(join(at, "clones", root))]);
+      if (there === null && repository === null) return;
       const found = await this.found(root, bound);
       if ("failed" in found) return;
-      const outcome = await this.request(found.known, found.place, root, "close", {}, this.halt.signal);
-      if (outcome === STALE || !letGone(outcome)) return;
+      const outcome = await this.request(found.known, found.place, root, "drop", {}, this.halt.signal);
+      if (outcome === STALE || !("ok" in outcome)) return;
       found.known.copies.delete(root);
-      await this.forget(root, there);
+      if (there !== null && there !== "other") await this.forget(root, there);
     }).catch(() => {});
   }
 
@@ -332,17 +343,22 @@ export class Copies {
       if (await this.refusedMaking(found.place, root)) return tooLarge(bound.folder);
       if (signal.aborted) return CANCELLED;
       const outcome = await this.opened(found.known, found.place, root, args, signal);
-      if (outcome !== STALE) return this.named(root, outcome);
+      if (outcome !== STALE) return this.named(root, found.place, outcome);
     }
     return unavailable(bound.folder, CHANGED);
   }
 
-  // A turn's open *outcome* for *root*, with the places its operations set aside since it was last answered: once each.
-  private named(root: string, outcome: Outcome): Outcome {
+  // A turn's open *outcome* for *root* in *place*, with the places its operations set aside since it was last answered,
+  // once each; and, at every one, those set aside under the folder's path that went at the bound (history/place.ts).
+  private named(root: string, place: Place, outcome: Outcome): Outcome {
+    if (!("ok" in outcome)) return outcome;
     const names = this.asides.get(root);
-    if (names === undefined || !("ok" in outcome)) return outcome;
     this.asides.delete(root);
-    return { ok: { ...(outcome.ok as Record<string, unknown>), set_aside_places: names } };
+    const gone = placesGone(place);
+    if (names === undefined && gone.length === 0) return outcome;
+    return {
+      ok: { ...(outcome.ok as Record<string, unknown>), ...(names ? { set_aside_places: names } : {}), ...(gone.length > 0 ? { set_aside_places_gone: gone } : {}) },
+    };
   }
 
   private async step(root: string, bound: BoundFolder, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {

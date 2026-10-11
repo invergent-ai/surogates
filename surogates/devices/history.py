@@ -376,8 +376,9 @@ def _opened(answer: dict[str, Any], thread: str | None, folder: str | None) -> d
     On either, what the place keeps set aside whole of the thread's own,
     and what of it went at the place's bound; and the places of the
     folder's the app set aside, which one open names, the first since the
-    thread's operation that set it aside, each its folder's, *folder*.  The
-    first form that holds, as the app takes them.
+    thread's operation that set it aside, and those of them that went at
+    the app's bound, which every open names, each its folder's, *folder*.
+    The first form that holds, as the app takes them.
     """
     for form in (_with_copy, _with_no_history):
         try:
@@ -385,8 +386,9 @@ def _opened(answer: dict[str, Any], thread: str | None, folder: str | None) -> d
             for names in ("set_aside_folders", "set_aside_gone"):
                 if names in answer:
                     opened[names] = _listed(answer[names], lambda name: _aside(name, thread), MAX_ASIDE)
-            if "set_aside_places" in answer:
-                opened["set_aside_places"] = _listed(answer["set_aside_places"], lambda name: _place_aside(name, folder), MAX_ASIDE)
+            for names in ("set_aside_places", "set_aside_places_gone"):
+                if names in answer:
+                    opened[names] = _listed(answer[names], lambda name: _place_aside(name, folder), MAX_ASIDE)
             return opened
         except _No:
             continue

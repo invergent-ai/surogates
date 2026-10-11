@@ -659,8 +659,12 @@ describe("the project dialog", () => {
     dialog = await projectDialog(shell);
     await clickClosing(dialog, "#archive");
     await expect.poll(() => dialogOpen(shell)).toBe(false);
-    const asked = await shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string }> }).asked);
-    expect(asked.at(-1)!.message).toBe("Archive Q3 report?");
+    const asked = await shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; detail: string }> }).asked);
+    // It says what the archive removes from this computer: what its threads did not land, which their copies held.
+    expect(asked.at(-1)).toMatchObject({
+      message: "Archive Q3 report?",
+      detail: "It leaves your projects, with its conversation and its threads. Its files and its memory are kept. What its threads did not land in your folders is removed from this computer.",
+    });
     await expect.poll(() => page.isVisible(`#projects [data-project="${REPORT}"]`)).toBe(false);
     await expect.poll(() => client.url()).toBe(`${origin}/chat`);
     expect(await page.textContent("#title")).toBe(new URL(origin).host);

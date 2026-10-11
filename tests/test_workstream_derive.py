@@ -577,6 +577,11 @@ def test_a_row_says_each_place_of_its_folder_its_computer_set_aside_among_what_i
         {"kind": "place", "at": "2026-10-09T08:00:00Z"}, {"kind": "copy", "at": "2026-10-10T10:15:00Z"},
         {"kind": "place", "at": "2026-10-10T10:15:01Z"},
     ], "snapshots": 0, "gone": []}
+    # One gone at its app's bound is said among what went, as it went.
+    gone = {"copies": [], "snapshots": [], "gone": [PLACE_NAME, COPY_NAME], "places": []}
+    assert derive_thread(replace(given, set_aside=gone), now=NOW)["set_aside"] == {"kept": [], "snapshots": 0, "gone": [
+        {"kind": "place", "at": "2026-10-09T08:00:00Z"}, {"kind": "copy", "at": "2026-10-10T10:15:00Z"},
+    ]}
     # A name that is no place's is left out, as is a place's among the copies; and with nothing left, nothing is said.
     for places in ([f"{PLACE_NAME}.json", f"../{PLACE_NAME}", "fcb59ee0818a927a.was-", f"fcb59ee0818a927a.was-{'9' * 16}", 7], "all"):
         told = {"copies": [PLACE_NAME], "snapshots": [], "gone": [], "places": places}

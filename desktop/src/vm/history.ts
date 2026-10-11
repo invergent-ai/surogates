@@ -182,8 +182,9 @@ const aside = (thread: string | undefined): Parse<string> => (value) => {
 
 // An open's answer, to a request for *thread*'s copy.
 // *set_asides*: the snapshots of what the copy held of its own when a record or a move made it other files,
-// the oldest first, at every open while the thread's repository holds any. A folder with no history says
-// why: more files than history tracks, or a name in it that is not UTF-8. On either form,
+// the oldest first, at every open while the thread's repository, or one of its set aside whole, holds any.
+// A folder with no history says why: more files than history tracks, or a name in it that is not UTF-8. On
+// either form,
 // *set_aside_folders*: what of the thread's own the place keeps set aside whole, the oldest first, and
 // *set_aside_gone*: what of it went at the place's bound, by the names it had; each only where it holds a name.
 function opened(thread: string | undefined): Parse<unknown> {
@@ -199,6 +200,8 @@ function opened(thread: string | undefined): Parse<unknown> {
 const ANSWERS: Record<string, Parse<unknown>> = {
   // What became of a copy its root let go: removed, its branch holding all of it; kept as it is; or there was none.
   close: fields({ copy: oneOf("removed", "kept", "gone") }),
+  // A deleted thread's copy, what waited beside it and its repository: dropped, or none of it was there.
+  drop: fields({ thread: oneOf("dropped", "gone") }),
   changed: fields({ paths: list(path) }),
   snapshot: fields({ hash: id }),
   restore: fields({}),

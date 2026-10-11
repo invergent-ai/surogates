@@ -257,6 +257,11 @@ def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went
         f"\n{WHERE}"
     )
     assert report(set_aside={"kept": [A_PLACE], "snapshots": 0, "gone": []}).endswith(f"copies as they were at 2026-10-09 08:00 UTC\n{WHERE}")
+    # And one gone at its app's bound, as what else went.
+    assert report(set_aside={"kept": [], "snapshots": 0, "gone": [A_COPY, A_PLACE]}).endswith(
+        "its copy set aside at 2026-10-10 10:15 UTC, the earlier history at its folder's path, with its threads' copies set aside at "
+        "2026-10-09 08:00 UTC"
+    )
 
 
 def test_a_report_says_nothing_set_aside_where_its_payload_names_nothing_that_is_one():
@@ -311,10 +316,12 @@ async def test_a_turns_end_records_what_its_computer_keeps_set_aside_and_tells_o
     assert await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_folders": ["../../etc"]}, told=kept) == (kept, None)
     # Once all of it went from the computer's word, the end records that, so a row says nothing set aside.
     assert await told_at_its_end(monkeypatch, {"copy": "kept"}, told=kept) == (nothing, None)
-    # A computer that names more snapshots than it keeps is taken at its latest few.
-    many = [f"{n:040x}" for n in range(local_landing.MAX_ASIDE + 5)]
+    # A computer that names more snapshots than it keeps, in a thread's repository and four set aside whole, is taken at
+    # its latest few.
+    assert local_landing.SNAPSHOTS_KEPT == 80
+    many = [f"{n:040x}" for n in range(local_landing.SNAPSHOTS_KEPT + 5)]
     kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_asides": many})
-    assert (kept["snapshots"], new["snapshots"]) == (many[-local_landing.MAX_ASIDE:], local_landing.MAX_ASIDE)
+    assert (kept["snapshots"], new["snapshots"]) == (many[-local_landing.SNAPSHOTS_KEPT:], local_landing.SNAPSHOTS_KEPT)
 
 
 async def test_a_place_its_computers_app_set_aside_is_recorded_from_the_one_open_that_names_it_and_told_once(monkeypatch):
@@ -338,19 +345,41 @@ async def test_a_place_its_computers_app_set_aside_is_recorded_from_the_one_open
     assert (kept["places"], len(new["kept"])) == (many, local_landing.MAX_ASIDE)
 
 
-async def test_the_snapshots_told_before_a_repository_was_set_aside_whole_stay_counted_while_it_is_kept(monkeypatch):
+async def test_a_place_gone_at_its_apps_bound_is_kept_no_more_and_told_once_as_gone_to_the_thread_it_was_told_to(monkeypatch):
+    told = {"copies": [COPY], "snapshots": [], "gone": [], "places": [PLACE]}
+    later = f"{KEY}.was-1791627300000"
+    # Every open names what went under the folder's path: of this thread's, it is no longer kept, and is told once more.
+    went = {"copy": "kept", "set_aside_folders": [COPY], "set_aside_places_gone": [later, PLACE]}
+    kept, new = await told_at_its_end(monkeypatch, went, told=told)
+    assert (kept, new) == ({"copies": [COPY], "snapshots": [], "gone": [PLACE]}, {"kept": [], "snapshots": 0, "gone": [A_PLACE]})
+    # Named again, nothing is new; with what went of the thread's own beside it.
+    again = {**went, "set_aside_gone": [COPY], "set_aside_folders": []}
+    assert await told_at_its_end(monkeypatch, again, told=kept) == (
+        {"copies": [], "snapshots": [], "gone": [COPY, PLACE]}, {"kept": [], "snapshots": 0, "gone": [A_COPY]},
+    )
+    # Another thread on the folder, which was never told of it, is told nothing of its going.
+    assert await told_at_its_end(monkeypatch, went, told={"copies": [COPY], "snapshots": [], "gone": []}) == (
+        {"copies": [COPY], "snapshots": [], "gone": []}, None,
+    )
+
+
+async def test_the_snapshots_counted_are_those_its_computer_names_whichever_repository_of_the_threads_holds_them(monkeypatch):
     told = {"copies": [], "snapshots": [ID, "b" * 40], "gone": []}
-    # Set aside whole, the thread's repository holds them: no open names them now, and they are kept all the same.
-    aside = {"copy": "made", "set_aside_folders": [REPOSITORY]}
+    # Set aside whole, the thread's repository holds them, and the open names them so: they stay counted.
+    aside = {"copy": "made", "set_asides": [ID, "b" * 40], "set_aside_folders": [REPOSITORY]}
     kept, new = await told_at_its_end(monkeypatch, aside, told=told)
     assert (kept, new) == ({"copies": [REPOSITORY], "snapshots": [ID, "b" * 40], "gone": []}, {"kept": [A_REPOSITORY], "snapshots": 0, "gone": []})
-    # The new repository's own are named, and counted beside them.
-    later = {"copy": "kept", "set_asides": ["c" * 40], "set_aside_folders": [REPOSITORY]}
-    assert (await told_at_its_end(monkeypatch, later, told=kept))[0]["snapshots"] == [ID, "b" * 40, "c" * 40]
-    # Gone at the bound, it takes them with it.
-    gone = {"copy": "kept", "set_aside_gone": [REPOSITORY]}
-    assert await told_at_its_end(monkeypatch, gone, told=kept) == (
-        {"copies": [], "snapshots": [], "gone": [REPOSITORY]}, {"kept": [], "snapshots": 0, "gone": [A_REPOSITORY]},
+    # The new repository's own are named beside them, and one gone at the thread's bound is named no more: it is no
+    # longer counted, though a repository is set aside.
+    later = {"copy": "kept", "set_asides": ["b" * 40, "c" * 40], "set_aside_folders": [REPOSITORY]}
+    kept = (await told_at_its_end(monkeypatch, later, told=kept))[0]
+    assert kept["snapshots"] == ["b" * 40, "c" * 40]
+    # With two repositories set aside, the older one's going takes its snapshots with it, and the newer one's stay.
+    newer = f"00000003-20261011T100000Z-{THREAD}.repository"
+    two = {**kept, "copies": [REPOSITORY, newer]}
+    gone = {"copy": "kept", "set_asides": ["c" * 40], "set_aside_folders": [newer], "set_aside_gone": [REPOSITORY]}
+    assert await told_at_its_end(monkeypatch, gone, told=two) == (
+        {"copies": [newer], "snapshots": ["c" * 40], "gone": [REPOSITORY]}, {"kept": [], "snapshots": 0, "gone": [A_REPOSITORY]},
     )
 
 

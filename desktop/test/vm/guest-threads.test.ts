@@ -489,15 +489,17 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
     expect(readFileSync(join(copyOf(TWO), "node_modules", "x.js"), "utf8")).toBe("1\n");
   });
 
-  it("let a deleted thread's copy go as an idle one's is, and leave its repository, the folder, its history and the other thread as they are", async () => {
+  it("drop a deleted thread's copy, what waits beside it and its repository, and leave the folder, its history and the other thread as they are", async () => {
     const place = join(data, "history", keyOf(folder));
     expect(await did(ONE, "read", { key: key("A.md"), max_bytes: null })).toEqual(data64("notes of A\n"));
     // As the binder retires a root: the tools are told while its binding is still there.
     executor.retired(ONE);
     journal.bindings.retire(ONE);
-    await until(() => !existsSync(copyOf(ONE)), 60_000);
-    // Its repository stays, with all it did, until this computer can show a person what was set aside of it.
-    expect(existsSync(join(place, "clones", ONE, "HEAD"))).toBe(true);
+    // Once the drop has ended: each goes by a name of its own first, and then it is removed.
+    await until(() => !existsSync(copyOf(ONE)) && readdirSync(join(place, "clones")).length === 1, 60_000);
+    expect([readdirSync(join(place, "clones")), existsSync(join(place, "waiting", ONE)), existsSync(join(place, "history.git", "HEAD"))]).toEqual([
+      [TWO], false, true,
+    ]);
     expect(await operate(ONE, "read", { key: key("A.md"), max_bytes: null })).toMatchObject({ error: { type: "folder_unavailable" } });
     expect(readdirSync(folder).sort()).toEqual(["A.md", "B.md", "Budget.csv", "Report.md", "notes"]);
     expect(await did(TWO, "read", { key: key("A.md"), max_bytes: null })).toEqual(data64("notes of A\n"));
