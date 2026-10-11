@@ -323,18 +323,19 @@ def set_aside_place(name: Any) -> dict[str, str] | None:
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:
     """Each ``(row, path)`` of the project an Undo put back, and no later Undo brought back.
 
-    *undos* are the project's Undo rows, each ``{id, undoes, files}``: an
-    Undo puts each of its files back as it was before the rows it
-    *undoes*, a landing, a Restore or another Undo.  An Undo of an Undo
-    brings back what that one put back, file by file: a row's file is
-    undone while an Undo that put it back is not undone itself, at that
-    file.  So the newest are read first.
+    *undos* are the project's Undo rows, each ``{id, files}``: an Undo puts
+    each of its files back as it was before the rows that file ``undoes``,
+    a landing, a Restore or another Undo, which its record names file by
+    file: an Undo of many landings goes back over each file's own.  An
+    Undo of an Undo brings back what that one put back, file by file: a
+    row's file is undone while an Undo that put it back is not undone
+    itself, at that file.  So the newest are read first.
     """
     undone: set[tuple[int, str]] = set()
     for undo in sorted(undos, key=lambda found: found["id"], reverse=True):
         for f in undo["files"]:
             if f.get("merged", True) and (undo["id"], f["path"]) not in undone:
-                undone.update((row, f["path"]) for row in undo["undoes"] or ())
+                undone.update((row, f["path"]) for row in f.get("undoes") or ())
     return frozenset(undone)
 
 

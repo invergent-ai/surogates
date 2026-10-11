@@ -861,6 +861,14 @@ async def test_a_command_answered_leaves_its_chat_at_rest(workers, command):
     assert await workers.nothing_waits(chat)
 
 
+async def test_a_command_typed_in_a_chat_raises_no_inbox_item(workers):
+    chat = await workers.chat()
+    items = await workers.store.get_events(chat, types=[EventType.INBOX_TASK_COMPLETE])
+    await workers.types(chat, "/goal status")
+    # Its user is reading the answer: the inbox has nothing to tell them.
+    assert await workers.store.get_events(chat, types=[EventType.INBOX_TASK_COMPLETE]) == items
+
+
 @pytest.mark.parametrize("command", list(ANSWERED))
 async def test_a_commands_turn_ends_once_and_as_a_models_turn_ends(workers, command):
     chat = await workers.chat()
@@ -2503,6 +2511,22 @@ async def test_a_threads_turn_after_a_command_is_named_by_the_turn_end_before_it
     assert (thread.config["turn_after"], (await last_turn_end(workers.store, thread.id)).id) == (landed.id, landed.id)
 
 
+async def test_a_command_its_user_types_in_a_thread_is_no_report_to_its_master(api, workers):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    # Its turn on its goal ends, and reports.
+    await workers.store.emit_event(thread.id, EventType.LLM_REQUEST, {})
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    reported = await workers.store.get_events(master.id, types=[EventType.WORKER_COMPLETE])
+
+    await workers.types(thread.id, "/compress")
+
+    # Between the thread and its user: the master is told of the thread's work, and a command is none.
+    assert (len(reported), len(await workers.ends(thread.id))) == (1, 2)
+    assert await workers.store.get_events(master.id, types=[EventType.WORKER_COMPLETE]) == reported
+
+
 async def test_a_threads_command_end_is_told_to_its_chats_viewers_and_to_its_projects_row(api, workers):
     state = api.app.state
     project = await create(api)
@@ -2645,6 +2669,81 @@ async def test_a_routines_run_whose_prompt_is_a_command_ends_and_its_routine_goe
     # ... and its routine is given its next run.
     given = await routines.recover_stalled_dynamic_loops(agent_id=AGENT_ID, stale_seconds=0)
     assert routine.id in [r.id for r in given]
+
+
+@pytest.mark.parametrize("its_chat", ["kept", "gone"])
+async def test_a_routines_run_whose_prompt_is_a_command_reports_its_answer_where_its_runs_report(workers, its_chat):
+    state = workers.api.app.state
+    routines = ScheduledSessionStore(state.session_factory)
+    chat = await workers.chat()
+    await workers.types(chat, "/loop /goal status")
+    [routine] = await workers.routines()
+    if its_chat == "gone":
+        # A routine whose chat is gone: its runs start in no chat, and report in the inbox.
+        async with state.session_factory() as db:
+            await db.execute(
+                text("UPDATE scheduled_sessions SET created_from_session_id = NULL WHERE id = :id"), {"id": routine.id},
+            )
+            await db.commit()
+        routine = await routines.get(routine.id)
+    run = await materialize_scheduled_run(
+        routine, session_store=workers.store, scheduled_store=routines,
+        storage=state.storage, settings=state.settings, redis=state.redis,
+    )
+
+    await workers.wake(run)
+
+    answer = "No active outcome. Set one with /goal <text>."
+    results = await workers.store.get_events(chat, types=[EventType.LOOP_RESULT])
+    items = await workers.store.get_events(run, types=[EventType.INBOX_TASK_COMPLETE])
+    if its_chat == "kept":
+        # In the routine's chat, as a run whose model answered reports there.
+        assert [(r.data["run_session_id"], r.data["content"], r.data["outcome"]) for r in results] == [(str(run), answer, "success")]
+        assert items == []
+    else:
+        assert results == []
+        assert [(i.data["outcome"], i.data["summary"], i.data["error"]) for i in items] == [("success", answer, None)]
+    # Told once: a later wake of the run, with nothing new, tells nobody again.
+    await workers.wake(run)
+    assert len(await workers.store.get_events(chat, types=[EventType.LOOP_RESULT])) == len(results)
+    assert len(await workers.store.get_events(run, types=[EventType.INBOX_TASK_COMPLETE])) == len(items)
+
+
+# -- A helper --
+
+
+@pytest.mark.parametrize("channel", ["worker", "task", "delegation"])
+async def test_a_helper_whose_goal_is_a_command_reports_its_answer_to_the_chat_that_started_it(workers, channel):
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel=channel)
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "/goal status"})
+    await workers.nobody_is_queued()
+
+    await workers.wake(helper.id)
+
+    # Its parent hears of it as of any helper's turn, and is woken for it.
+    [report] = await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE])
+    assert (report.data["worker_id"], report.data["result"]) == (str(helper.id), "No active outcome. Set one with /goal <text>.")
+    assert await queued(workers.api, await workers.session(chat))
+    # Once: a later wake of the helper, with nothing new, tells it nothing again.
+    await workers.wake(helper.id)
+    assert len(await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE])) == 1
+
+
+async def test_a_helper_stopped_as_its_command_is_answered_reports_no_turn_end(workers):
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="worker")
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "/goal status"})
+
+    async def it_is_stopped():
+        stopped = await workers.api.client.post(f"/v1/sessions/{helper.id}/pause", headers=workers.api.auth())
+        assert stopped.status_code == 200, stopped.text
+
+    await workers.worker(store=Meanwhile(workers.store, then=it_is_stopped)).wake(helper.id)
+
+    # The stop is its turn's end, and the command's answer does not make it one that ended by itself.
+    assert (await workers.status(helper.id), await workers.ends(helper.id)) == ("paused", [])
+    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
 
 
 @pytest.mark.parametrize("note", ["a helper's report", "a hand back of the browser"])

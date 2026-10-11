@@ -248,7 +248,10 @@ async function save(
       if (denied !== null) return notSaved("error" in denied ? denied.error.message : COULD_NOT);
       asked = true;
       const outcome = await saver.run(write, signal);
-      if (!("error" in outcome)) return { saved: `${said}. It is saved in the chat's folder as ${key.slice(binding.folder.length + 1)}.` };
+      const as = key.slice(binding.folder.length + 1);
+      // A project's thread works in a copy of its folder: what it saves reaches the folder only as its turn lands.
+      const where = binding.history === undefined ? `the chat's folder as ${as}` : `the thread's copy of its folder as ${as}, and lands in the folder with the thread's turn`;
+      if (!("error" in outcome)) return { saved: `${said}. It is saved in ${where}.` };
       // Refused. What is there now says whether another name may do: nothing is written through or over any of it.
       // Downloads itself, made a link or a file since the look, ends the save.
       const since = await unfit();

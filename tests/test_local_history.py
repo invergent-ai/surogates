@@ -655,8 +655,9 @@ def test_a_gitignore_of_the_folders_that_takes_back_what_history_leaves_out_brin
     tracked = [".gitignore", "Report.docx", "notes.txt"]
     assert git(store, "ls-tree", "-r", "--name-only", "refs/heads/main").splitlines() == tracked
     assert sorted(p.name for p in one.copy.iterdir()) == tracked
-    # A turn's write there, and your save there, are none of history's either.
+    # A turn's write there, and your save there, are none of history's either: never read, so one no git may read refuses nothing.
     (one.copy / ".env").write_text("SECRET=2\n")
+    (one.copy / ".env").chmod(0)
     (one.copy / "notes.txt").write_text("the thread's notes\n")
     (folder / "node_modules" / "left.js").write_text("saved by you\n")
     landed = land(one, "saga:1")
@@ -1953,10 +1954,10 @@ def test_a_stop_puts_the_copy_back_and_takes_away_what_the_turn_made(tmp_path, f
     with refused("failed", "git read-tree failed"):
         one.restore("f" * 40)
     assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
-    # And a file git may not read is refused by its name.
+    # And it is named by the git that failed, whatever options it was run with: a file of the copy it may not read.
     (one.copy / "locked.txt").write_text("not to be read\n")
     (one.copy / "locked.txt").chmod(0)
-    with refused("file_unreadable", '^refused the request: the file "locked.txt" cannot be read on this computer'):
+    with refused("failed", "^git update-index failed: "):
         one.snapshot("before a step")
 
 
@@ -4164,6 +4165,34 @@ def test_a_request_killed_at_any_step_before_a_landing_applies_leaves_the_folder
         args["pickup"] = ours.pickup(author=YOURS, trailers=SAGA)["commit"]
     for _at, root in each_cut(tmp_path, OURS, action, args):
         the_next_turn_lands_whole(root, kept, landed=False)
+
+
+@pytest.mark.parametrize("action", ["snapshot", "commit", "pickup"])
+def test_what_a_gitignore_takes_back_of_what_history_leaves_out_is_recorded_and_lands_nowhere_whatever_step_is_cut(tmp_path, action):
+    folder = tmp_path / "whole" / "Documents"
+    folder.mkdir(parents=True)
+    (folder / ".gitignore").write_text("!.env\n!*.tmp\n")
+    (folder / "notes.txt").write_text("v1 notes\n")
+    one = a_copy(tmp_path / "whole", folder, OURS)
+    # The thread writes what history leaves out, and so do you: each a name the folder's own ignores take back.
+    (one.copy / ".env").write_text("SECRET=2\n")
+    (one.copy / "notes.txt").write_text("our notes\n")
+    (folder / "draft.tmp").write_text("yours, half saved\n")
+    args = {
+        "snapshot": {"reason": "before a step"}, "commit": {"author": B, "trailers": SAGA, "pickup": None},
+        "pickup": {"author": YOURS, "trailers": SAGA},
+    }[action]
+    for at, root in each_cut(tmp_path, OURS, action, args):
+        ours = LocalHistory.at(root / "store", root / "Documents", thread=OURS, user="u1")
+        assert ours.open(moves=False)["copy"] == "kept", at
+        ours.snapshot("before a step")
+        landed = land(ours, "saga:next", B)
+        assert ([c["path"] for c in landed["changes"]], landed["excluded"]) == (["notes.txt"], [".env"]), at
+        # In no commit of the thread's or of the history's, and not in the folder.
+        for repo in (root / "store" / "clones" / OURS, root / "store" / "history.git"):
+            recorded = set(git(repo, "log", "--all", "--name-only", "--format=").split())
+            assert recorded.isdisjoint({".env", "draft.tmp"}), (at, repo, recorded)
+        assert not (root / "Documents" / ".env").exists() and (root / "Documents" / "notes.txt").read_text() == "our notes\n", at
 
 
 @pytest.mark.parametrize("inside", [0, 0.003, 0.012])

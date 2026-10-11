@@ -419,19 +419,20 @@ class LocalHistory(History):
             ) from None
 
     def _add_all(self, git: Callable[..., str]) -> None:
-        """The cloud's, and a file git could not read refused by its name, with what to do: one a build of yours left another user's, say.
+        """The cloud's, and a file of the folder's git could not read refused by its name, with what to do: one a build of yours left another user's, say.
 
         Asked again, it is refused the same until the file can be read, or,
         where history holds none of it yet, the folder's ``.gitignore``
-        leaves it out.
+        leaves it out.  A file of the thread's copy that cannot be read is
+        the thread's own doing, which no person sees: git's failure, as any.
         """
         try:
             super()._add_all(git)
         except HistoryError as failed:
             unread = None
-            if failed.code == FAILED:
+            if failed.code == FAILED and git == self._main:
                 with contextlib.suppress(HistoryError):
-                    unread = self._unreadable(git)
+                    unread = self._unreadable()
             if unread is None:
                 raise
             name, new = unread
@@ -442,18 +443,17 @@ class LocalHistory(History):
                 code=FILE_UNREADABLE,
             ) from None
 
-    def _unreadable(self, git: Callable[..., str]) -> tuple[str, bool] | None:
-        """A file *git* reads to add it that this computer cannot open to read, and whether history holds none of it yet; None for none.
+    def _unreadable(self) -> tuple[str, bool] | None:
+        """A file of the folder's git reads to add it that this computer cannot open to read, and whether history holds none of it yet; None for none.
 
         Of those git reads: the new files as a listing names them, and the
-        changed ones the index holds.  No link is followed.
+        changed ones ``main``'s index holds.  No link is followed.
         """
-        top = self.project if git == self._main else self.copy
-        new = {n for n in git("ls-files", "-z", "--others", *self._listing).split("\0") if n and not n.endswith("/")}
-        changed = {n for n in git("ls-files", "-z", "--modified").split("\0") if n}
+        new = {n for n in self._main("ls-files", "-z", "--others", *self._listing).split("\0") if n and not n.endswith("/")}
+        changed = {n for n in self._main("ls-files", "-z", "--modified").split("\0") if n}
         for name in sorted(new | changed):
             try:
-                os.close(os.open(top / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC))
+                os.close(os.open(self.project / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC))
             except PermissionError:
                 return name, name in new
             except OSError:

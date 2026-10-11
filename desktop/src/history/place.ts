@@ -34,6 +34,7 @@ import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, sep } from "node:path";
 
 import { confirmedFolder } from "../binding/folder.js";
+import { strerror } from "../files/answers.js";
 import { PLACE_KEY } from "../guest/protocol.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
 import { THREAD } from "../vm/history.js";
@@ -69,7 +70,8 @@ export interface PlaceOptions {
    * that is still the one there, and no other made at its path since.
    */
   letGo(place: Place, store: number): Promise<unknown>;
-  // How a folder is looked at, and how long the look may take; node's lstat and LOOK_MS unless a test says.
+  // How a folder is looked at, and how long the look may take; node's lstat and LOOK_MS unless a test says. A look
+  // rejects, with why, where the folder could not be read.
   look?(path: string): Promise<Looked>;
   lookMs?: number;
   // ASIDE_BYTES unless a test says.
@@ -207,18 +209,26 @@ function write(record: string, recorded: { path: string; dev: string; ino: strin
 // Each folder's look while it waits, so one that never answers holds one of libuv's threads, however often it is asked.
 const looking = new Map<string, Promise<Looked>>();
 
+// A look's errors that say nothing is at the path that could be the folder: no name, a file on its way, or links that lead nowhere.
+const NOTHING_THERE = new Set(["ENOENT", "ENOTDIR", "ELOOP"]);
+
+// What is at *path*. Rejects, in words for a person, where it could not be read: a network folder that is down, or
+// one whose way is shut to this user, may be the folder that was bound or not.
 async function seen(path: string): Promise<Looked> {
   try {
     // lstat: a link at its path is never the folder.
     const found = await lstat(path);
     return { found: { directory: found.isDirectory(), dev: found.dev, ino: found.ino }, real: await realpath(path) };
-  } catch {
-    return { found: null, real: null };
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code !== undefined && NOTHING_THERE.has(code)) return { found: null, real: null };
+    const why = strerror(code) ?? (error instanceof Error ? error.message : String(error));
+    throw new Error(`The folder ${path} could not be read (${why}), so whether it is the one this thread was bound to cannot be told. Once it can be read, ask again`);
   }
 }
 
 // Whether the folder *bound* is the one at its path now, as the sandbox will take it: a folder, the one that
-// was bound, at its own real path. Throws where the path did not answer in time: that says neither.
+// was bound, at its own real path. Throws where the path did not answer in time, or could not be read: that says neither.
 async function live(bound: BoundFolder, options: PlaceOptions): Promise<boolean> {
   let look = looking.get(bound.folder);
   if (!look) {

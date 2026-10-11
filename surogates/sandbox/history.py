@@ -1802,45 +1802,46 @@ class History:
         return folder.is_dir() and not target.is_dir()
 
     def _add_all(self, git: Callable[..., str]) -> None:
-        """``git add -A``, leaving out what history leaves out and every folder that holds a git repository.
+        """What ``git add -A`` adds, but for what history leaves out and every folder that holds a git repository.
 
-        A ``.gitignore`` in the files outranks every ignore file of the
-        repository's, and with a ``!`` takes back a ``.env`` or the
-        platform's own folders: what the add took that the excludes name,
-        and the index did not hold before it, is taken out of the index
-        again, and no listing of the files names it (:attr:`_listing`).
-        Git takes a folder that holds a repository for a submodule: a link
-        to a commit, not its files, and an add that fails while it has none.
-        Each one is written to ``info/exclude``, which ``main`` and every
-        copy share.  The real files are looked at and read several at once,
-        by no git alone.
+        The files the index holds as git finds them now, and the new files a
+        listing names (:attr:`_listing`), and no other: a ``.gitignore`` in
+        the files outranks every ignore file of the repository's, and with a
+        ``!`` would have ``git add -A`` take back a ``.env`` or the
+        platform's own folders.  So nothing history leaves out is read, nor
+        is it in the index at any step.  Git takes a folder that holds a
+        repository for a submodule: a link to a commit, not its files, and
+        an add that fails while it has none.  Each one is written to
+        ``info/exclude``, which ``main`` and every copy share.  The real
+        files are looked at and read several at once, by no git alone.
         """
+        new = self._new(git)
+        if git == self._main and self._read_at_once(new):
+            return
+        git("add", "-u")
+        # Listed again where the readers left the real files to one git: one may have changed under them.
+        if new := (self._new(git) if git == self._main else new):
+            # A file gone since it was listed is no error: --remove leaves it out.
+            git("update-index", "--add", "--remove", "-z", "--stdin", input="".join(f"{n}\0" for n in new))
+
+    def _new(self, git: Callable[..., str]) -> list[str]:
+        """The files *git*'s index lacks, as a listing names them; each folder that holds a repository written to the excludes."""
         # Listed file by file, git names a folder only for a repository it will not go into.
         new = [n for n in git("ls-files", "-z", "--others", *self._listing).split("\0") if n]
         found = [n for n in new if n.endswith("/")]
         if found:
             with open(self.repo / "info" / "exclude", "a") as out:
                 out.writelines(f"/{_pattern(n)}\n" for n in found)
-        if git == self._main and self._read_at_once([n for n in new if not n.endswith("/")]):
-            return
-
-        def excluded() -> set[str]:
-            return {n for n in git("ls-files", "-z", "--cached", "--ignored", *self._excluding).split("\0") if n}
-
-        held = excluded()
-        git("add", "-A")
-        if taken := sorted(excluded() - held):
-            git("update-index", "--force-remove", "-z", "--stdin", input="".join(f"{n}\0" for n in taken))
-
-    @property
-    def _excluding(self) -> list[str]:
-        """The excludes on a git's command line, where no ``.gitignore`` of the files outranks them as one outranks ``info/exclude``."""
-        return [f"--exclude={pattern}" for pattern in self.excludes]
+        return [n for n in new if not n.endswith("/")]
 
     @property
     def _listing(self) -> list[str]:
-        """What a git that lists the files leaves out: the excludes (:attr:`_excluding`), then git's own ignores."""
-        return [*self._excluding, "--exclude-standard"]
+        """What a git that lists the files leaves out: the excludes, on its command line, then git's own ignores.
+
+        On the command line, as no ignore file is: a ``.gitignore`` in the
+        files outranks ``info/exclude`` and every other file of git's.
+        """
+        return [*(f"--exclude={pattern}" for pattern in self.excludes), "--exclude-standard"]
 
     def _read_at_once(self, new: list[str]) -> bool:
         """Make ``main``'s index the real files as ``git add -A`` would, with no git reading them alone; whether it did.

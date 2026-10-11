@@ -250,13 +250,14 @@ def tree_git_alone_makes(project: Path, tmp_path: Path) -> str:
 
 
 def read_by(monkeypatch) -> dict:
-    """Which gits read the real files from here on: each reader's files, and every ``git add -A`` over the real files."""
+    """Which gits read the real files from here on: each reader's files, each with an index of its own, and every git
+    left to read them alone, its ``git add -u`` over the real files."""
     seen, run = {"readers": [], "alone": 0}, subprocess.run
 
     def spied(args, **kwargs):
-        if args[:2] == ["git", "update-index"] and "--stdin" in args:
+        if args[:2] == ["git", "update-index"] and "--stdin" in args and "GIT_INDEX_FILE" in (kwargs.get("env") or {}):
             seen["readers"].append(sorted(n for n in kwargs["input"].split("\0") if n))
-        if args[:3] == ["git", "add", "-A"] and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
+        if args[:3] == ["git", "add", "-u"] and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
             seen["alone"] += 1
         return run(args, **kwargs)
 
@@ -505,13 +506,13 @@ def a_reader_fails(monkeypatch, name: str, *, times: int) -> dict:
     seen, run = {"tries": 0, "alone": 0, "readers": 0}, subprocess.run
 
     def refused(args, **kwargs):
-        if args[:2] == ["git", "update-index"] and "--stdin" in args:
+        if args[:2] == ["git", "update-index"] and "--stdin" in args and "GIT_INDEX_FILE" in (kwargs.get("env") or {}):
             seen["readers"] += 1
             if name in kwargs["input"].split("\0"):
                 seen["tries"] += 1
                 if seen["tries"] <= times:
                     return subprocess.CompletedProcess(args, 128, "", f"error: unable to read {name}: Input/output error")
-        if args[:3] == ["git", "add", "-A"] and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
+        if args[:3] == ["git", "add", "-u"] and (kwargs.get("env") or {}).get("GIT_WORK_TREE", "").endswith("/project"):
             seen["alone"] += 1
         return run(args, **kwargs)
 

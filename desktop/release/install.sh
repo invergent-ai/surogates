@@ -925,18 +925,31 @@ settled() {
 # virtiofsd, and uidmap's newuidmap and newgidmap for the VM; zstd for its image; pkexec, which its
 # updates run the root helper with; and what this script runs itself.
 packages() {
+  local said updated=1 certutil=""
+  local cause="ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include"
   say "installing the packages it needs"
   export DEBIAN_FRONTEND=noninteractive
   # A package source of the computer's own that fails stops nothing: what is needed may be known already.
-  apt-get update -qq || say "apt-get update failed for a package source of this computer's: installing from what apt knows already"
+  said="$(apt-get update -qq 2>&1)" || updated=
+  [ -z "$said" ] || printf '%s\n' "$said" >&2
+  [ -n "$updated" ] || say "apt-get update failed for a package source of this computer's: installing from what apt knows already"
+  # Where apt did not trust the certificate that an https source answered with, as behind a proxy
+  # that inspects https, that is why an install fails, certutil's too, and not the sources'
+  # components. Its update says so, and ends 0: "Certificate verification failed" on 24.04,
+  # "certificate verify failed" on 26.04.
+  if [[ "${said,,}" == *"certificate verif"* ]]; then
+    cause="apt does not trust the certificate that this computer's https package sources answer with, as behind a proxy that inspects https, and the CA of --ca-cert is Surogate's alone. "
+    cause+="Have the system trust the network's CA (its certificate as a .crt file in /usr/local/share/ca-certificates, then update-ca-certificates), or name http package sources, and run this again"
+    certutil=": $cause"
+  fi
   # Soon after a desktop's first boot, its unattended upgrades hold dpkg's lock for a while.
   apt-get install -y -qq -o DPkg::Lock::Timeout=300 bubblewrap socat ripgrep virtiofsd uidmap zstd pkexec perl-base openssl jq curl desktop-file-utils \
     && apt-get install -y -qq -o DPkg::Lock::Timeout=300 --no-install-recommends qemu-system-x86 \
-    || fail "could not install the packages it needs: ripgrep and virtiofsd are in Ubuntu's universe, which this computer's package sources must include"
+    || fail "could not install the packages it needs: $cause"
   # certutil, with which the app adds the company's CA to each user's NSS database: with --ca-cert
   # ($1), and at any later run while the CA is kept, as a repair.
   if [ -n "${1:-}" ] || [ -f "$COMPANY_CA" ]; then
-    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil"
+    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil$certutil"
   fi
 }
 
@@ -965,11 +978,14 @@ company_ca() {
   taken "$file" "$work/given" 1048576 "$SMALL_WAIT" \
     || fail "$(named "$file") holds more than a megabyte, and a file of certificate authorities holds far less"
   # Each certificate into a file of its own, one open at a time: a megabyte holds more of them
-  # than a process may have files open.
-  awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { if (file) close(file); file = sprintf("%s/cert-%04d.pem", dir, ++n) } file { print > file } /-----END CERTIFICATE-----/ { if (file) close(file); file = "" }' "$work/given"
+  # than a process may have files open. Each on lines of its own first, whatever is joined to its
+  # first line or its last: cat joins files that end with no new line on the line where one ends.
+  sed 's/-----BEGIN CERTIFICATE-----/\n&/g; s/-----END CERTIFICATE-----/&\n/g' "$work/given" \
+    | awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { if (file) close(file); file = sprintf("%s/cert-%04d.pem", dir, ++n) } file { print > file } /-----END CERTIFICATE-----/ { if (file) close(file); file = "" }'
   for cert in "$work"/cert-*.pem; do
     [ -e "$cert" ] || break
-    said="$(openssl x509 -in "$cert" -noout -ext basicConstraints,keyUsage 2>/dev/null)" || said=
+    said="$(openssl x509 -in "$cert" -noout -ext basicConstraints,keyUsage 2>/dev/null)" \
+      || fail "$(named "$file") holds a certificate that openssl cannot read"
     [[ "$said" == *CA:TRUE* ]] && { [[ "$said" != *"X509v3 Key Usage"* ]] || [[ "$said" == *"Certificate Sign"* ]]; } \
       || fail "$(named "$file") holds a certificate that is not a certificate authority's"
     openssl x509 -in "$cert" >>"$work/ca.pem"
@@ -1005,18 +1021,18 @@ keep_company_ca() {
 # (C.UTF-8, which has no language of its own): a server's name may have letters outside ASCII, as
 # the name the user fetched this script from may, and in a locale without them curl refuses the
 # name before it looks it up. With the company's CA beside curl's own roots where there is one,
-# through a network that signs every site with it, or from the company's own server: the CA this
-# run was given, else the one kept. The kept one is root's own word, as the install record is: a
-# file that anyone else may write names no certificate authority to root. The CA says whose
-# certificate a server may show, and no more: what is downloaded is a release only by its
-# signature (signed).
+# through a network that signs every site with it, or from the company's own server, and for a
+# proxy reached over TLS, whose certificate curl checks apart: the CA this run was given, else the
+# one kept. The kept one is root's own word, as the install record is: a file that anyone else may
+# write names no certificate authority to root. The CA says whose certificate a server or a proxy
+# may show, and no more: what is downloaded is a release only by its signature (signed).
 fetch() {
   local ca="$GIVEN_CA" trust=()
   if [ -z "$ca" ] && { [ -e "$COMPANY_CA" ] || [ -L "$COMPANY_CA" ]; }; then
     roots_alone "$COMPANY_CA" || fail "$COMPANY_CA is not as Surogate Desktop's install leaves it: run its install script again with --ca-cert"
     ca="$COMPANY_CA"
   fi
-  [ -z "$ca" ] || trust=(--cacert "$ca" --capath /etc/ssl/certs)
+  [ -z "$ca" ] || trust=(--cacert "$ca" --capath /etc/ssl/certs --proxy-cacert "$ca" --proxy-capath /etc/ssl/certs)
   LC_ALL=C.UTF-8 curl -q --proto '=https,http' "${TIMELY[@]}" "${trust[@]}" "$@"
 }
 
