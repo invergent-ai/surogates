@@ -360,7 +360,8 @@ class LLMSettings(BaseSettings):
     # Fraction of the model's context window at which compaction fires.
     # The default deliberately leaves room for the response plus the
     # compaction call itself; raise it to trade a larger working context
-    # for a tighter margin before an overflow.
+    # for a tighter margin before an overflow.  Windows under 512K tokens
+    # compact at no less than 0.75 (see harness/context.py).
     compression_threshold: float = Field(default=0.50, gt=0.0, le=0.95)
 
     summary_model: str = ""  # cheap model for context compression summaries

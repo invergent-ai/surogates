@@ -48,6 +48,7 @@ from surogates.harness.agent_resolver import (
     resolve_agent_def,
 )
 from surogates.harness.connection_health import cleanup_dead_connections
+from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
@@ -4117,19 +4118,20 @@ class AgentHarness(
                     current_tokens=input_tokens or None,
                     pre_compress_guidance=pre_compress_text,
                 )
-                await self._store.emit_event(
-                    session.id,
-                    EventType.CONTEXT_COMPACT,
-                    {
-                        **summary_data,
-                        "compacted_messages": compressed,
-                    },
-                )
-                messages[:] = compressed
-                # Invalidate system prompt cache -- conversation shape changed.
-                self._system_prompt_cache.invalidate(session.id)
-                self._memory_snapshot_cache.pop(session.id, None)
-                self._forget_compacted_reads(session)
+                if summary_data.get("strategy") not in NOOP_STRATEGIES:
+                    await self._store.emit_event(
+                        session.id,
+                        EventType.CONTEXT_COMPACT,
+                        {
+                            **summary_data,
+                            "compacted_messages": compressed,
+                        },
+                    )
+                    messages[:] = compressed
+                    # Invalidate system prompt cache -- conversation shape changed.
+                    self._system_prompt_cache.invalidate(session.id)
+                    self._memory_snapshot_cache.pop(session.id, None)
+                    self._forget_compacted_reads(session)
 
             # Lease renewal is handled by a background task started in
             # ``wake()``; no per-iteration renewal needed here.
