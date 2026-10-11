@@ -389,16 +389,6 @@ export class ToolHosts implements Executor {
   }
 
   /**
-   * *root*'s hosts go now rather than once idle, each letting go of what it holds, and so do those its operations are
-   * starting: what they hold is no longer what the root works in, as when its chat is deleted. Its landing's host
-   * begins no step after, and goes once its helper has ended the ones it runs. Settles once every one of them has
-   * gone. Never rejects.
-   */
-  dismiss(root: string): Promise<void> {
-    return this.going(root);
-  }
-
-  /**
    * *root*'s chat was deleted, and its binding *bound* is forgotten next (binding/binder.ts). Its hosts on its copy go,
    * and so does its landing's, given RETIRE_STEP_MS for the step its helper runs; its copy stays, with what it did not
    * land. Answered at once: nothing waits for them. But a landing's host that has written in the folder, an apply or a
@@ -423,7 +413,7 @@ export class ToolHosts implements Executor {
   }
 
   // *root*'s hosts and those its operations are starting go, but *kept*; a landing's given *stepMs* for its step.
-  private async going(root: string, kept?: Host, stepMs?: number): Promise<void> {
+  private async going(root: string, kept: Host | undefined, stepMs: number): Promise<void> {
     const going = new Set<Host>();
     const go = (host: Host | Outcome | undefined) => {
       if (!(host instanceof Host) || host === kept || going.has(host)) return;

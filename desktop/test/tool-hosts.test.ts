@@ -1459,10 +1459,7 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(fakes[2]?.sent[0]).toMatchObject({ type: "start", folder: copyOf(ROOT_A).folder.path, expect: { dev: 7, ino: 71, boot: BOOT_ID } });
   });
 
-  it.each([
-    ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
-    ["this computer's access ended", (executor: ToolHosts) => executor.end()],
-  ])("stops a landing's host, %s, only once the step its helper runs has ended, a cancelled one too, and the landing's next step waits in a host of its own", async (_, going) => {
+  it("stops a landing's host, this computer's access ended, only once the step its helper runs has ended, a cancelled one too, and the landing's next step waits in a host of its own", async () => {
     const executor = threads({ spawnHost: spawnHost(readyOnly) });
     const cancel = new AbortController();
     const step = landing("apply", { saga: "s1", step: 0, path: "a.txt" });
@@ -1472,7 +1469,7 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     cancel.abort();
     expect(await applying).toEqual(CANCELLED);
     let over = false;
-    const stopped = going(executor).then(() => {
+    const stopped = executor.end().then(() => {
       over = true;
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1542,21 +1539,18 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     await until(() => fakes[0]?.count("stop") === 1);
   });
 
-  it("stops, when its thread is dismissed, the hosts its operations were starting while its copy was opened, once they are made", async () => {
+  it("stops, when its thread is deleted, the hosts its operations were starting while its copy was opened, once they are made", async () => {
     const makes: Array<(opened: Opened) => void> = [];
     answer = () => new Promise<Opened>((resolve) => void makes.push(resolve));
     // Hosts that are still starting when they are told to go.
     const executor = threads({ spawnHost: spawnHost(onStop) });
     const waiting = [executor.run(op("resolve", { path: "" }), signal()), executor.land(landing("revisions", { paths: [] }), signal())];
     await until(() => opens.length === 2);
-    let over = false;
-    const dismissed = executor.dismiss(ROOT_A).then(() => {
-      over = true;
-    });
+    executor.retired(ROOT_A, boundA());
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(over).toBe(false);
+    expect(fakes).toHaveLength(0);
     for (const make of makes) make(handed(ROOT_A));
-    await dismissed;
+    await until(() => gone === 2);
     // Each was told to go as it was made: neither ran what waited for it, and each let its hold go.
     expect([fakes.length, fakes.map((host) => host.count("stop")), fakes.map((host) => host.count("op")), closed.length]).toEqual([2, [1, 1], [0, 0], 2]);
     for (const outcome of await Promise.all(waiting)) {
@@ -1733,7 +1727,10 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
   });
 
   it.each([
-    ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
+    ["its thread deleted", (executor: ToolHosts) => {
+      executor.retired(ROOT_A, boundA());
+      return until(() => gone === 1);
+    }],
     ["the app quitting", (executor: ToolHosts) => executor.stop()],
   ])("begins no step in a landing's host told to go, %s, while the step waited for it to start, whatever it says as it stops", async (_, going) => {
     // As a host that has just taken the folder when it is told to stop: it says it is ready, then goes.
@@ -2206,10 +2203,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect([existsSync(keeps), readFileSync(join(folder, "a.txt"), "utf8")]).toEqual([false, "the user's own\n"]);
   });
 
-  it.each([
-    ["its thread deleted", (executor: ToolHosts) => executor.dismiss(ROOT_A)],
-    ["the app quitting", (executor: ToolHosts) => executor.stop()],
-  ])("leaves the file whole where a landing's host is told to go, %s, inside an apply: the step ends first, and then the host", async (_, going) => {
+  it("leaves the file whole where a landing's host is told to go, the app quitting, inside an apply: the step ends first, and then the host", async () => {
     const folder = changed();
     const executor = threads({ spawnHost: upset() });
     arm("hold");
@@ -2220,7 +2214,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     // Inside it, between its two renames: the user's file moved aside, its name empty.
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
     let over = false;
-    const gone = going(executor).then(() => {
+    const gone = executor.stop().then(() => {
       over = true;
     });
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -2402,6 +2396,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     const { folder, before } = await killed();
     const { executor, told } = startedAgain({ idleMs: 30_000, landWaitMs: 3_000 });
     // A chat holds the folder: the start's put-back waits in vain, and so does the landing that comes after.
+    const chat = spawned.length;
     expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
     executor.recoverLeft();
     await until(() => told.length === 2, 15_000);
@@ -2412,7 +2407,8 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(await landing).toEqual(folderBusy(folder));
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
     // Once the chat lets the folder go, the landing's host puts the file back, and the folder may be read.
-    await executor.dismiss(CHAT);
+    executor.retired(CHAT, { folder, ...identities.get(folder)! });
+    await new Promise<void>((resolve) => spawned[chat]?.onExit(resolve));
     expect(await executor.land(step("recover"), signal())).toEqual({ ok: putBack });
     expect(await executor.recoverBefore(folder, signal())).toBeNull();
     expect(lies(folder)).toEqual(before);
