@@ -55,6 +55,7 @@ from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
     coerce_message_content,
     content_as_text,
+    extract_final_response,
     message_texts,
 )
 from surogates.harness.prompt_cache import SystemPromptCache, mark_prefix_cacheable
@@ -170,13 +171,15 @@ from surogates.harness.loop_deep_research import (
 )
 from surogates.harness.loop_messages import (
     _initial_system_message,
+    _is_scheduled_run,
+    _last_assistant_message_excerpt,
     _latest_message_is_a_follow_up,
     _latest_user_event_data,
     _latest_user_event_id,
     _latest_user_event_text,
     _user_event_text,
     _latest_user_message_text,
-    _should_notify_parent_on_completion,  # noqa: F401
+    _should_notify_parent_on_completion,
     _view_context_note,  # noqa: F401
     _view_context_note_from_metadata,  # noqa: F401
     maybe_inject_browser_pause,
@@ -222,7 +225,7 @@ from surogates.harness.loop_vision import (
 )
 
 
-from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin, announce_result
 from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
@@ -1064,13 +1067,17 @@ class AgentHarness(
         back the browser gave it, unless they took it over again since.
 
         Read for each model request, and at the end of a reply, one message
-        each, as replay renders them.  Of workers, only a master reads them
-        live: its only reporting children are its threads.  A
-        ``delegate_task`` parent, which a master never is, already has its
-        child's result as the tool's result.
+        each, as replay renders them.  Of workers, a master reads them live,
+        whose only reporting children are its threads, and so does a
+        coordinator whose mission is in flight, of its helpers: replay puts
+        a report before the first request written after it, so one that
+        request did not read would stand ahead of the turn's answer, and
+        the next turn's request would end on that answer.  A ``delegate_task``
+        parent, which a master never is, already has its child's result as
+        the tool's result.
         """
         types: list[EventType] = []
-        if is_project_master(session.config):
+        if is_project_master(session.config) or (session.config or {}).get("active_mission_id"):
             types += [EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED]
         if is_project_thread(session.config):
             # Another thread's turn end can find this one's landing escalated, while it works.
@@ -3629,6 +3636,20 @@ class AgentHarness(
                 # at the top of process_wake_cycle, leaving the mission
                 # active forever even after its verifier task finishes.
                 if await self._mission_has_pending_work(session):
+                    # A message typed meanwhile the turn reads, as any turn's
+                    # end does: one typed as its last request was made ready,
+                    # which that request did not read, would be replayed ahead
+                    # of the answer, and the next turn's request would end on
+                    # that answer.
+                    followup, steer_cursor = await self._collect_steer_messages(session, steer_cursor)
+                    if followup is not None:
+                        messages.append(followup)
+                        request = _latest_user_message_text([followup])
+                        turn_id = str(uuid4())
+                        turn_base_iteration = iteration
+                        self._pending_iteration_summary_tasks = {}
+                        self._completed_iteration_summaries = {}
+                        continue
                     logger.debug(
                         "Session %s: mission has in-flight tasks; deferring completion",
                         session.id,
@@ -3637,9 +3658,8 @@ class AgentHarness(
                     # answer, so a wake with nothing new asks the model nothing.
                     # Not past what no request of the turn read, which has a
                     # turn of its own: a message past the steer cursor, typed
-                    # as a request was made ready or answered, and a report or
-                    # a redo past the report cursor, which a coordinator that
-                    # is no project's master reads only at its next turn.
+                    # as the turn ended, and a report or a redo past the report
+                    # cursor, which came after the turn's last request.
                     try:
                         since = await self._store.get_events(
                             session.id, after=min(steer_cursor, report_cursor),
@@ -5641,10 +5661,11 @@ class AgentHarness(
         ``session.complete`` tells whoever waits for the turn.  A command's
         answer ends its turn the same way, in one write, with a
         ``session.complete`` read as a turn's end is, that names the
-        command's message.  A worker that dies before that write leaves a
-        turn the next wake ends: the answer in the log says the command was
-        run.  One that dies after it leaves a session at rest, which no wake
-        ends again.
+        command's message, and whoever waits on the turn is told of it as
+        of a model's (``_report_command_turn``).  A worker that dies before
+        that write leaves a turn the next wake ends: the answer in the log
+        says the command was run.  One that dies after it leaves a session
+        at rest, which no wake ends again.
 
         Not when more was said since that still waits: a message no request
         has read, the user's own or the command's to start its work (a
@@ -5689,7 +5710,7 @@ class AgentHarness(
             "cost_summary": SessionCostTracker().summary(),
             "answers": typed_at,
         }
-        await self._store.advance_harness_cursor(
+        rested = await self._store.advance_harness_cursor(
             session.id,
             through_event_id=events[-1].id if unread is None else unread - 1,
             lease_token=lease.lease_token,
@@ -5697,6 +5718,8 @@ class AgentHarness(
         )
         if at_rest:
             await self._release_command_turn(session)
+        if rested:
+            await self._report_command_turn(session, events)
         return at_rest
 
     def _more_was_said(self, session: Session, events: list, typed_at: int) -> bool:
@@ -5723,8 +5746,8 @@ class AgentHarness(
         start of every turn does, and neither is counted against a turn.
 
         Nothing else of a model's turn end belongs here.  A command has no
-        tool saga, no summary and no files to land, and it reports to
-        nobody: its answer is its whole result.
+        tool saga, no summary and no files to land: its answer is its whole
+        result, which ``_report_command_turn`` tells.
         """
         if self._sandbox_pool is not None:
             try:
@@ -5741,6 +5764,36 @@ class AgentHarness(
             self._settle_commerce_reservation(session, nothing_spent),
             self._settle_allowance_reservation(session, nothing_spent),
         )
+
+    async def _report_command_turn(self, session: Session, events: list) -> None:
+        """Tell whoever waits on the turn a command ended that it ended, as a
+        model's turn end tells them, with the command's answer in *events*,
+        the session's log, as its result: a routine's run its routine's chat
+        or the inbox, and a helper the session that started it, which is
+        woken for it.  Once, by the write that brought the session to rest.
+
+        Not a project's thread: its master is told of the thread's work,
+        and a command its user typed there is none.  Nor a chat's own inbox
+        item: its user is reading the answer.
+        """
+        if _is_scheduled_run(session):
+            said = extract_final_response(events, fallback="")
+            try:
+                await announce_result(
+                    self._store, session, outcome="success",
+                    summary=_last_assistant_message_excerpt([{"role": "assistant", "content": said}]),
+                )
+            except Exception:
+                # The run is at rest all the same: its answer is in its own log.
+                logger.warning("Failed to announce the end of run %s at a command", session.id, exc_info=True)
+        if _should_notify_parent_on_completion(session) and not is_project_thread(session.config):
+            from surogates.harness.worker_notify import notify_parent_on_completion
+
+            await notify_parent_on_completion(
+                session_store=self._store, worker_session_id=session.id, parent_session_id=session.parent_id,
+                org_id=str(session.org_id), agent_id=session.agent_id, redis=self._redis,
+                task_id=getattr(session, "task_id", None), session_factory=self._session_factory,
+            )
 
     def _goal_waits(self, session: Session, events: list) -> bool:
         """Whether the session's goal is in flight with its next turn queued
