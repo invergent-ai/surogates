@@ -1239,8 +1239,10 @@ class ArtifactCompletionMixin:
         if landing is not None:
             # A thread's files are its landing's; artifacts still come from its summary.
             landed = landing["files"]
-            if not landed and landing["state"] != "completed":
-                # A landing that never knew its files: the turn's own list names them, none landed.
+            if not landed and landing["state"] != "completed" and not opens_its_copy(session):
+                # A landing that never knew its files: the turn's own list names them, none landed.  On a computer
+                # it names none: the turn's open may have brought your edits into its copy, which only its landing's
+                # ``changed`` tells apart.
                 landed = [{**f, "landing": "not_merged"} for f in files or [] if f.get("kind") == "file"]
             files = landed + [a for a in files or [] if a.get("kind") != "file"]
         elif is_project_thread(session.config) and (alone := await redo_files(self._store, session.id)):

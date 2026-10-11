@@ -1117,7 +1117,11 @@ async def _land(
             if not _journals(unsettled.__cause__):
                 # Its computer did not answer: the row says how far it got.  What the journal refused is another's to write.
                 await _written(row.write)
-            return {**_said_deleted(outcome, ending), "state": "unsettled", "commit": None, "landed": []}
+            # Of the files its computer named, none landed.
+            return {
+                **_said_deleted(outcome, ending), "state": "unsettled", "commit": None, "landed": [],
+                "files": _told(changes, [], outcome["overlapped"]),
+            }
         outcome["state"] = state
         if pushed is not None:
             # The push happened though its answer was lost: the landing counts, and nothing went back.

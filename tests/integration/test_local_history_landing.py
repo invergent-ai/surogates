@@ -498,6 +498,22 @@ async def test_a_landing_that_cannot_be_put_back_whole_keeps_what_it_kept_gives_
     assert told_.data["landing"] == "escalated"
 
 
+# -- a landing cut short -------------------------------------------------------------------------------------------
+
+
+async def test_a_landing_that_never_asked_what_its_copy_changed_names_none_of_the_turns_files(api, computer, monkeypatch):
+    _, master, thread = await begun_with_copy(api, computer)
+    # Its folder's helper refuses the hold, before the landing asks anything of the copy.
+    lie_at(computer, "recover", lambda frame, outcome: {"error": {"type": "os", "code": "EIO", "message": "I/O error"}}, invocation="land:0:hold")
+    await woken(api, monkeypatch, thread, [EDITS, _final_response("Done.")])
+    computer.app.lie = None
+    assert ran(computer, "land:0") == []
+    # The turn's own list of its files is not its copy's word: none is named, and what is said is that none was read.
+    [report] = await told(api, master)
+    assert (report.data["landing"], report.data["landing_reason"], report.data["landing_code"]) == ("compensated", "refused", "EIO")
+    assert files_of(report) == [] and "(its computer refused a step of it: EIO): the turn's files could not be read" in said(report)
+
+
 # -- what it leaves out --------------------------------------------------------------------------------------------
 
 
