@@ -336,9 +336,10 @@ export async function admit(root: string, leaf: "run" | "proc", id: string, pid:
   if (!ROOT_ID.test(root)) return;
   const cgroup = join(CGROUPS, root);
   for (const member of (await readFile(join(cgroup, "init", "cgroup.procs"), "utf8")).split("\n").filter(Boolean)) {
-    // Its pid in each PID namespace it is in, the root's last.
+    // Its pid in the guest's PID namespace and in the root's, which it is in: unshare is in the runner's cgroup
+    // too, outside the root's, with one pid alone, which a shell's in the root's may equal.
     const status = await readFile(`/proc/${member}/status`, "utf8").catch(() => "");
-    if (Number(/^NSpid:.*\s(\d+)$/m.exec(status)?.[1]) === pid) return writeFile(join(cgroup, leaf, id, "cgroup.procs"), member);
+    if (Number(/^NSpid:\s*\d+\s+(\d+)\s*$/m.exec(status)?.[1]) === pid) return writeFile(join(cgroup, leaf, id, "cgroup.procs"), member);
   }
 }
 
