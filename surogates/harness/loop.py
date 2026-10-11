@@ -3588,16 +3588,21 @@ class AgentHarness(
                     )
                     # The turn is over all the same: the cursor moves past its
                     # answer, so a wake with nothing new asks the model nothing.
-                    # Not past what this request did not read: a report or a
-                    # redo that came while the model answered has its own turn.
+                    # Not past what no request of the turn read, which has a
+                    # turn of its own: a message past the steer cursor, typed
+                    # as a request was made ready or answered, and a report or
+                    # a redo past the report cursor, which a coordinator that
+                    # is no project's master reads only at its next turn.
                     try:
                         since = await self._store.get_events(
-                            session.id, after=request_id, exclude_types=[EventType.LLM_DELTA],
+                            session.id, after=min(steer_cursor, report_cursor),
+                            types=[*MESSAGE_TYPES, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.HISTORY_REDO],
                         )
-                        unread = _first_unread(
-                            since, goal_in_flight=False,
-                            is_plain_message=lambda event: self._is_plain_message(session, event),
-                        )
+                        unread = min((
+                            event.id for event in since
+                            if event.id > steer_cursor and self._is_plain_message(session, event)
+                            or event.id > report_cursor and event.type not in MESSAGE_TYPES
+                        ), default=None)
                         await self._store.advance_harness_cursor(
                             session.id,
                             through_event_id=event_id if unread is None else min(event_id, unread - 1),
