@@ -100,9 +100,12 @@ def files_of(folder: Path) -> list[tuple[str, bytes]]:
 
 
 def as_it_is(top: Path) -> list[tuple[str, int, int, bytes]]:
-    """Every name under *top* with its mode, its time and what it holds, no link followed: a request that
+    """*top* and every name under it with its mode, its time and what it holds, no link followed: a request that
     leaves *top* alone leaves all of it the same, and a folder renamed whole takes all of it along."""
-    seen = []
+    if not os.path.lexists(top):
+        return []
+    itself = top.lstat()
+    seen = [(".", itself.st_mode, itself.st_mtime_ns, b"")]
     for at, folders, files in os.walk(top):
         for name in (*folders, *files):
             path = Path(at, name)
@@ -2933,6 +2936,27 @@ def test_a_repository_whose_first_open_did_not_end_is_set_aside_whole_with_its_c
     assert (as_it_is(aside / copy), as_it_is(aside / repository)) == (held, kept)
 
 
+@pytest.mark.parametrize("theirs", ["a tag of a repository of your own", "a HEAD on no branch"])
+def test_a_history_not_the_platforms_own_refuses_the_open_before_a_repository_or_a_copy_is_set_aside(tmp_path, folder, theirs):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "Draft.md").write_text("in a snapshot\n")
+    # A request after the first open's: the place is put right already, as every later request finds it.
+    tip = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").snapshot("before a step")
+    (one.copy / "notes.txt").write_text("the thread's notes, in no snapshot\n")
+    # The repository's first open did not end, so the next sets it aside with its copy: unless the history refuses first.
+    (one.repo / "made").unlink()
+    store = tmp_path / "store" / "history.git"
+    if theirs == "a tag of a repository of your own":
+        (store / "packed-refs").write_text(f"{(store / 'packed-refs').read_text()}{tip} refs/tags/v1.0\n")
+    else:
+        (store / "HEAD").write_text(f"{tip}\n")
+    place = as_it_is(tmp_path / "store")
+    with refused("history_refused", "^refused the project's history: "):
+        LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").open()
+    # Nothing of the place was renamed, made or written: every name, mode, time and byte, the place's own folder too.
+    assert as_it_is(tmp_path / "store") == place and set_aside_whole(tmp_path / "store") == []
+
+
 def test_a_copy_whose_index_is_gone_is_set_aside_whole_and_made_again_from_its_branch(tmp_path, folder):
     one = a_copy(tmp_path, folder)
     (one.copy / "Draft.md").write_text("in a snapshot\n")
@@ -3318,8 +3342,8 @@ def test_no_name_an_earlier_guest_left_among_what_is_set_aside_is_gone_through_w
     # Its own is one more than any name there has, whatever that name is of: nothing was at its name before.
     [copy] = opened["set_aside_folders"]
     assert re.fullmatch(r"00000010-[0-9]{8}T[0-9]{6}Z-t1\.copy", copy) and as_it_is(aside / copy) == held
-    # And nothing left there was gone through, written over or taken away.
-    assert [entry for entry in as_it_is(aside) if entry[0].split("/")[0] != copy] == left
+    # And nothing left there was gone through, written over or taken away: the folder itself holds one more.
+    assert [entry for entry in as_it_is(aside) if entry[0].split("/")[0] not in (copy, ".")] == [entry for entry in left if entry[0] != "."]
     assert as_it_is(elsewhere) == theirs
     assert LocalHistory.at(tmp_path / "store", folder, thread="t2", user="u1").open() == {
         "copy": "made", "set_aside_folders": ["00000007-20260101T000000Z-t2.copy"],
@@ -4628,12 +4652,13 @@ def made_whole_again(root: Path, kept: dict, files: list[tuple[str, bytes]], at:
 
 def test_a_letting_go_killed_at_any_step_leaves_the_whole_copy_at_its_name_or_nothing_and_its_next_open_makes_it_whole(tmp_path):
     kept, files, platform = a_copy_to_let_go(tmp_path / "whole")
-    held = [entry for entry in as_it_is(tmp_path / "whole" / "store" / "threads" / OURS) if entry not in platform]
+    # Every name of the copy but the platform's folders, and the copy's own folder, whose time their leaving changes.
+    held = [entry for entry in as_it_is(tmp_path / "whole" / "store" / "threads" / OURS) if entry not in platform and entry[0] != "."]
     for at, root in each_cut(tmp_path, OURS, "close", {}, removals=True):
         copy, waiting = root / "store" / "threads" / OURS, root / "store" / "waiting" / OURS
         # Cut anywhere: at the copy's name is the whole copy, but the platform's folders, or nothing; and each of those
         # is whole, in the copy or beside the copies.
-        assert not os.path.lexists(copy) or [entry for entry in as_it_is(copy) if entry not in platform] == held, at
+        assert not os.path.lexists(copy) or [entry for entry in as_it_is(copy) if entry not in platform and entry[0] != "."] == held, at
         assert sorted([*platform_folders(copy), *platform_folders(waiting)]) == platform, at
         made_whole_again(root, kept, files, at)
 
