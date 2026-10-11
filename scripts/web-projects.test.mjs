@@ -224,6 +224,7 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     statusLine: "Waiting for thinkpad", progress: { done: 1, total: 2 },
     files: [{ kind: "file", label: "notes.md", ref: "threads/tidy/notes.md", threadId: "t-1", landing: "redoing" }],
     landingId: "41",
+    setAside: null,
     place: { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false },
     createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z", resolvedAt: null,
   });
@@ -253,6 +254,28 @@ test("a row maps to the shell's ThreadRow field by field", () => {
     place: { kind: "cloud" }, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
   }).landingId;
   assert.deepEqual([7, "", { id: "41" }, "41"].map(landed), [null, null, null, "41"]);
+});
+
+test("what a thread's computer set aside maps to the row's, each entry taken only where the page knows it", () => {
+  const asideOf = (set_aside) => threadRowOf({
+    id: "t-6", title: "Draft E", group: "idle", reason: null, status_line: null, progress: null, files: [], set_aside,
+    place: { kind: "device", device_id: "d-1", device_name: "thinkpad", online: true },
+    created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z", resolved_at: null,
+  }).setAside;
+  const copy = { kind: "copy", at: "2026-10-10T10:15:00Z" };
+  assert.deepEqual(
+    asideOf({ kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] }),
+    { kept: [copy, { kind: "repository", at: "2026-10-10T10:15:01Z" }], snapshots: 2, gone: [copy] },
+  );
+  // A kind or a time the page does not know, or a count that is none, is left out; and with nothing left, none.
+  assert.deepEqual(
+    asideOf({ kept: [{ kind: "history", at: copy.at }, { kind: "copy", at: "yesterday" }, copy, 7], snapshots: -1, gone: "all" }),
+    { kept: [copy], snapshots: 0, gone: [] },
+  );
+  assert.deepEqual(
+    [undefined, null, {}, { kept: [], snapshots: 0, gone: [] }, "aside", { snapshots: 1.5 }].map(asideOf),
+    [null, null, null, null, null, null],
+  );
 });
 
 // The project routes over a fake fetch: *answer* gives each request's response, and every

@@ -413,8 +413,8 @@ _OPENS_READ = 20
 # What the computer :device answered the latest opens of the project's threads with, newest first: each outcome as
 # it was recorded, with the thread whose copy it was asked about.
 _FOLDER_OPENS = text("""
-    SELECT o.outcome, o.root_session_id FROM device_operations o
-      JOIN workstream_threads t ON t.session_id = o.calling_session_id AND t.session_id = o.root_session_id
+    SELECT o.outcome, o.calling_session_id FROM device_operations o
+      JOIN workstream_threads t ON t.session_id = o.calling_session_id
      WHERE t.workstream_id = :project AND o.device_id = :device AND o.kind = 'history'
        AND o.args->>'action' = 'open' AND o.outcome->'ok' IS NOT NULL
      ORDER BY o.created_at DESC

@@ -187,6 +187,110 @@ def test_a_report_says_why_a_landing_on_a_computer_left_a_file_out_that_nothing_
     ) in said
 
 
+THREAD = "3e9b6f4b-bd5a-4f8b-8c43-4d5e6f708192"
+COPY = f"00000001-20261010T101500Z-{THREAD}.copy"
+REPOSITORY = f"00000002-20261011T090000Z-{THREAD}.repository"
+WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
+
+
+def test_a_report_says_what_its_computer_set_aside_of_the_threads_work_what_went_and_where_it_is():
+    said = report(set_aside={"copies": [REPOSITORY], "snapshots": [ID, "b" * 40], "gone": [COPY]})
+    assert said.endswith(
+        "\nSet aside whole on its computer, as its copy there had to be made again: its repository as it was at 2026-10-11 09:00 UTC"
+        "\nSet aside on its computer, as its copy there was made other files: what the copy held of the thread's own, in 2 snapshots"
+        "\nNo longer kept on its computer, which keeps only the latest of what it set aside: its copy set aside at 2026-10-10 10:15 UTC"
+        f"\n{WHERE}"
+    )
+    # A failed turn's report says it the same; one snapshot is one; what went alone is nowhere to be found.
+    failed = worker_note(EventType.WORKER_FAILED.value, {
+        "worker_id": "t", "title": "Check the totals", "error": "llm_error", "set_aside": {"copies": [], "snapshots": [ID], "gone": []},
+    })["content"]
+    assert failed.endswith(f"in 1 snapshot\n{WHERE}")
+    assert report(set_aside={"copies": [], "snapshots": [], "gone": [COPY]}).endswith("its copy set aside at 2026-10-10 10:15 UTC")
+
+
+def test_a_report_says_nothing_set_aside_where_its_payload_names_nothing_that_is_a_name():
+    plain = report()
+    for told in (None, "everything", {"copies": ["../etc/passwd", 7], "snapshots": "all", "gone": [f"{COPY}.gone"]}):
+        assert report(set_aside=told) == plain, told
+
+
+class Ends:
+    """A thread's session store as a turn's end reads what an earlier end recorded set aside: its newest end that did."""
+
+    def __init__(self, told: dict | None = None) -> None:
+        self.told = told
+
+    async def last_event(self, session_id, *types, with_key=None):
+        assert (types, with_key) == ((EventType.SESSION_COMPLETE, EventType.SESSION_FAIL), "set_aside")
+        return None if self.told is None else SimpleNamespace(data={"set_aside": self.told})
+
+
+async def told_at_its_end(monkeypatch, opened: dict | None, told: dict | None = None, landing: dict | None = None):
+    """What a turn's end of the thread ``THREAD`` records set aside, and what it tells: its last open answered *opened*."""
+    async def last_opened(self, calling_session_id):
+        return None if opened is None else {"ok": opened}
+
+    monkeypatch.setattr(local_landing.DeviceOperations, "last_opened", last_opened)
+    session = SimpleNamespace(id=THREAD)
+    return await local_landing.set_aside_of(store=Ends(told), session_factory=None, redis=None, session=session, landing=landing)
+
+
+async def test_a_turns_end_records_what_its_computer_keeps_set_aside_and_tells_only_what_no_earlier_end_did(monkeypatch):
+    nothing = {"copies": [], "snapshots": [], "gone": []}
+    # Nothing ever set aside: nothing recorded, nothing told.
+    assert await told_at_its_end(monkeypatch, {"copy": "kept"}) == (None, None)
+    assert await told_at_its_end(monkeypatch, None) == (None, None)
+    # A copy set aside, and a landing's own snapshot, which no open has named yet.
+    kept, new = await told_at_its_end(monkeypatch, {"copy": "made", "set_aside_folders": [COPY]}, landing={"set_aside": [ID]})
+    assert kept == new == {"copies": [COPY], "snapshots": [ID], "gone": []}
+    # Named again by the next open, nothing is new; and gone at the bound, it is told once more, as gone.
+    assert await told_at_its_end(monkeypatch, {"copy": "moved", "set_asides": [ID], "set_aside_folders": [COPY]}, told=kept) == (kept, None)
+    gone = {"copy": "moved", "set_asides": [ID], "set_aside_folders": [REPOSITORY], "set_aside_gone": [COPY]}
+    assert await told_at_its_end(monkeypatch, gone, told=kept) == (
+        {"copies": [REPOSITORY], "snapshots": [ID], "gone": [COPY]}, {"copies": [REPOSITORY], "snapshots": [], "gone": [COPY]},
+    )
+    went = {"copies": [REPOSITORY], "snapshots": [ID], "gone": [COPY]}
+    assert await told_at_its_end(monkeypatch, gone, told=went) == (went, None)
+    # An open that found the folder's history off names no snapshot, and says nothing of those its repository holds.
+    off = {"history": "off", "reason": "cap", "set_aside_folders": [COPY]}
+    assert await told_at_its_end(monkeypatch, off, told=kept) == (kept, None)
+    # An open answered with what is no answer says nothing: the last word stands.
+    assert await told_at_its_end(monkeypatch, {"copy": "kept", "set_aside_folders": ["../../etc"]}, told=kept) == (kept, None)
+    # Once all of it went from the computer's word, the end records that, so a row says nothing set aside.
+    assert await told_at_its_end(monkeypatch, {"copy": "kept"}, told=kept) == (nothing, None)
+    # A computer that names more snapshots than it keeps is taken at its latest few.
+    many = [f"{n:040x}" for n in range(local_landing.MAX_ASIDE + 5)]
+    kept, new = await told_at_its_end(monkeypatch, {"copy": "kept", "set_asides": many})
+    assert kept["snapshots"] == new["snapshots"] == many[-local_landing.MAX_ASIDE:]
+
+
+class Unread:
+    """A session store that cannot be read: how many times it was asked."""
+
+    asked = 0
+
+    async def last_event(self, *args, **kwargs):
+        self.asked += 1
+        raise ConnectionError("the database went away")
+
+
+async def test_only_a_thread_in_a_copy_of_its_own_on_a_computer_is_asked_what_was_set_aside_and_an_end_that_cannot_read_it_goes_on():
+    from surogates.devices.history import opens_its_copy
+    from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+
+    harness = SimpleNamespace(_store=Unread(), _session_factory=None, _redis=None)
+    cloud = SimpleNamespace(id=uuid4(), config={"workstream_id": str(uuid4()), "workstream_role": "thread"})
+    assert await ArtifactCompletionMixin._set_aside(harness, cloud, None) == (None, None) and harness._store.asked == 0
+    thread = uuid4()
+    local = SimpleNamespace(id=thread, config={
+        **cloud.config, "execution": {"kind": "device", "device_id": str(uuid4()), "history": {"thread": str(thread)}},
+    })
+    assert opens_its_copy(local)
+    # Its turn's end records nothing of it, and the next end tells what this one did not.
+    assert await ArtifactCompletionMixin._set_aside(harness, local, None) == (None, None) and harness._store.asked == 1
+
+
 class Leases:
     """A session store's leases as a settle asks them: each renewal answered in turn by *renewals*, an exception raised."""
 

@@ -52,7 +52,7 @@ from surogates.harness.landing import (
     turn_ended,
     waiting_on_you,
 )
-from surogates.harness.local_landing import keep_local_turn, land_local_turn, waiting_on_you_here
+from surogates.harness.local_landing import keep_local_turn, land_local_turn, set_aside_of, waiting_on_you_here
 from surogates.runtime.turn_slots import detach_turn
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
@@ -1124,6 +1124,9 @@ class ArtifactCompletionMixin:
                 # The master hears it: the report names the turn's files as not saved.
                 landing = {"state": "failed", "files": [], "excluded": [], "repositories": []}
 
+        # What its computer keeps set aside of the thread's work: recorded at its end, and what is new told in its report.
+        set_aside, newly_aside = await self._set_aside(session, landing)
+
         not_kept: list[str] = []
         # What a hand-back that failed leaves: its completion's mark, and the files kept apart.
         unkept: dict[str, Any] = {}
@@ -1264,6 +1267,8 @@ class ArtifactCompletionMixin:
         if landing is not None and landing.get("stopped"):
             # Stopped once its landing had written a file: the landing was not interrupted.
             complete_data["stopped"] = "landing"
+        if set_aside is not None:
+            complete_data["set_aside"] = set_aside
 
         # Two independent best-effort settlements (neither raises); run
         # them concurrently to halve the session-complete round trip when
@@ -1368,6 +1373,7 @@ class ArtifactCompletionMixin:
                     files=files,
                     landing=landing,
                     unkept=unkept,
+                    set_aside=newly_aside,
                 )
             except Exception:
                 logger.warning(
@@ -1457,6 +1463,24 @@ class ArtifactCompletionMixin:
             return {"kept": False}
         left = apart.get("left", []) if apart else []
         return {"kept": False, "left": left} if left else {}
+
+    async def _set_aside(self, session: Any, landing: dict[str, Any] | None) -> tuple[dict | None, dict | None]:
+        """What a thread's computer keeps set aside of its work, for its turn's end to record, and what is new, for its report.
+
+        Only a thread that works in a copy of its own on its user's
+        computer has any (``local_landing.set_aside_of``).  As best it can:
+        a turn's end that cannot read it records nothing of it, and the next
+        end tells what this one did not.
+        """
+        if not opens_its_copy(session):
+            return None, None
+        try:
+            return await set_aside_of(
+                store=self._store, session_factory=self._session_factory, redis=self._redis, session=session, landing=landing,
+            )
+        except Exception:
+            logger.warning("Could not read what the computer of thread %s keeps set aside of its work", session.id, exc_info=True)
+            return None, None
 
     async def _open_copy_to_land(self, session: Session) -> None:
         """Give a cloud thread's turn that never used its pod one, when its end lands all the same."""
@@ -1587,6 +1611,8 @@ class ArtifactCompletionMixin:
                     self._destroy_sandbox_quietly(sandbox_id, str(session.id)), name=f"sandbox-teardown-{session.id}",
                 )
 
+        # What its computer keeps set aside of the thread's work, as a completed turn's end records and tells it.
+        set_aside, newly_aside = await self._set_aside(session, None)
         fail_data: dict[str, Any] = {
             "reason": reason, "worker_id": self._worker_id, **data,
             # Whether the keep saved the turn's work, as a completed turn's landing does.
@@ -1594,6 +1620,7 @@ class ArtifactCompletionMixin:
             # A failed helper's changes, kept apart in the history: never in its thread's copy.
             **({"left": left} if left else {}),
             **({"not_taken": not_taken} if not_taken else {}),
+            **({"set_aside": set_aside} if set_aside is not None else {}),
         }
         if cost_tracker is not None:
             fail_data["cost_summary"] = cost_tracker.summary()
@@ -1644,6 +1671,7 @@ class ArtifactCompletionMixin:
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
                     not_taken=not_taken,
+                    set_aside=newly_aside,
                 )
             except Exception:
                 logger.warning(

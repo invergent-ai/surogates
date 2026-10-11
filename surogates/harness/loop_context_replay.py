@@ -25,6 +25,7 @@ from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
+from surogates.workstreams.derive import set_aside_name
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +335,44 @@ def _found(key: str, entry: list) -> str:
     return named[0] if named and named[0] is not None else "a file"
 
 
+#: What a report says its computer set aside of the thread's work, out of its copy there, and what of that it no
+#: longer keeps: each once, in the report of the turn whose end first heard of it.
+_SET_ASIDE = {
+    "copies": "Set aside whole on its computer, as its copy there had to be made again",
+    "snapshots": "Set aside on its computer, as its copy there was made other files",
+    "gone": "No longer kept on its computer, which keeps only the latest of what it set aside",
+}
+#: Where what is set aside is, and that nothing here brings it back.
+_SET_ASIDE_WHERE = "What is set aside is in Surogate Desktop's data on that computer, and cannot be brought back from here yet"
+
+
+def _set_aside_lines(data: dict) -> str:
+    """A report's lines on what its computer set aside of the thread's work since its last report: a line for each kind it names."""
+    told = data.get("set_aside")
+    if not isinstance(told, dict):
+        return ""
+
+    def named(key: str) -> list:
+        return told[key] if isinstance(told.get(key), list) else []
+
+    def when(name: object, how: str) -> str | None:
+        found = set_aside_name(name)
+        return None if found is None else f"its {found['kind']} {how} {found['at'][:10]} {found['at'][11:16]} UTC"
+
+    copies = [said for said in (when(name, "as it was at") for name in named("copies")) if said]
+    snapshots = sum(isinstance(aside, str) for aside in named("snapshots"))
+    gone = [said for said in (when(name, "set aside at") for name in named("gone")) if said]
+    lines = ""
+    if copies:
+        lines += f"\n{_SET_ASIDE['copies']}: {_listed([{'label': said} for said in copies], limit=_MAX_LISTED_LEFT_OUT)}"
+    if snapshots:
+        counted = f"{snapshots} snapshot{'s' if snapshots > 1 else ''}"
+        lines += f"\n{_SET_ASIDE['snapshots']}: what the copy held of the thread's own, in {counted}"
+    if gone:
+        lines += f"\n{_SET_ASIDE['gone']}: {_listed([{'label': said} for said in gone], limit=_MAX_LISTED_LEFT_OUT)}"
+    return lines + (f"\n{_SET_ASIDE_WHERE}" if copies or snapshots else "")
+
+
 #: What a report says of the files a turn made that are in no landing, by where they were left.
 _LEFT_OUT = {
     "excluded": "Not saved, because the project's history leaves them out",
@@ -377,7 +416,7 @@ def worker_note(event_type: str, data: dict) -> dict:
         named = f"[Thread {json.dumps(title, ensure_ascii=False)} ({worker_id})"
         if failed:
             # A failed turn that was kept names what its take-ups left out, as a landing does.
-            content = f"{named} failed: {data.get('error', 'unknown error')}]" + _left_out_lines(data, "not_taken")
+            content = f"{named} failed: {data.get('error', 'unknown error')}]" + _left_out_lines(data, "not_taken") + _set_aside_lines(data)
         else:
             files = data.get("files")
             # A thread's files that did not land, and the ones it deleted,
@@ -405,7 +444,7 @@ def worker_note(event_type: str, data: dict) -> dict:
                     f"{named} reported]\n"
                     f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
                     f"Files: {listed}"
-                ) + _landing_lines(data, kept, deleted, redoing)
+                ) + _landing_lines(data, kept, deleted, redoing) + _set_aside_lines(data)
     return {"role": "user", "content": content}
 
 

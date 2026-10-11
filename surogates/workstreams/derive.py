@@ -7,6 +7,7 @@ from the event log.  The row is the shell's ``ThreadRow``
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,8 +28,11 @@ WAITING_KINDS = {"input_required": "question", "action_required": "approval", "g
 LATEST_TYPES = tuple(t.value for t in (
     *MESSAGE_TYPES, EventType.LLM_RESPONSE, EventType.TODO_UPDATED,
     EventType.ITERATION_SUMMARY, EventType.SESSION_FAIL, EventType.DEVICE_WAITING,
-    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE,
+    EventType.DEVICE_RESUMED, EventType.HARNESS_WAKE, EventType.SESSION_COMPLETE,
 ))
+#: A copy or a repository of a thread's that its computer set aside whole, by its folder's name there
+#: (``surogates.sandbox.local_history``): the order it was set aside in, when, in UTC, whose, and which of the two.
+_SET_ASIDE = re.compile(r"[0-9]{8}-([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f-]{36}\.(copy|repository)")
 #: What a thread waits on you with over a landing of its that could not be finished: one that could not be put back
 #: whole, or one left running in its folder on its computer with no worker on its turn.
 UNFINISHED = "Couldn't finish landing my changes"
@@ -85,6 +89,7 @@ def derive_thread(facts: ThreadFacts, *, now: datetime) -> dict[str, Any]:
         "progress": _progress(todos.data if todos else {}),
         "files": _files(facts, group),
         "landing_id": _landing_id(facts),
+        "set_aside": _set_aside(latest),
         "place": facts.place,
         "created_at": utc(facts.created_at),
         "updated_at": utc(facts.updated_at),
@@ -256,6 +261,41 @@ def _landing_id(facts: ThreadFacts) -> str | None:
         if any(f["merged"] and (landing["id"], f["path"]) not in facts.undone for f in landing["files"]):
             return str(landing["id"])
     return None
+
+
+def _set_aside(latest: dict[str, Any]) -> dict[str, Any] | None:
+    """What a thread's computer keeps set aside of its work, and what of that went at its bound; None with none.
+
+    As the newest of its turn ends to record it has it
+    (``local_landing.set_aside_of``): each copy or repository of the
+    thread's kept whole, ``{kind, at}``, and each that went, oldest first;
+    and how many snapshots of what its copy held of its own.  Only a thread
+    on a computer has any.
+    """
+    ended = [
+        latest[t.value] for t in (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL)
+        if t.value in latest and isinstance(latest[t.value].data.get("set_aside"), dict)
+    ]
+    if not ended:
+        return None
+    told = max(ended, key=lambda e: e.id).data["set_aside"]
+
+    def listed(key: str) -> list[Any]:
+        return told[key] if isinstance(told.get(key), list) else []
+
+    kept, gone = ([found for found in map(set_aside_name, listed(key)) if found is not None] for key in ("copies", "gone"))
+    snapshots = sum(isinstance(aside, str) for aside in listed("snapshots"))
+    return {"kept": kept, "snapshots": snapshots, "gone": gone} if kept or snapshots or gone else None
+
+
+def set_aside_name(name: Any) -> dict[str, str] | None:
+    """What its computer set aside whole of a thread's by the folder's name *name*: ``{kind, at}``, a copy or a repository,
+    and when, in UTC; None for a name that is none."""
+    found = _SET_ASIDE.fullmatch(name) if isinstance(name, str) else None
+    if found is None:
+        return None
+    year, month, day, hour, minute, second, kind = found.groups()
+    return {"kind": kind, "at": f"{year}-{month}-{day}T{hour}:{minute}:{second}Z"}
 
 
 def undone_files(undos: Iterable[dict[str, Any]]) -> frozenset[tuple[int, str]]:
