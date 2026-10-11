@@ -66,7 +66,7 @@ let recoveryStarts: Extract<FromHost, { type: "failed" }> | null;
 let landRefuses: ((args: Record<string, unknown>) => Outcome | undefined) | undefined;
 
 // A step's record, as a landing's helper writes it before the step changes anything (files/land.ts).
-const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0 });
+const record = (path: string) => JSON.stringify({ path, was: null, wrote: null, mode: null, made: [], above: [], temp: null, aside: null, moved: false, out: null, back: null, copied: 0, kept: null, left: null });
 
 // A file host that says it is ready, answers each operation as a file helper on an empty folder would, and lets
 // a command run. A landing's answers its steps as the land kind does, keeping a record of each apply until it is put
@@ -855,7 +855,7 @@ describe("what a landing cut short in a thread's folder, put back through the ap
     const forgetting = executor.run(landing({ action: "forget", saga: "saga-1", applied: [{ step: 0, path: "a.txt", before: null, after: "c".repeat(40) }] }), signal());
     await until(() => ops.some((done) => done.kind === "land" && done.args.action === "forget"));
     expect(await executor.run(history("pickup"), signal())).toEqual({
-      error: { type: "busy", message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+      error: { type: "busy", message: `A thread's landing on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
     });
     expect([asks(), actions()]).toEqual([[], ["open", "forget"]]);
     holding.delete("forget");
@@ -868,7 +868,7 @@ describe("what a landing cut short in a thread's folder, put back through the ap
     left();
     recoveryStarts = { type: "failed", message: "another chat on this computer is working in this folder; this one can use it once that one is done", busy: true };
     const busy = {
-      error: { type: "busy", message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+      error: { type: "busy", message: `What the app ran on this computer before its last connection to the server is still working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
     };
     for (const action of ["changed", "fetch", "pickup", "commit", "record", "keep"]) expect(await executor.run(history(action), signal()), action).toEqual(busy);
     expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual(busy);
@@ -901,7 +901,7 @@ describe("what a landing cut short in a thread's folder, put back through the ap
     left();
     recoveryStarts = { type: "failed", message: "another chat on this computer is working in this folder; this one can use it once that one is done", busy: true };
     const busy = {
-      error: { type: "busy", message: `Another chat on this computer is working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
+      error: { type: "busy", message: `What the app ran on this computer before its last connection to the server is still working in ${folder}, and what a landing cut short there is not put back yet, so this was not done. Ask again once that one is done` },
     };
     expect(await executor.run(history("pickup"), signal())).toEqual(busy);
     expect(await executor.run(history("open", "open:turn-2"), signal())).toEqual(busy);
