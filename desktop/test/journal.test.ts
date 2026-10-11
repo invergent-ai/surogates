@@ -557,6 +557,31 @@ describe("the bindings", () => {
     after.close();
   });
 
+  it("change a port with its turn or not at all: where the turn cannot be written, the port is still the chat's it was, and nobody is told", () => {
+    const journal = new OperationJournal(path);
+    for (const [root, at] of [["r1", 1], ["r2", 2]] as const) {
+      journal.bindings.add(binding(root, at));
+      journal.bindings.allowBrowser(root);
+    }
+    journal.bindings.allowPort("r1", 3000);
+    journal.bindings.allowPort("r1", 8000);
+    const before = journal.bindings.turns();
+    // Every turn's write fails from here on, as on a full disk.
+    const db = (journal as unknown as { db: DatabaseSync }).db;
+    for (const at of ["INSERT", "UPDATE"]) db.exec(`CREATE TRIGGER no_turn_${at} BEFORE ${at} ON browser_port_turns BEGIN SELECT RAISE(ABORT, 'disk full'); END`);
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    // Given to a chat, moved to another, taken back alone, with the browser, and with a deleted chat.
+    for (const change of [
+      () => journal.bindings.allowPort("r1", 5173), () => journal.bindings.allowPort("r2", 3000), () => journal.bindings.disallowPort("r1", 3000),
+      () => journal.bindings.disallowBrowser("r1"), () => journal.bindings.retire("r1"),
+    ]) expect(change).toThrow("disk full");
+    expect([journal.bindings.forwards(), journal.bindings.browsing("r1"), journal.bindings.get("r1"), journal.bindings.turns(), told]).toEqual([
+      [{ port: 3000, root: "r1" }, { port: 8000, root: "r1" }], true, binding("r1", 1), before, [],
+    ]);
+    journal.close();
+  });
+
   it("read back a folder whose device and inode numbers are past 2^53", () => {
     const journal = new OperationJournal(path);
     const large = { ...binding("r1", 1), dev: 2 ** 53 + 4, ino: 2 ** 53 + 2 };
