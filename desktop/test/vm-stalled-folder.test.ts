@@ -233,8 +233,8 @@ describe("a new chat's folder on a mount that does not answer", () => {
     sheets = [];
   });
   afterEach(() => journal.close());
-  // The binder, its dialog picking *picked*, and its sheet cancelled once seen.
-  const binder = (picked: string | null = null) => new Binder({
+  // The binder, its dialog picking *picked*, and its sheet cancelled once seen; its folders looked at by *looks*.
+  const binder = (picked: string | null = null, looks = new FolderLooks(undefined, 300)) => new Binder({
     bindings: journal.bindings,
     prompts: {
       pickFolder: async () => picked,
@@ -247,7 +247,25 @@ describe("a new chat's folder on a mount that does not answer", () => {
     agent: "Research assistant",
     hosts: { run: async () => ({ ok: null }) },
     approvalPrompts: { approve: async () => "deny", confirmFreeMode: async () => false },
-    answers: (path) => new FolderLooks(undefined, 300).answers(path),
+    answers: (path) => looks.answers(path),
+  });
+
+  it("as one that answers, while the app's looks wait on two bound folders that do not: taken, and its PATH entry looked on", async () => {
+    const [one, two] = [stalledFolder(), stalledFolder()];
+    try {
+      const looks = new FolderLooks(undefined, 300);
+      expect(await looks.held([one.folder.path, two.folder.path])).toEqual([]);
+      const healthy = join(dir, "healthy");
+      mkdirSync(healthy);
+      const { answer, longest } = await stalling(() => binder(healthy, looks).prepareFolder("pick", "window-1", new AbortController().signal));
+      expect(answer).toBeNull();
+      expect(sheets.map(({ folder: shown, refusal }) => [shown, refusal])).toEqual([[healthy, null]]);
+      expect(await looks.path(`/usr/bin:${healthy}:/bin`)).toBe(`/usr/bin:${healthy}:/bin`);
+      expect(longest).toBeLessThan(1_000);
+    } finally {
+      one.release();
+      two.release();
+    }
   });
 
   it("as the last chat's: a folder of its own is offered once the look's bound has passed, nothing on this thread waiting on the mount", async () => {

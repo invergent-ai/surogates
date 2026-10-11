@@ -211,6 +211,17 @@ describe("one agent's device", () => {
       { host: "example.com", port: 443, privateNetwork: false }, new AbortController().signal)).toBe("deny");
   });
 
+  it("asks the look it is given whether a new chat's folder answers, before its binder checks the folder", async () => {
+    const asked: string[] = [];
+    const sheets: Array<string | null> = [];
+    const device = await start({
+      prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: (sheet) => (sheets.push(sheet.refusal), Promise.resolve(null)) },
+      answers: (path) => (asked.push(path), Promise.resolve(false)),
+    });
+    expect(await device.binder.prepareFolder("pick", "window-1", new AbortController().signal)).toBeNull();
+    expect([asked, sheets]).toEqual([[folder], [`the folder ${folder} did not answer`]]);
+  });
+
   it("names in an act's prompt the page its tools say the calling session acts in", async () => {
     const asked: ApprovalRequest[] = [];
     tools.address = (session) => Promise.resolve(`https://bank.example/${session}`);

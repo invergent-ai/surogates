@@ -1,6 +1,6 @@
 // The folders this computer's chats are bound to, as the app holds them for its PATH rule
-// (pathOutside), the PATH's own entries, and a new chat's folder: each by what it is now, looked
-// at off the main process's own thread.
+// (pathOutside), each by what it is now, looked at off the main process's own thread; and the
+// PATH's own entries and a new chat's folder, each looked at in a child process of its own.
 //
 // A look into a network or FUSE mount whose server has gone does not return until the mount does.
 // On the main thread it would stop the tray, the pages and the device's link for as long. So each
@@ -9,12 +9,38 @@
 // has LOOKS_AT_ONCE looks running, whoever asked for them, and one look at a folder at a time,
 // which everyone who asks for that folder shares.
 
+import { execFile } from "node:child_process";
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
+
+import { cleanly } from "../clean-child.js";
 
 /** How long a folder has to answer. */
 export const LOOK_MS = 5_000;
 const LOOKS_AT_ONCE = 2;
+
+// coreutils' stat, by its whole path.
+const STAT = "/usr/bin/stat";
+
+/**
+ * What a look at *folder* in a child process of its own found within *ms*, following links as the
+ * checks do: "there" once it answered, "gone" where it is not there or cannot be read, "silent" where
+ * it did not answer in time, and the child is killed then: a wait on a FUSE or network mount gives way
+ * to SIGKILL. It holds none of this process's threads, so it never waits for the looks the bound
+ * folders hold, however many of them do not answer.
+ */
+export function lookApart(folder: string, ms = LOOK_MS): Promise<"there" | "gone" | "silent"> {
+  return new Promise((resolve) => {
+    const child = execFile(...cleanly(STAT, ["-L", "--printf=", "--", folder]), { env: {} }, (error) => {
+      clearTimeout(timer);
+      resolve(error ? "gone" : "there");
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolve("silent");
+    }, ms);
+  });
+}
 
 type Found = { dev: number; ino: number } | null;
 // A look under way: its answer, when it began, and whether it was said for not answering in its time.
@@ -26,8 +52,15 @@ export class FolderLooks {
   // Those waiting for one of them to end.
   private waiting: Array<() => void> = [];
 
-  /** *said*: told once of each folder whose look did not answer in its time, for the log, by when a call leaves it out for that. */
-  constructor(private readonly look: (folder: string) => Promise<Stats> = stat, private readonly ms = LOOK_MS, private readonly said: (folder: string) => void = () => {}) {}
+  /**
+   * *said*, for the log: told once of each folder whose look did not answer in its time ("silent"), by when a call
+   * leaves it out for that; of one left out as its look could not begin, every look waiting on one that does not
+   * answer ("busy"); and of each PATH entry that did not answer.
+   */
+  constructor(
+    private readonly look: (folder: string) => Promise<Stats> = stat, private readonly ms = LOOK_MS,
+    private readonly said: (folder: string, why: "silent" | "busy") => void = () => {},
+  ) {}
 
   /**
    * What each of *folders* is now. One that is not there, cannot be read, or has not answered within
@@ -41,20 +74,24 @@ export class FolderLooks {
     return found.filter((id) => id !== null);
   }
 
-  /** Whether *folder* is there and answered, by the same looks: a new chat's folder is checked on the main thread only once it has. */
+  /**
+   * Whether *folder* is there and answered, looked at apart (lookApart), so the bound folders' looks never keep
+   * it waiting: a new chat's folder is checked on the main thread only once it has.
+   */
   async answers(folder: string): Promise<boolean> {
-    return (await this.one(folder)) !== null;
+    return (await lookApart(folder, this.ms)) === "there";
   }
 
   /**
-   * *path*, a PATH, with only its absolute entries that are there and answered, in their order: the app
-   * looks for its tools on it (pathOutside, findOnPath), on the main thread, which an entry on a mount
-   * that has stopped answering would stop. A program in one could not be run anyway.
+   * *path*, a PATH, with only its absolute entries that are there and answered, in their order, each looked at
+   * apart: the app looks for its tools on it (pathOutside, findOnPath), on the main thread, which an entry on a
+   * mount that has stopped answering would stop. A program in one could not be run anyway.
    */
   async path(path: string | undefined): Promise<string> {
     const entries = (path ?? "").split(":").filter((entry) => entry.startsWith("/"));
-    const answering = await Promise.all(entries.map((entry) => this.answers(entry)));
-    return entries.filter((_entry, n) => answering[n]).join(":");
+    const found = await Promise.all(entries.map((entry) => lookApart(entry, this.ms)));
+    entries.forEach((entry, n) => found[n] === "silent" && this.said(entry, "silent"));
+    return entries.filter((_entry, n) => found[n] === "there").join(":");
   }
 
   // What *folder* is, by the look at it that runs, or by one begun once there is room for it.
@@ -69,6 +106,7 @@ export class FolderLooks {
       const left = [...this.running.values()].map(({ began }) => began + this.ms - now).filter((ms) => ms > 0);
       if (left.length === 0) {
         for (const [silent, look] of this.running) this.late(silent, look);
+        this.said(folder, "busy");
         return null;
       }
       const soonest = Math.min(...left);
@@ -104,7 +142,7 @@ export class FolderLooks {
   private late(folder: string, look: Look): null {
     if (!look.said && this.running.get(folder) === look) {
       look.said = true;
-      this.said(folder);
+      this.said(folder, "silent");
     }
     return null;
   }
