@@ -17,6 +17,7 @@ from asyncpg.exceptions import InternalClientError
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
+from surogates.db.engine import apply_observability_ddl
 from surogates.db.models import WorkstreamHistory
 import surogates.harness.loop as loop_module
 from surogates.governance.saga import SagaOrchestrator
@@ -110,10 +111,20 @@ async def edited(pool, thread, command: str) -> None:
     await pool.execute(str(thread.id), "terminal", json.dumps({"command": command}))
 
 
-async def test_the_history_table_is_made_with_its_indexes(api):
-    async with api.app.state.session_factory() as db:
-        names = set((await db.execute(text("SELECT indexname FROM pg_indexes WHERE tablename = 'workstream_history'"))).scalars())
-    assert {"idx_workstream_history_workstream", "idx_workstream_history_files", "idx_workstream_history_running"} <= names
+async def test_the_history_table_is_made_with_its_indexes(api, engine):
+    async def names() -> set[str]:
+        async with api.app.state.session_factory() as db:
+            return set((await db.execute(text("SELECT indexname FROM pg_indexes WHERE tablename = 'workstream_history'"))).scalars())
+
+    assert {
+        "idx_workstream_history_workstream", "idx_workstream_history_files", "idx_workstream_history_running",
+        "idx_workstream_history_undoes",
+    } <= await names()
+    # A table made before the Undos' index joined the model takes it at the next start.
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP INDEX idx_workstream_history_undoes"))
+        await apply_observability_ddl(conn)
+    assert "idx_workstream_history_undoes" in await names()
 
 
 async def test_a_landings_row_is_its_saga_written_as_it_runs(api, monkeypatch, pods):

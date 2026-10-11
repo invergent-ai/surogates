@@ -18,6 +18,7 @@ from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import event as sa_event
 from sqlalchemy import select, text
 
 from surogates.api.routes import workstreams as routes_module
@@ -25,7 +26,7 @@ from surogates.db.models import Workstream, WorkstreamHistory
 from surogates.governance.saga import SagaOrchestrator
 from surogates.harness import landing as landing_module
 from surogates.sandbox.history import HistoryError
-from surogates.session.store import SessionStore
+from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import bucket as bucket_module
@@ -168,12 +169,12 @@ async def test_a_threads_row_lists_what_its_landing_changed_each_as_it_landed(ap
 
 
 async def an_undo_recorded(api, landing, *, undoes: list[int], paths: list[str], **columns: str) -> int:
-    """An Undo's record made by hand, as a landing by you records it, of *paths* and the rows it *undoes*; its id.
+    """An Undo's record made by hand, as a landing by you records it, of *paths*, each put back over the rows it *undoes*; its id.
 
     A column is given as SQL, as :func:`recorded` takes it.
     """
     given = {"saga_state": "'completed'", "device_id": "NULL", **columns}
-    files = [{"path": path, "before": None, "after": blob_of(path.encode()), "merged": True} for path in paths]
+    files = [{"path": path, "before": None, "after": blob_of(path.encode()), "merged": True, "undoes": undoes} for path in paths]
     async with api.app.state.session_factory() as db:
         made = (await db.execute(text(
             "INSERT INTO workstream_history (workstream_id, device_id, kind, saga_id, saga_state, agent_id, undoes, files) "
@@ -204,6 +205,20 @@ async def test_a_file_the_projects_undo_put_back_is_undone_and_the_card_undoes_n
     assert (bare.landings, bare.undone) == ((), frozenset())
 
 
+async def test_the_undos_read_for_some_rows_are_those_that_name_them_and_the_undos_of_those_alone(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && echo a > a.md")
+    other = await recorded(api, row, saga="saga:other", files=[{"path": "b.md", "before": None, "after": blob_of(b"b"), "merged": True}])
+    first = await an_undo_recorded(api, row, undoes=[row.id], paths=["Report.docx"])
+    await an_undo_recorded(api, row, undoes=[other], paths=["b.md"])
+    again = await an_undo_recorded(api, row, undoes=[first], paths=["Report.docx"])
+    await an_undo_recorded(api, row, undoes=[again], paths=["Report.docx"])
+    session_factory = api.app.state.session_factory
+    # The rows' own Undos, and the Undos of those however far: never another row's, whatever the project holds.
+    assert await rows_module.undone_of(session_factory, project["id"], [row.id]) == {(row.id, "Report.docx"), (again, "Report.docx")}
+    assert await rows_module.undone_of(session_factory, project["id"], [other]) == {(other, "b.md")}
+    assert await rows_module.undone_of(session_factory, project["id"], []) == frozenset()
+
+
 async def test_a_file_your_edit_clashed_with_is_being_redone_until_the_redo_lands_it(api, monkeypatch, pods):
     project = await create(api)
     thread = await a_thread(api, "Draft A", await master_of(api, project))
@@ -220,20 +235,23 @@ async def test_a_file_your_edit_clashed_with_is_being_redone_until_the_redo_land
     assert await marks_of(api, project, thread) == [("Report.docx", "landed"), ("a.md", "landed")]
 
 
-@pytest.mark.parametrize("since, mark", [
-    ((), "redoing"),
-    ((REQUEST,), "redoing"),
-    ((REQUEST, EventType.SESSION_COMPLETE), "not_merged"),
-    ((REQUEST, EventType.SESSION_FAIL), "not_merged"),
-    ((REQUEST, EventType.SESSION_PAUSE), "not_merged"),
-    ((REQUEST, EventType.SESSION_STOPPED), "not_merged"),
-    ((EventType.SESSION_FAIL,), "redoing"),
-    ((EventType.SESSION_FAIL, REQUEST, EventType.SESSION_STOPPED), "not_merged"),
+@pytest.mark.parametrize("since, mark, redone", [
+    ((), "redoing", True),
+    ((REQUEST,), "redoing", True),
+    ((REQUEST, EventType.SESSION_COMPLETE), "not_merged", False),
+    ((REQUEST, EventType.SESSION_FAIL), "not_merged", False),
+    ((REQUEST, EventType.SESSION_PAUSE), "not_merged", False),
+    ((REQUEST, EventType.SESSION_STOPPED), "not_merged", False),
+    # The thread rests, waiting on its user's allowance: nothing redoes the file meanwhile, though its next turn will.
+    ((EventType.SESSION_FAIL,), "not_merged", True),
+    ((EventType.SESSION_FAIL, REQUEST, EventType.SESSION_STOPPED), "not_merged", False),
 ], ids=[
     "told", "its turn under way", "its turn ended and left the file", "its turn failed", "its turn stopped",
     "its turn stopped by the route", "a turn refused before it asked the model, which read nothing", "the turn after that one stopped",
 ])
-async def test_a_file_is_being_redone_exactly_while_its_threads_next_turn_would_redo_it(api, monkeypatch, pods, since, mark):
+async def test_a_file_is_being_redone_while_its_threads_turn_that_redoes_it_is_under_way_or_to_come(
+    api, monkeypatch, pods, since, mark, redone,
+):
     project = await create(api)
     thread = await a_thread(api, "Draft A", await master_of(api, project))
     store, pool = api.app.state.session_store, SandboxPool(pods)
@@ -242,7 +260,59 @@ async def test_a_file_is_being_redone_exactly_while_its_threads_next_turn_would_
         await store.emit_event(thread.id, kind, {})
     assert await marks_of(api, project, thread) == [("Report.docx", mark), ("a.md", "landed")]
     # The landing's own rule, for the turn the thread takes next.
-    assert await landing_module.redo_files(store, thread.id) == ({"Report.docx"} if mark == "redoing" else set())
+    assert await landing_module.redo_files(store, thread.id) == ({"Report.docx"} if redone else set())
+
+
+async def test_a_file_whose_redo_turn_was_refused_is_being_redone_again_once_its_thread_is_sent_on(api, monkeypatch, pods):
+    project = await create(api)
+    thread = await a_thread(api, "Draft A", await master_of(api, project))
+    store, pool = api.app.state.session_store, SandboxPool(pods)
+    await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v2 by you")
+    # Refused by its user's limit before it asked the model: it rests, failed, and the file is not being redone.
+    await store.update_session_status(thread.id, "failed")
+    await store.emit_event(thread.id, EventType.SESSION_FAIL, {"reason": "usage_limit"})
+    assert await marks_of(api, project, thread) == [("Report.docx", "not_merged"), ("a.md", "landed")]
+    # Sent on, the turn under way is the redo's.
+    await store.update_session_status(thread.id, "active")
+    assert await marks_of(api, project, thread) == [("Report.docx", "redoing"), ("a.md", "landed")]
+
+
+async def test_a_projects_rows_read_their_threads_redos_in_one_statement_however_many_threads_have_one(
+    api, monkeypatch, pods, engine,
+):
+    project = await create(api)
+    master = await master_of(api, project)
+    workstreams = WorkstreamStore(api.app.state.session_factory)
+
+    async def redo_reads() -> list[set]:
+        """The threads each statement reading the threads' redos asks of, as the project's rows are read."""
+        seen: list[set] = []
+
+        def before(conn, cursor, statement, parameters, context, executemany):
+            bound = list(parameters.values() if isinstance(parameters, dict) else parameters)
+            if EventType.HISTORY_REDO.value in bound:
+                seen.append({str(found) for value in bound if isinstance(value, list) for found in value})
+
+        sa_event.listen(engine.sync_engine, "before_cursor_execute", before)
+        try:
+            await workstreams.thread_facts(UUID(project["id"]))
+        finally:
+            sa_event.remove(engine.sync_engine, "before_cursor_execute", before)
+        return seen
+
+    pool = SandboxPool(pods)
+    first = await a_thread(api, "Draft A", master)
+    await a_clash(api, monkeypatch, pods, pool, first, b"PK\x03\x04 report v2 by you")
+    assert await redo_reads() == [{str(first.id)}]
+    others = []
+    for title in ("Draft B", "Draft C", "Draft D"):
+        others.append(thread := await a_thread(api, title, master))
+        await a_clash(api, monkeypatch, pods, pool, thread, f"PK\x03\x04 report by you for {title}".encode())
+    # A resolved thread's redo is none of its row's: it is not asked.
+    assert (await act_on(api, project, thread, "resolve")).status_code == 200
+    assert (await marks_of(api, project, thread))[0] == ("Report.docx", "not_merged")
+    assert await redo_reads() == [{str(each.id) for each in (first, *others[:-1])}]
+    assert [(await marks_of(api, project, each))[0] for each in (first, thread)] == [("Report.docx", "redoing"), ("Report.docx", "not_merged")]
 
 
 async def test_a_resolved_threads_file_is_not_being_redone_until_it_is_reopened(api, monkeypatch, pods):
@@ -1921,7 +1991,7 @@ def the_api_goes(monkeypatch, api, at: str, *, kind: str = "restore") -> None:
         monkeypatch.setattr(BucketHistory, "record", never_tried)
 
 
-@pytest.mark.parametrize("next_act", ["another Restore", "a thread's landing"])
+@pytest.mark.parametrize("next_act", ["another Restore", "a thread's landing", "a routine's pickup"])
 @pytest.mark.parametrize("at", list(KILLS))
 async def test_a_restore_killed_anywhere_loses_no_edit_and_is_settled_by_the_next_act_once_and_whole(api, monkeypatch, tmp_path, at, next_act):
     project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
@@ -1938,22 +2008,61 @@ async def test_a_restore_killed_anywhere_loses_no_edit_and_is_settled_by_the_nex
     await aged(api)
     if next_act == "another Restore":
         await restored(api, project, by_a)
-    else:
+    elif next_act == "a thread's landing":
         # The next lock holder, a thread's landing in its pod, settles what was left first.
         await edited(pool, first, "echo c > c.md")
         await ends(api, pool, first)
         assert (pods.project / "c.md").read_text() == "c\n"
+    else:
+        # The next lock holder, a routine's run through the master's pod, settles what was left first, then picks up
+        # what it changed.
+        run, _ = await a_routine_run(api, await master_of(api, project), "Tidy up")
+        await in_its_pod(api, pool, run, "true")
+        (pods.project / "notes.txt").write_text("tidied\n")  # as the run's call wrote it
+        await ends(api, pool, run)
     # Nothing is left running, nothing was restored twice or half, and your edit is a version in the History.
     assert [r.saga_state for r in await rows_of(api, project) if r.saga_state == "running"] == []
     restored_now = next_act == "another Restore" or at == "the record's push"
     assert restores_on_main(pods) == int(restored_now)
     assert (pods.project / "Report.docx").read_bytes() == (b"PK\x03\x04 report v1 by A" if restored_now else YOURS)
     listed = await history_of(api, project, "Report.docx")
-    assert [(v["by"]["kind"], v["change"]) for v in listed] == [
+    seen = [(v["by"]["kind"], v["change"]) for v in listed]
+    at_yours = 1 if restored_now else 0
+    if next_act == "a routine's pickup" and at in UNPICKED:
+        # Whom your edit is by there is a known fault, held by the test after this one: all else stands.
+        seen[at_yours] = ("you", seen[at_yours][1])
+    assert seen == [
         *([("you", "restored")] if restored_now else []), ("you", "changed"), ("thread", "changed"), ("thread", "changed"), ("you", "added"),
     ]
-    yours = listed[1 if restored_now else 0]
+    assert (await opened(api, project, listed[at_yours]["id"], "Report.docx")).content == YOURS
+
+
+#: Where a Restore can die before its own pickup pushed your edit.
+UNPICKED = ("the look", "the pickup's row", "the pickup's pack")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "a routine's pickup records whatever the real files hold that main does not as the routine's own, "
+    "your edit a Restore died before picking up among them"
+))
+@pytest.mark.parametrize("at", UNPICKED)
+async def test_your_edit_a_killed_restore_never_picked_up_stays_yours_when_a_routines_pickup_records_it(api, monkeypatch, tmp_path, at):
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    owned = await the_project(api, project)
+    entry = await rows_module.version_of(api.app.state.session_factory, project["id"], by_a["id"], "Report.docx")
+    with monkeypatch.context() as patch:
+        the_api_goes(patch, api, at)
+        with pytest.raises(TheApiWent):
+            await restore(api.app.state, owned, api.user_id, path="Report.docx", blob=entry["after"])
+    await aged(api)
+    run, _ = await a_routine_run(api, await master_of(api, project), "Tidy up")
+    await in_its_pod(api, pool, run, "true")
+    (pods.project / "notes.txt").write_text("tidied\n")  # as the run's call wrote it
+    await ends(api, pool, run)
+    [yours, *_] = await history_of(api, project, "Report.docx")
     assert (await opened(api, project, yours["id"], "Report.docx")).content == YOURS
+    assert yours["by"] == {"kind": "you"}
 
 
 @pytest.mark.parametrize("refused", ["the pickup's row", "the pickup recorded", "the restore's row", "the restore recorded"])
@@ -2213,9 +2322,10 @@ async def test_undo_of_a_threads_changes_puts_each_file_back_to_before_the_threa
     landings = await rows(api, thread)
     assert await undone(api, project, thread=str(thread.id)) == {"applied": ["Report.docx", "c.md"], "skipped": [], "picked_up": []}
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and not (pods.project / "c.md").exists()
-    # One landing by you, which names each landing it undid.
+    # One landing by you, which names each landing it undid, and each file the landings it went back over there, newest first.
     [the_undo] = [r for r in await rows_of(api, project) if r.kind == "undo"]
     assert the_undo.undoes == [r.id for r in landings]
+    assert [(f["path"], f["undoes"]) for f in the_undo.files] == [("Report.docx", [r.id for r in reversed(landings)]), ("c.md", [landings[1].id])]
     assert last_on_main(pods, "Surogate-Undoes") == ["Undo", ",".join(r.commit for r in landings)]
     [found] = await thread_rows(api, project, thread_id=str(thread.id))
     assert ([(f["ref"], f["landing"]) for f in found["files"]], found["landing_id"]) == ([("Report.docx", "undone"), ("c.md", "undone")], None)
@@ -2274,6 +2384,27 @@ async def test_undo_leaves_a_file_a_routine_changed_since_and_names_the_routine(
         "applied": ["a.md"], "skipped": [{"path": "Report.docx", "by": {"kind": "routine", "name": "Tidy up"}}], "picked_up": [],
     }
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A, tidied"
+
+
+async def test_undo_leaves_a_file_a_landing_left_half_put_back_wrote_since_and_names_its_thread(api, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    [by_a] = await rows(api, first)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    await ends(api, pool, second)
+    # B's landing as one whose put-back failed: escalated, the report left as B's apply wrote it, which its row no longer lists.
+    [by_b] = await rows(api, second)
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "UPDATE workstream_history SET saga_state = 'escalated', files = '[]', commit = NULL, steps = ("
+            "SELECT jsonb_agg(CASE WHEN s->>'tool_name' = 'history.apply' THEN jsonb_set(s, '{state}', '\"compensation_failed\"') ELSE s END) "
+            "FROM jsonb_array_elements(steps) s) WHERE id = :id"
+        ), {"id": by_b.id})
+        await db.commit()
+    assert await undone(api, project, landing=str(by_a.id)) == {
+        "applied": [], "skipped": [{"path": "Report.docx", "by": {"kind": "thread", "thread_id": str(second.id), "title": "Draft B"}}],
+        "picked_up": [],
+    }
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1 by A by B" and undos_on_main(pods) == 0
 
 
 def you_save_after_the_look_at_main(monkeypatch, pods, *saves: tuple[str, bytes]) -> None:
@@ -2343,6 +2474,48 @@ async def test_undo_answers_409_while_its_thread_works_and_writes_nothing(api, t
     for target in ({"landing": str(row.id)}, {"thread": str(thread.id)}):
         assert (await undone(api, project, status=409, **target))["detail"] == "Stop the thread to undo its changes."
     assert (pods.project / "Report.docx").read_bytes() == REPORT_BY_A and len(await rows_of(api, project)) == len(before)
+
+
+async def test_undo_of_a_landing_whose_thread_is_gone_puts_its_files_back(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    store, get = api.app.state.session_store, api.app.state.session_store.get_session
+
+    async def gone(session_id):
+        # Deleted as the Undo began: no thread of that id works, or ever will.
+        if session_id == thread.id:
+            raise SessionNotFoundError(f"session {session_id} not found")
+        return await get(session_id)
+
+    monkeypatch.setattr(store, "get_session", gone)
+    assert await undone(api, project, landing=str(row.id)) == {"applied": ["Report.docx"], "skipped": [], "picked_up": []}
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and undos_on_main(pods) == 1
+
+
+async def test_undo_leaves_a_file_whose_name_a_folder_holds_now_and_names_who(api, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "rm notes.txt && printf ' by A' >> Report.docx")
+    # A folder of the deleted file's name since, with a file of yours in it: no file can be put back there.
+    (pods.project / "notes.txt").mkdir()
+    (pods.project / "notes.txt" / "inside.md").write_text("yours\n")
+    assert await undone(api, project, landing=str(row.id)) == {
+        "applied": ["Report.docx"], "skipped": [{"path": "notes.txt", "by": {"kind": "you"}}], "picked_up": [],
+    }
+    assert (pods.project / "notes.txt" / "inside.md").read_text() == "yours\n"
+    assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and undos_on_main(pods) == 1
+
+
+async def test_undo_of_a_threads_changes_names_a_file_you_set_back_to_what_another_left_between_them(api, tmp_path):
+    project, first, second, pods, pool = await two_threads(api, tmp_path)
+    await edited(pool, second, "printf ' by B' >> Report.docx")
+    await ends(api, pool, second)
+    await edited(pool, first, "printf ' and A again' >> Report.docx")
+    await ends(api, pool, first)
+    # You set the report back as B left it: where the Undo would put it back to, were B's change not between A's two.
+    by_b = b"PK\x03\x04 report v1 by A by B"
+    (pods.project / "Report.docx").write_bytes(by_b)
+    assert await undone(api, project, thread=str(first.id)) == {
+        "applied": [], "skipped": [{"path": "Report.docx", "by": {"kind": "you"}}], "picked_up": ["Report.docx"],
+    }
+    assert (pods.project / "Report.docx").read_bytes() == by_b and undos_on_main(pods) == 0
 
 
 async def test_undo_names_a_file_whose_version_from_before_was_pruned(api, tmp_path):
@@ -2480,6 +2653,40 @@ async def test_an_undo_of_more_files_than_one_undo_puts_back_is_refused_in_words
     assert len(await rows_of(api, project)) == len(before) and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
 
 
+async def test_an_undo_of_more_bytes_than_one_undo_moves_in_its_time_is_refused_in_words_and_writes_nothing(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "head -c 3000000 /dev/zero > big.bin && printf ' by A' >> Report.docx")
+    # A store this slow, as a deployment names it, moves the large file, read twice and taken away, in more than an
+    # Undo's time under the lock.
+    planned = api.app.state.settings.history.store_rate
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", 100_000)
+    assert (await undone(api, project, status=409, landing=str(row.id)))["detail"] == (
+        "This change's files are too large to put back in one Undo. Restore each file from its History."
+    )
+    assert (await undone(api, project, status=409, thread=str(thread.id)))["detail"] == (
+        "This thread's files are too large to put back in one Undo. Undo its landings one at a time from its card."
+    )
+    assert (pods.project / "big.bin").stat().st_size == 3_000_000 and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
+    assert undos_on_main(pods) == 0
+    # Through a store as fast as an Undo is planned for, the same Undo puts both back.
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", planned)
+    assert (await undone(api, project, landing=str(row.id)))["applied"] == ["Report.docx", "big.bin"]
+
+
+async def test_a_restore_of_more_bytes_than_a_change_moves_in_its_time_is_refused_in_words_and_writes_nothing(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "head -c 3000000 /dev/zero > big.bin")
+    [landed_version, *_] = await history_of(api, project, "big.bin")
+    yours = b"y" * 3_000_000
+    (pods.project / "big.bin").write_bytes(yours)
+    planned = api.app.state.settings.history.store_rate
+    # Your edit read twice and the version written once, through a store this slow: more than a change's time.
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", 100_000)
+    assert (await restored(api, project, landed_version, status=409))["detail"] == "This version is too large to restore here."
+    assert (pods.project / "big.bin").read_bytes() == yours and restores_on_main(pods) == 0
+    monkeypatch.setattr(api.app.state.settings.history, "store_rate", planned)
+    assert (await restored(api, project, landed_version))["applied"] == ["big.bin"]
+    assert (pods.project / "big.bin").read_bytes() == bytes(3_000_000)
+
+
 async def test_a_restore_that_meets_an_undo_holding_the_projects_lock_is_told_to_try_again(api, monkeypatch, tmp_path):
     project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx && echo a > a.md")
     monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 1.0)
@@ -2499,6 +2706,122 @@ async def test_a_restore_that_meets_an_undo_holding_the_projects_lock_is_told_to
     go.set()
     assert (await asyncio.wait_for(undoing, 60))["applied"] == ["Report.docx", "a.md"]
     assert (await restored(api, project, (await history_of(api, project, "Report.docx"))[1]))["applied"] == ["Report.docx"]
+
+
+async def test_an_act_past_as_many_as_the_api_runs_at_once_waits_its_patience_then_is_told_to_try_again(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    (tmp_path / "second").mkdir()
+    other, _, other_pods, _, other_row = await a_landing(api, tmp_path / "second", "printf ' by A' >> Report.docx")
+    monkeypatch.setattr(undo_module, "ACTS_AT_ONCE", 1)
+    monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 1.0)
+    apply, writing, go = BucketHistory.apply, asyncio.Event(), asyncio.Event()
+
+    async def slow(self, path, before, after):
+        writing.set()
+        await go.wait()
+        return await apply(self, path, before, after)
+
+    monkeypatch.setattr(BucketHistory, "apply", slow)
+    undoing = asyncio.create_task(undone(api, project, landing=str(row.id)))
+    await asyncio.wait_for(writing.wait(), 30)
+    # Another project's lock is free, but each act holds one of the api's connections for its whole run.
+    refused = await undone(api, other, status=409, landing=str(other_row.id))
+    assert refused["detail"] == "Other changes are being restored or undone right now. Try again in a moment."
+    assert (other_pods.project / "Report.docx").read_bytes() == REPORT_BY_A
+    go.set()
+    assert (await asyncio.wait_for(undoing, 60))["applied"] == ["Report.docx"]
+    assert (await undone(api, other, landing=str(other_row.id)))["applied"] == ["Report.docx"]
+
+
+async def test_an_act_waiting_for_its_projects_lock_holds_none_of_the_turns_another_projects_act_needs(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    (tmp_path / "second").mkdir()
+    other, _, other_pods, _, other_row = await a_landing(api, tmp_path / "second", "printf ' by A' >> Report.docx")
+    monkeypatch.setattr(undo_module, "ACTS_AT_ONCE", 1)
+    monkeypatch.setattr(undo_module, "LOCK_PATIENCE", 10.0)
+    held, go = asyncio.Event(), asyncio.Event()
+
+    async def a_landing_holds_the_lock() -> None:
+        async with rows_module.project_lock(api.app.state.session_factory, project["id"]):
+            held.set()
+            await go.wait()
+
+    holding = asyncio.create_task(a_landing_holds_the_lock())
+    await asyncio.wait_for(held.wait(), 30)
+    waiting = asyncio.create_task(undone(api, project, landing=str(row.id)))
+    await asyncio.sleep(1.0)  # it tries its project's lock, and waits between its tries
+    # That act holds no connection between its tries, nor the api's one turn: another project's act runs meanwhile.
+    async with asyncio.timeout(5):
+        assert (await undone(api, other, landing=str(other_row.id)))["applied"] == ["Report.docx"]
+    assert (other_pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1" and not waiting.done()
+    go.set()
+    await holding
+    assert (await asyncio.wait_for(waiting, 30))["applied"] == ["Report.docx"]
+
+
+async def test_an_act_whose_store_stops_answering_lets_the_copy_go_as_the_try_ends(api, monkeypatch, tmp_path):
+    project, thread, pods, pool, row = await a_landing(api, tmp_path, "printf ' by A' >> Report.docx")
+    monkeypatch.setattr(api.app.state.settings.saga, "default_step_timeout", 2)
+    monkeypatch.setattr(api.app.state.settings.saga, "default_max_retries", 0)
+    storage, stat, asked, hung = api.app.state.storage, api.app.state.storage.stat, [], []
+
+    async def the_applys_look_never_answers(bucket_name, key):
+        # The report is looked at by the pickup's look, then by the apply's check, which the store never answers.
+        if key.endswith("/Report.docx"):
+            asked.append(key)
+            if len(asked) == 2:
+                hung.append(key)
+                await asyncio.sleep(3600)
+        return await stat(bucket_name, key)
+
+    monkeypatch.setattr(storage, "stat", the_applys_look_never_answers)
+    # The apply's try ends, and its look with it: the put-back finds the copy free, and nothing was written.
+    async with asyncio.timeout(60):
+        refused = await undone(api, project, status=409, landing=str(row.id))
+    assert refused["detail"] == "Nothing was changed: the project's files could not all be written. Try again."
+    assert hung and (pods.project / "Report.docx").read_bytes() == REPORT_BY_A
+    async with asyncio.timeout(60):
+        assert (await undone(api, project, landing=str(row.id)))["applied"] == ["Report.docx"]
+    assert [r.saga_state for r in await rows_of(api, project) if r.kind == "undo"] == ["compensated", "completed"]
+
+
+async def test_the_api_lets_its_database_go_at_shutdown_only_once_the_acts_under_way_ended_or_their_time_did(monkeypatch):
+    from fastapi import FastAPI
+
+    from surogates.api import app as app_module
+
+    went: list[str] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            went.append("the database")
+
+    monkeypatch.setattr(app_module, "async_engine_from_settings", lambda settings: Engine())
+    monkeypatch.setattr(app_module, "_install_shared_runtime_plumbing", lambda app, settings: None)
+    monkeypatch.setattr(app_module, "_install_browser_api_dependencies", lambda app, settings: None)
+
+    def acting(seconds: float) -> asyncio.Future:
+        async def act() -> None:
+            await asyncio.sleep(seconds)
+            went.append("an act")
+
+        act_ = asyncio.ensure_future(act())
+        undo_module._ACTS.add(act_)
+        act_.add_done_callback(undo_module._ACTS.discard)
+        return act_
+
+    acting(0.3)
+    async with app_module.lifespan(FastAPI()):
+        pass
+    assert went == ["an act", "the database"]
+    # One that goes on past the most an act takes is cut as a kill cuts it: the next lock holder settles what it left.
+    went.clear()
+    monkeypatch.setattr(undo_module, "ENDING_PATIENCE", 0.2)
+    late = acting(3600)
+    async with asyncio.timeout(5), app_module.lifespan(FastAPI()):
+        pass
+    assert went == ["the database"]
+    late.cancel()
 
 
 async def test_a_computers_landing_left_running_is_none_of_the_clouds_to_wait_on_or_settle(api, tmp_path):
@@ -2590,6 +2913,10 @@ async def test_an_undo_of_many_files_killed_anywhere_loses_no_edit_and_is_settle
     undone_now = next_act == "another Undo" or landed
     assert undos_on_main(pods) == int(undone_now) and as_undone(pods, 2 if undone_now else 0)
     assert (pods.project / "notes.txt").read_text() == YOUR_NOTES
+    # Whoever wrote the Undo's row, each file names the landing it went back over.
+    [the_undo] = [r for r in await rows_of(api, project) if r.kind == "undo" and r.saga_state == "completed"] if undone_now else [None]
+    if the_undo is not None:
+        assert [(f["path"], f["undoes"]) for f in the_undo.files] == [("Report.docx", [row.id]), ("a.md", [row.id])]
     yours = [v for v in await history_of(api, project, "notes.txt") if v["by"] == {"kind": "you"} and v["change"] == "changed"]
     assert len(yours) == 1 and (await opened(api, project, yours[0]["id"], "notes.txt")).content == YOUR_NOTES.encode()
 

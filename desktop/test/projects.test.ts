@@ -178,6 +178,19 @@ describe("the projects the page serves", () => {
     ]);
   });
 
+  it("take how many more files a row has than it lists", async () => {
+    const { source } = page();
+    const row = threads[REPORT]!.find((found) => found.id === FIXTURE_IDS.idle)!;
+    const asked = source.threads(REPORT);
+    source.answered(1, { ok: [{ ...row, moreFiles: 1_800 }] });
+    expect((await asked)[0]).toEqual({ ...row, moreFiles: 1_800 });
+    // A count that is none, as a page built before rows counted their files serves, is none more: the row is taken all the same.
+    const odd = [undefined, null, -2, 1.5, "7", 1_000_001];
+    const later = source.threads(REPORT);
+    source.answered(2, { ok: odd.map((moreFiles, at) => ({ ...row, id: `t-${at}`, moreFiles })) });
+    expect((await later).map((found) => found.moreFiles ?? 0)).toEqual(odd.map(() => 0));
+  });
+
   it("take the rows of an agent older than the app, whose files carry no mark and whose rows name no landing, with neither", async () => {
     const { source } = page();
     const asked = source.threads(REPORT);

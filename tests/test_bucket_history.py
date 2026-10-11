@@ -210,6 +210,8 @@ async def test_the_api_reads_the_history_a_pod_pushed_and_which_versions_it_hold
     # A version is a file's bytes: a commit's id names none, nor does an id the history never held.
     assert await history.held([v2, one, "0" * 40, None]) == {v2}
     assert await history.held([]) == set()
+    # And the bytes of each it holds.
+    assert await history.sizes([v2, one, None]) == {v2: len(b"PK\x03\x04 report v2")}
     # Its copy is its own repository: none of the bucket's config or HEAD.
     assert (history.clone / "config").read_text() != (project / "_history" / "config").read_text()
     # A project with no landing yet has no history to copy, and holds no version.
@@ -398,6 +400,120 @@ async def test_a_copy_not_used_for_a_while_is_removed_and_the_copies_stay_within
     assert {"one", "two", "three"} <= set(there())
     # A copy removed is made anew when it is asked again.
     assert await old.sync() == await idle.sync() is not None
+
+
+async def test_a_folder_beside_the_copies_that_is_no_copy_is_never_removed_or_counted(tmp_path, storage, project):
+    landed(tmp_path, project, "saga:1", {"Report.docx": os.urandom(2**20)})
+    copies = tmp_path / "api"
+    # Where the setting names a folder of other things too: a person's folders, and a dotted one, long untouched.
+    theirs = {name: copies / name for name in ("Documents", ".cache", ".gone-folder", "0123456789abcdef")}
+    for folder in theirs.values():
+        (folder / "inside").mkdir(parents=True)
+        (folder / "inside" / "kept.bin").write_bytes(os.urandom(2**20))
+        os.utime(folder, (time.time() - 7000, time.time() - 7000))
+    idle = BucketHistory(storage, "agent", PREFIX, copies / "idle")
+    await idle.sync()
+    os.utime(idle.clone / "HEAD", (time.time() - 700, time.time() - 700))
+    # And a copy a removal renamed, then died before it took it away.
+    (copies / ".gone-0a1b2c3d" / "objects").mkdir(parents=True)
+    # A copy and its room: the copy long unused goes, and the others are neither removed nor counted against the bound.
+    await BucketHistory(storage, "agent", PREFIX, copies / "one", Bounds(copies=3 * 2**20)).sync()
+    assert all((folder / "inside" / "kept.bin").is_file() for folder in theirs.values())
+    assert not idle.clone.exists() and not (copies / ".gone-0a1b2c3d").exists()
+
+
+async def test_an_action_on_the_copy_goes_on_past_its_try_to_its_bound_and_no_further_and_lets_the_copy_go(
+    tmp_path, storage, project, monkeypatch,
+):
+    landed(tmp_path, project, "saga:1", {"notes.txt": b"v2 notes\n"})
+    history = BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / "clone", within=0.5)
+    cut: list[bool] = []
+
+    async def never_answers(*args, **more):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cut.append(True)
+            raise
+
+    monkeypatch.setattr(storage, "stat", never_answers)
+    request = json.dumps({"action": "apply", "path": "notes.txt", "before": blob_of(b"v2 notes\n"), "after": blob_of(b"v1 notes\n")})
+    # Its try ends at its timeout, as a saga's step's does: the action goes on, shielded, to its bound, and a read of
+    # the store's it waits in there is stopped.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(history.execute("api", "_history", request), 0.1)
+    async with asyncio.timeout(3), module._alone(history.clone, patient=True):
+        assert cut == [True]
+    # Waited for, it answers that it was stopped, in words.
+    assert "error" in json.loads(await history.execute("api", "_history", request)) and cut == [True, True]
+    assert (project / "notes.txt").read_bytes() == b"v2 notes\n"
+    # A store's own time running out, within the bound, is the store's to say.
+
+    async def times_out(*args, **more):
+        raise TimeoutError("the store did not answer")
+
+    monkeypatch.setattr(storage, "stat", times_out)
+    assert json.loads(await history.execute("api", "_history", request)) == {"error": "the store did not answer"}
+
+
+async def test_an_action_stopped_at_its_bound_lets_the_copy_go_only_once_the_git_it_began_has_ended(tmp_path, storage):
+    history = BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / "clone", within=0.3)
+    history.clone.mkdir(parents=True)
+    ended = tmp_path / "ended"
+
+    async def work() -> None:
+        await module._child(module._BRINGING, 10.0, ["sh", "-c", f"sleep 1.5 && touch {ended}"])
+
+    began = time.monotonic()
+    with pytest.raises(Slow):
+        await history._held(work)
+    # Stopped at its bound, it waited for its child: the next holder of the copy never has it beside that git.
+    async with module._alone(history.clone, patient=True):
+        assert ended.exists() and time.monotonic() - began >= 1.4
+
+
+async def test_a_threads_work_on_the_copy_is_waited_for_to_its_end_though_what_waits_for_it_is_stopped():
+    ended: list[float] = []
+
+    def work() -> None:
+        time.sleep(0.5)
+        ended.append(time.monotonic())
+
+    waiting = asyncio.ensure_future(module._off(work))
+    await asyncio.sleep(0.1)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    # Stopped only once the thread was done with the copy.
+    assert ended
+
+
+async def test_a_write_its_bound_stopped_lands_before_the_put_back_runs_and_the_put_back_has_the_last_word(
+    tmp_path, storage, project, monkeypatch,
+):
+    from surogates.storage import backend as backend_module
+
+    landed(tmp_path, project, "saga:1", {"notes.txt": b"v2 notes\n"})
+    history = BucketHistory(storage, "agent", PREFIX, tmp_path / "api" / "clone", within=1.0)
+    copy, slow = backend_module.shutil.copyfileobj, []
+
+    def slow_once(source, target, *more):
+        if not slow:
+            # The version is open, and written for two seconds, as a large one is.
+            slow.append(True)
+            time.sleep(2.0)
+        return copy(source, target, *more)
+
+    monkeypatch.setattr(backend_module.shutil, "copyfileobj", slow_once)
+    v1, v2 = blob_of(b"v1 notes\n"), blob_of(b"v2 notes\n")
+    cut = json.loads(await history.execute("api", "_history", json.dumps({"action": "apply", "path": "notes.txt", "before": v2, "after": v1})))
+    assert "error" in cut and slow
+    # Its put-back, as a saga runs one for an apply that failed: it may have written its file.
+    put_back = {"action": "unapply", "path": "notes.txt", "before": v2, "after": v1, "ran": False}
+    assert "error" not in json.loads(await history.execute("api", "_history", json.dumps(put_back)))
+    await asyncio.sleep(2.5)
+    # Nothing the stopped apply began lands after the put-back answered: the file is as it was.
+    assert (project / "notes.txt").read_bytes() == b"v2 notes\n"
 
 
 async def test_a_copy_asked_again_was_used_just_now_however_long_ago_it_was_made(tmp_path, storage, project):

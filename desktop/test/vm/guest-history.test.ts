@@ -104,22 +104,26 @@ json.dump({"commit": None, "base": "0" * 40, "changes": [], "overlapped": [], "e
 `;
 // In the same place: a history that starts a writer of its own in the place, as a git it runs and does
 // not wait for, and never answers; asked what changed, it says whether the writer of the request before
-// it still lives as it starts.
+// it still lives as it starts. The writer is named by its guest's boot, its number and when it started:
+// a number alone may be another process's, in a guest booted since, as one that was given up under load.
 const WRITER = `
 import json, os, subprocess, sys, time
 request = json.load(sys.stdin)
 store = request["store"]
+def named(pid):
+    boot = open("/proc/sys/kernel/random/boot_id").read().strip()
+    return " ".join([boot, str(pid), open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[19]])
 if request["action"] == "changed":
     try:
-        os.kill(int(open(store + "/writer.pid").read()), 0)
-        left = ["a writer lives"]
-    except (OSError, ValueError):
+        writer = open(store + "/writer.pid").read()
+        left = ["a writer lives"] if named(int(writer.split()[1])) == writer else []
+    except (OSError, ValueError, IndexError):
         left = []
     json.dump({"paths": left}, sys.stdout)
 else:
     writer = subprocess.Popen(["/bin/sh", "-c", "while :; do echo beat >> " + store + "/beat; sleep 0.05; done"])
     with open(store + "/writer.pid", "w") as pid:
-        pid.write(str(writer.pid))
+        pid.write(named(writer.pid))
     time.sleep(3600)
 `;
 const author = (thread: string) => ({ name: thread === ONE ? "Draft A" : "Draft B", email: `thread:${thread}@surogate` });

@@ -387,19 +387,23 @@ class History:
             self.take_up()
 
     def _init(self) -> None:
-        """Make the pod's repository, once."""
+        """Make the pod's repository, once.
+
+        Its excludes and attributes are there before git makes it, which
+        keeps them: ``HEAD`` says it is made, so one a request was cut in the
+        middle of making leaves out what history leaves out all the same.
+        """
         if (self.repo / "HEAD").exists():
             return
-        self.repo.mkdir(parents=True, exist_ok=True)
+        (self.repo / "info").mkdir(parents=True, exist_ok=True)
+        (self.repo / "info" / "exclude").write_text("\n".join(self.excludes) + "\n")
+        (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
         self._main("init", "-q", "-b", "main")
         self._main("config", "user.name", "Surogates Checkpoint")
         self._main("config", "user.email", "surogates@local")
         # The kept index decides by size and time alone: geesefs's
         # inode numbers and change times differ from pod to pod.
         self._main("config", "core.checkStat", "minimal")
-        (self.repo / "info").mkdir(exist_ok=True)
-        (self.repo / "info" / "exclude").write_text("\n".join(self.excludes) + "\n")
-        (self.repo / "info" / "attributes").write_text(_ATTRIBUTES)
 
     def _read_real(self, main: str | None) -> None:
         """The index made the real files, from *main*: only a file whose size or time changed since is read.
@@ -1729,17 +1733,25 @@ class History:
         """main's index of the real files, made the landing's, into the durable history.
 
         The next pod reads only the real files whose size or time changed
-        since; an entry the landing changed has neither, so it is read.
+        since; an entry the landing changed has neither, so it is read.  So
+        is one saved in the second the pod's read began or since, which may
+        have been saved again unseen at the same size: the bucket dates the
+        kept index by its own clock as it goes up, seconds later for a large
+        one, and by that date alone it would vouch for such a file.
         """
         kept = self.repo / "kept.index"
         # With its time: the second the pod's read of the real files began, at its open or its landing's pickup.
         shutil.copy2(self.repo / "index", kept)
+        read = int(kept.stat().st_mtime)
         try:
             self._git(
                 ["read-tree", "-m", "-i", landing],
                 env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project), "GIT_INDEX_FILE": str(kept)},
                 cwd=self.project,
             )
+            if (entries := _entries(kept)) is None:
+                raise HistoryError("the index is not one whose entries this marks to be read again")
+            _replace(kept, _index({path: _read_again(entry, read) for path, entry in entries.items()}))
             self._put_durable("index", kept)
         finally:
             kept.unlink(missing_ok=True)
@@ -1790,21 +1802,46 @@ class History:
         return folder.is_dir() and not target.is_dir()
 
     def _add_all(self, git: Callable[..., str]) -> None:
-        """``git add -A``, leaving out every folder that holds a git repository.
+        """What ``git add -A`` adds, but for what history leaves out and every folder that holds a git repository.
 
-        Git takes such a folder for a submodule: a link to a commit, not
-        its files, and an add that fails while it has none.  Each one is
-        written to the excludes, which ``main`` and every copy share.  The
-        real files are looked at and read several at once, by no git alone.
+        The files the index holds as git finds them now, and the new files a
+        listing names (:attr:`_listing`), and no other: a ``.gitignore`` in
+        the files outranks every ignore file of the repository's, and with a
+        ``!`` would have ``git add -A`` take back a ``.env`` or the
+        platform's own folders.  So nothing history leaves out is read, nor
+        is it in the index at any step.  Git takes a folder that holds a
+        repository for a submodule: a link to a commit, not its files, and
+        an add that fails while it has none.  Each one is written to
+        ``info/exclude``, which ``main`` and every copy share.  The real
+        files are looked at and read several at once, by no git alone.
         """
+        new = self._new(git)
+        if git == self._main and self._read_at_once(new):
+            return
+        git("add", "-u")
+        # Listed again where the readers left the real files to one git: one may have changed under them.
+        if new := (self._new(git) if git == self._main else new):
+            # A file gone since it was listed is no error: --remove leaves it out.
+            git("update-index", "--add", "--remove", "-z", "--stdin", input="".join(f"{n}\0" for n in new))
+
+    def _new(self, git: Callable[..., str]) -> list[str]:
+        """The files *git*'s index lacks, as a listing names them; each folder that holds a repository written to the excludes."""
         # Listed file by file, git names a folder only for a repository it will not go into.
-        new = [n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n]
+        new = [n for n in git("ls-files", "-z", "--others", *self._listing).split("\0") if n]
         found = [n for n in new if n.endswith("/")]
         if found:
             with open(self.repo / "info" / "exclude", "a") as out:
                 out.writelines(f"/{_pattern(n)}\n" for n in found)
-        if git != self._main or not self._read_at_once([n for n in new if not n.endswith("/")]):
-            git("add", "-A")
+        return [n for n in new if not n.endswith("/")]
+
+    @property
+    def _listing(self) -> list[str]:
+        """What a git that lists the files leaves out: the excludes, on its command line, then git's own ignores.
+
+        On the command line, as no ignore file is: a ``.gitignore`` in the
+        files outranks ``info/exclude`` and every other file of git's.
+        """
+        return [*(f"--exclude={pattern}" for pattern in self.excludes), "--exclude-standard"]
 
     def _read_at_once(self, new: list[str]) -> bool:
         """Make ``main``'s index the real files as ``git add -A`` would, with no git reading them alone; whether it did.
@@ -1957,12 +1994,12 @@ class History:
         A copy starts with none, so the turn made them.  The platform's own
         folders are left out.
         """
-        out = self._copy("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+        out = self._copy("ls-files", "-z", "--others", "--ignored", *self._listing, "--directory")
         ignored = {n for n in out.split("\0") if n}
         # After an add, what is left untracked is the folders with no file in
         # them: history has none, so they are not saved.  A folder the real
         # files have is one the turn emptied, not made.
-        empty = self._copy("ls-files", "-z", "--others", "--exclude-standard", "--directory").split("\0")
+        empty = self._copy("ls-files", "-z", "--others", *self._listing, "--directory").split("\0")
         made = {n for n in empty if n and not (self.project / n).is_dir()}
         names = sorted(ignored | made)
         names = [n for n in names if not n.startswith(self.platform)]
@@ -1999,14 +2036,17 @@ class History:
             fd = os.open(target, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
         except (FileNotFoundError, NotADirectoryError):
             return None
-        with open(fd, "rb") as file:
+        try:
+            # Looked at before it is read: a folder opens, and open() refuses it without closing it.
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 return None
             os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
             blob = hashlib.sha1(b"blob %d\0" % info.st_size)
-            while chunk := file.read(1 << 20):
+            while chunk := os.read(fd, 1 << 20):
                 blob.update(chunk)
+        finally:
+            os.close(fd)
         return blob.hexdigest()
 
     def _put(self, path: str, blob: str) -> list[str]:
@@ -2068,13 +2108,13 @@ class History:
     def _admin(self) -> Path:
         return self.repo / "worktrees" / self.copy.name
 
-    def _main(self, *args: str) -> str:
+    def _main(self, *args: str, input: str | None = None) -> str:
         """Git on ``main``, the real files its work tree."""
-        return self._git(list(args), env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project)
+        return self._git(list(args), env={"GIT_DIR": str(self.repo), "GIT_WORK_TREE": str(self.project)}, cwd=self.project, input=input)
 
-    def _copy(self, *args: str) -> str:
+    def _copy(self, *args: str, input: str | None = None) -> str:
         """Git in the copy, on the thread's branch."""
-        return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy)
+        return self._git(list(args), env={"GIT_DIR": str(self._admin), "GIT_WORK_TREE": str(self.copy)}, cwd=self.copy, input=input)
 
     def _git(self, args: list[str], *, env: dict[str, str], cwd: Path, input: str | None = None) -> str:
         timeout = _TIMEOUT.get() or _GIT_TIMEOUT
@@ -2150,6 +2190,17 @@ def _known(entry: bytes, seen: os.stat_result, written: int) -> bool:
     if size == 0 and entry[40:60] != _EMPTY:
         return False
     return size == seen.st_size & 0xFFFFFFFF and saved == int(seen.st_mtime) & 0xFFFFFFFF and saved < written
+
+
+def _read_again(entry: bytes, written: int) -> bytes:
+    """*entry*, marked as git marks one it cannot vouch for where its file was saved in the second *written* or since: with no size.
+
+    Whoever reads the index then reads that file again, as :func:`_known`
+    and git both do with an entry with no size whose file is not the empty one.
+    """
+    if int.from_bytes(entry[8:12], "big") < written & 0xFFFFFFFF:
+        return entry
+    return entry[:36] + bytes(4) + entry[40:]
 
 
 def _environ(env: dict[str, str]) -> dict[str, str]:
