@@ -672,16 +672,16 @@ describe("the places set aside under a folder's path", () => {
   // Each time a place was set aside that is kept, by its stamp, the oldest first.
   const stamps = () => [...new Set(asides().filter((name) => !name.endsWith(".gone")).map((name) => /\.was-([0-9]+)/.exec(name)![1]!))];
 
-  it("take 10 GiB of the disk at most, the oldest going first with its record and what its landings kept, and never the newest", async () => {
+  it("take 10 GiB of the disk at most, the oldest going first with its record and its landings' folder, and never the newest", async () => {
     expect(ASIDE_BYTES).toBe(10 * 1024 ** 3);
     // Another folder's place set aside long ago, larger than the bound: it is that folder's own to keep.
     const elsewhere = join(data, "history", `${keyOf(join(base, "Elsewhere"))}.was-1`);
     mkdirSync(elsewhere, { recursive: true });
     writeFileSync(join(elsewhere, "Film.bin"), randomBytes(4 * MIB));
+    // Its landings began, and keep nothing now.
     const first = (await placeOf(data, bound(), small())).place;
-    mkdirSync(join(keptOf(data, first), "saga-1"), { recursive: true });
-    writeFileSync(join(keptOf(data, first), "saga-1", "0"), randomBytes(MIB / 2));
-    await filled(0.5);
+    mkdirSync(keptOf(data, first), { recursive: true });
+    await filled(1);
     // What holds next to nothing of the disk counts as little: a file of 64 MiB with nothing written in it.
     await filled(1, (history) => {
       writeFileSync(join(history, "Sparse.img"), "");
@@ -693,7 +693,7 @@ describe("the places set aside under a folder's path", () => {
     const kept = stamps();
     expect(kept).toHaveLength(3);
     expect(asides()).toEqual(expect.arrayContaining([`landings/${first.key}.was-${kept[0]}`, `${first.key}.was-${kept[0]}.json`]));
-    // The place whose set-aside passes the bound has the oldest go: its history, its record and what its landings kept.
+    // The place whose set-aside passes the bound has the oldest go: its history, its record and its landings' folder.
     await placeOf(data, bound(), small());
     expect(stamps()).toEqual([...kept.slice(1), expect.any(String)]);
     expect(asides().filter((name) => name.includes(kept[0]!))).toEqual([]);
@@ -705,6 +705,33 @@ describe("the places set aside under a folder's path", () => {
     expect([stamps(), before.includes(newest!), asides().length]).toEqual([[newest], false, 2]);
     expect(statSync(join(data, "history", `${first.key}.was-${newest}`, "Film.bin")).size).toBe(4 * MIB);
     expect(statSync(join(elsewhere, "Film.bin")).size).toBe(4 * MIB);
+  });
+
+  it("never let go of one whose landings still keep anything, at any size, but count it: the next-oldest goes, and where none other can, none does", async () => {
+    // The oldest folder's landing was cut: what it replaced of the user's is kept beside its place, its record with it.
+    const first = (await placeOf(data, bound(), small())).place;
+    const kept = join(keptOf(data, first), "saga-1");
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, "0.json"), "{}");
+    writeFileSync(join(kept, "0"), "the user's own report, as it was before the landing\n");
+    await filled(2);
+    // The next folder's landings began and kept nothing: their folder is empty.
+    await filled(1, () => mkdirSync(join(data, "landings", keyOf(folder)), { recursive: true }));
+    await filled(1);
+    const [oldest, empty] = stamps();
+    expect(existsSync(join(data, "landings", `${keyOf(folder)}.was-${empty}`))).toBe(true);
+    // Past the bound: the oldest is passed over, and counted, and the next-oldest goes, its empty landings with it.
+    await placeOf(data, bound(), small());
+    const [, third] = stamps();
+    expect([stamps(), third === empty]).toEqual([[oldest, third], false]);
+    expect(existsSync(join(data, "landings", `${keyOf(folder)}.was-${empty}`))).toBe(false);
+    // Past the bound again: what may go goes, and the oldest stays beside the newest, past the bound, as nothing else can go.
+    await filled(4);
+    await placeOf(data, bound(), small());
+    const [, newest] = stamps();
+    expect([stamps(), newest === third]).toEqual([[oldest, newest], false]);
+    expect(readFileSync(join(data, "landings", `${keyOf(folder)}.was-${oldest}`, "saga-1", "0"), "utf8")).toBe("the user's own report, as it was before the landing\n");
+    expect(statSync(join(data, "history", `${keyOf(folder)}.was-${oldest}`, "Film.bin")).size).toBe(2 * MIB);
   });
 
   it.skipIf(process.getuid?.() === 0)("is upkeep: one that cannot be removed whole, or read whole, leaves the new place made, and goes at the next set-aside", async () => {

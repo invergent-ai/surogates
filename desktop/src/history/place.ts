@@ -249,10 +249,12 @@ async function onDisk(path: string): Promise<number> {
 
 /**
  * Let go of the oldest of what was set aside under *key* in the app's data *data*, until what is kept takes *most*
- * bytes of the disk at most: each place set aside goes with its record and what its landings kept, as one, and the
- * newest never, however much it holds. Each is renamed to go first, where it lies (<name>.gone), its record removed,
- * and then it is: cut anywhere, none is kept with part of it gone, and the next set-aside removes what is left. None
- * of it is the sandbox's: a place is set aside only once the sandbox has let it go.
+ * bytes of the disk at most: each place set aside goes with its record and its landings' folder, as one, and the
+ * newest never, however much it holds. Nor one whose landings still keep anything: a landing cut short there may
+ * keep the only copy of a file of the user's it replaced, which no recovery could put back once it went. It counts,
+ * and is passed over; where none other can go, none does. Each is renamed to go first, where it lies
+ * (<name>.gone), its record removed, and then it is: cut anywhere, none is kept with part of it gone, and the next
+ * set-aside removes what is left. None of it is the sandbox's: a place is set aside only once the sandbox has let it go.
  */
 async function keptWithin(data: string, key: string, most: number): Promise<void> {
   const times = new Map<string, string[]>();
@@ -271,6 +273,9 @@ async function keptWithin(data: string, key: string, most: number): Promise<void
   let held = [...taken.values()].reduce((sum, bytes) => sum + bytes, 0);
   for (const time of oldest.slice(0, -1)) {
     if (held <= most) break;
+    // Anything at all in its landings' folder: a step's record, a file it kept, or what a put-back has not told yet.
+    const landings = join(data, "landings", `${key}.was-${time}`);
+    if (times.get(time)!.includes(landings) && (await readdir(landings)).length > 0) continue;
     // Its folders first, then its record: none is left set aside with no record of which folder's it was.
     const [folders, records] = [times.get(time)!.filter((path) => !path.endsWith(".json")), times.get(time)!.filter((path) => path.endsWith(".json"))];
     for (const path of folders) {
