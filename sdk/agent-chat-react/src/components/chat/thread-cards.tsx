@@ -71,6 +71,35 @@ function undoLines(result: AgentChatUndoResult): string[] {
   return lines.length > 0 ? lines : ["Nothing to put back: the files are as they were."];
 }
 
+// When a thread's work was set aside on its computer, in this computer's time: "10 Oct, 10:15".
+function setAsideWhen(at: number): string {
+  const parts = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(new Date(at));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((found) => found.type === type)?.value ?? "";
+  return `${part("day")} ${part("month")}, ${part("hour")}:${part("minute")}`;
+}
+
+/**
+ * What a thread's computer keeps set aside of its work, and what of that it no longer keeps, in the card's own words
+ * and built from kinds, times and a count alone: "Kept on its computer: its copy from 10 Oct, 10:15 · 2 snapshots", and
+ * "No longer kept: its copy from 9 Oct, 08:00". An entry the card does not know, as another adapter may send, is left out.
+ */
+function setAsideLines(aside: AgentChatThreadRow["setAside"]): string[] {
+  const each = (entries: unknown): string[] => (Array.isArray(entries) ? entries : []).flatMap((entry) => {
+    const { kind, at } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+    const moment = typeof at === "string" ? Date.parse(at) : NaN;
+    return (kind === "copy" || kind === "repository") && !Number.isNaN(moment) ? [`its ${kind} from ${setAsideWhen(moment)}`] : [];
+  });
+  if (!aside) return [];
+  const count = Number.isSafeInteger(aside.snapshots) && aside.snapshots > 0 ? aside.snapshots : 0;
+  const kept = [...each(aside.kept), ...(count > 0 ? [`${count} snapshot${count > 1 ? "s" : ""}`] : [])];
+  const gone = each(aside.gone);
+  return [
+    ...(kept.length > 0 ? [`Kept on its computer: ${kept.join(" · ")}`] : []),
+    ...(gone.length > 0 ? [`No longer kept: ${gone.join(" · ")}`] : []),
+  ];
+}
+
 function firstLine(text: string | null): string | null {
   return text?.split("\n").find((line) => line.trim())?.trim() ?? null;
 }
@@ -142,6 +171,8 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
     : STATE_LABEL[worker.state];
   const statusLine = live ? live.statusLine : statusLineOf(worker.report);
   const files = live ? live.files : worker.files;
+  // What its computer set aside of its work: nothing brings it back yet, so it is said, with no button.
+  const setAside = setAsideLines(live?.setAside);
   const name = worker.title ?? firstLine(worker.goal);
   const view = worker.title !== null ? "View thread" : "View worker";
   // A project's thread undoes its newest landing still as it landed, or all its changes, as a landing
@@ -205,6 +236,11 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
           })}
           {files.length > FILES_SHOWN && <li>+{files.length - FILES_SHOWN} more</li>}
         </ul>
+      )}
+      {setAside.length > 0 && (
+        <div data-testid="worker-card-set-aside" className="mt-1 text-xs text-muted-foreground">
+          {setAside.map((line, at) => <p key={at}>{line}</p>)}
+        </div>
       )}
       <div className="mt-1 flex items-center gap-1">
         {onOpenSession && (

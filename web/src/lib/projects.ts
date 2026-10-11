@@ -35,7 +35,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
   const ids = FIXTURE_IDS;
   const cloud = { kind: "cloud" } as const;
   const thread = (id: string, title: string, minutes: number, rest: Partial<ThreadRow>): ThreadRow => ({
-    id, title, group: "idle", reason: null, statusLine: null, progress: null, files: [], landingId: null, place: cloud,
+    id, title, group: "idle", reason: null, statusLine: null, progress: null, files: [], landingId: null, setAside: null, place: cloud,
     createdAt: ago(minutes + 60), updatedAt: ago(minutes), resolvedAt: null, ...rest,
   });
   // A file of each mark among them; an artifact has none.

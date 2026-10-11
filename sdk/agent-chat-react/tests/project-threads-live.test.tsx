@@ -264,6 +264,41 @@ describe("a thread's card, live", () => {
     expect(files()).toEqual(["Budget.xlsx · not merged", "b.md"]);
   });
 
+  it("says on a thread's card what its computer set aside of its work and what went, in this computer's time", async () => {
+    vi.stubEnv("TZ", "UTC");
+    try {
+      const stream = new FakeStream();
+      const copy = { kind: "copy" as const, at: "2026-10-10T10:15:00Z" };
+      let current = row({ group: "idle", setAside: { kept: [copy], snapshots: 2, gone: [{ kind: "repository", at: "2026-10-09T08:00:00Z" }] } });
+      const live = project(stream, () => [current]);
+      const adapter = { ...NO_BROWSER_ADAPTER, ...live } as unknown as AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      act(() => root?.render(<Live adapter={adapter} />));
+      const said = () => [...container!.querySelectorAll('[data-testid="worker-card-set-aside"] p')].map((line) => line.textContent);
+      stream.emit("ready");
+      await settle();
+      expect(said()).toEqual(["Kept on its computer: its copy from 10 Oct, 10:15 · 2 snapshots", "No longer kept: its repository from 9 Oct, 08:00"]);
+      expect(container!.querySelector('[data-testid="worker-card-set-aside"] button')).toBeNull();
+      // An entry the card does not know, or whose time is none, is left out; with nothing left, nothing is said.
+      current = row({ group: "idle", setAside: {
+        kept: [{ kind: "history", at: copy.at }, { kind: "copy", at: "yesterday" }, copy] as never, snapshots: 1.5, gone: [],
+      } });
+      stream.emit("change", { thread_id: THREAD });
+      await settle();
+      expect(said()).toEqual(["Kept on its computer: its copy from 10 Oct, 10:15"]);
+      for (const setAside of [null, undefined, { kept: [], snapshots: 0, gone: [] }]) {
+        current = row({ group: "idle", setAside });
+        stream.emit("change", { thread_id: THREAD });
+        await settle();
+        expect(container!.querySelector('[data-testid="worker-card-set-aside"]'), JSON.stringify(setAside)).toBeNull();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("gives a master's cards, through AgentChat, their rows, their Start and their View thread", async () => {
     const PROPOSAL = "5d1c0e7a-3f42-4b8e-9a61-2c7d8e9f0a1b";
     const events = new FakeStream();
