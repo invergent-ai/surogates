@@ -10,6 +10,19 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// A removal that fails, where a test says: of each path that matches, as one the app cannot finish. And removals of
+// what goes held until a test lets them on, as on a slow disk.
+const removals = vi.hoisted(() => ({ failing: null as RegExp | null, held: null as Promise<void> | null }));
+vi.mock("node:fs/promises", async (original) => {
+  const real = await original<typeof import("node:fs/promises")>();
+  const rm = async (...args: Parameters<typeof real.rm>) => {
+    if (String(args[0]).endsWith(".gone")) await removals.held;
+    if (removals.failing?.test(String(args[0]))) throw Object.assign(new Error(`EBUSY: resource busy or locked, rm '${String(args[0])}'`), { code: "EBUSY" });
+    return real.rm(...args);
+  };
+  return { ...real, rm, default: { ...real, rm } };
+});
+
 import { BOOT_ID, checkFolder } from "../src/binding/folder.js";
 import { ASIDE_BYTES, copyOf, FolderReplaced, keptOf, keyOf, type Looked, placeOf, type PlaceOptions } from "../src/history/place.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -73,6 +86,8 @@ beforeEach(() => {
   data = join(base, "data");
   folder = join(base, "Documents");
   for (const dir of [data, folder, join(base, "home")]) mkdirSync(dir);
+  removals.failing = null;
+  removals.held = null;
   letGo = [];
   sandbox = {
     letGo: (place) => {
@@ -661,10 +676,17 @@ describe("the places set aside under a folder's path", () => {
   // making sets this one aside.
   let moved = 0;
   const filled = async (mib: number, more: (history: string) => void = () => {}) => {
-    const { place } = await placeOf(data, bound(), small());
+    const { place } = await ask();
     writeFileSync(join(place.history, "Film.bin"), randomBytes(mib * MIB));
     more(place.history);
     replaced(`Documents.${(moved += 1)}`);
+  };
+  // The folder's place, answered once the bound on what is set aside under its path has run behind the ask.
+  const ask = async () => {
+    let run: Promise<void> = Promise.resolve();
+    const answer = await placeOf(data, bound(), { ...small(), bounded: (done) => void (run = done) });
+    await run;
+    return answer;
   };
   // What is set aside, by its names under the app's data: each history, its record and what its landings kept.
   const asides = () => [...histories(), ...(existsSync(join(data, "landings")) ? readdirSync(join(data, "landings")) : []).map((name) => `landings/${name}`)]
@@ -672,16 +694,16 @@ describe("the places set aside under a folder's path", () => {
   // Each time a place was set aside that is kept, by its stamp, the oldest first.
   const stamps = () => [...new Set(asides().filter((name) => !name.endsWith(".gone")).map((name) => /\.was-([0-9]+)/.exec(name)![1]!))];
 
-  it("take 10 GiB of the disk at most, the oldest going first with its record and what its landings kept, and never the newest", async () => {
+  it("take 10 GiB of the disk at most, the oldest going first with its record and its landings' folder, and never the newest", async () => {
     expect(ASIDE_BYTES).toBe(10 * 1024 ** 3);
     // Another folder's place set aside long ago, larger than the bound: it is that folder's own to keep.
     const elsewhere = join(data, "history", `${keyOf(join(base, "Elsewhere"))}.was-1`);
     mkdirSync(elsewhere, { recursive: true });
     writeFileSync(join(elsewhere, "Film.bin"), randomBytes(4 * MIB));
-    const first = (await placeOf(data, bound(), small())).place;
-    mkdirSync(join(keptOf(data, first), "saga-1"), { recursive: true });
-    writeFileSync(join(keptOf(data, first), "saga-1", "0"), randomBytes(MIB / 2));
-    await filled(0.5);
+    // Its landings began, and keep nothing now.
+    const first = (await ask()).place;
+    mkdirSync(keptOf(data, first), { recursive: true });
+    await filled(1);
     // What holds next to nothing of the disk counts as little: a file of 64 MiB with nothing written in it.
     await filled(1, (history) => {
       writeFileSync(join(history, "Sparse.img"), "");
@@ -693,51 +715,138 @@ describe("the places set aside under a folder's path", () => {
     const kept = stamps();
     expect(kept).toHaveLength(3);
     expect(asides()).toEqual(expect.arrayContaining([`landings/${first.key}.was-${kept[0]}`, `${first.key}.was-${kept[0]}.json`]));
-    // The place whose set-aside passes the bound has the oldest go: its history, its record and what its landings kept.
-    await placeOf(data, bound(), small());
+    // The place whose set-aside passes the bound has the oldest go: its history, its record and its landings' folder.
+    await ask();
     expect(stamps()).toEqual([...kept.slice(1), expect.any(String)]);
     expect(asides().filter((name) => name.includes(kept[0]!))).toEqual([]);
     // One larger than the bound by itself is kept whole, as the newest always is, and every older one goes.
     const before = stamps();
     await filled(4);
-    await placeOf(data, bound(), small());
+    await ask();
     const [newest] = stamps();
     expect([stamps(), before.includes(newest!), asides().length]).toEqual([[newest], false, 2]);
     expect(statSync(join(data, "history", `${first.key}.was-${newest}`, "Film.bin")).size).toBe(4 * MIB);
     expect(statSync(join(elsewhere, "Film.bin")).size).toBe(4 * MIB);
   });
 
-  it.skipIf(process.getuid?.() === 0)("is upkeep: one that cannot be removed whole, or read whole, leaves the new place made, and goes at the next set-aside", async () => {
-    const locked = (history: string) => {
-      mkdirSync(join(history, "locked"));
-      writeFileSync(join(history, "locked", "kept.md"), "a thread's\n");
-      chmodSync(join(history, "locked"), 0o555);
+  it("never let go of one whose landings still keep anything, at any size, but count it: the next-oldest goes, and where none other can, none does", async () => {
+    // The oldest folder's landing was cut: what it replaced of the user's is kept beside its place, its record with it.
+    const first = (await ask()).place;
+    const kept = join(keptOf(data, first), "saga-1");
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, "0.json"), "{}");
+    writeFileSync(join(kept, "0"), "the user's own report, as it was before the landing\n");
+    await filled(2);
+    // The next folder's landings began and kept nothing: their folder is empty.
+    await filled(1, () => mkdirSync(join(data, "landings", keyOf(folder)), { recursive: true }));
+    await filled(1);
+    const [oldest, empty] = stamps();
+    expect(existsSync(join(data, "landings", `${keyOf(folder)}.was-${empty}`))).toBe(true);
+    // Past the bound: the oldest is passed over, and counted, and the next-oldest goes, its empty landings with it.
+    await ask();
+    const [, third] = stamps();
+    expect([stamps(), third === empty]).toEqual([[oldest, third], false]);
+    expect(existsSync(join(data, "landings", `${keyOf(folder)}.was-${empty}`))).toBe(false);
+    // Past the bound again: what may go goes, and the oldest stays beside the newest, past the bound, as nothing else can go.
+    await filled(4);
+    await ask();
+    const [, newest] = stamps();
+    expect([stamps(), newest === third]).toEqual([[oldest, newest], false]);
+    expect(readFileSync(join(data, "landings", `${keyOf(folder)}.was-${oldest}`, "saga-1", "0"), "utf8")).toBe("the user's own report, as it was before the landing\n");
+    expect(statSync(join(data, "history", `${keyOf(folder)}.was-${oldest}`, "Film.bin")).size).toBe(2 * MIB);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("let go one whose folders the app may not search, list or change as any other, whole, and follow no link out of it", async () => {
+    // What a thread's commands can leave in its copy, which its place keeps as it was: a folder that may be listed and
+    // not searched, one that may be read and not changed, one that may not even be listed; and a link to a folder
+    // outside, which may not be changed either.
+    const outside = join(base, "Outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "theirs.md"), "another folder's\n");
+    chmodSync(outside, 0o555);
+    const odd = (history: string) => {
+      for (const [name, mode] of [["listed", 0o644], ["locked", 0o555], ["unread", 0]] as const) {
+        mkdirSync(join(history, name, "inside"), { recursive: true });
+        writeFileSync(join(history, name, "inside", "kept.md"), "a thread's\n");
+        chmodSync(join(history, name), mode);
+      }
+      symlinkSync(outside, join(history, "out"));
     };
-    const unread = (history: string) => {
-      mkdirSync(join(history, "unread"));
-      writeFileSync(join(history, "unread", "x"), randomBytes(MIB));
-      chmodSync(join(history, "unread"), 0);
-    };
-    // The oldest holds a folder nothing may be removed from; the next, past the bound with it, one nothing may read.
-    await filled(2, locked);
-    await filled(2, unread);
+    try {
+      await filled(2, odd);
+      await filled(2);
+      // Set aside, past the bound: the oldest is chosen, counting for what can be looked at, and goes whole.
+      expect(await ask()).toHaveProperty("place");
+      expect(stamps()).toHaveLength(1);
+      expect(asides().filter((name) => name.endsWith(".gone"))).toEqual([]);
+      // What the link led to is as it was, its mode with it.
+      expect([readdirSync(outside), statSync(outside).mode & 0o777]).toEqual([["theirs.md"], 0o555]);
+    } finally {
+      spawnSync("chmod", ["-R", "u+rwX", base]);
+    }
+  });
+
+  it("removes each one let go on its own: one that cannot be removed keeps none that goes after it, and goes at a later set-aside", async () => {
+    await filled(2);
+    await filled(2);
     const [oldest] = stamps();
     const key = keyOf(folder);
-    const gone = join(data, "history", `${key}.was-${oldest}.gone`);
+    const gone = (stamp: string) => join(data, "history", `${key}.was-${stamp}.gone`);
+    removals.failing = new RegExp(`\\.was-${oldest}\\.gone$`);
+    // Past the bound: the oldest goes as far as it may, and the place is made all the same.
+    expect(await ask()).toHaveProperty("place");
+    const [next] = stamps();
+    expect(existsSync(gone(oldest!))).toBe(true);
+    // Past the bound again: the next goes whole, though the one before it still cannot be removed.
+    await filled(2);
+    await ask();
+    expect([existsSync(gone(oldest!)), existsSync(gone(next!)), stamps().includes(next!)]).toEqual([true, false, false]);
+    // Once it may be, what is left of it goes at the next set-aside.
+    removals.failing = null;
+    await filled(0);
+    await ask();
+    expect(asides().filter((name) => name.endsWith(".gone"))).toEqual([]);
+  });
+
+  it("are bounded behind the ask that set one aside, which is answered first, and one run of the bound at a time for a folder's path", async () => {
+    await filled(2);
+    await filled(2);
+    const [oldest] = stamps();
+    const key = keyOf(folder);
+    let release = () => {};
+    removals.held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runs: Array<Promise<void>> = [];
+    const behind: PlaceOptions = { ...small(), bounded: (run) => void runs.push(run) };
+    // Answered while the bound, past which the oldest goes, is still removing it.
+    const { place } = await placeOf(data, bound(), behind);
+    await vi.waitFor(() => expect(existsSync(join(data, "history", `${key}.was-${oldest}.gone`))).toBe(true));
+    const [next] = stamps();
+    expect(runs).toHaveLength(1);
+    // Another set-aside past the bound meanwhile: its bound waits for the one before it to have run.
+    writeFileSync(join(place.history, "Film.bin"), randomBytes(2 * MIB));
+    replaced("Documents.again");
+    await placeOf(data, bound(), behind);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect([runs.length, stamps().includes(next!)]).toEqual([2, true]);
+    release();
+    await Promise.all(runs);
+    expect([stamps().length, stamps().includes(next!), asides().filter((name) => name.endsWith(".gone"))]).toEqual([1, false, []]);
+  });
+
+  it("go in the order they were set aside in, whatever the clock said: a place set aside after the clock went back is the newest", async () => {
+    await filled(2, (history) => writeFileSync(join(history, "first.md"), ""));
+    // The clock a day ahead as the first is set aside, as after a wrong clock at boot; then right as the second is.
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 86_400_000);
     try {
-      // Set aside, past the bound: the oldest goes as far as it may, and the place is made all the same.
-      expect(await placeOf(data, bound(), small())).toHaveProperty("place");
-      expect(stamps()).toHaveLength(1);
-      expect([existsSync(join(gone, "locked", "kept.md")), existsSync(join(data, "history", `${key}.was-${oldest}.json`))]).toEqual([true, false]);
-      // Once it may be, what is left of it goes at the next set-aside.
-      chmodSync(join(gone, "locked"), 0o755);
-      await filled(0);
-      await placeOf(data, bound(), small());
-      expect(existsSync(gone)).toBe(false);
+      await filled(2, (history) => writeFileSync(join(history, "second.md"), ""));
     } finally {
-      for (const name of histories().filter((one) => one.includes(".was-") && !one.endsWith(".json"))) {
-        for (const inside of ["locked", "unread"]) if (existsSync(join(data, "history", name, inside))) chmodSync(join(data, "history", name, inside), 0o755);
-      }
+      now.mockRestore();
     }
+    await ask();
+    // Past the bound: the first goes, and the second, the newest, stays.
+    const [only] = stamps();
+    expect([stamps().length, readdirSync(join(data, "history", `${keyOf(folder)}.was-${only}`)).includes("second.md")]).toEqual([1, true]);
   });
 });

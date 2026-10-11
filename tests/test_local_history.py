@@ -3539,6 +3539,65 @@ def test_a_copy_its_root_let_go_is_removed_only_where_its_branch_holds_all_of_it
     assert one.changed() == {"paths": ["notes.txt"]}
 
 
+def a_repository_with_a_commit(at: Path) -> str:
+    """A repository of the thread's own at *at*, its files in a commit of its own: the commit."""
+    subprocess.run(["git", "init", "-q", str(at)], check=True, env=HERMETIC)
+    subprocess.run(["git", "-C", str(at), "add", "-A"], check=True, env=HERMETIC)
+    subprocess.run(
+        ["git", "-C", str(at), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "the thread's own commit"],
+        check=True, env=HERMETIC,
+    )
+    return git(at / ".git", "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("held", [
+    "a repository two folders down, with a commit, among files its branch holds",
+    "a git file naming a repository elsewhere",
+    "a git folder that is no repository",
+    "a folder of the thread's where the user's folder keeps a repository",
+])
+def test_a_copy_that_holds_a_name_git_never_lists_anywhere_is_kept_with_all_of_it(tmp_path, folder, held):
+    if held.startswith("a folder of the thread's"):
+        # A repository in the user's folder, which history leaves out: the copy's folder of that name is the thread's.
+        (folder / "vendor").mkdir()
+        (folder / "vendor" / "lib.js").write_text("the user's\n")
+        a_repository_with_a_commit(folder / "vendor")
+    one = a_copy(tmp_path, folder)
+    if held.startswith("a repository two folders down"):
+        (one.copy / "lib" / "sub").mkdir(parents=True)
+        (one.copy / "lib" / "sub" / "mod.py").write_text("x = 1\n")
+        one.snapshot("before a step")
+        a_repository_with_a_commit(one.copy / "lib" / "sub")
+    elif held.startswith("a git file"):
+        (one.copy / "site").mkdir()
+        (one.copy / "site" / "index.html").write_text("<p>a submodule's checkout, copied in</p>\n")
+        (one.copy / "site" / ".git").write_text("gitdir: ../.git/modules/site\n")
+    elif held.startswith("a git folder"):
+        (one.copy / "notes" / ".git").mkdir(parents=True)
+        (one.copy / "notes" / "todo.md").write_text("in a snapshot\n")
+        (one.copy / "notes" / ".git" / "NOTES.md").write_text("the thread's own\n")
+    else:
+        (one.copy / "vendor").mkdir()
+        (one.copy / "vendor" / "mine.js").write_text("the thread's own\n")
+    # Every file git lists is in a snapshot.
+    one.snapshot("before a step")
+    held_now = as_it_is(one.copy)
+    assert LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").close() == {"copy": "kept"}
+    assert as_it_is(one.copy) == held_now
+
+
+def test_a_checkout_in_the_platforms_own_folder_waits_whole_beside_the_copies_as_the_copy_goes(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    checkout = one.copy / ".threads" / "site"
+    checkout.mkdir(parents=True)
+    (checkout / "index.html").write_text("<p>checked out</p>\n")
+    commit = a_repository_with_a_commit(checkout)
+    assert one.close() == {"copy": "removed"}
+    assert git(tmp_path / "store" / "waiting" / "t1" / ".threads" / "site" / ".git", "rev-parse", "HEAD") == commit
+    assert one.open(moves=False) == {"copy": "kept"}
+    assert git(checkout / ".git", "rev-parse", "HEAD") == commit
+
+
 @pytest.mark.parametrize("how", ["from its branch", "moved at its turn's start", "with its repository made again"])
 def test_what_waited_beside_the_copies_comes_back_whichever_way_the_copy_is_made_again(tmp_path, folder, how):
     one = a_copy(tmp_path, folder)

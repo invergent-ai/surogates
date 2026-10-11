@@ -568,7 +568,7 @@ class LocalHistory(History):
         self._add_all(self._copy)
         # All it holds, whichever turn wrote it: what an earlier turn left out is made again by no branch either.
         excluded, repositories, _ = History._excluded(self)
-        if excluded or repositories or os.path.lexists(self.copy / ".git") or self._copy("diff", "--cached", "--name-only", "HEAD"):
+        if excluded or repositories or self._holds_git() or self._copy("diff", "--cached", "--name-only", "HEAD"):
             return {"copy": "kept"}
         held = [self.copy / name.rstrip("/") for name in self.platform]
         held = [at for at in held if at.is_dir() and not at.is_symlink()]
@@ -583,6 +583,22 @@ class LocalHistory(History):
         shutil.rmtree(self._admin, ignore_errors=True)
         _removed(going)
         return {"copy": "removed"}
+
+    def _holds_git(self) -> bool:
+        """Whether the copy holds a name ``.git`` anywhere, which git never lists and passes over without a word.
+
+        It may be a repository of the thread's own, with its commits, a
+        submodule's checkout, or no repository at all; no branch holds any
+        of it.  The platform's own folders at the top, which wait beside the
+        copies whole, are not looked into.  No link is followed.
+        """
+        top = {name.rstrip("/") for name in self.platform}
+        for at, folders, files in os.walk(self.copy):
+            if ".git" in folders or ".git" in files:
+                return True
+            if at == str(self.copy):
+                folders[:] = [name for name in folders if name not in top]
+        return False
 
     def _back(self) -> None:
         """Put the platform's own folders that waited beside the copies back into the thread's copy, now whole.
