@@ -17,7 +17,10 @@
 // by the place it was given. What the app knew of its copies goes with it.
 //
 // A thread whose folder has no history works nowhere: no copy is made, and it is told why. The
-// guest's word can deny a thread its copy; nothing it says gives a thread the folder itself.
+// guest's word can deny a thread its copy; nothing it says gives a thread the folder itself. Nor
+// does a thread of a folder too large to copy in the time a copy may take: once the history's bound
+// has cut a copy of it, the folder is refused at once until it holds other files or its person asks
+// again (history/too-large.ts).
 
 import { lstat, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,6 +34,7 @@ import type { VmClient } from "../vm/client.js";
 import type { HistoryCode } from "../vm/history.js";
 import { type Folder, late, type Place } from "../vm/manager.js";
 import { copyOf, FolderReplaced, keyOf, placeOf } from "./place.js";
+import { forgetTooLarge, rememberTooLarge, tooLargeFor } from "./too-large.js";
 
 // A thread's copy as the guest left it: the folder's place, the copy's folder with its identity, and
 // the folder it is a copy of, by whose path the thread's tools and commands name its files.
@@ -73,6 +77,8 @@ export interface CopiesOptions {
   making?(event: Making): void;
   // How long an open runs before an answer that is no copy is taken as the history's bound cutting it.
   cutMs?: number;
+  // How long a count of a folder's files may take, where it is remembered as too large or looked at again (COUNT_MS).
+  countMs?: number;
   // Asked before any request to a folder's history that may read the folder itself, *folder*: null where it may be read
   // now, or what the request is answered instead, and nothing is asked. A landing cut short there may have left a file of
   // the user's beside its name, which a read would take for one the user deleted (hosts/tool-hosts.ts, recoverBefore).
@@ -89,8 +95,6 @@ const TURNS = 4;
 // The history ends an open at its bound: its git calls at 570 s, the guest's agent the request at 600 s (and
 // this computer one the agent does not answer at 1,215 s). An open that ran this long and made no copy was cut.
 export const CUT_MS = 500_000;
-// A thread whose copy of a folder was cut so often is not made one again: each try starts it from nothing.
-const CUTS = 2;
 
 // Why a folder has no history, as its history says it (surogates/sandbox/local_history.py, _off):
 // more files than one tracks, or a name in it that is not UTF-8.
@@ -104,11 +108,11 @@ const OFF: Record<Reason, string> = {
 /** What every operation of a thread whose *folder* has no history is answered, but its turn's own open. */
 export const historyOff = (reason: Reason, folder: string): Outcome => ({ error: { type: "history_off", message: `The folder ${folder} ${OFF[reason]}` } });
 
-// What every operation of a thread is answered whose copy of *folder* could not be made within the history's bound, twice.
+// What every operation of every thread on *folder* is answered once a copy of it could not be made within the history's bound.
 const tooLarge = (folder: string): Outcome => ({
   error: {
     type: "history_off",
-    message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take, twice. Choose a folder inside it that holds less`,
+    message: `The folder ${folder} is too large for a thread of the project to have a copy of its own on this computer: its copy could not be made within the time a copy may take. Choose a folder inside it that holds less, or try again`,
   },
 });
 
@@ -169,14 +173,12 @@ async function look(path: string): Promise<Identity | "other" | null> {
   return answer;
 }
 
-// What the app knows of a folder's place: the place, its folder in the app's data as it was found, each
-// root's copy in it as the guest's last answered open left it, which is whole while it is there, and how
-// often each root's open was cut by the history's bound.
+// What the app knows of a folder's place: the place, its folder in the app's data as it was found, and each
+// root's copy in it as the guest's last answered open left it, which is whole while it is there.
 interface Known {
   place: Place;
   store: Identity;
   copies: Map<string, Identity>;
-  cuts: Map<string, number>;
 }
 
 // A place in the guest, as the first request since it was last let go gave it, and how much holds it.
@@ -244,14 +246,18 @@ export class Copies {
   /**
    * One request to the history of *root*'s folder, for its own copy, which is made first for every
    * action but a turn's own open; that one is asked as it came, and answered as the guest answered
-   * it. A request the history refuses for want of a whole copy is asked again once, after an open
-   * that does not move the copy; refused again, it is answered so in words. A cancel is answered at
+   * it. A turn's open asked as retried (retried: true) is a turn its person asked for again: a
+   * folder refused as too large is tried again, and the guest is asked the open without it. A
+   * request the history refuses for want of a whole copy is asked again once, after an open that
+   * does not move the copy; refused again, it is answered so in words. A cancel is answered at
    * once, and stops the request's git in the guest. Never rejects.
    */
   async ask(root: string, bound: BoundFolder, action: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     const outcome = await this.until(signal, this.inTurn(root, async (): Promise<Outcome> => {
       if (signal.aborted) return CANCELLED;
-      return action === "open" ? this.turnOpen(root, bound, args, signal) : this.step(root, bound, action, args, signal);
+      if (action !== "open") return this.step(root, bound, action, args, signal);
+      const { retried, ...asked } = args;
+      return retried === true ? this.turnOpen(root, bound, asked, true, signal) : this.turnOpen(root, bound, args, false, signal);
     }).catch((error: unknown) => unavailable(describe(error))));
     return outcome === "cancelled" ? CANCELLED : outcome;
   }
@@ -299,10 +305,12 @@ export class Copies {
     this.held.clear();
   }
 
-  private async turnOpen(root: string, bound: BoundFolder, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
+  private async turnOpen(root: string, bound: BoundFolder, args: Record<string, unknown>, retried: boolean, signal: AbortSignal): Promise<Outcome> {
     for (let turn = 0; turn < TURNS; turn += 1) {
       const found = await this.found(root, bound);
       if ("failed" in found) return found.failed;
+      if (retried) await forgetTooLarge(found.place);
+      else if (await tooLargeFor(found.place, this.options.countMs)) return tooLarge(bound.folder);
       if (signal.aborted) return CANCELLED;
       const outcome = await this.opened(found.known, found.place, root, args, signal);
       if (outcome !== STALE) return outcome;
@@ -342,6 +350,7 @@ export class Copies {
       const found = await this.found(root, bound);
       if ("failed" in found) return found;
       const { known, place } = found;
+      if (await tooLargeFor(place, this.options.countMs)) return { failed: tooLarge(bound.folder) };
       const whole = known.copies.get(root);
       if (whole) {
         const there = await look(copyOf(place, root));
@@ -381,13 +390,13 @@ export class Copies {
         if (store === null || store === "other") return { failed: unavailable("its place in the app's data is not a folder of the app's own") };
         if ((this.lettings.get(key) ?? 0) !== lettings) continue;
         const known = this.known.get(key);
-        if (known && same(known.store, store)) return (known.cuts.get(root) ?? 0) >= CUTS ? { failed: tooLarge(bound.folder) } : { known, place };
+        if (known && same(known.store, store)) return { known, place };
         if (known) {
           // Not the place the app knew, though nothing of the app's let that one go: it goes now.
           await this.letGo(known.place, known.store.ino);
           continue;
         }
-        const fresh: Known = { place, store, copies: new Map(), cuts: new Map() };
+        const fresh: Known = { place, store, copies: new Map() };
         this.known.set(key, fresh);
         return { known: fresh, place };
       } catch (error) {
@@ -415,7 +424,11 @@ export class Copies {
     if (!Number.isNaN(sent.at)) {
       if (making) this.options.making?.({ root, folder: place.real.path, state: "ended" });
       const cut = outcome !== STALE && "error" in outcome && outcome.error.type !== "cancelled" && performance.now() - sent.at >= this.cutMs;
-      if (cut) known.cuts.set(root, (known.cuts.get(root) ?? 0) + 1);
+      if (cut) {
+        // Each try would take as long again, and start from nothing: the folder is refused from here on.
+        await rememberTooLarge(place, this.options.countMs);
+        return tooLarge(place.real.path);
+      }
     }
     if (outcome === STALE || !("ok" in outcome)) return outcome;
     if (offOf(outcome)) {
