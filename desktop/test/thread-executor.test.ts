@@ -175,9 +175,15 @@ function executorOf(more: Partial<VmExecutorOptions> = {}): VmExecutor {
       onProcesses: () => () => {},
       onAsk: () => () => {},
       // The guest's history: it makes a copy's folder at its open, as git does, removes one its root let go, as its branch
-      // holds all of it, and answers each step as a whole one would.
+      // holds all of it, drops a deleted thread's, and answers each step as a whole one would.
       history: async (request): Promise<Outcome> => {
         asked.push(request);
+        if (request.action === "drop") {
+          const copy = join(request.place.history, "threads", request.thread);
+          const there = existsSync(copy);
+          rmSync(copy, { recursive: true, force: true });
+          return { ok: { thread: there ? "dropped" : "gone" } };
+        }
         if (request.action === "close") {
           const copy = join(request.place.history, "threads", request.thread);
           const there = existsSync(copy);
@@ -678,15 +684,15 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     expect(stops).toEqual([copyOf(THREAD)]);
   });
 
-  it("stop a deleted thread's hosts on its copy, then have the guest let the copy go as an idle one's; a chat and a root bound nowhere here are left alone", async () => {
+  it("stop a deleted thread's hosts on its copy, then have the guest drop the thread; a chat and a root bound nowhere here are left alone", async () => {
     await executor.run(op("resolve", { path: "" }), signal());
     await executor.run(op("resolve", { path: "" }, CHAT), signal());
     // As the binder retires a root: the tools are told while its binding is still there, then it is forgotten.
     executor.retired(THREAD);
     bindings.delete(THREAD);
     await until(() => said().length === 2);
-    // Its copy goes where its branch holds all of it; nothing more is asked of the guest for its repository.
-    expect([stops, said(), existsSync(copyOf(THREAD))]).toEqual([[copyOf(THREAD)], [[THREAD, "open", { moves: false }], [THREAD, "close", {}]], false]);
+    // Its copy and its repository go; nothing more is asked of the guest for it.
+    expect([stops, said(), existsSync(copyOf(THREAD))]).toEqual([[copyOf(THREAD)], [[THREAD, "open", { moves: false }], [THREAD, "drop", {}]], false]);
     executor.retired(CHAT);
     executor.retired(OTHER);
     executor.retired("not a session");
@@ -695,7 +701,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     expect(await executor.run(op("resolve", { path: "" }), signal())).toEqual(FOLDER_UNAVAILABLE);
   });
 
-  it("let a deleted thread's copy go though no host of the app's run worked in it: the copy a run before left", async () => {
+  it("drop a deleted thread though no host of the app's run worked in its copy: the copy a run before left", async () => {
     await executor.run(op("resolve", { path: "" }), signal());
     // The app quits with the host on it, and lets no copy go as it quits.
     await executor.stop();
@@ -704,7 +710,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
     executor.retired(THREAD);
     bindings.delete(THREAD);
     await until(() => said().length === 2);
-    expect([said().at(-1), existsSync(copyOf(THREAD)), starts]).toEqual([[THREAD, "close", {}], false, [expect.objectContaining({ folder: copyOf(THREAD) })]]);
+    expect([said().at(-1), existsSync(copyOf(THREAD)), starts]).toEqual([[THREAD, "drop", {}], false, [expect.objectContaining({ folder: copyOf(THREAD) })]]);
   });
 
   it("let a thread's copy go once the host on it has idled out, and have it made again at the thread's next operation", async () => {
@@ -751,11 +757,11 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
       expect(await executor.run(operation, signal()), String(operation.args.action)).toHaveProperty("ok");
     }
     await until(() => stops.includes(folder));
-    // Once its landing's host has gone, nothing of the deleted thread's is taken, and no host is started for it; its copy is
-    // let go as an idle one's, now that no host holds it.
+    // Once its landing's host has gone, nothing of the deleted thread's is taken, and no host is started for it; the thread
+    // is dropped, now that no host holds its copy.
     for (const operation of [land({ action: "recover" }), history({ action: "changed" })]) expect(await executor.run(operation, signal())).toEqual(FOLDER_UNAVAILABLE);
     await until(() => said().length === 4);
-    expect([starts.length, said().map(([, action]) => action), existsSync(copyOf(THREAD))]).toEqual([2, ["open", "fetch", "forget", "close"], false]);
+    expect([starts.length, said().map(([, action]) => action), existsSync(copyOf(THREAD))]).toEqual([2, ["open", "fetch", "forget", "drop"], false]);
   });
 
   it("stop a deleted thread's landing's host that wrote nothing in its folder once the step its helper runs has ended, and answer the deletion at once", async () => {
