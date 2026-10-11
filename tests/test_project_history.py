@@ -13,6 +13,7 @@ import pytest
 from surogates.sandbox import history as history_module
 from surogates.sandbox.history import History, HistoryConflict, HistoryError
 from surogates.tools.utils.checkpoint_manager import _shadow_repo_path
+from tests.test_local_history import held_open
 
 
 def opened(tmp_path: Path, project: Path, thread: str = "t1") -> History:
@@ -225,6 +226,19 @@ def test_an_apply_checks_the_real_file_and_its_undo_checks_it_again(tmp_path, pr
     with pytest.raises(HistoryConflict):
         history.unapply(new["path"], new["before"], new["after"])
     assert (project / "new.md").read_text() == "changed after the landing wrote it"
+
+
+def test_a_real_file_a_folder_took_the_place_of_since_the_landings_look_is_changed_and_left_open_nowhere(tmp_path, project):
+    history = opened(tmp_path, project)
+    (history.copy / "Report.docx").write_bytes(b"report v2")
+    [change] = history.commit_turn(author=THREAD_A, trailers=trailers("turn"))["changes"]
+    (project / "Report.docx").unlink()
+    (project / "Report.docx").mkdir()
+    (project / "Report.docx" / "inside.txt").write_text("yours")
+    with pytest.raises(HistoryConflict):
+        history.apply(change["path"], change["before"], change["after"])
+    assert held_open(project / "Report.docx") == []
+    assert (project / "Report.docx" / "inside.txt").read_text() == "yours"
 
 
 def test_an_apply_whose_reply_was_lost_runs_again_as_a_no_op(tmp_path, project):

@@ -2007,14 +2007,17 @@ class History:
             fd = os.open(target, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
         except (FileNotFoundError, NotADirectoryError):
             return None
-        with open(fd, "rb") as file:
+        try:
+            # Looked at before it is read: a folder opens, and open() refuses it without closing it.
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 return None
             os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
             blob = hashlib.sha1(b"blob %d\0" % info.st_size)
-            while chunk := file.read(1 << 20):
+            while chunk := os.read(fd, 1 << 20):
                 blob.update(chunk)
+        finally:
+            os.close(fd)
         return blob.hexdigest()
 
     def _put(self, path: str, blob: str) -> list[str]:
