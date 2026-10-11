@@ -90,12 +90,12 @@ REFUSALS = frozenset({
     "history", "busy", "history_off", NO_COPY, "refused", "value", "conflict", "stale", "sandbox", "os", "too_large",
     "cancelled", "interrupted", "unavailable", "folder_unavailable", "revoked", "other",
 })
-#: The code a refusal of the type ``history`` always has: the folder's history's own ten
+#: The code a refusal of the type ``history`` always has: the folder's history's own eleven
 #: (``surogates.sandbox.history`` and ``local_history``), the guest's for a request that
 #: ended without an answer, and the app's for what its guest sent in an answer's place.
 HISTORY_CODES = frozenset({
-    "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "not_a_request", "record_unfinished",
-    "move_unfinished", "landing_unsettled", "not_on_base", "no_answer", "not_an_answer",
+    "failed", "history_refused", "conflict", "no_whole_copy", "name_not_utf8", "file_unreadable", "not_a_request",
+    "record_unfinished", "move_unfinished", "landing_unsettled", "not_on_base", "no_answer", "not_an_answer",
 })
 #: A refusal of the type ``os`` may carry the system's name for the error.
 _ERRNOS = frozenset(errno.errorcode.values())
@@ -127,17 +127,22 @@ MADE_BEFORE_COPIES = "made_before_copies"
 _TOO_LARGE = "history_off"
 #: Why a thread has nowhere to work, by its open's refusal: its type, else its code.
 _NOWHERE_BY = {
-    NO_COPY: NO_COPY, _TOO_LARGE: _TOO_LARGE, "name_not_utf8": "names", "folder_unavailable": "gone", "revoked": "revoked",
+    NO_COPY: NO_COPY, _TOO_LARGE: _TOO_LARGE, "name_not_utf8": "names", "file_unreadable": "unreadable",
+    "folder_unavailable": "gone", "revoked": "revoked",
 }
 #: What a person reads where a thread has nowhere to work on its computer, by why: its folder has
-#: more files than its history keeps, or a name its history cannot keep, or is too large for its
-#: computer's app to copy; its app keeps no copy of the folder for it; the folder is no longer
-#: where it was; the computer's access was revoked; its copy could not be opened just now; it
-#: cannot be opened there; or the thread was made before threads worked in copies.  Said as its
-#: turn's failure, in these words alone.
+#: more files than its history keeps, or a name its history cannot keep, or a file its computer
+#: cannot read, or is too large for its computer's app to copy; its app keeps no copy of the
+#: folder for it; the folder is no longer where it was; the computer's access was revoked; its
+#: copy could not be opened just now; it cannot be opened there; or the thread was made before
+#: threads worked in copies.  Said as its turn's failure, in these words alone.
 NOWHERE: dict[str, str] = {
     "cap": "This folder has more files than its history can keep, so this thread cannot work there. Choose a folder inside it.",
     "names": "A file in this folder has a name its history cannot keep, so this thread cannot work there. Choose a folder inside it.",
+    "unreadable": (
+        "A file in this folder cannot be read on this computer, so this thread cannot work there. "
+        "Let it be read, as by chmod a+r, or move it out of the folder."
+    ),
     _TOO_LARGE: (
         "This folder is too large for this thread to have a copy of its own on this computer, so it cannot work there. "
         "Choose a folder inside it that holds less."

@@ -1061,6 +1061,46 @@ def test_a_folder_holding_a_name_that_is_not_utf8_has_no_history(tmp_path, folde
     assert not other.repo.exists() and not other.copy.exists()
 
 
+def test_a_new_file_this_computer_cannot_read_is_refused_by_its_name_until_it_is_left_out(tmp_path, folder):
+    (folder / "build out").mkdir()
+    secret = folder / "build out" / "secret.key"
+    # As a docker build leaves one of yours: another user's, which git cannot read.
+    secret.write_text("a key\n")
+    secret.chmod(0)
+    try:
+        for _ in range(2):
+            with refused("file_unreadable", (
+                '^refused the request: the file "build out/secret.key" cannot be read on this computer, so history cannot '
+                "record it: let it be read, as by chmod a\\+r, or add it to the folder's .gitignore$"
+            )):
+                a_copy(tmp_path, folder)
+        # Left out by the folder's own ignores, it is none of history's to read.
+        (folder / ".gitignore").write_text("secret.key\n")
+        one = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
+        assert one.open() == {"copy": "made"} and not (one.copy / "build out").exists()
+    finally:
+        secret.chmod(0o644)
+
+
+def test_a_file_of_historys_this_computer_cannot_read_since_is_refused_by_its_name_until_it_is_read(tmp_path, folder):
+    one = a_copy(tmp_path, folder)
+    (one.copy / "notes.txt").write_text("the thread's notes\n")
+    (folder / "Report.docx").write_bytes(b"PK\x03\x04 report v2, saved by you")
+    (folder / "Report.docx").chmod(0)
+    try:
+        for _ in range(2):
+            with refused("file_unreadable", (
+                '^refused the request: the file "Report.docx" cannot be read on this computer, so history cannot record '
+                "its change: let it be read, as by chmod a\\+r, or move it out of the folder$"
+            )):
+                land(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"), "saga:1")
+    finally:
+        (folder / "Report.docx").chmod(0o644)
+    landed = land(LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1"), "saga:1")
+    assert [c["path"] for c in landed["changes"]] == ["notes.txt"]
+    assert git(tmp_path / "store" / "history.git", "show", "refs/heads/main:Report.docx") == "PK\x03\x04 report v2, saved by you"
+
+
 def test_what_an_earlier_guest_planted_in_the_history_runs_nothing(tmp_path, folder):
     one = a_copy(tmp_path, folder)
     (one.copy / "A.md").write_text("A\n")
@@ -1913,10 +1953,10 @@ def test_a_stop_puts_the_copy_back_and_takes_away_what_the_turn_made(tmp_path, f
     with refused("failed", "git read-tree failed"):
         one.restore("f" * 40)
     assert (one.copy / "notes.txt").read_text() == "v1 notes\n"
-    # And it is named by the git that failed, whatever options it was run with: a file it may not read.
+    # And a file git may not read is refused by its name.
     (one.copy / "locked.txt").write_text("not to be read\n")
     (one.copy / "locked.txt").chmod(0)
-    with refused("failed", "^git add failed: "):
+    with refused("file_unreadable", '^refused the request: the file "locked.txt" cannot be read on this computer'):
         one.snapshot("before a step")
 
 
