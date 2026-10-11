@@ -1194,14 +1194,16 @@ def test_a_link_an_earlier_guest_left_in_a_threads_repository_is_never_followed(
     assert as_it_is(one.copy) == held
     again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
     # The repository is made again from the folder's history, and its copy with it.  What the thread had not
-    # committed for a landing is set aside with the copy, whole, and the open names both.
+    # committed for a landing is set aside with the copy, whole, one time with the repository the first request set
+    # aside, and the open names both.
     opened = again.open()
     assert set(opened) == {"copy", "set_aside_folders"} and opened["copy"] == "made", opened
     assert opened["set_aside_folders"] == set_aside_whole(tmp_path / "store")
-    assert [name.rpartition(".")[2] for name in opened["set_aside_folders"]] == (["copy"] if kept is None else ["repository", "copy"])
+    assert [name.rpartition(".")[2] for name in opened["set_aside_folders"]] == (["copy"] if kept is None else ["copy", "repository"])
+    assert len({name.rpartition(".")[0] for name in opened["set_aside_folders"]}) == 1
     aside = tmp_path / "store" / "set-aside"
-    assert as_it_is(aside / opened["set_aside_folders"][-1]) == held
-    assert kept is None or as_it_is(aside / opened["set_aside_folders"][0]) == kept
+    assert as_it_is(aside / opened["set_aside_folders"][0]) == held
+    assert kept is None or as_it_is(aside / opened["set_aside_folders"][1]) == kept
     assert not one.repo.is_symlink() and not any(p.is_symlink() for p in one.repo.rglob("*"))
     assert (again.copy / "notes.txt").read_text() == "v1 notes\n"
     assert (again.copy / "Report.docx").read_bytes() == b"PK\x03\x04 saved by you meanwhile"
@@ -1235,11 +1237,11 @@ def test_nothing_an_earlier_guest_left_among_a_threads_objects_is_read_as_one(tm
     with refused("no_whole_copy"):
         LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1").changed()
     again = LocalHistory.at(tmp_path / "store", folder, thread="t1", user="u1")
-    # It is set aside as it was left, what was put among its objects with it, and the thread's copy beside it.
+    # It is set aside as it was left, what was put among its objects with it, and the thread's copy beside it, as one time.
     opened = again.open()
     assert set(opened) == {"copy", "set_aside_folders"} and opened["copy"] == "made", opened
-    repository, copy = (tmp_path / "store" / "set-aside" / name for name in opened["set_aside_folders"])
-    assert (repository.suffix, copy.suffix) == (".repository", ".copy")
+    copy, repository = (tmp_path / "store" / "set-aside" / name for name in opened["set_aside_folders"])
+    assert (copy.suffix, repository.suffix, copy.stem) == (".copy", ".repository", repository.stem)
     assert (as_it_is(repository), as_it_is(copy)) == (kept, held)
     assert not any(p.is_symlink() or p.is_fifo() for p in one.repo.rglob("*"))
     # Neither the second thread's commit nor the names of its files is anything the first one's git reads.
