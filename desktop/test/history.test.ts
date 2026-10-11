@@ -451,7 +451,7 @@ describe("the agent's control port, asked for a history", () => {
       (message) => sent.push(message),
       { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) },
       undefined,
-      history && { mount: async () => {}, unmount: async () => {}, history },
+      history && { mount: async () => {}, unmount: async () => {}, history, stop: async () => {} },
     );
     const tell = async (message: unknown) => {
       agent.receive(JSON.stringify(message));
@@ -494,6 +494,44 @@ describe("the agent's control port, asked for a history", () => {
     const none = control();
     await none.tell({ ...whole, id: 1 });
     expect(none.sent).toEqual([{ type: "result", id: 1, outcome: { error: { type: "unavailable", message: "The agent keeps no folder's history" } } }]);
+  });
+
+  it("ends what a folder's history runs at the host's shutdown, and the guest powers off once that has gone, as around the roots' own", async () => {
+    const order: string[] = [];
+    // A history whose request runs until it is ended, and whose processes take a moment to go.
+    const places = new Places({
+      folder: join(dir, "places"), mount: async () => {}, unmount: async () => {},
+      ask: (_asked, stop) => new Promise<string>((_resolve, reject) => {
+        order.push("asked");
+        stop.addEventListener("abort", () => setTimeout(() => {
+          order.push("ended");
+          reject(new Error("ended"));
+        }, 20), { once: true });
+      }),
+    });
+    await places.mount(KEY, R1, R2);
+    const sent: FromAgent[] = [];
+    const agent = new Control(
+      (message) => sent.push(message),
+      { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) },
+      {
+        setClock: async () => {}, woke: () => {}, heard: () => {}, trust: async () => {},
+        powerOff: async (ending) => {
+          order.push("powering off");
+          await ending;
+          order.push("powered off");
+        },
+      },
+      places,
+    );
+    agent.receive(JSON.stringify({ type: "history", id: 1, key: KEY, thread: THREAD, user: "u1", action: "open", args: {} }));
+    await until(() => order.length === 1);
+    agent.receive(JSON.stringify({ type: "shutdown", id: 2 }));
+    await until(() => order.length === 4, 2_000);
+    expect(order).toEqual(["asked", "powering off", "ended", "powered off"]);
+    expect(sent).toEqual([{ type: "result", id: 1, outcome: SANDBOX_STOPPED }]);
+    // And none starts after.
+    expect(await places.history(KEY, { thread: THREAD, user: "u1", action: "open", args: {} }, signal())).toEqual(SANDBOX_STOPPED);
   });
 });
 
@@ -985,7 +1023,7 @@ describe("the VM manager, asked for a folder's history", () => {
       {
         mount: async (key, store, real) => void asked.push(["mount", key, store.tag, real.tag]),
         unmount: async (key) => void asked.push(["unmount", key]),
-        history, ...places,
+        history, stop: async () => {}, ...places,
       },
     );
     createInterface({ input: agent }).on("line", (line) => control.receive(line));
