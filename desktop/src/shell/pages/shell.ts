@@ -246,11 +246,27 @@ function who(by: NonNullable<Version["by"]>): string {
   return by.kind === "you" ? "you" : by.kind === "thread" ? `the thread ${asShown(by.title)}` : `the routine ${asShown(by.name)}`;
 }
 
-// A file's History opens in the Library, in place of its files.
-function openHistory(path: string): void {
+// What Electron puts before the main process's words: the name of the call it invoked.
+const INVOKED = /^Error invoking remote method '[^']*': (?:Error: )?/;
+
+// Where the History shown was opened from, to go back to as it closes: the tab, and what had the keyboard there.
+let historyFrom: { tab: string; focus: string } | null = null;
+// A History the main process would not open: its file, why in the main process's words, and the project it was
+// asked of. It is shown in the History's place, with its way back, until that is pressed, another History is
+// asked for, or the project is no longer open.
+let refused: { path: string; failure: string; project: string } | null = null;
+
+// A file's History opens in the Library, in place of its files, from *from*, the data-focus of what opened it.
+function openHistory(path: string, from: string): void {
+  const project = last?.view.kind === "project" ? last.view.id : "";
+  historyFrom = { tab, focus: from };
+  refused = null;
   tab = "library";
   showTab();
-  void shell.history(path);
+  shell.history(path).catch((error: unknown) => {
+    refused = { path, failure: (error instanceof Error ? error.message : String(error)).replace(INVOKED, ""), project };
+    void render();
+  });
 }
 
 // A thread's, or a file's, on the user's computer: a laptop, titled with the computer and whether it is online.
@@ -267,7 +283,7 @@ function laptop(place: ThreadRow["place"]): HTMLElement[] {
 function threadRow(thread: ThreadRow): HTMLElement {
   const unmerged = thread.reason === "files" && thread.place?.kind === "cloud"
     ? thread.files.find((file) => file.kind === "file" && file.landing === "not_merged") : undefined;
-  const row = button("thread", "", () => void (unmerged ? openHistory(unmerged.ref) : shell.read(thread.id)));
+  const row = button("thread", "", () => void (unmerged ? openHistory(unmerged.ref, `thread:${thread.id}`) : shell.read(thread.id)));
   if (thread.group) row.dataset.group = thread.group;
   row.dataset.thread = thread.id;
   row.dataset.focus = `thread:${thread.id}`;
@@ -308,7 +324,7 @@ function listRow(first: string, second: string, third: string, place: ThreadRow[
 
 // A cloud file's row in the Library, which opens its History: one of its files, or of those deleted from them.
 function historyRow(path: string, item: HTMLElement, list: "file" | "deleted" = "file"): HTMLElement {
-  const open = button("file", "", () => openHistory(path));
+  const open = button("file", "", () => openHistory(path, `${list}:${path}`));
   open.dataset.file = path;
   open.dataset.focus = `${list}:${path}`;
   open.setAttribute("aria-label", `History of ${asShown(path)}`);
@@ -387,11 +403,15 @@ function told(result: NonNullable<State["history"]>["result"]): string[] {
 // The file whose History the pane showed when it was last drawn.
 let historyShown: string | null = null;
 
-// A file's History, in place of the Library's files. As it opens, the row that had the keyboard is
-// hidden and the redraw gives it to the History's way back; as it closes, the keyboard goes back to
-// the file's row, while the pane has it.
+// A file's History, in place of the Library's files; or one the main process would not open, with why. As
+// it opens, the row that had the keyboard is hidden and the keyboard goes to the History's way back. As it
+// closes, the tab it was opened from shows again, where the Library still shows; and the keyboard goes back to
+// what opened it, or to that tab where that shows no more. The keyboard moves only while the pane has it.
 function renderHistory(state: State): void {
-  const history = state.history;
+  if (refused && !(state.view.kind === "project" && state.view.id === refused.project)) refused = null;
+  const history: State["history"] = refused
+    ? { path: refused.path, versions: null, failure: refused.failure, opening: null, changing: null, result: null }
+    : state.history;
   byId("file-history").hidden = history === null;
   byId("files").hidden = history !== null;
   if (history !== null) {
@@ -410,8 +430,21 @@ function renderHistory(state: State): void {
   const was = historyShown;
   historyShown = history?.path ?? null;
   const inPane = document.activeElement === document.body || byId("panel").contains(document.activeElement);
-  if (historyShown !== null || was === null || !inPane) return;
-  document.querySelector<HTMLElement>(`[data-file="${CSS.escape(was)}"]`)?.focus();
+  if (historyShown !== null) {
+    // The browser may have taken the keyboard from the hidden row already.
+    if (was === null && inPane) byId("history-back").focus();
+    return;
+  }
+  if (was === null) return;
+  const from = historyFrom ?? { tab: "library", focus: `file:${was}` };
+  historyFrom = null;
+  if (tab === "library" && from.tab !== tab) {
+    tab = from.tab;
+    showTab();
+  }
+  if (!inPane) return;
+  const opener = document.querySelector<HTMLElement>(`[data-focus="${CSS.escape(from.focus)}"]`);
+  (opener?.checkVisibility() ? opener : document.querySelector<HTMLElement>(`[data-tab="${tab}"]`))?.focus();
 }
 
 function renderOverview(state: State): void {
@@ -638,7 +671,14 @@ byId("new-project").addEventListener("click", () => void shell.newProject());
 byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
 byId("reading-back").addEventListener("click", () => void shell.read(null));
-byId("history-back").addEventListener("click", () => void shell.closeHistory());
+// One the main process would not open is the page's own: it goes here, and anything the main process shows with it.
+byId("history-back").addEventListener("click", () => {
+  if (refused) {
+    refused = null;
+    void render();
+  }
+  void shell.closeHistory();
+});
 // Tab after the head's last control takes the keyboard into the transcript; it comes back from the transcript's
 // edges: Shift+Tab from its first control to Open, Escape to Back.
 byId("reading-open").addEventListener("keydown", (event) => {
