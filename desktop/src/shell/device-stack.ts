@@ -76,6 +76,8 @@ export interface DeviceStackOptions {
   tools(bindings: Bindings, network: NetworkApprovals, changed: () => void): ToolLayer;
   prompts: FolderPrompts;
   approvalPrompts: ApprovalPrompts;
+  // Whether a folder for a new chat answered a look off the main thread in time (FolderLooks).
+  answers?: (folder: string) => Promise<boolean>;
   onStatus(status: LinkStatus): void;
   // Each chat bound here, each change of a chat's mode, and each chat's folder forgotten, by the chat's id, once it is written.
   onBindingChanged?: (root: string) => void;
@@ -199,6 +201,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     notComing: tools.notComing?.bind(tools),
     listening: tools.listening?.bind(tools),
     approvalPrompts: options.approvalPrompts,
+    answers: options.answers,
     onError: options.onError,
   });
   // A download is saved as any write of the chat's, one at a time for a chat: asked in a chat that asks every

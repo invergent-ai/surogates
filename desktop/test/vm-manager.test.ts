@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import { type Duplex, duplexPair } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
+import { findOnPath } from "../src/files/operations.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { Inbound } from "../src/guest/inbound.js";
@@ -20,7 +21,7 @@ import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
   type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
 } from "../src/vm/manager.js";
-import { VIRTIOFSD } from "../src/vm/qemu.js";
+import { readOnlyDaemon, VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
 
@@ -130,6 +131,25 @@ describe("the VM manager on the host", () => {
       expect(statSync(run).mode & 0o777).toBe(0o700);
     } finally {
       qemu.kill("SIGKILL");
+      daemon.kill("SIGKILL");
+    }
+  });
+
+  it("ends the bwrap a manager that died left serving a folder read-only, and the virtiofsd in it", async () => {
+    const run = join(dir, "vm");
+    const folder = join(dir, "Documents");
+    for (const made of [run, folder]) mkdirSync(made);
+    const bwrap = findOnPath("bwrap", process.env.PATH, "/")!;
+    const socket = join(run, "vfs-1.sock");
+    const [program, ...args] = readOnlyDaemon(bwrap, VIRTIOFSD, folder, socket);
+    const daemon = spawn(program!, args, { stdio: "ignore" });
+    const serving = () => spawnSync("pgrep", ["-f", `^${VIRTIOFSD} --shared-dir=${folder} --socket-path=${socket}`]).status === 0;
+    try {
+      await until(() => existsSync(socket) && serving());
+      writeFileSync(join(run, "vfs-1.pid"), String(daemon.pid));
+      sweep(run, [VIRTIOFSD, bwrap]);
+      await until(() => !alive(daemon.pid!) && !serving());
+    } finally {
       daemon.kill("SIGKILL");
     }
   });

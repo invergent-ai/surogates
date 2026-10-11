@@ -2,7 +2,7 @@
 // the rest (vitest.config.ts): a mount that comes or goes while bwrap binds / fails that
 // sandbox's start, and srt's file hosts bind / whole.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +12,13 @@ import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { Binder, type FolderSheet } from "../src/binding/binder.js";
+import { BOOT_ID } from "../src/binding/folder.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
+import { fileToolsMissing, pathOutside } from "../src/hosts/policy.js";
+import { OperationJournal } from "../src/journal/journal.js";
+import { FolderLooks } from "../src/shell/folders-held.js";
+import { missingTools } from "../src/vm/linux.js";
 import { type BootVm, type Folder, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
@@ -60,10 +66,27 @@ const fakeVm = (roots: ControlRoots, shared: string[] = []): BootVm => async () 
 const within = <T>(answer: Promise<T>, ms: number) =>
   Promise.race([answer, new Promise<"no answer">((resolve) => setTimeout(() => resolve("no answer"), ms))]);
 
+// *act*'s answer, and the longest this thread went without running its timers while it ran.
+async function stalling<T>(act: () => Promise<T>): Promise<{ answer: T; longest: number }> {
+  let last = performance.now();
+  let longest = 0;
+  const tick = setInterval(() => {
+    longest = Math.max(longest, performance.now() - last);
+    last = performance.now();
+  }, 20);
+  try {
+    const answer = await act();
+    return { answer, longest: Math.max(longest, performance.now() - last) };
+  } finally {
+    clearInterval(tick);
+  }
+}
+
 // A folder on a FUSE mount whose daemon is stopped, in a folder of its own: every look into it
 // waits, as on a dead network mount. Bound first, as a chat's folder is; let go by *release*.
-// With *stopped* false it answers until *stall* is called.
-function stalledFolder(stopped = true): { folder: Folder; stall: () => void; release: () => void } {
+// With *stopped* false it answers until *stall* is called. *wakeIn*: it answers again in *ms*, from
+// another process, should this one wait on it.
+function stalledFolder(stopped = true): { folder: Folder; stall: () => void; wakeIn: (ms: number) => void; release: () => void } {
   const fuse = mkdtempSync(join(dir, "fuse-"));
   for (const name of ["lower/folder", "upper", "work", "mnt"]) mkdirSync(join(fuse, name), { recursive: true });
   const mnt = join(fuse, "mnt");
@@ -80,6 +103,7 @@ function stalledFolder(stopped = true): { folder: Folder; stall: () => void; rel
     return {
       folder: { path, dev, ino },
       stall,
+      wakeIn: (ms) => spawn("/bin/sh", ["-c", `sleep ${ms / 1000}; kill -CONT ${pid}`], { stdio: "ignore", detached: true }).unref(),
       release: () => {
         try {
           process.kill(pid, "SIGCONT");
@@ -193,6 +217,103 @@ describe("a folder's place on a mount that does not answer", () => {
       expect(await within(stat(dir).then(() => "answered"), 1_000)).toBe("answered");
       await manager.stop();
     } finally {
+      release();
+    }
+  });
+});
+
+describe("a new chat's folder on a mount that does not answer", () => {
+  let journal: OperationJournal;
+  let home: string;
+  let sheets: FolderSheet[];
+  beforeEach(() => {
+    journal = new OperationJournal(join(dir, "journal.db"));
+    home = join(dir, "home");
+    mkdirSync(home);
+    sheets = [];
+  });
+  afterEach(() => journal.close());
+  // The binder, its dialog picking *picked*, and its sheet cancelled once seen; its folders looked at by *looks*.
+  const binder = (picked: string | null = null, looks = new FolderLooks(undefined, 300)) => new Binder({
+    bindings: journal.bindings,
+    prompts: {
+      pickFolder: async () => picked,
+      confirmFolder: async (sheet) => {
+        sheets.push(sheet);
+        return null;
+      },
+    },
+    guards: { home, dataDir: join(dir, "data"), cacheDir: join(dir, "cache"), appDirs: [] },
+    agent: "Research assistant",
+    hosts: { run: async () => ({ ok: null }) },
+    approvalPrompts: { approve: async () => "deny", confirmFreeMode: async () => false },
+    answers: (path) => looks.answers(path),
+  });
+
+  it("as one that answers, while the app's looks wait on two bound folders that do not: taken, and its PATH entry looked on", async () => {
+    const [one, two] = [stalledFolder(), stalledFolder()];
+    try {
+      const looks = new FolderLooks(undefined, 300);
+      expect(await looks.held([one.folder.path, two.folder.path])).toEqual([]);
+      const healthy = join(dir, "healthy");
+      mkdirSync(healthy);
+      const { answer, longest } = await stalling(() => binder(healthy, looks).prepareFolder("pick", "window-1", new AbortController().signal));
+      expect(answer).toBeNull();
+      expect(sheets.map(({ folder: shown, refusal }) => [shown, refusal])).toEqual([[healthy, null]]);
+      expect(await looks.path(`/usr/bin:${healthy}:/bin`)).toBe(`/usr/bin:${healthy}:/bin`);
+      expect(longest).toBeLessThan(1_000);
+    } finally {
+      one.release();
+      two.release();
+    }
+  });
+
+  it("as the last chat's: a folder of its own is offered once the look's bound has passed, nothing on this thread waiting on the mount", async () => {
+    const { folder, wakeIn, release } = stalledFolder();
+    wakeIn(6_000);
+    try {
+      journal.bindings.add({ root: "root-1", nonce: "n", folder: folder.path, dev: folder.dev, ino: folder.ino, boot: BOOT_ID, mode: "free", boundAt: Date.now() });
+      const { answer, longest } = await stalling(() => binder().prepareFolder("last", "window-1", new AbortController().signal));
+      expect(answer).toBeNull();
+      expect(sheets.map((sheet) => sheet.folder)).toEqual([expect.stringMatching(new RegExp(`^${home}/Surogate/Research-assistant/`))]);
+      expect(longest).toBeLessThan(1_000);
+    } finally {
+      release();
+    }
+  });
+
+  it("as picked in the dialog: the sheet says it did not answer, once the look's bound has passed, nothing on this thread waiting on the mount", async () => {
+    const { folder, wakeIn, release } = stalledFolder();
+    wakeIn(6_000);
+    try {
+      const { answer, longest } = await stalling(() => binder(folder.path).prepareFolder("pick", "window-1", new AbortController().signal));
+      expect(answer).toBeNull();
+      expect(sheets.map(({ folder: shown, refusal }) => [shown, refusal])).toEqual([[folder.path, `the folder ${folder.path} did not answer`]]);
+      expect(longest).toBeLessThan(1_000);
+    } finally {
+      release();
+    }
+  });
+});
+
+describe("the app's PATH with an entry on a mount that does not answer", () => {
+  it("is looked on for the app's tools without that entry once the look's bound has passed, nothing on this thread waiting on the mount", async () => {
+    const { folder, wakeIn, release } = stalledFolder();
+    wakeIn(6_000);
+    const app = process.env.PATH;
+    process.env.PATH = `/usr/bin:${folder.path}:/bin`;
+    try {
+      const looks = new FolderLooks(undefined, 300);
+      const { answer, longest } = await stalling(async () => {
+        const path = await looks.path(process.env.PATH);
+        fileToolsMissing(undefined, pathOutside(path, []));
+        await missingTools({}, false, [], path);
+        return path;
+      });
+      expect(answer).toBe("/usr/bin:/bin");
+      expect(longest).toBeLessThan(1_000);
+    } finally {
+      process.env.PATH = app;
       release();
     }
   });

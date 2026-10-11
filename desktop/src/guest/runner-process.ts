@@ -24,7 +24,8 @@ export class RunnerChild implements CommandChild {
   // Writes the runner has not answered yet, in the order they were sent.
   private readonly writes: Array<(refused: string | null) => void> = [];
 
-  constructor(readonly id: string, private readonly send: (message: ToRunner) => void) {
+  // *stdin*: a background process's, whose cgroup in the guest is in its root's proc folder, not its run folder.
+  constructor(readonly id: string, private readonly send: (message: ToRunner) => void, readonly stdin = false) {
     this.started = new Promise((resolve) => {
       this.settleStarted = resolve;
     });
@@ -98,7 +99,12 @@ export class SessionRunner {
 
   // *child* is the runner's process: enter-root's, or, in the tests, the bare script.
   // *onLost* is told when it goes without being stopped; *readyMs* is how long it has to say it is ready.
-  constructor(private readonly child: ChildProcess, onLost: () => void = () => {}, readyMs = READY_TIMEOUT_MS) {
+  // *admit*, in the guest: moves a command's shell, *pid* in the runner's view, into the command's cgroup,
+  // after which the runner is told it may go on (runner.ts, ENTER).
+  constructor(
+    private readonly child: ChildProcess, onLost: () => void = () => {}, readyMs = READY_TIMEOUT_MS,
+    private readonly admit?: (id: string, pid: number, stdin: boolean) => Promise<void>,
+  ) {
     // A write to a runner that has died is not an error of its own: its exit is the one way out.
     child.stdin?.on("error", () => {});
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -137,6 +143,11 @@ export class SessionRunner {
           return;
         }
         const target = this.children.get(message.id);
+        // Its shell waits in the runner's cgroup until it has been moved into its own. One that was not finds so, and runs nothing.
+        if (target && this.admit && message.type === "started" && typeof message.pid === "number") {
+          const { id, stdin } = target;
+          void this.admit(id, message.pid, stdin).catch(() => {}).then(() => this.send({ type: "entered", id }));
+        }
         if (target?.receive(message)) this.children.delete(message.id);
       });
       // A runner whose line never ends is broken: it is killed, and goes as one that died.
@@ -176,7 +187,7 @@ export class SessionRunner {
   }
 
   spawn(request: SpawnRequest): RunnerChild {
-    const target = new RunnerChild(request.id, (message) => this.send(message));
+    const target = new RunnerChild(request.id, (message) => this.send(message), request.stdin);
     if (this.left) {
       target.finish({ lost: true });
       return target;
