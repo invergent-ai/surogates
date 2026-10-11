@@ -3589,7 +3589,7 @@ return 1;`, FIRST)).toBe(1);
       const answer = await theirs.goto(`http://localhost:${at}/theirs/<b>there</b>?"><script>document.title = "theirs"</script>`);
       expect([answer?.status(), await answer?.text()]).toEqual([403, notOpenPage(at)]);
       expect(answer?.headers()).toMatchObject({
-        "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
+        "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
       });
       expect([await theirs.title(), await theirs.locator("body").innerText()]).toEqual([
         `Port ${at} is not open`,

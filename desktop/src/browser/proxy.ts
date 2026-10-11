@@ -98,9 +98,9 @@ export function notOpenPage(port: number): string {
     + `<body><h1>Port ${port} of a chat's servers is not open in this browser</h1><p>It opens when that chat's agent navigates to it and the chat's user allows it.</p>`
     + "<p>The ports allowed now are listed in Surogate's Settings, under Folders and permissions.</p></body></html>";
 }
-// What it is sent with: nothing in it runs or loads, and no copy of it is kept past a port's allowing.
+// What it is sent with: nothing in it runs or loads, no page frames it, and no copy of it is kept past a port's allowing.
 const NOT_OPEN_HEADERS = {
-  "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
+  "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store",
 };
 
 // The names the proxy answers itself, <token>.proxy-check.invalid: what a launch asks for, to
@@ -424,8 +424,10 @@ export class BrowserProxy {
       // of a chat's own page, and never dialed here; whatever else needs the sign-in is carried for nobody.
       const chat = chatPort(url.hostname, port);
       const allowed = this.chats?.ports;
-      // A tab sent to a port not allowed, by its user or by a page: nobody is asked, and the tab is told what the port is.
-      if (chat !== null && !allowed?.has(chat) && !SANDBOX_PORTS.has(chat) && request.headers["sec-fetch-mode"] === "navigate" && request.headers["sec-fetch-dest"] === "document") {
+      // A tab sent to a port not allowed, by its user or by a page: nobody is asked, and the tab is told what the port is. Not
+      // a page the browser loads ahead of any visit (Sec-Purpose), which no tab shows yet.
+      const tab = request.headers["sec-fetch-mode"] === "navigate" && request.headers["sec-fetch-dest"] === "document" && request.headers["sec-purpose"] === undefined;
+      if (chat !== null && !allowed?.has(chat) && !SANDBOX_PORTS.has(chat) && tab) {
         const page = notOpenPage(chat);
         return void response.writeHead(403, { ...NOT_OPEN_HEADERS, "content-length": Buffer.byteLength(page) }).end(page);
       }

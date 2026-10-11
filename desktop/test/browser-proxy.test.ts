@@ -954,7 +954,7 @@ describe("a chat's own servers, through the browser's proxy", () => {
     for (const [to, at] of [["localhost:3003", 3003], ["127.0.0.1:65535", 65_535], ["[::1]:1", 1], ["LOCALHOST:03003", 3003], ["127.1", 80]] as const) {
       expect(await navigated(to), to).toEqual({
         status: "HTTP/1.1 403 Forbidden", body: PAGE(at),
-        headers: ["cache-control: no-store", "content-security-policy: default-src 'none'", "content-type: text/html; charset=utf-8", "x-content-type-options: nosniff"],
+        headers: ["cache-control: no-store", "content-security-policy: default-src 'none'; frame-ancestors 'none'", "content-type: text/html; charset=utf-8", "x-content-type-options: nosniff"],
       });
     }
     expect(notOpenPage(3003)).toBe(PAGE(3003));
@@ -965,6 +965,8 @@ describe("a chat's own servers, through the browser's proxy", () => {
       const said = await raw(`GET http://localhost:3003/ HTTP/1.1\r\nHost: localhost:3003\r\nProxy-Authorization: ${signed}\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: ${mode}\r\nSec-Fetch-Dest: ${dest}\r\n\r\n`);
       expect(said, `${mode} ${dest}`).toMatch(/^HTTP\/1\.1 403 Forbidden\r\n(?:(?:Date|Connection|Keep-Alive|Transfer-Encoding): [^\r]+\r\n)*\r\n(?:0\r\n\r\n)?$/);
     }
+    // Nor for a page the browser loads ahead of any visit, which no tab shows yet.
+    for (const purpose of ["prefetch", "prefetch;prerender"]) expect(await navigated("localhost:3003", `Sec-Purpose: ${purpose}\r\n`), purpose).toEqual(BARE);
     expect((await fetched("http://localhost:3003/", {})).body).toBe("");
     expect((await connect("localhost:3003")).status).toBe(403);
     // Not for one of the sandbox's own proxies' ports, which no agent's navigation opens; nor for an allowed port whose request is not carried.
