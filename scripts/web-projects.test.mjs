@@ -793,6 +793,27 @@ test("an Undo the agent refuses says why in the agent's words, and an answer tha
   }
 });
 
+test("an Undo whose answer the network or a gateway cut off says it may still finish, as the agent goes on with it", async () => {
+  const mayStillFinish = "The connection was lost before the agent answered: the undo may still finish.";
+  for (const [why, answer] of [
+    // As authFetch says it, and as fetch itself does.
+    ["unreachable", () => Promise.reject(new Error("API server is not reachable."))],
+    ["a fetch that failed", () => Promise.reject(new TypeError("Failed to fetch"))],
+    ["its answer cut on its way", () => new Response(new ReadableStream({ start: (stream) => stream.error(new TypeError("network error")) }))],
+    ["a gateway's timeout", () => new Response("<html>Gateway Timeout</html>", { status: 504 })],
+    ["a gateway that lost the agent", () => new Response("<html>Bad gateway</html>", { status: 502 })],
+  ]) {
+    const { routes } = routesOver(answer);
+    await assert.rejects(routes.undo("p-1", { landingId: "12" }), { message: mayStillFinish }, why);
+  }
+  // Answered, it is the agent's word, or the route's own failure: neither is one that may still finish.
+  const refused = routesOver(() => Response.json({ detail: "This change was undone already." }, { status: 504 }));
+  await assert.rejects(refused.routes.undo("p-1", { landingId: "12" }), { message: "This change was undone already." });
+  for (const answer of [() => new Response("<html>Service Unavailable</html>", { status: 503 }), () => new Response("{not json")]) {
+    await assert.rejects(routesOver(answer).routes.undo("p-1", { threadId: "t-1" }), { message: "The change could not be undone." });
+  }
+});
+
 test("a Restore the agent refuses says why in the agent's words, and an answer that is not a Restore's is the route's own failure", async () => {
   for (const [status, detail] of [
     [409, "Your project's files are being saved right now. Try again in a moment."],
