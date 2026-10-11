@@ -14,6 +14,7 @@ mode, time and bytes.
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID, uuid5
 
 import pytest
@@ -445,6 +446,59 @@ async def test_a_landing_that_gives_up_waiting_for_a_workers_half_landing_gives_
         "apply", "record", "forget",
     ]
     assert kept(here) == {} and here.app.places.holder is None
+
+
+async def test_a_lost_landing_left_escalated_is_told_before_its_row_says_so(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 2)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    # You save the report again, over the lost landing's: its put-back leaves yours.
+    (here.folder / "Report.docx").write_bytes(b"PK report v3, by you")
+    [row] = await records(api, lost)
+    save = landing_module.save_landing
+
+    async def killed_once_written(session_factory, row_id, saga, **values):
+        written = await save(session_factory, row_id, saga, **values)
+        if row_id == row.id and values.get("state") == "escalated":
+            # The settling worker is killed as it has written the row escalated.
+            raise Lost
+        return written
+
+    with monkeypatch.context() as dying:
+        dying.setattr(landing_module, "save_landing", killed_once_written)
+        with pytest.raises(Lost):
+            await lands_next(api, monkeypatch, here, next_)
+    [settled] = await records(api, lost)
+    assert settled.saga_state == "escalated"
+    # The half landing it left in your folder was told before its row said so: its thread waits on you, and its master heard.
+    [waits] = await events_of(api, lost.id, EventType.INBOX_ACTION_REQUIRED)
+    assert (waits.data["files"], waits.data["escalated"]) == (["Report.docx"], True)
+    [report] = await told(api, lost_master)
+    assert (report.data["landing"], report.data["recovered"], report.data["saga"]) == ("escalated", True, settled.saga_id)
+
+
+async def test_a_settle_keeps_no_answer_of_an_apply_that_names_another_file_than_it_asked_to_write(api, here, monkeypatch):
+    lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
+    before = seen(here.folder)
+    # Its computer wrote the budget, and answered as if it had written another file: the lost worker never checked it.
+    here.app.lie = lambda frame, outcome: (
+        {"ok": {"path": "Payroll.xlsx", "before": None, "after": "c" * 40, "made": []}}
+        if (frame["session_id"], frame["args"].get("action")) == (str(lost.id), "apply") else outcome
+    )
+    with monkeypatch.context() as first_run:
+        lost_after(first_run, "apply", 1)
+        with pytest.raises(Lost):
+            await woken(api, monkeypatch, lost, [EDITS, _final_response("Done.")])
+    here.app.lie = None
+    await lands_next(api, monkeypatch, here, next_)
+    # The settle read that answer from the journal, as no answer to the step: it put the landing back whole, and its row
+    # holds what the landing asked to write, never what its computer said it wrote.
+    [settled] = await records(api, lost)
+    assert settled.saga_state == "compensated" and "Payroll.xlsx" not in json.dumps([settled.steps, settled.files])
+    assert asked_by(here, next_, settles(lost)) == ["unapply", "unapply", "forget"]
+    assert but(seen(here.folder), "Y.md") == before and kept(here) == {}
 
 
 def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") -> None:

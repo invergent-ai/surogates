@@ -1241,9 +1241,16 @@ async def _applied(steps: Steps, **asked: Any) -> dict:
     computer's answer is checked against that: one that names another
     file, or other versions, is no answer to this step.
     """
-    did = await _land_asked(steps, "apply", **asked)
-    if (did["path"], did["before"], did["after"]) != (asked["path"], asked["before"], asked["after"]):
+    did = _as_applied(await _land_asked(steps, "apply", **asked), asked)
+    if did is None:
         raise NotAnAnswer("This computer's answer to 'apply' names another file than the one it was asked to write")
+    return did
+
+
+def _as_applied(did: dict, asked: dict) -> dict | None:
+    """An apply's answer *did* to the step that asked *asked*, as its row keeps it; None where it names another file or other versions."""
+    if (did["path"], did["before"], did["after"]) != (asked["path"], asked["before"], asked["after"]):
+        return None
     return {"path": asked["path"], "before": asked["before"], "after": asked["after"], "made": did["made"]}
 
 
@@ -1491,11 +1498,11 @@ async def settle_folder(
     under none.
 
     A landing settled ``escalated`` is told to its thread's master, and its
-    thread waits on you over it, once a landing.  Raises
-    :class:`LandingUnsettled` where one recorded and its row could not say
-    so: nothing lands in the folder until it can.  Then each landing ended
-    there whose forgetting never let go of what it kept is forgotten
-    (:func:`_forget_owed`).
+    thread waits on you over it, once a landing, before its row says so.
+    Raises :class:`LandingUnsettled` where one recorded and its row could
+    not say so: nothing lands in the folder until it can.  Then each
+    landing ended there whose forgetting never let go of what it kept is
+    forgotten (:func:`_forget_owed`).
     """
     patience = time.monotonic() + BUSY_PATIENCE
     while True:
@@ -1503,15 +1510,20 @@ async def settle_folder(
         for row in await running_in(session_factory, copy.device_id, copy.folder):
             if row.saga_id in _own(session, turn):
                 continue
+            # A deleted thread has nobody to tell.
+            told = None if row.thread_id is None else partial(
+                _tell_escalated, session_factory, row.thread_id, redis=redis,
+                waits=lambda thread, paths: waiting_on_you_here(thread, paths, escalated=True),
+            )
             if row.thread_id is None or row.thread_id == session.id:
-                state, at_issue = await settle(session_factory, copy, turn, row, held if row.thread_id is not None else None)
+                state = await settle(session_factory, copy, turn, row, held if row.thread_id is not None else None, told=told)
             else:
                 try:
                     async with _lease_of(store, row.thread_id, f"settle:{session.id}") as taken:
                         if taken is None:
                             waits = True
                             continue
-                        state, at_issue = await settle(session_factory, copy, turn, row, (row.thread_id, taken))
+                        state = await settle(session_factory, copy, turn, row, (row.thread_id, taken), told=told)
                 except LeaseLost as lost:
                     if lost.session_id != row.thread_id:
                         raise
@@ -1519,11 +1531,6 @@ async def settle_folder(
                     waits = True
                     continue
             logger.warning("Settled landing %s of thread %s, left running in its folder: %s", row.saga_id, row.thread_id, state)
-            if state == "escalated" and row.thread_id is not None:
-                await _tell_escalated(
-                    session_factory, row.thread_id, saga_of(row), at_issue, redis=redis,
-                    waits=lambda thread, paths: waiting_on_you_here(thread, paths, escalated=True),
-                )
         if not waits:
             await _forget_owed(store, session_factory, copy, session, turn, held)
             return
@@ -1586,8 +1593,9 @@ async def _forget_again(session_factory: Any, copy: ThreadCopy, turn: int, row: 
 
 async def settle(
     session_factory: Any, copy: ThreadCopy, turn: int, row: Any, held: tuple[UUID, str] | None, *, wait: float | None = None,
-) -> tuple[str, list[str]]:
-    """End the landing *row* records, which no worker goes on with; its state, and the files a person has to check.
+    told: Callable[[Saga, list[str]], Awaitable[None]] | None = None,
+) -> str:
+    """End the landing *row* records, which no worker goes on with; its state.
 
     Asked through this thread's own landing helper, under an invocation of
     the settling's own, ``land:<turn>:settle:<saga>``: a settle begun again
@@ -1607,15 +1615,25 @@ async def settle(
 
     *held* is the landing's thread and the lease token its settler holds it
     by: the row is written only while that is its lease.  Each step waits
-    for its computer as a landing's does, or for *wait*.  Raises
-    :class:`LandingUnsettled` where it recorded and its row could not say
-    so, and ``_Unsettled`` where its computer did not answer.
+    for its computer as a landing's does, or for *wait*.  One left
+    ``escalated`` is told first, with the files a person has to check
+    (*told*), so a settler lost before its row says so leaves it running,
+    for the next to settle and tell, and never a half landing nobody is
+    told of.  Raises :class:`LandingUnsettled` where it recorded and its row
+    could not say so, and ``_Unsettled`` where its computer did not answer.
     """
     steps = copy.steps(f"land:{turn}:settle:{row.saga_id}")
     saga = saga_of(row)
     orchestrator = _orchestrator(None)
     orchestrator.adopt(saga)
     written = _Row(session_factory, row.id, saga, held=held)
+
+    async def escalated(at_issue: list[str]) -> str:
+        if told is not None:
+            await told(saga, at_issue)
+        await _written(written.write, tries=2, state="escalated")
+        return "escalated"
+
     if row.thread_id is not None:
         record = _as_asked(saga, await copy.operations.close_landing(row.thread_id, row.saga_id))
     else:
@@ -1635,11 +1653,9 @@ async def settle(
             if written.state != "completed":
                 raise LandingUnsettled(f"landing {row.saga_id} recorded, and its row could not be written")
             await _forgotten(saga, orchestrator, steps, written, set(), "completed", wait=wait)
-            return "completed", []
+            return "completed"
         if looked["hidden"]:
-            at_issue = _given_up(saga, every=True)
-            await _written(written.write, tries=2, state="escalated")
-            return "escalated", at_issue
+            return await escalated(_given_up(saga, every=True))
     nothing: set[int] = set()
     try:
         failed = await _put_back(saga, steps, written, nothing, every=True, wait=wait)
@@ -1647,12 +1663,11 @@ async def settle(
         # As far as it got, for whoever settles it next.
         await _written(written.write)
         raise
-    state = "escalated" if failed else "compensated"
-    await _written(written.write, tries=2, state=state)
     if failed:
-        return state, [it.arguments["path"] for it in failed]
-    await _forgotten(saga, orchestrator, steps, written, nothing, state, wait=wait)
-    return state, []
+        return await escalated([it.arguments["path"] for it in failed])
+    await _written(written.write, tries=2, state="compensated")
+    await _forgotten(saga, orchestrator, steps, written, nothing, "compensated", wait=wait)
+    return "compensated"
 
 
 async def _settled(
@@ -1687,7 +1702,9 @@ def _as_asked(saga: Saga, asked: list[tuple[str, dict, dict | None]]) -> SagaSte
     Each the journal holds is taken with what the row says of it, and with
     its computer's answer, checked as one given now, where the row has none;
     then those of the row's its computer was never asked.  One asked whose
-    answer is lost, closed or a refusal may have run.
+    answer is lost, closed or a refusal may have run; and so may an apply
+    answered as the landing's own run takes no answer, of another file or
+    other versions than it asked to write.
     """
     rows = {(s.tool_name, json.dumps(s.arguments, sort_keys=True)): s for s in saga.steps}
     steps: list[SagaStep] = []
@@ -1700,6 +1717,8 @@ def _as_asked(saga: Saga, asked: list[tuple[str, dict, dict | None]]) -> SagaSte
             step_id=f"step:{uuid4()}", tool_name=name, tool_call_id="", arguments=arguments, timeout_seconds=STEP_WAIT,
         )
         answer = answered(kind, args["action"], outcome)
+        if answer is not None and name == "history.apply":
+            answer = _as_applied(answer, arguments)
         if answer is not None:
             it.execute_result = it.execute_result or answer
             if it.state in (StepState.PENDING, StepState.EXECUTING):
