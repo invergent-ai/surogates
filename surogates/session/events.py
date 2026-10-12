@@ -12,6 +12,14 @@ from enum import Enum
 #: neither should have to import the other.
 SEED_SYNTHETIC_MARKER = "seed"
 
+#: ``synthetic`` values of the user-role events that record a message the
+#: platform sent first (a Program's check-in opener, a follow-up template).
+#: The session then waits on the person's reply: no turn is under way, so
+#: the orphan sweeper must not read one as abandoned work and wake the agent.
+CHECKIN_OPENER_MARKER = "checkin_opener"
+OUTREACH_OPENER_MARKER = "outreach_opener"
+OPENER_SYNTHETIC_MARKERS = (CHECKIN_OPENER_MARKER, OUTREACH_OPENER_MARKER)
+
 
 @unique
 class EventType(str, Enum):

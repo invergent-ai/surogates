@@ -31,7 +31,7 @@ import sqlalchemy as sa
 from surogates.db.models import ChannelContactRow, OutreachMessageRow, SessionLease
 from surogates.followup import store as followup_store
 from surogates.programs.opener import dm_session, whatsapp_session_key
-from surogates.session.events import EventType
+from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +379,7 @@ async def _reopen(
         event_id = await session_store.emit_synthetic_user_message(
             session_id,
             content=f"[Outreach opener sent: template '{row.template_name}']",
-            synthetic="outreach_opener",
+            synthetic=OUTREACH_OPENER_MARKER,
             metadata={"outreach_id": str(row.id), "template_name": row.template_name},
         )
         outbox_id = await delivery_service.enqueue(

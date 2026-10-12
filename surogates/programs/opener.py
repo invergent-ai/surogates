@@ -27,6 +27,7 @@ from uuid import UUID
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.memory_boundary import boundary_token
 from surogates.channels.source import SessionSource, build_session_key
+from surogates.session.events import CHECKIN_OPENER_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ def make_opener_enqueue(
         # model from reading its own invitation as something the person said.
         event_id = await session_store.emit_synthetic_user_message(
             session_id, content=f"[Check-in opener sent: {text}]",
-            synthetic="checkin_opener",
+            synthetic=CHECKIN_OPENER_MARKER,
             metadata=_metadata(invitation, template_name=None),
         )
         return await delivery_service.enqueue(
@@ -212,7 +213,7 @@ def make_opener_enqueue(
             invitation, platform, session_key, channel_id=wa_id, sender=sender,
         )
         event_id = await session_store.emit_synthetic_user_message(
-            session_id, content=_opener_text(config), synthetic="checkin_opener",
+            session_id, content=_opener_text(config), synthetic=CHECKIN_OPENER_MARKER,
             metadata=_metadata(invitation, template_name=template_name),
         )
         # Same three keys the reply path writes; the dispatcher reads
