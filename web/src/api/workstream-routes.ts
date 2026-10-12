@@ -139,6 +139,8 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFil
     create: (input) => asked("", sent("POST", input), "The project could not be created.", PROJECT),
     update: async (projectId, change) =>
       asked(project(projectId), sent("PATCH", projectChangeOf(change)), "The project could not be changed.", PROJECT),
+    useComputer: async (projectId, execution) =>
+      asked(`${project(projectId)}/computer`, sent("POST", { execution }), "This computer could not be used for the project.", PROJECT),
     // Archived, the route answers nothing: whatever body it sends is not read.
     archive: async (projectId) => asked(project(projectId), sent("DELETE"), "The project could not be archived.", () => undefined),
     threads: async (projectId, threadId) => {

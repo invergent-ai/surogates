@@ -12,6 +12,11 @@ export interface AgentChatAdapterContextValue {
   onOpenSession?: (sessionId: string) => void;
   /** The project whose master this conversation is, or null: its proposal cards start threads. */
   projectId?: string | null;
+  /**
+   * The computer that project works on, by the name the server stamped, for a project made in
+   * Surogate Desktop; null for a project in the cloud. Its cards start their threads there alone.
+   */
+  projectComputer?: { deviceId: string; name: string } | null;
   /** That project's threads, live, by id: what their cards show. */
   threadRows?: Record<string, AgentChatThreadRow>;
   /** A chat the host only reads (AgentChat's ``disabled``): nothing in it answers the agent's questions. */

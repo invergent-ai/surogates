@@ -11,7 +11,7 @@ import type {
 } from "./projects-contract";
 
 /** A place as the routes answer it: the cloud, or a computer. A later server may send another kind. */
-type PlaceResponse = { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean };
+type PlaceResponse = { kind: "cloud" } | { kind: "device"; device_id: string; device_name: string; online: boolean; lost?: boolean };
 
 /**
  * A thread's row as GET /v1/workstreams/{id}/threads answers it. A later server may send a group, a reason, a file's
@@ -76,10 +76,11 @@ function setAsideOf(aside: unknown): SetAside | null {
 
 /** A place the page knows, or none: a kind it does not know, or a computer whose fields it cannot read, is no place it names. */
 function placeOf(place: unknown): ThreadPlace | null {
-  const { kind, device_id, device_name, online } = fields(place);
+  const { kind, device_id, device_name, online, lost } = fields(place);
   if (kind === "cloud") return { kind: "cloud" };
   return kind === "device" && typeof device_id === "string" && typeof device_name === "string" && typeof online === "boolean"
-    ? { kind: "device", deviceId: device_id, deviceName: device_name, online }
+    && (lost === undefined || typeof lost === "boolean")
+    ? { kind: "device", deviceId: device_id, deviceName: device_name, online, ...(lost === undefined ? {} : { lost }) }
     : null;
 }
 
@@ -122,6 +123,8 @@ export interface ProjectSummaryResponse {
   updated_at: string;
   waiting: number;
   working: number;
+  // A server from before projects had folders sends none.
+  place?: PlaceResponse | { kind: string };
 }
 
 /** A project as GET, POST and PATCH /v1/workstreams[/{id}] answer it. */
@@ -132,6 +135,7 @@ export interface ProjectResponse extends ProjectSummaryResponse {
   // A later server may send a tier not known here: the page takes it as unknown.
   coordinator_tier: Tier | string;
   thread_tier: Tier | string;
+  folder?: string | null;
 }
 
 export function projectSummaryOf(project: ProjectSummaryResponse): ProjectSummary {
@@ -143,6 +147,7 @@ export function projectSummaryOf(project: ProjectSummaryResponse): ProjectSummar
     updatedAt: project.updated_at,
     waiting: project.waiting,
     working: project.working,
+    place: placeOf(project.place),
   };
 }
 
@@ -156,6 +161,7 @@ export function projectOf(project: ProjectResponse): Project {
     masterSessionId: project.master_session_id,
     coordinatorTier: tierOf(project.coordinator_tier),
     threadTier: tierOf(project.thread_tier),
+    folder: typeof project.folder === "string" ? project.folder : null,
   };
 }
 

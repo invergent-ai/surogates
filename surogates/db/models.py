@@ -2164,6 +2164,12 @@ class Workstream(Base):
     # 'basic' | 'pro', or NULL for the agent's own tier.
     coordinator_tier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     thread_tier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The computer a project made in Surogate Desktop works on, a logical
+    # reference to ``devices.id``, and its folder there, as its user chose it:
+    # both NULL for a project in the cloud.  Set when the project is made, and changed, with its master, only as
+    # its user uses a computer for a project whose computer lost the folder (WorkstreamStore.move).
+    device_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    folder: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 'active' | 'archived'
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
     created_at: Mapped[datetime] = mapped_column(

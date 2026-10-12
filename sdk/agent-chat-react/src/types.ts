@@ -1071,7 +1071,8 @@ export interface AgentChatAdapter {
   }): Promise<AgentChatThreadRow>;
   /**
    * Start a thread the master proposed for the user's computer, in Surogate Desktop only: in a
-   * folder its user confirms in the desktop's own sheet, which names the project and *title*.
+   * folder its user confirms in the desktop's own sheet, which names the project and *title*; or,
+   * in a project made on this computer, at once in a copy of the project's folder, asking nothing.
    */
   startLocalThread?(input: {
     projectId: string;
@@ -1079,6 +1080,17 @@ export interface AgentChatAdapter {
     key: string;
     title: string;
   }): Promise<AgentChatThreadRow>;
+  /**
+   * The id of the computer this client runs on, as Surogate Desktop added it to the agent; null in
+   * a browser, and where the app has added none. A project made on a computer starts its threads there alone.
+   */
+  getLocalDeviceId?(): Promise<string | null>;
+  /**
+   * Whether a project made on a computer can no longer reach its folder there: that computer was removed from the
+   * user's computers or its access revoked, or it could not set the folder up. Its user then uses another computer
+   * for the project, in Surogate Desktop. Another adapter says none is.
+   */
+  isProjectFolderLost?(input: { projectId: string }): Promise<boolean>;
   getArtifact(input: {
     sessionId: string;
     artifactId: string;

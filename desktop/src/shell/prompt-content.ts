@@ -69,6 +69,9 @@ function linked({ count, examples, complete }: LinkSummary): string {
   return `${complete ? "" : "At least "}${files} also linked from elsewhere; commands the agent runs can change those copies too: ${examples.join(", ")}${more}.`;
 }
 
+// What a new project's folder is to its threads, as its sheet says it.
+const PROJECT_COPIES = "Each of the project's threads works in a copy of this folder, and what it changes lands here.";
+
 // A name the page sent, as a field of its own, and the height its lines take.
 const plain = (label: string, value: string): PromptDetail => ({ label, value, code: false, keep: "" });
 const tall = (value: string) => 26 + Math.ceil(value.length / 45) * 19;
@@ -83,6 +86,12 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     details.push(plain("Project", sheet.thread.project), plain("Thread", sheet.thread.thread));
     room = tall(sheet.thread.project) + tall(sheet.thread.thread);
   }
+  // A new project's own folder: its name, once it has one, and what its threads do with the folder.
+  if (sheet.project) {
+    details.push(plain("Project", sheet.project));
+    room += tall(sheet.project);
+  }
+  const forProject = sheet.project === null ? [] : [PROJECT_COPIES];
   if (sheet.refusal !== null) {
     return {
       title: `${name} cannot be used`,
@@ -101,14 +110,14 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     title: `Work in ${name}?`,
     lead: `${sheet.agent} will read and change the files in this folder, and run commands there. It works in the cloud: the files it reads and what its commands print are sent to it, and can stay in the conversation.`,
     details,
-    notes: sheet.links ? [linked(sheet.links)] : [],
+    notes: [...(sheet.links ? [linked(sheet.links)] : []), ...forProject],
     choice: { ...MODES, value: sheet.mode },
     buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
     // On Cancel, as every prompt starts on the button that changes nothing: a Return of a person who was typing
     // elsewhere binds no folder. The mode is theirs to pick, and Use this folder theirs to walk to.
     focus: "cancel",
     cancel: "cancel",
-    height: (sheet.links ? 550 : 490) + room,
+    height: (sheet.links ? 550 : 490) + forProject.length * 60 + room,
   };
 }
 

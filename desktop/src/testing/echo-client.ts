@@ -8,7 +8,10 @@
 // ("prepared"); then it answers a chat's bind operation against that confirmation,
 // and runs the chat's other operations through the VmExecutor. With --times N it
 // confirms that folder N times, one confirmation for each chat or thread to bind
-// there, and says each. With --ask
+// there, and says each. With --project N it confirms that folder once, for a new
+// project, and says it; once the project's coordinator is bound there, it prepares
+// a copy of the folder for each of N threads of the project, as the app does with
+// no sheet, and says each ("prepared", with "thread": true). With --ask
 // WORD as well, those chats ask every time: each approval is said ("approval"),
 // and denied when what it asks about names WORD, allowed otherwise. A command's
 // connection to a host off the package list, other than this computer's own or one
@@ -42,16 +45,19 @@ const { values } = parseArgs({
     folder: { type: "string" },
     confirm: { type: "string" },
     times: { type: "string" },
+    project: { type: "string" },
     ask: { type: "string" },
   },
 });
 const times = Number(values.times ?? "1");
+const threads = values.project === undefined ? null : Number(values.project);
 // --folder binds every root by itself, so it cannot stand beside a confirmed folder; only a confirmed one asks.
 const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm)
-  || !Number.isInteger(times) || times < 1 || (values.times !== undefined && !values.confirm);
+  || !Number.isInteger(times) || times < 1 || (values.times !== undefined && !values.confirm)
+  || (threads !== null && (!values.confirm || values.times !== undefined || !Number.isInteger(threads) || threads < 0));
 if (!values.url || !values.token || !values.journal || usage) {
   process.stderr.write(
-    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--times N] [--ask WORD]]\n",
+    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--times N | --project N] [--ask WORD]]\n",
   );
   process.exit(2);
 }
@@ -119,13 +125,29 @@ const binder = confirm && hosts
     onError: sayError,
   })
   : null;
-for (let time = 0; binder && time < times; time++) {
-  const prepared = await binder.prepareFolder("pick", "cross-check", new AbortController().signal);
+for (let time = 0; binder && time < (threads === null ? times : 1); time++) {
+  const signal = new AbortController().signal;
+  const prepared = threads === null
+    ? await binder.prepareFolder("pick", "cross-check", signal)
+    : await binder.prepareProjectFolder("cross-check", signal, "the cross-check's project");
   if (!prepared) {
     say({ event: "error", message: `the folder was refused: ${refusal ?? "the sheet was not accepted"}` });
     process.exit(2);
   }
   say({ event: "prepared", folder: prepared.folder, nonce: prepared.nonce });
+}
+// The project's threads, each in a copy of its folder, once its coordinator is bound there.
+if (binder && threads !== null) {
+  const stop = journal.bindings.watch((root) => {
+    if (!journal.bindings.get(root)?.project) return;
+    stop();
+    void (async () => {
+      for (let thread = 0; thread < threads; thread++) {
+        const ready = await binder.prepareThreadFolder(root, "cross-check");
+        say({ event: "prepared", folder: ready.folder, nonce: ready.nonce, thread: true });
+      }
+    })().catch(sayError);
+  });
 }
 
 const { link } = connectDevice({

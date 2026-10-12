@@ -33,9 +33,11 @@ from .test_devices import api, eventually, link_url, register  # noqa: F401  (ap
 from .test_local_history_landing import said
 from .test_local_history_open import woken
 from .test_local_threads import begin, device_card, make_local
+from .test_projects_on_a_computer import held
 from .test_turn_sagas import calling
 from .test_workstream_overview import rows
 from .test_workstream_threads import PROPOSED, call_tool, events_of
+from .test_workstreams import create, master_of
 
 pytestmark = [
     pytest.mark.desktop,
@@ -299,5 +301,50 @@ async def test_a_place_the_app_set_aside_for_another_folder_at_the_path_reaches_
         # Its row says what is kept, and the first thread's says nothing of it.
         found = {row["id"]: row["set_aside"] for row in await rows(api, project)}
         assert (found[str(two.id)], found[str(one.id)]) == ({"kept": [place], "snapshots": 0, "gone": []}, None)
+    finally:
+        await app.close()
+
+
+async def test_a_project_made_on_the_app_works_in_its_folder_itself_and_starts_each_thread_in_a_copy_of_it_asking_nothing(
+    built_client, agent_disk, apart, journal_dir, api, link_url, tmp_path, monkeypatch,  # noqa: F811
+):
+    folder = tmp_path / "Reports"
+    folder.mkdir()
+    (folder / "Report.docx").write_bytes(b"PK report v1")
+    device = await register(api)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, project=1)
+    try:
+        [chosen] = await confirmed_on(app)
+        # The project is made with the folder its user chose for it, and the app binds its coordinator to the folder itself.
+        execution = {"kind": "device", "device_id": device["id"], "folder": chosen["folder"], "nonce": chosen["nonce"]}
+        project = await create(api, execution=execution)
+        master = await master_of(api, project)
+        await eventually(lambda: is_bound(api, project["master_session_id"]), timeout=60.0)
+        assert await bound_as(api, master) == {"ok": None}
+        # It makes a file there itself: the file is in the folder as its turn writes it, with no copy and no landing.
+        await asyncio.wait_for(woken(api, monkeypatch, master, [
+            calling(("write_file", {"path": "Plan.md", "content": "Check the totals.\n"})),
+            _final_response("Plan.md has the plan."),
+        ], said="Write the plan down."), TURN_S)
+        assert (folder / "Plan.md").read_text() == "Check the totals.\n"
+
+        # Its thread's card starts the thread in a copy of the project's folder, which the app prepared with no sheet:
+        # its user was asked once, for the project.
+        await app.until(lambda events: any(e.get("thread") for e in events), timeout=60.0)
+        [copy] = [e for e in app.events if e["event"] == "prepared" and e.get("thread")]
+        assert (copy["folder"], [e["event"] for e in app.events].count("sheet")) == (chosen["folder"], 1)
+        proposal_id = (await held(api, master, "propose_threads", threads=[PROPOSED[1]]))["proposal_id"]
+        made = await make_local(api, project, proposal_id, {**execution, "nonce": copy["nonce"]}, key="1")
+        assert made.status_code == 201, made.text
+        thread = await api.app.state.session_store.get_session(UUID(made.json()["thread_id"]))
+        await eventually(lambda: is_bound(api, made.json()["thread_id"]), timeout=60.0)
+        assert await bound_as(api, thread) == {"ok": {"history": {"thread": str(thread.id)}}}
+        assert (await begin(api, project, str(thread.id))).status_code == 201
+        await asyncio.wait_for(woken(api, monkeypatch, thread, [
+            calling(("write_file", {"path": "Notes.md", "content": "Checked.\n"})),
+            _final_response("Notes.md has the check."),
+        ]), TURN_S)
+        assert entries(folder) == {"Plan.md": b"Check the totals.\n", "Notes.md": b"Checked.\n", "Report.docx": b"PK report v1"}
+        assert nothing_kept(journal_dir)
     finally:
         await app.close()

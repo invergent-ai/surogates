@@ -23,7 +23,7 @@ import {
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
-import type { FolderPrompts } from "../binding/binder.js";
+import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
@@ -226,7 +226,10 @@ let failure: string | null = null;
 const NO_SUCH_THREAD = "No such thread in the open project";
 // The open project, for the Overview pane, and what stops following it. deleted: its files that are
 // gone, each the version that deleted it, which the Library lists under its files.
-let overview: { project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[]; deleted: DeletedFiles } | null = null;
+// lost: why the project, made on a computer, cannot work on this one now, as Use this computer for this project mends it.
+let overview: {
+  project: Project; threads: ThreadRow[]; library: LibraryEntry[]; routines: Routine[]; deleted: DeletedFiles; lost: string | null;
+} | null = null;
 let unfollow = (): void => {};
 // The project dialog's view, while it is open over the window.
 let projectDialog: WebContents | null = null;
@@ -634,9 +637,65 @@ async function refreshOverview(): Promise<void> {
     projects.get(open.id), projects.threads(open.id), projects.library(open.id), projects.routines(open.id), deletedFiles(open.id),
   ]);
   remember(project);
+  const lost = await lostHere(project);
   if (view !== open) return;
-  overview = { project, threads, library, routines, deleted };
+  overview = { project, threads, library, routines, deleted, lost };
   leaveIfGone(open);
+}
+
+/**
+ * Why *project*, made on a computer, cannot work on this one now, as Use this computer for this project mends it: its
+ * computer can no longer reach its folder, as the agent says, or it works on this computer and its folder here was
+ * forgotten, moved or replaced. Null for a project in the cloud, one that works here, one on another computer of the
+ * user's that still reaches its folder, and wherever this computer takes no folders of the agent's.
+ */
+async function lostHere(project: Project): Promise<string | null> {
+  const { place } = project;
+  if (place?.kind !== "device" || !device) return null;
+  const here = place.deviceId === device.credential.deviceId;
+  if (place.lost) return here ? "This project's folder could not be set up on this computer." : `This project's folder can no longer be reached on ${place.deviceName}.`;
+  if (!here) return null;
+  const why = await Promise.resolve(device.stack ?? device.started).then((stack) => stack.binder.projectFolderLost(project.masterSessionId), () => null);
+  return why && `${why}.`;
+}
+
+// Use this computer for the open project, which cannot work on it now (lostHere): its user confirms a folder of this
+// computer in the sheet, which offers the project's own folder first, and the agent moves the project here and has
+// this computer bind its conversation there afresh. Its conversation is loaded again, to read where it works now.
+// Why it did not happen is said in the sidebar.
+let usingHere = false;
+async function useThisComputer(): Promise<void> {
+  const open = view.kind === "project" && overview?.project.id === view.id ? overview : null;
+  const shell = main?.window.webContents;
+  if (!open?.lost || usingHere || !shell) return;
+  const { project } = open;
+  usingHere = true;
+  failure = null;
+  changed();
+  try {
+    const stack = await registered();
+    // Its binding reaches this computer through the agent: one the agent does not hear would wait in silence.
+    if (device?.status !== "connected" || !kept) throw new Error("This computer is not connected to the agent right now: use it for this project once it is");
+    const window = String(shell.id);
+    const again = { master: project.masterSessionId, folder: project.folder };
+    const picked = await preparing(window, (signal) => stack.binder.prepareProjectFolder(window, signal, project.name, again));
+    if (!picked) return;
+    try {
+      await projects.useComputer(project.id, { kind: "device", device_id: kept.deviceId, folder: picked.folder, nonce: picked.nonce });
+    } catch (error) {
+      // Not moved: its confirmation binds nothing. One that may have been moved keeps it, for its binding.
+      if (!(error instanceof TimedOut)) stack.binder.cancelPrepared(picked.token, window);
+      throw error;
+    }
+    await stack.binder.bindSession(project.masterSessionId, picked.token, window);
+    if (view.kind === "project" && view.id === project.id && !view.thread) main?.reload();
+  } catch (error) {
+    failure = `Surogate could not use this computer for ${project.name}: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    usingHere = false;
+    void refreshProjects();
+    changed();
+  }
 }
 
 // One thread's row of the open project, read alone: it keeps its place, a new one comes first,
@@ -1078,6 +1137,17 @@ async function ask(options: Electron.MessageBoxOptions): Promise<boolean> {
   return (await messageBox(options)) === 0;
 }
 
+// " The project X works in a folder on this computer: …" for the projects the page listed that work here: once this
+// computer's access ends, each works here again only once its user chooses Use this computer for this project.
+function projectsHere(): string {
+  const deviceId = kept?.deviceId;
+  const names = listed.filter(({ place }) => place?.kind === "device" && place.deviceId === deviceId).map(({ name }) => asShown(name));
+  if (names.length === 0) return "";
+  if (names.length === 1) return ` The project ${names[0]} works in a folder on this computer: open it afterwards and choose Use this computer for this project.`;
+  const all = `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return ` The projects ${all} work in folders on this computer: open each afterwards and choose Use this computer for this project.`;
+}
+
 // "1 thread working on this computer stops." when one works: what a log out cuts off.
 function cutOff(): string {
   const working = device?.stack?.working() ?? 0;
@@ -1095,12 +1165,12 @@ async function signOut(agent: Agent, removing: boolean): Promise<void> {
   const options: Electron.MessageBoxOptions = removing
     ? {
       type: "warning", message: `Remove ${agent.name} from Surogate?`,
-      detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${cutOff()}`,
+      detail: `You are logged out, this computer's access to ${agent.name} ends, and the folders it was given here are forgotten. Surogate then asks for an agent again.${projectsHere()}${cutOff()}`,
       buttons: ["Remove", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
     }
     : {
       type: "warning", message: `Log out of ${agent.name}?`,
-      detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${cutOff()}`,
+      detail: `This computer's access to ${agent.name} ends, and the folders it was given here are forgotten.${projectsHere()}${cutOff()}`,
       buttons: ["Log out", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
     };
   // Whose browser profiles they are, before the log out forgets the computer's credential: none
@@ -1343,19 +1413,22 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
   }
 }
 
+// The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
+const anotherAccount = () => kept !== null && !pageIs(kept);
+
+// The device, once started, for a folder of this computer the page or the shell asks for: one asking while
+// it still starts, as at a launch, waits for it.
+async function registered(): Promise<DeviceStack> {
+  if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
+  if (kept?.token === null) throw new Error(REVOKED);
+  if (!device) throw new Error("This computer is not registered with the agent");
+  return device.stack ?? device.started;
+}
+
 // The bridge, on a view of the agent's web client: its calls answer for this agent only.
 function bridge(contents: WebContents, agent: Agent): void {
   // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
   let load = 0;
-  // The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
-  const anotherAccount = () => kept !== null && !pageIs(kept);
-  // The device, once started: a page asking while it still starts, as at a launch, waits for it.
-  const registered = async (): Promise<DeviceStack> => {
-    if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
-    if (kept?.token === null) throw new Error(REVOKED);
-    if (!device) throw new Error("This computer is not registered with the agent");
-    return device.stack ?? device.started;
-  };
   // The browser is one for every chat of the agent's here, held from the chat that took it over until that chat hands it back.
   const HELD_FROM_ANOTHER_CHAT = "The agent's browser on this computer is taken over from another chat, and is handed back there";
   // The device, for a call about a chat's browser: refused for a chat with no folder here.
@@ -1389,6 +1462,7 @@ function bridge(contents: WebContents, agent: Agent): void {
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
+    prepareThreadFolder: async (masterSessionId, window) => (await registered()).binder.prepareThreadFolder(masterSessionId, window),
     setMode: async (sessionId, mode) => (await registered()).binder.approvals.setMode(sessionId, mode),
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
@@ -2138,11 +2212,26 @@ async function confirmArchive(name: string): Promise<boolean> {
 }
 
 // The project dialog, over the window: a new project, or the open project's settings. Its page's
-// calls are answered on its own view only; each answers why it was refused, or null once done.
+// calls are answered on its own view only; each answers why it was refused, or null once done. A new
+// project works in a folder of this computer, which its user picks and confirms in the desktop's sheet:
+// its coordinator is bound to that folder itself, once the agent has made the project with it.
 function showProject(editing: Opened | null): void {
   const page = join(PAGES, "project.html");
   main?.openSettings(page, PAGES_PRELOAD, undefined, (contents) => {
     projectDialog = contents;
+    // The dialog's own window, which its folder is confirmed in.
+    const window = String(contents.id);
+    // The new project's folder, as its user confirmed it, until the project is made with it.
+    let chosen: Prepared | null = null;
+    // A Create that did not answer in time may have made the project with the folder it took: none is made again with it.
+    let mayHaveMade = false;
+    // A new project works in a folder of this computer, unless the agent takes no folders of it: then in the cloud.
+    const local = () => agents.get()?.desktopSessions === true && agents.get()?.multiSession === true;
+    // A folder confirmed for a project that was never made binds nothing from now on.
+    const letGo = (prepared: Prepared | null) => {
+      if (prepared) void registered().then((stack) => stack.binder.cancelPrepared(prepared.token, window), () => {});
+    };
+    contents.once("destroyed", () => letGo(chosen));
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
         if (!ownPage(event.senderFrame, page)) throw new Error("Not the project dialog's own page");
@@ -2161,7 +2250,7 @@ function showProject(editing: Opened | null): void {
     let shown: Project | null = null;
     // A project that cannot be read, gone or out of reach, is said so, with nothing to save.
     handle("project:state", async () => {
-      if (!editing) return { editing: false, project: null, refused: null };
+      if (!editing) return { editing: false, project: null, refused: null, folder: local() };
       try {
         shown = await askServed(() => projects.get(editing.id));
         return { editing: true, project: shown, refused: null };
@@ -2173,6 +2262,77 @@ function showProject(editing: Opened | null): void {
     const close = () => {
       if (main?.settingsContents() === contents) main.closeSettings();
     };
+    // Choose…: the system's folder dialog, then the desktop's sheet, which names the project as typed so far.
+    handle("project:choose", async (name) => {
+      if (editing) return { refused: "A project's folder is chosen when the project is made" };
+      try {
+        const stack = await registered();
+        const typed = typeof name === "string" ? name.slice(0, 256) : "";
+        const picked = await preparing(window, (signal) => stack.binder.prepareProjectFolder(window, signal, typed));
+        if (!picked) return null;
+        letGo(chosen);
+        chosen = picked;
+        mayHaveMade = false;
+        return { folder: picked.folder };
+      } catch (error) {
+        return { refused: refused(error) };
+      }
+    });
+    // The folder the dialog shows: the one confirmed for the new project now, or none, as after a refusal that let it go.
+    handle("project:chosen", () => chosen?.folder ?? null);
+    // A new project, made with the folder its user confirmed: the agent binds its coordinator there, and the
+    // dialog closes once this computer has recorded it. For an agent that takes no folders of this computer, in the cloud.
+    const make = async (fields: ProjectFields): Promise<Project | string> => {
+      if (!local()) return projects.create({ name: fields.name, goal: fields.goal });
+      const stack = await registered();
+      const folder = chosen;
+      if (!folder && mayHaveMade) return "The last Create may have made the project: look for it in your projects, or choose the folder again to make another.";
+      if (!folder || !stack.binder.isPrepared(folder.token, window)) {
+        chosen = null;
+        return folder
+          ? "Choose the folder again: its confirmation lapsed, or a project was made with it."
+          : "Choose the folder on this computer the project works in.";
+      }
+      // Its binding reaches this computer through the agent: one the agent does not hear would wait in silence.
+      if (device?.status !== "connected" || !kept) return "This computer is not connected to the agent right now: create the project once it is.";
+      // Taken: a dialog closed while the agent makes the project leaves its binding to come.
+      chosen = null;
+      let project: Project;
+      try {
+        project = await projects.create({
+          name: fields.name, goal: fields.goal,
+          execution: { kind: "device", device_id: kept.deviceId, folder: folder.folder, nonce: folder.nonce },
+        });
+      } catch (error) {
+        // One that may have been made keeps its confirmation, for its binding, and the dialog none: another Create
+        // would make the project again with it.
+        if (error instanceof TimedOut) {
+          mayHaveMade = true;
+          throw error;
+        }
+        // Not made: the folder stays confirmed for the next Create, unless the dialog has closed meanwhile.
+        if (contents.isDestroyed()) letGo(folder);
+        else chosen = folder;
+        throw error;
+      }
+      try {
+        await stack.binder.bindSession(project.masterSessionId, folder.token, window);
+      } catch (error) {
+        // A binding recorded here before the link went is finished at its next connection: the project is kept.
+        if (stack.bindings.get(project.masterSessionId)) {
+          remember(project);
+          void refreshProjects();
+          return `Surogate made the project, but the agent has not heard that its folder is set up on this computer: ${refused(error)}`;
+        }
+        // None was: its conversation could never work there, so the project goes.
+        const archived = await projects.archive(project.id).then(() => true, (failed: unknown) => (report(failed), false));
+        void refreshProjects();
+        return archived
+          ? `Surogate could not set up the project's folder on this computer, so the project was not kept: ${refused(error)}. Choose the folder again.`
+          : `Surogate could not set up the project's folder on this computer: ${refused(error)}. Archive ${fields.name} from its settings, and create it again.`;
+      }
+      return project;
+    };
     handle("project:save", async (value) => {
       const fields = projectFields(value, editing !== null);
       if (fields.name === "") return "Name the project.";
@@ -2182,9 +2342,8 @@ function showProject(editing: Opened | null): void {
         return null;
       }
       try {
-        const project = editing
-          ? await projects.update(editing.id, change)
-          : await projects.create({ name: fields.name, goal: fields.goal });
+        const project = editing ? await projects.update(editing.id, change) : await make(fields);
+        if (typeof project === "string") return project;
         remember(project);
         // A new project opens on its conversation, as one chosen in the sidebar does, unless its dialog
         // was closed meanwhile: the user has gone on to something else, which a late answer leaves alone.
@@ -2199,7 +2358,9 @@ function showProject(editing: Opened | null): void {
         void refreshProjects();
         return null;
       } catch (error) {
-        return unanswered(error, editing ? "the change may have been made" : "the project may have been made");
+        return unanswered(
+          error, editing ? "the change may have been made" : "the project may have been made. Look for it in your projects before you create it again.",
+        );
       }
     });
     handle("project:archive", async () => {
@@ -2468,6 +2629,7 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:menu", popup);
   handle("shell:settings", () => showSettings());
   handle("shell:new-project", () => showProject(null));
+  handle("shell:use-here", () => useThisComputer());
   handle("shell:project-settings", () => {
     if (view.kind !== "project") throw new Error("No project is open");
     showProject({ id: view.id, name: view.name, masterSessionId: view.masterSessionId });

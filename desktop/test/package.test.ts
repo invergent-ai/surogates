@@ -16,6 +16,7 @@ import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const DESKTOP = fileURLToPath(new URL("..", import.meta.url));
+const REPO = join(DESKTOP, "..");
 const VERSION = "1.2.3";
 const NAME = `surogate-desktop-${VERSION}-linux-x64`;
 // Every file and folder of the agent's disk $1, one a line, as debugfs lists it: its path, its
@@ -233,21 +234,29 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", 
   let dir: string;
   // No credentials of this user's reach the image's pull or the container.
   const docker = (...args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: { ...process.env, DOCKER_CONFIG: join(dir, "docker") }, timeout: 100_000 });
-  // *script* in a container of *from*, as a user who is not root, with this package's folder read-only at /desktop.
-  const runner = (from: string, script: string) => docker("run", "--rm", "--user", "1000:1000", "-v", `${DESKTOP}:/desktop:ro`, from, "bash", "-c", script);
+  // *script* in a container of *from*, as a user who is not root, with this package's repository
+  // read-only at /repo, whole, as the release's job checks it out: the disk carries modules of the
+  // repository's own (vm/history-tree.sh).
+  const runner = (from: string, script: string) => docker("run", "--rm", "--user", "1000:1000", "-v", `${REPO}:/repo:ro`, from, "bash", "-c", script);
   // What the disk holds, from this package's build: the agent and the modules it imports, the
-  // guest's init and what enters a session's root, each a file all may read, root's.
+  // guest's init and what enters a session's root, and a folder's history, its way in and the
+  // repository's modules it runs under empty packages of their names, each a file all may read, root's.
   const expected = () => {
     const files = (folder: string, base = folder): string[] => readdirSync(folder, { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
       ? [`/${relative(base, join(folder, entry.name))}/ 040755 0 0`, ...files(join(folder, entry.name), base)]
       : entry.name.endsWith(".map") ? [] : [`/${relative(base, join(folder, entry.name))} 100644 0 0 ${statSync(join(folder, entry.name)).size}`]);
     const dist = join(DESKTOP, "dist");
+    const packages = ["surogates", "surogates/sandbox", "surogates/tools", "surogates/tools/utils"];
+    const modules = ["surogates/sandbox/history.py", "surogates/sandbox/local_history.py", "surogates/tools/utils/checkpoint_manager.py"];
     return [
       "/lost+found/ 040700 0 0",
       "/guest/ 040755 0 0", ...files(join(dist, "guest")).map((line) => `/guest${line}`),
       "/files/ 040755 0 0", ...files(join(dist, "files")).map((line) => `/files${line}`),
       "/link/ 040755 0 0", `/link/protocol.js 100644 0 0 ${statSync(join(dist, "link", "protocol.js")).size}`,
       `/init 100755 0 0 ${statSync(join(DESKTOP, "vm", "init")).size}`, `/enter-root 100755 0 0 ${statSync(join(DESKTOP, "vm", "enter-root")).size}`,
+      "/history/ 040755 0 0", `/history/main.py 100644 0 0 ${statSync(join(DESKTOP, "vm", "history.py")).size}`,
+      ...packages.flatMap((name) => [`/history/${name}/ 040755 0 0`, `/history/${name}/__init__.py 100644 0 0 0`]),
+      ...modules.map((name) => `/history/${name} 100644 0 0 ${statSync(join(REPO, name)).size}`),
       "/package.json 100644 0 0 18",
     ].sort();
   };
@@ -271,7 +280,7 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", 
     const made = runner(image, `${LISTED}
       echo "user $(id -u), mke2fs $(mke2fs -V 2>&1 | head -n 1 | cut -d' ' -f2)"
       echo "a user namespace: $(unshare -r true 2>&1)"
-      /desktop/vm/agent-disk.sh /tmp/agent.img >/dev/null || exit
+      /repo/desktop/vm/agent-disk.sh /tmp/agent.img >/dev/null || exit
       listed /tmp/agent.img / | LC_ALL=C sort
       e2fsck -fn /tmp/agent.img >/dev/null 2>&1; echo "checked $?"`);
     expect(made.status, made.stderr).toBe(0);
@@ -293,7 +302,7 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", 
       sha256sum </tmp/agent-1.img; sha256sum </tmp/agent-2.img
       debugfs -R "stat /guest/agent.js" /tmp/agent-2.img 2>/dev/null | grep -E "^ *(c|a|m|cr)time:" | cut -d- -f1 | tr -s " \n" " "; echo
       dumpe2fs -h /tmp/agent-2.img 2>/dev/null | grep -E "^Filesystem (UUID|created):" | tr -s " \n" " "`;
-    const there = runner(image, twice("/desktop/vm/agent-disk.sh"));
+    const there = runner(image, twice("/repo/desktop/vm/agent-disk.sh"));
     expect(there.status, there.stderr).toBe(0);
     const [first, second, times, superblock] = there.stdout.trim().split("\n").map((line) => line.trim());
     expect(second).toBe(first);
@@ -317,8 +326,8 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", 
   it("is not made without fakeroot, and nor is a tarball: each script says so before it does anything", () => {
     // Ubuntu's own image, which has mke2fs and no fakeroot, and nothing else a packaging needs.
     const without = runner("ubuntu:24.04", [
-      "/desktop/vm/agent-disk.sh /tmp/agent.img; echo \"agent-disk.sh $?\"",
-      "/desktop/scripts/package.sh 1.2.3 /desktop/package.json /tmp/out; echo \"package.sh $?\"",
+      "/repo/desktop/vm/agent-disk.sh /tmp/agent.img; echo \"agent-disk.sh $?\"",
+      "/repo/desktop/scripts/package.sh 1.2.3 /repo/desktop/package.json /tmp/out; echo \"package.sh $?\"",
       "ls -A /tmp",
     ].join("\n"));
     expect(without.stdout).toBe("agent-disk.sh 1\npackage.sh 1\n");

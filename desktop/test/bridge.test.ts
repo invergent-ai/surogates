@@ -12,6 +12,7 @@ function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
     getDevice: vi.fn(() => ({ device: null, localFolders: true })),
     webSignIn: vi.fn(() => Promise.resolve({ code: "web-code" })),
     prepareFolder: vi.fn(() => Promise.resolve(null)),
+    prepareThreadFolder: vi.fn(() => Promise.resolve({ folder: "/home/flavius/Q3", mode: "ask", nonce: "n", token: "t" })),
     bindSession: vi.fn(() => Promise.resolve()),
     setMode: vi.fn(() => Promise.resolve()),
     requestFreeMode: vi.fn(() => Promise.resolve(true)),
@@ -53,6 +54,8 @@ describe("the bridge", () => {
     expect(made.prepareFolder).toHaveBeenCalledWith("pick", "7", null);
     await handlers.bindSession!(TOP, "7", SESSION, "b".repeat(43));
     expect(made.bindSession).toHaveBeenCalledWith(SESSION, "b".repeat(43), "7");
+    expect(await handlers.prepareThreadFolder!(TOP, "7", SESSION)).toMatchObject({ folder: "/home/flavius/Q3" });
+    expect(made.prepareThreadFolder).toHaveBeenCalledWith(SESSION, "7");
     expect(await handlers.getAppearance!(TOP, "7")).toMatchObject({ theme: "dark" });
     await handlers.setMode!(TOP, "7", SESSION, "ask");
     expect(made.setMode).toHaveBeenCalledWith(SESSION, "ask");
@@ -164,6 +167,7 @@ describe("the bridge", () => {
     ["prepareFolder", ["last", { project: "", thread: "Check the totals" }], "Not a project's thread"],
     ["prepareFolder", ["last", { project: "Q3 report", thread: "x".repeat(257) }], "Not a project's thread"],
     ["bindSession", ["not-a-session", "b".repeat(43)], "Not a chat"],
+    ["prepareThreadFolder", ["../other"], "Not a chat"],
     ["bindSession", [SESSION, "short"], "Not a folder confirmation"],
     ["setAccount", [{ ...ACCOUNT, name: "x".repeat(201) }], "Not an account"],
     ["setAccount", [{ ...ACCOUNT, userId: "" }], "Not an account"],

@@ -4,8 +4,8 @@
 // types and copied field by field before the shell uses it.
 
 import type {
-  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, SetAside,
-  SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
+  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectFolder, ProjectsSource, ProjectSummary, Routine,
+  SetAside, SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
 } from "../../../web/src/lib/projects-contract.js";
 
 // How long the page has to answer a call.
@@ -19,8 +19,8 @@ export const HISTORY_ANSWER_TIMEOUT_MS = 30_000;
 export const LONG_ANSWER_TIMEOUT_MS = 120_000;
 
 const METHODS = [
-  "list", "get", "create", "update", "archive", "threads", "resolve", "reopen", "library", "routines", "history", "openVersion",
-  "deleted", "restore", "undo",
+  "list", "get", "create", "update", "archive", "useComputer", "threads", "resolve", "reopen", "library", "routines", "history",
+  "openVersion", "deleted", "restore", "undo",
 ] as const;
 type Method = (typeof METHODS)[number];
 const LONG: readonly Method[] = ["openVersion", "restore", "undo"];
@@ -55,32 +55,36 @@ function listOf<T>(value: unknown, max: number, item: (value: unknown) => T): T[
   return (value as unknown[]).map(item);
 }
 
+// Where a project works, as its row's place is taken. An agent older than the app names none.
 function summaryOf(value: unknown): ProjectSummary {
-  const { id, name, icon, createdAt, updatedAt, waiting, working } = fields(value);
+  const { id, name, icon, createdAt, updatedAt, waiting, working, place } = fields(value);
   need(named(id) && named(name) && (icon === null || text(icon, 100)) && time(createdAt) && time(updatedAt) && count(waiting) && count(working));
-  return { id, name, icon, createdAt, updatedAt, waiting, working } as ProjectSummary;
+  return { id, name, icon, createdAt, updatedAt, waiting, working, place: placeOf(place) } as ProjectSummary;
 }
 
 // A tier the app does not know, as a later agent's page may serve, is one it shows as unknown, never a project refused.
 const TIERS = [null, "basic", "pro"] as const;
 const tierOf = (value: unknown): Project["coordinatorTier"] => (one(value, TIERS) ? value : "unknown");
 
+// A project's folder on its computer. An agent older than the app names none.
 function projectOf(value: unknown): Project {
-  const { goal, instructions, masterSessionId, coordinatorTier, threadTier } = fields(value);
-  need((goal === null || text(goal, 16_000)) && text(instructions, 16_000) && named(masterSessionId));
+  const { goal, instructions, masterSessionId, coordinatorTier, threadTier, folder = null } = fields(value);
+  need((goal === null || text(goal, 16_000)) && text(instructions, 16_000) && named(masterSessionId) && (folder === null || text(folder, 4096)));
   return {
     ...summaryOf(value), goal, instructions, masterSessionId, coordinatorTier: tierOf(coordinatorTier), threadTier: tierOf(threadTier),
+    folder,
   } as Project;
 }
 
 // A place of a kind the app does not know, as a later agent's page may serve, and none, are no place it can name:
-// none, never a row refused. A computer's place is checked, as a row's own facts are.
+// none, never a row refused. A computer's place is checked, as a row's own facts are: a project's says whether its
+// folder can no longer be reached there.
 function placeOf(value: unknown): ThreadPlace | null {
-  const { kind, deviceId, deviceName, online } = fields(value);
+  const { kind, deviceId, deviceName, online, lost } = fields(value);
   if (kind === "cloud") return { kind };
   if (kind !== "device") return null;
-  need(named(deviceId) && text(deviceName, 200) && typeof online === "boolean");
-  return { kind: "device", deviceId, deviceName, online } as ThreadPlace;
+  need(named(deviceId) && text(deviceName, 200) && typeof online === "boolean" && (lost === undefined || typeof lost === "boolean"));
+  return { kind: "device", deviceId, deviceName, online, ...(lost === undefined ? {} : { lost }) } as ThreadPlace;
 }
 
 const MARKS = ["landed", "redoing", "not_merged", "undone"] as const;
@@ -208,6 +212,7 @@ const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   create: projectOf,
   update: projectOf,
   archive: (value) => need(value === undefined || value === null),
+  useComputer: projectOf,
   // With a thread, the read is that row alone, or none once it is no longer one of the project's.
   threads: (value, [, threadId]) => {
     const rows = listOf(value, 500, threadOf);
@@ -249,9 +254,10 @@ export class PageProjects implements ProjectsSource {
 
   list = () => this.call<ProjectSummary[]>("list");
   get = (projectId: string) => this.call<Project>("get", projectId);
-  create = (input: { name: string; goal?: string; instructions?: string }) => this.call<Project>("create", input);
+  create = (input: { name: string; goal?: string; instructions?: string; execution?: ProjectFolder }) => this.call<Project>("create", input);
   update = (projectId: string, patch: Parameters<ProjectsSource["update"]>[1]) => this.call<Project>("update", projectId, patch);
   archive = (projectId: string) => this.call<void>("archive", projectId);
+  useComputer = (projectId: string, execution: ProjectFolder) => this.call<Project>("useComputer", projectId, execution);
   threads = (projectId: string, threadId?: string) =>
     this.call<ThreadRow[]>("threads", ...(threadId === undefined ? [projectId] : [projectId, threadId]));
   resolve = (projectId: string, threadId: string) => this.call<ThreadRow>("resolve", projectId, threadId);

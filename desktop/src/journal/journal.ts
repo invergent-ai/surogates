@@ -76,7 +76,8 @@ export class OperationJournal {
           boot TEXT NOT NULL,
           mode TEXT NOT NULL,
           bound_at INTEGER NOT NULL,
-          history TEXT
+          history TEXT,
+          project INTEGER
         );
         CREATE TABLE IF NOT EXISTS domains (
           root TEXT NOT NULL,
@@ -98,6 +99,8 @@ export class OperationJournal {
       // the build that wrote the journal still reads it afterwards, and names its own columns when it binds.
       const columns = this.db.prepare(`PRAGMA table_info(bindings)`).all() as Array<{ name: string }>;
       if (!columns.some((column) => column.name === "history")) this.db.exec(`ALTER TABLE bindings ADD COLUMN history TEXT`);
+      // And one written before a project could be made here: none of its chats is a project's.
+      if (!columns.some((column) => column.name === "project")) this.db.exec(`ALTER TABLE bindings ADD COLUMN project INTEGER`);
       this.bindings = new Bindings(this.db);
       // Opened once per process: what a crash cut off is interrupted before
       // anything is reported or run.
