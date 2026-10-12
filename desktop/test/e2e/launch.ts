@@ -32,12 +32,37 @@ afterAll(() => {
 const TAKEN = ["PATH", "DISPLAY", "XAUTHORITY", "SUROGATE_VM_IMAGE"];
 
 /**
+ * The environment of an app a test launches on a Mac: its own home, under *home*, which its data, Electron's
+ * own and its Library's are in, and its own temp folder; no window server of its own, the runner's being
+ * the one there is.
+ */
+function macEnv(home: string): Record<string, string> {
+  const env: Record<string, string> = { LANG: process.env.LANG || "en_US.UTF-8" };
+  for (const name of ["PATH", "SUROGATE_VM_IMAGE"]) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  const [own, temp] = ["h", "t"].map((name) => join(home, name));
+  for (const folder of [own, temp]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
+  return { ...env, HOME: own!, TMPDIR: temp! };
+}
+
+/** Where the app launched with its data home at *home* keeps what it keeps (src/shell/places.ts). */
+export const dataRoot = (home: string): string =>
+  process.platform === "darwin" ? join(home, "h", "Library", "Application Support", "Surogate") : join(home, "surogate");
+
+// Each launch's own secret store: Linux's basic store, and on a Mac Chromium's mock Keychain, so that no
+// test leaves an item in the keyring of the account it runs in.
+const STORE = process.platform === "darwin" ? "--use-mock-keychain" : "--password-store=basic";
+
+/**
  * The environment of every app a test launches: a session of its own under *home*, the test's
  * data home. It has no session bus, so it reaches and starts no keyring daemon, portal, gvfsd or
  * at-spi; its own home, runtime, config, cache, state and temp folders; and X11, on xvfb's display.
  * It throws on any other display, before anything is made or started.
  */
 export function shellEnv(home: string): Record<string, string> {
+  if (process.platform === "darwin") return macEnv(home);
   // xvfb-run -a sets both: its display, never the desktop's :0, and an authority in a folder of its own.
   const { DISPLAY: display, XAUTHORITY: authority } = process.env;
   if (!display || display === ":0" || !/^:\d+$/.test(display) || !authority?.startsWith(join(tmpdir(), "xvfb-run."))) {
@@ -63,13 +88,13 @@ export function shellEnv(home: string): Record<string, string> {
 
 /**
  * A second launch with *args*, as the system's link handler starts one: in the test's session,
- * with the basic store, it hands the running app its arguments and exits. Its exit code. One that
+ * with its own secret store, it hands the running app its arguments and exits. Its exit code. One that
  * has not exited within 10 s found no app to hand them to, and became the app: it is killed, and
  * the test is told.
  */
 export async function secondLaunch(home: string, ...args: string[]): Promise<number | null> {
   await appsElectron();
-  const second = spawn(ELECTRON, [MAIN, "--password-store=basic", ...args], { env: shellEnv(home), stdio: "ignore", detached: true });
+  const second = spawn(ELECTRON, [MAIN, STORE, ...args], { env: shellEnv(home), stdio: "ignore", detached: true });
   let late: NodeJS.Timeout | undefined;
   const code = await Promise.race([
     once(second, "exit").then(([exited]) => exited as number | null),
@@ -133,8 +158,8 @@ export async function launch(home: string, env: Record<string, string> = {}, arg
   await appsElectron();
   const app = await _electron.launch({
     executablePath: ELECTRON,
-    // The basic store: no test leaves an item in the user's keyring.
-    args: [...requires.flatMap((script) => ["-r", script]), MAIN, "--password-store=basic", ...args],
+    // Its own secret store (STORE): no test leaves an item in the user's keyring.
+    args: [...requires.flatMap((script) => ["-r", script]), MAIN, STORE, ...args],
     env: { ...shellEnv(home), ...env },
     // Playwright adds --no-sandbox unless told: the app never runs without its sandbox.
     chromiumSandbox: true,

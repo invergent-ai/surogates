@@ -5,11 +5,10 @@
 // new chat's page says it went. Made at its first opening, then hidden, never closed until the app
 // quits. Its page is one of the app's files.
 
-import { BrowserWindow, screen } from "electron";
+import { app, BrowserWindow, screen } from "electron";
 
-import { notBuilt } from "../platform.js";
-import { lockPage } from "./main-window.js";
-import * as linux from "./quick-entry-linux.js";
+import { dropMenu, lockPage } from "./main-window.js";
+import { QUICK_ENTRY } from "./quick-entry-keys.js";
 import { ownPage } from "./window-policy.js";
 
 export const WIDTH = 606;
@@ -17,10 +16,7 @@ export const HEIGHT = 470;
 // The longest message it takes, in UTF-16 units, as JavaScript counts them: a paste of a whole book is said, not sent.
 export const LONGEST = 100_000;
 
-/** The keys that open quick entry from anywhere, by this OS (quick-entry-linux.ts), or null where the app takes none. */
-export const quickEntryKeys: (env: NodeJS.ProcessEnv) => string | null = process.platform === "linux"
-  ? linux.quickEntryKeys
-  : () => notBuilt("Surogate Desktop's quick entry shortcut");
+export { quickEntryKeys, unheldWords } from "./quick-entry-keys.js";
 
 export interface QuickEntryOptions {
   page: string; // quick.html
@@ -60,8 +56,7 @@ export class QuickEntry {
       width: WIDTH,
       height: HEIGHT,
     });
-    window.show();
-    window.focus();
+    QUICK_ENTRY.present(app, window);
   }
 
   private make(): BrowserWindow {
@@ -84,7 +79,7 @@ export class QuickEntry {
     });
     window.setAlwaysOnTop(true, "pop-up-menu");
     // Linux gives every window the app's menu: its keys would act on the agent's page behind this one.
-    window.removeMenu();
+    dropMenu(window);
     // Another window taking the focus hides it, as Claude's does.
     window.on("blur", () => window.hide());
     window.once("closed", () => {

@@ -36,8 +36,8 @@ it("runs what the user picked in Custom… as it is, resolved, and refuses Snap 
 });
 
 it("knows none on a system the app drives no browser on yet, and refuses each one picked there in the words every such part says", async () => {
-  const { KNOWN_BROWSERS } = await importedOn("darwin", () => import("../src/browser/known.js"));
+  const { KNOWN_BROWSERS } = await importedOn("win32", () => import("../src/browser/known.js"));
   const disk = { realpath: (path: string) => path, executable: () => true, head: () => "" };
-  expect(KNOWN_BROWSERS.candidates("/Users/ana")).toEqual([]);
-  expect(KNOWN_BROWSERS.refused("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", disk)).toBe("driving a browser is not built for macOS yet");
+  expect(KNOWN_BROWSERS.candidates("C:\\Users\\ana")).toEqual([]);
+  expect(KNOWN_BROWSERS.refused("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", disk)).toBe("driving a browser is not built for win32 yet");
 });

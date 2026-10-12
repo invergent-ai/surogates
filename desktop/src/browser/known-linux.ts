@@ -39,4 +39,6 @@ export const LINUX: KnownBrowsers = {
       return null;
     }
   },
+  // Every rule of Linux's is said at once.
+  checked: async () => {},
 };

@@ -19,7 +19,8 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf, unsupportedAt,
+  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
+  unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
@@ -38,13 +39,14 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
+import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { computerName } from "./computer-name.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { Copying } from "./copying.js";
-import { linkOfLaunch, type OpenLink } from "./deep-link.js";
+import { linkOfLaunch, listenForLinks, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
 import { loginItemFor } from "./login-item.js";
@@ -57,7 +59,7 @@ import { PreferencesStore } from "./preferences.js";
 import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
-import { QuickEntry, quickEntryKeys } from "./quick-entry.js";
+import { QuickEntry, quickEntryKeys, unheldWords } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
@@ -100,10 +102,10 @@ ownSpelling(app, DICTIONARIES, console.error);
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
-// Start at login (login-item.ts); and what it starts: the installed app's launcher, or a
-// development build's Electron on this main.
-const loginItem = loginItemFor(places);
-const loginCommand = (): string[] => (app.isPackaged ? [places.launcher!] : [process.execPath, import.meta.filename]);
+// Start at login (login-item.ts); and what it starts: the installed app's launcher, or the app itself
+// where it has none, or a development build's Electron on this main.
+const loginItem = loginItemFor(places, app);
+const loginCommand = (): string[] => (app.isPackaged ? [places.launcher ?? process.execPath] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
 const browserSetting = new BrowserSetting(join(root, "browser.json"));
@@ -1881,6 +1883,8 @@ function goWeb(path: string): Promise<boolean> {
 let quickEntry: QuickEntry | null = null;
 // The keys that open it from anywhere, once the app holds them: never in a Wayland session, nor while another app holds them.
 let shortcut: string | null = null;
+// What Settings says of the keys another app held at the start, where this OS's Settings says it.
+let shortcutUnheld: string | null = null;
 
 /** Quick entry shown, or hidden when it shows. With nobody signed in, the window shows instead: it asks them to sign in. */
 function toggleQuickEntry(): void {
@@ -1988,9 +1992,9 @@ const handedBack = (by: AbortController): void => {
   for (const other of handBacks) if (other !== by) other.abort();
 };
 
-// Settings → Browser's rows: what is found here, each named with the version it says.
+// Settings → Browser's rows: what is found here, each checked as this OS checks one, and named with the version it says.
 async function browserState() {
-  const found = findBrowsers();
+  const found = await checkedBrowsers();
   const choice = browserSetting.get();
   const versions = new Map<string, string>();
   await Promise.all(found.filter((browser) => browser.unsupported === null).map(async (browser) => {
@@ -2028,7 +2032,7 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
       return;
     }
-    const why = unsupportedAt(real);
+    const why = await unsupportedOnceChecked(real);
     if (why) {
       browserFailure = `Surogate cannot use ${real}: ${why}.`;
       return;
@@ -2148,6 +2152,7 @@ async function settingsState() {
     preferences: { startAtLogin: onOff(loginItem.on()), keepRunning: onOff(keepRunning), developer: onOff(developer) },
     // Why this build cannot start at login, or null.
     startAtLoginRefused: loginItem.refusal(loginCommand()),
+    quickEntryUnheld: shortcutUnheld,
     account,
     computer: {
       name: computerName(),
@@ -2761,6 +2766,14 @@ if (!app.requestSingleInstanceLock()) {
     const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);
   });
+  // A link the system hands the running app as an event, as macOS hands each (deep-link.ts): opened as a
+  // second launch's is, and one before the window is made once it is.
+  listenForLinks(app, (link) => void openDeepLink(link).catch(report));
+  // The app opened again while it runs, as by a click on its icon in the Dock (Electron's activate, macOS's
+  // alone), shows the window; once the quit goes on, nothing does.
+  app.on("activate", () => {
+    if (!leaving) main?.show();
+  });
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
   app.on("before-quit", (event) => {
@@ -2796,6 +2809,10 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
+    // The VM's disks, which the OS's backups leave out (backups.ts).
+    void keepOutOfBackups(join(root, "vm")).catch(report);
+    // The browsers found here, checked as this OS checks one before the agent's first launch asks for one.
+    void checkedBrowsers().catch(report);
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();
@@ -2819,8 +2836,12 @@ if (!app.requestSingleInstanceLock()) {
     // gives none, the tray opens quick entry.
     const keys = quickEntryKeys(process.env);
     if (keys !== null) {
-      if (globalShortcut.register(keys, toggleQuickEntry)) shortcut = keys;
-      else report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
+      if (globalShortcut.register(keys, toggleQuickEntry)) {
+        shortcut = keys;
+      } else {
+        report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
+        shortcutUnheld = unheldWords(keys);
+      }
       updateTray();
     }
     main.window.on("focus", () => void refreshProjects());

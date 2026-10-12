@@ -1,8 +1,10 @@
 // Start at login (spec, Section 7), by this computer's OS: Linux's, an entry in the user's
-// autostart folder (login-item-linux.ts). Electron-free.
+// autostart folder (login-item-linux.ts); macOS's, the app itself as the user's login item
+// (login-item-darwin.ts). Electron-free.
 
 import { notBuilt } from "../platform.js";
-import { loginItem } from "./login-item-linux.js";
+import * as darwin from "./login-item-darwin.js";
+import * as linux from "./login-item-linux.js";
 import type { Places } from "./places.js";
 
 export interface LoginItem {
@@ -12,9 +14,17 @@ export interface LoginItem {
   refusal(command: readonly string[]): string | null;
   /** Start *command* at login from now on, or no longer. */
   set(on: boolean, command: readonly string[]): void;
-  /** Whether a launch with *argv* is the start at login: its window waits for the user. */
+  /** Whether a launch with *argv*, the app's own or a second one's, is the start at login: its window waits for the user. */
   startedHidden(argv: readonly string[]): boolean;
 }
 
-/** The login item of the app whose places are *places*. */
-export const loginItemFor: (places: Places) => LoginItem = process.platform === "linux" ? loginItem : () => notBuilt("Surogate Desktop's start at login");
+/** What of Electron's app keeps the login item where the OS keeps it: macOS's. */
+export interface LoginSystem {
+  getLoginItemSettings(): { openAtLogin: boolean; wasOpenedAtLogin: boolean };
+  setLoginItemSettings(settings: { openAtLogin: boolean }): void;
+}
+
+/** The login item of the app whose places are *places*, which *system*, Electron's app, keeps where the OS does. */
+export const loginItemFor: (places: Places, system: LoginSystem) => LoginItem = process.platform === "linux"
+  ? linux.loginItem
+  : process.platform === "darwin" ? darwin.loginItem : () => notBuilt("Surogate Desktop's start at login");
