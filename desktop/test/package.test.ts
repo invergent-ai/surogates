@@ -40,7 +40,7 @@ const holds = (disk: string) => spawnSync("bash", ["-c", `${LISTED}\nlisted "$1"
 describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarball", { timeout: 180_000 }, () => {
   let dir: string;
   let top: string;
-  const vmManifest = `${JSON.stringify({ key: "a".repeat(64), files: [] })}\n`;
+  const vmManifest = `${JSON.stringify({ key: "a".repeat(64), arch: "amd64", files: [] })}\n`;
 
   // The packaged app, started in a session of the test's own: a scratch home and XDG folders, no
   // session bus, X11 on an Xvfb of its own. Settles with its exit code and what it wrote, or with
@@ -193,6 +193,26 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the release's tarba
       for (const version of ["1.2.\u0663", "\uff11.2.3", "1.\u00b2.3"]) expect(await asked(version, wide), `${version} in ${wide}`).toMatchObject(usage);
     }
     expect(existsSync(join(dir, "refused"))).toBe(false);
+  });
+
+  it("leaves the tarball's own agent disk beside it, for the macOS app's build, which cannot make one", () => {
+    expect(readdirSync(join(dir, "out")).sort()).toEqual([`${NAME}.tar.gz`, "agent.img"].sort());
+    expect(readFileSync(join(dir, "out", "agent.img")).equals(readFileSync(join(top, "resources", "vm", "agent.img")))).toBe(true);
+  });
+
+  it("packs the guest image the linux-x64 app boots, amd64's, and no other arch's: refused before anything is packed", async () => {
+    for (const manifest of [{ key: "a".repeat(64), arch: "arm64", files: [] }, { key: "a".repeat(64), files: [] }]) {
+      writeFileSync(join(dir, "other-manifest.json"), `${JSON.stringify(manifest)}\n`);
+      const refused = await new Promise<{ status: number | string | null; stdout: string; stderr: string }>((resolve) => {
+        execFile(join(DESKTOP, "scripts", "package.sh"), [VERSION, "other-manifest.json", "other"], { cwd: dir, encoding: "utf8" },
+          (error, stdout, stderr) => resolve({ status: error ? error.code ?? null : 0, stdout, stderr }));
+      });
+      expect(refused).toMatchObject({
+        status: 1, stdout: "",
+        stderr: `package.sh: ${join(dir, "other-manifest.json")} is not the manifest of an amd64 guest image, the one the linux-x64 app boots\n`,
+      });
+    }
+    expect(existsSync(join(dir, "other"))).toBe(false);
   });
 
   it("is the same bytes when the same build is packed again: a release sent again puts no other tarball under a name already served", async () => {

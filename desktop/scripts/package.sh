@@ -12,12 +12,14 @@
 #     resources/surogate.svg        the desktop entry's icon
 #     bin/surogate-apply-update     the install script, which applies a verified release as root
 #
-# The install script adds bin/bwrap, the system's copy, to each version it installs.
+# The install script adds bin/bwrap, the system's copy, to each version it installs. The VM's
+# manifest is the amd64 guest image's, the one this app boots. The agent's disk is also left
+# beside the tarball, <out>/agent.img, for the macOS app's build, which has no mke2fs or debugfs.
 #
 # Usage, after npm run build (which fetches and checks bin/node and the dictionary), from any folder, with its
 # paths as that folder names them:
 #   scripts/package.sh <version> <vm manifest.json> <out> [<install script>]
-# It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz. The install script it packs as the
+# It writes <out>/surogate-desktop-<version>-linux-x64.tar.gz and <out>/agent.img. The install script it packs as the
 # root helper is release/install.sh, the only one a release is signed with (release/publish.sh
 # describe refuses a tarball with any other); a test names its own, which trusts a key of the test's.
 set -euo pipefail
@@ -45,6 +47,8 @@ DESKTOP="$PWD"
 # Said before any work is done, and not at the end of it.
 command -v fakeroot >/dev/null \
   || { echo "package.sh: fakeroot is missing, which the agent's disk is made with (vm/agent-disk.sh): install it (apt install fakeroot)" >&2; exit 1; }
+jq -e '.arch == "amd64"' "$VM_MANIFEST" > /dev/null 2>&1 \
+  || { echo "package.sh: $VM_MANIFEST is not the manifest of an amd64 guest image, the one the linux-x64 app boots" >&2; exit 1; }
 
 # One time for all that is packed, the commit's unless SOURCE_DATE_EPOCH names another: each
 # member of the tarball has it, and it is every time in the agent's disk. The same build, packed
@@ -85,4 +89,5 @@ chmod -R u+w,go-w,a+rX,a-st "$top"
 mkdir -p "$OUT"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$EPOCH" \
   -C "$stage" -czf "$OUT/$name.tar.gz" "$name"
+cp "$top/resources/vm/agent.img" "$OUT/agent.img"
 echo "$OUT/$name.tar.gz"

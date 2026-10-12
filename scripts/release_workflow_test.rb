@@ -169,13 +169,16 @@ class ReleaseWorkflowTest < Minitest::Test
     steps = job.fetch("steps")
     runs = steps.map { |step| step["run"].to_s }
 
-    assert_equal({ "group" => "desktop-vm-image", "cancel-in-progress" => false }, job.fetch("concurrency"))
+    # One build of an arch's key at a time: each arch's own group, so a second release's run of one arch
+    # never waits behind, or cancels, the other arch's.
+    assert_equal({ "group" => "desktop-vm-image-${{ matrix.arch }}", "cancel-in-progress" => false }, job.fetch("concurrency"))
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
-    assert_equal({ "state" => "${{ steps.published.outputs.state }}" }, job.fetch("outputs"))
-    kernel = runs.index { |run| run.include?("images/guest/kernel-current.sh") }
-    fetch = runs.index { |run| run.include?("images/guest/publish.sh fetch images/guest/out") }
-    build = runs.index { |run| run.include?("images/guest/build.sh --packed images/guest/out") }
-    send = runs.index { |run| run.include?("images/guest/publish.sh send images/guest/out") }
+    # A matrix's legs share their outputs: the state is each step's own, and no job reads it.
+    refute job.key?("outputs")
+    kernel = runs.index { |run| run.include?("images/guest/kernel-current.sh --arch ${{ matrix.arch }}") }
+    fetch = runs.index { |run| run.include?("images/guest/publish.sh --arch ${{ matrix.arch }} fetch images/guest/out") }
+    build = runs.index { |run| run.include?("images/guest/build.sh --arch ${{ matrix.arch }} --packed images/guest/out") }
+    send = runs.index { |run| run.include?("images/guest/publish.sh --arch ${{ matrix.arch }} send images/guest/out") }
     refute_nil kernel
     assert_operator kernel, :<, fetch
     assert_operator fetch, :<, build
@@ -185,10 +188,27 @@ class ReleaseWorkflowTest < Minitest::Test
       assert_equal "steps.published.outputs.state == 'missing'", steps[index].fetch("if")
     end
     keep = steps.find { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
-    assert_equal "images/guest/out/manifest.json", keep.fetch("with").fetch("path")
+    assert_equal({ "name" => "${{ matrix.artifact }}", "path" => "images/guest/out/manifest.json", "if-no-files-found" => "error" }, keep.fetch("with"))
     %w[images/guest/inputs.sh images/guest/build.sh images/guest/publish.sh images/guest/kernel-current.sh].each do |script|
       assert File.executable?(script), "#{script} is not executable"
     end
+  end
+
+  def test_desktop_vm_image_builds_each_arch_s_image_on_a_runner_of_that_arch
+    job = @workflow.fetch("jobs").fetch("desktop-vm-image")
+
+    # Natively, never under emulation: amd64's for the Linux app, under the artifact's name the desktop's build
+    # takes, and arm64's for the macOS app. A leg that fails leaves the other to finish its publish.
+    assert_equal({
+      "fail-fast" => false,
+      "matrix" => {
+        "include" => [
+          { "arch" => "amd64", "runner" => "blacksmith-4vcpu-ubuntu-2404", "artifact" => "desktop-vm-manifest" },
+          { "arch" => "arm64", "runner" => "blacksmith-4vcpu-ubuntu-2404-arm", "artifact" => "desktop-vm-manifest-arm64" },
+        ],
+      },
+    }, job.fetch("strategy"))
+    assert_equal "${{ matrix.runner }}", job.fetch("runs-on")
   end
 
   def test_only_the_jobs_that_write_a_release_may_write_its_assets
@@ -220,9 +240,9 @@ class ReleaseWorkflowTest < Minitest::Test
     refute job.key?("env"), "the job's env reaches every step"
     job.fetch("steps").each do |step|
       run = step["run"].to_s
-      if run.include?("images/guest/publish.sh fetch")
+      if run.include?("images/guest/publish.sh --arch ${{ matrix.arch }} fetch")
         assert_equal r2.merge("GH_TOKEN" => "${{ github.token }}"), step.fetch("env")
-      elsif run.include?("images/guest/publish.sh send")
+      elsif run.include?("images/guest/publish.sh --arch ${{ matrix.arch }} send")
         assert_equal r2, step.fetch("env")
       else
         refute step.to_s.include?("secrets."), "#{step["name"] || step["uses"]} reads a secret"
@@ -239,8 +259,10 @@ class ReleaseWorkflowTest < Minitest::Test
     refute job.key?("if")
     assert_includes run, "gh release view"
     assert_equal({ "contents" => "write" }, job.fetch("permissions"))
-    download = job.fetch("steps").find { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
-    assert_equal "desktop-vm-manifest", download.fetch("with").fetch("name")
+    # Each arch's manifest, into a folder of its own, and each attached.
+    downloads = job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-vm-manifest", "path" => "out/amd64" }, { "name" => "desktop-vm-manifest-arm64", "path" => "out/arm64" }], downloads.map { |step| step.fetch("with") }
+    assert_includes run, "for manifest in out/amd64/manifest.json out/arm64/manifest.json; do"
     assert_includes run, 'desktop-vm-${key}.json'
     assert_includes run, 'gh release upload "$GITHUB_REF_NAME"'
   end
@@ -293,6 +315,11 @@ class ReleaseWorkflowTest < Minitest::Test
       {
         "name" => "Keep the tarball for the publish job", "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
         "with" => { "name" => "desktop-tarball", "path" => "out/desktop/surogate-desktop-*-linux-x64.tar.gz", "if-no-files-found" => "error" },
+      },
+      # The tarball's own agent disk, for the macOS app, whose build has no mke2fs or debugfs to make one.
+      {
+        "name" => "Keep the agent's disk for the macOS app's build", "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "with" => { "name" => "desktop-agent-disk", "path" => "out/desktop/agent.img", "if-no-files-found" => "error" },
       },
     ], job.fetch("steps")
     # The tarball's hash and its size are the job's own outputs, which no other job of the run can
@@ -593,9 +620,9 @@ class ReleaseWorkflowTest < Minitest::Test
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
         "images" => ["8ebea57277fdbb89", %w[87fcdec176307d16 0619e48968c28792 617ad6a92e3fd6a0 73c45f0486d37ee1 24a2521493be90fe d971c94aab8fd2bb]],
         "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
-        "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 1c8fad583502f38f c210483245b04521 04f76870922f0e0c 9cf23a5158e4d38d 4d2b3220158de0c1 b71b78b7115f448e]],
-        "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
-        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298]],
+        "desktop-vm-image" => ["05c6124c52ad8e02", %w[87fcdec176307d16 0bf156909f2fc161 2f1046c49cf9cc02 04f76870922f0e0c 4dec877d0bd7dd8a c55df8210861da52 69521b7f5ab29e2a]],
+        "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[228f7404a3b46f9c 8157c94a6aef509e 432ab4e8e320e8d8]],
+        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298 85f19c7854602bce]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
         "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
         "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
@@ -677,18 +704,25 @@ class ReleaseWorkflowTest < Minitest::Test
     kept = []
     taken = []
     @workflow.fetch("jobs").each do |name, job|
+      # A matrix's job keeps an artifact for each of its legs, by the name the leg gives it.
+      legs = job.dig("strategy", "matrix", "include") || [{}]
       job.fetch("steps", []).each do |step|
         uses = step["uses"].to_s
-        kept << [name, step.fetch("with").fetch("name")] if uses.start_with?("actions/upload-artifact@")
-        taken << [name, step.fetch("with").fetch("name")] if uses.start_with?("actions/download-artifact@")
+        artifact = step.fetch("with", {})["name"].to_s
+        named = legs.map { |leg| artifact.gsub(/\$\{\{ matrix\.(\w+) \}\}/) { leg.fetch(Regexp.last_match(1)) } }
+        named.each { |each| kept << [name, each] } if uses.start_with?("actions/upload-artifact@")
+        named.each { |each| taken << [name, each] } if uses.start_with?("actions/download-artifact@")
         refute step.fetch("with", {}).key?("overwrite"), "#{name} overwrites an artifact"
         refute_match(/upload-artifact|download-artifact|gh run download|actions\/artifacts/, step["run"].to_s, "#{name} keeps or takes an artifact by hand")
       end
     end
-    assert_equal [%w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-build desktop-tarball]], kept
     assert_equal [
-      %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-build desktop-vm-manifest], %w[desktop-describe desktop-tarball],
-      %w[desktop-publish desktop-tarball], %w[release dist],
+      %w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-vm-image desktop-vm-manifest-arm64], %w[desktop-build desktop-tarball],
+      %w[desktop-build desktop-agent-disk],
+    ], kept
+    assert_equal [
+      %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-vm-manifest desktop-vm-manifest-arm64], %w[desktop-build desktop-vm-manifest],
+      %w[desktop-describe desktop-tarball], %w[desktop-publish desktop-tarball], %w[release dist],
     ], taken
   end
 end
