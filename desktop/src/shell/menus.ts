@@ -5,6 +5,9 @@
 
 import type { MenuItemConstructorOptions } from "electron";
 
+import { notBuilt } from "../platform.js";
+import * as linux from "./menus-linux.js";
+
 export interface MenuActions {
   newChat(): void;
   settings(): void;
@@ -16,19 +19,13 @@ export interface MenuActions {
   about(): void;
 }
 
+// What differs by OS: the menus before Edit (menus-linux.ts).
+const OS = process.platform === "linux" ? linux : { firstMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus") };
+
 /** The app's menu; *developer* adds Developer, in developer mode. */
 export function appMenu(act: MenuActions, developer: boolean): MenuItemConstructorOptions[] {
   const menu: MenuItemConstructorOptions[] = [
-    {
-      label: "File",
-      submenu: [
-        { id: "new-chat", label: "New chat", accelerator: "CmdOrCtrl+N", click: () => act.newChat() },
-        { id: "settings", label: "Settings…", accelerator: "CmdOrCtrl+Shift+,", click: () => act.settings() },
-        { type: "separator" },
-        { label: "Close window", role: "close" },
-        { id: "quit", label: "Quit Surogate", accelerator: "CmdOrCtrl+Q", click: () => act.quit() },
-      ],
-    },
+    ...OS.firstMenus(act),
     {
       label: "Edit",
       submenu: [
