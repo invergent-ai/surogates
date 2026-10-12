@@ -44,6 +44,12 @@ describe("a git hook", () => {
     expect(isGitHook(folder, `${folder}/.git/config`)).toBe(false);
     expect(isGitHook(folder, "/elsewhere/.git/hooks/pre-commit")).toBe(false);
   });
+
+  it("is one too under the names a volume that compares names without case takes as .git and hooks", () => {
+    expect(isGitHook(folder, `${folder}/.git/hookſ/pre-commit`)).toBe(true);
+    expect(isGitHook(folder, `${folder}/.gıt/hooKs/pre-commit`)).toBe(true);
+    expect(isGitHook(folder, `${folder}/hookſ/pre-commit`)).toBe(false);
+  });
 });
 
 describe("the walk", () => {

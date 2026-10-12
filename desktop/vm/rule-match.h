@@ -11,18 +11,92 @@
 
 #define SG_WALK 12    // path components judged from the target up to the mount root
 #define SG_NAMELEN 16 // the longest protected name is config.worktree (15)
+// The bytes of a component read for its fold (sg_fold), its NUL among them. The most a protected name
+// takes, written with the characters sg_fold takes to its letters, is 18 (config.worktree, with ı for
+// its i and the Kelvin sign for its k): a name too long to be read whole folds to none.
+#define SG_RAWLEN 32
 
 #ifdef __bpf__
 #define SG_INLINE static __attribute__((always_inline)) inline
 #define SG_NOINLINE __attribute__((noinline))
 #define SG_ARG_NONNULL __attribute__((btf_decl_tag("arg:nonnull")))
+// What it hides the compiler cannot see through, so arithmetic on a name's bytes is never turned into
+// a branch, which would fork the verifier at every byte.
+#define SG_OPAQUE(x) asm volatile("" : "+r"(x))
 #else
 #define SG_INLINE static inline
 #define SG_NOINLINE static
 #define SG_ARG_NONNULL
+#define SG_OPAQUE(x) ((void)0)
 #endif
 
 struct sg_name { char b[SG_NAMELEN]; };
+// A component as read, NUL-terminated, with two NULs past SG_RAWLEN for sg_fold's look ahead.
+struct sg_raw { unsigned char b[SG_RAWLEN + 2]; };
+
+// 1 when x is 0, else 0.
+SG_INLINE unsigned sg_zero(unsigned x)
+{
+	unsigned t = x | (0u - x);
+	SG_OPAQUE(t);
+	t >>= 31;
+	SG_OPAQUE(t);
+	return t ^ 1u;
+}
+
+// 1 when x < y, for x and y below 2^31.
+SG_INLINE unsigned sg_below(unsigned x, unsigned y)
+{
+	unsigned t = x - y;
+	SG_OPAQUE(t);
+	return t >> 31;
+}
+
+// The component *raw*, *len* bytes, into *nm* as a volume that compares names without case may compare
+// it, as files/protect.ts's folded does: ASCII lower-cased; ſ (U+017F) as s; ı (U+0131) and İ (U+0130) as
+// i; ß (U+00DF) and ẞ (U+1E9E) as ss; the Kelvin sign (U+212A) as k; the ligatures U+FB00 to U+FB06 as the
+// letters they join. Returns the folded name's length, or *len* for a name too long to be read whole.
+// Branch-free (SG_OPAQUE), and writing *nm* at fixed places alone: each byte of a name is a value here,
+// never a branch or an address, so the verifier walks one path, once, for every name. Each character
+// writes its letters at *o*, where the folded name has got to: each place k of *nm* takes the letter, of
+// whichever character's, that lands at k.
+SG_NOINLINE int sg_fold(const struct sg_raw *raw SG_ARG_NONNULL, int len, struct sg_name *nm SG_ARG_NONNULL)
+{
+	unsigned o = 0, skip = 0;
+	for (int k = 0; k < SG_NAMELEN; k++)
+		nm->b[k] = 0;
+	for (int j = 0; j < SG_RAWLEN; j++) {
+		unsigned b0 = raw->b[j], b1 = raw->b[j + 1], b2 = raw->b[j + 2];
+		unsigned two = b0 << 8 | b1, three = two << 8 | b2;
+		unsigned long_s = sg_zero(two ^ 0xc5bf);
+		unsigned dotless = sg_zero(two ^ 0xc4b1) | sg_zero(two ^ 0xc4b0);
+		unsigned sharp = sg_zero(two ^ 0xc39f);
+		unsigned kelvin = sg_zero(three ^ 0xe284aa);
+		unsigned capital_sharp = sg_zero(three ^ 0xe1ba9e);
+		// U+FB00 + l, for l from 0 to 6: ff, fi, fl, ffi, ffl, st, st.
+		unsigned l = (b2 - 0x80u) & 0xffu;
+		unsigned lig = sg_zero((three >> 8) ^ 0xefac) & sg_below(l, 7);
+		unsigned l3 = sg_zero(l ^ 3), l4 = sg_zero(l ^ 4), st = sg_zero(l ^ 5) | sg_zero(l ^ 6);
+		unsigned lig0 = 'f' + st * ('s' - 'f');
+		unsigned lig1 = (sg_zero(l) | l3 | l4) * 'f' + sg_zero(l ^ 1) * 'i' + sg_zero(l ^ 2) * 'l' + st * 't';
+		unsigned lig2 = l3 * 'i' + l4 * 'l';
+		unsigned paired = long_s | dotless | sharp, tripled = kelvin | capital_sharp | lig;
+		unsigned plain = 1 - paired - tripled;
+		unsigned upper = sg_below('A' - 1, b0) & sg_below(b0, 'Z' + 1);
+		unsigned at0 = plain * (b0 + (upper << 5)) + (long_s | sharp | capital_sharp) * 's' + dotless * 'i' + kelvin * 'k' + lig * lig0;
+		unsigned at1 = (sharp | capital_sharp) * 's' + lig * lig1;
+		unsigned at2 = lig * lig2;
+		unsigned count = plain + long_s + dotless + kelvin + 2 * (sharp | capital_sharp) + lig * (2 + l3 + l4);
+		// A byte of the name, and none of a character taken already.
+		unsigned active = sg_below(j, len) & sg_zero(skip);
+		for (int k = 0; k < SG_NAMELEN; k++)
+			nm->b[k] = (char)(nm->b[k] + active * (sg_zero(o ^ k) * at0 + sg_zero((o + 1) ^ k) * at1 + sg_zero((o + 2) ^ k) * at2));
+		o += active * count;
+		skip = active * (plain + 2 * paired + 3 * tripled - 1) + (1 - active) * (skip - 1 + sg_zero(skip));
+	}
+	unsigned whole = sg_below(len, SG_RAWLEN);
+	return (int)(whole * o + (1 - whole) * (unsigned)len);
+}
 
 #define SB_PROTECTED (1 << 0) // a shell's, editor's or agent's name: not below a dependency folder
 #define SB_DOTGIT    (1 << 1)

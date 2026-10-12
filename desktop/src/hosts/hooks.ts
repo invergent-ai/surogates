@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 
 import { fdPaths, type Where } from "../files/fd-paths.js";
 import { inside, realpath as followed } from "../files/paths.js";
-import { dependencyFolder, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
+import { dependencyFolder, folded, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
 const SCAN_TIMEOUT_MS = 30_000;
@@ -66,10 +66,10 @@ export interface GuardOptions {
   running?: () => boolean;
 }
 
-// A key under a hooks folder inside a .git folder, at any depth and in any case.
+// A key under a hooks folder inside a .git folder, at any depth, in any case, and as folded (protect.ts).
 export function isGitHook(folder: string, key: string): boolean {
   if (key === folder || !inside(key, folder)) return false;
-  const parts = key.slice(folder.length + 1).toLowerCase().split("/");
+  const parts = folded(key.slice(folder.length + 1)).split("/");
   const git = parts.indexOf(".git");
   const hooks = git < 0 ? -1 : parts.indexOf("hooks", git + 1);
   return hooks > git && hooks < parts.length - 1;
@@ -100,7 +100,7 @@ async function describe(path: string): Promise<string | null> {
 // Where the guest's rule refuses to move a folder to or from, since what it holds would arrive
 // unjudged: a KEY_FOLDERS leaf (.claude, .git), or a place at or under .git/modules or .git/worktrees.
 function keyPlace(folder: string, path: string): boolean {
-  const parts = path.slice(folder.length + 1).toLowerCase().split("/");
+  const parts = folded(path.slice(folder.length + 1)).split("/");
   return KEY_FOLDERS.has(parts.at(-1) ?? "") || parts.some((part, i) => part === ".git" && (parts[i + 1] === "modules" || parts[i + 1] === "worktrees"));
 }
 
@@ -150,7 +150,7 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
     // no HEAD of its own: else it may be the git folder of a submodule named objects.
     const gitFolder = inGit && entries.some((entry) => entry.name === "HEAD");
     // A .git folder, or a git folder in one: a submodule's, a linked worktree's.
-    if (gitFolder || basename(dir).toLowerCase() === ".git") scan.todos.push(join(dir, "rebase-merge", "git-rebase-todo"), join(dir, "sequencer", "todo"));
+    if (gitFolder || folded(basename(dir)) === ".git") scan.todos.push(join(dir, "rebase-merge", "git-rebase-todo"), join(dir, "sequencer", "todo"));
     await Promise.all(entries.map(async (entry) => {
       const path = join(dir, entry.name);
       // A name that is not valid UTF-8 reads back with U+FFFD, and no path reaches it.

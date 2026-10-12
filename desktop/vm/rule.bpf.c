@@ -27,26 +27,21 @@ char LICENSE[] SEC("license") = "GPL";
 #define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component (dir: as a directory being moved). One bounded pass, no array:
-// sg_classify is out-of-line and sg_step branch-free, so the walk stays within the
-// verifier's budget at SG_WALK=12.
+// judging each component (dir: as a directory being moved) as folded (sg_fold). One bounded
+// pass: sg_fold and sg_classify are out-of-line, each verified once, and sg_fold and sg_step
+// branch-free, so the walk stays within the verifier's budget at SG_WALK=12.
 static __noinline int judge(struct dentry *dentry, int dir)
 {
+	struct sg_raw raw = {};
 	struct sg_name nm;
 	struct sg_state st;
 	sg_init(&st, dir);
 	for (int i = 0; i < SG_WALK; i++) {
 		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
 		int len = BPF_CORE_READ(dentry, d_name.len);
-		long got = bpf_core_read_str(nm.b, SG_NAMELEN, name);
-		// Branch-free ASCII lower-case: unknown name bytes must not fork the verifier.
-		for (int j = 0; j < SG_NAMELEN; j++) {
-			unsigned char uc = nm.b[j];
-			unsigned char ge = (unsigned char)('A' - 1 - uc) >> 7; // 1 iff uc >= 'A'
-			unsigned char le = (unsigned char)(uc - ('Z' + 1)) >> 7; // 1 iff uc <= 'Z'
-			nm.b[j] = uc + ((ge & le) << 5);
-		}
-		if (sg_step(&st, sg_classify(&nm, got < 0 ? 0 : len)))
+		// NUL-terminated: what a longer name before it left past the NUL completes no character.
+		long got = bpf_core_read_str(raw.b, SG_RAWLEN, name);
+		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, got < 0 ? 0 : len, &nm))))
 			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
 		if (parent == dentry)
