@@ -13,7 +13,7 @@ import { gzipSync } from "node:zlib";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { type Applied, AS_ROOT, helperRun, installedUpdates, newer, releaseKeys, updateLine, Updates, type UpdatesOptions } from "../src/shell/updates.js";
+import { type Applied, AS_ROOT, helperRun, installedUpdates, newer, releaseKeys, signedRelease, updateLine, Updates, type UpdatesOptions } from "../src/shell/updates.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const keys = generateKeyPairSync("ed25519");
@@ -162,6 +162,46 @@ describe("an update", () => {
     served.delete("/desktop/latest.json");
     await expect(refused.check()).rejects.toThrow(`${new URL(base).host} answered 404 for ${base}/desktop/latest.json`);
     expect(refused.state).toEqual({ state: "none" });
+  });
+
+  it("takes a release of its own target alone: Linux's app refuses macOS's in the words for another platform's, and macOS's looks for its own in its own folders", async () => {
+    // macOS's release, signed by a listed key, where Linux's app looks for its own.
+    const darwin = (version: string) => ({
+      version, channel: "stable", platform: "darwin", arch: "arm64", url: `releases/${version}/darwin-arm64/surogate-desktop-${version}-darwin-arm64.tar.gz`,
+    });
+    publish("1.2.4", darwin("1.2.4"));
+    await expect(updates().check()).rejects.toThrow(`${base}/desktop/latest.json is not a release of Surogate Desktop for this computer`);
+    // macOS's app, at its own latest.json and its release's own folder: it takes its own, and downloads it.
+    const tarball = gzipSync(randomBytes(300_000));
+    const manifest = Buffer.from(`${JSON.stringify({ ...darwin("1.2.4"), sha256: sha256(tarball), size: tarball.length, stateSchema: 1 })}\n`);
+    served.set("/desktop/darwin-arm64/latest.json", manifest);
+    served.set("/desktop/releases/1.2.4/darwin-arm64/manifest.json.sig", sign(null, manifest, keys.privateKey));
+    served.set("/desktop/releases/1.2.4/darwin-arm64/surogate-desktop-1.2.4-darwin-arm64.tar.gz", tarball);
+    heard = [];
+    const mac = updates({ target: "darwin-arm64" });
+    await mac.check();
+    expect(mac.state).toMatchObject({ state: "available", version: "1.2.4" });
+    expect(readFileSync(join(cache(), "1.2.4", "release.tar.gz")).equals(tarball)).toBe(true);
+    expect(heard.map(({ url }) => url)).toEqual([
+      "/desktop/darwin-arm64/latest.json", "/desktop/releases/1.2.4/darwin-arm64/manifest.json.sig", "/desktop/releases/1.2.4/darwin-arm64/surogate-desktop-1.2.4-darwin-arm64.tar.gz",
+    ]);
+    // And Linux's release, where macOS's app looks, is not one for it.
+    publish("1.2.5");
+    served.set("/desktop/darwin-arm64/latest.json", served.get("/desktop/latest.json")!);
+    served.set("/desktop/releases/1.2.5/darwin-arm64/manifest.json.sig", served.get("/desktop/releases/1.2.5/manifest.json.sig")!);
+    await expect(updates({ target: "darwin-arm64" }).check()).rejects.toThrow(`${base}/desktop/darwin-arm64/latest.json is not a release of Surogate Desktop for this computer`);
+    // The manifest's check alone, by the target asked: each refuses the other's.
+    const linux = served.get("/desktop/latest.json")!;
+    const signedBy = (bytes: Buffer) => sign(null, bytes, keys.privateKey);
+    expect(() => signedRelease("URL", linux, signedBy(linux), [keys.publicKey], "stable", "darwin-arm64")).toThrow("URL is not a release of Surogate Desktop for this computer");
+    expect(signedRelease("URL", linux, signedBy(linux), [keys.publicKey], "stable", "linux-x64").version).toBe("1.2.5");
+    expect(() => signedRelease("URL", manifest, signedBy(manifest), [keys.publicKey], "stable", "linux-x64")).toThrow("URL is not a release of Surogate Desktop for this computer");
+    expect(signedRelease("URL", manifest, signedBy(manifest), [keys.publicKey], "stable", "darwin-arm64").version).toBe("1.2.4");
+    // A computer the app is built for none of takes none, and asks its base for none.
+    expect(() => signedRelease("URL", linux, signedBy(linux), [keys.publicKey], "stable", null)).toThrow("URL is not a release of Surogate Desktop for this computer");
+    heard = [];
+    await expect(updates({ target: null }).check()).rejects.toThrow("Surogate Desktop has no releases for this computer");
+    expect(heard).toEqual([]);
   });
 
   it("stops asking its base when the app quits", async () => {

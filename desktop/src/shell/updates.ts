@@ -16,6 +16,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { spawnClean } from "../clean-child.js";
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
+import { type Target, type TargetFiles, TARGETS, targetOf } from "../platform.js";
 import { installBase, rootsOwn } from "../vm/image.js";
 
 export const CHECK_MS = 6 * 60 * 60 * 1000;
@@ -88,8 +89,8 @@ const INSTALLED = "/opt/surogate/current/release.json";
 export interface Release {
   version: string;
   channel: string;
-  platform: "linux";
-  arch: "x64";
+  platform: TargetFiles["platform"];
+  arch: TargetFiles["arch"];
   url: string; // relative to <base>/desktop/
   sha256: string;
   size: number;
@@ -407,18 +408,20 @@ function oneObject(bytes: Buffer): Record<string, unknown> | null {
 
 /**
  * The release *manifest*, from *url*, names: once one of *keys* signed its exact bytes, in
- * *signature*, and it is a release of *channel* for this computer, as the root helper's own check
- * has one (release_of in release/install.sh). The app takes only what the helper will take: what
- * it took and the helper refused would be offered as an update, and then refused. Throws why not.
+ * *signature*, and it is a release of *channel* for *target*, this computer's, as the root helper's
+ * own check has one (release_of in release/install.sh). The app takes only what the helper will
+ * take: what it took and the helper refused would be offered as an update, and then refused. A
+ * computer the app is built for none of takes none. Throws why not.
  */
-export function signedRelease(url: string, manifest: Buffer, signature: Buffer, keys: KeyObject[], channel: string): Release {
+export function signedRelease(url: string, manifest: Buffer, signature: Buffer, keys: KeyObject[], channel: string, target: Target | null = targetOf()): Release {
   if (!keys.some((key) => verify(null, manifest, key, signature))) throw new Unsigned(`${url} is not signed by Surogate's release key`);
   const release: Partial<Release> = oneObject(manifest) ?? {};
   // Whole numbers below 10^15, as the helper's own check has them.
   const counted = (value: unknown, least: number) => Number.isSafeInteger(value) && (value as number) >= least && (value as number) < 1e15;
   const { version } = release;
-  if (!(typeof version === "string" && VERSION.test(version) && release.channel === channel && release.platform === "linux" && release.arch === "x64"
-    && release.url === `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`
+  const files = target === null ? null : TARGETS[target];
+  if (!(files !== null && typeof version === "string" && VERSION.test(version) && release.channel === channel && release.platform === files.platform && release.arch === files.arch
+    && release.url === `${files.releaseDir(version)}/${files.tarball(version)}`
     && typeof release.sha256 === "string" && /^[0-9a-f]{64}$/.test(release.sha256) && counted(release.size, 1) && counted(release.stateSchema, 1))) {
     throw new Error(`${url} is not a release of Surogate Desktop for this computer`);
   }
@@ -531,6 +534,7 @@ export interface UpdatesOptions {
   log?: (words: string) => void; // told, whole, what pkexec and the helper said of an install that did not end well
   standing?: string; // a file of the app's own, where it keeps how long the newest release has been unsigned; in memory without
   now?: () => number; // the clock: Date.now
+  target?: Target | null; // the releases taken, and where on the base they are: this computer's (targetOf)
 }
 
 /**
@@ -626,7 +630,10 @@ export class Updates {
     }
     // Put right since, as the install script leaves them: the line goes.
     if (this.state.state === "broken") this.set({ state: "none" });
-    const latest = `${base}/desktop/latest.json`;
+    const target = this.options.target === undefined ? targetOf() : this.options.target;
+    if (target === null) throw new Error("Surogate Desktop has no releases for this computer");
+    const at = TARGETS[target];
+    const latest = `${base}/desktop/${at.latest}`;
     const manifest = await this.small(latest, MANIFEST_MAX);
     // Its signature is its release's own, at the release's place, which is sent before latest.json
     // names the release and never again: no moment has a manifest beside another's signature. The
@@ -634,10 +641,10 @@ export class Updates {
     // it, and a version is all it may be.
     const named = oneObject(manifest)?.version;
     if (typeof named !== "string" || !VERSION.test(named)) throw new Error(`${latest} is not a release of Surogate Desktop for this computer`);
-    const signature = await this.small(`${base}/desktop/releases/${named}/manifest.json.sig`, SIGNATURE_MAX);
+    const signature = await this.small(`${base}/desktop/${at.releaseDir(named)}/manifest.json.sig`, SIGNATURE_MAX);
     let release: Release;
     try {
-      release = signedRelease(latest, manifest, signature, keys, channel);
+      release = signedRelease(latest, manifest, signature, keys, channel, target);
     } catch (error) {
       // Signed by no key the helper lists: forged, or signed by a key that a release this computer
       // never took brought. The helper would refuse it too. The app keeps its version and checks
