@@ -1,0 +1,13 @@
+// Streamdown's own rehype plugins, its link hardening included, with one change: a link it refuses
+// (a relative address such as thread/<id>, which the model can write and no chat opens) shows its
+// words alone, not its words and a " [blocked]" marker.
+
+import { defaultRehypePlugins, type StreamdownProps } from "streamdown";
+
+type Plugins = NonNullable<StreamdownProps["rehypePlugins"]>;
+
+export const streamdownRehypePlugins: Plugins = Object.entries(defaultRehypePlugins).map(([name, plugin]) => {
+  if (name !== "harden" || !Array.isArray(plugin)) return plugin;
+  const [harden, options] = plugin;
+  return [harden, { ...(options as object), linkBlockPolicy: "text-only" }] as Plugins[number];
+});

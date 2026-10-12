@@ -24,6 +24,8 @@ import {
 } from "react";
 import { Streamdown } from "streamdown";
 
+import { streamdownRehypePlugins } from "../../lib/streamdown-rehype";
+
 import { OrbShimmerLabel } from "./orb-label";
 
 interface ReasoningContextValue {
@@ -200,6 +202,7 @@ export const ReasoningContent = memo(
         // container edge.
         className="[&_ol]:list-outside [&_ol]:pl-5 [&_ul]:list-outside [&_ul]:pl-5"
         plugins={streamdownPlugins}
+        rehypePlugins={streamdownRehypePlugins}
       >
         {children}
       </Streamdown>
