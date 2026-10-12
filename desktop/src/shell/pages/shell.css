@@ -1133,8 +1133,24 @@ body.settings-page {
   gap: 16px;
 }
 
-.project-dialog .settings-only[hidden] {
+.project-dialog .settings-only[hidden],
+.project-dialog .new-only[hidden] {
   display: none;
+}
+
+/* A new project's folder: its path, as the sheet confirmed it, and Choose… beside it. */
+.project-dialog .folder-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-dialog .folder-choice code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+  font-size: 13px;
 }
 
 .project-dialog .actions {

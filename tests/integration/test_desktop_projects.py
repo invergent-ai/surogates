@@ -64,6 +64,8 @@ async def test_the_desktop_takes_every_answer_of_a_real_project(built_client, ap
     computer = {"kind": "device", "deviceId": local.config["execution"]["device_id"], "deviceName": "Flavius's ThinkPad", "online": False}
     assert [row["place"] for row in seen["threads"] if row["id"] == str(local.id)] == [computer]
     assert (seen["opened"]["masterSessionId"], seen["opened"]["goal"]) == (project["master_session_id"], "The board's Q3 report")
+    # Made in the web app, it works in the cloud: it has no folder.
+    assert (seen["opened"]["place"], seen["opened"]["folder"]) == ({"kind": "cloud"}, None)
     assert {row["title"]: (row["id"], row["group"], row["reason"]) for row in seen["threads"]} == {
         title: (str(made[title].id), *state) for title, state in {
             "Check the revenue figures": ("waiting", "question"),

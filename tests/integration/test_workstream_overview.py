@@ -503,7 +503,7 @@ async def test_a_question_the_master_gives_up_on_is_heard_once_it_no_longer_coun
     publish = project_stream.publish
 
     async def recorded(redis, workstream_id, session_id, kind):
-        [(_, waits)] = (await WorkstreamStore(api.app.state.session_factory).masters([master.id])).values()
+        [(_, waits, _)] = (await WorkstreamStore(api.app.state.session_factory).masters([master.id])).values()
         asking.append((str(session_id), kind, waits))
         await publish(redis, workstream_id, session_id, kind)
 

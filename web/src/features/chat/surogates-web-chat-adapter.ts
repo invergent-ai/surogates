@@ -13,7 +13,7 @@ import * as workspaceApi from "@/api/workspace";
 import { workstreams } from "@/api/workstreams";
 import { getAuthToken } from "@/features/auth";
 import { getDesktop } from "@/lib/desktop-bridge";
-import { localThreads } from "@/lib/local-thread";
+import { localThreads, projectFolderLost } from "@/lib/local-thread";
 import { INBOX_REOPENING, reopeningStream } from "@/lib/reopening-stream";
 import { useAppStore } from "@/stores/app-store";
 import type { ScheduledWorkItem, Session } from "@/types/session";
@@ -211,6 +211,11 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
 
   async undoProjectChanges(input) {
     return workstreams.undo(input.projectId, input.target);
+  },
+
+  // A computer project's card says to use another computer for it once its own can no longer reach its folder.
+  async isProjectFolderLost(input) {
+    return projectFolderLost(workstreams, input.projectId);
   },
 
   // Only Surogate Desktop has folders of this computer for a thread to work in.

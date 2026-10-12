@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.config import enqueue_session
+from surogates.devices.binding import device_of
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.workstreams import is_project_master
@@ -243,6 +244,12 @@ async def _start_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     master = await session_store.get_session(UUID(str(kwargs["session_id"])))
     if not is_project_master(master.config):
         return _error("Only a project's coordinator starts threads.")
+    # Not offered in a project on a computer: refused all the same, should its model name it.
+    if device_of(master.config) is not None:
+        return _error(
+            "This project works in a folder on the user's computer, so its threads start there: propose this one "
+            'with propose_threads and where: "device", and the user starts it from its card.'
+        )
     thread = await start_thread(
         session_store=session_store,
         session_factory=kwargs["session_factory"],
@@ -393,6 +400,8 @@ async def _propose_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> 
     proposed = arguments.get("threads")
     if not isinstance(proposed, list) or not proposed:
         return _error("threads is required")
+    # A project made on a computer has every thread on its folder there.
+    on_computer = device_of(kwargs.get("session_config")) is not None
     threads = []
     for key, thread in enumerate(proposed, 1):
         thread = thread if isinstance(thread, dict) else {}
@@ -401,6 +410,11 @@ async def _propose_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> 
             return _error(f"threads[{key}]: {malformed}")
         if thread.get("where") not in ("cloud", "device"):
             return _error(f"threads[{key}]: where must be cloud or device")
+        if on_computer and thread["where"] != "device":
+            return _error(
+                f"threads[{key}]: this project works in a folder on the user's computer, "
+                "and every thread works there: where must be device"
+            )
         threads.append({"key": str(key), **texts, "where": thread["where"]})
     if not is_project_master(kwargs.get("session_config")):
         return _error("Only a project's coordinator proposes threads.")

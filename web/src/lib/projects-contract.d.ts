@@ -17,6 +17,9 @@ export interface ProjectSummary {
   updatedAt: string;
   waiting: number; // threads in Waiting on you, plus one for a question or approval open in the master
   working: number;
+  // Where the project works: the cloud, or the computer it was made on in Surogate Desktop, whose folder its
+  // coordinator works in and its threads copy. null: a place this client does not know, or none.
+  place: ThreadPlace | null;
 }
 
 export interface Project extends ProjectSummary {
@@ -26,11 +29,24 @@ export interface Project extends ProjectSummary {
   // "unknown": a tier this client does not know, as a later server may send. Shown as unknown, and never sent back.
   coordinatorTier: Tier | "unknown";
   threadTier: Tier | "unknown";
+  folder: string | null; // that folder, as its user chose it on that computer; null in the cloud
 }
 
+// What a project made in Surogate Desktop is made with: a folder of this computer its user confirmed there,
+// as the route takes it, and as a new chat's local folder is sent.
+export interface ProjectFolder {
+  kind: "device";
+  device_id: string;
+  folder: string;
+  nonce: string; // names the confirmation: the token that goes with it never leaves the desktop
+}
+
+// A project's place says whether its folder can no longer be reached on that computer (lost): the computer was
+// removed or its access revoked, or it could not set the folder up. Its user then uses another computer for it.
+// A thread's place says nothing of it.
 export type ThreadPlace =
   | { kind: "cloud" }
-  | { kind: "device"; deviceId: string; deviceName: string; online: boolean };
+  | { kind: "device"; deviceId: string; deviceName: string; online: boolean; lost?: boolean };
 
 // A row lists only its files of a kind its client knows.
 export interface ProducedFile {
@@ -139,13 +155,16 @@ export interface Routine {
 export interface ProjectsSource {
   list(): Promise<ProjectSummary[]>;
   get(projectId: string): Promise<Project>;
-  create(input: { name: string; goal?: string; instructions?: string }): Promise<Project>;
+  create(input: { name: string; goal?: string; instructions?: string; execution?: ProjectFolder }): Promise<Project>;
   // A tier is sent only as one the client knows: one it shows as unknown is left as it is.
   update(
     projectId: string,
     patch: Partial<Pick<Project, "name" | "icon" | "goal" | "instructions"> & { coordinatorTier: Tier; threadTier: Tier }>,
   ): Promise<Project>;
   archive(projectId: string): Promise<void>;
+  // A project whose computer can no longer reach its folder, moved to this computer, in a folder its user
+  // confirmed here: its coordinator is bound there afresh, and its threads from now on start there.
+  useComputer(projectId: string, execution: ProjectFolder): Promise<Project>;
   // With threadId, that thread's row alone: none once it is no longer one of the project's threads.
   threads(projectId: string, threadId?: string): Promise<ThreadRow[]>;
   resolve(projectId: string, threadId: string): Promise<ThreadRow>;

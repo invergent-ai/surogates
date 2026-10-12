@@ -76,13 +76,15 @@ class Client:
 async def client(
     built_client: Path, url: str, token: str, journal: Path, *,
     hold: bool = False, folder: Path | None = None, confirm: Path | None = None, ask: str | None = None, times: int | None = None,
+    project: int | None = None,
 ) -> Client:
-    """The echo client; with *confirm*, a folder its user confirmed, *times* times where more than one chat is to bind there."""
+    """The echo client; with *confirm*, a folder its user confirmed, *times* times where more than one chat is to bind there;
+    or once, for a new project, and a copy of it for each of *project* threads once the project's coordinator is bound there."""
     args = ["node", str(built_client), "--url", url, "--token", token, "--journal", str(journal)]
     process = await asyncio.create_subprocess_exec(
         *args, *(["--hold"] if hold else []), *(["--folder", str(folder)] if folder else []),
         *(["--confirm", str(confirm)] if confirm else []), *(["--times", str(times)] if times is not None else []),
-        *(["--ask", ask] if ask is not None else []),
+        *(["--project", str(project)] if project is not None else []), *(["--ask", ask] if ask is not None else []),
         stdout=asyncio.subprocess.PIPE,
     )
     return Client(process)

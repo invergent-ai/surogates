@@ -5285,12 +5285,16 @@ class AgentHarness(
                 if is_project_master(config):
                     from surogates.tools.builtin.coordinator import (
                         PROJECT_MASTER_EXCLUDED_TOOLS,
-                        PROJECT_MASTER_READ_TOOLS,
+                        PROJECT_MASTER_OWN_TOOLS,
+                        PROJECT_ON_COMPUTER_EXCLUDED_TOOLS,
                     )
 
                     user_excluded = set(config.get("excluded_tools") or [])
-                    excluded -= PROJECT_MASTER_READ_TOOLS - user_excluded
+                    excluded -= PROJECT_MASTER_OWN_TOOLS - user_excluded
                     excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
+                    # Where the project works is the server's stamp, never the caller's.
+                    if device_of(config) is not None:
+                        excluded |= PROJECT_ON_COMPUTER_EXCLUDED_TOOLS
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])

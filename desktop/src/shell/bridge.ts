@@ -21,6 +21,8 @@ export interface BridgeCalls {
   signOut(): Promise<void>;
   prepareFolder(choice: "last" | "pick", window: string, thread: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string, window: string): Promise<void>;
+  // A copy of the folder its user chose for a project made here, for a thread of it: no sheet asks again.
+  prepareThreadFolder(masterSessionId: string, window: string): Promise<DesktopPreparedFolder>;
   // The chat asks every time from now on: the page can make a chat only safer.
   setMode(sessionId: string, mode: "ask"): Promise<void>;
   // The desktop's own confirmation: true once the chat works freely.
@@ -106,6 +108,7 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
       if (typeof token !== "string" || !PREPARED.test(token)) throw new Error("Not a folder confirmation");
       return calls.bindSession(sessionId, token, window);
     }),
+    prepareThreadFolder: checked((window, masterSessionId) => calls.prepareThreadFolder(chat(masterSessionId), window)),
     setMode: checked((_window, sessionId, mode) => {
       if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
       if (mode !== "ask") throw new Error("Only the desktop can let a chat work freely");

@@ -1,19 +1,23 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { FIXTURE_IDS, type Project, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
-import { connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { FIXTURE_IDS, type Project, type ProjectFixtures, projectFixtures, type ThreadPlace } from "../../../web/src/lib/projects.js";
+import { connect, FakeAgent, signedInAndAdded, signIn, webClient } from "./fake-agent.js";
+import { dataHome, launch, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
 const { report: REPORT, budget: BUDGET } = FIXTURE_IDS;
 const HIRING = "9f0a1b2c-3d4e-4f50-8a61-7b8c9d0e1f20";
+// A project made in Surogate Desktop, which a test adds where it wants one (onComputer).
+const NOTES = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
 // Each project's conversation: a master session of its own, never the project's id.
 const MASTERS: Record<string, string> = {
   [REPORT]: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
   [BUDGET]: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
   [HIRING]: "c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e7f",
+  [NOTES]: "d4e5f6a7-b8c9-4d0e-8f1a-3b4c5d6e7f80",
 };
 
 // The fixtures' two projects and a third, listed neither last active first nor newest first, so
@@ -29,12 +33,15 @@ function fixtures(): ProjectFixtures {
 }
 
 let home: string;
+// A folder of this computer a new project works in.
+let folder: string;
 let agent: FakeAgent;
 let origin: string;
 let app: ElectronApplication | undefined;
 
 beforeEach(async () => {
   home = dataHome();
+  folder = realpathSync(mkdtempSync("/tmp/sp-"));
   agent = new FakeAgent();
   agent.projects = fixtures();
   origin = await agent.start();
@@ -46,16 +53,26 @@ afterEach(async () => {
   await agent.stop();
   await agent.link.stop();
   rmSync(home, { recursive: true, force: true });
+  rmSync(folder, { recursive: true, force: true });
 });
 
-// The app connected to the fake agent, whose page serves the fixtures' projects.
-async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
+// A project made in Surogate Desktop that works on *place*'s computer, in *at*, among the fixtures: "Field notes".
+function onComputer(place: ThreadPlace, at: string, id = NOTES, name = "Field notes"): Project {
+  const budget = agent.projects!.projects.find((project) => project.id === BUDGET)!;
+  const made: Project = { ...budget, id, name, masterSessionId: MASTERS[id] ?? crypto.randomUUID(), place, folder: at };
+  agent.projects!.projects.push(made);
+  return made;
+}
+
+// The app connected to the fake agent, this computer added unless the agent takes no folders of it, and the agent's
+// page serving the fixtures' projects.
+async function signedIn(added = true): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
   const shell = await launch(home);
   app = shell;
   await stubNative(shell);
   const page = await shellPage(shell);
   await connect(page, origin);
-  await signIn(shell, page, agent);
+  await (added ? signedInAndAdded(shell, page, agent) : signIn(shell, page, agent));
   const client = await webClient(shell, origin);
   await page.waitForSelector("#projects .project");
   return { shell, page, client };
@@ -245,7 +262,7 @@ describe("the sidebar's pages", () => {
 
   it.each([["with", true], ["without", false]])("open the web client's own Settings from the user menu, for an agent %s local folders, and Devices only with them", async (_, localFolders) => {
     agent.config = { ...agent.config, desktop_sessions: localFolders };
-    const { page, client } = await signedIn();
+    const { page, client } = await signedIn(localFolders);
     await page.click("#user");
     expect(await page.isVisible('#user-menu [data-action="devices"]')).toBe(localFolders);
     await page.click('#user-menu [data-action="account"]');
@@ -620,8 +637,20 @@ const dialogOpen = (shell: ElectronApplication) => overlayOpen(shell, "/project.
 // and that it went is what tells the click landed.
 const clickClosing = (dialog: Page, selector: string) => dialog.click(selector, { noWaitAfter: true }).catch(() => {});
 
+// A new project's folder, chosen with Choose…: the system's dialog picks the test's folder, and the user accepts it in
+// the desktop's sheet, working freely or asking. The dialog then shows it.
+async function choose(shell: ElectronApplication, dialog: Page, mode: "free" | "ask" = "free"): Promise<Page> {
+  await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+  await dialog.click("#choose");
+  const sheet = await prompt(shell);
+  await sheet.check(`input[value="${mode}"]`);
+  await press(sheet, "accept");
+  await expect.poll(() => dialog.textContent("#folder")).toBe(folder);
+  return sheet;
+}
+
 describe("the project dialog", () => {
-  it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
+  it("makes a new project in the folder its user chose on this computer, binds its conversation there, lists it, and opens it", async () => {
     const { shell, page, client } = await signedIn();
     await page.click("#open-projects");
     await page.click("#new-project");
@@ -629,15 +658,48 @@ describe("the project dialog", () => {
     expect(await dialog.textContent("#heading")).toBe("New project");
     expect(await dialog.isVisible("#instructions")).toBe(false);
     expect(await dialog.isVisible("#archive")).toBe(false);
+    // The folder is asked for: none is chosen yet, and none makes no project.
+    expect(await dialog.textContent("#folder")).toBe("No folder chosen");
     await dialog.fill("#name", "  Hiring brief ");
     await dialog.fill("#goal", "Hire two analysts by December.");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Choose the folder on this computer the project works in.");
+    expect(agent.projects!.projects.some((project) => project.name === "Hiring brief")).toBe(false);
+    // The desktop's own sheet confirms it, naming the project as typed so far, and says what its threads do there.
+    const sheet = await choose(shell, dialog, "ask");
+    expect(sheet.isClosed()).toBe(true);
     await clickClosing(dialog, "#save");
-    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await expect.poll(() => dialogOpen(shell), { timeout: 10_000 }).toBe(false);
     const made = agent.projects!.projects.find((project) => project.name === "Hiring brief")!;
-    expect(made.goal).toBe("Hire two analysts by December.");
+    expect([made.goal, made.folder, made.place]).toEqual([
+      "Hire two analysts by December.", folder, { kind: "device", deviceId: "d", deviceName: "Laptop", online: true },
+    ]);
+    // Its conversation is bound to the folder itself, as its user confirmed it, and asks as they chose.
+    expect(agent.bound).toEqual([{ session: made.masterSessionId, folder, outcome: { ok: null } }]);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${made.masterSessionId}`);
+    expect(await client.evaluate((master) => window.surogateDesktop!.getBinding!(master), made.masterSessionId))
+      .toEqual({ folder, mode: "ask", takenOver: false });
     await expect.poll(() => page.textContent("#title")).toBe("Hiring brief");
     expect(await page.getAttribute(row(made.id), "aria-current")).toBe("page");
+  });
+
+  it("asks no folder of an open project's settings, and says why one cannot be chosen", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    expect(await (await projectDialog(shell)).isVisible("#choose")).toBe(false);
+    await clickClosing(await projectDialog(shell), "#cancel");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    // Its access revoked here, this computer works on no folder: Choose… says so, and opens nothing.
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-text")).toBe("Local access revoked.");
+    await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.click("#choose");
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 10_000 }).toContain("revoked");
+    expect(shell.windows().some((window) => window.url().endsWith("/prompt.html"))).toBe(false);
   });
 
   it("changes the open project's name, instructions and tiers, then archives it", async () => {
@@ -705,7 +767,7 @@ describe("the project dialog", () => {
     });
   }
 
-  it("says a create that did not answer in time may have made the project, and lists it once made", async () => {
+  it("says a create that did not answer in time may have made the project, lists it once made, and never makes it again", async () => {
     const { shell, page, client } = await signedIn();
     await client.evaluate(() => {
       (window as unknown as { fakeProjects: { lag: number } }).fakeProjects.lag = 11_000;
@@ -714,11 +776,114 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     const dialog = await projectDialog(shell);
     await dialog.fill("#name", "Late");
+    await choose(shell, dialog);
     await dialog.click("#save");
-    await expect.poll(() => dialog.textContent("#error"), { timeout: 15_000 })
-      .toBe("The agent's page did not answer create in time: the project may have been made");
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 15_000 }).toBe(
+      "The agent's page did not answer create in time: the project may have been made. Look for it in your projects before you create it again.",
+    );
     expect(await dialog.inputValue("#name")).toBe("Late");
     await expect.poll(() => texts(page, "#projects .project .name")).toContain("Late");
+    // Its folder's confirmation went with that Create: another asks for a folder again, and makes nothing.
+    expect(await dialog.textContent("#folder")).toBe("No folder chosen");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error"))
+      .toBe("The last Create may have made the project: look for it in your projects, or choose the folder again to make another.");
+    expect(agent.projects!.projects.filter((project) => project.name === "Late")).toHaveLength(1);
+    expect(agent.bound).toHaveLength(1);
+  });
+
+  it("asks for the folder again once its confirmation lapsed, showing none chosen, and makes nothing", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Lapsed");
+    await choose(shell, dialog);
+    // The computer's access ends and is restored: what it confirmed before binds nothing now.
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-button")).toBe("Restore…");
+    await page.evaluate(() => (window as unknown as { surogateShell: { restore(): Promise<void> } }).surogateShell.restore());
+    await expect.poll(() => page.getAttribute("#device", "title"), { timeout: 10_000 }).toBe("Connected as Laptop");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Choose the folder again: its confirmation lapsed, or a project was made with it.");
+    expect(await dialog.textContent("#folder")).toBe("No folder chosen");
+    expect(agent.projects!.projects.some((project) => project.name === "Lapsed")).toBe(false);
+    // Chosen again, it makes the project.
+    await choose(shell, dialog);
+    await clickClosing(dialog, "#save");
+    await expect.poll(() => dialogOpen(shell), { timeout: 10_000 }).toBe(false);
+    expect(agent.projects!.projects.filter((project) => project.name === "Lapsed")).toHaveLength(1);
+  });
+
+  it("makes no project while this computer is not connected to the agent, and says so", async () => {
+    const { shell, page } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Offline");
+    await choose(shell, dialog);
+    agent.link.refusing = true;
+    agent.link.drop();
+    await expect.poll(() => page.getAttribute("#device", "title")).not.toBe("Connected as Laptop");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("This computer is not connected to the agent right now: create the project once it is.");
+    expect(agent.projects!.projects.some((project) => project.name === "Offline")).toBe(false);
+    // The folder stays chosen for when it is.
+    expect(await dialog.textContent("#folder")).toBe(folder);
+  });
+
+  it("keeps a project whose folder this computer recorded before its access ended, and says the agent has not heard of it", async () => {
+    agent.acking = false;
+    const { shell, page } = await signedIn();
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Unheard");
+    await choose(shell, dialog);
+    await dialog.click("#save");
+    // Answered here, and the access ends before the agent says it recorded the answer.
+    await expect.poll(() => agent.bound[0]?.outcome, { timeout: 10_000 }).toEqual({ ok: null });
+    agent.link.close(4403);
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 10_000 }).toBe(
+      "Surogate made the project, but the agent has not heard that its folder is set up on this computer: This computer's access to the agent ended before its chat's folder was recorded",
+    );
+    expect(agent.projects!.projects.filter((project) => project.name === "Unheard")).toHaveLength(1);
+  });
+
+  it("keeps no project whose folder could not be set up on this computer, and says why", async () => {
+    const { shell, page, client } = await signedIn();
+    // The agent names another folder in the coordinator's bind than the one its user confirmed.
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { bindFolder: string | null } }).fakeProjects.bindFolder = "/elsewhere";
+    });
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.fill("#name", "Unbound");
+    await choose(shell, dialog);
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 10_000 }).toBe(
+      "Surogate could not set up the project's folder on this computer, so the project was not kept: The server named another folder for this chat. Choose the folder again.",
+    );
+    expect(agent.projects!.projects.some((project) => project.name === "Unbound")).toBe(false);
+    await expect.poll(() => texts(page, "#projects .project .name")).not.toContain("Unbound");
+    expect(await dialog.textContent("#folder")).toBe("No folder chosen");
+  });
+
+  it("asks no folder of a new project, and makes it in the cloud, for an agent that takes no folders of this computer", async () => {
+    agent.config = { ...agent.config, multi_session: false };
+    const { shell, page } = await signedIn(false);
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    expect(await dialog.isVisible("#choose")).toBe(false);
+    expect(await dialog.isVisible("#folder")).toBe(false);
+    await dialog.fill("#name", "In the cloud");
+    await clickClosing(dialog, "#save");
+    await expect.poll(() => dialogOpen(shell), { timeout: 10_000 }).toBe(false);
+    const made = agent.projects!.projects.find((project) => project.name === "In the cloud")!;
+    expect([made.place, made.folder]).toEqual([{ kind: "cloud" }, null]);
+    expect(agent.bound).toEqual([]);
   });
 
   it("names each field by its label alone, describes it by its help, and gives the name the focus back after a refusal", async () => {
@@ -755,6 +920,7 @@ describe("the project dialog", () => {
     await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
     expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Create project", null]);
     await dialog.fill("#name", "Busy");
+    await choose(shell, dialog);
     await dialog.click("#save");
     expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Creating…", "true"]);
     await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
@@ -783,6 +949,7 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     const dialog = await projectDialog(shell);
     await dialog.fill("#name", "Twice");
+    await choose(shell, dialog);
     await dialog.evaluate(() => {
       document.querySelector<HTMLButtonElement>("#save")!.click();
       document.querySelector<HTMLButtonElement>("#save")!.click();
@@ -801,6 +968,7 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     const dialog = await projectDialog(shell);
     await dialog.fill("#name", "Escaped");
+    await choose(shell, dialog);
     await dialog.click("#save");
     // Closed while the create is under way, and Settings opened in its place.
     await dialog.keyboard.press("Escape").catch(() => {});
@@ -881,6 +1049,7 @@ describe("the project dialog", () => {
       (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = "This agent keeps a single conversation, so it has no projects.";
     });
     await dialog.fill("#name", "Hiring brief");
+    await choose(shell, dialog);
     await dialog.click("#save");
     await expect.poll(() => dialog.textContent("#error")).toBe("This agent keeps a single conversation, so it has no projects.");
     expect([await dialog.inputValue("#name"), await dialog.inputValue("#goal")]).toEqual(["Hiring brief", "Hire two analysts by December."]);
@@ -899,5 +1068,113 @@ describe("the project dialog", () => {
       .toBe("Archive Quarterly report?");
     expect(await dialogOpen(shell)).toBe(true);
     expect(agent.projects!.projects.some((project) => project.id === REPORT)).toBe(true);
+  });
+});
+
+describe("a project made on a computer that can no longer work in its folder there", () => {
+  const lostElsewhere: ThreadPlace = { kind: "device", deviceId: "d-before", deviceName: "Laptop", online: false, lost: true };
+
+  it("offers to use this computer for it, its own folder first, and moves it here, its conversation bound there", async () => {
+    const made = onComputer(lostElsewhere, folder);
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, NOTES);
+    await expect.poll(() => page.textContent("#use-here-text")).toBe("This project's folder can no longer be reached on Laptop.");
+    expect(await page.textContent("#use-here-button")).toBe("Use this computer for this project");
+    await client.evaluate(() => Object.assign(window, { loadedBefore: true }));
+    // Clicked twice, it asks once.
+    await clickBoth(page, "#use-here-button", "#use-here-button");
+    // The sheet opens on the project's own folder, naming the project.
+    const sheet = await prompt(shell);
+    expect(await sheet.textContent("#prompt-details")).toContain(folder);
+    expect(await sheet.textContent("#prompt-details")).toContain("Field notes");
+    await sheet.check('input[value="ask"]');
+    await press(sheet, "accept");
+    await expect.poll(() => page.isVisible("#use-here"), { timeout: 10_000 }).toBe(false);
+    expect(agent.bound).toEqual([{ session: made.masterSessionId, folder, outcome: { ok: null } }]);
+    expect(agent.projects!.projects.find((project) => project.id === NOTES)).toMatchObject({
+      place: { kind: "device", deviceId: "d", lost: false }, folder,
+    });
+    // A second sheet, had the second click asked one, would be up by now: it opens once the first closes.
+    await pause(1_500);
+    expect(await promptsShown(shell)).toBe(0);
+    // Its conversation is loaded again, to read where it works now.
+    await expect.poll(() => client.evaluate(() => "loadedBefore" in window).catch(() => true)).toBe(false);
+    await client.waitForLoadState();
+    await expect.poll(() => client.evaluate((master) => window.surogateDesktop!.getBinding!(master).catch(() => null), made.masterSessionId))
+      .toEqual({ folder, mode: "ask", takenOver: false });
+    expect(await page.isVisible("#failure")).toBe(false);
+  });
+
+  it("offers it for a project of this computer whose folder is not set up here, where any folder may be chosen", async () => {
+    const gone = join(folder, "gone");
+    onComputer({ kind: "device", deviceId: "d", deviceName: "Laptop", online: true, lost: false }, gone);
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, NOTES);
+    await expect.poll(() => page.textContent("#use-here-text")).toBe("This project's folder is not set up on this computer.");
+    await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+    await page.click("#use-here-button");
+    // Its own path is offered first: it is not there, so another is chosen.
+    let sheet = await prompt(shell);
+    expect(await sheet.textContent("#prompt-details")).toContain(gone);
+    await press(sheet, "change");
+    sheet = await prompt(shell);
+    expect(await sheet.textContent("#prompt-details")).toContain(folder);
+    await press(sheet, "accept");
+    await expect.poll(() => page.isVisible("#use-here"), { timeout: 10_000 }).toBe(false);
+    expect(agent.bound).toEqual([{ session: MASTERS[NOTES], folder, outcome: { ok: null } }]);
+  });
+
+  it("asks for no folder while this computer is not connected to the agent, and says so", async () => {
+    onComputer(lostElsewhere, folder);
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, NOTES);
+    await expect.poll(() => page.isVisible("#use-here")).toBe(true);
+    agent.link.refusing = true;
+    agent.link.drop();
+    await expect.poll(() => page.getAttribute("#device", "title")).not.toBe("Connected as Laptop");
+    await page.click("#use-here-button");
+    await expect.poll(() => page.textContent("#failure")).toBe(
+      "Surogate could not use this computer for Field notes: This computer is not connected to the agent right now: use it for this project once it is",
+    );
+    expect(shell.windows().some((window) => window.url().endsWith("/prompt.html"))).toBe(false);
+    expect(agent.bound).toEqual([]);
+  });
+
+  it("says why this computer could not be used for it, and leaves it where it was", async () => {
+    onComputer(lostElsewhere, folder);
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, NOTES);
+    await expect.poll(() => page.isVisible("#use-here")).toBe(true);
+    await client.evaluate(() => {
+      (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = "This project was moved meanwhile: open it again.";
+    });
+    await page.click("#use-here-button");
+    await press(await prompt(shell), "accept");
+    await expect.poll(() => page.textContent("#failure"))
+      .toBe("Surogate could not use this computer for Field notes: This project was moved meanwhile: open it again.");
+    expect(agent.bound).toEqual([]);
+    expect(await page.isVisible("#use-here")).toBe(true);
+  });
+});
+
+describe("logging out, or removing the agent", () => {
+  it("names the projects of this computer that then need Use this computer for this project", async () => {
+    const here: ThreadPlace = { kind: "device", deviceId: "d", deviceName: "Laptop", online: true, lost: false };
+    onComputer(here, folder);
+    onComputer(here, folder, "8b9c0d1e-2f3a-4b4c-9d5e-6f7a8b9c0d1e", "Garden");
+    onComputer({ ...here, deviceId: "d-elsewhere" }, folder, "9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f", "Elsewhere");
+    const { shell, page } = await signedIn();
+    await shell.evaluate(() => Object.assign(globalThis, { answer: 1 }));
+    const asked = () => shell.evaluate(() => (globalThis as unknown as { asked: Array<{ message: string; detail: string }> }).asked.at(-1));
+    for (const action of ["logout", "remove"]) {
+      await page.click("#user");
+      await page.click(`[data-action="${action}"]`);
+      await expect.poll(async () => (await asked())?.detail ?? "").toContain(
+        "The projects Field notes and Garden work in folders on this computer: open each afterwards and choose Use this computer for this project.",
+      );
+      expect((await asked())!.detail).not.toContain("Elsewhere");
+    }
+    // Cancelled: nothing ended.
+    expect(await page.getAttribute("#device", "title")).toBe("Connected as Laptop");
   });
 });
