@@ -38,6 +38,7 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
+import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
 import { reauthorize, rebind, register } from "./computer.js";
@@ -2796,6 +2797,8 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
+    // The VM's disks, which the OS's backups leave out (backups.ts).
+    void keepOutOfBackups(join(root, "vm")).catch(report);
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();
