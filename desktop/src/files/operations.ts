@@ -24,6 +24,7 @@ import {
 } from "./answers.js";
 import { retold, saidInFailing, searched, spared } from "./edge.js";
 import { fdPaths, type Listing, type Where } from "./fd-paths.js";
+import { FLAGS } from "./flags.js";
 import { land } from "./land.js";
 import { type Edge, edgeOf, keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -186,7 +187,7 @@ function read(args: Record<string, unknown>, { folder, at }: Context): string {
   const key = keyInFolder(folder, text(args, "key"), at);
   const wanted = wholeOrNull(args, "max_bytes");
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
-  const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => openSync(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // Asked for whole, a file over the cap is refused from its size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
@@ -224,7 +225,7 @@ function readLines(args: Record<string, unknown>, { folder, at }: Context): { da
   ) {
     throw valueError(BAD_PAGE);
   }
-  const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => openSync(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // From the file's size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES) throw READ_EFBIG;
@@ -373,7 +374,7 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
   }
   const temporary = join(parent, ownFile());
   const fd = io(key, () =>
-    openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+    openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
   try {
     try {
       for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
@@ -406,7 +407,7 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
 // another writer made meanwhile. What it made goes when the data cannot be written whole.
 function create(key: string, data: Buffer): null {
   makeDirs(dirname(key));
-  const fd = io(key, () => openSync(key, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+  const fd = io(key, () => openSync(key, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
   try {
     try {
       for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
@@ -495,7 +496,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
   let looks = 0;
   let truncated = false;
   // The key's own failure is the answer.
-  const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
+  const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | FLAGS.NOFOLLOW));
   let keyDir: Listing;
   try {
     keyDir = io(key, () => fdPaths.listing(keyFd));
@@ -538,7 +539,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
         }
         let fd: number;
         try {
-          fd = fdPaths.open(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          fd = fdPaths.open(at, constants.O_RDONLY | constants.O_DIRECTORY | FLAGS.NOFOLLOW);
         } catch (error) {
           if (outOfHandles(error)) {
             truncated = true;

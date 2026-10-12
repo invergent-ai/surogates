@@ -137,14 +137,16 @@ describe("Linux's FdPaths", () => {
 });
 
 describe("the file host's FdPaths", () => {
-  it("are Linux's on Linux", async () => {
+  it("are Linux's on Linux, and macOS's on macOS", async () => {
     expect((await import("../src/files/fd-paths.js")).fdPaths).toBe(linuxFdPaths);
+    const [{ fdPaths }, { darwinFdPaths }] = await importedOn("darwin", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-darwin.js")]));
+    expect(fdPaths).toBe(darwinFdPaths);
   });
 
   it("refuse every call, in words, on a system the file host is not built for yet, and are shown there as any object is", async () => {
-    const { fdPaths } = await importedOn("darwin", () => import("../src/files/fd-paths.js"));
-    const { notBuiltWords } = await importedOn("darwin", () => import("../src/platform.js"));
-    const words = "The file host is not built for macOS yet";
+    const { fdPaths } = await importedOn("win32", () => import("../src/files/fd-paths.js"));
+    const { notBuiltWords } = await importedOn("win32", () => import("../src/platform.js"));
+    const words = "The file host is not built for win32 yet";
     expect(words).toBe(notBuiltWords("The file host"));
     expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
     expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));

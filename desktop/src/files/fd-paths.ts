@@ -1,10 +1,11 @@
 // What the file host does through a folder it holds open: a file in it is reached through the folder's descriptor,
 // never by the folder's path again, so nothing put on that path since is followed (operations.ts, walk; land.ts;
 // hosts/hooks.ts). Each OS names a file through a descriptor its own way: Linux by the descriptor's entry in
-// /proc/self/fd (fd-paths-linux.ts).
+// /proc/self/fd (fd-paths-linux.ts), macOS by Darwin's *at calls on the descriptor (fd-paths-darwin.ts).
 
 import type { BigIntStats, Dirent, Stats } from "node:fs";
 
+import { darwinFdPaths } from "./fd-paths-darwin.js";
 import { linuxFdPaths } from "./fd-paths-linux.js";
 
 /** A file by its path, or by its *name* in the folder held open as *dir*: with no name, that folder itself. */
@@ -52,4 +53,4 @@ const unbuilt: FdPaths = {
   link: refused, rename: refused, copy: refused, listing: refused, pathOf: refused, handed: refused, shown: refused,
 };
 
-export const fdPaths: FdPaths = process.platform === "linux" ? linuxFdPaths : unbuilt;
+export const fdPaths: FdPaths = ({ linux: linuxFdPaths, darwin: darwinFdPaths } as Partial<Record<NodeJS.Platform, FdPaths>>)[process.platform] ?? unbuilt;
