@@ -136,7 +136,11 @@ function adapterStub(overrides: Partial<AgentChatAdapter> = {}): AgentChatAdapte
   } as unknown as AgentChatAdapter;
 }
 
-type CardContext = { projectId?: string; onOpenSession?: (id: string) => void };
+type CardContext = {
+  projectId?: string;
+  projectComputer?: { deviceId: string; name: string } | null;
+  onOpenSession?: (id: string) => void;
+};
 
 function provided(node: ReactElement, adapter: AgentChatAdapter, context: CardContext) {
   return (
@@ -471,6 +475,71 @@ describe("the cards in the conversation", () => {
     expect(card.textContent).toContain("Started");
     expect(card.querySelector('[role="alert"]')).toBeNull();
   });
+
+  // A project made in Surogate Desktop on the user's ThinkPad: every thread works in a copy of its folder there.
+  const onTheThinkPad = { projectId: "project-1", projectComputer: { deviceId: "thinkpad", name: "ThinkPad" } };
+  const forTheFolder = { ...proposed, data: { ...proposed.data, threads: [
+    { key: "1", title: "Check the totals", goal: "Check the totals in Budget.xlsx.", where: "device" },
+    { key: "2", title: "Tidy the notes", goal: "Tidy notes.md.", where: "device" },
+  ] } };
+  const started = ({ key }: { key: string }) => Promise.resolve<AgentChatThreadRow>({
+    id: `thread-${key}`, title: "", group: "working", reason: null, statusLine: null, progress: null, files: [],
+  });
+
+  it("starts a computer project's thread at once in the project's folder there, with no folder asked for and no cloud", async () => {
+    const startLocalThread = vi.fn(started);
+    const startProposedThread = vi.fn(started);
+    const dom = mount(thread(applied(forTheFolder), "simple"), adapterStub({
+      startProposedThread, startLocalThread, getLocalDeviceId: async () => "thinkpad",
+    }), onTheThinkPad);
+    await act(async () => {});
+    const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+    expect(card.textContent).toContain("Works in its own copy of the project's folder");
+    expect(card.textContent).not.toContain("Allow Surogate to work in a folder on your device");
+    expect([...card.querySelectorAll("button")].map((found) => found.textContent)).toEqual(["Start"]);
+    const start = button(dom, "Start", card);
+    expect(start.getAttribute("aria-label")).toBe("Start Check the totals");
+    await act(async () => start.click());
+    expect(startLocalThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "1", title: "Check the totals" });
+    expect(card.textContent).toContain("Started");
+    expect(startProposedThread).not.toHaveBeenCalled();
+  });
+
+  it("starts every card of a computer project with Start all, one at a time in the project's folder", async () => {
+    const finish: Record<string, () => void> = {};
+    const startLocalThread = vi.fn(({ key }: { key: string; title: string }) => new Promise<AgentChatThreadRow>((resolve) => {
+      finish[key] = () => void started({ key }).then(resolve);
+    }));
+    const startProposedThread = vi.fn(started);
+    const dom = mount(thread(applied(forTheFolder), "simple"), adapterStub({
+      startProposedThread, startLocalThread, getLocalDeviceId: async () => "thinkpad",
+    }), onTheThinkPad);
+    await act(async () => {});
+    await act(async () => button(dom, "Start all").click());
+    expect(startLocalThread.mock.calls.map(([input]) => input.key)).toEqual(["1"]);
+    await act(async () => finish["1"]!());
+    expect(startLocalThread.mock.calls.map(([input]) => [input.key, input.title])).toEqual([
+      ["1", "Check the totals"], ["2", "Tidy the notes"],
+    ]);
+    await act(async () => finish["2"]!());
+    expect([...dom.querySelectorAll('[data-testid="proposed-thread"]')].every((card) => card.textContent?.includes("Started"))).toBe(true);
+    expect(startProposedThread).not.toHaveBeenCalled();
+  });
+
+  for (const [where, local] of [
+    ["in a browser", {}],
+    ["in Surogate Desktop on another computer", { startLocalThread: vi.fn(started), getLocalDeviceId: async () => "desktop-2" }],
+    ["in Surogate Desktop on a computer not added to the agent", { startLocalThread: vi.fn(started), getLocalDeviceId: async () => null }],
+  ] as const) {
+    it(`says ${where} to start a computer project's thread in Surogate Desktop on its computer, and offers no cloud`, async () => {
+      const startProposedThread = vi.fn(started);
+      const dom = mount(thread(applied(forTheFolder), "simple"), adapterStub({ startProposedThread, ...local }), onTheThinkPad);
+      await act(async () => {});
+      const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+      expect(card.textContent).toContain("Start this thread in Surogate Desktop on ThinkPad");
+      expect(dom.querySelector('[data-testid="thread-proposal-card"] button')).toBeNull();
+    });
+  }
 
   it("offers no Start outside a project's master", () => {
     const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread: vi.fn() }));

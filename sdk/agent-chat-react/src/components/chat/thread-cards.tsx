@@ -7,7 +7,7 @@
 // written by a model, so each sits in its own <bdi>: a bidirectional control
 // character in one cannot reorder the card around it.
 
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import type {
   AgentChatAdapter, AgentChatChangedBy, AgentChatThreadProposal, AgentChatThreadRow, AgentChatUndoResult, AgentChatWorker,
@@ -159,6 +159,26 @@ function useCardStarts(adapter: AgentChatAdapter): ReadonlyMap<string, CardStart
   return cardStarts.get(adapter) ?? new Map();
 }
 
+/**
+ * The computer this client runs on, asked of *adapter* while *wanted*, as by the cards of a project made on a
+ * computer: undefined until it answers, and null where the client can say of none.
+ */
+function useLocalDevice(adapter: AgentChatAdapter, wanted: boolean): string | null | undefined {
+  const [found, setFound] = useState<{ adapter: AgentChatAdapter; id: string | null } | null>(null);
+  useEffect(() => {
+    if (!wanted || !adapter.getLocalDeviceId) return;
+    let live = true;
+    void adapter.getLocalDeviceId().catch(() => null).then((id) => {
+      if (live) setFound({ adapter, id });
+    });
+    return () => {
+      live = false;
+    };
+  }, [adapter, wanted]);
+  if (!adapter.getLocalDeviceId) return null;
+  return found?.adapter === adapter ? found.id : undefined;
+}
+
 /** The card a "worker" or "thread_proposal" system message draws, or nothing. */
 export function ThreadCards({ message }: { message: ChatMessage }) {
   if (message.worker) return <WorkerCard worker={message.worker} />;
@@ -302,7 +322,7 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
 }
 
 function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
-  const { adapter, projectId, onOpenSession } = useAgentChatAdapterContext();
+  const { adapter, projectId, projectComputer, onOpenSession } = useAgentChatAdapterContext();
   const starts = useCardStarts(adapter);
   const startOf = (key: string) => starts.get(`${proposal.proposalId}:${key}`);
   const told = (key: string, start: CardStart) => setCardStart(adapter, `${proposal.proposalId}:${key}`, start);
@@ -321,6 +341,10 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
   const canStart = !!projectId && !!adapter.startProposedThread;
   // Only Surogate Desktop starts a thread in a folder of the user's computer.
   const canStartHere = !!projectId && !!adapter.startLocalThread;
+  // A project made on a computer has every thread in a copy of its folder there, started there alone,
+  // and none in the cloud.
+  const here = useLocalDevice(adapter, !!projectComputer && canStartHere);
+  const onItsComputer = !!projectComputer && canStartHere && here === projectComputer.deviceId;
   // A card started here gives its View thread the focus its Start took away with it,
   // unless the user has put the focus elsewhere meanwhile; a card drawn anew owes it still,
   // when one was drawn as the start finished.
@@ -355,23 +379,24 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
       told(key, { state: "failed", error: error instanceof Error ? error.message : "The thread could not be started." });
     }
   };
+  // The cloud's, or in a project made on a computer, every card's there.
   const startable = proposal.threads.filter(
-    (thread) => thread.where === "cloud" && !started[thread.key] && !starting(thread.key),
+    (thread) => (projectComputer ? onItsComputer : thread.where === "cloud") && !started[thread.key] && !starting(thread.key),
   );
   // One at a time, each awaited: a card that fails leaves the rest to go on. Every
   // card waiting its turn counts as starting, so neither its Start nor Start all
   // starts it a second time.
-  const startAll = async (keys: string[]) => {
-    for (const key of keys) told(key, { state: "starting", where: "cloud" });
-    for (const key of keys) await start(key);
+  const startAll = async (threads: typeof startable) => {
+    for (const { key } of threads) told(key, { state: "starting", where: projectComputer ? "device" : "cloud" });
+    for (const { key, title } of threads) await start(key, projectComputer ? title : undefined);
   };
 
   return (
     <div data-testid="thread-proposal-card" className="my-2 rounded-lg border border-border px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
         <span className="flex-1 font-medium text-foreground">Proposed threads</span>
-        {canStart && startable.length > 1 && (
-          <Button size="xs" onClick={() => void startAll(startable.map((thread) => thread.key))}>
+        {(projectComputer ? onItsComputer : canStart) && startable.length > 1 && (
+          <Button size="xs" onClick={() => void startAll(startable)}>
             Start all
           </Button>
         )}
@@ -404,6 +429,25 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
                     >
                       View thread
                     </Button>
+                  )
+                ) : projectComputer ? (
+                  onItsComputer ? (
+                    <>
+                      <span>Works in its own copy of the project's folder</span>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={starting(thread.key)}
+                        aria-label={`${starting(thread.key) ? "Starting" : "Start"} ${thread.title}`}
+                        onClick={() => void start(thread.key, thread.title)}
+                      >
+                        {starting(thread.key) ? "Starting…" : "Start"}
+                      </Button>
+                    </>
+                  ) : canStartHere && here === undefined ? null : (
+                    <span>
+                      Start this thread in Surogate Desktop on <bdi>{projectComputer.name}</bdi>
+                    </span>
                   )
                 ) : thread.where === "device" ? (
                   <>
