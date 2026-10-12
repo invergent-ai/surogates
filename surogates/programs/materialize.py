@@ -5,6 +5,12 @@ recorded on that row rather than dropping it.  The roster is the denominator
 run history counts against: dropping an unreachable user would quietly turn
 "12 of 14" into "12 of 13", and the two unreachable people would vanish from
 the record instead of being the thing the operator needs to see.
+
+A Program with an ``audience`` has no fixed roster: its roster for one
+occurrence is every active enrollment of the audience's protocol that is due
+today (its day window, phase and silence filter).  People who are simply not
+due — someone on day 40 for a first-month Program — get no row at all: they
+were never part of this occurrence, unlike an unreachable person who was.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +30,8 @@ from surogates.db.models import (
     ProgramOccurrenceRow,
     ProgramScheduleRow,
 )
+from surogates.followup import store as followup_store
+from surogates.followup.eligibility import Audience, ineligibility
 from surogates.programs.opener import OpenerUndeliverable
 
 logger = logging.getLogger(__name__)
@@ -130,12 +139,13 @@ async def materialize_occurrence(
             return await _existing_occurrence(db, schedule.program_id, now)
 
         platform = config.get("channel", "whatsapp")
-        for user_id in config.get("users", []):
+        roster = await _roster(
+            schedule, config, platform=platform, now=now,
+            session_factory=session_factory, identity_lookup=identity_lookup,
+        )
+        for user_id, identity in roster:
             reason: str | None = None
             state = "queued"
-            identity = await identity_lookup(
-                schedule.org_id, platform, uuid.UUID(user_id),
-            )
             if identity is None:
                 reason = f"No {platform} identity"
                 state = "skipped"
@@ -152,7 +162,7 @@ async def materialize_occurrence(
                     program_id=schedule.program_id,
                     org_id=schedule.org_id,
                     agent_id=schedule.agent_id,
-                    user_id=uuid.UUID(user_id),
+                    user_id=user_id,
                     platform=platform,
                     platform_user_id=(
                         identity.platform_user_id if identity else ""
@@ -165,6 +175,73 @@ async def materialize_occurrence(
             )
         await db.commit()
         return occ.id
+
+
+async def _roster(
+    schedule: Any,
+    config: dict,
+    *,
+    platform: str,
+    now: datetime,
+    session_factory: Any,
+    identity_lookup: Any,
+) -> list[tuple[uuid.UUID, Any]]:
+    """The people this occurrence is for, each with their channel identity.
+
+    A fixed roster is returned whole.  An audience is resolved against the
+    enrollments as they stand right now, filtered to who is due today in the
+    Program's own timezone.
+    """
+    if config.get("audience") is None:
+        roster = []
+        for user_id in config.get("users", []):
+            uid = uuid.UUID(user_id)
+            roster.append(
+                (uid, await identity_lookup(schedule.org_id, platform, uid)),
+            )
+        return roster
+
+    try:
+        audience = Audience.from_config(config.get("audience"))
+    except ValueError as exc:
+        # Ops validates audiences before projecting them, so this is drift.
+        # Messaging nobody is the only safe reading of a filter we cannot
+        # understand.
+        logger.warning(
+            "[programs] program %s has an unreadable audience (%s); "
+            "nobody is messaged", schedule.program_id, exc,
+        )
+        return []
+
+    today = now.astimezone(ZoneInfo(str(config.get("timezone") or "UTC"))).date()
+    sender = str(config.get("channel_identifier") or "")
+    enrollments = await followup_store.active_enrollments(
+        session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
+        protocol=audience.protocol,
+    )
+    roster = []
+    for enrollment in enrollments:
+        identity = await identity_lookup(
+            schedule.org_id, platform, enrollment.user_id,
+        )
+        last = None
+        if audience.silent_days is not None and identity is not None:
+            last = await followup_store.last_inbound(
+                session_factory, org_id=schedule.org_id, platform=platform,
+                platform_user_id=identity.platform_user_id,
+                channel_identifier=sender,
+            )
+        if ineligibility(
+            audience,
+            start_date=enrollment.start_date,
+            phase=enrollment.phase,
+            enrolled_at=enrollment.created_at,
+            last_inbound_at=last,
+            today=today,
+            now=now,
+        ) is None:
+            roster.append((enrollment.user_id, identity))
+    return roster
 
 
 async def send_queued_openers(

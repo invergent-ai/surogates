@@ -1,7 +1,7 @@
 """Reproductions of the gaps the cardiology follow-up pilot hits.
 
-Each test pins TODAY's behaviour, so a pass means the gap is reproduced.
-When a gap is fixed its test is rewritten to assert the new behaviour.
+A ``test_gap_*`` pins behaviour still to be fixed, so a pass means the gap
+is reproduced.  A ``test_fixed_*`` is a former gap, rewritten to assert the fix.
 """
 
 from __future__ import annotations
@@ -27,45 +27,51 @@ def _utcnow() -> datetime:
 
 
 @pytest.mark.asyncio
-async def test_gap_patient_past_the_phase_still_gets_the_opener(sf):
-    # A post-TAVI patient on day 40 is in the "month 1" Program's roster.
-    # Nothing knows the procedure date, so month 1 keeps messaging them.
-    user = uuid.uuid4()
+async def test_fixed_a_patient_past_the_phase_is_not_invited(sf):
+    # A patient on day 40 of a protocol whose "first month" Program covers
+    # days 0-30: the audience leaves them out of the occurrence entirely.
+    from surogates.followup import store
+
+    org, user = uuid.uuid4(), uuid.uuid4()
+    await store.upsert_enrollment(
+        sf, org_id=org, agent_id="a1", user_id=user, protocol="post-op",
+        start_date=date.today() - timedelta(days=40), phase=None,
+        enrolled_by="agent",
+    )
     schedule = SimpleNamespace(
         program_id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
+        org_id=org,
         agent_id="a1",
         config={
             "channel": "whatsapp",
+            "channel_identifier": "pn1",
             "skill_ref": "check-in",
-            "template_name": "intrebari_dimineata",
+            "template_name": "morning",
             "template_language": "ro",
             "response_deadline_hours": 10,
-            "users": [str(user)],
+            "timezone": "UTC",
+            "audience": {"protocol": "post-op", "day_from": 0, "day_to": 30},
+            "users": [],
         },
     )
-    start = (date.today() - timedelta(days=40)).isoformat()
 
     async def lookup(org_id, platform, user_id):
         return SimpleNamespace(
             platform_user_id="40700000001",
-            platform_meta={
-                "contact_permission": {"status": "granted"},
-                "followup": {"protocol": "tavi", "start_date": start},
-            },
+            platform_meta={"contact_permission": {"status": "granted"}},
         )
 
     occ = await materialize_occurrence(
         schedule, session_factory=sf, identity_lookup=lookup, now=_utcnow(),
     )
     async with sf() as db:
-        row = (
+        rows = (
             await db.execute(
                 sa.select(ProgramInvitationRow)
                 .where(ProgramInvitationRow.occurrence_id == occ)
             )
-        ).scalar_one()
-    assert row.delivery_state == "queued"  # GAP: should be skipped
+        ).scalars().all()
+    assert rows == []
 
 
 @pytest.mark.asyncio
