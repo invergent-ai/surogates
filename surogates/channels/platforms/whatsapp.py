@@ -457,8 +457,11 @@ def _render_input_prompt(payload: dict) -> str:
     Choices are bulleted rather than numbered, matching Telegram's text
     fallback: ``resolve_text_answer`` matches choice *labels*, so numbering
     would invite a "1" that the resolver records as a free-form answer.
+
+    No header or footer of our own: the people on the other end are
+    end users writing in their own language, and any typed reply answers.
     """
-    lines: list[str] = ["❓ I need your input"]
+    lines: list[str] = []
     context = (payload.get("context") or "").strip()
     if context:
         lines.append(context)
@@ -473,7 +476,6 @@ def _render_input_prompt(payload: dict) -> str:
             if label:
                 lines.append(f"  • {label}")
 
-    lines.append("Reply with your answer.")
     return "\n".join(line for line in lines if line)
 
 
