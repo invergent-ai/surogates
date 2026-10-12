@@ -223,8 +223,7 @@ async def _tell_care_team(sf: Any, ctx: _Context, settings: Any, *, kind: str, t
     return await followup_store.notify_care_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
         text=f"{text.strip()}\n\n— {ctx.person_label()}", created_by="agent",
-        subject_user_id=ctx.user_id, source_session_id=ctx.session_id,
-        exclude_user_id=ctx.user_id,
+        subject_user_id=ctx.user_id, exclude_user_id=ctx.user_id,
         fallback_sender=ctx.sender if ctx.channel == "whatsapp" else None,
     )
 

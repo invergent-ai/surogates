@@ -404,7 +404,6 @@ async def notify_care_team(
     text: str,
     created_by: str,
     subject_user_id: uuid.UUID | None = None,
-    source_session_id: uuid.UUID | None = None,
     dedupe_prefix: str | None = None,
     exclude_user_id: uuid.UUID | None = None,
     fallback_sender: str | None = None,
@@ -436,8 +435,7 @@ async def notify_care_team(
             user_id=recipient_id, platform="whatsapp", channel_identifier=sender,
             kind=kind, text=text, template_name=settings.alert_template_name,
             template_language=settings.alert_template_language,
-            subject_user_id=subject_user_id, source_session_id=source_session_id,
-            created_by=created_by,
+            subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=f"{dedupe_prefix}:{recipient_id}" if dedupe_prefix else None,
         )
         queued += 1
@@ -540,7 +538,6 @@ async def queue_outreach(
     template_name: str | None,
     template_language: str | None,
     subject_user_id: uuid.UUID | None = None,
-    source_session_id: uuid.UUID | None = None,
     created_by: str | None = None,
     dedupe_key: str | None = None,
 ) -> OutreachMessageRow:
@@ -563,8 +560,7 @@ async def queue_outreach(
             platform=platform, channel_identifier=channel_identifier,
             kind=kind, text=text, template_name=template_name or None,
             template_language=template_language or None, state="queued",
-            subject_user_id=subject_user_id,
-            source_session_id=source_session_id, created_by=created_by,
+            subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=dedupe_key,
         )
         db.add(row)

@@ -1282,11 +1282,8 @@ class OutreachMessageRow(Base):
     )
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: What the message is about, for the run history: the person an alert
-    #: concerns, the session it came from.
+    #: concerns.
     subject_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        GUID(), nullable=True,
-    )
-    source_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(), nullable=True,
     )
     #: The recipient's session the text was or will be written into.

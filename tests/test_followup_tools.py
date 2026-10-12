@@ -272,7 +272,6 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
     assert item.title == "Needs your attention: Ion Popescu · +40700000001"
     [alert] = await _outreach(sf)
     assert alert.user_id == doctor
-    assert alert.source_session_id == session_id
 
 
 @pytest.mark.asyncio
