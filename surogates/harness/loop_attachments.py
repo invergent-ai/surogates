@@ -23,7 +23,7 @@ _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
     ),
     "empty_output": (
         "the parser produced no text; the file may be a scan — try the"
-        " ocr-and-documents skill"
+        " pdf-reading skill"
     ),
     "total_budget_exceeded": (
         "earlier attachments already filled the inline-budget; use read_file"

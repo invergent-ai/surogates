@@ -24,37 +24,20 @@ For **any** request to read, summarise, analyse, extract data from, or aggregate
 read_file(path="path/to/document.pdf")
 ```
 
-The harness parses PDFs natively via `markitdown` and returns markdown.
-Pagination via `offset`/`limit` is free (cached). Do **NOT** `pip install
-pypdf`/`pdfplumber`/`pymupdf` or write subprocess extraction scripts for
-reading — that bootstrap is exactly what `read_file` eliminates.
+The harness parses PDFs natively (mupdf; a scan without a text layer is
+OCR'd over its first pages only, and the output says so) and returns
+markdown. Pagination via `offset`/`limit` is free (cached). Do
+**NOT** write extraction scripts for plain reading — that bootstrap is
+exactly what `read_file` eliminates.
 
-If `read_file` fails or **times out** on a specific PDF (large papers,
-encrypted, corrupt, or a scanned image-only PDF with no text layer),
-fall back in this order:
+When `read_file` is not enough — it fails or times out, the text comes
+back garbled, or the question is about figures, charts, layout, embedded
+images, attachments or form-field values — load the **`pdf-reading`**
+skill. It covers the content inventory, page rasterization for
+`vision_analyze`, OCR and table extraction.
 
-1. **`pypdf` first.** It's a pure-Python library that's always
-   importable in the sandbox and doesn't depend on apt packages. Use
-   it to read pages directly — see the snippet below.
-2. **`pdftotext` / `pandoc`** (poppler-utils) when `pypdf` can't
-   handle the specific PDF (e.g. tricky encoding). These are CLI
-   tools and may be missing on older sandbox images; if `which
-   pdftotext` errors, stay on `pypdf`.
-3. **`ocr-and-documents` skill** for scanned image-only PDFs.
-
-```python
-# Reliable fallback when read_file times out — chunk by page range
-# so a single call doesn't run past the tool timeout on long papers.
-from pypdf import PdfReader
-reader = PdfReader("path/to/document.pdf")
-print(f"Total pages: {len(reader.pages)}")
-for i in range(0, len(reader.pages)):
-    print(f"--- Page {i + 1} ---")
-    print(reader.pages[i].extract_text())
-```
-
-The other Python libraries on this page are for **transformations**
-(the next sections), not for plain reading.
+The Python libraries on this page are for **transformations** (the next
+sections), not for reading.
 
 ## Python Libraries
 
@@ -341,7 +324,7 @@ with open("encrypted.pdf", "wb") as output:
 | Layout-precise text / structured tables (fallback) | pdfplumber | `page.extract_text()` / `page.extract_tables()` |
 | Create PDFs | reportlab | Canvas or Platypus |
 | Command line merge | qpdf | `qpdf --empty --pages ...` |
-| OCR scanned PDFs | `ocr-and-documents` skill or pytesseract | Convert to image first |
+| OCR scanned PDFs | `pdf-reading` skill or pytesseract | Convert to image first |
 | Fill PDF forms | pdf-lib or pypdf (see FORMS.md) | See FORMS.md |
 
 ## Next Steps

@@ -59,10 +59,12 @@ RUN uv venv /opt/venv \
         pypdf \
         python-docx \
         python-pptx \
-        openpyxl
+        openpyxl \
+        defusedxml
 # The extra libraries above (reportlab, pdfplumber, pypdfium2,
-# pytesseract, pdf2image, pypdf, python-docx, python-pptx, openpyxl) are
-# referenced by the bundled productivity skills (pdf/docx/xlsx/pptx);
+# pytesseract, pdf2image, pypdf, python-docx, python-pptx, openpyxl,
+# defusedxml) are referenced by the bundled productivity skills
+# (pdf/pdf-reading/docx/xlsx/pptx; defusedxml by their scripts/office);
 # preinstalling them lets the skills run without any `pip install` step,
 # in the cloud and in the desktop's guest.  Pandoc the binary comes from
 # the apt layer below (the `pandoc` PyPI package is just a wrapper).
@@ -82,12 +84,15 @@ FROM python:3.12-slim AS tools
 # skills, and liteparse uses it as the OCR backend for scanned PDFs.
 # imagemagick is used by liteparse to rasterise image inputs (tiff/
 # webp/svg/etc.) before parsing.  pdfgrep is a nice CLI for full-text
-# PDF search.
+# PDF search.  zip/unzip pack and unpack the OOXML archives the
+# docx/pptx skills edit in place.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git openssh-client \
         ripgrep \
         curl \
         jq \
+        zip \
+        unzip \
         tini \
         ca-certificates \
         gnupg \
@@ -116,8 +121,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Global npm packages ─────────────────────────────────────────────
-# pdf-lib and pdfjs-dist back the JavaScript snippets in the pdf skill;
-# preinstalling them lets the skill examples run without `npm install`.
+# pdf-lib and pdfjs-dist back the JavaScript snippets in the pdf skill,
+# jszip the pptx skill's scripts/apply_theme.js; preinstalling them lets
+# the skill examples run without `npm install`.  They land in
+# /usr/lib/node_modules, which NODE_PATH below puts on require()'s path.
 RUN npm install -g \
         docx \
         react-icons \
@@ -125,6 +132,7 @@ RUN npm install -g \
         react-dom \
         sharp \
         pptxgenjs \
+        jszip \
         pdf-lib \
         pdfjs-dist \
         pnpm \
@@ -166,6 +174,7 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_USER=1 \
     NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
+    NODE_PATH="/home/sandbox/.npm-global/lib/node_modules:/usr/lib/node_modules" \
     UV_CACHE_DIR="/home/sandbox/.cache/uv" \
     XDG_CACHE_HOME="/home/sandbox/.cache"
 
@@ -276,7 +285,7 @@ RUN depmod "$KERNEL" \
     && find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
     && find / -xdev -type f -exec python3 -c 'import os, sys; [os.removexattr(p, "security.capability") for p in sys.argv[1:] if "security.capability" in os.listxattr(p)]' {} + \
     && mkdir -p /etc/surogate \
-    && printenv | grep -E '^(PATH|PYTHONUSERBASE|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|PIP_USER|NPM_CONFIG_PREFIX|UV_CACHE_DIR|XDG_CACHE_HOME)=' \
+    && printenv | grep -E '^(PATH|PYTHONUSERBASE|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|PIP_USER|NPM_CONFIG_PREFIX|NODE_PATH|UV_CACHE_DIR|XDG_CACHE_HOME)=' \
         > /etc/surogate/environment
 # Docker writes these two at run time, so neither is in a layer. localhost
 # resolves without DNS, and the guest has no DNS: the host resolves the names
