@@ -36,6 +36,16 @@ function userTempFolder(): string {
   return path;
 }
 
+// What the helper's sandbox lacks of this Mac, by the name a person installs it by (fileToolsMissing). Anything else
+// the sandbox's line is given is what its VM lacks, in the VM's own words (requirementsDarwin): "This Mac cannot run
+// Surogate's sandbox: <why>". Installing Surogate again brings back a tool, not virtualization.
+const TOOLS = ["ripgrep"];
+const toolsMissing = (lacking: string[]): string => {
+  const tools = lacking.filter((name) => TOOLS.includes(name));
+  const vm = lacking.filter((name) => !TOOLS.includes(name));
+  return [...vm, ...(tools.length > 0 ? [`Surogate's sandbox tools are missing. Install Surogate again. It lacks ${tools.join(", ")}`] : [])].join(". ");
+};
+
 // The user's own temp folders, which are Linux's /tmp: /tmp itself (a link to /private/tmp) and the per-user
 // folders under /private/var/folders that os.tmpdir() names. The rest of /private is the system's own.
 const TEMP = ["/private/tmp", "/private/var/folders"];
@@ -55,9 +65,9 @@ export const DARWIN_SRT: SrtOs = {
   reserved: (path) =>
     ["/System", "/Library", "/dev", "/cores"].some((dir) => inside(path, dir)) || path === "/Volumes"
     || (inside(path, "/private") && !TEMP.some((dir) => inside(path, dir))),
-  toolsMissing: (lacking) => `Surogate's sandbox tools are missing. Install Surogate again. It lacks ${lacking.join(", ")}`,
+  toolsMissing,
   // ripgrep alone, which the helper searches with: srt on macOS runs Apple's sandbox-exec.
-  fileToolsMissing: (_bwrap, path) => (findOnPath("rg", path, "/") === null ? ["ripgrep"] : []),
+  fileToolsMissing: (_bwrap, path) => (findOnPath("rg", path, "/") === null ? [...TOOLS] : []),
   // The app's own rg, beside the node the host runs on (bin/ in a development build, the bundle's own folder in the
   // app), before anything of the app's PATH: a Mac's PATH has no rg, and one a person installed reads libraries
   // the sandbox does not.
