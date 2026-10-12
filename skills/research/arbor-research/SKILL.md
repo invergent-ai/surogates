@@ -4,6 +4,8 @@ description: "Intake for an autonomous research run (Arbor). Use when the user w
 version: 1.0.0
 license: MIT
 tags: [research, optimization, intake]
+requires_agents:
+  - arbor-executor
 ---
 
 # Arbor Research — Intake

@@ -4,6 +4,8 @@ description: "Hard-gated ideation for an Arbor research run. Load at the START o
 version: 1.0.0
 license: MIT
 tags: [research, ideate, arbor]
+requires_agents:
+  - arbor-executor
 ---
 
 # Arbor Ideate — Hard-Gated Idea Drafting

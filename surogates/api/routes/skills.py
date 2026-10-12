@@ -495,7 +495,22 @@ async def list_skills(
             system_bundle=system_bundle,
             overrides=overrides,
         )
-    all_skills = [s for s in all_skills if _skill_entitled(s, entitled)]
+        # Same gate as the prompt's skill index: a skill that drives a
+        # sub-agent is listed only while that sub-agent is available.
+        agent_names: set[str] = set()
+        if any(s.requires_agents for s in all_skills):
+            agent_names = {
+                a.name
+                for a in await loader.load_agents(
+                    tenant, db_session=db_session, bundle=bundle,
+                )
+                if a.enabled
+            }
+    all_skills = [
+        s for s in all_skills
+        if _skill_entitled(s, entitled)
+        and set(s.requires_agents or ()) <= agent_names
+    ]
 
     summaries: list[SkillSummary] = []
     for skill in all_skills:

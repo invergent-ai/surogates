@@ -41,6 +41,7 @@ You are a code reviewer. When asked to review code:
 | `type` | string | no | `skill` (default) or `expert` (see [Experts](../experts/index.md)) |
 | `tags` | list | no | Metadata tags for categorisation and discovery |
 | `requires_tools` | list | no | Only activate when **all** listed tools are available |
+| `requires_agents` | list | no | Only activate when **all** listed sub-agents are available |
 | `fallback_for_tools` | list | no | Only activate when **any** listed tool is unavailable |
 
 The body text after the frontmatter is the skill's prompt content. It is injected into the system prompt or provided as context when the skill is activated.
@@ -54,6 +55,7 @@ Skills can declare conditions that control whether they appear in a session. The
 | Field | Rule |
 |---|---|
 | `requires_tools` | Skill is **included** only when **all** listed tools are available. |
+| `requires_agents` | Skill is **included** only when **all** listed sub-agents are in the session's sub-agent catalog. A feature pack whose sub-agent ships in the agent's bundle only while the feature is on uses this to gate the skills that drive it — the research-mission (Arbor) skills require `arbor-executor`, which the bundle carries only when research missions are enabled. |
 | `fallback_for_tools` | Skill is **excluded** when **all** listed tools are available. It only appears as a fallback when at least one is missing. |
 
 Example -- a skill that provides manual web search instructions when the `web_search` tool is not connected:

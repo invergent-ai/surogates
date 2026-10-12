@@ -640,6 +640,7 @@ class PromptBuilder:
                     skill.get("fallback_for_tools"),
                 )
                 requires_tools = self._as_string_list(skill.get("requires_tools"))
+                requires_agents = self._as_string_list(skill.get("requires_agents"))
             elif isinstance(skill, SkillDef):
                 name = skill.name
                 desc = skill.description
@@ -648,6 +649,7 @@ class PromptBuilder:
                 category_description = skill.category_description or ""
                 fallback_for_tools = self._as_string_list(skill.fallback_for_tools)
                 requires_tools = self._as_string_list(skill.requires_tools)
+                requires_agents = self._as_string_list(skill.requires_agents)
             else:
                 name = str(skill)
                 desc = ""
@@ -656,13 +658,16 @@ class PromptBuilder:
                 category_description = ""
                 fallback_for_tools = []
                 requires_tools = []
+                requires_agents = []
 
             safe_desc = self._sanitise(desc, f"skill:{name}")
 
             if skill_type == "expert":
                 continue
             else:
-                if not self._skill_visible(fallback_for_tools, requires_tools):
+                if not self._skill_visible(
+                    fallback_for_tools, requires_tools, requires_agents,
+                ):
                     continue
                 safe_category = self._sanitise(category, f"skill_category:{category}")
                 safe_category_desc = self._sanitise(
@@ -733,8 +738,10 @@ class PromptBuilder:
         self,
         fallback_for_tools: list[str],
         requires_tools: list[str],
+        requires_agents: list[str],
     ) -> bool:
-        """Return whether a regular skill should appear for this toolset."""
+        """Return whether a regular skill should appear for this toolset
+        and sub-agent catalog."""
         if fallback_for_tools and all(
             tool in self._available_tools for tool in fallback_for_tools
         ):
@@ -742,6 +749,13 @@ class PromptBuilder:
         if requires_tools and not all(
             tool in self._available_tools for tool in requires_tools
         ):
+            return False
+        # A feature pack ships its sub-agent in the agent's bundle only
+        # while the feature is on (the research-missions arbor-executor),
+        # so the sub-agent's presence gates the skills that drive it.
+        if requires_agents and not set(requires_agents) <= {
+            agent.name for agent in self._available_agents
+        }:
             return False
         return True
 
