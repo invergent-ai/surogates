@@ -1883,8 +1883,13 @@ describe("a landing's helper in the file helper's sandbox", () => {
     const work = join(base, "work");
     // srt's own files go where its host points them, as the app's host does: never in the folder.
     for (const dir of [work, join(base, "srt")]) mkdirSync(dir);
+    // The kept folder is made before its sandbox starts, as the app's landing host makes it (hosts/start.ts): its sandbox
+    // may write in it, not in the folder above it where it would be made. Seatbelt refuses that (EPERM), and srt's bwrap
+    // gives it a folder of srt's own, which goes with the sandbox.
+    mkdirSync(kept, { recursive: true, mode: 0o700 });
     // A host of the test's own: the file helper's policy as a landing's host asks for it, the copy to read and the kept
-    // folder to write, around a helper that is asked a landing's steps. It says what it was answered.
+    // folder to write, around a helper that is asked a landing's steps after a look at the folder. It says what it was
+    // answered for the steps.
     const host = `
       import { spawnSync } from "node:child_process";
       import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
@@ -1914,33 +1919,34 @@ describe("a landing's helper in the file helper's sandbox", () => {
       process.stdout.write(ran.stdout);
       process.exit(ran.status ?? 1);
     `;
-    const steps = [
-      { action: "revisions", paths: ["Report.docx"] },
-      { ...apply(1, "Report.docx", blob("the report, v1"), after, "seen") },
-      apply(2, "threads/A/new.md", null, fresh, "absent"),
-      unapply(2, "threads/A/new.md"),
-      unapply(1, "Report.docx"),
-    ];
-    // In a group of its own, as the app's hosts are: what srt started goes with it.
-    const child = spawn(process.execPath, ["--input-type=module", "-e", host, folder, work, copy, kept, process.execPath, base], {
-      cwd: fileURLToPath(new URL("..", import.meta.url)), detached: true, stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, TMPDIR: join(base, "srt"), STEPS: JSON.stringify(steps) },
-    });
-    let [said, failed] = ["", ""];
-    child.stdout.on("data", (chunk: Buffer) => { said += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { failed += chunk.toString(); });
-    const bound = setTimeout(() => child.kill("SIGKILL"), 45_000);
-    const status = await new Promise<number | null>((resolve) => child.once("exit", resolve));
-    clearTimeout(bound);
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {
-      // Nothing of it was left.
-    }
-    expect([status, failed]).toEqual([0, ""]);
-    expect(JSON.parse(said)).toEqual([
+    // *steps* asked of a helper in that sandbox, after its look at Report.docx: what it answered.
+    const asked = async (steps: Array<Record<string, unknown>>): Promise<unknown> => {
+      // In a group of its own, as the app's hosts are: what srt started goes with it.
+      const child = spawn(process.execPath, ["--input-type=module", "-e", host, folder, work, copy, kept, process.execPath, base], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)), detached: true, stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, TMPDIR: join(base, "srt"), STEPS: JSON.stringify([{ action: "revisions", paths: ["Report.docx"] }, ...steps]) },
+      });
+      let [said, failed] = ["", ""];
+      child.stdout.on("data", (chunk: Buffer) => { said += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { failed += chunk.toString(); });
+      const bound = setTimeout(() => child.kill("SIGKILL"), 45_000);
+      const status = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+      clearTimeout(bound);
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        // Nothing of it was left.
+      }
+      expect([status, failed]).toEqual([0, ""]);
+      return JSON.parse(said);
+    };
+    expect(await asked([apply(1, "Report.docx", blob("the report, v1"), after, "seen"), apply(2, "threads/A/new.md", null, fresh, "absent")])).toEqual([
       { ok: { path: "Report.docx", before: blob("the report, v1"), after, made: [] } },
       { ok: { path: "threads/A/new.md", before: null, after: fresh, made: ["threads/A", "threads"] } },
+    ]);
+    // What the landing replaced is kept in the app's data, where a put-back by a helper started later finds it.
+    expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
+    expect(await asked([unapply(2, "threads/A/new.md"), unapply(1, "Report.docx")])).toEqual([
       { ok: { path: "threads/A/new.md", put_back: true } },
       { ok: { path: "Report.docx", put_back: true } },
     ]);
