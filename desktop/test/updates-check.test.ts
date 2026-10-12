@@ -253,10 +253,10 @@ describe("a release that no key this computer trusts has signed", () => {
     const unsigned = [...script.matchAll(/fail "\$1 is (?:not )?signed by [^"]+"/g)].map(([words]) => words);
     expect(unsigned).toHaveLength(5);
     for (const words of [...unsigned, LINE.text]) expect(words).not.toMatch(/uninstall|remove|install it again/i);
-    // The README quotes each of the three as it is said: the script's, the app's own, and the helper's on the app's line.
-    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    // The troubleshooting page quotes each of the three as it is said: the script's, the app's own, and the helper's on the app's line.
+    const readme = readFileSync(fileURLToPath(new URL("../TROUBLESHOOTING.md", import.meta.url)), "utf8");
     for (const named of ["<base>/desktop/latest.json", "Surogate's newest release", "Surogate could not install its update: the release's manifest"]) expect(readme).toContain(`\n    ${named}${said[1]}\n`);
-    // And the removal is the README's alone, behind a condition that a person can check elsewhere.
+    // And the removal is that page's alone, behind a condition that a person can check elsewhere.
     expect(readme.replace(/\s+/g, " ")).toContain("Do it only once Surogate's release notes say that the release key has changed");
   });
 
