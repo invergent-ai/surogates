@@ -95,6 +95,8 @@ async def dm_session(
             "multi_party": False,
         },
         session_factory=session_factory, storage=storage, settings=settings,
+        # Writing first is no work for the agent: the reply resumes it.
+        resume=False,
     )
 
 

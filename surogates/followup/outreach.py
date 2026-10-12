@@ -351,21 +351,25 @@ async def _reopen(
             "template is configured to reopen it",
         )
 
+    # The burst's template carries every text queued behind it.  An alert
+    # rides only on an earlier alert: behind a routine notice it would reach
+    # the care team whenever they next happened to reply.
+    earlier = (
+        sa.select(sa.func.count())
+        .select_from(OutreachMessageRow)
+        .where(OutreachMessageRow.org_id == row.org_id)
+        .where(OutreachMessageRow.agent_id == row.agent_id)
+        .where(OutreachMessageRow.user_id == row.user_id)
+        .where(OutreachMessageRow.platform == row.platform)
+        .where(OutreachMessageRow.channel_identifier == row.channel_identifier)
+        .where(OutreachMessageRow.state == "awaiting_reply")
+        .where(OutreachMessageRow.outbox_id.isnot(None))
+        .where(OutreachMessageRow.sent_at > now - BATCH_WINDOW)
+    )
+    if row.kind == "alert":
+        earlier = earlier.where(OutreachMessageRow.kind == "alert")
     async with session_factory() as db:
-        batched = (
-            await db.execute(
-                sa.select(sa.func.count())
-                .select_from(OutreachMessageRow)
-                .where(OutreachMessageRow.org_id == row.org_id)
-                .where(OutreachMessageRow.agent_id == row.agent_id)
-                .where(OutreachMessageRow.user_id == row.user_id)
-                .where(OutreachMessageRow.platform == row.platform)
-                .where(OutreachMessageRow.channel_identifier == row.channel_identifier)
-                .where(OutreachMessageRow.state == "awaiting_reply")
-                .where(OutreachMessageRow.outbox_id.isnot(None))
-                .where(OutreachMessageRow.sent_at > now - BATCH_WINDOW)
-            )
-        ).scalar_one() > 0
+        batched = (await db.execute(earlier)).scalar_one() > 0
     if not await _transition(
         session_factory, row.id, from_states=("queued",),
         state="awaiting_reply", session_id=session_id, sent_at=now,

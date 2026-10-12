@@ -232,3 +232,20 @@ async def test_does_not_backfill_workspace_boundary_for_non_managed_channel_with
 
     assert got == sid
     assert all(key != "workspace_boundary" for _, key, _ in store.config_updates)
+
+
+async def test_a_writer_that_only_appends_leaves_a_finished_session_asleep():
+    """An opener or outreach message is no work for the agent: resuming here
+    woke it with nothing to answer, and it replied to its own instructions."""
+    sid = uuid4()
+    store = _Store()
+    got = await get_or_create_channel_session(
+        store, None,
+        session_key="agent:whatsapp:dm:40700000001",
+        user_id=uuid4(), org_id=uuid4(), agent_id="a1",
+        channel="whatsapp", config={},
+        session_factory=_SessionFactory(SimpleNamespace(id=sid, status="completed")),
+        resume=False,
+    )
+    assert got == sid
+    assert store.resumed == []

@@ -324,10 +324,16 @@ async def get_or_create_channel_session(
     session_factory: async_sessionmaker[AsyncSession],
     storage: object = None,
     settings: object = None,
+    resume: bool = True,
 ) -> UUID:
     """Reuse the most-recent session for the channel routing key — resuming an
     idle (completed/paused) one so the conversation continues — or create a new
     session. The caller (the inbound pipeline) enqueues the returned session.
+
+    ``resume=False`` is for writers that only append to the conversation (an
+    opener, an outreach message): resuming records work for the agent, and
+    with no new message to answer the woken agent replies to nothing.  The
+    person's reply resumes it through the inbound pipeline.
 
     Parameters
     ----------
@@ -448,7 +454,7 @@ async def get_or_create_channel_session(
             await session_store.update_session_config_key(
                 existing_id, "channel_identifier", incoming_identifier,
             )
-        if existing_status in ("completed", "paused"):
+        if resume and existing_status in ("completed", "paused"):
             await session_store.resume_session(existing_id, source="channel_message")
             logger.info(
                 "Resuming %s session %s (status=%s, key=%s)",

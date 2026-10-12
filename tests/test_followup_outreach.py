@@ -339,3 +339,18 @@ async def test_only_queued_rows_are_picked_up(sf, doctor_session):
         )
         await db.commit()
     assert await _send(sf, _Store(), _Delivery()) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_alert_never_rides_on_a_routine_notice(sf, doctor_session):
+    doctor = uuid.uuid4()
+    await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=doctor, platform="whatsapp",
+        channel_identifier=SENDER, kind="enrolment", text="New patient enrolled",
+        template_name="alert", template_language="ro",
+    )
+    delivery = _Delivery()
+    await _send(sf, _Store(), delivery)
+    await _queue(sf, doctor, text="Patient fainted")
+    await _send(sf, _Store(), delivery, now=NOW + timedelta(minutes=5))
+    assert len(delivery.sent) == 2  # the alert pinged on its own
