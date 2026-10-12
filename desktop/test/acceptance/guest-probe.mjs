@@ -16,7 +16,7 @@ import { app, net, utilityProcess } from "electron";
 import { BOOT_ID } from "./dist/binding/folder.js";
 import { keyOf } from "./dist/history/place.js";
 import { appTools, appVm } from "./dist/shell/tools.js";
-import { ROOT_RECORD } from "./dist/shell/updates.js";
+import { ROOT_RECORD } from "./dist/shell/installer-linux.js";
 import { MANAGER, vmEnv, vmOptions } from "./dist/vm/client.js";
 import { ImageDelivery, installBase, readManifest } from "./dist/vm/image.js";
 

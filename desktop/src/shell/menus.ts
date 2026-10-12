@@ -5,6 +5,9 @@
 
 import type { MenuItemConstructorOptions } from "electron";
 
+import { notBuilt } from "../platform.js";
+import * as linux from "./menus-linux.js";
+
 export interface MenuActions {
   newChat(): void;
   settings(): void;
@@ -16,19 +19,16 @@ export interface MenuActions {
   about(): void;
 }
 
+// What differs by OS: the menus before Edit, and the tray's icon (menus-linux.ts).
+const OS = process.platform === "linux" ? linux : {
+  firstMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
+  trayIcon: (): string => notBuilt("Surogate Desktop's tray icon"),
+};
+
 /** The app's menu; *developer* adds Developer, in developer mode. */
 export function appMenu(act: MenuActions, developer: boolean): MenuItemConstructorOptions[] {
   const menu: MenuItemConstructorOptions[] = [
-    {
-      label: "File",
-      submenu: [
-        { id: "new-chat", label: "New chat", accelerator: "CmdOrCtrl+N", click: () => act.newChat() },
-        { id: "settings", label: "Settings…", accelerator: "CmdOrCtrl+Shift+,", click: () => act.settings() },
-        { type: "separator" },
-        { label: "Close window", role: "close" },
-        { id: "quit", label: "Quit Surogate", accelerator: "CmdOrCtrl+Q", click: () => act.quit() },
-      ],
-    },
+    ...OS.firstMenus(act),
     {
       label: "Edit",
       submenu: [
@@ -94,8 +94,7 @@ export function trayMenu(state: TrayState, act: TrayActions): MenuItemConstructo
   ];
 }
 
-/** The tray's icon, by Claude Desktop's rule: the light one on a dark panel, as GNOME's always is, the dark one on a light panel. */
-export function trayIcon(dark: boolean, desktop: string | undefined): "tray-dark.png" | "tray-light.png" {
-  const gnome = (desktop ?? "").split(":").some((name) => name.toLowerCase() === "gnome");
-  return dark || gnome ? "tray-dark.png" : "tray-light.png";
+/** The tray's icon, among the app's assets, for a theme that is *dark* or not, on the desktop *desktop* (XDG_CURRENT_DESKTOP). */
+export function trayIcon(dark: boolean, desktop: string | undefined): string {
+  return OS.trayIcon(dark, desktop);
 }

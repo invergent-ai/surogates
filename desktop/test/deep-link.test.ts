@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { linkIn } from "../src/shell/deep-link.js";
+import { linkIn, linkOfLaunch } from "../src/shell/deep-link.js";
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
 const link = (url: string) => `surogate://open?url=${encodeURIComponent(url)}`;
@@ -32,5 +32,11 @@ describe("a surogate:// link", () => {
       "surogate:not a link",
     ]) expect(linkIn(["surogate", refused]), refused).toBeNull();
     expect(linkIn(["/opt/surogate/surogate", "--password-store=basic"])).toBeNull();
+  });
+});
+
+describe.runIf(process.platform === "linux")("a surogate:// link on Linux", () => {
+  it("comes in the arguments of a launch, the first or a second: the system starts the app with it", () => {
+    expect(linkOfLaunch).toBe(linkIn);
   });
 });

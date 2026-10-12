@@ -9,7 +9,7 @@ import { type ChildProcess, execFile } from "node:child_process";
 import {
   accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
-import { connect, type Socket } from "node:net";
+import type { Socket } from "node:net";
 import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -19,9 +19,9 @@ import type { Share } from "../guest/protocol.js";
 import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
 import { Qmp, qemuArgs, readOnlyDaemon, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
+import { ended, reach, RETRY_MS } from "./sockets.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
-const RETRY_MS = 5;
 // util-linux's, as setpriv is.
 const PRLIMIT = "/usr/bin/prlimit";
 
@@ -167,26 +167,11 @@ export function refusesWrites(program = VIRTIOFSD, ms = 5_000): Promise<boolean>
   return asked;
 }
 
-const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
-
 const exited = (child: ChildProcess) => new Promise<void>((resolve) => {
   if (ended(child)) resolve();
   else child.once("exit", () => resolve());
   child.once("error", () => resolve());
 });
-
-// A socket QEMU makes as it starts, tried until it takes the connection; null once *qemu* has exited, or at *deadline*.
-async function reach(path: string, qemu: ChildProcess, deadline: number): Promise<Socket | null> {
-  while (!ended(qemu) && performance.now() <= deadline) {
-    const socket = await new Promise<Socket | null>((resolve) => {
-      const tried = connect(path);
-      tried.once("connect", () => resolve(tried));
-      tried.once("error", () => setTimeout(() => resolve(null), RETRY_MS));
-    });
-    if (socket) return socket;
-  }
-  return null;
-}
 
 /**
  * Null when this user can open *kvm* read and write, as QEMU does for KVM; otherwise why

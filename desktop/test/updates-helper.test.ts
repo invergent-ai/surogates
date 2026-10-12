@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 
 import { cleanly } from "../src/clean-child.js";
-import { installedUpdates } from "../src/shell/updates.js";
+import { installedUpdates } from "../src/shell/installer-linux.js";
 
 const asked = vi.hoisted(() => ({
   spawned: [] as unknown[][],

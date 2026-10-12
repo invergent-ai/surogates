@@ -27,10 +27,11 @@ import { ADDRESS_MS } from "../src/binding/approvals.js";
 import { CANCELLED, type Launch, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
-  A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN, holding,
+  A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN,
   NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, REDIRECTED_TO_A_CHAT, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
+import { browserTemp, holding } from "../src/browser/processes-linux.js";
 import { BrowserProxy, notOpenPage } from "../src/browser/proxy.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
@@ -748,6 +749,12 @@ describe("the processes on a profile", () => {
       on.kill("SIGKILL");
       rmSync(folder, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the browser's own temporary folder", () => {
+  it("is the user's runtime folder, short enough for its singleton's socket, else /tmp", () => {
+    expect([browserTemp({ XDG_RUNTIME_DIR: "/run/user/1000" }), browserTemp({}), browserTemp({ XDG_RUNTIME_DIR: "" })]).toEqual(["/run/user/1000", "/tmp", "/tmp"]);
   });
 });
 
