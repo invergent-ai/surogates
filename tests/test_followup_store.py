@@ -196,12 +196,15 @@ async def test_welcome_settings_and_package_protocols(sf):
         alert_template_name=None, alert_template_language=None,
         message_template_name=None, message_template_language=None,
         welcome_template_name="bun_venit", welcome_template_language="ro",
-        welcome_text="  Vă mulțumim.  ",
         offer_protocols={"offer-1": " post-op ", "offer-2": ""},
-        texts={"checkout_phone": " Nr. WhatsApp ", "purchase_notice": ""},
+        texts={
+            "checkout_phone": " Nr. WhatsApp ", "purchase_notice": "",
+            "welcome_text": "  Vă mulțumim.  ",
+        },
     )
-    assert saved.welcome_text == "Vă mulțumim."
-    assert saved.texts == {"checkout_phone": "Nr. WhatsApp"}
+    assert saved.texts == {
+        "checkout_phone": "Nr. WhatsApp", "welcome_text": "Vă mulțumim.",
+    }
     assert saved.offer_protocols == {"offer-1": "post-op"}
 
 
@@ -241,13 +244,13 @@ async def test_the_care_team_is_never_enrolled_by_any_path(sf):
 async def test_settings_change_only_the_fields_given(sf):
     await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, channel_identifier="pn1",
-        welcome_text="Bun venit", offer_protocols={"off_1": "post-op"},
+        texts={"welcome_text": "Bun venit"}, offer_protocols={"off_1": "post-op"},
     )
     saved = await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, alert_template_name="alerta",
     )
     assert saved.channel_identifier == "pn1"
-    assert saved.welcome_text == "Bun venit"
+    assert saved.texts == {"welcome_text": "Bun venit"}
     assert saved.offer_protocols == {"off_1": "post-op"}
     assert saved.alert_template_name == "alerta"
     with pytest.raises(ValueError):

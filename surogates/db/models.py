@@ -1189,14 +1189,14 @@ class FollowupSettingsRow(Base):
         Text, nullable=True,
     )
     #: The approved template that opens a newly paid patient's
-    #: conversation, and the text that follows once they answer it.
+    #: conversation.  The text that follows once they answer it is
+    #: ``texts["welcome_text"]``.
     welcome_template_name: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
     )
     welcome_template_language: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
     )
-    welcome_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: Which protocol each package enrols its buyer in:
     #: ``{commerce offer id: protocol}``.  An offer not listed enrols nobody.
     offer_protocols: Mapped[dict[str, str]] = mapped_column(
@@ -1205,8 +1205,8 @@ class FollowupSettingsRow(Base):
     #: Wording in the practice's language for what the platform itself
     #: writes: the checkout field labels and the notices the care team gets.
     #: Keys: ``checkout_phone``, ``checkout_name``, ``checkout_consent``,
-    #: ``purchase_notice``, ``invalid_number_notice``.  Missing keys use the
-    #: platform's defaults.
+    #: ``purchase_notice``, ``invalid_number_notice``, ``welcome_text``.
+    #: Missing keys use the platform's defaults.
     texts: Mapped[dict[str, str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )

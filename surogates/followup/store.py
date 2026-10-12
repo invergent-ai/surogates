@@ -65,7 +65,7 @@ SETTINGS_FIELDS = frozenset({
     "alert_recipient_user_ids", "alert_template_name",
     "alert_template_language", "message_template_name",
     "message_template_language", "welcome_template_name",
-    "welcome_template_language", "welcome_text", "offer_protocols", "texts",
+    "welcome_template_language", "offer_protocols", "texts",
 })
 
 
@@ -357,8 +357,6 @@ def _normalised(field: str, value: Any) -> Any:
             str(k): str(v).strip() for k, v in (value or {}).items()
             if str(v).strip()
         }
-    if field == "welcome_text":
-        return (value or "").strip() or None
     if isinstance(value, str):
         return value or None
     return value
