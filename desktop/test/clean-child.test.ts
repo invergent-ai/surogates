@@ -6,6 +6,9 @@
 
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -13,8 +16,9 @@ import { describe, expect, it } from "vitest";
 import { cleanly, spawnClean } from "../src/clean-child.js";
 import { importedOn } from "./platforms.js";
 
-// *file* and *args*, run by a parent that holds descriptors 3, 7 and 8 open.
-const held = (file: string, args: string[]) => spawnSync("/usr/bin/env", ["-i", "WORD=kept", "/bin/bash", "-c", 'exec 3</dev/null 7</dev/null 8</dev/null; exec "$@"', "bash", file, ...args], { encoding: "utf8" });
+// *file* and *args*, run by a parent that holds descriptors 3, 7 and 8 open: a bash that reads no rc file, which with a
+// socket for stdin, as spawnSync's pipes are on macOS, it would.
+const held = (file: string, args: string[]) => spawnSync("/usr/bin/env", ["-i", "WORD=kept", "/bin/bash", "--norc", "--noprofile", "-c", 'exec 3</dev/null 7</dev/null 8</dev/null; exec "$@"', "bash", file, ...args], { encoding: "utf8" });
 // A child that lists its own descriptors, by number: by its /proc entry on Linux, by /dev/fd on macOS.
 const OPEN = process.platform === "linux" ? "/proc/$$/fd/$fd" : "/dev/fd/$fd";
 const LISTS: [string, string[]] = ["/bin/bash", ["-c", `for fd in $(seq 0 40); do [ ! -e ${OPEN} ] || echo -n "$fd "; done`]];
@@ -42,6 +46,24 @@ describe("a child the app starts", () => {
     const gone = held(...cleanly("/nowhere/program", []));
     expect([gone.status, gone.stderr]).toEqual([127, "/nowhere/program: No such file or directory\n"]);
     expect(() => cleanly("pkexec", [])).toThrow("pkexec is not named by its whole path");
+  });
+
+  it("reads no shell's startup file, nor a BASH_ENV or an ENV, whatever the environment it is given names", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "clean-home-")));
+    try {
+      // Each says it was read, on stdout and on stderr: a shell that reads its rc files with a socket for stdin, as
+      // spawnSync's pipes are on macOS, or a login shell, or one told of a file by BASH_ENV or ENV.
+      for (const name of [".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin", "env.sh"]) {
+        writeFileSync(join(home, name), `echo ${name} was read; echo ${name} was read >&2\n`);
+      }
+      const env = { HOME: home, ZDOTDIR: home, BASH_ENV: join(home, "env.sh"), ENV: join(home, "env.sh"), WORD: "kept" };
+      const ran = spawnSync(...cleanly("/bin/echo", ["only", "this"]), { encoding: "utf8", env });
+      expect([ran.status, ran.stdout, ran.stderr]).toEqual([0, "only this\n", ""]);
+      const gone = spawnSync(...cleanly("/nowhere/program", []), { encoding: "utf8", env });
+      expect([gone.status, gone.stdout, gone.stderr]).toEqual([127, "", "/nowhere/program: No such file or directory\n"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("is the very process spawn gave", async () => {
