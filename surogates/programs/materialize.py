@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,7 +31,7 @@ from surogates.db.models import (
     ProgramScheduleRow,
 )
 from surogates.followup import store as followup_store
-from surogates.followup.eligibility import Audience, ineligibility
+from surogates.followup.eligibility import Audience, as_utc, ineligibility
 from surogates.followup.missed import paused_by_silence, threshold
 from surogates.programs.opener import OpenerUndeliverable
 
@@ -339,7 +339,7 @@ async def send_queued_openers(
             hours=deadlines.get(pending.program_id, _DEFAULT_DEADLINE_HOURS),
         )
         async with session_factory() as db:
-            if scheduled_for is not None and _as_utc(scheduled_for) + window <= now:
+            if scheduled_for is not None and as_utc(scheduled_for) + window <= now:
                 # The slot's own response window has already closed.  A
                 # "how are you this morning" sent two days late is wrong,
                 # and retrying it every tick forever is worse.
@@ -442,10 +442,6 @@ async def _release(db: Any, invitation_id: Any) -> None:
         .values(response_state="not_started", deadline_at=None)
     )
     await db.commit()
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 async def _deadline_hours_by_program(db, program_ids: set) -> dict:

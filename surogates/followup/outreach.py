@@ -36,6 +36,7 @@ from surogates.db.models import (
     SessionLease,
 )
 from surogates.followup import store as followup_store
+from surogates.followup.eligibility import as_utc
 from surogates.programs.opener import dm_session, whatsapp_session_key
 from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
 
@@ -68,18 +69,10 @@ BATCH = 200
 _HELD = ("queued", "awaiting_reply")
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-
 def window_open(last_inbound_at: datetime | None, now: datetime) -> bool:
     if last_inbound_at is None:
         return False
-    return _as_utc(now) - _as_utc(last_inbound_at) < WINDOW - WINDOW_MARGIN
+    return as_utc(now) - as_utc(last_inbound_at) < WINDOW - WINDOW_MARGIN
 
 
 async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> bool:
@@ -92,7 +85,7 @@ async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> b
             )
         ).scalar_one_or_none()
     # ``session_leases.expires_at`` is naive UTC.
-    return expires is not None and _as_utc(expires) > _as_utc(now)
+    return expires is not None and as_utc(expires) > as_utc(now)
 
 
 async def _transition(
@@ -182,7 +175,7 @@ async def deliver_pending(
     session nothing is written: the send pass delivers it once the turn is
     over.
     """
-    now = now or _utcnow()
+    now = now or datetime.now(timezone.utc)
     async with session_factory() as db:
         rows = (
             await db.execute(

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-__all__ = ["Audience", "day_index", "ineligibility"]
+__all__ = ["Audience", "as_utc", "day_index", "ineligibility"]
 
 #: The longest a protocol can run, in days.  Bounds the window fields so a
 #: typo like 3650000 is refused rather than silently meaning "forever".
@@ -98,7 +98,8 @@ def day_index(start_date: date | None, today: date) -> int | None:
     return (today - start_date).days
 
 
-def _as_utc(value: datetime) -> datetime:
+def as_utc(value: datetime) -> datetime:
+    """*value* as an aware UTC datetime; drivers hand back naive UTC stamps."""
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
@@ -132,8 +133,8 @@ def ineligibility(
     if audience.silent_days is not None:
         # Someone who never wrote is measured from when they were enrolled:
         # otherwise every new enrollment would look silent since forever.
-        last = _as_utc(last_inbound_at or enrolled_at)
-        if _as_utc(now) - last < timedelta(days=audience.silent_days):
+        last = as_utc(last_inbound_at or enrolled_at)
+        if as_utc(now) - last < timedelta(days=audience.silent_days):
             return f"Wrote within the last {audience.silent_days} days"
 
     return None

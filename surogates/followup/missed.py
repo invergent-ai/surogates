@@ -24,6 +24,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store as followup_store
+from surogates.followup.eligibility import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,6 @@ LOOKBACK = timedelta(hours=6)
 
 #: Openers whose streak this process already judged, with their deadline.
 _JUDGED: dict[Any, datetime] = {}
-
-
-def _aware(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 #: Used when the Program carries no wording of its own.  Placeholders:
 #: ``{name}``, ``{phone}``, ``{count}``, ``{program}``.
@@ -132,7 +129,7 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
                 inv.id,
             )
             continue
-        _JUDGED[inv.id] = _aware(inv.deadline_at)
+        _JUDGED[inv.id] = as_utc(inv.deadline_at)
     return queued
 
 
