@@ -309,6 +309,22 @@ describe("the check of the kernel's configuration", () => {
     expect(checked("amd64", config({ ...whole("amd64"), BPF_LSM: "unset", BPF_LSM_EXTRA: "y" })).status).toBe(1);
   });
 
+  it("fails on a kernel without any one of them, or with any one that must be built in as a module, and names that one", () => {
+    for (const arch of ARCHES) {
+      for (const name of Object.keys(whole(arch))) {
+        const loaded = LOADED.includes(name);
+        const said = (file: string) => loaded
+          ? `kernel-config.sh: ${file} has no CONFIG_${name}, which vm/init loads\n`
+          : `kernel-config.sh: ${file} does not build in CONFIG_${name}, which the guest boots on without an initrd\n`;
+        const without = config(Object.fromEntries(Object.entries(whole(arch)).filter(([option]) => option !== name)));
+        expect(checked(arch, without), `${arch} without ${name}`).toMatchObject({ status: 1, stderr: said(without) });
+        if (loaded) continue;
+        const module = config({ ...whole(arch), [name]: "m" });
+        expect(checked(arch, module), `${arch} with ${name} a module`).toMatchObject({ status: 1, stderr: said(module) });
+      }
+    }
+  });
+
   it("refuses an arch it has no list for, and a config it cannot read", () => {
     expect(checked("riscv64", config(whole("arm64")))).toMatchObject({ status: 2 });
     expect(checked("arm64", join(dir, "missing"))).toMatchObject({ status: 1, stderr: expect.stringContaining("cannot read") });
