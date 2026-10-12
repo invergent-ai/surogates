@@ -259,3 +259,12 @@ def test_ask_user_question_is_not_handed_out_when_governance_blocks_it() -> None
     )
     assert allowed._can_ask_user_question()
     assert "ask_user_question" in allowed._ensure_always_available_tools({"memory"})
+
+
+def test_a_policy_naming_the_old_escalation_tool_still_allows_it() -> None:
+    from surogates.governance.policy import GovernanceGate
+
+    assert GovernanceGate(allowed_tools={"checkin_escalate"}).check("escalate", {}).allowed
+    assert not GovernanceGate(
+        allowed_tools={"escalate", "memory"}, denied_tools={"checkin_escalate"},
+    ).check("escalate", {}).allowed

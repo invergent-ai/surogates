@@ -72,6 +72,20 @@ class PolicyDecision:
     policy_id: str | None = None
 
 
+#: Tools that were renamed: a policy written with the old name keeps meaning
+#: the same tool.  ``checkin_escalate`` became ``escalate`` when escalation
+#: stopped being limited to check-ins.
+_RENAMED_TOOLS = {"checkin_escalate": "escalate"}
+
+
+def _with_renamed(names: set[str] | None) -> set[str] | None:
+    if names is None:
+        return None
+    names = set(names)
+    names |= {new for old, new in _RENAMED_TOOLS.items() if old in names}
+    return names
+
+
 class GovernanceGate:
     """Wraps the AGT PolicyEngine for Surogates tool-call governance.
 
@@ -118,6 +132,9 @@ class GovernanceGate:
         # AGT EgressPolicy — controls which domains/ports tools can reach.
         # When None, egress is unchecked (all outbound allowed).
         self._egress_policy: EgressPolicy | None = egress_policy
+
+        allowed_tools = _with_renamed(allowed_tools)
+        denied_tools = _with_renamed(denied_tools)
 
         # Resolve effective allow-set.
         if allowed_tools is not None:
