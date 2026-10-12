@@ -1,11 +1,12 @@
 // Which folders a chat may work on (spec, Section 4): checked when the user
 // confirms one, and again by its tool host before anything runs there.
 
-import { readFileSync, realpathSync, type Stats, statSync } from "node:fs";
+import { realpathSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { inside, realpath } from "../files/paths.js";
 import { GLOB, isReserved } from "../hosts/policy.js";
+import { bootId } from "./boot-id.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 
@@ -15,15 +16,8 @@ const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".c
 // root's own mounts; /root is no user's to bind.
 export const GUEST_SYSTEM = ["/etc", "/opt/venv", "/usr", "/var/cache", "/var/lib", "/var/log", "/var/spool"];
 
-// This boot, read once; "" when it cannot be read. A folder's st_dev belongs to its mount and
-// can change at a reboot (btrfs subvolumes, ZFS, NFS and SMB, FUSE, several NVMe drives).
-export const BOOT_ID = (() => {
-  try {
-    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-  } catch {
-    return "";
-  }
-})();
+// This boot, read once (boot-id.ts); "" when it cannot be read.
+export const BOOT_ID = bootId();
 
 // Whether *found* is the folder confirmed as *expect*. A reboot can renumber the folder's
 // mount: after one, only the inode is compared. A boot id that could not be read counts as this boot.

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { linuxFdPaths } from "../src/files/fd-paths-linux.js";
+import { importedOn } from "./platforms.js";
 
 // Each call of these the module made, by name and arguments.
 const calls = vi.hoisted(() => ({ made: [] as unknown[][] }));
@@ -140,18 +141,10 @@ describe("the file host's FdPaths", () => {
   });
 
   it("refuse every call, in words, on a system the file host is not built for yet", async () => {
-    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-    vi.resetModules();
-    Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
-    try {
-      const { fdPaths } = await import("../src/files/fd-paths.js");
-      const words = "The file tools are not built for this computer's system yet";
-      expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
-      expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));
-      expect(() => fdPaths.handed()).toThrow(new Error(words));
-    } finally {
-      Object.defineProperty(process, "platform", platform);
-      vi.resetModules();
-    }
+    const { fdPaths } = await importedOn("darwin", () => import("../src/files/fd-paths.js"));
+    const words = "The file tools are not built for this computer's system yet";
+    expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
+    expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));
+    expect(() => fdPaths.handed()).toThrow(new Error(words));
   });
 });

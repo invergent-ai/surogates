@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import { cleanly } from "../src/clean-child.js";
+import { importedOn } from "./platforms.js";
 
 // *file* and *args*, run by a parent that holds descriptors 3, 7 and 8 open.
 const held = (file: string, args: string[]) => spawnSync("/usr/bin/env", ["-i", "WORD=kept", "/bin/bash", "-c", 'exec 3</dev/null 7</dev/null 8</dev/null; exec "$@"', "bash", file, ...args], { encoding: "utf8" });
@@ -37,5 +38,11 @@ describe("a child the app starts", () => {
     const gone = held(...cleanly("/nowhere/program", []));
     expect([gone.status, gone.stderr]).toEqual([127, "/nowhere/program: No such file or directory\n"]);
     expect(() => cleanly("pkexec", [])).toThrow("pkexec is not named by its whole path");
+  });
+
+  it("is refused, in words, on a system the app cannot start one cleanly on yet", async () => {
+    const { cleanly: elsewhere } = await importedOn("darwin", () => import("../src/clean-child.js"));
+    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for this computer's system yet"));
+    expect(() => elsewhere("env", [])).toThrow("env is not named by its whole path");
   });
 });

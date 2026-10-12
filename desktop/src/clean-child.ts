@@ -9,7 +9,8 @@
 // arguments and environment. Perl, and no shell: a shell puts names of its own into the
 // environment of what it runs (PWD, SHLVL), and the app's children are given theirs to the name.
 // perl-base is part of every Ubuntu. The environment is always the caller's own naming, never the
-// app's: perl reads PERL5OPT and PERL5LIB.
+// app's: perl reads PERL5OPT and PERL5LIB. That is Linux's way: another OS starts no child until it
+// has its own.
 
 import { type ChildProcess, spawn, type SpawnOptions } from "node:child_process";
 
@@ -19,10 +20,15 @@ const PERL = "/usr/bin/perl";
 const LINE = 'use POSIX (); my $keep = shift; opendir(my $dir, "/proc/self/fd") or exit 126; my @open = grep { /^\\d+$/ && $_ > $keep } readdir($dir); '
   + 'closedir($dir); POSIX::close($_) for @open; exec { $ARGV[0] } @ARGV; print STDERR "$ARGV[0]: $!\\n"; exit 127;';
 
+const NOT_BUILT = "Starting a program cleanly is not built for this computer's system yet";
+type Clean = (program: string, args: string[], keep: number) => [file: string, args: string[]];
+const clean: Clean | null = process.platform === "linux" ? (program, args, keep) => [PERL, ["-e", LINE, "--", String(keep), program, ...args]] : null;
+
 /** What to run in place of *program* with *args*, so that it holds its first *keep* + 1 descriptors and no other. */
 export function cleanly(program: string, args: string[], keep = 2): [file: string, args: string[]] {
   if (!program.startsWith("/")) throw new Error(`${program} is not named by its whole path`);
-  return [PERL, ["-e", LINE, "--", String(keep), program, ...args]];
+  if (!clean) throw new Error(NOT_BUILT);
+  return clean(program, args, keep);
 }
 
 /**
