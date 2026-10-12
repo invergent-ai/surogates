@@ -6,7 +6,7 @@
 #   desktop/releases/<version>/manifest.json, .sig        each release's own, kept
 #   desktop/releases/<version>/surogate-desktop-<version>-linux-x64.tar.gz
 #
-# Each for the target TARGET names, the platform and architecture the release is built for:
+# Each for the target DESKTOP_TARGET names, the platform and architecture the release is built for:
 # linux-x64, as above, where it names none; darwin-arm64's in folders of its own, with no install
 # script, which installs linux-x64's alone (see target_files):
 #
@@ -74,8 +74,8 @@ target_files() {
   esac
   TARBALL="surogate-desktop-$VERSION-$1.tar.gz"
 }
-TARGET="${TARGET:-linux-x64}"
-target_files "$TARGET" || { echo "publish.sh: TARGET is $TARGET, and a release is made for linux-x64 or darwin-arm64" >&2; exit 2; }
+DESKTOP_TARGET="${DESKTOP_TARGET:-linux-x64}"
+target_files "$DESKTOP_TARGET" || { echo "publish.sh: DESKTOP_TARGET is $DESKTOP_TARGET, and a release is made for linux-x64 or darwin-arm64" >&2; exit 2; }
 fail() {
   echo "publish.sh: $*" >&2
   exit 1
@@ -94,7 +94,7 @@ manifest() {
 # its own platform, arch and tarball, as its app reads one (signedRelease in src/shell/updates.ts):
 # one JSON object by the script's own reader (one_object), of the script's channel.
 release_read() {
-  if [ "$TARGET" = linux-x64 ]; then
+  if [ "$DESKTOP_TARGET" = linux-x64 ]; then
     bash -c '. <(sed "\$d" "$1") && settings && release_of "$2"' _ "$HERE/install.sh" "$1"
     return
   fi
@@ -128,7 +128,7 @@ NOT_LISTED="install.sh's list of release keys is not in the one form that an ins
 case "$VERB" in
   describe)
     # What the tarball holds, and where in it the app's package is, is linux-x64's alone so far.
-    [ "$TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball, and not yet one for $TARGET"
+    [ "$DESKTOP_TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball, and not yet one for $DESKTOP_TARGET"
     : "${DESKTOP_TARBALL_SHA256:?}"
     [ -f "$OUT/$TARBALL" ] || fail "$OUT/$TARBALL is not there: run scripts/package.sh first"
     # The tarball is the one the build made, by the hash the build's job gave for it: an artifact
@@ -257,9 +257,9 @@ case "$VERB" in
     keys_listed || fail "$NOT_LISTED"
     pair='. <(sed "\$d" "$1") && settings && listed keys "$1" && signed_by "$2" "$2.sig" "${keys[@]}"'
     # linux-x64's is read in the same run, by the root helper's own check; another target's after it (release_read).
-    [ "$TARGET" = linux-x64 ] && pair="$pair"' && release="$(release_of "$2")" && [ "${release%% *}" = "$3" ]'
+    [ "$DESKTOP_TARGET" = linux-x64 ] && pair="$pair"' && release="$(release_of "$2")" && [ "${release%% *}" = "$3" ]'
     [ -f "$OUT/manifest.json" ] && [ -f "$OUT/manifest.json.sig" ] && bash -c "$pair" _ "$HERE/install.sh" "$OUT/manifest.json" "$VERSION" 2>/dev/null \
-      && { [ "$TARGET" = linux-x64 ] || { release="$(release_read "$OUT/manifest.json" 2>/dev/null)" && [ "${release%% *}" = "$VERSION" ]; }; } \
+      && { [ "$DESKTOP_TARGET" = linux-x64 ] || { release="$(release_read "$OUT/manifest.json" 2>/dev/null)" && [ "${release%% *}" = "$VERSION" ]; }; } \
       || fail "$OUT/manifest.json and $OUT/manifest.json.sig are not the manifest of $VERSION and its signature by a key that install.sh lists: nothing is sent"
     # And its tarball is the one that manifest names, by its hash. The manifest was signed for the
     # build's own word of that hash, where no tarball was opened, and the tarball here is this
