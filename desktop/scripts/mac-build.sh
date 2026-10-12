@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A development build of the whole app on a Mac (Apple silicon): the app's code and pages, and every native
-# program where the app looks for it. surogate-vm (native/build.sh) at native/out; surogate-spawn and the app's
-# rg at bin/, beside a node at bin/node; fsat at dist/native/fsat.node; surogate-helper at native/helper/.build.
+# program where the app looks for it. surogate-helper at native/helper/.build and surogate-spawn at bin/, with the
+# app's code (npm run build:darwin); surogate-vm (native/build.sh) at native/out; the app's rg at bin/, beside a
+# node at bin/node; fsat at dist/native/fsat.node.
 # On a Mac with Xcode, Node 22.14 first on the PATH, from desktop/, after `npm ci`:
 #   scripts/mac-build.sh
 # The guest image and the agent's disk come from test/vm/darwin/measure/prepare.sh, which needs a container
@@ -13,7 +14,6 @@ cd "$(dirname "$0")/.."
 npm run electron:install
 npm run build:darwin
 native/build.sh
-native/spawn/build.sh
 native/fsat/build.sh
 mkdir -p bin
 cp "$(command -v node)" bin/node

@@ -44,9 +44,12 @@ jobs:
       - name: Install Electron
         run: npm run electron:install
 
-      # The app's own way of starting a program cleanly on macOS, beside its node.
-      - name: Build surogate-spawn
-        run: native/spawn/build.sh
+      # The app's code, which a file of the project runs as the app does, and the app's own way of starting a program
+      # cleanly on macOS, beside its node.
+      - name: Build the app's code and surogate-spawn
+        run: |
+          npx tsc -p tsconfig.build.json
+          native/spawn/build.sh
 
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos
@@ -149,12 +152,12 @@ jobs:
           native/out/surogate-vm check | tee check.json
           grep -q '"supported"' check.json
 
-  # The shell and the browser on a Mac: surogate-helper built, with its own tests; the shell's and the browser's
-  # files of the macos project with the helper there to run; the app end to end, with no VM; and the browser host
-  # headed on the runner's own Chrome and Edge. Each step runs whatever came of the one before it. A change to the admin
-  # trust domain waits for an administrator to confirm it, which nobody can on a runner, and the runner's
-  # authorization database refuses to let it go unasked (errAuthorizationDenied): test/darwin/admin-trust.sh
-  # runs by hand on a Mac.
+  # The shell and the browser on a Mac: surogate-helper and surogate-spawn built, the helper with its own tests; the
+  # shell's and the browser's files of the macos project with the helper there to run; the app end to end, with no
+  # VM; and the browser host headed on the runner's own Chrome and Edge. Each step runs whatever came of the one
+  # before it. A change to the admin trust domain waits for an administrator to confirm it, which nobody can on a
+  # runner, and the runner's authorization database refuses to let it go unasked (errAuthorizationDenied):
+  # test/darwin/admin-trust.sh runs by hand on a Mac.
   shell:
     runs-on: macos-15
     timeout-minutes: 60
@@ -181,7 +184,8 @@ jobs:
       - name: Install Electron
         run: npm run electron:install
 
-      - name: Build the app for a Mac, surogate-helper with it
+      # The app's own programs with it: surogate-helper, and surogate-spawn, through which the app starts every program.
+      - name: Build the app for a Mac, surogate-helper and surogate-spawn with it
         run: npm run build:darwin
 
       - name: Run surogate-helper's own tests
