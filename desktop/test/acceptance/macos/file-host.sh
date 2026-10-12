@@ -33,7 +33,12 @@ step "build what the file host runs on" build
 export PATH="$DESKTOP/bin:$PATH"
 log="$(mktemp -d)"
 
-step "the file host's macOS suites" sh -c "npx vitest run --project macos > '$log/suites.log' 2>&1"
+# The file host's suites, as the macOS workflow's file-host job runs them, and the macos project's.
+SUITES="test/clean-child.test.ts test/fd-paths-darwin.test.ts test/srt-darwin.test.ts test/folder-lock.test.ts test/boot-id.test.ts
+  test/hosts-handed.test.ts test/policy-darwin.test.ts test/agent-disk-imports.test.ts test/flags.test.ts test/operations.test.ts
+  test/hooks.test.ts test/hooks-chmod.test.ts test/land.test.ts test/file-tools-race.test.ts"
+step "the file host's suites" sh -c "npx vitest run --project unit $(echo $SUITES) > '$log/suites.log' 2>&1"
+step "the macos project" sh -c "npx vitest run --project macos >> '$log/suites.log' 2>&1"
 
 places=()
 documents="$HOME/Documents/surogate-file-host-probe"

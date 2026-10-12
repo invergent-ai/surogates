@@ -121,9 +121,11 @@ describe("the file tools, against a process of this computer's racing them", { t
   it("reach nothing beside the folder through its file host on the app's own node, where the same operations outside any sandbox do", async () => {
     const folder = folders[ROOT_A]!;
     const outside = join(base, "outside");
-    // The probe can race: the helper's own checks alone, outside srt, are beaten.
+    // The probe can race: the helper's own checks alone, outside srt, are beaten on Linux. On macOS the helper's opens
+    // refuse a link anywhere on their way (O_NOFOLLOW_ANY), so only its listings and deletions, which follow one, can be
+    // beaten, and this flipper rarely beats them: there the control's count is written out, not held to.
     const bare = await race((kind, args) => perform(kind, args, { folder, home: base, env: { PATH: "/usr/bin:/bin" } }, signal()), folder, outside);
-    expect(bare.reached + bare.wroteOutside).toBeGreaterThan(0);
+    if (process.platform === "linux") expect(bare.reached + bare.wroteOutside).toBeGreaterThan(0);
     const executor = toolHosts();
     const sandboxed = await race((kind, args) => executor.run(op(kind, args), signal()), folder, outside);
     console.log(`M8: ${JSON.stringify({ bare, sandboxed })}`);

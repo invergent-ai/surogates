@@ -37,7 +37,7 @@ describe.runIf(process.platform === "darwin" && PLACES.length > 0)("the file hos
       };
       harness.send(start);
       const said = await harness.until((messages) => messages.find((message) => message.type === "ready" || message.type === "failed"), 60_000);
-      expect({ said, stderr: harness.stderr }).toMatchObject({ said: { type: "ready" } });
+      expect(said.type === "ready" ? "ready" : `${JSON.stringify(said)} ${harness.stderr}`).toBe("ready");
       expect(await harness.op("read", "read", { key: join(folder, "a.txt"), max_bytes: null })).toEqual({ ok: Buffer.from("alpha\n").toString("base64") });
       expect(await harness.op("write", "write", { key: join(folder, "b.txt"), data: Buffer.from("beta\n").toString("base64") })).toEqual({ ok: null });
       expect(await harness.op("search", "ripgrep", { key: folder, mode: "count", pattern: "alpha", glob: null, context: 0 })).toMatchObject({ ok: expect.stringContaining("a.txt") });

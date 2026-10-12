@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { connect, createServer } from "node:net";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { linkSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const at = JSON.parse(process.argv[2]);
@@ -56,6 +56,9 @@ tried("read another folder", () => readFileSync(join(at.other, "secret.txt")));
 tried("list another folder", () => readdirSync(at.other));
 tried("write another folder", () => writeFileSync(join(at.other, "made.txt"), "made"));
 tried("list /Users", () => readdirSync("/Users"));
+tried("hard-link a file in the folder", () => linkSync(join(at.folder, "inside.txt"), join(at.folder, "linked.txt")));
+tried("hard-link a file of the folder into the working folder", () => linkSync(join(at.folder, "inside.txt"), join(at.tmp, "linked.txt")));
+tried("hard-link a file outside into the folder", () => linkSync(join(at.other, "secret.txt"), join(at.folder, "stolen.txt")));
 tried("load fsat", () => {
   const fsat = createRequire(import.meta.url)(at.fsat);
   const fd = fsat.openat(fsat.constants.AT_FDCWD, join(at.folder, "inside.txt"), fsat.constants.O_RDONLY, 0);

@@ -12,10 +12,11 @@ const BUILT = fileURLToPath(new URL("../dist/hosts/handed.js", import.meta.url))
 const FSAT = fileURLToPath(new URL("../dist/files/fsat.js", import.meta.url));
 // What a child of the Node would hold of its descriptors. On Linux, what a child lists by its /proc entries. On macOS
 // a child Node starts holds nothing it is not given (libuv's posix_spawn closes the rest), so what an exec would keep
-// is read in the Node itself instead: each descriptor open and not close-on-exec, as fsat tells it.
+// is read in the Node itself instead: the standard three, which every child is given, and each other descriptor open
+// and not close-on-exec, as fsat tells it.
 const LISTS = process.platform === "linux"
   ? `const lists = () => spawnSync("/bin/bash", ["-c", 'for fd in $(seq 0 60); do [ ! -e /proc/$$/fd/$fd ] || echo -n "$fd "; done'], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).stdout.trim();`
-  : `const { fsat } = await import(${JSON.stringify(FSAT)}); const lists = () => [...Array(61).keys()].filter((fd) => fsat().cloexec(fd) === false).join(" ");`;
+  : `const { fsat } = await import(${JSON.stringify(FSAT)}); const lists = () => [...Array(61).keys()].filter((fd) => fd <= 2 || fsat().cloexec(fd) === false).join(" ");`;
 // What the Node holds of its own descriptors that a child would inherit, before and after *between* ran.
 const CODE = (between: string) => `
 import { spawnSync } from "node:child_process";
