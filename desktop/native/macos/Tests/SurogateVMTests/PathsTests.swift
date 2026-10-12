@@ -61,10 +61,15 @@ final class PathsTests: XCTestCase {
     for path in ["work", "\(root)/linked", "\(root)/work/..", "\(root)/./work", "\(root)/work/", "\(root)/a-file", "\(root)/missing"] {
       XCTAssertEqual(refusal { try checkShared(path, in: laid.places) }, "the folder to share is not a folder named as it is: \(path)", path)
     }
-    dir("\(laid.places.data)/history/0123456789ABCDEF")
+    dir("\(laid.places.data)/history/FEDCBA9876543210")
     dir("\(laid.places.data)/history/0123456789abcdef/sub")
     dir("\(laid.places.bundle)/Contents")
-    for path in [laid.places.run, laid.places.data, "\(laid.places.data)/history", "\(laid.places.data)/history/0123456789ABCDEF", "\(laid.places.data)/history/0123456789abcdef/sub",
+    // A key in capitals beside its own in small letters: on a volume that compares names without case (APFS's
+    // default) it names that folder, by another name than its own, and is refused as not named as it is.
+    let twin = "\(laid.places.data)/history/0123456789ABCDEF"
+    dir(twin)
+    XCTAssertNotNil(refusal { try checkShared(twin, in: laid.places) })
+    for path in [laid.places.run, laid.places.data, "\(laid.places.data)/history", "\(laid.places.data)/history/FEDCBA9876543210", "\(laid.places.data)/history/0123456789abcdef/sub",
                  laid.places.image, "\(laid.places.bundle)/Contents", root] {
       XCTAssertEqual(refusal { try checkShared(path, in: laid.places) }, "the folder to share is the app's own, or holds it: \(path)", path)
     }
