@@ -36,7 +36,6 @@ import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
-import { autostartFile, HIDDEN, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyCaFile, trustCompanyCa } from "./company-ca.js";
@@ -46,6 +45,7 @@ import { Copying } from "./copying.js";
 import { linkIn, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
+import { loginItemFor } from "./login-item.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
@@ -98,9 +98,9 @@ ownSpelling(app, DICTIONARIES, console.error);
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
-// Start at login's entry, in the user's autostart folder; and what it starts: the installed app's
-// launcher, or a development build's Electron on this main.
-const autostart = autostartFile(places.autostartFolder!);
+// Start at login (login-item.ts); and what it starts: the installed app's launcher, or a
+// development build's Electron on this main.
+const loginItem = loginItemFor(places);
 const loginCommand = (): string[] => (app.isPackaged ? [places.launcher!] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
@@ -2067,9 +2067,9 @@ async function settingsState() {
   return {
     browser,
     appearance: appearance.get(),
-    preferences: { startAtLogin: onOff(startsAtLogin(autostart)), keepRunning: onOff(keepRunning), developer: onOff(developer) },
+    preferences: { startAtLogin: onOff(loginItem.on()), keepRunning: onOff(keepRunning), developer: onOff(developer) },
     // Why this build cannot start at login, or null.
-    startAtLoginRefused: loginRefusal(loginCommand()),
+    startAtLoginRefused: loginItem.refusal(loginCommand()),
     account,
     computer: {
       name: hostname(),
@@ -2307,7 +2307,7 @@ function showSettings(section?: "browser"): void {
       if (key === "keepRunning" || key === "developer") return setPreference(key, value);
       if (key === "startAtLogin") {
         if (value !== "on" && value !== "off") throw new Error(`No setting startAtLogin = ${String(value)}`);
-        return setStartAtLogin(autostart, value === "on", loginCommand());
+        return loginItem.set(value === "on", loginCommand());
       }
       if (key !== "theme") {
         appearance.set(String(key), value);
@@ -2594,7 +2594,7 @@ if (!app.requestSingleInstanceLock()) {
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
-    if (!argv.includes(HIDDEN)) main?.show();
+    if (!loginItem.startedHidden(argv)) main?.show();
     const link = linkIn(argv);
     if (link) void openDeepLink(link).catch(report);
   });
@@ -2643,7 +2643,7 @@ if (!app.requestSingleInstanceLock()) {
       // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
       quitsOnClose: () => !preferences.get().keepRunning && !waiting,
       // Started at login: the window waits for the user, in the tray or at the next launch.
-      hidden: process.argv.includes(HIDDEN),
+      hidden: loginItem.startedHidden(process.argv),
     });
     wire(main, page);
     // In the tray where the desktop has one; GNOME without one shows the window at the next launch.

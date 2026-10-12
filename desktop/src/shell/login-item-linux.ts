@@ -1,9 +1,12 @@
-// Start at login (spec, Section 7): an entry in the user's autostart folder, as the XDG
+// Start at login on Linux (spec, Section 7): an entry in the user's autostart folder, as the XDG
 // Autostart specification reads one, which starts the app with its window hidden. Electron's
 // login-item API does not support Linux. The entry is the setting: on while it is there.
 
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+
+import type { LoginItem } from "./login-item.js";
+import type { Places } from "./places.js";
 
 // What the app is started with at login: its window waits for the user.
 export const HIDDEN = "--hidden";
@@ -61,4 +64,15 @@ export function setStartAtLogin(file: string, on: boolean, command: readonly str
     rmSync(next, { force: true });
     throw error;
   }
+}
+
+/** The login item of the app whose places are *places*: its entry in the user's autostart folder. */
+export function loginItem(places: Places): LoginItem {
+  const file = autostartFile(places.autostartFolder!);
+  return {
+    on: () => startsAtLogin(file),
+    refusal: loginRefusal,
+    set: (on, command) => setStartAtLogin(file, on, command),
+    startedHidden: (argv) => argv.includes(HIDDEN),
+  };
 }
