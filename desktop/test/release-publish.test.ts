@@ -318,9 +318,17 @@ describe("the desktop's release manifest", () => {
     expect(checked).toMatchObject({ status: 0, stdout: `1.2.3 ${sha256(readFileSync(tarball()))} ${statSync(tarball()).size}\n`, stderr: "" });
   });
 
+  it("reads its target from DESKTOP_TARGET alone: a TARGET that a build tool set leaves Linux's release as it is", () => {
+    expect(describes({ TARGET: "win32-x64" })).toMatchObject({ status: 0, stderr: "" });
+    expect(signs({ TARGET: "win32-x64" })).toMatchObject({ status: 0, stderr: "" });
+    expect(JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"))).toMatchObject({
+      platform: "linux", arch: "x64", url: "releases/1.2.3/surogate-desktop-1.2.3-linux-x64.tar.gz",
+    });
+  });
+
   it("signs macOS's manifest by its own target's names, which macOS's app takes and Linux's readers refuse; and makes a release for no other target", () => {
     const words = { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: SHA, DESKTOP_TARBALL_SIZE: "171199516", DESKTOP_STATE_SCHEMA: "2" };
-    expect(publish("sign", "1.2.3", { TARGET: "darwin-arm64", ...words })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    expect(publish("sign", "1.2.3", { DESKTOP_TARGET: "darwin-arm64", ...words })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
     const manifest = readFileSync(join(out, "manifest.json"));
     expect(manifest.toString()).toBe(`${JSON.stringify({
       version: "1.2.3", channel: "stable", platform: "darwin", arch: "arm64", url: "releases/1.2.3/darwin-arm64/surogate-desktop-1.2.3-darwin-arm64.tar.gz",
@@ -332,11 +340,11 @@ describe("the desktop's release manifest", () => {
     const applied = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
     expect([applied.status === 0, applied.stdout]).toEqual([false, ""]);
     // Its tarball, the app's bundle, is not described here yet; and a target that is none is no release.
-    expect(publish("describe", "1.2.3", { TARGET: "darwin-arm64", DESKTOP_TARBALL_SHA256: SHA })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads a linux-x64 tarball, and not yet one for darwin-arm64\n" });
+    expect(publish("describe", "1.2.3", { DESKTOP_TARGET: "darwin-arm64", DESKTOP_TARBALL_SHA256: SHA })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads a linux-x64 tarball, and not yet one for darwin-arm64\n" });
     rmSync(join(out, "manifest.json"));
     rmSync(join(out, "manifest.json.sig"));
     for (const verb of ["describe", "sign", "send"]) {
-      expect(publish(verb, "1.2.3", verb === "describe" ? { TARGET: "win32-x64", DESKTOP_TARBALL_SHA256: SHA } : { TARGET: "win32-x64", ...words }), verb).toMatchObject({ status: 2, stdout: "", stderr: "publish.sh: TARGET is win32-x64, and a release is made for linux-x64 or darwin-arm64\n" });
+      expect(publish(verb, "1.2.3", verb === "describe" ? { DESKTOP_TARGET: "win32-x64", DESKTOP_TARBALL_SHA256: SHA } : { DESKTOP_TARGET: "win32-x64", ...words }), verb).toMatchObject({ status: 2, stdout: "", stderr: "publish.sh: DESKTOP_TARGET is win32-x64, and a release is made for linux-x64 or darwin-arm64\n" });
     }
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
   });
@@ -353,7 +361,7 @@ describe("the desktop's release manifest", () => {
       const manifest = Buffer.from(typeof fields === "string" ? fields : `${JSON.stringify({ ...own, ...fields })}\n`);
       writeFileSync(join(out, "manifest.json"), manifest);
       writeFileSync(join(out, "manifest.json.sig"), sign(null, manifest, keys.privateKey));
-      return publish("send", "1.2.3", { TARGET: "darwin-arm64", S3_ENDPOINT: "http://127.0.0.1:9", S3_BUCKET: "none", ...CREDENTIALS }).stderr;
+      return publish("send", "1.2.3", { DESKTOP_TARGET: "darwin-arm64", S3_ENDPOINT: "http://127.0.0.1:9", S3_BUCKET: "none", ...CREDENTIALS }).stderr;
     };
     expect(sends({})).toMatch(/publish\.sh: looking for desktop\/releases\/1\.2\.3\/darwin-arm64\/manifest\.json stopped: curl exit \d+\n$/);
     const refused = `publish.sh: ${out}/manifest.json and ${out}/manifest.json.sig are not the manifest of 1.2.3 and its signature by a key that install.sh lists: nothing is sent\n`;
@@ -1334,9 +1342,9 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     writeFileSync(tarball, randomBytes(1024 * 1024));
     const { DESKTOP_RELEASE_KEY: _held, ...own } = process.env;
     const words = { DESKTOP_TARBALL_SHA256: sha256(readFileSync(tarball)), DESKTOP_TARBALL_SIZE: String(statSync(tarball).size), DESKTOP_STATE_SCHEMA: "1" };
-    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", "1.0.0", out], { env: { ...own, TARGET: "darwin-arm64", DESKTOP_RELEASE_KEY: PRIVATE, ...words } }).status).toBe(0);
+    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", "1.0.0", out], { env: { ...own, DESKTOP_TARGET: "darwin-arm64", DESKTOP_RELEASE_KEY: PRIVATE, ...words } }).status).toBe(0);
     rmSync(join(dir, "curl-argv"), { force: true });
-    expect(send("1.0.0", out, { TARGET: "darwin-arm64" })).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0/darwin-arm64 as desktop/darwin-arm64/latest.json\n" });
+    expect(send("1.0.0", out, { DESKTOP_TARGET: "darwin-arm64" })).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0/darwin-arm64 as desktop/darwin-arm64/latest.json\n" });
     const sent = readFileSync(join(dir, "curl-argv"), "utf8").split(/^-q\n/m).filter((args) => args.includes("\n-T\n")).map((args) => args.trimEnd().split("\n").at(-1)?.replace(/^.*\/desktop\//, ""));
     expect(sent).toEqual([
       "releases/1.0.0/darwin-arm64/surogate-desktop-1.0.0-darwin-arm64.tar.gz", "releases/1.0.0/darwin-arm64/manifest.json.sig", "releases/1.0.0/darwin-arm64/manifest.json", "darwin-arm64/latest.json",
@@ -1348,7 +1356,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     expect(caching("darwin-arm64/latest.json")).toBe("no-cache");
     for (const path of ["latest.json", "install.sh", "releases/1.0.0/manifest.json"]) expect(object(path), path).toBeNull();
     // Never again, once its latest.json names it: it has no install script to wait for.
-    expect(send("1.0.0", out, { TARGET: "darwin-arm64" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.0.0/darwin-arm64 is published already, and is not sent again\n" });
+    expect(send("1.0.0", out, { DESKTOP_TARGET: "darwin-arm64" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.0.0/darwin-arm64 is published already, and is not sent again\n" });
     // Nor sent as Linux's, whose readers take no manifest of macOS's.
     expect(send("1.0.0", out)).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json and ${out}/manifest.json.sig are not the manifest of 1.0.0 and its signature by a key that install.sh lists: nothing is sent\n` });
     // And Linux's release of the same version goes where it always has, beside it.

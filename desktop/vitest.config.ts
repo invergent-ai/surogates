@@ -7,8 +7,8 @@ const MOUNTING = ["test/vm-stalled-folder.test.ts", "test/vm/guest-places.test.t
 // The files that pass on macOS, which the macOS workflow runs (.github/workflows/desktop-macos.yml): each
 // part of the app built for macOS adds its own. A project on macOS alone: on Linux each is the unit project's.
 export const MACOS = [
-  "test/backoff.test.ts", "test/egress.test.ts", "test/flags.test.ts", "test/guest-control.test.ts", "test/output.test.ts", "test/protocol.test.ts",
-  "test/vm-manifest.test.ts",
+  "test/platform.test.ts", "test/backoff.test.ts", "test/egress.test.ts", "test/flags.test.ts", "test/guest-control.test.ts", "test/output.test.ts",
+  "test/protocol.test.ts", "test/vm-manifest.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

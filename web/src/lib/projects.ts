@@ -73,7 +73,7 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
     id, name, icon: null, createdAt: ago(created), updatedAt: ago(updated),
     waiting: threads.filter((found) => found.group === "waiting").length,
     working: threads.filter((found) => found.group === "working").length,
-    goal: null, instructions: "", masterSessionId: id, coordinatorTier: null, threadTier: null,
+    goal: null, instructions: "", masterSessionId: id, coordinatorTier: null, threadTier: null, place: cloud, folder: null,
   });
   return {
     projects: [

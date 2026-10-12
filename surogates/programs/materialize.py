@@ -5,14 +5,21 @@ recorded on that row rather than dropping it.  The roster is the denominator
 run history counts against: dropping an unreachable user would quietly turn
 "12 of 14" into "12 of 13", and the two unreachable people would vanish from
 the record instead of being the thing the operator needs to see.
+
+A Program with an ``audience`` has no fixed roster: its roster for one
+occurrence is every active enrollment of the audience's protocol that is due
+today (its day window, phase and silence filter).  People who are simply not
+due — someone on day 40 for a first-month Program — get no row at all: they
+were never part of this occurrence, unlike an unreachable person who was.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +30,9 @@ from surogates.db.models import (
     ProgramOccurrenceRow,
     ProgramScheduleRow,
 )
+from surogates.followup import store as followup_store
+from surogates.followup.eligibility import Audience, as_utc, ineligibility
+from surogates.followup.missed import paused_by_silence, threshold
 from surogates.programs.opener import OpenerUndeliverable
 
 logger = logging.getLogger(__name__)
@@ -50,11 +60,6 @@ def platform_of(identity: Any, schedule: Any) -> str:
         or (schedule.config or {}).get("channel")
         or "whatsapp"
     )
-
-
-def _permission(identity: Any) -> str:
-    meta = getattr(identity, "platform_meta", None) or {}
-    return (meta.get("contact_permission") or {}).get("status") or "none"
 
 
 async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
@@ -111,6 +116,29 @@ async def materialize_occurrence(
     rather than a second message to every user.
     """
     config = schedule.config or {}
+    platform = config.get("channel", "whatsapp")
+    pause = threshold(config, "pause_after_missed")
+    # Resolved before the occurrence's transaction opens: an audience is one
+    # read per enrolled person, the pause one per reachable person, and none
+    # of it needs the row lock.
+    roster, last_by_phone = await _roster(
+        schedule, config, platform=platform, now=now,
+        session_factory=session_factory, identity_lookup=identity_lookup,
+        with_last_inbound=pause is not None,
+    )
+    paused: set[uuid.UUID] = set()
+    if pause:
+        for user_id, identity in roster:
+            if (
+                identity is not None
+                and followup_store.permission_status(identity) == "granted"
+                and await paused_by_silence(
+                    session_factory, program_id=schedule.program_id,
+                    user_id=user_id, count=pause,
+                    last_inbound_at=last_by_phone.get(identity.platform_user_id),
+                )
+            ):
+                paused.add(user_id)
     async with session_factory() as db:
         occ = ProgramOccurrenceRow(
             program_id=schedule.program_id,
@@ -129,21 +157,23 @@ async def materialize_occurrence(
             await db.rollback()
             return await _existing_occurrence(db, schedule.program_id, now)
 
-        platform = config.get("channel", "whatsapp")
-        for user_id in config.get("users", []):
+        for user_id, identity in roster:
             reason: str | None = None
             state = "queued"
-            identity = await identity_lookup(
-                schedule.org_id, platform, uuid.UUID(user_id),
-            )
             if identity is None:
                 reason = f"No {platform} identity"
                 state = "skipped"
-            elif _permission(identity) != "granted":
+            elif followup_store.permission_status(identity) != "granted":
                 reason = "No permission to message"
                 state = "skipped"
             elif await _has_open_invitation(db, schedule, identity):
                 reason = "Previous check-in still open"
+                state = "skipped"
+            elif user_id in paused:
+                reason = (
+                    f"Paused: the last {pause} openers went unanswered; "
+                    "resumes when they write"
+                )
                 state = "skipped"
 
             db.add(
@@ -152,7 +182,7 @@ async def materialize_occurrence(
                     program_id=schedule.program_id,
                     org_id=schedule.org_id,
                     agent_id=schedule.agent_id,
-                    user_id=uuid.UUID(user_id),
+                    user_id=user_id,
                     platform=platform,
                     platform_user_id=(
                         identity.platform_user_id if identity else ""
@@ -165,6 +195,86 @@ async def materialize_occurrence(
             )
         await db.commit()
         return occ.id
+
+
+async def _roster(
+    schedule: Any,
+    config: dict,
+    *,
+    platform: str,
+    now: datetime,
+    session_factory: Any,
+    identity_lookup: Any,
+    with_last_inbound: bool = False,
+) -> tuple[list[tuple[uuid.UUID, Any]], dict[str, datetime]]:
+    """The people this occurrence is for, each with their channel identity.
+
+    A fixed roster is returned whole.  An audience is resolved against the
+    enrollments as they stand right now, filtered to who is due today in the
+    Program's own timezone.
+
+    Also returns when each person last wrote to the Program's sender, keyed
+    by phone: read in one query when the audience's silence filter or the
+    caller (*with_last_inbound*, for the pause) needs it, else empty.
+    """
+    sender = str(config.get("channel_identifier") or "")
+
+    async def _last_inbound(identities) -> dict[str, datetime]:
+        return await followup_store.last_inbound_by_user(
+            session_factory, org_id=schedule.org_id, platform=platform,
+            channel_identifier=sender,
+            platform_user_ids=[i.platform_user_id for i in identities if i is not None],
+        )
+
+    if config.get("audience") is None:
+        roster = []
+        for user_id in config.get("users", []):
+            uid = uuid.UUID(user_id)
+            roster.append(
+                (uid, await identity_lookup(schedule.org_id, platform, uid)),
+            )
+        last = await _last_inbound(i for _, i in roster) if with_last_inbound else {}
+        return roster, last
+
+    try:
+        audience = Audience.from_config(config.get("audience"))
+    except ValueError as exc:
+        # Ops validates audiences before projecting them, so this is drift.
+        # Messaging nobody is the only safe reading of a filter we cannot
+        # understand.
+        logger.warning(
+            "[programs] program %s has an unreadable audience (%s); "
+            "nobody is messaged", schedule.program_id, exc,
+        )
+        return [], {}
+
+    today = now.astimezone(ZoneInfo(str(config.get("timezone") or "UTC"))).date()
+    enrollments = await followup_store.enrollments(
+        session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
+        protocol=audience.protocol, status="active",
+    )
+    identities = {
+        e.user_id: await identity_lookup(schedule.org_id, platform, e.user_id)
+        for e in enrollments
+    }
+    last_by_phone: dict[str, datetime] = {}
+    if audience.silent_days is not None or with_last_inbound:
+        last_by_phone = await _last_inbound(identities.values())
+    roster = []
+    for enrollment in enrollments:
+        identity = identities[enrollment.user_id]
+        last = last_by_phone.get(identity.platform_user_id) if identity is not None else None
+        if ineligibility(
+            audience,
+            start_date=enrollment.start_date,
+            phase=enrollment.phase,
+            enrolled_at=enrollment.created_at,
+            last_inbound_at=last,
+            today=today,
+            now=now,
+        ) is None:
+            roster.append((enrollment.user_id, identity))
+    return roster, last_by_phone
 
 
 async def send_queued_openers(
@@ -229,7 +339,7 @@ async def send_queued_openers(
             hours=deadlines.get(pending.program_id, _DEFAULT_DEADLINE_HOURS),
         )
         async with session_factory() as db:
-            if scheduled_for is not None and _as_utc(scheduled_for) + window <= now:
+            if scheduled_for is not None and as_utc(scheduled_for) + window <= now:
                 # The slot's own response window has already closed.  A
                 # "how are you this morning" sent two days late is wrong,
                 # and retrying it every tick forever is worse.
@@ -251,7 +361,7 @@ async def send_queued_openers(
                 )
                 continue
 
-            if identity is None or _permission(identity) != "granted":
+            if identity is None or followup_store.permission_status(identity) != "granted":
                 withdrawn = await db.execute(_unsent(pending.id).values(
                     delivery_state="canceled",
                     reason="Permission withdrawn before the opener was sent",
@@ -332,10 +442,6 @@ async def _release(db: Any, invitation_id: Any) -> None:
         .values(response_state="not_started", deadline_at=None)
     )
     await db.commit()
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 async def _deadline_hours_by_program(db, program_ids: set) -> dict:

@@ -121,14 +121,20 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "worker_context",
 })
 
-# A project's master is a strict coordinator that answers a quick question in
-# place, so it reads the project's files and knowledge bases.  It starts work
-# only through the thread tools: workers, tasks and delegation are taken away,
-# and so is the coding tool, which like ``delegate_task`` holds the turn.
-PROJECT_MASTER_READ_TOOLS: frozenset[str] = frozenset({
+# A project's master is a strict coordinator that does a simple thing in
+# place: it reads the project's files and knowledge bases, makes a file or a
+# small edit, and runs a quick command.  Anything more it gives out only
+# through the thread tools: workers, tasks and delegation are taken away, and
+# so is the coding tool, which like ``delegate_task`` holds the turn.  The web,
+# the browser and images stay a thread's.
+PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
     "read_file",
     "search_files",
     "list_files",
+    "write_file",
+    "patch",
+    "terminal",
+    "process",
     "kb_list_pages",
     "kb_read_page",
     "kb_search_pages",
@@ -137,6 +143,10 @@ PROJECT_MASTER_EXCLUDED_TOOLS: frozenset[str] = WORKER_EXCLUDED_TOOLS | {
     "delegate_task",
     "run_coding_agent",
 }
+# What the master of a project made on a computer is not sent besides: every
+# thread of such a project works in a copy of the project's folder there, and
+# only its user starts one, from its card.
+PROJECT_ON_COMPUTER_EXCLUDED_TOOLS: frozenset[str] = frozenset({"start_thread"})
 
 # ---------------------------------------------------------------------------
 # Schemas

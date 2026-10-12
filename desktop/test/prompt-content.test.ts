@@ -5,7 +5,9 @@ import type { FolderSheet } from "../src/binding/binder.js";
 import { segments } from "../src/shell/text.js";
 import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
-const SHEET: FolderSheet = { agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null };
+const SHEET: FolderSheet = {
+  agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null, project: null,
+};
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
 const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map((button) => button.id);
 const allowing = (content: { buttons: Array<{ id: string; allows: boolean }> }) => content.buttons.filter((b) => b.allows).map((b) => b.id);
@@ -34,6 +36,20 @@ describe("the folder sheet", () => {
     expect(folderSheet({ ...SHEET, thread: { ...thread, thread: "x".repeat(256) } }).height).toBeGreaterThan(content.height);
     expect(folderSheet({ ...SHEET, thread, refusal: "the folder holds the app's own data" }).details.map((d) => d.label))
       .toEqual(["Folder", "Project", "Thread"]);
+  });
+
+  it("names the new project the folder is for, says its threads work in copies of it, and makes room for both", () => {
+    const content = folderSheet({ ...SHEET, project: "Q3 report" });
+    expect(content.details).toEqual([
+      { label: "Folder", value: "/home/me/notes", code: true, keep: "" },
+      { label: "Project", value: "Q3 report", code: false, keep: "" },
+    ]);
+    expect(content.notes).toEqual(["Each of the project's threads works in a copy of this folder, and what it changes lands here."]);
+    expect(content.height).toBeGreaterThan(folderSheet(SHEET).height);
+    expect(folderSheet(SHEET).notes).toEqual([]);
+    // A project not named yet is named nowhere, and its threads still work in copies.
+    const unnamed = folderSheet({ ...SHEET, project: "" });
+    expect([unnamed.details.map((detail) => detail.label), unnamed.notes]).toEqual([["Folder"], content.notes]);
   });
 
   it("offers only Cancel and Change for a folder that cannot be used, saying why", () => {

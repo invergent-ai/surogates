@@ -4730,7 +4730,7 @@ class AgentHarness(
 
         if action_kind != "ask_user_question":
             return None
-        if "ask_user_question" not in self._tools.tool_names:
+        if not self._can_ask_user_question():
             return None
         if tool_filter is not None and "ask_user_question" not in tool_filter:
             return None
@@ -5010,6 +5010,20 @@ class AgentHarness(
         return content_as_text(value, sep="\n")[:limit]
 
 
+    def _can_ask_user_question(self) -> bool:
+        """Whether ``ask_user_question`` is registered and governance lets it run.
+
+        The final-response rescue and the always-available force-add both
+        hand the model this tool.  An agent whose governance allowlist
+        omits it would then have every question-shaped reply rewritten
+        into a call the gate refuses, and the model retries the refused
+        call for the rest of the wake.
+        """
+        if "ask_user_question" not in self._tools.tool_names:
+            return False
+        gate = self._governance_gate
+        return gate is None or gate.check("ask_user_question", {}).allowed
+
     def _ensure_always_available_tools(
         self,
         tool_filter: set[str] | None,
@@ -5034,7 +5048,7 @@ class AgentHarness(
             return None
         if explicit_allowed:
             return tool_filter
-        if "ask_user_question" not in self._tools.tool_names:
+        if not self._can_ask_user_question():
             return tool_filter
         updated = set(tool_filter)
         updated.add("ask_user_question")
@@ -5285,12 +5299,16 @@ class AgentHarness(
                 if is_project_master(config):
                     from surogates.tools.builtin.coordinator import (
                         PROJECT_MASTER_EXCLUDED_TOOLS,
-                        PROJECT_MASTER_READ_TOOLS,
+                        PROJECT_MASTER_OWN_TOOLS,
+                        PROJECT_ON_COMPUTER_EXCLUDED_TOOLS,
                     )
 
                     user_excluded = set(config.get("excluded_tools") or [])
-                    excluded -= PROJECT_MASTER_READ_TOOLS - user_excluded
+                    excluded -= PROJECT_MASTER_OWN_TOOLS - user_excluded
                     excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
+                    # Where the project works is the server's stamp, never the caller's.
+                    if device_of(config) is not None:
+                        excluded |= PROJECT_ON_COMPUTER_EXCLUDED_TOOLS
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])

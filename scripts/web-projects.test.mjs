@@ -318,7 +318,7 @@ function routesOver(answer) {
 const PROJECT = {
   id: "p-1", name: "Quarterly report", icon: null, created_at: "2026-10-07T10:00:00Z", updated_at: "2026-10-07T11:00:00Z",
   waiting: 1, working: 2, goal: "Close Q3", instructions: "Write in French.", master_session_id: "m-1",
-  coordinator_tier: null, thread_tier: "pro",
+  coordinator_tier: null, thread_tier: "pro", place: { kind: "cloud" }, folder: null,
 };
 const ROW = {
   id: "t-1", title: "Draft A", group: "idle", reason: null, status_line: "Drafted the memo.", progress: null, files: [],
@@ -417,11 +417,15 @@ test("each project route is asked at its own path, and answers the shell's types
     if (url.includes("/threads")) return Response.json(init.method === "POST" ? ROW : [ROW]);
     return Response.json(url === "/api/v1/workstreams" && !init.method ? [PROJECT] : PROJECT);
   });
+  // Where it works is listed with it: the list tells which of the projects work on this computer.
   const summary = {
     id: "p-1", name: "Quarterly report", icon: null, createdAt: "2026-10-07T10:00:00Z", updatedAt: "2026-10-07T11:00:00Z",
-    waiting: 1, working: 2,
+    waiting: 1, working: 2, place: { kind: "cloud" },
   };
-  const project = { ...summary, goal: "Close Q3", instructions: "Write in French.", masterSessionId: "m-1", coordinatorTier: null, threadTier: "pro" };
+  const project = {
+    ...summary, goal: "Close Q3", instructions: "Write in French.", masterSessionId: "m-1", coordinatorTier: null, threadTier: "pro",
+    folder: null,
+  };
   assert.deepEqual(await routes.list(), [summary]);
   assert.deepEqual(await routes.get("p-1"), project);
   assert.deepEqual(await routes.create({ name: "Quarterly report", goal: "Close Q3" }), project);
@@ -458,6 +462,37 @@ test("each project route is asked at its own path, and answers the shell's types
     ["GET", "/api/v1/workstreams/p-1", undefined],
     ["GET", "/api/v1/scheduled-work?created_from_session_id=m-1&status=all&limit=200", undefined],
   ]);
+});
+
+test("a project made on a computer says that computer and its folder, and is made with the folder its user confirmed there", async () => {
+  const onComputer = {
+    ...PROJECT, place: { kind: "device", device_id: "d-1", device_name: "thinkpad", online: true }, folder: "/home/flavius/Q3",
+  };
+  const { asked, routes } = routesOver(() => Response.json(onComputer));
+  const execution = { kind: "device", device_id: "d-1", folder: "/home/flavius/Q3", nonce: "n".repeat(43) };
+  const made = await routes.create({ name: "Quarterly report", goal: "Close Q3", execution });
+  assert.deepEqual([made.place, made.folder], [{ kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: true }, "/home/flavius/Q3"]);
+  assert.deepEqual(asked, [["POST", "/api/v1/workstreams", { name: "Quarterly report", goal: "Close Q3", execution }, "application/json"]]);
+  // A server from before projects had folders says neither: a place it cannot name, and no folder.
+  const { place: _place, folder: _folder, ...older } = PROJECT;
+  assert.deepEqual([projectOf(older).place, projectOf(older).folder], [null, null]);
+  // One whose computer can no longer reach its folder says so; a thread's place says nothing of it.
+  const lost = { kind: "device", device_id: "d-1", device_name: "thinkpad", online: false, lost: true };
+  assert.deepEqual(projectOf({ ...PROJECT, place: lost }).place, { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false, lost: true });
+  assert.deepEqual(projectOf({ ...PROJECT, place: { ...lost, lost: "yes" } }).place, null);
+  assert.deepEqual(threadRowOf({ ...ROW, place: { ...lost, lost: undefined } }).place, { kind: "device", deviceId: "d-1", deviceName: "thinkpad", online: false });
+});
+
+test("a project whose computer lost its folder moves to this computer at its own route, with the folder its user confirmed here", async () => {
+  const here = { ...PROJECT, place: { kind: "device", device_id: "d-2", device_name: "thinkpad", online: true, lost: false }, folder: "/home/flavius/notes" };
+  const { asked, routes } = routesOver(() => Response.json(here));
+  const execution = { kind: "device", device_id: "d-2", folder: "/home/flavius/notes", nonce: "n".repeat(43) };
+  const moved = await routes.useComputer("p-1", execution);
+  assert.deepEqual([moved.place, moved.folder], [{ kind: "device", deviceId: "d-2", deviceName: "thinkpad", online: true, lost: false }, "/home/flavius/notes"]);
+  assert.deepEqual(asked, [["POST", "/api/v1/workstreams/p-1/computer", { execution }, "application/json"]]);
+  // The agent's refusal is said in its words.
+  const refusing = routesOver(() => Response.json({ detail: "This project works in a folder on thinkpad, which still reaches it." }, { status: 409 }));
+  await assert.rejects(refusing.routes.useComputer("p-1", execution), { message: "This project works in a folder on thinkpad, which still reaches it." });
 });
 
 test("a project route puts each id in its path as one segment, so no id reaches another route", async () => {

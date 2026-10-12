@@ -3,10 +3,10 @@
 // sandbox's start, and srt's file hosts bind / whole.
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { duplexPair } from "node:stream";
 
@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Binder, type FolderSheet } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
+import { HookGuard } from "../src/hosts/hooks.js";
 import { fileToolsMissing, pathOutside } from "../src/hosts/policy.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import { FolderLooks } from "../src/shell/folders-held.js";
@@ -289,6 +290,27 @@ describe("a new chat's folder on a mount that does not answer", () => {
       const { answer, longest } = await stalling(() => binder(folder.path).prepareFolder("pick", "window-1", new AbortController().signal));
       expect(answer).toBeNull();
       expect(sheets.map(({ folder: shown, refusal }) => [shown, refusal])).toEqual([[folder.path, `the folder ${folder.path} did not answer`]]);
+      expect(longest).toBeLessThan(1_000);
+    } finally {
+      release();
+    }
+  });
+});
+
+describe("a paused rebase's todo on a mount that stops answering", () => {
+  it("is read for the next command with nothing on this thread waiting on the mount, and the command goes on once it answers", async () => {
+    const { folder, stall, wakeIn, release } = stalledFolder(false);
+    try {
+      const todo = join(folder.path, ".git", "rebase-merge", "git-rebase-todo");
+      mkdirSync(dirname(todo), { recursive: true });
+      writeFileSync(todo, "pick abc one\nexec make test\n");
+      const guard = new HookGuard(folder.path);
+      // Its looks find the todo while the mount answers; the command's refusal then reads the user's steps in it.
+      await guard.watch();
+      stall();
+      wakeIn(2_000);
+      const { answer, longest } = await stalling(() => guard.refusal());
+      expect(answer).toBeNull();
       expect(longest).toBeLessThan(1_000);
     } finally {
       release();

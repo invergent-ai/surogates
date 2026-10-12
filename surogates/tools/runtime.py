@@ -54,6 +54,7 @@ class ToolRuntime:
             channel_files,
             channel_messages,
             checkin,
+            followup,
             voice_call,
             coding_agent,
             coordinator,
@@ -117,7 +118,8 @@ class ToolRuntime:
             channel_files,  # fetch_channel_file (pull a shared channel file)
             channel_messages,  # fetch_channel_messages (read recent channel messages)
             whiteboard,  # whiteboard_draw (canvas chat surface)
-            checkin,  # checkin_outcome, checkin_escalate (Program check-ins)
+            checkin,  # checkin_outcome (Program check-ins)
+            followup,  # followup_enroll/update/status, escalate
             voice_call,  # end_call (a phone call's agent hangs up)
         ]
 

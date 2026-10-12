@@ -63,6 +63,7 @@ interface State {
     routines: Array<{ name: string; scheduleDisplay: string }>;
     // Its files that are gone, each the version that deleted it; more: others, deleted longer ago, may not be listed.
     deleted: { files: Version[]; more: boolean };
+    lost: string | null; // why the project cannot work on this computer now, as Use this computer for this project mends it
   } | null;
   reading: { id: string; title: string } | null; // the thread read in the pane, beside the project's conversation
   // A file's History, shown in the Library in place of its files: its versions, null until they are
@@ -114,6 +115,7 @@ interface Shell {
   menu(which: "app" | "project"): Promise<void>;
   settings(): Promise<void>;
   newProject(): Promise<void>;
+  useHere(): Promise<void>;
   projectSettings(): Promise<void>;
   quitNow(): Promise<void>;
   link(which: string): Promise<void>;
@@ -459,6 +461,9 @@ function renderOverview(state: State): void {
   byId("greeting-line").textContent = overview
     ? (waiting === 0 ? "Nothing is waiting on you." : `${plural(waiting, "thread is", "threads are")} waiting on you.`)
     : state.view.kind === "project" ? "Loading the project's threads…" : "Open a project to see its threads.";
+  // Its words may name the user's folder.
+  byId("use-here").hidden = !overview?.lost;
+  showText(byId("use-here-text"), overview?.lost ?? "");
   byId("thread-count").textContent = String(waiting);
   byId("thread-count").hidden = waiting === 0;
   // Waiting on you always shows, and says what it holds while it holds nothing; the other groups show only with threads.
@@ -671,6 +676,7 @@ byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
 byId("new").addEventListener("click", () => void shell.go("/chat"));
 byId("new-project").addEventListener("click", () => void shell.newProject());
+byId("use-here-button").addEventListener("click", () => void shell.useHere());
 byId("project-settings").addEventListener("click", () => void shell.projectSettings());
 byId("open-projects").addEventListener("click", () => void shell.projects());
 byId("reading-back").addEventListener("click", () => void shell.read(null));

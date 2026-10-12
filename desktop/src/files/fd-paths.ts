@@ -41,12 +41,15 @@ export interface FdPaths {
   shown(where: Where): string;
 }
 
-// On a system the file host is not built for yet, every call is refused.
-const NOT_BUILT = "The file tools are not built for this computer's system yet";
-const unbuilt = new Proxy({} as FdPaths, {
-  get: () => () => {
-    throw new Error(NOT_BUILT);
-  },
-});
+// On a system the file host is not built for yet, every call is refused, in notBuilt's words (platform.ts): files/ is on
+// the agent's disk, which holds no platform.js. The object itself is shown as any other is.
+const NOT_BUILT = `The file host is not built for ${process.platform === "darwin" ? "macOS" : process.platform} yet`;
+const refused = (): never => {
+  throw new Error(NOT_BUILT);
+};
+const unbuilt: FdPaths = {
+  hold: refused, open: refused, lstat: refused, stat: refused, access: refused, mkdir: refused, rmdir: refused, unlink: refused, chmod: refused,
+  link: refused, rename: refused, copy: refused, listing: refused, pathOf: refused, handed: refused, shown: refused,
+};
 
 export const fdPaths: FdPaths = process.platform === "linux" ? linuxFdPaths : unbuilt;

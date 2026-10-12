@@ -49,5 +49,8 @@ E2FSPROGS_FAKE_TIME="$STAMP" fakeroot mke2fs -q -t ext4 -O ^has_journal -L surog
 # mke2fs records each file's time of change as it finds it: the moment of the
 # touch above, which nothing can set on this side. debugfs sets it in the disk.
 # It ends 0 whatever it could not do, and says that after its name and version.
-said="$(find "$tree" -mindepth 1 -printf 'sif "/%P" ctime @'"$STAMP"'\n' | debugfs -w -f - "$OUT" 2>&1 >/dev/null | grep -v '^debugfs [0-9]' || true)"
+# Once it has written to the disk before it closes it, as a tree this size makes
+# it, it writes the superblock too, with its time of last write: the build's, as
+# it is told, and not the moment it closes.
+said="$(find "$tree" -mindepth 1 -printf 'sif "/%P" ctime @'"$STAMP"'\n' | E2FSPROGS_FAKE_TIME="$STAMP" debugfs -w -f - "$OUT" 2>&1 >/dev/null | grep -v '^debugfs [0-9]' || true)"
 [ -z "$said" ] || { echo "agent-disk.sh: debugfs could not set a file's time in $OUT: $said" >&2; exit 1; }

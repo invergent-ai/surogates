@@ -5,6 +5,7 @@
 import { closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -140,11 +141,16 @@ describe("the file host's FdPaths", () => {
     expect((await import("../src/files/fd-paths.js")).fdPaths).toBe(linuxFdPaths);
   });
 
-  it("refuse every call, in words, on a system the file host is not built for yet", async () => {
+  it("refuse every call, in words, on a system the file host is not built for yet, and are shown there as any object is", async () => {
     const { fdPaths } = await importedOn("darwin", () => import("../src/files/fd-paths.js"));
-    const words = "The file tools are not built for this computer's system yet";
+    const { notBuiltWords } = await importedOn("darwin", () => import("../src/platform.js"));
+    const words = "The file host is not built for macOS yet";
+    expect(words).toBe(notBuiltWords("The file host"));
     expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
     expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));
     expect(() => fdPaths.handed()).toThrow(new Error(words));
+    // As a log line, a test's printer or an await is handed it.
+    expect([`${fdPaths}`, JSON.stringify(fdPaths), inspect(fdPaths).startsWith("{")]).toEqual(["[object Object]", "{}", true]);
+    expect(await Promise.resolve(fdPaths)).toBe(fdPaths);
   });
 });

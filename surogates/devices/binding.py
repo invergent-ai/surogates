@@ -104,8 +104,10 @@ async def binding_of(db: AsyncSession, root_session_id: UUID) -> Binding:
     answers that it keeps that copy, ``{"history": {"thread": <id>}}``.
     """
     # Not filtered by device: a bind row is recorded only after the root was
-    # confirmed to name that device, and the server never changes a session's
-    # ``execution``, so the root's one bind row is always its device's.
+    # confirmed to name that device, and the server changes a session's
+    # ``execution`` only as it moves a project's master to another computer,
+    # deleting its bind row in the same transaction (WorkstreamStore.move), so
+    # the root's one bind row is always its device's.
     row = (await db.execute(
         select(DeviceOperation.args, DeviceOperation.outcome).where(
             DeviceOperation.calling_session_id == root_session_id,

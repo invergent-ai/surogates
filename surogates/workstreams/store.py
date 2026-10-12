@@ -8,13 +8,23 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, any_, bindparam, func, not_, or_, select, text, update
+from sqlalchemy import and_, any_, bindparam, delete, func, not_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Event, InboxItem, SessionLease, Workstream, WorkstreamHistory, WorkstreamThread
+from surogates.db.models import (
+    Device,
+    DeviceOperation,
+    Event,
+    InboxItem,
+    SessionLease,
+    Workstream,
+    WorkstreamHistory,
+    WorkstreamThread,
+)
 from surogates.db.models import Session as SessionRow
+from surogates.devices.binding import BIND
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import master_instructions
 from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts, place_of
@@ -142,6 +152,64 @@ class WorkstreamStore:
             master.title = row.name
             await db.commit()
             return row
+
+    async def move(
+        self, workstream_id: UUID, *, away_from: UUID, device_id: UUID, device_name: str, folder: str, **owner: Any,
+    ) -> Workstream | None:
+        """Move a live project of the owner's that works on *away_from* to *device_id*'s *folder*, in one transaction:
+        the project's row, and its master's stamp of where it works, which every thread made after it copies.  None,
+        changing nothing, when the project works elsewhere by now.
+
+        The master's binding on the computer it worked on goes too, so its new computer's bind is its binding from now
+        on.  Its threads keep their own: each works in its copy on the computer it was made on.
+        """
+        async with self._sf() as db:
+            row = await db.scalar(
+                update(Workstream)
+                .where(*_owned(workstream_id, **owner), Workstream.device_id == away_from)
+                .values(device_id=device_id, folder=folder, updated_at=func.now())
+                .returning(Workstream)
+            )
+            if row is None:
+                return None
+            master = await db.get(SessionRow, row.master_session_id, with_for_update=True)
+            config = dict(master.config or {})
+            config["execution"] = {"kind": "device", "device_id": str(device_id), "device_name": device_name}
+            config["workspace_path"] = folder
+            master.config = config
+            await db.execute(delete(DeviceOperation).where(
+                DeviceOperation.calling_session_id == row.master_session_id,
+                DeviceOperation.invocation_id == BIND,
+                DeviceOperation.ordinal == 0,
+            ))
+            await db.commit()
+            return row
+
+    async def lost(self, masters: dict[UUID, UUID]) -> set[UUID]:
+        """The masters among *masters*, each named with the computer its project works on, whose folder can no longer
+        be reached there: that computer was removed, or its access revoked, or it could not set the folder up for the
+        master, as ``binding_of`` reads a binding that failed."""
+        if not masters:
+            return set()
+        async with self._sf() as db:
+            live = set(await db.scalars(
+                select(Device.id).where(Device.id == _any(set(masters.values())), Device.revoked_at.is_(None))
+            ))
+            bound = {
+                master_id: outcome
+                for master_id, outcome in await db.execute(
+                    select(DeviceOperation.calling_session_id, DeviceOperation.outcome).where(
+                        DeviceOperation.calling_session_id == _any(masters),
+                        DeviceOperation.invocation_id == BIND,
+                        DeviceOperation.ordinal == 0,
+                        DeviceOperation.kind == BIND,
+                    )
+                )
+            }
+        return {
+            master_id for master_id, device_id in masters.items()
+            if device_id not in live or master_id not in bound or (bound[master_id] is not None and "ok" not in bound[master_id])
+        }
 
     async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> bool:
         """Record *session_id* as a thread of the project, and title its chat;
@@ -408,9 +476,10 @@ class WorkstreamStore:
                             produced.append((thread_id, path, execution, at))
         return produced
 
-    async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
-        """Each master's last activity, and whether it waits on the user: a
-        question or an approval pending in the project's conversation."""
+    async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool, dict[str, Any]]]:
+        """Each master's last activity, whether it waits on the user: a
+        question or an approval pending in the project's conversation; and
+        where it works, as a thread's place says it."""
         asking = (
             select(InboxItem.id)
             .where(
@@ -422,9 +491,12 @@ class WorkstreamStore:
         )
         async with self._sf() as db:
             found = await db.execute(
-                select(SessionRow.id, SessionRow.updated_at, asking).where(SessionRow.id == _any(master_ids))
+                select(SessionRow.id, SessionRow.updated_at, asking, SessionRow.config["execution"])
+                .where(SessionRow.id == _any(master_ids))
             )
-            return {master_id: (updated_at, asks) for master_id, updated_at, asks in found}
+            return {
+                master_id: (updated_at, asks, place_of(execution)) for master_id, updated_at, asks, execution in found
+            }
 
     async def proposal(self, master_id: UUID, proposal_id: UUID) -> dict[str, Any] | None:
         """The master's ``thread.proposed`` payload for *proposal_id*."""

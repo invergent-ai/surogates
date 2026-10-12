@@ -273,3 +273,49 @@ async def test_a_reachable_user_is_queued_not_skipped(
     assert rows[0].delivery_state == "queued"
     assert rows[0].reason is None
     assert rows[0].platform_user_id
+
+
+@pytest.mark.asyncio
+async def test_a_program_set_to_pause_skips_someone_who_stopped_answering(
+    sf, schedule, identity_lookup,
+):
+    """``pause_after_missed`` stops the openers after N unanswered in a row,
+    with the reason in the history; one write from the person lifts it."""
+    from datetime import timedelta
+
+    from surogates.followup import store as followup_store
+
+    schedule.config["pause_after_missed"] = 2
+    schedule.config["channel_identifier"] = "pn1"
+    user_id = uuid.UUID(schedule.config["users"][0])
+    ident = await identity_lookup(schedule.org_id, "whatsapp", user_id)
+    async with sf() as db:
+        for hours in (48, 24):
+            db.add(ProgramInvitationRow(
+                occurrence_id=uuid.uuid4(), program_id=schedule.program_id,
+                org_id=schedule.org_id, agent_id=schedule.agent_id,
+                user_id=user_id, platform="whatsapp",
+                platform_user_id=ident.platform_user_id,
+                delivery_state="accepted", response_state="no_reply_by_deadline",
+                escalation_state="none",
+                created_at=_utcnow().replace(tzinfo=None) - timedelta(hours=hours),
+            ))
+        await db.commit()
+
+    occ_id = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=identity_lookup, now=_utcnow(),
+    )
+    [row] = await _invitations(sf, occ_id)
+    assert row.delivery_state == "skipped"
+    assert row.reason.startswith("Paused")
+
+    await followup_store.record_inbound(
+        sf, org_id=schedule.org_id, platform="whatsapp",
+        platform_user_id=ident.platform_user_id, channel_identifier="pn1",
+    )
+    occ_id = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=identity_lookup,
+        now=_utcnow() + timedelta(minutes=1),
+    )
+    [row] = await _invitations(sf, occ_id)
+    assert row.delivery_state == "queued"

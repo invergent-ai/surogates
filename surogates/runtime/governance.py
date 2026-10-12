@@ -162,20 +162,31 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
     return profile or None
 
 
+#: Tools that were renamed: a policy written with the old name keeps meaning
+#: the same tool.  ``checkin_escalate`` became ``escalate`` when escalation
+#: stopped being limited to check-ins.  Applied here, where ops' blobs are
+#: parsed, so the allow, deny and approval lists all honour it.
+_RENAMED_TOOLS = {"checkin_escalate": "escalate"}
+
+
 def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
     """Non-empty string tool names under *key*, or an empty set.
 
     A malformed value never widens the policy: an unusable
     ``allowed_tools`` becomes "no allow-list" and an unusable
-    ``denied_tools`` simply matches nothing.
+    ``denied_tools`` simply matches nothing.  A renamed tool's old name
+    also names its new one.
     """
     value = governance.get(key)
     if isinstance(value, list):
         # Strip: a padded entry that silently matches nothing fails OPEN for
         # ``denied_tools`` and ``require_approval``, which is the wrong
         # direction for both.
-        return {
+        names = {
             t.strip() for t in value if isinstance(t, str) and t.strip()
+        }
+        return names | {
+            new for old, new in _RENAMED_TOOLS.items() if old in names
         }
     if value not in (None, []):
         logger.warning(

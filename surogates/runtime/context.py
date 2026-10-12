@@ -185,6 +185,12 @@ class AgentRuntimeContext:
     # never had one.
     whiteboard_enabled: bool = False
 
+    # "Programs" capability: scheduled check-ins and follow-up protocols.
+    # Gates the follow-up tools (enrol, update, status, escalate).  Defaults
+    # False: a payload from an ops build that predates the field describes
+    # an agent whose Programs never reach the runtime anyway.
+    programs_enabled: bool = False
+
     # "Multi session" capability.  When False each end-user gets exactly
     # one session per channel — the create routes reuse the latest
     # reusable session instead of creating another.  Defaults True so a

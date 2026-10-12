@@ -40,6 +40,12 @@ END $$;
 -- When a device's token was last reissued (``Device.reauthorized_at``): none was dated before.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS reauthorized_at timestamptz;
 
+-- The computer and folder a project made in Surogate Desktop works on (``Workstream.device_id``,
+-- ``Workstream.folder``): a project made before them was made in the cloud, and stays there.
+ALTER TABLE workstreams
+    ADD COLUMN IF NOT EXISTS device_id uuid,
+    ADD COLUMN IF NOT EXISTS folder text;
+
 -- Retrofit for databases created before ``idx_device_operations_session_kind`` joined the model: what a session asked
 -- of one kind, by when it closed.  A landing on a computer reads a thread's commands, writes and records since its last
 -- landing; without this it reads every operation the thread ever asked, at every landing.
@@ -1017,3 +1023,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS sign_in_provider text;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_username
     ON users (org_id, lower(username))
     WHERE username IS NOT NULL;
+
+-- ── program_invitations: one person's history in one Program ────────
+-- The missed check-in streak and the silence pause read a person's last
+-- few invitations of a Program, newest first, once per person per pass.
+-- Without this every one of those reads scans the Program's whole history.
+CREATE INDEX IF NOT EXISTS idx_program_invitations_program_user
+    ON program_invitations (program_id, user_id, created_at);

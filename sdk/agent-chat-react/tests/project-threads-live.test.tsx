@@ -351,6 +351,54 @@ describe("a thread's card, live", () => {
     expect(startProposedThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "2" });
   });
 
+  it("has a master on the user's computer, through AgentChat, start its cards in the project's folder there", async () => {
+    const PROPOSAL = "5d1c0e7a-3f42-4b8e-9a61-2c7d8e9f0a1b";
+    for (const [here, starts] of [["thinkpad", true], ["desktop-2", false]] as const) {
+      const events = new FakeStream();
+      const startLocalThread = vi.fn(async ({ key }: { key: string }) => row({ id: `thread-${key}` }));
+      const adapter = {
+        ...NO_BROWSER_ADAPTER,
+        ...project(new FakeStream(), () => []),
+        startProposedThread: vi.fn(),
+        startLocalThread,
+        getLocalDeviceId: async () => here,
+        listSessions: async () => ({ sessions: [], total: 0 }),
+        getSession: async ({ sessionId }: { sessionId: string }) => ({
+          id: sessionId, status: "completed", config: {
+            workstream_role: "coordinator", workstream_id: "project-1",
+            execution: { kind: "device", device_id: "thinkpad", device_name: "ThinkPad" },
+          },
+        }),
+        openEventStream: () => events,
+      } as unknown as AgentChatAdapter;
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="master" />);
+      });
+      await settle();
+      act(() => {
+        events.emit("thread.proposed", { proposal_id: PROPOSAL, threads: [
+          { key: "1", title: "Check the totals", goal: "Check the totals in Budget.xlsx.", where: "device" },
+        ] }, 1);
+      });
+      await settle();
+      const card = container.querySelector('[data-testid="proposed-thread"]')!;
+      const start = [...card.querySelectorAll("button")].find((found) => found.textContent === "Start");
+      if (starts) {
+        await act(async () => start?.click());
+        expect(startLocalThread).toHaveBeenCalledWith({ projectId: "project-1", proposalId: PROPOSAL, key: "1", title: "Check the totals" });
+      } else {
+        expect(start).toBeUndefined();
+        expect(card.textContent).toContain("Start this thread in Surogate Desktop on ThinkPad");
+      }
+      act(() => root?.unmount());
+      root = null;
+      container.remove();
+    }
+  });
+
   it("follows the project of a master's conversation, and only a master's", async () => {
     for (const [config, followed] of [
       [{ workstream_role: "coordinator", workstream_id: "project-1" }, true],

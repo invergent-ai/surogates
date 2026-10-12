@@ -361,6 +361,19 @@ describe("the bindings", () => {
     after.close();
   });
 
+  it("keep the mark of a project's own folder, and none for any other chat", () => {
+    const before = new OperationJournal(path);
+    before.bindings.add({ ...binding("r1", 1), project: true });
+    before.bindings.add({ ...binding("r2", 2), history: "r2" });
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.get("r1")).toEqual({ ...binding("r1", 1), project: true });
+    expect(after.bindings.get("r2")).toEqual({ ...binding("r2", 2), history: "r2" });
+    after.bindings.setMode("r1", "ask");
+    expect(after.bindings.get("r1")).toEqual({ ...binding("r1", 1), mode: "ask", project: true });
+    after.close();
+  });
+
   it("bind a root once", () => {
     const journal = new OperationJournal(path);
     journal.bindings.add(binding("r1", 1));
@@ -713,6 +726,20 @@ describe("a journal written before a binding could name a thread's copy", () => 
     journal.close();
     const after = new OperationJournal(path);
     expect(after.bindings.all()).toEqual([binding("r0", 1), binding("r1", 2, "ask"), { ...binding("r2", 3), history: "r2" }]);
+    after.close();
+  });
+
+  it("opens a journal from before projects had folders with no chat a project's, and takes a project's folder beside them", () => {
+    written();
+    const db = new DatabaseSync(path);
+    db.exec(`ALTER TABLE bindings ADD COLUMN history TEXT`);
+    db.close();
+    const journal = new OperationJournal(path);
+    asItWas(journal);
+    journal.bindings.add({ ...binding("r2", 3), project: true });
+    journal.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.all()).toEqual([binding("r0", 1), binding("r1", 2, "ask"), { ...binding("r2", 3), project: true }]);
     after.close();
   });
 

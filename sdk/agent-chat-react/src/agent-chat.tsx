@@ -16,6 +16,7 @@ import { cn } from "./lib/utils";
 import {
   isSubAgentSession,
   readOnlyReasonForSession,
+  sessionComputer,
 } from "./lib/sessions";
 import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
@@ -214,6 +215,14 @@ export function AgentChat({
     && typeof sessionConfig.workstream_id === "string"
     ? sessionConfig.workstream_id
     : null;
+  // A project made in Surogate Desktop: its master works in the project's folder on that computer.
+  const projectComputer = useMemo(() => {
+    const execution = projectId ? sessionConfig?.execution as { kind?: unknown; device_id?: unknown } | undefined : undefined;
+    const name = sessionComputer(sessionConfig);
+    return execution?.kind === "device" && typeof execution.device_id === "string" && name !== null
+      ? { deviceId: execution.device_id, name }
+      : null;
+  }, [projectId, sessionConfig]);
   const threadRows = useProjectThreads(adapter, projectId);
 
   // Reset right-stack pane defaults when the user flips view modes.
@@ -430,6 +439,7 @@ export function AgentChat({
         onOpenBilling,
         onOpenSession: onSessionChange,
         projectId,
+        projectComputer,
         threadRows,
         readOnly: disabled === true,
       }}

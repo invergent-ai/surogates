@@ -3,7 +3,8 @@
 
 import { expect, it } from "vitest";
 
-import { notBuilt, TARGETS, targetOf } from "../src/platform.js";
+import { notBuilt, notBuiltWords, TARGETS, targetOf } from "../src/platform.js";
+import { importedOn } from "./platforms.js";
 
 it("is the target of Linux on x64 and of macOS on Apple silicon, and of no other computer", () => {
   expect(targetOf("linux", "x64")).toBe("linux-x64");
@@ -34,4 +35,11 @@ it("names macOS's files in folders of their own, beside Linux's", () => {
 it("says plainly, of a part that has only Linux's side so far, that it is not built for another OS yet", () => {
   const os = process.platform === "darwin" ? "macOS" : process.platform;
   expect(() => notBuilt("Surogate Desktop's data folder")).toThrow(`Surogate Desktop's data folder is not built for ${os} yet`);
+  expect(notBuiltWords("driving a browser")).toBe(`driving a browser is not built for ${os} yet`);
+});
+
+it("says so in the words of the OS it was imported on, as each part picks its side", async () => {
+  const there = await importedOn("darwin", () => import("../src/platform.js"));
+  expect(() => there.notBuilt("The folder lock")).toThrow(new Error("The folder lock is not built for macOS yet"));
+  expect(there.notBuiltWords("driving a browser")).toBe("driving a browser is not built for macOS yet");
 });

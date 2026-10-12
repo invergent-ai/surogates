@@ -48,11 +48,12 @@ from .test_workstreams import create, master_of, patch, system_prompt, turn_call
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def call_tool(api, session, name: str, *, gate=None, **arguments) -> dict:
+async def call_tool(api, session, name: str, *, gate=None, lease=None, **arguments) -> dict:
     """One call of *name* in *session*'s turn, executed as the harness executes it.
 
     The store, Redis, storage and database are the app's.  The sandbox pool
-    is a stub that must stay unused: a thread tool runs in the worker.
+    is a stub that must stay unused: a thread tool runs in the worker.  A
+    session on the user's computer answers only under the *lease* its worker holds.
     """
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
@@ -62,7 +63,7 @@ async def call_tool(api, session, name: str, *, gate=None, **arguments) -> dict:
     message = await execute_single_tool(
         {"id": f"call_{name}", "function": {"name": name, "arguments": json.dumps(arguments)}},
         session=session,
-        lease=SimpleNamespace(lease_token=uuid4()),
+        lease=lease or SimpleNamespace(lease_token=uuid4()),
         store=state.session_store,
         tools=registry,
         tenant=SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test"),
