@@ -501,7 +501,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], macos.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, macos.fetch("permissions"))
     jobs = macos.fetch("jobs")
-    assert_equal %w[unit], jobs.keys
+    assert_equal %w[unit vm-native], jobs.keys
     jobs.each do |name, job|
       assert_equal "macos-15", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -652,6 +652,7 @@ class ReleaseWorkflowTest < Minitest::Test
       },
       "desktop-macos.yml" => {
         "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed a2447334158f4627]],
+        "vm-native" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 5f09c6834194b464 52c04af5d542ff2d aa9be0ef548ec62e 196c921f1237fc02 fb5acba9341bb560]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
