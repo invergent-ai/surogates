@@ -48,5 +48,16 @@ jobs:
       - name: Build surogate-spawn
         run: native/spawn/build.sh
 
+      # What the file host runs on: the app's code, fsat beside it, a node at bin/node as the app's own (this
+      # runner's, until the release pins macOS's), and the app's rg beside it, on the PATH as the app's tools are.
+      - name: Build the file host
+        run: |
+          npx tsc -p tsconfig.build.json
+          native/fsat/build.sh
+          mkdir -p bin
+          cp "$(command -v node)" bin/node
+          scripts/rg.sh
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos

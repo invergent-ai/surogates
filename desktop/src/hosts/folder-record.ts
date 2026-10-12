@@ -1,6 +1,6 @@
 // What the app knows about a folder a tool host works in, and the lock that gives
 // a folder one host at a time. Both are outside every sandbox: the record in the
-// app's data, the lock in the kernel.
+// app's data, the lock in the kernel (on macOS, a file of the app's data the kernel locks).
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -28,12 +28,13 @@ export interface FolderRecord {
 }
 
 // One host per folder, by device and inode however it is spelled: the lock as this OS
-// takes it (folder-lock.ts), tried again until *waitMs* have passed.
-export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS): Promise<FolderLock> {
+// takes it (folder-lock.ts), in the app's data folder *dataDir* where it takes one there,
+// tried again until *waitMs* have passed.
+export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS, dataDir?: string): Promise<FolderLock> {
   const uid = process.getuid?.() ?? 0;
   const deadline = Date.now() + waitMs;
   for (;;) {
-    const lock = await takeLock(uid, dev, ino);
+    const lock = await takeLock(uid, dev, ino, dataDir);
     if (lock !== null) return lock;
     if (Date.now() >= deadline) throw new FolderBusy();
     await new Promise((resolve) => setTimeout(resolve, 100));

@@ -9,11 +9,13 @@ import { describe, expect, it } from "vitest";
 
 const NODE = fileURLToPath(new URL("../bin/node", import.meta.url));
 const BUILT = fileURLToPath(new URL("../dist/hosts/handed.js", import.meta.url));
+// A descriptor of the listing shell's own, by its /proc entry on Linux, by /dev/fd on macOS.
+const OPEN = process.platform === "linux" ? "/proc/$$/fd/$fd" : "/dev/fd/$fd";
 // What a child of the Node lists of its own descriptors, before and after *between* ran.
 const CODE = (between: string) => `
 import { spawnSync } from "node:child_process";
 import { closeHanded } from ${JSON.stringify(BUILT)};
-const lists = () => spawnSync("/bin/bash", ["-c", 'for fd in $(seq 0 60); do [ ! -e /proc/$$/fd/$fd ] || echo -n "$fd "; done'], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).stdout.trim();
+const lists = () => spawnSync("/bin/bash", ["-c", 'for fd in $(seq 0 60); do [ ! -e ${OPEN} ] || echo -n "$fd "; done'], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).stdout.trim();
 const before = lists();
 const closed = ${between};
 console.log(JSON.stringify({ before, closed, after: lists() }));`;

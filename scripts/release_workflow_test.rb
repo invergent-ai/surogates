@@ -651,7 +651,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "guest" => ["eca5e065813cef05", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 bd6e6df4eb2ca928 8c986439d5d86488 9443e3fdb92fa905 53a6f85d9c3376f6 8a9f74820350edf8 d20f5f9b98bf4212]],
       },
       "desktop-macos.yml" => {
-        "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed 28019958b7950ec1 a2447334158f4627]],
+        "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed 28019958b7950ec1 9363936d488f3cf0 a2447334158f4627]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],

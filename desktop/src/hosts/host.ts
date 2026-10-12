@@ -187,7 +187,7 @@ async function start(message: HostStart): Promise<void> {
   const srtTmp = join(message.dataDir, "srt", key);
   // srt's sockets there must have paths this OS takes.
   if (!srtOs.socketsFit(srtTmp)) throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
-  lock = await lockFolder(dev, ino, message.lockWaitMs);
+  lock = await lockFolder(dev, ino, message.lockWaitMs, message.dataDir);
   // Before anything in the folder is touched: what a host killed with the app left of srt
   // (on Linux its bridges, socat, and anything else whose command line names srt's folder).
   srtOs.sweep(srtTmp);
