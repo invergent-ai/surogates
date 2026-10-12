@@ -57,7 +57,9 @@ const pidOf = () => Number(readFileSync(join(options.run, "vm.pid"), "utf8"));
 
 beforeEach(() => {
   built(fileURLToPath(new URL("../dist/guest/control.js", import.meta.url)));
-  dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-darwin-")));
+  // A short name: the VM's sockets go in the runtime folder under it, and a Mac's temp folder takes 57 of a socket path's 103
+  // bytes before it (/private/var/folders/<2>/<28>/T/).
+  dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-")));
   for (const folder of ["data/vm", "data/logs", "image", "app", "work"]) mkdirSync(join(dir, folder), { recursive: true });
   for (const file of ["image/vmlinuz", "image/rootfs.img", "app/agent.img"]) writeFileSync(join(dir, file), "");
   options = {
