@@ -43,14 +43,17 @@ class _FakeDeliveryService:
         return list(self._items)
 
     async def mark_delivered(
-        self, outbox_id: int, *, provider_message_id: str | None = None
+        self, outbox_id: int, *, provider_message_id: str | None = None,
+        payload: dict | None = None,
     ) -> None:
         self.delivered.append((outbox_id, provider_message_id))
 
     async def mark_failed(self, outbox_id: int, error: str) -> None:
         self.failed.append((outbox_id, error))
 
-    async def mark_dead(self, outbox_id: int, error: str) -> None:
+    async def mark_dead(
+        self, outbox_id: int, error: str, *, payload: dict | None = None,
+    ) -> None:
         self.dead.append((outbox_id, error))
 
 

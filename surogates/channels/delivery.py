@@ -283,8 +283,13 @@ class DeliveryService:
         outbox_id: int,
         *,
         provider_message_id: str | None = None,
+        payload: dict | None = None,
     ) -> None:
-        """Mark an outbox item as successfully delivered."""
+        """Mark an outbox item as successfully delivered.
+
+        *payload* is the row's payload as claimed; it tells the reporting
+        below whether the row was a template.
+        """
         async with self._sf() as db:
             await db.execute(
                 update(DeliveryOutbox)
@@ -297,30 +302,48 @@ class DeliveryService:
             outbox_id,
             provider_message_id,
         )
-        await self._report_to_invitation(
+        await self._report_unprompted(
             outbox_id, provider_message_id=provider_message_id, error=None,
+            payload=payload,
         )
 
-    async def _report_to_invitation(
-        self, outbox_id: int, *, provider_message_id: str | None, error: str | None,
+    async def _report_unprompted(
+        self,
+        outbox_id: int,
+        *,
+        provider_message_id: str | None,
+        error: str | None,
+        payload: dict | None,
     ) -> None:
-        """Tell a check-in invitation, if one rides on this row, how it went.
+        """Tell whichever unprompted message rides on this row how it went.
 
         This is the only point at which the provider's message id is known,
-        and therefore the only way a later status webhook can ever match the
-        invitation. Best-effort: a bookkeeping failure must not fail the
+        and therefore the only way a later status webhook can ever match it:
+        a check-in opener (a Program invitation), or a template reopening a
+        conversation for an alert or an operator's message (an outreach
+        row).  Openers can be plain content (Slack), so every row is checked
+        against the invitations; only a ``template`` payload can be an
+        outreach row.  Best-effort: a bookkeeping failure must not fail the
         delivery that already happened.
         """
+        from surogates.followup.outreach import record_outreach_delivery
         from surogates.programs.delivery import record_outbox_result
 
         try:
-            await record_outbox_result(
+            if await record_outbox_result(
                 self._sf, outbox_id,
                 provider_message_id=provider_message_id, error=error,
-            )
+            ):
+                return
+            if (payload or {}).get("template"):
+                await record_outreach_delivery(
+                    self._sf, outbox_id,
+                    provider_message_id=provider_message_id, error=error,
+                )
         except Exception:  # noqa: BLE001
             logger.warning(
-                "[programs] could not report outbox %d to its invitation",
+                "[delivery] could not report outbox %d to the invitation or "
+                "outreach message it carries",
                 outbox_id, exc_info=True,
             )
 
@@ -345,7 +368,9 @@ class DeliveryService:
             await db.commit()
         logger.warning("Outbox %d failed: %s (will retry)", outbox_id, error)
 
-    async def mark_dead(self, outbox_id: int, error: str) -> None:
+    async def mark_dead(
+        self, outbox_id: int, error: str, *, payload: dict | None = None,
+    ) -> None:
         """Terminally fail an outbox item — a permanent error or age-exhausted.
 
         Sets ``status='failed'`` so :meth:`claim_batch` never re-claims it; the
@@ -362,8 +387,8 @@ class DeliveryService:
         # A check-in opener that died here was never seen by the user. Say
         # so on the invitation, or the deadline sweep later records them as a
         # non-responder for a question they were never asked.
-        await self._report_to_invitation(
-            outbox_id, provider_message_id=None, error=error,
+        await self._report_unprompted(
+            outbox_id, provider_message_id=None, error=error, payload=payload,
         )
 
     # ------------------------------------------------------------------

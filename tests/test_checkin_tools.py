@@ -1,4 +1,4 @@
-"""The two tools an agent uses to close or escalate a check-in."""
+"""Closing a check-in, and escalating from inside one."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import sqlalchemy as sa
 
 from surogates.db.models import (
     InboxItem,
+    Session as SessionRow,
     ProgramInvitationRow,
     ProgramOccurrenceRow,
     ProgramScheduleRow,
@@ -77,6 +78,18 @@ async def awaiting_invitation(sf):
             session_id=uuid.uuid4(),
         )
         db.add(row)
+        # The person's own WhatsApp conversation, which escalate reads its
+        # context from.
+        db.add(
+            SessionRow(
+                id=row.session_id, org_id=org_id, agent_id="a1",
+                channel="whatsapp",
+                config={
+                    "whatsapp_channel_id": "40746148303",
+                    "channel_identifier": "pn1",
+                },
+            )
+        )
         await db.commit()
         return row
 
@@ -134,9 +147,9 @@ async def test_escalation_targets_the_operator_not_the_user(
 ):
     # An item created against the acting principal lands in the user's own
     # inbox and reaches nobody else.
-    from surogates.tools.builtin.checkin import handle_checkin_escalate
+    from surogates.tools.builtin.followup import handle_escalate
 
-    await handle_checkin_escalate(
+    await handle_escalate(
         {"reason": "BP 180/110"}, **_kwargs(sf, awaiting_invitation),
     )
     item = await _latest_inbox_item(sf)
@@ -153,7 +166,7 @@ async def test_escalation_targets_the_operator_not_the_user(
 @pytest.mark.asyncio
 async def test_a_failed_escalation_is_visible(sf, awaiting_invitation):
     # The agent saying it escalated is not evidence anyone was told.
-    from surogates.tools.builtin.checkin import handle_checkin_escalate
+    from surogates.tools.builtin.followup import handle_escalate
 
     async with sf() as db:
         sched = (
@@ -166,7 +179,7 @@ async def test_a_failed_escalation_is_visible(sf, awaiting_invitation):
         sched.config = {}  # no escalation target configured
         await db.commit()
 
-    result = await handle_checkin_escalate(
+    result = await handle_escalate(
         {"reason": "x"}, **_kwargs(sf, awaiting_invitation),
     )
     row = await _reload(sf, awaiting_invitation.id)
@@ -180,9 +193,9 @@ async def test_a_failed_escalation_is_visible(sf, awaiting_invitation):
 async def test_escalation_does_not_close_the_check_in(sf, awaiting_invitation):
     # Escalation and response are separate axes: raising a hand to the operator
     # does not mean the user finished answering.
-    from surogates.tools.builtin.checkin import handle_checkin_escalate
+    from surogates.tools.builtin.followup import handle_escalate
 
-    await handle_checkin_escalate(
+    await handle_escalate(
         {"reason": "BP 180/110"}, **_kwargs(sf, awaiting_invitation),
     )
     assert (await _reload(sf, awaiting_invitation.id)).response_state == "replied"

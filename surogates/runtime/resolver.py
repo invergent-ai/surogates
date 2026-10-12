@@ -131,6 +131,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         # payload from an ops build that predates the capability
         # describes an agent that never had one.
         whiteboard_enabled=bool(payload.get("whiteboard_enabled", False)),
+        programs_enabled=bool(payload.get("programs_enabled", False)),
         multi_session=multi_session_from_payload(payload),
         linkable_channels=tuple(payload.get("linkable_channels") or ()),
         end_user_token_allowance=payload.get("end_user_token_allowance"),

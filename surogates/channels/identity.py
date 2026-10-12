@@ -41,6 +41,23 @@ class ResolvedIdentity:
     platform_user_id: str
 
 
+def channel_user_email(platform: str, platform_user_id: str, org_id: UUID | str) -> str:
+    """The synthetic email of the user a channel identity provisions.
+
+    Namespaced by org so the same platform user id in two orgs (or two ids
+    differing only by a stripped '@') can't collide.
+    ``uq_users_org_lower_email`` on (org_id, lower(email)) enforces this, and
+    downstream lookups treat the address as a key — so anything else that
+    provisions a channel user (ops does, at checkout) must build it here.
+
+    Only '@' is stripped, so an adapter must normalise anything else that
+    cannot sit in an email local part (e.g. a leading '+' on an E.164 id)
+    before it reaches here.
+    """
+    local_part = platform_user_id.lstrip("@")
+    return f"{platform}-{local_part}@{org_id}.channels.surogate.local"
+
+
 async def resolve_identity(
     session_factory: async_sessionmaker[AsyncSession],
     platform: str,
@@ -158,16 +175,7 @@ async def get_or_create_channel_identity(
     if existing is not None:
         return existing
 
-    # Synthetic address namespaced by org so the same platform user id in two
-    # orgs (or two ids differing only by a stripped '@') can't collide.
-    # ``uq_users_org_lower_email`` on (org_id, lower(email)) enforces this,
-    # and downstream lookups treat the address as a key.
-    #
-    # Only '@' is stripped, so an adapter must normalise anything else that
-    # cannot sit in an email local part (e.g. a leading '+' on an E.164 id)
-    # before it reaches here.
-    local_part = platform_user_id.lstrip("@")
-    email = f"{platform}-{local_part}@{org_id}.channels.surogate.local"
+    email = channel_user_email(platform, platform_user_id, org_id)
 
     async with session_factory() as db:
         user_id = (
@@ -324,10 +332,16 @@ async def get_or_create_channel_session(
     session_factory: async_sessionmaker[AsyncSession],
     storage: object = None,
     settings: object = None,
+    resume: bool = True,
 ) -> UUID:
     """Reuse the most-recent session for the channel routing key — resuming an
     idle (completed/paused) one so the conversation continues — or create a new
     session. The caller (the inbound pipeline) enqueues the returned session.
+
+    ``resume=False`` is for writers that only append to the conversation (an
+    opener, an outreach message): resuming records work for the agent, and
+    with no new message to answer the woken agent replies to nothing.  The
+    person's reply resumes it through the inbound pipeline.
 
     Parameters
     ----------
@@ -448,7 +462,7 @@ async def get_or_create_channel_session(
             await session_store.update_session_config_key(
                 existing_id, "channel_identifier", incoming_identifier,
             )
-        if existing_status in ("completed", "paused"):
+        if resume and existing_status in ("completed", "paused"):
             await session_store.resume_session(existing_id, source="channel_message")
             logger.info(
                 "Resuming %s session %s (status=%s, key=%s)",

@@ -56,9 +56,13 @@ def build_input_prompt(
 
     ``reply_markup`` is an ``inline_keyboard`` dict when the prompt is a
     single choice-question, else ``None``.
+
+    No header of our own: the people on the other end may be end users
+    writing in their own language, and the question already says what is
+    being asked.
     """
-    lines_html: list[str] = ["❓ <b>I need your input</b>"]
-    lines_plain: list[str] = ["❓ I need your input"]
+    lines_html: list[str] = []
+    lines_plain: list[str] = []
     if context.strip():
         lines_html.append(_esc(context.strip()))
         lines_plain.append(context.strip())
