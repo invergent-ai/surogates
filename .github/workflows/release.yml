@@ -289,7 +289,8 @@ jobs:
   # desktop-release Environment, which only a v* tag deploys to, it writes and signs the
   # release's manifest with the release key, of this tag, the build's own two words for its
   # tarball and that one of the describe job's, each a job's own output, then puts the release,
-  # the install script and latest.json on R2 under desktop/. The cloud's release waits for none.
+  # the install script and latest.json on R2 under desktop/. The cloud's release waits for none;
+  # the cluster's rollout waits for all.
   # What rests on the describe job's runner alone: that a signed release's root helper is the
   # tag's install script. The job that signs opens no tarball, and cannot see it.
   # Every action of the workflow is named by its commit: a tag can be moved to other code.
@@ -471,11 +472,17 @@ jobs:
           body_path: release-notes.md
 
   # The cluster's rollout (update-images.yml): the nodes update their agent images and the agent
-  # pods restart. It waits for the cloud's release, which waits for the images, the npm packages
-  # and the wheel, and for no job of the desktop's: one of those that fails changes how the run
-  # ends and never whether the cluster is rolled out.
+  # pods restart. It runs only once every other job of the run has succeeded: the cloud's release
+  # (the images, the npm packages and the wheel), and the desktop's, from its VM image to its
+  # publish and the image's manifest attached. Its needs reach each job, and a job that failed,
+  # was skipped or was cancelled keeps the cluster as it is (success(), the default, said here).
   rollout:
-    needs: release
+    needs:
+      - release
+      - npm
+      - desktop-publish
+      - desktop-vm-manifest
+    if: success()
     # It holds the cluster's SSH key and reads nothing of the repository's.
     permissions: {}
     uses: ./.github/workflows/update-images.yml
