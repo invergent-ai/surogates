@@ -632,7 +632,20 @@ describe("a paused rebase's or cherry-pick's todo", () => {
   });
 });
 
-describe("the guard, in a folder holding a name that is not valid UTF-8", () => {
+// Where this computer's temp folder takes such a name: APFS refuses one (EILSEQ).
+const takesAnyName = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "names-"));
+  try {
+    mkdirSync(Buffer.concat([Buffer.from(`${probe}/`), Buffer.from([0xff])]));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
+describe.runIf(takesAnyName)("the guard, in a folder holding a name that is not valid UTF-8", () => {
   it("refuses commands, naming it as the walk reads it back, and lets them run once it is gone", async () => {
     // The walk reads the name back with U+FFFD, and no path it can build reaches it.
     const named = Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0xff])]);

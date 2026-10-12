@@ -63,11 +63,11 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
   });
 
   // The probe in the sandbox of *config*, as the host wraps the helper: what it said, or how it failed.
-  async function probe(config: SandboxRuntimeConfig = policy, line = srtOs.line): Promise<{ said: Record<string, string> | null; status: number | null; stderr: string }> {
+  async function probe(config: SandboxRuntimeConfig = policy): Promise<{ said: Record<string, string> | null; status: number | null; stderr: string }> {
     SandboxManager.updateConfig(config);
     const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(PROBE)} ${quote(JSON.stringify(at))}`);
     const [file, flag, wrapped] = argv;
-    const ran = spawnSync(file!, ["--norc", "--noprofile", flag!, line(wrapped!)], {
+    const ran = spawnSync(file!, ["--norc", "--noprofile", flag!, srtOs.line(wrapped!)], {
       cwd: String(at.folder), env: { HOME: String(at.home), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, encoding: "utf8", timeout: 60_000,
     });
     const last = ran.stdout.trim().split("\n").at(-1) ?? "";
@@ -88,7 +88,9 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
     const { said, status, stderr } = await probe();
     console.log(`Seatbelt: ${JSON.stringify(said)}`);
     expect(status, stderr).toBe(0);
-    // What a copy of native code in the folder does is measured alone, below.
+    // Seatbelt as srt writes it lets a program map as code any file it may read, the folder's too (measured on
+    // macOS 15): the helper loads none but fsat. Written out, not held to.
+    console.log(`Seatbelt maps a copy of fsat in the folder: ${said?.["load a copy of fsat in the folder"]}`);
     const reached = Object.entries(said ?? {}).filter(([name, what]) => what === "ok" && name !== "load a copy of fsat in the folder").map(([name]) => name).sort();
     expect(reached).toEqual([
       "list the folder", "load fsat", "read the folder", "run rg", "write the folder", "write the working folder",
@@ -98,11 +100,6 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
     expect(statSync(join(String(at.folder), "made.txt")).isFile()).toBe(true);
   });
 
-  it("measures whether srt's own profile maps fsat as code, without the rule the host adds", async () => {
-    const { said } = await probe(policy, (line) => line);
-    console.log(`Seatbelt without fsat's rule: load fsat ${said?.["load fsat"]}; a copy in the folder ${said?.["load a copy of fsat in the folder"]}`);
-    expect(said?.["read the folder"]).toBe("ok");
-  });
 
   it("measures which of the system's folders the helper's node, fsat and rg need", async () => {
     const needed: string[] = [];
@@ -113,6 +110,15 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
       if (!works) needed.push(dir);
     }
     console.log(`Seatbelt needs: ${JSON.stringify(needed)} of ${JSON.stringify(srtOs.system)}`);
+    // And taken out one after another, each kept out while they still start: one least list, in this order.
+    let kept = [...srtOs.system];
+    for (const dir of srtOs.system) {
+      const fewer = kept.filter((path) => path !== dir);
+      const without = { ...policy, filesystem: { ...policy.filesystem, allowRead: (policy.filesystem.allowRead ?? []).filter((path) => !srtOs.system.includes(path) || fewer.includes(path)) } };
+      const { said, status } = await probe(without);
+      if (status === 0 && said?.["read the folder"] === "ok" && said["load fsat"] === "ok" && said["run rg"] === "ok") kept = fewer;
+    }
+    console.log(`Seatbelt starts them on: ${JSON.stringify(kept)}`);
     expect((await probe()).status).toBe(0);
   });
 });
@@ -145,7 +151,8 @@ describe.runIf(process.platform === "darwin")("a tool host on macOS", { timeout:
     harness = new Harness(undefined, undefined, NODE);
     harness.send(start);
     const said = await harness.until((messages) => messages.find((message) => message.type === "ready" || message.type === "failed"));
-    expect(said, harness.stderr).toMatchObject({ type: "ready" });
+    // A host that failed says why, and its stderr, in the failure.
+    expect({ said, stderr: harness.stderr }).toMatchObject({ said: { type: "ready" } });
     expect(await harness.op("1", "read", { key: `${folder}/a.txt`, max_bytes: null })).toEqual({ ok: Buffer.from("alpha\n").toString("base64") });
     expect(await harness.op("2", "write", { key: `${folder}/b.txt`, data: Buffer.from("beta\n").toString("base64") })).toEqual({ ok: null });
     expect(readFileSync(join(folder, "b.txt"), "utf8")).toBe("beta\n");

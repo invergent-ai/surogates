@@ -9,17 +9,22 @@ import { describe, expect, it } from "vitest";
 
 const NODE = fileURLToPath(new URL("../bin/node", import.meta.url));
 const BUILT = fileURLToPath(new URL("../dist/hosts/handed.js", import.meta.url));
-// A descriptor of the listing shell's own, by its /proc entry on Linux, by /dev/fd on macOS.
-const OPEN = process.platform === "linux" ? "/proc/$$/fd/$fd" : "/dev/fd/$fd";
-// What a child of the Node lists of its own descriptors, before and after *between* ran.
+const FSAT = fileURLToPath(new URL("../dist/files/fsat.js", import.meta.url));
+// What a child of the Node would hold of its descriptors. On Linux, what a child lists by its /proc entries. On macOS
+// a child Node starts holds nothing it is not given (libuv's posix_spawn closes the rest), so what an exec would keep
+// is read in the Node itself instead: each descriptor open and not close-on-exec, as fsat tells it.
+const LISTS = process.platform === "linux"
+  ? `const lists = () => spawnSync("/bin/bash", ["-c", 'for fd in $(seq 0 60); do [ ! -e /proc/$$/fd/$fd ] || echo -n "$fd "; done'], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).stdout.trim();`
+  : `const { fsat } = await import(${JSON.stringify(FSAT)}); const lists = () => [...Array(61).keys()].filter((fd) => fsat().cloexec(fd) === false).join(" ");`;
+// What the Node holds of its own descriptors that a child would inherit, before and after *between* ran.
 const CODE = (between: string) => `
 import { spawnSync } from "node:child_process";
 import { closeHanded } from ${JSON.stringify(BUILT)};
-const lists = () => spawnSync("/bin/bash", ["-c", 'for fd in $(seq 0 60); do [ ! -e ${OPEN} ] || echo -n "$fd "; done'], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).stdout.trim();
+${LISTS}
 const before = lists();
 const closed = ${between};
 console.log(JSON.stringify({ before, closed, after: lists() }));`;
-const run = (between: string) => JSON.parse(spawnSync("/bin/bash", ["-c", 'exec 5</dev/null 30</dev/null 31</dev/null 47</dev/null; exec "$@"', "bash", NODE, "--input-type=module", "-e", CODE(between)], { encoding: "utf8" }).stdout) as unknown;
+const run = (between: string) => JSON.parse(spawnSync("/bin/bash", ["--norc", "--noprofile", "-c", 'exec 5</dev/null 30</dev/null 31</dev/null 47</dev/null; exec "$@"', "bash", NODE, "--input-type=module", "-e", CODE(between)], { encoding: "utf8" }).stdout) as unknown;
 
 describe("a file host's first line", () => {
   it("closes what it was handed that a child of its own would inherit: the sandboxed helper then holds none of it", () => {

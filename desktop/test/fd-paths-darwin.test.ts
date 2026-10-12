@@ -60,7 +60,7 @@ describe.runIf(process.platform === "darwin")("macOS's FdPaths", () => {
   it("are fsat's numbers, Darwin's headers' own, name for name", () => {
     const headers = JSON.parse(spawnSync(CONSTANTS, { encoding: "utf8" }).stdout) as Record<string, number>;
     expect(fsat().constants).toEqual(headers);
-    expect(FLAGS.NOFOLLOW).toBe(constants.O_NOFOLLOW | headers.O_NOFOLLOW_ANY!);
+    expect(FLAGS.NOFOLLOW).toBe(headers.O_NOFOLLOW_ANY);
   });
 
   it("hold a folder by its descriptor, and never through a link at its name, nor anything but a folder", () => {
@@ -144,6 +144,9 @@ describe.runIf(process.platform === "darwin")("macOS's FdPaths", () => {
 
   it("open a path with no link on the way to it, where O_NOFOLLOW alone follows one above its last name", () => {
     symlinkSync(dir, join(base, "via"));
+    symlinkSync("a", join(dir, "link"));
+    // A link at its last name too, as O_NOFOLLOW refuses one.
+    expect(code(() => openSync(join(dir, "link"), constants.O_RDONLY | FLAGS.NOFOLLOW))).toBe("ELOOP");
     closeSync(openSync(join(base, "via", "a"), constants.O_RDONLY | constants.O_NOFOLLOW));
     expect(code(() => openSync(join(base, "via", "a"), constants.O_RDONLY | FLAGS.NOFOLLOW))).toBe("ELOOP");
     expect(code(() => paths.open(join(base, "via", "a"), constants.O_RDONLY | FLAGS.NOFOLLOW))).toBe("ELOOP");

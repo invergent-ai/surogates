@@ -18,10 +18,11 @@ const darwinFlags = (): FsatConstants | null => (darwin === undefined ? (darwin 
 export const FLAGS = {
   /**
    * What a path the file helper opens never goes through, a link: at its last name, as O_NOFOLLOW; and on macOS at
-   * any name on the way too, O_NOFOLLOW_ANY (open(2)), a second layer under the sandbox's own. Every path the helper
-   * opens is one that resolves to itself, so no link on the way to it is one it was given.
+   * any name on the way, O_NOFOLLOW_ANY (open(2): "do not follow symlinks in the entire path"), a second layer under
+   * the sandbox's own. Every path the helper opens is one that resolves to itself, so no link on the way to it is one
+   * it was given. Darwin takes one of the two, never both: an open with both fails EINVAL (measured on macOS 15).
    */
   get NOFOLLOW(): number {
-    return constants.O_NOFOLLOW | (darwinFlags()?.O_NOFOLLOW_ANY ?? 0);
+    return darwinFlags()?.O_NOFOLLOW_ANY ?? constants.O_NOFOLLOW;
   },
 };

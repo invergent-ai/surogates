@@ -131,6 +131,26 @@ vi.mock("../src/files/fsat.js", async (importOriginal) => {
   };
   return { ...real, fsat };
 });
+// A file's mtime set to the nanosecond, from "@<seconds>": by GNU touch on Linux; by CPython's os.utime on macOS,
+// whose touch takes no such time.
+function setMtime(time: string, path: string): void {
+  if (process.platform === "linux") return void execFileSync("touch", ["-d", time, path]);
+  const [whole, part = ""] = time.slice(1).replace(/^-/, "").split(".");
+  const ns = (BigInt(whole!) * 1_000_000_000n + BigInt(part.padEnd(9, "0"))) * (time.startsWith("@-") ? -1n : 1n);
+  execFileSync("python3", ["-c", "import os, sys; os.utime(sys.argv[1], ns=(int(sys.argv[2]),) * 2)", path, String(ns)]);
+}
+// Whether this computer's temp folder takes a name that is not valid UTF-8: APFS refuses one (EILSEQ).
+const takesAnyName = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "names-"));
+  try {
+    writeFileSync(Buffer.concat([Buffer.from(`${probe}/`), Buffer.from([0x6e, 0xff])]), "");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
 // What the file helper looks at a file in a held folder by: the folder's /proc entry on Linux, its descriptor on macOS.
 const THROUGH_HELD = process.platform === "linux" ? /^\/proc\/self\/fd\/\d+\/(a\.txt|b\.md)$/ : /^fd \d+: (a\.txt|b\.md)$/;
 // This process's open descriptors, one entry each.
@@ -189,7 +209,7 @@ describe("stat", () => {
     ["@-0.128129134", -0.12812913399999992],
     ["@1700000000.987654321", 1700000000.9876542],
   ])("answers the mtime of %s to the last bit, as CPython's st_mtime", async (time, expected) => {
-    execFileSync("touch", ["-d", time, join(folder, "a.txt")]);
+    setMtime(time, join(folder, "a.txt"));
     const answer = (await run("stat", { key: `${folder}/a.txt` })) as { ok: { mtime: number } };
     expect(answer.ok.mtime).toBe(expected);
   });
@@ -765,7 +785,7 @@ describe("walk", () => {
     expect(listed(walked)).toEqual([[".github/f.txt", 1], ["a.txt", 6], ["src/f.txt", 1], ["sub/_whiteboard/f.txt", 1]]);
   });
 
-  it("leaves out a name that is not UTF-8, and lists its decoded twin once", async () => {
+  it.runIf(takesAnyName)("leaves out a name that is not UTF-8, and lists its decoded twin once", async () => {
     writeFileSync(Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0x6e, 0xff])]), "bytes");
     writeFileSync(join(folder, "n\ufffd"), "t");
     expect(listed(await walk())).toEqual([["a.txt", 6], ["n\ufffd", 1]]);
@@ -841,7 +861,7 @@ describe("walk", () => {
     await walk();
     // Its key is checked for links first; a link put in its place since is still not followed.
     const key = opens.made.find((open) => open.path === folder);
-    expect(key !== undefined && (key.flags & constants.O_NOFOLLOW) !== 0).toBe(true);
+    expect(key !== undefined && (key.flags & FLAGS.NOFOLLOW) === FLAGS.NOFOLLOW).toBe(true);
     // Never by a path that a folder swapped for a link on the way could take elsewhere.
     expect(lstats.paths).not.toContain(join(folder, "a.txt"));
     expect(lstats.paths).not.toContain(join(folder, "sub", "b.md"));

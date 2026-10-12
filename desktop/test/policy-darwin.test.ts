@@ -20,8 +20,8 @@ describe("the file helper's sandbox on macOS", () => {
       filesystem: {
         denyRead: ["/"],
         allowRead: [
-          "/usr", "/bin", "/sbin", "/System/Library", "/System/Cryptexes", "/System/Volumes/Preboot/Cryptexes", "/Library/Apple",
-          "/private/etc", "/private/var/db/timezone", "/dev", "/app", "/f", "/t", "/copy", "/kept",
+          "/usr", "/bin", "/sbin", "/System/Library", "/System/Cryptexes", "/System/Volumes/Preboot/Cryptexes", "/private/etc",
+          "/private/var/db/timezone", "/dev", "/app", "/f", "/t", "/copy", "/kept",
         ],
         allowWrite: ["/f", "/t", "/kept"],
         denyWrite: ["/tmp/claude", "/private/tmp/claude"],
@@ -66,19 +66,9 @@ describe("the file helper's sandbox on macOS", () => {
     }
   });
 
-  it("lets the helper map fsat as code, by a rule at the end of srt's profile, and refuses a line it does not recognise", async () => {
-    const { mapFsat } = await importedOn("darwin", () => import("../src/hosts/srt-darwin.js"));
-    const line = `env TMPDIR=/tmp/claude /usr/bin/sandbox-exec -p '(version 1)\n(deny default)\n(allow file-read* (subpath "/f/it'"'"'s"))' /bin/bash -c 'node helper.js'`;
-    expect(mapFsat(line, "/app/dist/native/fsat.node")).toBe(
-      `env TMPDIR=/tmp/claude /usr/bin/sandbox-exec -p '(version 1)\n(deny default)\n(allow file-read* (subpath "/f/it'"'"'s"))\n(allow file-map-executable (literal "/app/dist/native/fsat.node"))' /bin/bash -c 'node helper.js'`,
-    );
-    expect(() => mapFsat("/bin/bash -c 'node helper.js'")).toThrow(/cannot let the file helper load fsat/);
-    expect(() => mapFsat("/usr/bin/sandbox-exec -p '(version 1)")).toThrow(/cannot let the file helper load fsat/);
-    expect(() => mapFsat(line, "/it's/fsat.node")).toThrow(/holds a quote/);
-  });
-
-  it("puts its sockets where a Mac's 104 bytes take them, and leaves no process of srt's", async () => {
+  it("runs srt's line as srt gives it, puts its sockets where a Mac's 104 bytes take them, and leaves no process of srt's", async () => {
     const [, { srtOs }] = await onMac();
+    expect(srtOs.line("/bin/bash -c 'x'")).toBe("/bin/bash -c 'x'");
     // srt-mux-<5 digits>-<4 base-36 digits>.sock is 23 bytes, behind a slash, after the folder's own slash.
     expect(srtOs.socketsFit(`/${"d".repeat(103 - 25)}`)).toBe(true);
     expect(srtOs.socketsFit(`/${"d".repeat(103 - 24)}`)).toBe(false);
