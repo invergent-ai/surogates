@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { autostartEntry, autostartFile, LAUNCHER, loginRefusal, MISREAD, REFUSED, setStartAtLogin, startsAtLogin } from "../src/shell/autostart.js";
+import { autostartEntry, autostartFile, loginItem, loginRefusal, MISREAD, REFUSED, setStartAtLogin, startsAtLogin } from "../src/shell/login-item-linux.js";
+import { LAUNCHER } from "../src/shell/places-linux.js";
 
 let config: string;
 
@@ -45,7 +46,7 @@ describe("start at login", () => {
   });
 
   it("is on while its entry is in the user's autostart folder, which it makes when it must", () => {
-    const file = autostartFile(config);
+    const file = autostartFile(join(config, "autostart"));
     expect(file).toBe(join(config, "autostart", "surogate.desktop"));
     expect(startsAtLogin(file)).toBe(false);
     setStartAtLogin(file, true, [LAUNCHER]);
@@ -59,10 +60,21 @@ describe("start at login", () => {
   });
 
   it("leaves no temporary file in the user's autostart folder when its entry cannot be written", () => {
-    const file = autostartFile(config);
+    const file = autostartFile(join(config, "autostart"));
     // A folder where the entry goes: its rename fails, as its write fails on a full disk.
     mkdirSync(join(file, "taken"), { recursive: true });
     expect(() => setStartAtLogin(file, true, [LAUNCHER])).toThrow();
     expect(readdirSync(join(config, "autostart"))).toEqual(["surogate.desktop"]);
+  });
+
+  it("is the app's login item: on while its entry is in the places' autostart folder, refusing what the entry refuses, and started hidden by the entry's own argument", () => {
+    const item = loginItem({ root: join(config, "data"), cache: join(config, "cache"), autostartFolder: join(config, "autostart"), launcher: LAUNCHER });
+    expect(item.on()).toBe(false);
+    item.set(true, [LAUNCHER]);
+    expect([item.on(), readFileSync(join(config, "autostart", "surogate.desktop"), "utf8")]).toEqual([true, autostartEntry([LAUNCHER])]);
+    item.set(false, [LAUNCHER]);
+    expect(item.on()).toBe(false);
+    expect([item.refusal(["/home/f/100%/electron"]), item.refusal([LAUNCHER])]).toEqual([REFUSED, null]);
+    expect([item.startedHidden([LAUNCHER, "--hidden"]), item.startedHidden([LAUNCHER])]).toEqual([true, false]);
   });
 });

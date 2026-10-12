@@ -3,10 +3,10 @@
 // app's data, the lock in the kernel.
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:net";
 import { dirname } from "node:path";
 
 import type { ProcessHandle } from "../guest/processes.js";
+import { type FolderLock, takeLock } from "./folder-lock.js";
 
 // How long a host waits for another host on the same folder to let it go.
 export const LOCK_WAIT_MS = 10_000;
@@ -27,30 +27,16 @@ export interface FolderRecord {
   processes: ProcessHandle[];
 }
 
-// One host per folder, by device and inode however it is spelled: a name in the
-// kernel's abstract socket namespace, which one process at a time can hold and the
-// kernel frees when that process dies, however it dies. Each sandbox has its own
-// network namespace, so no command can take it.
-export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS): Promise<Server> {
-  const name = `\0surogate-folder-${process.getuid?.() ?? 0}-${dev}-${ino}`;
+// One host per folder, by device and inode however it is spelled: the lock as this OS
+// takes it (folder-lock.ts), tried again until *waitMs* have passed.
+export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS): Promise<FolderLock> {
+  const uid = process.getuid?.() ?? 0;
   const deadline = Date.now() + waitMs;
   for (;;) {
-    // Anything in the host's network namespace can connect to the name: drop it at once.
-    const server = createServer((socket) => socket.destroy());
-    try {
-      await new Promise<void>((resolve, reject) => {
-        // on, not once: a later error lands on the settled promise, not on the host.
-        server.on("error", reject);
-        server.listen(name, resolve);
-      });
-      // It holds the name; it does not keep the host running.
-      server.unref();
-      return server;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
-      if (Date.now() >= deadline) throw new FolderBusy();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    const lock = await takeLock(uid, dev, ino);
+    if (lock !== null) return lock;
+    if (Date.now() >= deadline) throw new FolderBusy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 

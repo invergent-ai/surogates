@@ -17,7 +17,8 @@ import { app, net } from "electron";
 
 import { BOOT_ID } from "./dist/binding/folder.js";
 import { OperationJournal } from "./dist/journal/journal.js";
-import { installedUpdates, updateLine, Updates } from "./dist/shell/updates.js";
+import { installedUpdates } from "./dist/shell/installer-linux.js";
+import { updateLine, Updates } from "./dist/shell/updates.js";
 
 const ROOT = "11111111-1111-4111-8111-111111111111";
 const { version } = JSON.parse(readFileSync(join(import.meta.dirname, "package.json"), "utf8"));

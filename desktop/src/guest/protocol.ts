@@ -45,8 +45,15 @@ export const MAX_INBOUND = 160;
 // How the guest mounts a root's folder, as the host's VM backend shared it. Each
 // kind names who maps the folder's owner to the root's guest uid. virtiofs: its
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
+// vz: Apple's (macOS's Virtualization framework), which maps no owner. Its tag is one of
+// the VM's fixed devices (VZ_TAG); *name*, the folder's directory in a device that holds several.
 // A backend whose share maps no owner, or maps them at the mount, adds its own kind.
-export type Share = { kind: "virtiofs"; tag: string };
+export type Share = { kind: "virtiofs"; tag: string } | { kind: "vz"; tag: string; name?: string };
+
+// Apple's share's devices: one that holds every folder, or one of MAX_SHARES of a folder each.
+export const VZ_TAG = /^(?:surogate|s[1-8])$/;
+// A folder's directory in the device that holds every folder: never used again in its guest, as Linux's tags are not.
+export const VZ_NAME = /^r[1-9][0-9]{0,8}$/;
 
 // The control port, ai.surogate.control (spec, Section 11, Transport). The agent
 // says hello first, and the host answers it with its user and the company's CA; from

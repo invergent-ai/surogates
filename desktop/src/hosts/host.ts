@@ -13,7 +13,6 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
-import type { Server } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -24,6 +23,7 @@ import { confirmedFolder } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
+import type { FolderLock } from "./folder-lock.js";
 import { FolderBusy, type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
@@ -63,7 +63,7 @@ let made: string[] = [];
 // Why a start failed, as this host says it: a copy's names its files by the folder's path (start.ts).
 let named = (text: string): string => text;
 // Held for the host's life: the kernel lets go of it when the host goes.
-let lock: Server | null = null;
+let lock: FolderLock | null = null;
 let recordPath: string | null = null;
 // What the folder's record holds, while this host runs.
 let saved: FolderRecord | null = null;

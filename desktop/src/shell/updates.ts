@@ -6,16 +6,14 @@
 // an installed app; the helper checks all of them again before it applies anything.
 // Electron-free.
 
-import type { ChildProcess } from "node:child_process";
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 import {
   closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 
-import { spawnClean } from "../clean-child.js";
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
+import { type Target, type TargetFiles, TARGETS, targetOf } from "../platform.js";
 import { installBase, rootsOwn } from "../vm/image.js";
 
 export const CHECK_MS = 6 * 60 * 60 * 1000;
@@ -77,19 +75,12 @@ const ASK_MS = 30_000;
 // A version: x.y.z in the ten digits, and no part with a zero before it, as the root helper has it:
 // dpkg reads 1.2.03 as 1.2.3, and a version's folder is named as it is written.
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-// What the install script leaves an installed app, each root's alone: its record of where it was
-// installed from; the helper pkexec runs, whose list of release keys is the one this computer
-// trusts; and the mark of the version installed for every user now.
-export const ROOT_RECORD = "/etc/surogate/install.json";
-export const ROOT_HELPER = "/opt/surogate/bin/surogate-apply-update";
-const INSTALLED = "/opt/surogate/current/release.json";
-
 // A release, as its signed manifest names it (release/publish.sh sign).
 export interface Release {
   version: string;
   channel: string;
-  platform: "linux";
-  arch: "x64";
+  platform: TargetFiles["platform"];
+  arch: TargetFiles["arch"];
   url: string; // relative to <base>/desktop/
   sha256: string;
   size: number;
@@ -139,10 +130,6 @@ const DISMISSED = 126;
 const NOT_AUTHORIZED = 127;
 const AS_ANOTHER_USER = "Error executing command as another user:";
 const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
-// The most that is kept of what a helper said, its end: its last lines are why it failed.
-const SAID_MAX = 4000;
-// How long what a helper says is waited for once the helper itself has ended.
-const OUTPUT_MS = 2_000;
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
 // The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest
@@ -171,13 +158,6 @@ function shown(why: string): string {
   const letters = [...why];
   return letters.length <= WHY_MAX ? why : `${letters.slice(0, WHY_MAX - 1).join("")}\u2026`;
 }
-// How an installed app runs the root helper: pkexec, by its whole path, on the helper at the path
-// with no link in it that the install script's polkit action names. Never with pkexec's own agent:
-// started from a terminal in a session with no polkit agent, pkexec would ask for a password on
-// that terminal and wait there, with the app's line at "Installing". Without it, pkexec ends at
-// once with 127, and the line says an administrator is needed.
-export const AS_ROOT = ["/usr/bin/pkexec", "--disable-internal-agent", ROOT_HELPER];
-
 // The update's line in the sidebar: what the user is told, and the button they act on it with.
 export interface UpdateLine {
   text: string;
@@ -224,51 +204,6 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
     default:
       return null;
   }
-}
-
-/**
- * What runs the root helper on a downloaded release: *command*, then --apply and the files'
- * paths, with no more of the app's environment than a PATH. In an installed app, pkexec and
- * the helper's path; polkit asks an administrator, and the helper checks the files again as root.
- */
-export function helperRun(command: string[]): (files: Staged) => Promise<Applied> {
-  return (files) => new Promise((resolve) => {
-    const [program, ...args] = command;
-    let child: ChildProcess;
-    try {
-      // With its three standard descriptors and nothing else the app has open: pkexec is root's
-      // process for as long as its prompt is.
-      child = spawnClean(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
-        stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" },
-      });
-    } catch (error) {
-      return resolve({ code: null, said: error instanceof Error ? error.message : String(error) });
-    }
-    // Before anything else is asked of it: one that could not be started, as for want of file
-    // descriptors, tells its error later, and has no output to read.
-    child.once("error", (error) => resolve({ code: null, said: error.message }));
-    // What it says is one stream, read as it comes: a letter may come in two reads. Its end alone
-    // is kept, cut at each read by the one rule, so that no more than a read of it is ever held.
-    const decoder = new StringDecoder("utf8");
-    const kept = (all: string) => all.slice(-SAID_MAX);
-    let said = "";
-    child.stderr?.on("data", (chunk: Buffer) => {
-      said = kept(said + decoder.write(chunk));
-    });
-    // One a signal ended has no exit code: how it ended is the last of what is said of it.
-    const answer = (code: number | null, signal: NodeJS.Signals | null): void => {
-      clearTimeout(waited);
-      said = kept(said + decoder.end());
-      resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() });
-    };
-    // Its exit is its answer. What it says ends with it, or a moment after; a program it left
-    // running holds that open for as long as it runs, and is not waited for beyond OUTPUT_MS.
-    let waited: NodeJS.Timeout | undefined;
-    child.once("exit", (code, signal) => {
-      waited = setTimeout(() => answer(code, signal), OUTPUT_MS);
-    });
-    child.once("close", answer);
-  });
 }
 
 /** Whether version *a* comes after *b*, each x.y.z, compared part by part as numbers. */
@@ -407,18 +342,20 @@ function oneObject(bytes: Buffer): Record<string, unknown> | null {
 
 /**
  * The release *manifest*, from *url*, names: once one of *keys* signed its exact bytes, in
- * *signature*, and it is a release of *channel* for this computer, as the root helper's own check
- * has one (release_of in release/install.sh). The app takes only what the helper will take: what
- * it took and the helper refused would be offered as an update, and then refused. Throws why not.
+ * *signature*, and it is a release of *channel* for *target*, this computer's, as the root helper's
+ * own check has one (release_of in release/install.sh). The app takes only what the helper will
+ * take: what it took and the helper refused would be offered as an update, and then refused. A
+ * computer the app is built for none of takes none. Throws why not.
  */
-export function signedRelease(url: string, manifest: Buffer, signature: Buffer, keys: KeyObject[], channel: string): Release {
+export function signedRelease(url: string, manifest: Buffer, signature: Buffer, keys: KeyObject[], channel: string, target: Target | null = targetOf()): Release {
   if (!keys.some((key) => verify(null, manifest, key, signature))) throw new Unsigned(`${url} is not signed by Surogate's release key`);
   const release: Partial<Release> = oneObject(manifest) ?? {};
   // Whole numbers below 10^15, as the helper's own check has them.
   const counted = (value: unknown, least: number) => Number.isSafeInteger(value) && (value as number) >= least && (value as number) < 1e15;
   const { version } = release;
-  if (!(typeof version === "string" && VERSION.test(version) && release.channel === channel && release.platform === "linux" && release.arch === "x64"
-    && release.url === `releases/${version}/surogate-desktop-${version}-linux-x64.tar.gz`
+  const files = target === null ? null : TARGETS[target];
+  if (!(files !== null && typeof version === "string" && VERSION.test(version) && release.channel === channel && release.platform === files.platform && release.arch === files.arch
+    && release.url === `${files.releaseDir(version)}/${files.tarball(version)}`
     && typeof release.sha256 === "string" && /^[0-9a-f]{64}$/.test(release.sha256) && counted(release.size, 1) && counted(release.stateSchema, 1))) {
     throw new Error(`${url} is not a release of Surogate Desktop for this computer`);
   }
@@ -527,18 +464,11 @@ export interface UpdatesOptions {
   cache: string; // <cache>/surogate/updates
   fetch: Fetch;
   signal: AbortSignal; // the quit: a check or a download under way stops with the app
-  apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's
+  apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's (installer-linux.ts)
   log?: (words: string) => void; // told, whole, what pkexec and the helper said of an install that did not end well
   standing?: string; // a file of the app's own, where it keeps how long the newest release has been unsigned; in memory without
   now?: () => number; // the clock: Date.now
-}
-
-/**
- * An installed app's updates: what the install script left it, where the user's downloads go, and
- * the root helper run under polkit.
- */
-export function installedUpdates(version: string, cache: string, fetch: Fetch, signal: AbortSignal): UpdatesOptions {
-  return { version, record: ROOT_RECORD, rootOwned: true, helper: ROOT_HELPER, installed: INSTALLED, cache, fetch, signal, apply: helperRun(AS_ROOT) };
+  target?: Target | null; // the releases taken, and where on the base they are: this computer's (targetOf)
 }
 
 /** The app's updates: one check at a time, each change told. */
@@ -626,7 +556,10 @@ export class Updates {
     }
     // Put right since, as the install script leaves them: the line goes.
     if (this.state.state === "broken") this.set({ state: "none" });
-    const latest = `${base}/desktop/latest.json`;
+    const target = this.options.target === undefined ? targetOf() : this.options.target;
+    if (target === null) throw new Error("Surogate Desktop has no releases for this computer");
+    const at = TARGETS[target];
+    const latest = `${base}/desktop/${at.latest}`;
     const manifest = await this.small(latest, MANIFEST_MAX);
     // Its signature is its release's own, at the release's place, which is sent before latest.json
     // names the release and never again: no moment has a manifest beside another's signature. The
@@ -634,10 +567,10 @@ export class Updates {
     // it, and a version is all it may be.
     const named = oneObject(manifest)?.version;
     if (typeof named !== "string" || !VERSION.test(named)) throw new Error(`${latest} is not a release of Surogate Desktop for this computer`);
-    const signature = await this.small(`${base}/desktop/releases/${named}/manifest.json.sig`, SIGNATURE_MAX);
+    const signature = await this.small(`${base}/desktop/${at.releaseDir(named)}/manifest.json.sig`, SIGNATURE_MAX);
     let release: Release;
     try {
-      release = signedRelease(latest, manifest, signature, keys, channel);
+      release = signedRelease(latest, manifest, signature, keys, channel, target);
     } catch (error) {
       // Signed by no key the helper lists: forged, or signed by a key that a release this computer
       // never took brought. The helper would refuse it too. The app keeps its version and checks

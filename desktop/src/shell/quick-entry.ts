@@ -7,22 +7,20 @@
 
 import { BrowserWindow, screen } from "electron";
 
+import { notBuilt } from "../platform.js";
 import { lockPage } from "./main-window.js";
+import * as linux from "./quick-entry-linux.js";
 import { ownPage } from "./window-policy.js";
 
 export const WIDTH = 606;
 export const HEIGHT = 470;
-// Its shortcut, Claude Desktop's own on Linux.
-export const QUICK_ENTRY_KEYS = "Ctrl+Alt+Space";
 // The longest message it takes, in UTF-16 units, as JavaScript counts them: a paste of a whole book is said, not sent.
 export const LONGEST = 100_000;
 
-/**
- * A Wayland session, as Claude Desktop tells one: by its session type, or else by a Wayland display.
- * Electron's globalShortcut grabs keys from the X server, and no app's grab is global there.
- */
-export const waylandSession = (env: NodeJS.ProcessEnv): boolean =>
-  env.XDG_SESSION_TYPE ? env.XDG_SESSION_TYPE === "wayland" : Boolean(env.WAYLAND_DISPLAY);
+/** The keys that open quick entry from anywhere, by this OS (quick-entry-linux.ts), or null where the app takes none. */
+export const quickEntryKeys: (env: NodeJS.ProcessEnv) => string | null = process.platform === "linux"
+  ? linux.quickEntryKeys
+  : () => notBuilt("Surogate Desktop's quick entry shortcut");
 
 export interface QuickEntryOptions {
   page: string; // quick.html

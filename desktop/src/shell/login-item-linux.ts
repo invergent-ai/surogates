@@ -1,14 +1,15 @@
-// Start at login (spec, Section 7): an entry in the user's autostart folder, as the XDG
+// Start at login on Linux (spec, Section 7): an entry in the user's autostart folder, as the XDG
 // Autostart specification reads one, which starts the app with its window hidden. Electron's
 // login-item API does not support Linux. The entry is the setting: on while it is there.
 
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import type { LoginItem } from "./login-item.js";
+import type { Places } from "./places.js";
+
 // What the app is started with at login: its window waits for the user.
 export const HIDDEN = "--hidden";
-// The installed app's launcher (spec, Section 9): it stays where it is through updates.
-export const LAUNCHER = "/usr/local/bin/surogate";
 
 // GNOME looks for the program of an Exec whose path holds a % before it reads %% as one, finds
 // none, and starts nothing. An argument's % it reads as written.
@@ -23,8 +24,8 @@ export const loginRefusal = (command: readonly string[]): string | null => {
   return command.some((word) => /[$`\\]/.test(word)) ? MISREAD : null;
 };
 
-/** The entry's place: the autostart folder of *configHome*, the user's XDG config folder. */
-export const autostartFile = (configHome: string): string => join(configHome, "autostart", "surogate.desktop");
+/** The entry's place in *folder*, the user's autostart folder (places.ts). */
+export const autostartFile = (folder: string): string => join(folder, "surogate.desktop");
 
 // One argument of Exec, as the Desktop Entry specification reads it: a percent sign doubled, an
 // argument with a reserved character quoted, with ", `, $ and \ escaped in it, then every
@@ -63,4 +64,15 @@ export function setStartAtLogin(file: string, on: boolean, command: readonly str
     rmSync(next, { force: true });
     throw error;
   }
+}
+
+/** The login item of the app whose places are *places*: its entry in the user's autostart folder. */
+export function loginItem(places: Places): LoginItem {
+  const file = autostartFile(places.autostartFolder!);
+  return {
+    on: () => startsAtLogin(file),
+    refusal: loginRefusal,
+    set: (on, command) => setStartAtLogin(file, on, command),
+    startedHidden: (argv) => argv.includes(HIDDEN),
+  };
 }

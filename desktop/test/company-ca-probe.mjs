@@ -1,5 +1,5 @@
 // Run by this package's Electron as its main, in an Ubuntu container that the install script set up
-// with --ca-cert: the app's own trust of the company's CA (dist/shell/company-ca.js), as its main
+// with --ca-cert: the app's own trust of the company's CA (dist/shell/ca-source-linux.js), as its main
 // does it at start, on that release's certutil and NSS. Laid out as a release is, the Electron
 // knows itself installed, and reads /etc/surogate/ca.pem as an installed app does. Then each TLS
 // stack against servers of this process: one the CA signed for localhost, one it signed for
@@ -11,7 +11,7 @@ import { createServer, get } from "node:https";
 
 import { app, net } from "electron";
 
-import { companyCaFile, trustCompanyCa } from "../dist/shell/company-ca.js";
+import { companyCaFile, trustCompanyCa } from "../dist/shell/ca-source-linux.js";
 
 const companyCa = process.env.PROBE_BROWSER ? undefined : companyCaFile(app.isPackaged, process.env);
 const { untrusted } = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : { untrusted: null };

@@ -4,7 +4,7 @@
 // and the cross-check, a Node child process. Its guest goes with it (pdeathsig).
 
 import { fork } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser } from "../guest/protocol.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
+import { backendFor } from "./backends.js";
 import { Backoff, MOST_MS } from "./backoff.js";
 import { type HistoryRequest, named, NOT_A_REQUEST, REFUSED } from "./history.js";
 import { DOOR, REACH_MS } from "./inbound.js";
@@ -74,9 +75,8 @@ function outcomeOf(sent: unknown): Outcome | null {
 
 /**
  * The VM's files for an app whose data is *dataDir*: the sessions disk and the
- * console log there, the sockets in a folder of this user's runtime folder that is
- * that data's own, so two apps never share one (a development build beside the
- * installed app, a test), and a boot's sweep reaches no other app's guest. The image
+ * console log there, the sockets in the runtime folder this OS's backend gives that
+ * data, Linux's where this OS has none yet (backends.ts). The image
  * is SUROGATE_VM_IMAGE's folder when it is set, else the one the app delivers
  * (*delivered.image*), else the repository's; the agent disk is the app's
  * (*delivered.agentDisk*), else this package's (npm run agent-disk). SUROGATE_VM_KVM
@@ -90,8 +90,7 @@ export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEn
     agentDisk: delivered.agentDisk ?? join(PACKAGE, "dist", "agent.img"),
     ...(env.SUROGATE_VM_KVM ? { kvm: env.SUROGATE_VM_KVM } : {}),
     sessions: join(dataDir, "vm", "sessions.img"),
-    // The user's own, 0700, made by logind; short enough for a vhost-user socket's 108 bytes.
-    run: join(env.XDG_RUNTIME_DIR || `/run/user/${user.uid}`, "surogate", `vm-${createHash("sha256").update(dataDir).digest("hex").slice(0, 8)}`),
+    run: (backendFor(process.platform) ?? backendFor("linux")!).runtimeFolder(user, env, dataDir),
     console: join(dataDir, "logs", "vm-console.log"),
     user,
   };

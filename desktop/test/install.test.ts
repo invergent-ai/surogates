@@ -15,8 +15,8 @@ import { promisify } from "node:util";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { companyCertificates } from "../src/shell/company-ca.js";
-import { AS_ROOT } from "../src/shell/updates.js";
+import { companyCertificates } from "../src/shell/ca-source-linux.js";
+import { AS_ROOT } from "../src/shell/installer-linux.js";
 
 import { certificate, rewritten } from "./certificates.js";
 import { HELPER_MODES } from "./helper-modes.js";

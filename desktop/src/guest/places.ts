@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import type { Outcome } from "../link/protocol.js";
 import { CANCELLED, SANDBOX_STOPPED } from "./command.js";
 import { PLACE_KEY, type Share } from "./protocol.js";
-import { BOUNDS, TAG } from "./root.js";
+import { BOUNDS, TAG, UNMOUNTABLE } from "./root.js";
 
 export const PLACES = "/run/surogate/places";
 const MOUNT_RETRY_MS = 25;
@@ -195,7 +195,10 @@ export class Places {
    */
   mount(key: string, history: Share, real: Share): Promise<void> {
     if (typeof key !== "string" || !PLACE_KEY.test(key)) return Promise.reject(new Error(`not a folder's key: ${String(key).slice(0, 64)}`));
-    for (const share of [history, real]) if (!TAG.test(share.tag)) return Promise.reject(new Error(`not a share tag: ${share.tag.slice(0, 64)}`));
+    for (const share of [history, real]) {
+      if (share.kind !== "virtiofs") return Promise.reject(new Error(UNMOUNTABLE));
+      if (!TAG.test(share.tag)) return Promise.reject(new Error(`not a share tag: ${share.tag.slice(0, 64)}`));
+    }
     return this.after(key, async () => {
       const known = this.mounted.get(key);
       if (known) {

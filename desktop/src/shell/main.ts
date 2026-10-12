@@ -4,8 +4,8 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { homedir, hostname, userInfo } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -18,47 +18,52 @@ import type {
   DeletedFiles, LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier,
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
-import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
+import {
+  type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf, unsupportedAt,
+} from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
+import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
+import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
-import { missingTools } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
-import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
-import { companyCaFile, trustCompanyCa } from "./company-ca.js";
+import { companyTrust } from "./ca-source.js";
 import { reauthorize, rebind, register } from "./computer.js";
+import { computerName } from "./computer-name.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { Copying } from "./copying.js";
-import { linkIn, type OpenLink } from "./deep-link.js";
+import { linkOfLaunch, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
+import { loginItemFor } from "./login-item.js";
 import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
+import { placesFor } from "./places.js";
 import { PreferencesStore } from "./preferences.js";
 import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
-import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
+import { QuickEntry, quickEntryKeys } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
 import { appTools, appVm, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
-import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
+import { keepChecked, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -83,10 +88,9 @@ const DICTIONARIES = join(import.meta.dirname, "..", "..", "dictionaries");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
-// Everything the app keeps lives under one root, Electron's own data too: the folder
-// guards refuse it as a chat's folder, so no agent reaches a device token through one.
-const dataHome = process.env.XDG_DATA_HOME?.startsWith("/") ? process.env.XDG_DATA_HOME : join(app.getPath("home"), ".local", "share");
-const root = join(dataHome, "surogate");
+// Where the app keeps what it keeps (places.ts): everything under one root, Electron's own data too.
+const places = placesFor(process.env, app.getPath("home"));
+const { root } = places;
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
 app.setPath("userData", join(root, "electron"));
@@ -96,12 +100,10 @@ ownSpelling(app, DICTIONARIES, console.error);
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
-// Start at login's entry, in the user's XDG config folder; and what it starts: the installed app's
-// launcher, or a development build's Electron on this main.
-// A relative XDG_CONFIG_HOME is ignored, as the XDG Base Directory specification says: Electron's appData takes it as it is.
-const configHome = process.env.XDG_CONFIG_HOME?.startsWith("/") ? process.env.XDG_CONFIG_HOME : join(app.getPath("home"), ".config");
-const autostart = autostartFile(configHome);
-const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
+// Start at login (login-item.ts); and what it starts: the installed app's launcher, or a
+// development build's Electron on this main.
+const loginItem = loginItemFor(places);
+const loginCommand = (): string[] => (app.isPackaged ? [places.launcher!] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
 const browserSetting = new BrowserSetting(join(root, "browser.json"));
@@ -313,7 +315,7 @@ const stopDelivery = new AbortController();
 // Where the install script recorded the base the app was installed from: root's, in an installed
 // app. A development build reads only SUROGATE_INSTALL_JSON's, a test's, so it never downloads
 // from an installed app's base.
-const INSTALL_RECORD = app.isPackaged ? ROOT_RECORD : process.env.SUROGATE_INSTALL_JSON;
+const INSTALL_RECORD = app.isPackaged ? INSTALLER.record() : process.env.SUROGATE_INSTALL_JSON;
 // What the app downloads from that base: no cookie of its own session goes with it, and none of it
 // through the HTTP cache: a second copy of what is downloaded, and cached ranges in a resume.
 const fromBase = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) =>
@@ -346,21 +348,19 @@ function imageDelivery(): ImageDelivery | null {
 // from at its start and every 6 hours, trusting the release keys that the helper pkexec runs
 // lists, and downloads into the user's cache. A development build updates only when a test names
 // an install record and a helper of its own, SUROGATE_UPDATE_HELPER.
-// A relative XDG_CACHE_HOME is ignored, as the XDG Base Directory specification says.
-const cacheHome = process.env.XDG_CACHE_HOME?.startsWith("/") ? process.env.XDG_CACHE_HOME : join(app.getPath("home"), ".cache");
 let updates: Updates | null = null;
 
 function startUpdates(): void {
-  const cache = join(cacheHome, "surogate", "updates");
+  const cache = join(places.cache, "updates");
   const helper = process.env.SUROGATE_UPDATE_HELPER;
   let options: UpdatesOptions;
   if (app.isPackaged) {
-    options = installedUpdates(VERSION, cache, fromBase, stopDelivery.signal);
+    options = INSTALLER.updates(VERSION, cache, fromBase, stopDelivery.signal);
   } else if (INSTALL_RECORD && helper) {
     // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
     options = {
       version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
-      apply: helperRun([helper]),
+      apply: INSTALLER.helper([helper]),
     };
   } else {
     return;
@@ -405,7 +405,7 @@ function lookForTools(): void {
   // looks then hold the same folders, and the line and a file tool name the same tools.
   const held = boundFolders();
   const path = toolsPath();
-  vmLacking = Promise.all([held, path]).then(([folders, on]) => missingTools({}, unpacking, folders, on));
+  vmLacking = Promise.all([held, path]).then(([folders, on]) => backendFor(process.platform)?.requirements({ unpacking, held: folders, path: on }) ?? []);
   lookForFileTools(true, held, path);
 }
 
@@ -869,7 +869,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
       tools: appTools({
-        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: join(cacheHome, "surogate"), env, vm: vmFor(), changed,
+        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed,
         // A thread's history is made in the name of the account signed in on this device.
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
@@ -957,7 +957,7 @@ async function registerComputer(agent: Agent): Promise<void> {
   signInAgain = false;
   try {
     const added = await register({
-      agent, session, computer: hostname(),
+      agent, session, computer: computerName(),
       verify: (token) => verifyDevice(linkUrl(agent.origin), token),
       start: (credential) => startStack(agent, credential),
       save: (credential) => credentials.save(credential),
@@ -1324,7 +1324,7 @@ async function signIn(agent: Agent): Promise<void> {
   let unkept: string | null = null;
   try {
     const tokens = await signInWithBrowser({
-      origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
+      origin: agent.origin, computer: computerName(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
     });
     unkept = tokens.refreshToken;
     let started: DesktopSession | null = null;
@@ -2012,7 +2012,7 @@ async function chooseBrowser(value: unknown): Promise<void> {
   try {
     if (value === "custom") return;
     if (value !== "pick") {
-      if (value !== "auto" && !KNOWN.some(({ id }) => id === value)) throw new Error(`No browser ${String(value)}`);
+      if (value !== "auto" && !knownBrowsers().some(({ id }) => id === value)) throw new Error(`No browser ${String(value)}`);
       browserSetting.set({ choice: value } as BrowserChoice);
       return;
     }
@@ -2020,10 +2020,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;
-    let real: string;
-    try {
-      real = realpathSync(path);
-    } catch {
+    const real = pickedProgram(path);
+    if (real === null) {
       // Gone since it was picked, or a link that leads nowhere.
       browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
       return;
@@ -2145,12 +2143,12 @@ async function settingsState() {
   return {
     browser,
     appearance: appearance.get(),
-    preferences: { startAtLogin: onOff(startsAtLogin(autostart)), keepRunning: onOff(keepRunning), developer: onOff(developer) },
+    preferences: { startAtLogin: onOff(loginItem.on()), keepRunning: onOff(keepRunning), developer: onOff(developer) },
     // Why this build cannot start at login, or null.
-    startAtLoginRefused: loginRefusal(loginCommand()),
+    startAtLoginRefused: loginItem.refusal(loginCommand()),
     account,
     computer: {
-      name: hostname(),
+      name: computerName(),
       connection: agent ? deviceLine(agent) : "",
       added: kept?.addedAt ?? null,
       // The app's own sign-in names it, before the web client reports and whatever it reports.
@@ -2472,7 +2470,7 @@ function showSettings(section?: "browser"): void {
       if (key === "keepRunning" || key === "developer") return setPreference(key, value);
       if (key === "startAtLogin") {
         if (value !== "on" && value !== "off") throw new Error(`No setting startAtLogin = ${String(value)}`);
-        return setStartAtLogin(autostart, value === "on", loginCommand());
+        return loginItem.set(value === "on", loginCommand());
       }
       if (key !== "theme") {
         appearance.set(String(key), value);
@@ -2747,21 +2745,18 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  // The company's CA, which the install script's --ca-cert keeps for every user, or for a development
-  // build SUROGATE_CA_CERT's file: trusted in both TLS stacks before Chromium checks a certificate, as it
-  // checks none again. What keeps it untrusted is said once the app is ready, and the app goes on without it:
-  // a file it refuses is trusted no more than none.
-  const companyCa = companyCaFile(app.isPackaged, process.env);
-  // An installed app's is root's alone to write, as the install script leaves it. In the database Chromium
-  // reads for this user, by its own rule: the session's XDG_DATA_HOME as it is written.
-  const { certificates, untrusted } = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : { certificates: [], untrusted: null };
+  // The company's CA, as an administrator gave it for every user of this computer (ca-source.ts), or a
+  // development build's: trusted in both TLS stacks before Chromium checks a certificate, as it checks
+  // none again. What keeps it untrusted is said once the app is ready, and the app goes on without it:
+  // a CA it refuses is trusted no more than none.
+  const { certificates, untrusted } = companyTrust(app.isPackaged, process.env, app.getPath("home"));
   companyCertificates = certificates;
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
-    if (!argv.includes(HIDDEN)) main?.show();
-    const link = linkIn(argv);
+    if (!loginItem.startedHidden(argv)) main?.show();
+    const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);
   });
   // The device link stays up with the window closed (spec, Section 7).
@@ -2809,7 +2804,7 @@ if (!app.requestSingleInstanceLock()) {
       // A quit already waiting for the threads asks nothing more: the window hides meanwhile, as with Keep running on.
       quitsOnClose: () => !preferences.get().keepRunning && !waiting,
       // Started at login: the window waits for the user, in the tray or at the next launch.
-      hidden: process.argv.includes(HIDDEN),
+      hidden: loginItem.startedHidden(process.argv),
     });
     wire(main, page);
     // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
@@ -2818,11 +2813,12 @@ if (!app.requestSingleInstanceLock()) {
     tray.on("click", () => main?.show());
     updateTray();
     quickEntry = new QuickEntry({ page: join(PAGES, "quick.html"), preload: PAGES_PRELOAD, send: sendQuickEntry });
-    // From anywhere on the display, where the X server grabs keys for an app: a Wayland session has
-    // its GlobalShortcuts portal instead, which Surogate does not ask. There the tray opens quick entry.
-    if (!waylandSession(process.env)) {
-      if (globalShortcut.register(QUICK_ENTRY_KEYS, toggleQuickEntry)) shortcut = QUICK_ENTRY_KEYS;
-      else report(new Error(`Another app holds ${QUICK_ENTRY_KEYS}: quick entry opens from the tray only`));
+    // From anywhere, where this OS's session gives the app keys of its own (quick-entry.ts). Where it
+    // gives none, the tray opens quick entry.
+    const keys = quickEntryKeys(process.env);
+    if (keys !== null) {
+      if (globalShortcut.register(keys, toggleQuickEntry)) shortcut = keys;
+      else report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
       updateTray();
     }
     main.window.on("focus", () => void refreshProjects());
@@ -2839,7 +2835,7 @@ if (!app.requestSingleInstanceLock()) {
       revokeLater(owed);
     }
     // The link the app was started with, or one a second launch handed it meanwhile, once its window can show it.
-    const launched = linkIn(process.argv) ?? linkEarly;
+    const launched = linkOfLaunch(process.argv) ?? linkEarly;
     const agent = agents.get();
     if (!agent) {
       if (launched) void openDeepLink(launched).catch(report);

@@ -1,29 +1,18 @@
 // Which browser the agent drives on this computer (spec, Section 5, "Choosing the browser"):
 // one installed from its own package, as Settings → Browser chose it, for every agent. The
-// choice is a program's path, so only this computer's user makes it, never the web page.
-// Snap and Flatpak builds are not supported: their confinement breaks the profile folder and
-// the pipe. Ubuntu ships Chromium only as a Snap, and its chromium-browser package as a script
-// that runs it.
+// choice is a program's path, so only this computer's user makes it, never the web page. Which
+// browsers the app knows, where, and which builds it does not drive, are this OS's (known.ts).
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { accessSync, closeSync, constants, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { readState, writeState } from "../shell/state-file.js";
+import { KNOWN_BROWSERS } from "./known.js";
 
 export type BrowserId = "chrome" | "edge" | "brave" | "vivaldi" | "chromium";
-
-// Where each one's package puts it, its own program first. Verified: Chrome and Edge from
-// their .deb, with playwright-core 1.63.0; the rest are detected, unverified.
-export const KNOWN: ReadonlyArray<{ id: BrowserId; name: string; paths: readonly string[]; verified: boolean }> = [
-  { id: "chrome", name: "Google Chrome", paths: ["/opt/google/chrome/chrome", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"], verified: true },
-  { id: "edge", name: "Microsoft Edge", paths: ["/opt/microsoft/msedge/msedge", "/usr/bin/microsoft-edge-stable", "/usr/bin/microsoft-edge"], verified: true },
-  { id: "brave", name: "Brave", paths: ["/opt/brave.com/brave/brave", "/usr/bin/brave-browser"], verified: false },
-  { id: "vivaldi", name: "Vivaldi", paths: ["/opt/vivaldi/vivaldi", "/usr/bin/vivaldi-stable", "/usr/bin/vivaldi"], verified: false },
-  // The Snap first, so it is looked at wherever another path leads; then Debian's own program.
-  { id: "chromium", name: "Chromium", paths: ["/snap/bin/chromium", "/usr/lib/chromium/chromium", "/usr/bin/chromium", "/usr/bin/chromium-browser"], verified: false },
-];
 
 export interface Found {
   id: BrowserId | "custom";
@@ -67,23 +56,23 @@ const DISK: Disk = {
   },
 };
 
-/** Why the program at *real*, resolved, cannot be the agent's browser: a Snap or a Flatpak build. Null when it can. */
-export function confined(real: string): string | null {
-  if (real === "/usr/bin/snap" || real.startsWith("/snap/")) return "the Snap build is not supported";
-  if (real.includes("/flatpak/")) return "a Flatpak build is not supported";
-  return null;
+// The browsers the app knows here, for this computer's user.
+export const knownBrowsers = () => KNOWN_BROWSERS.candidates(homedir());
+
+/** Why the program at *real*, resolved, cannot be the agent's, by this OS's rules. Null when it can. */
+export function unsupportedAt(real: string, disk: Disk = DISK): string | null {
+  return KNOWN_BROWSERS.refused(real, disk);
 }
 
-/** Why the program at *real*, resolved, cannot be the agent's: confined(), or a script that runs a Snap. Null when it can. */
-export function unsupportedAt(real: string, disk: Disk = DISK): string | null {
-  const head = disk.head(real);
-  return confined(real) ?? (head.startsWith("#!") && head.includes("/snap/") ? "the Snap build is not supported" : null);
+/** The program to run for what the user picked in Custom…, resolved, or null where it cannot be read. */
+export function pickedProgram(picked: string, disk: Disk = DISK): string | null {
+  return KNOWN_BROWSERS.programOf(picked, disk);
 }
 
 /** The known browsers installed here, each once: at the first of its paths it can be, else the first found. */
 export function findBrowsers(disk: Disk = DISK): Found[] {
   const found: Found[] = [];
-  for (const known of KNOWN) {
+  for (const known of knownBrowsers()) {
     const at: Found[] = [];
     for (const path of known.paths) {
       let real: string;
@@ -122,7 +111,7 @@ export function chosenBrowser(choice: BrowserChoice, found: Found[], disk: Disk 
   return browser?.unsupported === null ? browser : null;
 }
 
-const CHOICE_IDS = new Set<string>(["auto", ...KNOWN.map(({ id }) => id)]);
+const CHOICE_IDS = new Set<string>(["auto", ...knownBrowsers().map(({ id }) => id)]);
 
 /** Settings → Browser's choice, kept beside the app's other settings: Automatic until the user picks another. */
 export class BrowserSetting {

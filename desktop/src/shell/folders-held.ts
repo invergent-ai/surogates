@@ -14,13 +14,17 @@ import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 
 import { cleanly } from "../clean-child.js";
+import { notBuilt } from "../platform.js";
+import * as linux from "./folders-held-linux.js";
 
 /** How long a folder has to answer. */
 export const LOOK_MS = 5_000;
 const LOOKS_AT_ONCE = 2;
 
-// coreutils' stat, by its whole path.
-const STAT = "/usr/bin/stat";
+// The look in a child process of its own, by this OS (folders-held-linux.ts).
+const lookCommand: (folder: string) => [string, string[]] = process.platform === "linux"
+  ? linux.lookCommand
+  : () => notBuilt("Surogate Desktop's look at a folder");
 
 /**
  * What a look at *folder* in a child process of its own found within *ms*, following links as the
@@ -31,7 +35,7 @@ const STAT = "/usr/bin/stat";
  */
 export function lookApart(folder: string, ms = LOOK_MS): Promise<"there" | "gone" | "silent"> {
   return new Promise((resolve) => {
-    const child = execFile(...cleanly(STAT, ["-L", "--printf=", "--", folder]), { env: {} }, (error) => {
+    const child = execFile(...cleanly(...lookCommand(folder)), { env: {} }, (error) => {
       clearTimeout(timer);
       resolve(error ? "gone" : "there");
     });

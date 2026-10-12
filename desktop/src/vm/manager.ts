@@ -1,7 +1,7 @@
 // The VM manager (spec, Section 11): one guest for every chat of this app, booted
 // at the first process operation of any root, with each root's folder shared into
 // it when that root first needs the guest. What differs by OS is behind one
-// interface, VmBackend, with a backend per OS (linux.ts); everything here is the
+// interface, VmBackend, with a backend per OS (backends.ts); everything here is the
 // same on every OS: hello, the keepalive, the roots' set-up and teardown, the host
 // proxy on the guest's net port, the way into a root on its inbound port, and what a
 // lost guest was running.
@@ -18,11 +18,11 @@ import type { ProcessHandle } from "../guest/processes.js";
 import { type FromAgent, HELD, type HostUser, PLACE_KEY, type Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
+import { backendFor } from "./backends.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
 import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
 import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
-import { bootLinux } from "./linux.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
 
@@ -139,7 +139,7 @@ export type BootVm = (options: VmOptions, signal: AbortSignal | undefined, deadl
 
 /** The backend for *platform*: Linux's, or null on an OS whose backend is not built yet. */
 export function bootFor(platform: NodeJS.Platform): BootVm | null {
-  return platform === "linux" ? bootLinux : null;
+  return backendFor(platform)?.boot ?? null;
 }
 
 // A root's background processes in the guest, each time they change: the handles to

@@ -6,6 +6,14 @@
 #   desktop/releases/<version>/manifest.json, .sig        each release's own, kept
 #   desktop/releases/<version>/surogate-desktop-<version>-linux-x64.tar.gz
 #
+# Each for the target DESKTOP_TARGET names, the platform and architecture the release is built for:
+# linux-x64, as above, where it names none; darwin-arm64's in folders of its own, with no install
+# script, which installs linux-x64's alone (see target_files):
+#
+#   desktop/darwin-arm64/latest.json
+#   desktop/releases/<version>/darwin-arm64/manifest.json, .sig
+#   desktop/releases/<version>/darwin-arm64/surogate-desktop-<version>-darwin-arm64.tar.gz
+#
 # Usage, after scripts/package.sh <version> <vm manifest> <out>:
 #   release/publish.sh describe <version> <out>   # <out>/manifest.json, of the tarball whose sha256
 #                                                 # is DESKTOP_TARBALL_SHA256 (the build's own word for
@@ -54,7 +62,20 @@ OUT="${3:-}"
 # A version is x.y.z with no zero before a part, as the install script takes one: dpkg reads
 # 1.2.03 as 1.2.3, and a release has one name.
 [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ -d "$OUT" ] || { echo "usage: publish.sh describe|sign|send <x.y.z> <out>" >&2; exit 2; }
-TARBALL="surogate-desktop-$VERSION-linux-x64.tar.gz"
+# The names of the release's files for target $1: its manifest's platform and arch; its tarball;
+# the folder under desktop/ that the release's own three are sent to and kept in; the manifest of
+# the newest release; and whether the install script goes with it. The app names them the same
+# (TARGETS, in src/platform.ts).
+target_files() {
+  case "$1" in
+    linux-x64) PLATFORM=linux ARCH=x64 RELEASE="releases/$VERSION" LATEST=latest.json SCRIPT=1 ;;
+    darwin-arm64) PLATFORM=darwin ARCH=arm64 RELEASE="releases/$VERSION/darwin-arm64" LATEST=darwin-arm64/latest.json SCRIPT= ;;
+    *) return 1 ;;
+  esac
+  TARBALL="surogate-desktop-$VERSION-$1.tar.gz"
+}
+DESKTOP_TARGET="${DESKTOP_TARGET:-linux-x64}"
+target_files "$DESKTOP_TARGET" || { echo "publish.sh: DESKTOP_TARGET is $DESKTOP_TARGET, and a release is made for linux-x64 or darwin-arm64" >&2; exit 2; }
 fail() {
   echo "publish.sh: $*" >&2
   exit 1
@@ -62,9 +83,27 @@ fail() {
 # The manifest of release $1, whose tarball has sha256 $2 and is $3 bytes, and whose app keeps
 # state of schema $4: one line, as every install takes one, and the bytes that are signed.
 manifest() {
-  jq -cn --arg version "$1" --arg sha256 "$2" --argjson size "$3" --argjson schema "$4" \
-    '{version: $version, channel: "stable", platform: "linux", arch: "x64",
-      url: "releases/\($version)/surogate-desktop-\($version)-linux-x64.tar.gz", sha256: $sha256, size: $size, stateSchema: $schema}'
+  jq -cn --arg version "$1" --arg sha256 "$2" --argjson size "$3" --argjson schema "$4" --arg platform "$PLATFORM" --arg arch "$ARCH" --arg url "$RELEASE/$TARBALL" \
+    '{version: $version, channel: "stable", platform: $platform, arch: $arch, url: $url, sha256: $sha256, size: $size, stateSchema: $schema}'
+}
+
+# The release that manifest $1 of this version is to its readers, as "<version> <sha256> <size>",
+# or nothing. linux-x64's is read by the root helper's own check (release_of in install.sh), which
+# every install and every update asks, from the script's functions without its last line, which
+# runs it. Another target has no root helper, and its manifest is read by that check's rules for
+# its own platform, arch and tarball, as its app reads one (signedRelease in src/shell/updates.ts):
+# one JSON object by the script's own reader (one_object), of the script's channel.
+release_read() {
+  if [ "$DESKTOP_TARGET" = linux-x64 ]; then
+    bash -c '. <(sed "\$d" "$1") && settings && release_of "$2"' _ "$HERE/install.sh" "$1"
+    return
+  fi
+  bash -c '. <(sed "\$d" "$1") && settings && one_object "$2" | jq -er --arg channel "$CHANNEL" --arg version "$3" --arg platform "$4" --arg arch "$5" --arg url "$6" '"'"'
+    select(.version == $version and .channel == $channel and .platform == $platform and .arch == $arch and .url == $url
+      and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
+      and (.size | type == "number" and . == floor and (floor | . >= 1 and . < 1e15))
+      and (.stateSchema | type == "number" and . == floor and (floor | . >= 1 and . < 1e15)))
+    | "\(.version) \(.sha256) \(.size | floor)"'"'"'' _ "$HERE/install.sh" "$1" "$VERSION" "$PLATFORM" "$ARCH" "$RELEASE/$TARBALL"
 }
 
 # Whether the install script beside this one lists its release keys in the one form that an
@@ -88,6 +127,8 @@ NOT_LISTED="install.sh's list of release keys is not in the one form that an ins
 
 case "$VERB" in
   describe)
+    # What the tarball holds, and where in it the app's package is, is linux-x64's alone so far.
+    [ "$DESKTOP_TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball, and not yet one for $DESKTOP_TARGET"
     : "${DESKTOP_TARBALL_SHA256:?}"
     [ -f "$OUT/$TARBALL" ] || fail "$OUT/$TARBALL is not there: run scripts/package.sh first"
     # The tarball is the one the build made, by the hash the build's job gave for it: an artifact
@@ -195,7 +236,7 @@ case "$VERB" in
     signing="$(mktemp -d --tmpdir release-signing-XXXXXXXXXX)"
     trap 'rm -rf "$signing"' EXIT
     manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$DESKTOP_STATE_SCHEMA" >"$signing/manifest.json"
-    taken="$(bash -c '. <(sed "\$d" "$1") && settings && release_of "$2"' _ "$HERE/install.sh" "$signing/manifest.json" 2>/dev/null)" || taken=
+    taken="$(release_read "$signing/manifest.json" 2>/dev/null)" || taken=
     [ "$taken" = "$VERSION $DESKTOP_TARBALL_SHA256 $DESKTOP_TARBALL_SIZE" ] || fail "the manifest of $VERSION is none that install.sh takes for it: nothing is signed"
     openssl pkeyutl -sign -inkey <(printf '%s\n' "$DESKTOP_RELEASE_KEY") -rawin -in "$signing/manifest.json" -out "$signing/manifest.json.sig"
     mv -T "$signing/manifest.json" "$OUT/manifest.json"
@@ -214,8 +255,11 @@ case "$VERB" in
     # would be one that no install takes, under a version that is never sent again.
     [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): its release keys are not read'
     keys_listed || fail "$NOT_LISTED"
-    pair='. <(sed "\$d" "$1") && settings && listed keys "$1" && signed_by "$2" "$2.sig" "${keys[@]}" && release="$(release_of "$2")" && [ "${release%% *}" = "$3" ]'
+    pair='. <(sed "\$d" "$1") && settings && listed keys "$1" && signed_by "$2" "$2.sig" "${keys[@]}"'
+    # linux-x64's is read in the same run, by the root helper's own check; another target's after it (release_read).
+    [ "$DESKTOP_TARGET" = linux-x64 ] && pair="$pair"' && release="$(release_of "$2")" && [ "${release%% *}" = "$3" ]'
     [ -f "$OUT/manifest.json" ] && [ -f "$OUT/manifest.json.sig" ] && bash -c "$pair" _ "$HERE/install.sh" "$OUT/manifest.json" "$VERSION" 2>/dev/null \
+      && { [ "$DESKTOP_TARGET" = linux-x64 ] || { release="$(release_read "$OUT/manifest.json" 2>/dev/null)" && [ "${release%% *}" = "$VERSION" ]; }; } \
       || fail "$OUT/manifest.json and $OUT/manifest.json.sig are not the manifest of $VERSION and its signature by a key that install.sh lists: nothing is sent"
     # And its tarball is the one that manifest names, by its hash. The manifest was signed for the
     # build's own word of that hash, where no tarball was opened, and the tarball here is this
@@ -250,34 +294,35 @@ case "$VERB" in
     # tarball and its signature are there. A bucket whose token may not list answers 403 for an
     # object that is not there, as R2 does, where another answers 404: both are "not there". A
     # token that could not read at all is found at the first object sent, which is read back.
-    status="$(s3 -o "$OUT/sent" "$bucket/releases/$VERSION/manifest.json")" || fail "looking for desktop/releases/$VERSION/manifest.json stopped: curl exit $?"
+    status="$(s3 -o "$OUT/sent" "$bucket/$RELEASE/manifest.json")" || fail "looking for desktop/$RELEASE/manifest.json stopped: curl exit $?"
     case "$status" in
       404 | 403) there= ;;
       200)
-        cmp -s "$OUT/manifest.json" "$OUT/sent" || fail "desktop/releases/$VERSION is published already, with another manifest, and is not sent again"
+        cmp -s "$OUT/manifest.json" "$OUT/sent" || fail "desktop/$RELEASE is published already, with another manifest, and is not sent again"
         there=1
         ;;
-      *) fail "looking for desktop/releases/$VERSION/manifest.json got $status" ;;
+      *) fail "looking for desktop/$RELEASE/manifest.json got $status" ;;
     esac
     rm -f "$OUT/sent"
     # The newest release the bucket names, which an older one does not replace.
-    status="$(s3 -o "$OUT/latest.json" "$bucket/latest.json")" || fail "looking for desktop/latest.json stopped: curl exit $?"
+    status="$(s3 -o "$OUT/latest.json" "$bucket/$LATEST")" || fail "looking for desktop/$LATEST stopped: curl exit $?"
     case "$status" in
       200) newest="$(jq -r .version "$OUT/latest.json")" ;;
       404 | 403) newest= ;;
-      *) fail "looking for desktop/latest.json got $status" ;;
+      *) fail "looking for desktop/$LATEST got $status" ;;
     esac
     rm -f "$OUT/latest.json"
     # A release that is there, and older than the one latest.json names, is whole: no object of
     # a release is sent a second time. So is one that latest.json names, once the bucket's
-    # install script is this one. Else a send was cut short after the release's own three were
-    # there, and this one ends it.
+    # install script is this one, for a target that has one. Else a send was cut short after the
+    # release's own three were there, and this one ends it.
     if [ -n "$there" ] && [ -n "$newest" ]; then
-      if dpkg --compare-versions "$VERSION" lt "$newest"; then fail "desktop/releases/$VERSION is published already, and is not sent again"; fi
+      if dpkg --compare-versions "$VERSION" lt "$newest"; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
+      if [ "$VERSION" = "$newest" ] && [ -z "$SCRIPT" ]; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
       if [ "$VERSION" = "$newest" ]; then
         status="$(s3 -o "$OUT/sent" "$bucket/install.sh")" || fail "looking for desktop/install.sh stopped: curl exit $?"
         case "$status" in
-          200) ! cmp -s "$HERE/install.sh" "$OUT/sent" || fail "desktop/releases/$VERSION is published already, and is not sent again" ;;
+          200) ! cmp -s "$HERE/install.sh" "$OUT/sent" || fail "desktop/$RELEASE is published already, and is not sent again" ;;
           404 | 403) ;;
           *) fail "looking for desktop/install.sh got $status" ;;
         esac
@@ -292,12 +337,12 @@ case "$VERB" in
     #    the newest release from here, and --version reads all three. Cut before the mark, the
     #    next send sends the three again.
     if [ -z "$there" ]; then
-      put "$OUT/$TARBALL" "releases/$VERSION/$TARBALL" application/gzip
-      put "$OUT/manifest.json.sig" "releases/$VERSION/manifest.json.sig" application/octet-stream
-      put "$OUT/manifest.json" "releases/$VERSION/manifest.json" application/json
+      put "$OUT/$TARBALL" "$RELEASE/$TARBALL" application/gzip
+      put "$OUT/manifest.json.sig" "$RELEASE/manifest.json.sig" application/octet-stream
+      put "$OUT/manifest.json" "$RELEASE/manifest.json" application/json
     fi
     if [ -n "$newest" ] && dpkg --compare-versions "$VERSION" lt "$newest"; then
-      published="published desktop/releases/$VERSION; desktop/latest.json stays $newest"
+      published="published desktop/$RELEASE; desktop/$LATEST stays $newest"
     else
       # 2. latest.json: the one object that says which release is the newest, and the one that
       #    every app and every install reads first. It has no signature of its own: its
@@ -311,10 +356,11 @@ case "$VERB" in
       #    one: a key signs only once a release that lists it is out. Sent before latest.json,
       #    a script that has dropped the key before's would refuse the release before, and
       #    every first install would end there until the send was run again. The next send of
-      #    this release finds the script owed, and sends it.
-      [ "$VERSION" = "$newest" ] || put "$OUT/manifest.json" latest.json application/json no-cache --retry 3
-      put "$HERE/install.sh" install.sh text/x-shellscript no-cache
-      published="published desktop/releases/$VERSION as desktop/latest.json"
+      #    this release finds the script owed, and sends it. A target with no install script
+      #    ends at 2.
+      [ "$VERSION" = "$newest" ] || put "$OUT/manifest.json" "$LATEST" application/json no-cache --retry 3
+      [ -z "$SCRIPT" ] || put "$HERE/install.sh" install.sh text/x-shellscript no-cache
+      published="published desktop/$RELEASE as desktop/$LATEST"
     fi
     echo "$published"
     ;;

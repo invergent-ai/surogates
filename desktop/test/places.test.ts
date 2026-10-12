@@ -10,6 +10,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlPlaces, type ControlRoots } from "../src/guest/control.js";
 import { Places } from "../src/guest/places.js";
 import type { FromAgent, Share } from "../src/guest/protocol.js";
+import { UNMOUNTABLE } from "../src/guest/root.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { readonlyFlag, refusesWrites } from "../src/vm/linux.js";
 import { type BootVm, type Place, VmManager, type VmOptions } from "../src/vm/manager.js";
@@ -185,6 +186,14 @@ describe("the agent's places", () => {
     await expect(places.mount(KEY, { kind: "virtiofs", tag: "r3" }, R2)).rejects.toThrow("already mounted from other shares");
     expect(() => places.paths("fedcba9876543210")).toThrow("This folder's history is not in the sandbox");
     expect(ran).toHaveLength(2);
+  });
+
+  it("refuses Apple's shares, which it cannot mount yet, and makes nothing for them", async () => {
+    const { ran, places } = recorded();
+    await expect(places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, R2)).rejects.toThrow(new Error(UNMOUNTABLE));
+    await expect(places.mount(KEY, R1, { kind: "vz", tag: "s2" })).rejects.toThrow(new Error(UNMOUNTABLE));
+    expect(existsSync(join(dir, "places"))).toBe(false);
+    expect(ran).toEqual([]);
   });
 
   it("lets both mounts go, the folder's first, and mounts them again when asked", async () => {

@@ -4,6 +4,13 @@ import { configDefaults, defineConfig } from "vitest/config";
 // EINVAL), and srt's file hosts bind / whole: the files that mount one run alone, after the rest.
 const MOUNTING = ["test/vm-stalled-folder.test.ts", "test/vm/guest-places.test.ts"];
 
+// The files that pass on macOS, which the macOS workflow runs (.github/workflows/desktop-macos.yml): each
+// part of the app built for macOS adds its own. A project on macOS alone: on Linux each is the unit project's.
+export const MACOS = [
+  "test/platform.test.ts", "test/backoff.test.ts", "test/egress.test.ts", "test/flags.test.ts", "test/guest-control.test.ts", "test/output.test.ts",
+  "test/protocol.test.ts",
+];
+
 // Every git the tests run themselves reads none of the user's or the system's config, so it
 // never signs with the user's key or reaches their gpg-agent, and commits as the tests.
 const GIT = {
@@ -24,6 +31,7 @@ export default defineConfig({
     projects: [
       { extends: true, test: { name: "unit", include: ["test/**/*.test.ts"], exclude: [...configDefaults.exclude, ...MOUNTING] } },
       { extends: true, test: { name: "mounting", include: MOUNTING, sequence: { groupOrder: 1 } } },
+      ...(process.platform === "darwin" ? [{ extends: true as const, test: { name: "macos", include: MACOS } }] : []),
     ],
   },
 });

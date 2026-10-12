@@ -1,4 +1,4 @@
-// The company's CA (src/shell/company-ca.ts): what the install script's file holds, which NSS
+// The company's CA (src/shell/company-ca.ts, and Linux's, ca-source-linux.ts): what the install script's file holds, which NSS
 // database Chromium reads for a user, and that database changed by this computer's certutil, in a
 // home of the test's own and never the user's. Node's half needs Node 24's
 // tls.setDefaultCACertificates, which the tests' Node 22 lacks: the app's own Electron runs it, in
@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { chromiumDatabase, COMPANY_CA, companyCaFile, companyCertificates, DatabaseRefusal, NICKNAME, trustCompanyCa, trustInChromium } from "../src/shell/company-ca.js";
+import { chromiumDatabase, COMPANY_CA, companyCaFile, companyCertificates, companyTrust, DatabaseRefusal, NICKNAME, trustCompanyCa, trustInChromium } from "../src/shell/ca-source-linux.js";
 import { certificate } from "./certificates.js";
 
 // Each program started here, by what was handed to spawnSync: the real one starts it.
@@ -380,6 +380,18 @@ describe.skipIf(!existsSync(CERTUTIL))("the company's CA in the user's NSS datab
       expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
       node.trusted = undefined;
     };
+
+    it("trusts the file a development build names, as SUROGATE_CA_CERT names it, in the database of its session's XDG_DATA_HOME; and none where it names none", () => {
+      added(own(), another, "IT Root", "CT,C,C");
+      writeFileSync(file(), pem(company));
+      node.trusted = undefined;
+      expect(companyTrust(false, { SUROGATE_CA_CERT: file(), XDG_DATA_HOME: data() }, home)).toEqual({ certificates: [pem(company).trim()], untrusted: null });
+      expect(node.trusted).toEqual(["a public root", pem(company).trim()]);
+      expect(entries(own())).toEqual(["IT Root CT,C,C", `${nickname(company)} C,,`]);
+      node.trusted = undefined;
+      expect(companyTrust(false, { XDG_DATA_HOME: data() }, home)).toEqual({ certificates: [], untrusted: null });
+      expect(node.trusted).toBeUndefined();
+    });
 
     it.each<[kind: string, spoil: (path: string) => void, why: string]>([
       ["emptied", (path) => writeFileSync(path, ""), "holds no certificate"],

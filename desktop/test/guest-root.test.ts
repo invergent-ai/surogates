@@ -10,7 +10,7 @@ import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
-import { admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor } from "../src/guest/root.js";
+import { admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor, UNMOUNTABLE } from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
 
@@ -763,6 +763,14 @@ describe("a root's inputs", () => {
   ])("refuses %s %j %s %j before anything is given", async (root, at, tag, user, message) => {
     await expect(enter(root, at, { kind: "virtiofs", tag }, user)).rejects.toThrow(message);
   });
+
+  it.each([{ kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "s1" }] as const)(
+    "refuses Apple's share %j, which it cannot mount yet, before anything is given",
+    async (share) => {
+      await expect(enter("root-1", place, share, ana)).rejects.toThrow(new Error(UNMOUNTABLE));
+      expect(UNMOUNTABLE).toBe("This computer's sandbox cannot mount this kind of share yet");
+    },
+  );
 });
 
 describe("a command's shell, moved into its cgroup by the agent", () => {
