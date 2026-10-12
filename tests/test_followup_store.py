@@ -198,8 +198,10 @@ async def test_welcome_settings_and_package_protocols(sf):
         welcome_template_name="bun_venit", welcome_template_language="ro",
         welcome_text="  Vă mulțumim.  ",
         offer_protocols={"offer-1": " post-op ", "offer-2": ""},
+        texts={"checkout_phone": " Nr. WhatsApp ", "purchase_notice": ""},
     )
     assert saved.welcome_text == "Vă mulțumim."
+    assert saved.texts == {"checkout_phone": "Nr. WhatsApp"}
     assert saved.offer_protocols == {"offer-1": "post-op"}
 
 

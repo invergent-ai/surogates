@@ -332,6 +332,7 @@ async def save_settings(
     welcome_template_language: str | None = None,
     welcome_text: str | None = None,
     offer_protocols: dict[str, str] | None = None,
+    texts: dict[str, str] | None = None,
 ) -> FollowupSettingsRow:
     recipients = list(dict.fromkeys(str(u) for u in alert_recipient_user_ids))
     async with session_factory() as db:
@@ -351,6 +352,10 @@ async def save_settings(
         row.welcome_text = (welcome_text or "").strip() or None
         row.offer_protocols = {
             str(k): str(v).strip() for k, v in (offer_protocols or {}).items()
+            if str(v).strip()
+        }
+        row.texts = {
+            str(k): str(v).strip() for k, v in (texts or {}).items()
             if str(v).strip()
         }
         row.updated_at = _utcnow()

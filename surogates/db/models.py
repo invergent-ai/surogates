@@ -1195,6 +1195,14 @@ class FollowupSettingsRow(Base):
     offer_protocols: Mapped[dict[str, str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )
+    #: Wording in the practice's language for what the platform itself
+    #: writes: the checkout field labels and the notices the care team gets.
+    #: Keys: ``checkout_phone``, ``checkout_name``, ``checkout_consent``,
+    #: ``purchase_notice``, ``invalid_number_notice``.  Missing keys use the
+    #: platform's defaults.
+    texts: Mapped[dict[str, str]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
         onupdate=func.now(),
