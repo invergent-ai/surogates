@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from surogates.runtime.pubsub import listen_forever
+
 __all__ = [
     "INVALIDATION_CHANNELS",
     "handle_invalidation_message",
@@ -173,40 +175,32 @@ async def run_invalidator(
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
-    Wired from the FastAPI lifespan as a background task.  Iterates
-    messages from ``redis.pubsub()`` and dispatches each to
-    :func:`handle_invalidation_message`.  Yields control between
-    messages so cancellation propagates cleanly when the lifespan
-    shuts down the task on app exit.
+    Wired from the FastAPI lifespan as a background task: dispatches every
+    message to :func:`handle_invalidation_message` until the lifespan
+    cancels it, across Redis restarts.
     """
-    pubsub = redis.pubsub()
-    try:
-        for prefix in INVALIDATION_CHANNELS:
-            await pubsub.psubscribe(f"{prefix}*")
-        async for msg in pubsub.listen():
-            if msg.get("type") != "pmessage":
-                continue
-            channel = msg.get("channel")
-            if isinstance(channel, bytes):
-                channel = channel.decode()
-            payload = msg.get("data") or b""
-            handle_invalidation_message(
-                channel=channel or "",
-                payload=payload,
-                runtime_config_cache=runtime_config_cache,
-                firebase_cache=firebase_cache,
-                slug_cache=slug_cache,
-                file_bundle_cache=file_bundle_cache,
-                memory_cache=memory_cache,
-                mcp_pool=mcp_pool,
-                channel_routing_cache=channel_routing_cache,
-                system_bundle_cache=system_bundle_cache,
-                mate_settings_cache=mate_settings_cache,
-                channel_identity_cache=channel_identity_cache,
-                agent_principal_cache=agent_principal_cache,
-            )
-    finally:
-        try:
-            await pubsub.aclose()
-        except Exception:  # noqa: BLE001 — best-effort teardown
-            pass
+
+    async def on_message(msg: dict) -> None:
+        channel = msg.get("channel")
+        if isinstance(channel, bytes):
+            channel = channel.decode()
+        handle_invalidation_message(
+            channel=channel or "",
+            payload=msg.get("data") or b"",
+            runtime_config_cache=runtime_config_cache,
+            firebase_cache=firebase_cache,
+            slug_cache=slug_cache,
+            file_bundle_cache=file_bundle_cache,
+            memory_cache=memory_cache,
+            mcp_pool=mcp_pool,
+            channel_routing_cache=channel_routing_cache,
+            system_bundle_cache=system_bundle_cache,
+            mate_settings_cache=mate_settings_cache,
+            channel_identity_cache=channel_identity_cache,
+            agent_principal_cache=agent_principal_cache,
+            service_account_auth_cache=service_account_auth_cache,
+        )
+
+    await listen_forever(
+        redis, [f"{prefix}*" for prefix in INVALIDATION_CHANNELS], on_message, name="Cache invalidator",
+    )
