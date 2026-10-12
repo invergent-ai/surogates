@@ -478,10 +478,19 @@ async def _opener_of_outbox(db: Any, outbox_id: int) -> Any:
     )
     if event_id is None:
         return None
-    data = await db.scalar(sa.select(Event.data).where(Event.id == event_id)) or {}
-    if data.get("synthetic") != OUTREACH_OPENER_MARKER or not data.get("outreach_id"):
+    marker = (
+        await db.execute(
+            sa.select(
+                Event.data["synthetic"].astext, Event.data["outreach_id"].astext,
+            ).where(Event.id == event_id)
+        )
+    ).first()
+    if marker is None:
         return None
-    return await db.get(OutreachMessageRow, uuid.UUID(str(data["outreach_id"])))
+    synthetic, outreach_id = marker
+    if synthetic != OUTREACH_OPENER_MARKER or not outreach_id:
+        return None
+    return await db.get(OutreachMessageRow, uuid.UUID(outreach_id))
 
 
 async def apply_outreach_status(
