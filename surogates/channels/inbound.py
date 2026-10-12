@@ -1050,7 +1050,8 @@ class ChannelInboundPipeline:
         except Exception:
             logger.warning("[channels] pending input resolution failed", exc_info=True)
         if resolved:
-            await _nudge("✅ Got it — continuing.")
+            # No acknowledgement of our own: the agent's next message is the
+            # reply, in the language it speaks with this person.
             return InboundOutcome.DROPPED
         return None
 
