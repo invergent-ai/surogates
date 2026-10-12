@@ -39,6 +39,7 @@ if (location.protocol === "file:") {
     menu: (which: "app" | "project") => ipcRenderer.invoke("shell:menu", which),
     settings: () => ipcRenderer.invoke("shell:settings"),
     newProject: () => ipcRenderer.invoke("shell:new-project"),
+    useHere: () => ipcRenderer.invoke("shell:use-here"),
     projectSettings: () => ipcRenderer.invoke("shell:project-settings"),
     quitNow: () => ipcRenderer.invoke("shell:quit-now"),
     link: (which: string) => ipcRenderer.invoke("shell:link", which),
@@ -56,6 +57,7 @@ if (location.protocol === "file:") {
     state: () => ipcRenderer.invoke("project:state"),
     save: (fields: unknown) => ipcRenderer.invoke("project:save", fields),
     choose: (name: unknown) => ipcRenderer.invoke("project:choose", name),
+    chosen: () => ipcRenderer.invoke("project:chosen"),
     archive: () => ipcRenderer.invoke("project:archive"),
     close: () => ipcRenderer.invoke("project:close"),
   });

@@ -23,12 +23,15 @@ interface Fields {
 }
 
 interface ProjectDialog {
-  // A project's settings, or a new project's; and why the project could not be read, if it could not.
-  state(): Promise<{ editing: boolean; project: Shown | null; refused: string | null }>;
+  // A project's settings, or a new project's; and why the project could not be read, if it could not. A new project
+  // asks for a folder of this computer, unless the agent takes none of it (folder false): it is made in the cloud.
+  state(): Promise<{ editing: boolean; project: Shown | null; refused: string | null; folder?: boolean }>;
   save(fields: Fields): Promise<string | null>; // why it was refused, or null once done
   // A new project's folder, picked and confirmed in the desktop's own sheet, which names the project as typed so
   // far: the folder, null when the user cancelled, or why none can be chosen.
   choose(name: string): Promise<{ folder: string } | { refused: string } | null>;
+  // The folder confirmed for the new project now, or null: a refused Create may have let it go.
+  chosen(): Promise<string | null>;
   archive(): Promise<string | null>;
   close(): Promise<void>;
 }
@@ -43,14 +46,19 @@ const value = (id: string) => byId<HTMLInputElement | HTMLTextAreaElement | HTML
 const tier = (id: string): Tier | undefined =>
   value(id) === "basic" || value(id) === "pro" ? (value(id) as Tier) : value(id) === "unknown" ? undefined : null;
 
+// The new project's folder as the dialog shows it: its path, or that none is chosen.
+const showFolder = (folder: string | null) => {
+  byId("folder").textContent = folder ?? "No folder chosen";
+};
+
 async function render(): Promise<void> {
-  const { editing: shown, project, refused } = await dialog.state();
+  const { editing: shown, project, refused, folder } = await dialog.state();
   editing = shown;
   byId("heading").textContent = editing ? "Project settings" : "New project";
   byId("save").textContent = editing ? "Save" : "Create project";
   byId("settings-only").hidden = !editing;
-  // A new project's folder is chosen as it is made, and never changed.
-  byId("new-only").hidden = editing;
+  // A new project's folder is chosen as it is made, and never changed; none, for an agent that takes no folders here.
+  byId("new-only").hidden = editing || folder !== true;
   // A project that could not be read is said so, with nothing to save or archive.
   byId("error").textContent = refused ?? "";
   byId("save").hidden = refused !== null;
@@ -104,14 +112,19 @@ byId<HTMLFormElement>("form").addEventListener("submit", (event) => {
   if (editing) {
     Object.assign(fields, { instructions: value("instructions"), coordinatorTier: tier("coordinator-tier"), threadTier: tier("thread-tier") });
   }
-  void asked(() => dialog.save(fields), editing ? "Saving…" : "Creating…");
+  void asked(async () => {
+    const refused = await dialog.save(fields);
+    // A refused Create may have let its folder go, as one whose confirmation lapsed: the dialog shows what it holds now.
+    if (!editing && refused !== null) showFolder(await dialog.chosen());
+    return refused;
+  }, editing ? "Saving…" : "Creating…");
 });
 byId("archive").addEventListener("click", () => void asked(() => dialog.archive()));
 byId("choose").addEventListener("click", () => void asked(async () => {
   const chosen = await dialog.choose(value("name"));
   if (chosen === null) return null;
   if ("refused" in chosen) return chosen.refused;
-  byId("folder").textContent = chosen.folder;
+  showFolder(chosen.folder);
   return null;
 }));
 byId("cancel").addEventListener("click", () => void dialog.close());
