@@ -29,6 +29,19 @@ class TestAlwaysInherit:
         # console_scripts entry points installed by pip.
         assert "PATH" in term._ALWAYS_INHERIT
 
+    def test_node_module_paths_are_propagated(self):
+        # The image's global npm packages (docx, pptxgenjs, ...) resolve
+        # through NODE_PATH; stripped, the document skills' require('docx')
+        # failed with "Cannot find module".  NPM_CONFIG_PREFIX sends
+        # `npm install -g` to the user prefix the non-root sandbox can write.
+        with patch.dict(os.environ, {
+            "NODE_PATH": "/home/sandbox/.npm-global/lib/node_modules:/usr/lib/node_modules",
+            "NPM_CONFIG_PREFIX": "/home/sandbox/.npm-global",
+        }, clear=True):
+            env = term._build_child_env()
+        assert env["NODE_PATH"].endswith("/usr/lib/node_modules")
+        assert env["NPM_CONFIG_PREFIX"] == "/home/sandbox/.npm-global"
+
 
 class TestBuildChildEnv:
     """``_build_child_env`` strips secrets but keeps allowlisted vars."""
