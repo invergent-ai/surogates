@@ -661,6 +661,10 @@ class DeliveryOutbox(Base):
             "available_at",
             postgresql_where=text("status = 'pending'"),
         ),
+        # Deleting events or sessions checks every removed row against
+        # these references; unindexed, each check scans the whole outbox.
+        Index("idx_delivery_outbox_event", "event_id"),
+        Index("idx_delivery_outbox_session", "session_id"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -2113,6 +2117,8 @@ class BoardNote(Base):
         Index("idx_board_notes_group_seq", "group_id", "seq"),
         Index("idx_board_notes_group_status", "group_id", "status"),
         Index("idx_board_notes_org", "org_id"),
+        # Deleting a session checks its notes by writer; unindexed, a scan.
+        Index("idx_board_notes_writer_session", "writer_session_id"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -2466,6 +2472,8 @@ class WorkstreamHistory(Base):
         Index(
             "idx_workstream_history_undoes", "undoes", postgresql_using="gin", postgresql_where=text("kind = 'undo'"),
         ),
+        # Deleting a session nulls its thread's history rows; unindexed, a scan to find them.
+        Index("idx_workstream_history_thread", "thread_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

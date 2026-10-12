@@ -75,6 +75,23 @@ CREATE INDEX IF NOT EXISTS idx_events_session_type
 CREATE INDEX IF NOT EXISTS idx_sessions_parent
     ON sessions (parent_id);
 
+-- Retrofit for the references into events and sessions, which agent and
+-- session deletion remove in bulk.  Postgres checks each removed row against
+-- every referencing table; an unindexed reference makes each check a
+-- sequential scan of that table.  Deleting a 240k-event agent scanned
+-- delivery_outbox 240k times before idx_delivery_outbox_event existed.
+CREATE INDEX IF NOT EXISTS idx_delivery_outbox_event
+    ON delivery_outbox (event_id);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_outbox_session
+    ON delivery_outbox (session_id);
+
+CREATE INDEX IF NOT EXISTS idx_board_notes_writer_session
+    ON board_notes (writer_session_id);
+
+CREATE INDEX IF NOT EXISTS idx_workstream_history_thread
+    ON workstream_history (thread_id);
+
 -- Backing index for ``SessionStore.find_feedback_on_event`` — the
 -- feedback dedupe query filters on (session_id, type, target_event_id,
 -- and either rated_by_user_id or rated_by_service_account_id).  Without
