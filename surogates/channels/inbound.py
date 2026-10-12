@@ -621,6 +621,49 @@ class ChannelInboundPipeline:
         await deps.state.remember_session(session_key, str(session_id))
 
         # ------------------------------------------------------------------
+        # Follow-up: this person just opened their provider window with our
+        # sender.  Recorded before /stop and the pending-input intercept,
+        # because those messages open the window too.  Anything held for
+        # them (an alert, an operator's message) goes out now, ahead of the
+        # agent's answer to what they wrote.
+        # ------------------------------------------------------------------
+        if deps.session_factory is not None and routing.identifier:
+            try:
+                from surogates.followup import store as followup_store
+                from surogates.followup.outreach import (
+                    SUPPORTED_PLATFORMS,
+                    deliver_pending,
+                )
+
+                _org = UUID(str(routing.org_id))
+                await followup_store.record_inbound(
+                    deps.session_factory,
+                    org_id=_org,
+                    platform=routing.platform,
+                    platform_user_id=msg.platform_user_id,
+                    channel_identifier=routing.identifier,
+                )
+                if routing.platform in SUPPORTED_PLATFORMS:
+                    await deliver_pending(
+                        deps.session_factory,
+                        deps.session_store,
+                        org_id=_org,
+                        agent_id=routing.agent_id,
+                        user_id=identity.user_id,
+                        platform=routing.platform,
+                        channel_identifier=routing.identifier,
+                        session_id=session_id,
+                    )
+            except Exception:  # noqa: BLE001
+                # The person's own message must reach the agent whatever
+                # happens to the bookkeeping around it.
+                logger.warning(
+                    "[followup] could not record or deliver outreach for %s "
+                    "on %s", msg.platform_user_id, routing.agent_id,
+                    exc_info=True,
+                )
+
+        # ------------------------------------------------------------------
         # /stop — interrupt the running turn OUT-OF-BAND.  A normal message
         # would queue behind the busy worker and never reach it in time (a
         # long coding run, say), so publish the interrupt directly: the

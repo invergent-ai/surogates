@@ -55,6 +55,56 @@ def _default_slack_client(bot_token: str):
     return AsyncWebClient(token=bot_token)
 
 
+async def dm_session(
+    session_store: Any,
+    redis: Any,
+    *,
+    session_factory: Any,
+    storage: Any,
+    settings: Any,
+    org_id: UUID,
+    agent_id: str,
+    user_id: UUID,
+    platform: str,
+    session_key: str,
+    channel_id: str,
+    sender: str,
+) -> UUID:
+    """The one-to-one conversation a person's reply will land in.
+
+    Shared by check-in openers and outreach: both must write into the session
+    the inbound pipeline resolves for that person's next message, or the
+    reply arrives in a conversation that never asked anything.
+    """
+    return await get_or_create_channel_session(
+        session_store, redis,
+        session_key=session_key,
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=agent_id,
+        channel=platform,
+        config={
+            f"{platform}_channel_id": channel_id,
+            f"{platform}_thread_key": None,
+            "channel_identifier": sender,
+            "memory_boundary": boundary_token(
+                platform=platform, channel_id=channel_id, visibility="dm",
+                source={"chat_type": "private"}, fallback_id=session_key,
+            ),
+            "multi_party": False,
+        },
+        session_factory=session_factory, storage=storage, settings=settings,
+    )
+
+
+def whatsapp_session_key(wa_id: str) -> str:
+    """The session key the inbound pipeline computes for a WhatsApp DM."""
+    return build_session_key(SessionSource(
+        platform="whatsapp", chat_id=wa_id, chat_type="dm", user_id=wa_id,
+        user_name="", thread_id=None, chat_name=wa_id,
+    ))
+
+
 def make_opener_enqueue(
     *,
     session_store: Any,
@@ -82,24 +132,12 @@ def make_opener_enqueue(
     slack_client_factory = slack_client_factory or _default_slack_client
 
     async def _session(invitation, platform, session_key, *, channel_id, sender) -> UUID:
-        return await get_or_create_channel_session(
+        return await dm_session(
             session_store, redis,
-            session_key=session_key,
-            user_id=invitation.user_id,
-            org_id=invitation.org_id,
-            agent_id=invitation.agent_id,
-            channel=platform,
-            config={
-                f"{platform}_channel_id": channel_id,
-                f"{platform}_thread_key": None,
-                "channel_identifier": sender,
-                "memory_boundary": boundary_token(
-                    platform=platform, channel_id=channel_id, visibility="dm",
-                    source={"chat_type": "private"}, fallback_id=session_key,
-                ),
-                "multi_party": False,
-            },
             session_factory=session_factory, storage=storage, settings=settings,
+            org_id=invitation.org_id, agent_id=invitation.agent_id,
+            user_id=invitation.user_id, platform=platform,
+            session_key=session_key, channel_id=channel_id, sender=sender,
         )
 
     def _metadata(invitation, *, template_name):

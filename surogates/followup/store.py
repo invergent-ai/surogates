@@ -25,6 +25,7 @@ from surogates.followup.eligibility import Audience
 __all__ = [
     "ENROLLMENT_STATUSES",
     "OUTREACH_KINDS",
+    "OUTREACH_PLATFORMS",
     "active_enrollments",
     "enrollments_for_agent",
     "enrollments_for_user",
@@ -41,6 +42,9 @@ __all__ = [
 
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
 OUTREACH_KINDS = ("alert", "operator", "enrolment")
+#: Where outreach can reach a person.  WhatsApp only: it is the one channel
+#: whose rules (a template outside the 24-hour window) this module implements.
+OUTREACH_PLATFORMS = ("whatsapp",)
 
 
 def _utcnow() -> datetime:
@@ -395,6 +399,8 @@ async def queue_outreach(
 ) -> OutreachMessageRow:
     if kind not in OUTREACH_KINDS:
         raise ValueError(f"kind must be one of {', '.join(OUTREACH_KINDS)}")
+    if platform not in OUTREACH_PLATFORMS:
+        raise ValueError(f"outreach is not available on {platform}")
     text = text.strip()
     if not text:
         raise ValueError("an outreach message needs text")

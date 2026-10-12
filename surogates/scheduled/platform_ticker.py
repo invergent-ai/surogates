@@ -456,6 +456,20 @@ async def main(
                 row, next_run_at=upcoming[0] if upcoming else None,
             )
 
+        from surogates.followup.outreach import make_outreach_sender
+
+        _send_outreach = make_outreach_sender(
+            session_factory=_session_factory(),
+            session_store=session_store,
+            redis=redis,
+            delivery_service=DeliveryService(
+                session_factory=_session_factory(), redis_client=redis,
+            ),
+            identity_lookup=_identity_lookup,
+            storage=storage,
+            settings=settings,
+        )
+
         async def _program_send_openers():  # pragma: no cover - prod path
             await send_queued_openers(
                 _session_factory(),
@@ -463,6 +477,12 @@ async def main(
                 now=_program_now(),
                 enqueue=_opener_enqueue,
             )
+            # Alerts and operator messages ride the same leader-checked send
+            # phase as the openers: a second replica must never send them too.
+            try:
+                await _send_outreach(_program_now())
+            except Exception:
+                logger.exception("[outreach] send pass failed")
 
         # Mirror ops' active Programs. Unconfigured by default: with no
         # ops endpoint the ticker still fires the schedules it already has,
