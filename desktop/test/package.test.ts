@@ -329,3 +329,31 @@ describe.skipIf(process.env.SUROGATE_PACKAGE_TESTS !== "1")("the agent's disk", 
     ].join("\n"));
   });
 });
+
+// npm run electron:install, as npm runs it, in a package of its own: Electron's install a stand-in, its index.js
+// one that downloads first, as Electron's does where its binary is missing, and fuses.mjs one that says what it got.
+describe("this package's own Electron, given its fuses", () => {
+  it("is the binary its install named in path.txt, on each OS, wherever ELECTRON_OVERRIDE_DIST_PATH points, and nothing a download says", () => {
+    const { scripts } = JSON.parse(readFileSync(join(DESKTOP, "package.json"), "utf8")) as { scripts: Record<string, string> };
+    for (const [named, binary] of [["electron", "node_modules/electron/dist/electron"], ["Electron.app/Contents/MacOS/Electron", "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"]]) {
+      const own = mkdtempSync(join(tmpdir(), "electron-install-"));
+      try {
+        const electron = join(own, "node_modules", "electron");
+        mkdirSync(electron, { recursive: true });
+        mkdirSync(join(own, "scripts"));
+        writeFileSync(join(electron, "install.js"), "");
+        writeFileSync(join(electron, "path.txt"), named!);
+        writeFileSync(join(electron, "index.js"), [
+          'console.log("Downloading Electron binary...");',
+          'module.exports = require("path").join(process.env.ELECTRON_OVERRIDE_DIST_PATH || require("path").join(__dirname, "dist"), require("fs").readFileSync(require("path").join(__dirname, "path.txt"), "utf8"));',
+        ].join("\n"));
+        writeFileSync(join(own, "scripts", "fuses.mjs"), 'import { writeFileSync } from "node:fs";\nwriteFileSync("flipped.json", JSON.stringify(process.argv.slice(2)));\n');
+        const ran = spawnSync("sh", ["-c", scripts["electron:install"]!], { cwd: own, encoding: "utf8", env: { ...process.env, ELECTRON_OVERRIDE_DIST_PATH: join(own, "elsewhere") } });
+        expect(ran.status, ran.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(join(own, "flipped.json"), "utf8"))).toEqual([binary, "--inspect"]);
+      } finally {
+        rmSync(own, { recursive: true, force: true });
+      }
+    }
+  });
+});
