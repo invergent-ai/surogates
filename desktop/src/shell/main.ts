@@ -38,7 +38,7 @@ import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
-import { companyCaFile, trustCompanyCa } from "./company-ca.js";
+import { companyTrust } from "./ca-source.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { computerName } from "./computer-name.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
@@ -2582,14 +2582,11 @@ async function quit(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  // The company's CA, which the install script's --ca-cert keeps for every user, or for a development
-  // build SUROGATE_CA_CERT's file: trusted in both TLS stacks before Chromium checks a certificate, as it
-  // checks none again. What keeps it untrusted is said once the app is ready, and the app goes on without it:
-  // a file it refuses is trusted no more than none.
-  const companyCa = companyCaFile(app.isPackaged, process.env);
-  // An installed app's is root's alone to write, as the install script leaves it. In the database Chromium
-  // reads for this user, by its own rule: the session's XDG_DATA_HOME as it is written.
-  const { certificates, untrusted } = companyCa ? trustCompanyCa(companyCa, app.isPackaged, app.getPath("home"), process.env.XDG_DATA_HOME) : { certificates: [], untrusted: null };
+  // The company's CA, as an administrator gave it for every user of this computer (ca-source.ts), or a
+  // development build's: trusted in both TLS stacks before Chromium checks a certificate, as it checks
+  // none again. What keeps it untrusted is said once the app is ready, and the app goes on without it:
+  // a CA it refuses is trusted no more than none.
+  const { certificates, untrusted } = companyTrust(app.isPackaged, process.env, app.getPath("home"));
   companyCertificates = certificates;
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
