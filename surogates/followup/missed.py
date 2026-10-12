@@ -71,12 +71,19 @@ def threshold(config: dict, key: str = "alert_after_missed") -> int | None:
 async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     """Queue alerts for every streak of unanswered openers.  Returns how many."""
     async with session_factory() as db:
-        # Only Programs that ask for it: everything else is never read.
+        # Only Programs that ask for it: everything else is never read.  The
+        # SQL keeps the configs that set the key at all (``->>`` is NULL for
+        # a missing key and a JSON null alike); ``threshold`` still judges
+        # the value.
         watched = {
             pid: cfg for pid, cfg in (
                 await db.execute(
                     sa.select(ProgramScheduleRow.program_id, ProgramScheduleRow.config)
                     .where(ProgramScheduleRow.active.is_(True))
+                    .where(
+                        ProgramScheduleRow.config["alert_after_missed"]
+                        .as_string().isnot(None)
+                    )
                 )
             ).all()
             if threshold(cfg) is not None
