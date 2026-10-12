@@ -203,8 +203,13 @@ export function extractToolDetail(tc: ToolCallInfo): string | null {
     case "skill_view":
     case "skill_manage":
       return stringArg("name") ?? stringArg("skill");
+    case "consult_expert": {
+      // The expert's name, never ``task``: that is the whole brief, and
+      // it would fill the one-line label with paragraphs.
+      const expert = stringArg("expert");
+      return expert ? truncate(expert, 40) : null;
+    }
     case "create_artifact":
-    case "consult_expert":
     case "delegate_task":
       return stringArg("name") ?? stringArg("task") ?? stringArg("title");
     case "run_coding_agent":
