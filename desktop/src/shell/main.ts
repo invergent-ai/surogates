@@ -5,7 +5,7 @@
 // awaits app.whenReady() deadlocks.
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir, hostname, userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -40,6 +40,7 @@ import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyCaFile, trustCompanyCa } from "./company-ca.js";
 import { reauthorize, rebind, register } from "./computer.js";
+import { computerName } from "./computer-name.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { Copying } from "./copying.js";
 import { linkOfLaunch, type OpenLink } from "./deep-link.js";
@@ -896,7 +897,7 @@ async function registerComputer(agent: Agent): Promise<void> {
   signInAgain = false;
   try {
     const added = await register({
-      agent, session, computer: hostname(),
+      agent, session, computer: computerName(),
       verify: (token) => verifyDevice(linkUrl(agent.origin), token),
       start: (credential) => startStack(agent, credential),
       save: (credential) => credentials.save(credential),
@@ -1252,7 +1253,7 @@ async function signIn(agent: Agent): Promise<void> {
   let unkept: string | null = null;
   try {
     const tokens = await signInWithBrowser({
-      origin: agent.origin, computer: hostname(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
+      origin: agent.origin, computer: computerName(), fetch: apiFetch, signal: attempt.signal, open: (url) => shell.openExternal(url),
     });
     unkept = tokens.refreshToken;
     let started: DesktopSession | null = null;
@@ -2072,7 +2073,7 @@ async function settingsState() {
     startAtLoginRefused: loginItem.refusal(loginCommand()),
     account,
     computer: {
-      name: hostname(),
+      name: computerName(),
       connection: agent ? deviceLine(agent) : "",
       added: kept?.addedAt ?? null,
       // The app's own sign-in names it, before the web client reports and whatever it reports.
