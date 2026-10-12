@@ -1,11 +1,7 @@
-// Surogate Desktop's release bucket at https://surogate.ai/desktop/: a Cloudflare Worker on the route
-// surogate.ai/desktop/*, with the bucket bound as BUCKET. What publish.sh puts under desktop/ is
-// served by its path, read-only: /desktop/latest.json is the object desktop/latest.json, with the
-// type and the cache control it was sent with. The install script and the app ask for nothing else.
-// Bundled to one module for its deploy: npx esbuild release/worker.ts --bundle --format=esm.
+// Surogate Desktop's releases at https://surogate.ai/desktop/: what publish.sh puts under desktop/,
+// served by its path, read-only, with the type and the cache control it was sent with.
 
-// The part of the R2 binding this Worker reads: an object's body, its size, its etag, and the
-// metadata it was stored with.
+// What this Worker reads of an object: its body, its size, its etag, and the metadata it was stored with.
 export interface ReleaseObject {
   readonly size: number;
   readonly httpEtag: string;
