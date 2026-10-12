@@ -38,13 +38,14 @@ test/acceptance/macos/file-host.sh
 - When macOS asks whether Terminal may reach Documents, or iCloud Drive, allow it. Note which you allowed.
 - Pass:
   - the last line is `PASS`;
-  - `Seatbelt:` says `ok` only for the six designed tries: read, list and write the folder, write the working folder, load fsat, run rg;
+  - `Seatbelt:` says `ok` only for the designed tries, and `load a copy of fsat in the folder`, which is recorded:
+    - read, list and write the folder, and write the working folder;
+    - the three hard links a landing makes: in the folder, from it into the working folder, and back;
+    - load fsat, and run rg;
+  - in `Seatbelt:`, `hard-link a file of the app's into the folder` and `hard-link a file outside into the folder` are refused (`EPERM`). **Either one `ok` is a security finding: stop and report it before anything else;**
   - `M8` shows `reached 0, wroteOutside 0, kept "OUTSIDE\n"`;
   - every place line shows `"reached":0` and `"left":["only-outside"]`.
-- **Expected:** the landing in Seatbelt fails, because the sandbox allows no hard links yet.
-- **Send back:**
-  - the lines `Seatbelt measured: …` and `Seatbelt with (allow file-link …): …`, which decide that fix;
-  - the two logs the script names at its end.
+- **Send back:** the `Seatbelt:` line, and the two logs the script names at its end.
 
 ## 3. The VM
 
@@ -117,7 +118,7 @@ Then:
     - Settings → This computer shows your Mac's Sharing name.
     - `tmutil isexcluded "$HOME/Library/Application Support/Surogate/vm"` prints `[Excluded]`.
     - Settings → Browser lists your Chrome and Edge with versions, and an app run from a mounted `.dmg` is refused.
-11. **Headed tests on your own browsers:** `CI=true SUROGATE_BROWSER_TESTS_MAC=1 SUROGATE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npx vitest run --project macos test/browser-host-darwin.test.ts`, then the same with Edge. Pass: 5 passed.
+11. **Headed tests on your own browsers:** `CI=true SUROGATE_BROWSER_TESTS_MAC=1 SUROGATE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npx vitest run --project macos test/browser-host-darwin.test.ts`, then the same with Edge. Pass: 6 passed.
 
 ## 5. The whole app
 
@@ -125,13 +126,13 @@ In Surogate Dev, signed in to your agent:
 
 1. Start a chat on a folder in `~/Documents`, and ask the agent to read, write and search a file there. Note any privacy prompt, and whose name it shows: Surogate, node or Electron.
 2. Ask it to run a command in that folder, such as `ls -la && git status`. Pass: it runs in the guest, and sees the folder's files.
-3. Create a project with a folder of this Mac, and start a thread from a proposed card. Pass: the thread works in its own copy, and its turn lands its change in the folder. Expected today: the landing fails, as in step 2.
+3. Create a project with a folder of this Mac, and start a thread from a proposed card. Pass: the thread works in its own copy, and its turn lands its change in the folder.
 
 Clean up with `test/darwin/dev-bundle.sh --remove`.
 
 ## What to send back
 
-- Step 2: the two Seatbelt lines and the two logs.
+- Step 2: the `Seatbelt:` line and the two logs.
 - Step 3: the whole `out/` folder.
 - Every FAIL, with its words.
 - Every privacy prompt and Keychain prompt you saw, and the app each named.
