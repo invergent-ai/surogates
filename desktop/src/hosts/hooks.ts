@@ -12,9 +12,10 @@
 // write git's transient state (stripTodo).
 
 import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, readFileSync, type Stats, writeFileSync } from "node:fs";
+import { close, fstat, open as openFile, readFile, type Stats, writeFile } from "node:fs";
 import { access, constants, lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
+import { promisify } from "node:util";
 
 import { fdPaths, type Where } from "../files/fd-paths.js";
 import { inside, realpath as followed } from "../files/paths.js";
@@ -30,6 +31,9 @@ export const MAX_LISTED = 20;
 const EXEC = /^[ \t]*(?:exec|x)(?:[ \t\r]|$)/;
 // Far larger than any rebase's todo: one a command made larger is not read.
 const MAX_TODO = 16 * 1024 * 1024;
+// fs's calls by a descriptor, on libuv's threads as fs/promises' are: a mount that stops answering holds one of those,
+// and the host goes on answering the app.
+const onThreads = { open: promisify(openFile), fstat: promisify(fstat), readFile: promisify(readFile), writeFile: promisify(writeFile), close: promisify(close) };
 
 export interface HookScan {
   // Each hook's key, and what tells whether it changed (see describe).
@@ -233,28 +237,30 @@ export async function neutralize(
 
 // What git reads at *path*, through links: null when there is none; undefined when git could read
 // something this does not: a FIFO or a device it would wait on or read without end, or a file too large.
-function readTodo(path: Where): { text: string; stats: Stats } | null | undefined {
+// A todo by its path is opened on libuv's threads; one in a folder held open, through FdPaths.
+async function readTodo(path: Where): Promise<{ text: string; stats: Stats } | null | undefined> {
+  const flags = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY;
   let file: number;
   try {
-    file = fdPaths.open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
+    file = typeof path === "string" ? await onThreads.open(path, flags) : fdPaths.open(path, flags);
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     return code === "ENOENT" || code === "ENOTDIR" ? null : undefined;
   }
   try {
-    const stats = fstatSync(file);
+    const stats = await onThreads.fstat(file);
     // Byte for byte: a line this leaves is written back as it was.
-    return stats.isFile() && stats.size <= MAX_TODO ? { text: readFileSync(file, "latin1"), stats } : undefined;
+    return stats.isFile() && stats.size <= MAX_TODO ? { text: await onThreads.readFile(file, "latin1"), stats } : undefined;
   } catch {
     return undefined;
   } finally {
-    closeSync(file);
+    await onThreads.close(file).catch(() => {});
   }
 }
 
 // The exec steps in the todo at *path*, as they are now.
-function todoSteps(path: string): Set<string> {
-  const read = readTodo(path);
+async function todoSteps(path: string): Promise<Set<string>> {
+  const read = await readTodo(path);
   return new Set(read ? read.text.split("\n").filter((line) => EXEC.test(line)) : []);
 }
 
@@ -270,7 +276,7 @@ async function stripTodo(path: string, keep: ReadonlySet<string>, folders: reado
   const temp: Where = { dir: dir.fd, name: `.${basename(path)}.${randomUUID()}` };
   let made = false;
   try {
-    const read = readTodo(todo);
+    const read = await readTodo(todo);
     if (!read) return read === null ? "none" : "stuck";
     const lines = read.text.split("\n");
     const added = new Set(lines.filter((line) => EXEC.test(line) && !keep.has(line)));
@@ -280,9 +286,9 @@ async function stripTodo(path: string, keep: ReadonlySet<string>, folders: reado
     const out = fdPaths.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, read.stats.mode & 0o666);
     made = true;
     try {
-      writeFileSync(out, lines.map((line) => (added.has(line) ? `${REMOVED}${line}` : line)).join("\n"), "latin1");
+      await onThreads.writeFile(out, lines.map((line) => (added.has(line) ? `${REMOVED}${line}` : line)).join("\n"), "latin1");
     } finally {
-      closeSync(out);
+      await onThreads.close(out);
     }
     // Changed since it was read, as by a git going on: judged again at the next look.
     // ponytail: a write between this and the rename is lost; taking git's own lock file would close that.
@@ -492,7 +498,7 @@ export class HookGuard {
 
   // The exec steps in the latest look's todos are the user's.
   private async record(): Promise<void> {
-    this.steps = new Map(await Promise.all(this.todos.map(async (todo) => [todo, todoSteps(todo)] as const)));
+    this.steps = new Map(await Promise.all(this.todos.map(async (todo) => [todo, await todoSteps(todo)] as const)));
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
