@@ -44,6 +44,7 @@ import { join } from "node:path";
 
 import { Failure, fromNode, io, osError, sandboxError, valueError } from "./answers.js";
 import { fdPaths, type Where } from "./fd-paths.js";
+import { FLAGS } from "./flags.js";
 import { type Context, OWN_FILE, ownFile, revisionOf } from "./operations.js";
 import { inFolderRefusal, protectedInFolder } from "./protect.js";
 
@@ -353,7 +354,7 @@ function restore(dir: Held, own: string, name: string): string | null {
 function ownAt(path: Where): number | null {
   let fd: number;
   try {
-    fd = fdPaths.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = fdPaths.open(path, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") remove(path);
     return null;
@@ -384,7 +385,7 @@ function sourceOf(theirs: Held | null, name: string, path: string): number {
   if (theirs === null) throw osError("ENOENT", path);
   let fd: number;
   try {
-    fd = fdPaths.open(theirs.at(name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = fdPaths.open(theirs.at(name), constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     // A link at its name is no file of the copy's.
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw sandboxError(`Not a path in this folder: '${path}'`);
@@ -403,7 +404,7 @@ function sourceOf(theirs: Held | null, name: string, path: string): number {
 // its bytes are the blob *after*. Which file it wrote.
 function stage(from: number, temp: Where, path: string, after: string, mode: number | null): Identity {
   const { size } = fstatSync(from);
-  const to = io(path, () => fdPaths.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+  const to = io(path, () => fdPaths.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
   try {
     const hash = createHash("sha1").update(`blob ${size}\0`);
     const piece = Buffer.allocUnsafe(PIECE_BYTES);
@@ -710,7 +711,7 @@ class Landing {
           // takes its own back. Seen with a file of the landing's own, so the user's never has two names.
           const [first, second] = [dir.at(did.temp ?? did.back!), dir.at(did.out!)];
           try {
-            if (did.temp === null) closeSync(fdPaths.open(first, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600));
+            if (did.temp === null) closeSync(fdPaths.open(first, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o600));
             fdPaths.link(first, second);
           } catch (error) {
             throw unlinkable(path, error);
@@ -788,7 +789,7 @@ class Landing {
       const part = `${to}.part`;
       fdPaths.copy(from, part);
       // Read-only: a file the user may only read is copied with that mode, and is theirs to date and sync all the same.
-      const fd = openSync(part, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const fd = openSync(part, constants.O_RDONLY | FLAGS.NOFOLLOW);
       try {
         dated(fd, from);
         fsyncSync(fd);
@@ -874,7 +875,7 @@ class Landing {
     const staged = dir.at(at.back!);
     const open: number[] = [];
     try {
-      const from = io(did.path, () => fdPaths.open(held, constants.O_RDONLY | constants.O_NOFOLLOW));
+      const from = io(did.path, () => fdPaths.open(held, constants.O_RDONLY | FLAGS.NOFOLLOW));
       open.push(from);
       const size = fstatSync(from).size;
       for (let tries = 0; ; tries += 1) {
@@ -889,7 +890,7 @@ class Landing {
         if (to === null || at.copied < size) {
           // Written on as it was made, this user's to write; and only the very file compared, or one made new.
           if (to !== null) fchmodSync(to, 0o600);
-          const flags = constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK | (to === null ? constants.O_CREAT | constants.O_EXCL : 0);
+          const flags = constants.O_RDWR | FLAGS.NOFOLLOW | constants.O_NONBLOCK | (to === null ? constants.O_CREAT | constants.O_EXCL : 0);
           const fd = io(did.path, () => fdPaths.open(staged, flags, 0o600));
           open.push(fd);
           if (to !== null && !sameFile(fstatSync(fd), fstatSync(to))) throw conflict(did.path);
@@ -1217,7 +1218,7 @@ class Landing {
   private holdsKept(at: Where, step: number): boolean {
     const open: number[] = [];
     try {
-      open.push(fdPaths.open(at, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), openSync(this.bytes(step), constants.O_RDONLY | constants.O_NOFOLLOW));
+      open.push(fdPaths.open(at, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK), openSync(this.bytes(step), constants.O_RDONLY | FLAGS.NOFOLLOW));
       const size = fstatSync(open[0]!).size;
       return size === fstatSync(open[1]!).size && sameBytes(open[0]!, open[1]!, size);
     } catch {

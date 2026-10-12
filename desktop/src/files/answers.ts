@@ -4,6 +4,13 @@
 
 import { getSystemErrorMessage } from "node:util";
 
+import type { Outcome } from "../link/protocol.js";
+
+// The answer to an operation in a folder that is no longer the one the chat was bound to, or no longer there.
+export const FOLDER_UNAVAILABLE: Outcome = {
+  error: { type: "folder_unavailable", message: "The folder for this chat is no longer available on this computer" },
+};
+
 export const MAX_PAYLOAD_BYTES = 1024 * 1024;
 export const MAX_READ_BYTES = 50 * 1024 * 1024;
 export const MAX_WRITE_BYTES = 50 * 1024 * 1024;

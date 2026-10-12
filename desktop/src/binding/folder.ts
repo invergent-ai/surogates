@@ -5,7 +5,7 @@ import { realpathSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { inside, realpath } from "../files/paths.js";
-import { GLOB, isReserved } from "../hosts/policy.js";
+import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
 import { bootId } from "./boot-id.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
@@ -68,6 +68,9 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   if (!stats.isDirectory()) return { ok: false, missing: true, message: `the folder ${folder} is not a folder` };
   const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message });
   if (GLOB.test(path)) return refused(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${path}`);
+  if (FOLDER_BYTES !== null && Buffer.byteLength(path) > FOLDER_BYTES) {
+    return refused(`this computer cannot sandbox a folder whose path is longer than ${FOLDER_BYTES} bytes: ${path}`);
+  }
   if (isReserved(path)) return refused(`the folder ${path} is inside one of this computer's system folders`);
   // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
   const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));

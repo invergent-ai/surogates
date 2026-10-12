@@ -15,6 +15,8 @@ import {
   MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WALK_DEPTH, MAX_WALK_FILES, MAX_WALK_LOOKS, MAX_WRITE_BYTES,
   READ_TOO_LARGE, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
+import { fdPaths } from "../src/files/fd-paths.js";
+import { FLAGS } from "../src/files/flags.js";
 import { BAD_PAGE, BAD_WALK, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
@@ -84,6 +86,75 @@ vi.mock("node:fs", async (importOriginal) => {
   const mocked = { readSync, writeSync, readdirSync, opendirSync, openSync, lstatSync };
   return { ...fs, ...mocked, default: { ...fs, ...mocked } };
 });
+// On macOS a held folder is listed, and a name in it opened and looked at, through fsat (fd-paths-darwin.ts): each of
+// those counted as Node's own are, a name by the folder's descriptor and the name.
+vi.mock("../src/files/fsat.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/files/fsat.js")>();
+  // The hidden folders each listing still lists before what is on disk.
+  const hiddenIn = new WeakMap<object, number>();
+  const fsat = () => {
+    const own = real.fsat();
+    return {
+      ...own,
+      opendir: (dir: number) => {
+        if (dirents.refuse > 0 && --dirents.refuse === 0) {
+          throw Object.assign(new Error("EMFILE: too many open files, openat"), { code: "EMFILE", errno: -24, syscall: "openat" });
+        }
+        const listing = own.opendir(dir);
+        hiddenIn.set(listing, dirents.hidden);
+        dirents.hidden = 0;
+        return listing;
+      },
+      readdir: (listing: Parameters<typeof own.readdir>[0]) => {
+        const hidden = hiddenIn.get(listing) ?? 0;
+        if (hidden > 0) {
+          hiddenIn.set(listing, hidden - 1);
+          dirents.read += 1;
+          return [Buffer.from(`.${hidden - 1}`), own.constants.DT_DIR] as [Buffer, number];
+        }
+        const entry = own.readdir(listing);
+        if (entry !== null) dirents.read += 1;
+        return entry;
+      },
+      openat: (dir: number, name: string, flags: number, mode: number) => {
+        opens.made.push({ path: `fd ${dir}: ${name}`, flags });
+        if (opens.refuseAt > 0 && --opens.refuseAt === 0) {
+          throw Object.assign(new Error("EMFILE: too many open files, openat"), { code: "EMFILE", errno: -24, syscall: "openat" });
+        }
+        return own.openat(dir, name, flags, mode);
+      },
+      fstatat: (dir: number, name: string | null, flags: number) => {
+        if (name !== null) lstats.paths.push(`fd ${dir}: ${name}`);
+        return own.fstatat(dir, name, flags);
+      },
+    };
+  };
+  return { ...real, fsat };
+});
+// A file's mtime set to the nanosecond, from "@<seconds>": by GNU touch on Linux; by CPython's os.utime on macOS,
+// whose touch takes no such time.
+function setMtime(time: string, path: string): void {
+  if (process.platform === "linux") return void execFileSync("touch", ["-d", time, path]);
+  const [whole, part = ""] = time.slice(1).replace(/^-/, "").split(".");
+  const ns = (BigInt(whole!) * 1_000_000_000n + BigInt(part.padEnd(9, "0"))) * (time.startsWith("@-") ? -1n : 1n);
+  execFileSync("python3", ["-c", "import os, sys; os.utime(sys.argv[1], ns=(int(sys.argv[2]),) * 2)", path, String(ns)]);
+}
+// Whether this computer's temp folder takes a name that is not valid UTF-8: APFS refuses one (EILSEQ).
+const takesAnyName = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "names-"));
+  try {
+    writeFileSync(Buffer.concat([Buffer.from(`${probe}/`), Buffer.from([0x6e, 0xff])]), "");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+// What the file helper looks at a file in a held folder by: the folder's /proc entry on Linux, its descriptor on macOS.
+const THROUGH_HELD = process.platform === "linux" ? /^\/proc\/self\/fd\/\d+\/(a\.txt|b\.md)$/ : /^fd \d+: (a\.txt|b\.md)$/;
+// This process's open descriptors, one entry each.
+const DESCRIPTORS = "/dev/fd";
 
 let base: string;
 let folder: string;
@@ -138,7 +209,7 @@ describe("stat", () => {
     ["@-0.128129134", -0.12812913399999992],
     ["@1700000000.987654321", 1700000000.9876542],
   ])("answers the mtime of %s to the last bit, as CPython's st_mtime", async (time, expected) => {
-    execFileSync("touch", ["-d", time, join(folder, "a.txt")]);
+    setMtime(time, join(folder, "a.txt"));
     const answer = (await run("stat", { key: `${folder}/a.txt` })) as { ok: { mtime: number } };
     expect(answer.ok.mtime).toBe(expected);
   });
@@ -427,7 +498,7 @@ describe("write", () => {
     const key = `${folder}/Downloads/report.txt`;
     expect(await run("write", { key, data: b64("first"), create: true })).toEqual({ ok: null });
     // Opened create-only, under its own name: the look and the making are one act, and nothing is renamed over a file made meanwhile.
-    expect(opens.made.at(-1)).toEqual({ path: key, flags: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW });
+    expect(opens.made.at(-1)).toEqual({ path: key, flags: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW });
     expect(readdirSync(join(folder, "Downloads"))).toEqual(["report.txt"]);
     // A file there, or a folder: left as it is.
     const exists = (at: string) => ({ error: { type: "os", code: "EEXIST", message: `File exists: '${at}'` } });
@@ -714,7 +785,7 @@ describe("walk", () => {
     expect(listed(walked)).toEqual([[".github/f.txt", 1], ["a.txt", 6], ["src/f.txt", 1], ["sub/_whiteboard/f.txt", 1]]);
   });
 
-  it("leaves out a name that is not UTF-8, and lists its decoded twin once", async () => {
+  it.runIf(takesAnyName)("leaves out a name that is not UTF-8, and lists its decoded twin once", async () => {
     writeFileSync(Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0x6e, 0xff])]), "bytes");
     writeFileSync(join(folder, "n\ufffd"), "t");
     expect(listed(await walk())).toEqual([["a.txt", 6], ["n\ufffd", 1]]);
@@ -760,27 +831,27 @@ describe("walk", () => {
   it("reads a folder no further than it looks, and closes every folder it opened", async () => {
     mkdirSync(join(folder, "deep", "many"), { recursive: true });
     for (let i = 0; i < 2 * MAX_WALK_FILES; i++) writeFileSync(join(folder, "deep", "many", String(i)), "");
-    const handles = readdirSync("/proc/self/fd").length;
+    const handles = readdirSync(DESCRIPTORS).length;
     dirents.read = 0;
     const walked = await walk();
     expect(walked.ok.truncated).toBe(true);
     // The key's and deep's few entries, then many's up to the one past the cap: not the rest of it.
     expect(dirents.read).toBeLessThan(MAX_WALK_FILES + 10);
-    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+    expect(readdirSync(DESCRIPTORS)).toHaveLength(handles);
   });
 
   it("closes the key's handle when it cannot read the key", async () => {
-    const handles = readdirSync("/proc/self/fd").length;
+    const handles = readdirSync(DESCRIPTORS).length;
     dirents.refuse = 1;
     expect(await walk()).toMatchObject({ error: { type: "os", code: "EMFILE" } });
-    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+    expect(readdirSync(DESCRIPTORS)).toHaveLength(handles);
   });
 
   it("closes a folder's handle when it cannot read the folder, and says it stopped", async () => {
-    const handles = readdirSync("/proc/self/fd").length;
+    const handles = readdirSync(DESCRIPTORS).length;
     dirents.refuse = 2; // the key's listing, then sub's
     expect((await walk()).ok.truncated).toBe(true);
-    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+    expect(readdirSync(DESCRIPTORS)).toHaveLength(handles);
   });
 
   it("opens its key without following a link, and looks at each file through its folder's handle", async () => {
@@ -790,11 +861,11 @@ describe("walk", () => {
     await walk();
     // Its key is checked for links first; a link put in its place since is still not followed.
     const key = opens.made.find((open) => open.path === folder);
-    expect(key !== undefined && (key.flags & constants.O_NOFOLLOW) !== 0).toBe(true);
+    expect(key !== undefined && (key.flags & FLAGS.NOFOLLOW) === FLAGS.NOFOLLOW).toBe(true);
     // Never by a path that a folder swapped for a link on the way could take elsewhere.
     expect(lstats.paths).not.toContain(join(folder, "a.txt"));
     expect(lstats.paths).not.toContain(join(folder, "sub", "b.md"));
-    expect(lstats.paths.filter((path) => /^\/proc\/self\/fd\/\d+\/(a\.txt|b\.md)$/.test(path))).toHaveLength(2);
+    expect(lstats.paths.filter((path) => THROUGH_HELD.test(path))).toHaveLength(2);
   });
 
   // *depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command in the VM
@@ -804,12 +875,12 @@ describe("walk", () => {
     let fd = openSync(top, constants.O_RDONLY | constants.O_DIRECTORY);
     try {
       for (let level = 0; level < depth; level++) {
-        mkdirSync(`/proc/self/fd/${fd}/d`);
-        const child = openSync(`/proc/self/fd/${fd}/d`, constants.O_RDONLY | constants.O_DIRECTORY);
+        fdPaths.mkdir({ dir: fd, name: "d" });
+        const child = fdPaths.open({ dir: fd, name: "d" }, constants.O_RDONLY | constants.O_DIRECTORY);
         closeSync(fd);
         fd = child;
       }
-      writeFileSync(`/proc/self/fd/${fd}/bottom.txt`, "");
+      closeSync(fdPaths.open({ dir: fd, name: "bottom.txt" }, constants.O_WRONLY | constants.O_CREAT, 0o666));
     } finally {
       closeSync(fd);
     }
@@ -848,13 +919,13 @@ describe("walk", () => {
 
   it("stops at a folder it has no handle left to enter, and says it stopped", async () => {
     writeFileSync(join(folder, "sub", "b.txt"), "b");
-    const handles = readdirSync("/proc/self/fd").length;
+    const handles = readdirSync(DESCRIPTORS).length;
     opens.refuseAt = 2; // the key's, then sub's
     const walked = await walk();
     opens.refuseAt = 0;
     expect(walked.ok.truncated).toBe(true);
     expect(walked.ok.files).not.toContainEqual(["sub/b.txt", 1]);
-    expect(readdirSync("/proc/self/fd")).toHaveLength(handles);
+    expect(readdirSync(DESCRIPTORS)).toHaveLength(handles);
   });
 
   it("stops at its cap and says it did", async () => {
