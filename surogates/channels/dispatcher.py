@@ -46,6 +46,7 @@ from surogates.channels.inbound import (
 )
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
+from surogates.runtime.pubsub import listen_forever
 
 __all__ = ["ChannelWebhookDispatcher", "ChannelDeliveryDispatcher", "ChannelWebhookReconciler"]
 
@@ -1120,37 +1121,22 @@ class ChannelWebhookReconciler:
                     platform.kind,
                 )
 
-        pubsub = redis.pubsub()
-        try:
-            await pubsub.psubscribe("channel_routing_changed:*")
-            async for msg in pubsub.listen():
-                if msg.get("type") != "pmessage":
-                    continue
-                channel = msg.get("channel") or ""
-                if isinstance(channel, bytes):
-                    channel = channel.decode()
-                # channel name format: channel_routing_changed:<kind>:<identifier>
-                # Strip the fixed prefix then split on the FIRST colon only so
-                # identifiers that themselves contain colons (e.g. "telegram:@bot"
-                # isn't our case, but guarded defensively) are handled correctly.
-                suffix = channel.removeprefix("channel_routing_changed:")
-                if ":" not in suffix:
-                    continue
-                kind, identifier = suffix.split(":", 1)
-                if not kind or not identifier:
-                    continue
-                try:
-                    await self.handle_routing_change(kind, identifier)
-                except Exception:
-                    logger.exception(
-                        "[reconcile] handle_routing_change raised for %s:%s",
-                        kind, identifier,
-                    )
-        finally:
-            try:
-                await pubsub.aclose()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
+        async def on_message(msg: dict) -> None:
+            channel = msg.get("channel") or ""
+            if isinstance(channel, bytes):
+                channel = channel.decode()
+            # channel name format: channel_routing_changed:<kind>:<identifier>
+            # Strip the fixed prefix then split on the FIRST colon only so
+            # identifiers that themselves contain colons (e.g. "telegram:@bot"
+            # isn't our case, but guarded defensively) are handled correctly.
+            suffix = channel.removeprefix("channel_routing_changed:")
+            if ":" not in suffix:
+                return
+            kind, identifier = suffix.split(":", 1)
+            if kind and identifier:
+                await self.handle_routing_change(kind, identifier)
+
+        await listen_forever(redis, ["channel_routing_changed:*"], on_message, name="[reconcile] Webhook reconciler")
 
     # ------------------------------------------------------------------
     # Private helpers
