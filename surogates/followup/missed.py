@@ -184,31 +184,26 @@ async def paused_by_silence(
 ) -> bool:
     """Whether this Program should stop writing to someone for now.
 
-    True when the person's last *count* openers from it all went unanswered
-    and they have not written since the newest one.  Their next message
-    lifts it: the streak is still there, but it is older than what they
-    said.  Skipped openers do not count either way — the person was never
-    asked — so a pause holds until they write instead of lapsing after one
-    skipped run.
+    True when the *count* openers it sent since the person last wrote all
+    went unanswered.  Writing starts the count over: after a message, the
+    pause needs *count* new misses, not one more on top of the old streak.
+    Skipped openers do not count either way — the person was never asked —
+    so a pause holds until they write instead of lapsing after one skipped
+    run.
     """
+    query = (
+        sa.select(ProgramInvitationRow.response_state)
+        .where(ProgramInvitationRow.program_id == program_id)
+        .where(ProgramInvitationRow.user_id == user_id)
+        .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled")))
+        .order_by(ProgramInvitationRow.created_at.desc())
+        .limit(count)
+    )
+    if last_inbound_at is not None:
+        query = query.where(ProgramInvitationRow.created_at > _naive_utc(last_inbound_at))
     async with session_factory() as db:
-        recent = (
-            await db.execute(
-                sa.select(
-                    ProgramInvitationRow.response_state,
-                    ProgramInvitationRow.created_at,
-                )
-                .where(ProgramInvitationRow.program_id == program_id)
-                .where(ProgramInvitationRow.user_id == user_id)
-                .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled")))
-                .order_by(ProgramInvitationRow.created_at.desc())
-                .limit(count)
-            )
-        ).all()
-    if len(recent) < count or any(state != "no_reply_by_deadline" for state, _ in recent):
-        return False
-    newest = recent[0][1]
-    return last_inbound_at is None or _naive_utc(last_inbound_at) < _naive_utc(newest)
+        recent = (await db.execute(query)).scalars().all()
+    return len(recent) == count and all(state == "no_reply_by_deadline" for state in recent)
 
 
 def _naive_utc(value: datetime) -> datetime:

@@ -183,6 +183,11 @@ async def test_a_program_pauses_after_unanswered_openers_until_they_write(sf):
     assert await paused(NOW - timedelta(days=5))  # wrote before the streak
     assert not await paused(NOW)  # wrote since: the pause lifts
 
+    # After they write, one new miss is not a streak: it takes three again.
+    wrote = NOW - timedelta(hours=12)
+    await _invitation(sf, program_id, patient, days_ago=0.25)
+    assert not await paused(wrote)
+
 
 @pytest.mark.asyncio
 async def test_no_pause_without_a_full_streak(sf):
