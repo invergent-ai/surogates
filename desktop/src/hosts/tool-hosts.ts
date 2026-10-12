@@ -99,6 +99,10 @@ const QUITTING = unavailable("the app is quitting");
 // How often a thread's copy is opened for one host, where it is told each time that the copy is not vouched for.
 const OPENINGS = 4;
 // What a thread's operation is answered that its host could not do, its copy made again while it was asked.
+// Whether a host's folder is the one a binding names, by its path and its identity then.
+const sameFolder = (held: Folder, bound: BoundFolder): boolean =>
+  held.path === bound.folder && held.dev === bound.dev && held.ino === bound.ino && (held.boot ?? "") === (bound.boot ?? "");
+
 const madeAgain = (at: string): Outcome => unavailable(`the copy of ${at} this thread works in was made again while this was asked, so it was not done. Ask again`);
 
 // A step of a landing that came to its host as the host was told to go: nothing of it was done.
@@ -610,7 +614,15 @@ export class ToolHosts implements Executor {
     const binding = SESSION_ID.test(root) ? this.options.bindingOf(root) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
     const known = this.hosts.get(root);
-    if (known) return known;
+    // A chat's host holds the folder its binding names. One a project's coordinator had before its user chose the
+    // project's folder again goes, and the next starts on the folder named now once the guest has let the old one go.
+    let before: Promise<void> | undefined;
+    if (known && binding.history === undefined && !sameFolder(known.works.folder, binding)) {
+      known.finish();
+      before = known.letGo();
+    } else if (known) {
+      return known;
+    }
     if (binding.history === undefined) {
       // What a landing cut short in the folder, being put back, holds it first: a chat's host waits for that as long as it
       // waits for the folder, and no longer.
@@ -622,7 +634,7 @@ export class ToolHosts implements Executor {
         const started = this.hosts.get(root);
         if (started) return started;
       }
-      return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } });
+      return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
     }
     const { copies } = this.options;
     if (!copies) return NO_COPIES;

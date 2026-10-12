@@ -67,12 +67,28 @@ export class Bindings {
 
   /** Record a root's binding. A root is bound once: a second binding for it throws. */
   add(binding: Binding): void {
+    this.insert(binding);
+    this.changed(binding.root);
+  }
+
+  private insert(binding: Binding): void {
     this.db
       .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at, history, project) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt,
         binding.history ?? null, binding.project ? 1 : null,
       );
+  }
+
+  /**
+   * Record a root's binding in place of the one it has, as a project's coordinator is bound afresh to the folder its
+   * user chose again for the project: what its user allowed for it stays. A root with none is bound as add binds it.
+   */
+  replace(binding: Binding): void {
+    this.atomically(() => {
+      this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(binding.root);
+      this.insert(binding);
+    });
     this.changed(binding.root);
   }
 

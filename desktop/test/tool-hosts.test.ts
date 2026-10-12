@@ -153,6 +153,20 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     expect(spawned).toHaveLength(2);
   });
 
+  it("starts a chat's host on the folder its binding names now, once its project's folder was chosen again elsewhere", async () => {
+    const executor = toolHosts();
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_A), signal())).toEqual({ ok: folders[ROOT_A] });
+    // Its binding now names another folder, as a project's coordinator's does once its user chose its folder again.
+    const chosen = join(base, "chosen");
+    mkdirSync(chosen);
+    const { dev, ino } = statSync(chosen);
+    identities.set(chosen, { dev, ino, boot: BOOT_ID });
+    folders[ROOT_A] = chosen;
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_A), signal())).toEqual({ ok: chosen });
+    expect(spawned).toHaveLength(2);
+    await until(() => exits === 1);
+  });
+
   it("answers a root it has no folder for, and a bind it cannot confirm yet", async () => {
     const executor = toolHosts();
     expect(await executor.run(op("stat", { key: "/x" }, "33333333-3333-4333-8333-333333333333"), signal())).toEqual(FOLDER_UNAVAILABLE);
