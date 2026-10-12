@@ -115,6 +115,8 @@ markers = [
 
 [dependency-groups]
 dev = [
+    # The voice extra, so the tests of surogates/voice import livekit.
+    "surogates[voice]",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0a0",
     "testcontainers[postgres,redis]>=4.0,<5.0",

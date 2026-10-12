@@ -3395,6 +3395,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "reportlab" },
     { name = "respx" },
+    { name = "surogates", extra = ["voice"] },
     { name = "testcontainers", extra = ["redis"] },
 ]
 
@@ -3449,6 +3450,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.4.0a0" },
     { name = "reportlab", specifier = ">=4.0" },
     { name = "respx", specifier = ">=0.21" },
+    { name = "surogates", extras = ["voice"] },
     { name = "testcontainers", extras = ["postgres", "redis"], specifier = ">=4.0,<5.0" },
 ]
 
