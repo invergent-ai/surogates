@@ -23,6 +23,9 @@ export interface Binding {
   // A project's thread, which works in a copy of the folder that is its own: the thread, which is
   // the root itself. Without it, a chat that works in the folder itself.
   history?: string;
+  // The coordinator of a project made here, on the folder its user chose for the project: each of the
+  // project's threads works in a copy of it, made with no sheet. Without it, no project's.
+  project?: true;
 }
 
 // Read as bigints: node:sqlite throws on an INTEGER above 2^53, and SMB/CIFS and
@@ -38,12 +41,14 @@ interface Row {
   mode: string;
   bound_at: bigint;
   history: string | null;
+  project: bigint | null;
 }
 
 const read = (row: Row | undefined): Binding | undefined =>
   row && {
     root: row.root, nonce: row.nonce, folder: row.folder, dev: Number(row.dev), ino: Number(row.ino), boot: row.boot,
     mode: row.mode as Mode, boundAt: Number(row.bound_at), ...(row.history === null ? {} : { history: row.history }),
+    ...(row.project ? { project: true } : {}),
   };
 
 export class Bindings {
@@ -63,8 +68,11 @@ export class Bindings {
   /** Record a root's binding. A root is bound once: a second binding for it throws. */
   add(binding: Binding): void {
     this.db
-      .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at, history) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt, binding.history ?? null);
+      .prepare(`INSERT INTO bindings (root, nonce, folder, dev, ino, boot, mode, bound_at, history, project) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt,
+        binding.history ?? null, binding.project ? 1 : null,
+      );
     this.changed(binding.root);
   }
 

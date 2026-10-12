@@ -4,8 +4,8 @@
 // types and copied field by field before the shell uses it.
 
 import type {
-  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectsSource, ProjectSummary, Routine, SetAside,
-  SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
+  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectFolder, ProjectsSource, ProjectSummary, Routine,
+  SetAside, SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
 } from "../../../web/src/lib/projects-contract.js";
 
 // How long the page has to answer a call.
@@ -65,11 +65,13 @@ function summaryOf(value: unknown): ProjectSummary {
 const TIERS = [null, "basic", "pro"] as const;
 const tierOf = (value: unknown): Project["coordinatorTier"] => (one(value, TIERS) ? value : "unknown");
 
+// Where a project works, as its row's place is taken; and its folder there. An agent older than the app names neither.
 function projectOf(value: unknown): Project {
-  const { goal, instructions, masterSessionId, coordinatorTier, threadTier } = fields(value);
-  need((goal === null || text(goal, 16_000)) && text(instructions, 16_000) && named(masterSessionId));
+  const { goal, instructions, masterSessionId, coordinatorTier, threadTier, place, folder = null } = fields(value);
+  need((goal === null || text(goal, 16_000)) && text(instructions, 16_000) && named(masterSessionId) && (folder === null || text(folder, 4096)));
   return {
     ...summaryOf(value), goal, instructions, masterSessionId, coordinatorTier: tierOf(coordinatorTier), threadTier: tierOf(threadTier),
+    place: placeOf(place), folder,
   } as Project;
 }
 
@@ -249,7 +251,7 @@ export class PageProjects implements ProjectsSource {
 
   list = () => this.call<ProjectSummary[]>("list");
   get = (projectId: string) => this.call<Project>("get", projectId);
-  create = (input: { name: string; goal?: string; instructions?: string }) => this.call<Project>("create", input);
+  create = (input: { name: string; goal?: string; instructions?: string; execution?: ProjectFolder }) => this.call<Project>("create", input);
   update = (projectId: string, patch: Parameters<ProjectsSource["update"]>[1]) => this.call<Project>("update", projectId, patch);
   archive = (projectId: string) => this.call<void>("archive", projectId);
   threads = (projectId: string, threadId?: string) =>

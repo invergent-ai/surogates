@@ -26,6 +26,9 @@ interface ProjectDialog {
   // A project's settings, or a new project's; and why the project could not be read, if it could not.
   state(): Promise<{ editing: boolean; project: Shown | null; refused: string | null }>;
   save(fields: Fields): Promise<string | null>; // why it was refused, or null once done
+  // A new project's folder, picked and confirmed in the desktop's own sheet, which names the project as typed so
+  // far: the folder, null when the user cancelled, or why none can be chosen.
+  choose(name: string): Promise<{ folder: string } | { refused: string } | null>;
   archive(): Promise<string | null>;
   close(): Promise<void>;
 }
@@ -46,6 +49,8 @@ async function render(): Promise<void> {
   byId("heading").textContent = editing ? "Project settings" : "New project";
   byId("save").textContent = editing ? "Save" : "Create project";
   byId("settings-only").hidden = !editing;
+  // A new project's folder is chosen as it is made, and never changed.
+  byId("new-only").hidden = editing;
   // A project that could not be read is said so, with nothing to save or archive.
   byId("error").textContent = refused ?? "";
   byId("save").hidden = refused !== null;
@@ -102,6 +107,13 @@ byId<HTMLFormElement>("form").addEventListener("submit", (event) => {
   void asked(() => dialog.save(fields), editing ? "Saving…" : "Creating…");
 });
 byId("archive").addEventListener("click", () => void asked(() => dialog.archive()));
+byId("choose").addEventListener("click", () => void asked(async () => {
+  const chosen = await dialog.choose(value("name"));
+  if (chosen === null) return null;
+  if ("refused" in chosen) return chosen.refused;
+  byId("folder").textContent = chosen.folder;
+  return null;
+}));
 byId("cancel").addEventListener("click", () => void dialog.close());
 byId("backdrop").addEventListener("click", () => void dialog.close());
 // An Escape that cancels an input method's composition is the composition's: the dialog stays, with what was typed.

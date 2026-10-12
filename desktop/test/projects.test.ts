@@ -366,6 +366,28 @@ describe("the projects the page serves", () => {
     }
   });
 
+  it("take where a project works and its folder, made with the folder its user confirmed here, and a place it does not know as none", async () => {
+    const { source, last } = page();
+    const project = projects[0]!;
+    const execution = { kind: "device" as const, device_id: "d-1", folder: "/home/flavius/Q3", nonce: "n".repeat(43) };
+    const made = source.create({ name: "Quarterly report", goal: "", execution });
+    expect(last()).toMatchObject({ method: "create", args: [{ name: "Quarterly report", goal: "", execution }] });
+    const place = { kind: "device", deviceId: "d-1", deviceName: "ThinkPad", online: true };
+    source.answered(1, { ok: { ...project, place, folder: "/home/flavius/Q3" } });
+    expect(await made).toEqual({ ...project, place, folder: "/home/flavius/Q3" });
+    // An agent older than the app names neither; a later one may name a place the app does not know.
+    for (const [at, [given, taken]] of [[undefined, null], [{ kind: "server" }, null], [{ kind: "cloud" }, { kind: "cloud" }]].entries()) {
+      const read = source.get(REPORT);
+      source.answered(at + 2, { ok: { ...project, place: given, folder: undefined } });
+      expect(await read, JSON.stringify(given)).toEqual({ ...project, place: taken, folder: null });
+    }
+    for (const [at, odd] of [{ place, folder: 7 }, { place: { ...place, online: "yes" }, folder: null }].entries()) {
+      const read = source.get(REPORT);
+      source.answered(at + 5, { ok: { ...project, ...odd } });
+      await expect(read).rejects.toThrow("The agent's page answered get with something Surogate cannot use");
+    }
+  });
+
   it("take a file's History, and refuse a version of another file, one with no zone or more than it lists", async () => {
     const { source, last } = page();
     const versions = history[REPORT]![REVENUE]!;

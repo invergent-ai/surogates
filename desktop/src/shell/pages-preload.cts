@@ -55,6 +55,7 @@ if (location.protocol === "file:") {
   contextBridge.exposeInMainWorld("surogateProject", {
     state: () => ipcRenderer.invoke("project:state"),
     save: (fields: unknown) => ipcRenderer.invoke("project:save", fields),
+    choose: (name: unknown) => ipcRenderer.invoke("project:choose", name),
     archive: () => ipcRenderer.invoke("project:archive"),
     close: () => ipcRenderer.invoke("project:close"),
   });

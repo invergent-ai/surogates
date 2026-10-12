@@ -76,6 +76,7 @@ export interface FolderSheet {
   links: LinkSummary | null; // null: no file in the folder is linked from elsewhere
   refusal: string | null; // why no chat may work on this folder: the sheet offers Change and Cancel only
   thread: ThreadLabel | null; // a project's thread the folder is for; null for a new chat
+  project: string | null; // a new project the folder is for, by the name it has so far ("" before it has one); null for a chat or a thread
 }
 
 // The desktop shell's own windows; fakes in tests. Each call is dismissed by its signal.
@@ -134,6 +135,7 @@ interface Preparation {
   ino: number;
   mode: Mode;
   window: string;
+  project?: true; // a new project's own folder, which its coordinator binds and its threads' copies are made of
   root?: string; // the chat its bind operation bound
   settled: Promise<Binding>;
   resolve: (binding: Binding) => void;
@@ -223,7 +225,7 @@ export class Binder implements Executor {
     const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     let prepared: Prepared | null = null;
     try {
-      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal, thread);
+      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal, thread, null);
       return prepared;
     } finally {
       // Taken: it goes still if its chat is never bound.
@@ -231,6 +233,39 @@ export class Binder implements Executor {
       if (preparation) preparation.made = true;
       else if (made !== null) this.release(made);
     }
+  }
+
+  /**
+   * The folder for a new project made here, as the user picks it in the folder dialog and confirms it in the sheet,
+   * which names *project*: its coordinator works in the folder itself, and each of its threads in a copy of it,
+   * which asks no more (prepareThreadFolder). Null when the user cancels.
+   */
+  async prepareProjectFolder(window: string, signal: AbortSignal, project: string): Promise<Prepared | null> {
+    const last = this.options.bindings.last()?.folder;
+    return this.confirm(null, last ?? this.options.guards.home, window, signal, null, project.trim(), true);
+  }
+
+  /**
+   * A copy of a project's folder for one of its threads, with no dialog and no sheet: the folder its user chose for
+   * the project when they made it here, which its coordinator's chat, *master*, works in. The thread asks as that
+   * chat does. Refused for a chat whose folder was confirmed for no project, and for a folder that is no longer the
+   * one its user chose; and where no copy of it could be made, before the thread is.
+   */
+  async prepareThreadFolder(master: string, window: string): Promise<Prepared> {
+    const binding = this.options.bindings.get(master);
+    if (!binding?.project) throw new Error("This chat is no project's on this computer");
+    if (this.options.keepsCopies !== true) throw new Error(NO_COPY_HERE);
+    const { folder } = binding;
+    const checked: FolderCheck = (await this.answers(folder))
+      ? checkFolder(folder, this.options.guards)
+      : { ok: false, missing: true, message: `the folder ${folder} did not answer` };
+    if (!checked.ok) throw new Error(`This project's folder cannot be used: ${checked.message}`);
+    if (checked.path !== folder || !confirmedFolder(binding, checked)) {
+      throw new Error(`The folder ${folder} was replaced after it was chosen for this project`);
+    }
+    const alone = noCopyAt(folder, this.options.guards);
+    if (alone !== null) throw new Error(noCopyOf(folder, alone));
+    return this.prepare(checked, binding.mode === "free" ? "free" : "ask", window);
   }
 
   private answers(folder: string): Promise<boolean> {
@@ -277,6 +312,12 @@ export class Binder implements Executor {
     return binding.folder;
   }
 
+  /** Whether a folder confirmed in *window* can still bind the chat it is for: neither bound, nor dropped, nor expired. */
+  isPrepared(preparedToken: string, window: string): boolean {
+    const preparation = this.byToken.get(preparedToken);
+    return preparation?.window === window && preparation.root === undefined && this.byNonce.get(preparation.nonce) === preparation;
+  }
+
   /** Drop a folder confirmed in *window* whose chat was never created: its bind is refused from now on. A chat bound already keeps it. */
   cancelPrepared(preparedToken: string, window: string): void {
     const preparation = this.byToken.get(preparedToken);
@@ -309,9 +350,11 @@ export class Binder implements Executor {
     }
   }
 
-  // The sheet for *offered*, or for the folder the dialog picks from *startIn*, until the user accepts one or cancels.
+  // The sheet for *offered*, or for the folder the dialog picks from *startIn*, until the user accepts one or cancels:
+  // for a chat, a project's thread, or a new *project*'s own folder (*forProject*).
   private async confirm(
     offered: string | null, startIn: string, window: string, signal: AbortSignal, thread: ThreadLabel | null,
+    project: string | null, forProject = false,
   ): Promise<Prepared | null> {
     const { prompts, guards } = this.options;
     // A page that has gone gets no prompt: the signal is looked at before each one.
@@ -330,10 +373,11 @@ export class Binder implements Executor {
         links,
         refusal: checked.ok ? null : checked.message,
         thread,
+        project,
       };
       const answer = await prompts.confirmFolder(sheet, signal);
       if (answer === null || signal.aborted) return null;
-      if (answer !== "change") return checked.ok ? this.prepare(checked, answer.mode, window) : null;
+      if (answer !== "change") return checked.ok ? this.prepare(checked, answer.mode, window, forProject) : null;
       // A dialog the user cancels goes back to the sheet.
       folder = (await prompts.pickFolder(sheet.folder, signal)) ?? folder;
     }
@@ -389,6 +433,11 @@ export class Binder implements Executor {
       preparation.reject(new Error("The server named another folder for this chat"));
       return NOT_BOUND;
     }
+    // A project's own folder is its coordinator's, never a thread's copy.
+    if (copy !== undefined && preparation.project) {
+      preparation.reject(new Error("The server asked for a copy of a project's own folder"));
+      return NOT_BOUND;
+    }
     // Nothing here would make the thread's copy: it is bound to nothing, so that it works nowhere.
     if (copy !== undefined && this.options.keepsCopies !== true) {
       preparation.reject(new Error(NO_COPY_HERE));
@@ -403,7 +452,10 @@ export class Binder implements Executor {
     }
     const { dev, ino, mode } = preparation;
     try {
-      this.options.bindings.add({ root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now(), ...(copy === undefined ? {} : { history: copy }) });
+      this.options.bindings.add({
+        root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now(),
+        ...(copy === undefined ? {} : { history: copy }), ...(preparation.project ? { project: true } : {}),
+      });
     } catch (error) {
       report(this.options.onError, error);
       preparation.reject(error instanceof Error ? error : new Error(String(error)));
@@ -455,7 +507,7 @@ export class Binder implements Executor {
     await this.options.hosts.end?.();
   }
 
-  private prepare(checked: { path: string; dev: number; ino: number }, mode: Mode, window: string): Prepared {
+  private prepare(checked: { path: string; dev: number; ino: number }, mode: Mode, window: string, forProject = false): Prepared {
     const nonce = token();
     const secret = token();
     const { promise: settled, resolve, reject } = Promise.withResolvers<Binding>();
@@ -463,6 +515,7 @@ export class Binder implements Executor {
     settled.catch(() => {});
     const preparation: Preparation = {
       nonce, folder: checked.path, dev: checked.dev, ino: checked.ino, mode, window, settled, resolve, reject,
+      ...(forProject ? { project: true } : {}),
     };
     this.byNonce.set(nonce, preparation);
     this.byToken.set(secret, preparation);

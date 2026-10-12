@@ -3,7 +3,9 @@
 // standing for the web client at every other path. Tests drive that page as the web client
 // would, and stand in for the system browser on the authorize page. With projects set, the
 // page serves them on every load, as the web client serves its own, and keeps what it
-// changes of them here (PUT /fake/projects), as the agent's server keeps its projects. Given a
+// changes of them here (PUT /fake/projects), as the agent's server keeps its projects; a project
+// made with a folder of this computer has its coordinator bound there over the link (POST
+// /fake/bind), as the agent asks once it has made the project. Given a
 // certificate and its key, it serves over TLS, as an agent behind a company's network is met.
 
 import { createHash } from "node:crypto";
@@ -15,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import type { ElectronApplication, Page } from "playwright-core";
 import { expect } from "vitest";
 
-import type { Project, ProjectFixtures, ProjectsSource, ThreadRow, UndoResult } from "../../../web/src/lib/projects.js";
+import type { Project, ProjectFixtures, ProjectFolder, ProjectsSource, ThreadRow, UndoResult } from "../../../web/src/lib/projects.js";
 import type { SignedInAccount } from "../../src/shell/session.js";
 import { FakeLinkServer } from "../fake-server.js";
 
@@ -70,6 +72,8 @@ export class FakeAgent {
   private readonly held = new Map<Held, Promise<void>>();
   readonly asked: Record<Held, number> = { config: 0, me: 0, register: 0, reauthorize: 0, item: 0, title: 0 };
   readonly link = new FakeLinkServer({ token: TOKEN });
+  // Each project coordinator the agent asked this computer to bind, with its folder and what the computer answered.
+  readonly bound: Array<{ session: string; folder: string; outcome?: unknown }> = [];
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
   // The bearer of each reauthorization of this computer: the sign-in the agent bound to it.
@@ -101,6 +105,23 @@ export class FakeAgent {
   readonly server: Server;
   private readonly scheme: "http" | "https";
   private linked = false;
+
+  // The bind of a project's coordinator, as the agent sends it once it has made the project: answered, recorded, and
+  // acknowledged, so the app tells whoever waits for it.
+  private bind(session: string, folder: string, nonce: string): void {
+    const id = `bind-${session}`;
+    const asked: { session: string; folder: string; outcome?: unknown } = { session, folder };
+    this.bound.push(asked);
+    this.link.send({
+      type: "op", id, session_id: session, calling_session_id: session, invocation_id: "bind", ordinal: 0, kind: "bind",
+      args: { folder, nonce }, digest: `d-${id}`,
+    });
+    const answered = () => this.link.received.find((frame) => frame.type === "op_result" && frame.id === id);
+    void this.link.until(() => answered() !== undefined, 20_000).then(() => {
+      asked.outcome = answered()?.outcome;
+      this.link.send({ type: "op_ack", id });
+    }, () => {});
+  }
 
   constructor(tls?: { cert: string; key: string }) {
     const answer = (request: IncomingMessage, response: ServerResponse): void => void this.answer(request, response);
@@ -219,6 +240,12 @@ export class FakeAgent {
     if (request.method === "PUT" && path === "/fake/projects") {
       this.projects = JSON.parse(await body(request)) as ProjectFixtures;
       response.writeHead(204).end();
+      return;
+    }
+    if (request.method === "POST" && path === "/fake/bind") {
+      const { session, folder, nonce } = JSON.parse(await body(request)) as { session: string; folder: string; nonce: string };
+      response.writeHead(204).end();
+      this.bind(session, folder, nonce);
       return;
     }
     await this.pagesHeld;
@@ -501,15 +528,23 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
       if (answer.applied.length > 0) fake.changed(project, null);
       return answer;
     },
-    async create(input: { name: string; goal?: string; instructions?: string }) {
+    async create(input: { name: string; goal?: string; instructions?: string; execution?: ProjectFolder }) {
       if (fake.refusal) throw new Error(fake.refusal);
       const now = new Date().toISOString();
+      const { execution } = input;
       const made: Project = {
         id: crypto.randomUUID(), name: input.name, icon: null, createdAt: now, updatedAt: now, waiting: 0, working: 0,
         goal: input.goal || null, instructions: input.instructions ?? "", masterSessionId: crypto.randomUUID(),
         coordinatorTier: null, threadTier: null,
+        place: execution ? { kind: "device", deviceId: execution.device_id, deviceName: "Laptop", online: true } : { kind: "cloud" },
+        folder: execution?.folder ?? null,
       };
       this.served.projects.push(made);
+      if (execution) {
+        await fetch("/fake/bind", {
+          method: "POST", body: JSON.stringify({ session: made.masterSessionId, folder: execution.folder, nonce: execution.nonce }),
+        });
+      }
       await keep(this.served);
       return made;
     },

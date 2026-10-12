@@ -21,7 +21,7 @@ import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from ".
 import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
-import type { FolderPrompts } from "../binding/binder.js";
+import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
@@ -1343,19 +1343,22 @@ async function preparing<T>(window: string, prepare: (signal: AbortSignal) => Pr
   }
 }
 
+// The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
+const anotherAccount = () => kept !== null && !pageIs(kept);
+
+// The device, once started, for a folder of this computer the page or the shell asks for: one asking while
+// it still starts, as at a launch, waits for it.
+async function registered(): Promise<DeviceStack> {
+  if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
+  if (kept?.token === null) throw new Error(REVOKED);
+  if (!device) throw new Error("This computer is not registered with the agent");
+  return device.stack ?? device.started;
+}
+
 // The bridge, on a view of the agent's web client: its calls answer for this agent only.
 function bridge(contents: WebContents, agent: Agent): void {
   // Each load of the page is a page of its own: what its user refused there holds until it is replaced.
   let load = 0;
-  // The device is the account's it was registered for: a page of anyone else's, or of nobody's, sees none.
-  const anotherAccount = () => kept !== null && !pageIs(kept);
-  // The device, once started: a page asking while it still starts, as at a launch, waits for it.
-  const registered = async (): Promise<DeviceStack> => {
-    if (anotherAccount()) throw new Error("This computer is registered with the agent for another account");
-    if (kept?.token === null) throw new Error(REVOKED);
-    if (!device) throw new Error("This computer is not registered with the agent");
-    return device.stack ?? device.started;
-  };
   // The browser is one for every chat of the agent's here, held from the chat that took it over until that chat hands it back.
   const HELD_FROM_ANOTHER_CHAT = "The agent's browser on this computer is taken over from another chat, and is handed back there";
   // The device, for a call about a chat's browser: refused for a chat with no folder here.
@@ -1389,6 +1392,7 @@ function bridge(contents: WebContents, agent: Agent): void {
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
+    prepareThreadFolder: async (masterSessionId, window) => (await registered()).binder.prepareThreadFolder(masterSessionId, window),
     setMode: async (sessionId, mode) => (await registered()).binder.approvals.setMode(sessionId, mode),
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),
@@ -2140,11 +2144,22 @@ async function confirmArchive(name: string): Promise<boolean> {
 }
 
 // The project dialog, over the window: a new project, or the open project's settings. Its page's
-// calls are answered on its own view only; each answers why it was refused, or null once done.
+// calls are answered on its own view only; each answers why it was refused, or null once done. A new
+// project works in a folder of this computer, which its user picks and confirms in the desktop's sheet:
+// its coordinator is bound to that folder itself, once the agent has made the project with it.
 function showProject(editing: Opened | null): void {
   const page = join(PAGES, "project.html");
   main?.openSettings(page, PAGES_PRELOAD, undefined, (contents) => {
     projectDialog = contents;
+    // The dialog's own window, which its folder is confirmed in.
+    const window = String(contents.id);
+    // The new project's folder, as its user confirmed it, until the project is made with it.
+    let chosen: Prepared | null = null;
+    // A folder confirmed for a project that was never made binds nothing from now on.
+    const letGo = (prepared: Prepared | null) => {
+      if (prepared) void registered().then((stack) => stack.binder.cancelPrepared(prepared.token, window), () => {});
+    };
+    contents.once("destroyed", () => letGo(chosen));
     const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
       contents.ipc.handle(channel, (event, ...args: unknown[]) => {
         if (!ownPage(event.senderFrame, page)) throw new Error("Not the project dialog's own page");
@@ -2175,6 +2190,59 @@ function showProject(editing: Opened | null): void {
     const close = () => {
       if (main?.settingsContents() === contents) main.closeSettings();
     };
+    // Choose…: the system's folder dialog, then the desktop's sheet, which names the project as typed so far.
+    handle("project:choose", async (name) => {
+      if (editing) return { refused: "A project's folder is chosen when the project is made" };
+      try {
+        const stack = await registered();
+        const typed = typeof name === "string" ? name.slice(0, 256) : "";
+        const picked = await preparing(window, (signal) => stack.binder.prepareProjectFolder(window, signal, typed));
+        if (!picked) return null;
+        letGo(chosen);
+        chosen = picked;
+        return { folder: picked.folder };
+      } catch (error) {
+        return { refused: refused(error) };
+      }
+    });
+    // A new project, made with the folder its user confirmed: the agent binds its coordinator there, and the
+    // dialog closes once this computer has recorded it.
+    const make = async (fields: ProjectFields): Promise<Project | string> => {
+      const stack = await registered();
+      const folder = chosen;
+      if (!folder || !stack.binder.isPrepared(folder.token, window)) {
+        chosen = null;
+        return folder
+          ? "Choose the folder again: its confirmation lapsed, or a project was made with it."
+          : "Choose the folder on this computer the project works in.";
+      }
+      // Its binding reaches this computer through the agent: one the agent does not hear would wait in silence.
+      if (device?.status !== "connected" || !kept) return "This computer is not connected to the agent right now: create the project once it is.";
+      // Taken: a dialog closed while the agent makes the project leaves its binding to come.
+      chosen = null;
+      let project: Project;
+      try {
+        project = await projects.create({
+          name: fields.name, goal: fields.goal,
+          execution: { kind: "device", device_id: kept.deviceId, folder: folder.folder, nonce: folder.nonce },
+        });
+      } catch (error) {
+        // Not made: the folder stays confirmed for the next Create, unless the dialog has closed meanwhile. One
+        // that may have been made keeps it too, for its binding.
+        if (error instanceof TimedOut || !contents.isDestroyed()) chosen = folder;
+        else letGo(folder);
+        throw error;
+      }
+      try {
+        await stack.binder.bindSession(project.masterSessionId, folder.token, window);
+      } catch (error) {
+        // Kept, as a chat made on a folder is: a binding recorded here before the link went is finished at its next connection.
+        remember(project);
+        void refreshProjects();
+        return `Surogate made the project but could not set up its folder on this computer: ${refused(error)}`;
+      }
+      return project;
+    };
     handle("project:save", async (value) => {
       const fields = projectFields(value, editing !== null);
       if (fields.name === "") return "Name the project.";
@@ -2184,9 +2252,8 @@ function showProject(editing: Opened | null): void {
         return null;
       }
       try {
-        const project = editing
-          ? await projects.update(editing.id, change)
-          : await projects.create({ name: fields.name, goal: fields.goal });
+        const project = editing ? await projects.update(editing.id, change) : await make(fields);
+        if (typeof project === "string") return project;
         remember(project);
         // A new project opens on its conversation, as one chosen in the sidebar does, unless its dialog
         // was closed meanwhile: the user has gone on to something else, which a late answer leaves alone.

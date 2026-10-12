@@ -1,11 +1,11 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FIXTURE_IDS, type Project, type ProjectFixtures, projectFixtures } from "../../../web/src/lib/projects.js";
-import { connect, FakeAgent, signIn, webClient } from "./fake-agent.js";
-import { dataHome, launch, quit, shellPage, stubNative } from "./launch.js";
+import { connect, FakeAgent, signedInAndAdded, signIn, webClient } from "./fake-agent.js";
+import { dataHome, launch, press, prompt, quit, shellPage, stubNative } from "./launch.js";
 
 const { report: REPORT, budget: BUDGET } = FIXTURE_IDS;
 const HIRING = "9f0a1b2c-3d4e-4f50-8a61-7b8c9d0e1f20";
@@ -29,12 +29,15 @@ function fixtures(): ProjectFixtures {
 }
 
 let home: string;
+// A folder of this computer a new project works in.
+let folder: string;
 let agent: FakeAgent;
 let origin: string;
 let app: ElectronApplication | undefined;
 
 beforeEach(async () => {
   home = dataHome();
+  folder = realpathSync(mkdtempSync("/tmp/sp-"));
   agent = new FakeAgent();
   agent.projects = fixtures();
   origin = await agent.start();
@@ -46,16 +49,18 @@ afterEach(async () => {
   await agent.stop();
   await agent.link.stop();
   rmSync(home, { recursive: true, force: true });
+  rmSync(folder, { recursive: true, force: true });
 });
 
-// The app connected to the fake agent, whose page serves the fixtures' projects.
-async function signedIn(): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
+// The app connected to the fake agent, this computer added unless the agent takes no folders of it, and the agent's
+// page serving the fixtures' projects.
+async function signedIn(added = true): Promise<{ shell: ElectronApplication; page: Page; client: Page }> {
   const shell = await launch(home);
   app = shell;
   await stubNative(shell);
   const page = await shellPage(shell);
   await connect(page, origin);
-  await signIn(shell, page, agent);
+  await (added ? signedInAndAdded(shell, page, agent) : signIn(shell, page, agent));
   const client = await webClient(shell, origin);
   await page.waitForSelector("#projects .project");
   return { shell, page, client };
@@ -245,7 +250,7 @@ describe("the sidebar's pages", () => {
 
   it.each([["with", true], ["without", false]])("open the web client's own Settings from the user menu, for an agent %s local folders, and Devices only with them", async (_, localFolders) => {
     agent.config = { ...agent.config, desktop_sessions: localFolders };
-    const { page, client } = await signedIn();
+    const { page, client } = await signedIn(localFolders);
     await page.click("#user");
     expect(await page.isVisible('#user-menu [data-action="devices"]')).toBe(localFolders);
     await page.click('#user-menu [data-action="account"]');
@@ -620,8 +625,20 @@ const dialogOpen = (shell: ElectronApplication) => overlayOpen(shell, "/project.
 // and that it went is what tells the click landed.
 const clickClosing = (dialog: Page, selector: string) => dialog.click(selector, { noWaitAfter: true }).catch(() => {});
 
+// A new project's folder, chosen with Choose…: the system's dialog picks the test's folder, and the user accepts it in
+// the desktop's sheet, working freely or asking. The dialog then shows it.
+async function choose(shell: ElectronApplication, dialog: Page, mode: "free" | "ask" = "free"): Promise<Page> {
+  await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+  await dialog.click("#choose");
+  const sheet = await prompt(shell);
+  await sheet.check(`input[value="${mode}"]`);
+  await press(sheet, "accept");
+  await expect.poll(() => dialog.textContent("#folder")).toBe(folder);
+  return sheet;
+}
+
 describe("the project dialog", () => {
-  it("makes a new project from its name and goal, lists it at once, and opens its conversation", async () => {
+  it("makes a new project in the folder its user chose on this computer, binds its conversation there, lists it, and opens it", async () => {
     const { shell, page, client } = await signedIn();
     await page.click("#open-projects");
     await page.click("#new-project");
@@ -629,15 +646,48 @@ describe("the project dialog", () => {
     expect(await dialog.textContent("#heading")).toBe("New project");
     expect(await dialog.isVisible("#instructions")).toBe(false);
     expect(await dialog.isVisible("#archive")).toBe(false);
+    // The folder is asked for: none is chosen yet, and none makes no project.
+    expect(await dialog.textContent("#folder")).toBe("No folder chosen");
     await dialog.fill("#name", "  Hiring brief ");
     await dialog.fill("#goal", "Hire two analysts by December.");
+    await dialog.click("#save");
+    await expect.poll(() => dialog.textContent("#error")).toBe("Choose the folder on this computer the project works in.");
+    expect(agent.projects!.projects.some((project) => project.name === "Hiring brief")).toBe(false);
+    // The desktop's own sheet confirms it, naming the project as typed so far, and says what its threads do there.
+    const sheet = await choose(shell, dialog, "ask");
+    expect(sheet.isClosed()).toBe(true);
     await clickClosing(dialog, "#save");
-    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    await expect.poll(() => dialogOpen(shell), { timeout: 10_000 }).toBe(false);
     const made = agent.projects!.projects.find((project) => project.name === "Hiring brief")!;
-    expect(made.goal).toBe("Hire two analysts by December.");
+    expect([made.goal, made.folder, made.place]).toEqual([
+      "Hire two analysts by December.", folder, { kind: "device", deviceId: "d", deviceName: "Laptop", online: true },
+    ]);
+    // Its conversation is bound to the folder itself, as its user confirmed it, and asks as they chose.
+    expect(agent.bound).toEqual([{ session: made.masterSessionId, folder, outcome: { ok: null } }]);
     await expect.poll(() => client.url()).toBe(`${origin}/chat/${made.masterSessionId}`);
+    expect(await client.evaluate((master) => window.surogateDesktop!.getBinding!(master), made.masterSessionId))
+      .toEqual({ folder, mode: "ask", takenOver: false });
     await expect.poll(() => page.textContent("#title")).toBe("Hiring brief");
     expect(await page.getAttribute(row(made.id), "aria-current")).toBe("page");
+  });
+
+  it("asks no folder of an open project's settings, and says why one cannot be chosen", async () => {
+    const { shell, page, client } = await signedIn();
+    await opened(page, client, REPORT);
+    await page.click("#project-settings");
+    expect(await (await projectDialog(shell)).isVisible("#choose")).toBe(false);
+    await clickClosing(await projectDialog(shell), "#cancel");
+    await expect.poll(() => dialogOpen(shell)).toBe(false);
+    // Its access revoked here, this computer works on no folder: Choose… says so, and opens nothing.
+    agent.link.close(4403);
+    await expect.poll(() => page.textContent("#device-action-text")).toBe("Local access revoked.");
+    await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+    await page.click("#open-projects");
+    await page.click("#new-project");
+    const dialog = await projectDialog(shell);
+    await dialog.click("#choose");
+    await expect.poll(() => dialog.textContent("#error"), { timeout: 10_000 }).toContain("revoked");
+    expect(shell.windows().some((window) => window.url().endsWith("/prompt.html"))).toBe(false);
   });
 
   it("changes the open project's name, instructions and tiers, then archives it", async () => {
@@ -714,6 +764,7 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     const dialog = await projectDialog(shell);
     await dialog.fill("#name", "Late");
+    await choose(shell, dialog);
     await dialog.click("#save");
     await expect.poll(() => dialog.textContent("#error"), { timeout: 15_000 })
       .toBe("The agent's page did not answer create in time: the project may have been made");
@@ -755,6 +806,7 @@ describe("the project dialog", () => {
     await expect.poll(() => dialog.textContent("#error")).toBe("Name the project.");
     expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Create project", null]);
     await dialog.fill("#name", "Busy");
+    await choose(shell, dialog);
     await dialog.click("#save");
     expect([await dialog.textContent("#save"), await dialog.getAttribute("#form", "aria-busy")]).toEqual(["Creating…", "true"]);
     await expect.poll(() => dialogOpen(shell), { timeout: 5_000 }).toBe(false);
@@ -783,6 +835,7 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     const dialog = await projectDialog(shell);
     await dialog.fill("#name", "Twice");
+    await choose(shell, dialog);
     await dialog.evaluate(() => {
       document.querySelector<HTMLButtonElement>("#save")!.click();
       document.querySelector<HTMLButtonElement>("#save")!.click();
@@ -801,6 +854,7 @@ describe("the project dialog", () => {
     await page.click("#new-project");
     const dialog = await projectDialog(shell);
     await dialog.fill("#name", "Escaped");
+    await choose(shell, dialog);
     await dialog.click("#save");
     // Closed while the create is under way, and Settings opened in its place.
     await dialog.keyboard.press("Escape").catch(() => {});
@@ -881,6 +935,7 @@ describe("the project dialog", () => {
       (window as unknown as { fakeProjects: { refusal: string | null } }).fakeProjects.refusal = "This agent keeps a single conversation, so it has no projects.";
     });
     await dialog.fill("#name", "Hiring brief");
+    await choose(shell, dialog);
     await dialog.click("#save");
     await expect.poll(() => dialog.textContent("#error")).toBe("This agent keeps a single conversation, so it has no projects.");
     expect([await dialog.inputValue("#name"), await dialog.inputValue("#goal")]).toEqual(["Hiring brief", "Hire two analysts by December."]);

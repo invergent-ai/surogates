@@ -159,7 +159,7 @@ describe("preparing a new chat's folder", () => {
     const made = user.sheets[0]?.folder ?? "";
     expect(made).toMatch(new RegExp(`^${join(base, "home", "Surogate", "Research-assistant")}/\\d{4}-\\d{2}-\\d{2}$`));
     expect(user.dialogs).toEqual([]);
-    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null, thread: null }]);
+    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null, thread: null, project: null }]);
     expect(ready).toEqual({
       folder: made, mode: "ask", nonce: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/), token: expect.any(String),
     });
@@ -325,6 +325,114 @@ describe("preparing a new chat's folder", () => {
     };
     expect(await binder(user).prepareFolder("pick", WINDOW, gone.signal)).toBeNull();
     expect(user.sheets).toHaveLength(1);
+  });
+});
+
+// A new project's folder, as its user picks it in the dialog and confirms it in the sheet, bound to its coordinator, *master*.
+async function aProject(user: User, chooser: Binder, master = ROOT, folder = notes, mode: Mode = "ask"): Promise<void> {
+  user.picks.push(folder);
+  user.answers.push({ mode });
+  const ready = await chooser.prepareProjectFolder(WINDOW, never(), "Q3 report");
+  if (!ready) throw new Error("the folder was not confirmed");
+  expect(await chooser.admit(bindOp(master, ready), never())).toEqual({ ok: null });
+}
+
+// A thread's bind, as the server sends it for a copy of *ready*'s folder.
+const threadBind = (root: string, ready: { folder: string; nonce: string }) =>
+  bindOp(root, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: root } } });
+
+describe("a project's folder", () => {
+  it("is picked in the dialog and confirmed in the sheet, which names the project, and binds its coordinator to the folder itself", async () => {
+    const user = new User([notes], [{ mode: "ask" }]);
+    const chooser = binder(user);
+    const ready = await chooser.prepareProjectFolder(WINDOW, never(), "Q3 report");
+    expect(ready).toMatchObject({ folder: notes, mode: "ask" });
+    expect(user.dialogs).toHaveLength(1);
+    expect(user.sheets.map((sheet) => [sheet.folder, sheet.project, sheet.thread])).toEqual([[notes, "Q3 report", null]]);
+    expect(await chooser.admit(bindOp(ROOT, ready!), never())).toEqual({ ok: null });
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes, mode: "ask", project: true });
+    expect(journal.bindings.get(ROOT)).not.toHaveProperty("history");
+    // A chat's folder is no project's.
+    const plain = await confirmed(user, chooser, join(base, "other"));
+    expect(await chooser.admit(bindOp(OTHER, plain), never())).toEqual({ ok: null });
+    expect(journal.bindings.get(OTHER)).not.toHaveProperty("project");
+  });
+
+  it("is nothing when the user cancels, and names no project on the sheet before the project has a name", async () => {
+    const user = new User([notes], [null]);
+    expect(await binder(user).prepareProjectFolder(WINDOW, never(), "  ")).toBeNull();
+    expect(user.sheets.map((sheet) => sheet.project)).toEqual([""]);
+  });
+
+  it("never binds its coordinator to a copy of the folder", async () => {
+    const user = new User([notes], [{ mode: "free" }]);
+    const chooser = binder(user);
+    const ready = (await chooser.prepareProjectFolder(WINDOW, never(), "Q3 report"))!;
+    expect(await chooser.admit(threadBind(ROOT, ready), never())).toEqual(NOT_BOUND);
+    expect(journal.bindings.all()).toEqual([]);
+  });
+
+  it("can bind the project's coordinator while its confirmation stands: until it binds, is dropped or expires, in its own window", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const ending of ["bound", "dropped", "expired"] as const) {
+        const user = new User([notes], [{ mode: "free" }]);
+        const chooser = binder(user);
+        const ready = (await chooser.prepareProjectFolder(WINDOW, never(), "Q3 report"))!;
+        expect([chooser.isPrepared(ready.token, WINDOW), chooser.isPrepared(ready.token, "window-2")], ending).toEqual([true, false]);
+        if (ending === "bound") await chooser.admit(bindOp(ROOT, ready), never());
+        if (ending === "dropped") chooser.cancelPrepared(ready.token, WINDOW);
+        if (ending === "expired") vi.advanceTimersByTime(5 * 60_000);
+        expect(chooser.isPrepared(ready.token, WINDOW), ending).toBe(false);
+        journal.bindings.retire(ROOT);
+      }
+      expect(binder(new User()).isPrepared("t".repeat(43), WINDOW)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is prepared for each of the project's threads at once, with no dialog and no sheet, and the thread asks as its coordinator does", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    await aProject(user, chooser);
+    for (const thread of [OTHER, THIRD]) {
+      const ready = await chooser.prepareThreadFolder(ROOT, WINDOW);
+      expect(ready).toMatchObject({ folder: notes, mode: "ask" });
+      expect(await chooser.admit(threadBind(thread, ready), never())).toEqual(keeps(thread));
+      expect(journal.bindings.get(thread)).toMatchObject({ folder: notes, mode: "ask", history: thread });
+      expect(journal.bindings.get(thread)).not.toHaveProperty("project");
+    }
+    // Only the project's own confirmation was asked.
+    expect([user.dialogs.length, user.sheets.length]).toEqual([1, 1]);
+  });
+
+  it("is prepared for no thread of a chat whose folder was confirmed for no project, nor of a thread's", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const plain = await confirmed(user, chooser);
+    expect(await chooser.admit(bindOp(ROOT, plain), never())).toEqual({ ok: null });
+    await aProject(user, chooser, OTHER);
+    const copy = await chooser.prepareThreadFolder(OTHER, WINDOW);
+    expect(await chooser.admit(threadBind(THIRD, copy), never())).toEqual(keeps(THIRD));
+    for (const root of [ROOT, THIRD, "77777777-7777-4777-8777-777777777777"]) {
+      await expect(chooser.prepareThreadFolder(root, WINDOW), root).rejects.toThrow("This chat is no project's on this computer");
+    }
+  });
+
+  it("is prepared for no thread once it is not the folder its user chose, nor where no copy of it can be made", async () => {
+    const user = new User();
+    await aProject(user, binder(user));
+    // Its tools make no copies here.
+    await expect(binder(user, { keepsCopies: false }).prepareThreadFolder(ROOT, WINDOW))
+      .rejects.toThrow("This computer keeps no copy of a folder for a project's thread to work in");
+    renameSync(notes, join(base, "notes-before"));
+    mkdirSync(notes);
+    await expect(binder(user).prepareThreadFolder(ROOT, WINDOW))
+      .rejects.toThrow(`The folder ${notes} was replaced after it was chosen for this project`);
+    rmSync(notes, { recursive: true });
+    await expect(binder(user).prepareThreadFolder(ROOT, WINDOW))
+      .rejects.toThrow(`This project's folder cannot be used: the folder ${notes} is not there`);
   });
 });
 
