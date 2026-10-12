@@ -37,12 +37,13 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, futimesSync, linkSync, lstatSync,
-  mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, rmSync, type Stats, unlinkSync, writeFileSync, writeSync,
+  type BigIntStats, chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, futimesSync, lstatSync,
+  mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, type Stats, writeFileSync, writeSync,
 } from "node:fs";
 import { join } from "node:path";
 
 import { Failure, fromNode, io, osError, sandboxError, valueError } from "./answers.js";
+import { fdPaths, type Where } from "./fd-paths.js";
 import { type Context, OWN_FILE, ownFile, revisionOf } from "./operations.js";
 import { inFolderRefusal, protectedInFolder } from "./protect.js";
 
@@ -60,8 +61,6 @@ const RECORD_BYTES = 32 * 1024 * 1024;
 const KEPT = /^(0|[1-9][0-9]*)$/;
 // A file's revision, as the look answers it (operations.ts, revisionOf).
 const REVISION = /^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+$/;
-// A folder held, not read: O_PATH, which Node does not name. One this user may pass through but not list is entered all the same.
-const HOLD = 0o10000000 | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 // The largest file a landing writes: the helper copies it while every other operation on the folder waits.
 const MAX_LAND_BYTES = 1024 * 1024 * 1024;
 // The most the files a folder's landings replaced may take while they are kept. A file that would go past it is
@@ -148,12 +147,12 @@ function expectedIdentity(revision: string): Identity {
 const tokenOf = (found: BigIntStats | null): string => (found === null ? "absent" : plain(found) ? revisionOf(found) : "other");
 const settled = (step: Step): boolean => step.temp === null && step.aside === null && step.out === null && step.back === null;
 
-function look(path: string): BigIntStats | null {
+function look(path: Where): BigIntStats | null {
   try {
-    return lstatSync(path, { bigint: true });
+    return fdPaths.lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw fromNode(error, path);
+    throw fromNode(error, fdPaths.shown(path));
   }
 }
 
@@ -202,12 +201,13 @@ export function landable(path: string): boolean {
 }
 
 // A folder held open. What is in it is reached through the handle, never by the folder's path
-// again, so nothing put on that path since is followed (operations.ts, walk).
+// again, so nothing put on that path since is followed (operations.ts, walk). One this user may
+// pass through but not list is held all the same.
 class Held {
   constructor(readonly fd: number) {}
 
-  at(name: string): string {
-    return `/proc/self/fd/${this.fd}/${name}`;
+  at(name: string): Where {
+    return { dir: this.fd, name };
   }
 
   close(): void {
@@ -218,7 +218,7 @@ class Held {
 // The folder *name* in *dir*, held: null where there is none, and refused where what is there is no folder, a link least of all.
 function into(dir: Held, name: string, path: string): Held | null {
   try {
-    return new Held(openSync(dir.at(name), HOLD));
+    return new Held(fdPaths.hold(dir.at(name)));
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     if (code === "ENOENT") return null;
@@ -241,7 +241,7 @@ function enter(from: Held, names: string[], path: string, make = false, made?: (
           return { dir: null, depth, modes };
         }
         try {
-          mkdirSync(dir.at(name));
+          fdPaths.mkdir(dir.at(name));
         } catch (error) {
           // Made by another meanwhile: it is entered as any other.
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw fromNode(error, path);
@@ -261,10 +261,10 @@ function enter(from: Held, names: string[], path: string, make = false, made?: (
   }
 }
 
-function syncDir(dir: string): void {
+function syncDir(dir: Where): void {
   let fd: number | undefined;
   try {
-    fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY);
+    fd = fdPaths.open(dir, constants.O_RDONLY | constants.O_DIRECTORY);
     fsyncSync(fd);
   } catch {
     // A filesystem that syncs no folder: the files in it were synced themselves.
@@ -275,22 +275,22 @@ function syncDir(dir: string): void {
 
 // Gone, or never there. Any other failure is raised: a file that could not be removed is still in the folder, and
 // whoever asked must not go on as if it were not.
-function remove(path: string | null): void {
+function remove(path: Where | null): void {
   if (path === null) return;
   try {
-    unlinkSync(path);
+    fdPaths.unlink(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw fromNode(error, path);
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw fromNode(error, fdPaths.shown(path));
   }
 }
 
 // Whether this user may give *found*, the file at *at*, a second name: any file of their own, and another's only
 // as the kernel allows it (fs.protected_hardlinks): one they may read and write that runs as nobody else.
-function relinkable(found: BigIntStats, at: string): boolean {
+function relinkable(found: BigIntStats, at: Where): boolean {
   if (Number(found.uid) === process.getuid?.()) return true;
   if ((found.mode & 0o4000n) !== 0n || (found.mode & 0o2010n) === 0o2010n) return false;
   try {
-    accessSync(at, constants.R_OK | constants.W_OK);
+    fdPaths.access(at, constants.R_OK | constants.W_OK);
     return true;
   } catch {
     return false;
@@ -301,8 +301,8 @@ function relinkable(found: BigIntStats, at: string): boolean {
 // move keeps a file's times, and a put-back's file is the one the user saved then, not one made now.
 // Node sets a time from seconds as a float, which at today's dates is exact to a quarter of a microsecond and is cut
 // down to one: half a microsecond past the one meant, so that the cut never lands on the one before it.
-function dated(fd: number, from: string): void {
-  const { atimeNs, mtimeNs } = lstatSync(from, { bigint: true });
+function dated(fd: number, from: Where): void {
+  const { atimeNs, mtimeNs } = fdPaths.lstat(from);
   const seconds = (ns: bigint) => (Number(ns / 1000n) + 0.5) / 1e6;
   futimesSync(fd, seconds(atimeNs), seconds(mtimeNs));
 }
@@ -335,10 +335,10 @@ function restore(dir: Held, own: string, name: string): string | null {
     }
     try {
       // A link fails where the name was taken meanwhile. A folder, which a save can leave where the file was, has no second name to give.
-      if (held.isDirectory()) renameSync(from, dir.at(to));
+      if (held.isDirectory()) fdPaths.rename(from, dir.at(to));
       else {
-        linkSync(from, dir.at(to));
-        unlinkSync(from);
+        fdPaths.link(from, dir.at(to));
+        fdPaths.unlink(from);
       }
       return count === 0 ? null : to;
     } catch (error) {
@@ -350,10 +350,10 @@ function restore(dir: Held, own: string, name: string): string | null {
 
 // The file at *path*, a step's own name beside the user's file, held open to read where it is a plain file no other name
 // shares, as one the step made is. Null where there is none; anything else there loses that name, which is the step's.
-function ownAt(path: string): number | null {
+function ownAt(path: Where): number | null {
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = fdPaths.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") remove(path);
     return null;
@@ -384,7 +384,7 @@ function sourceOf(theirs: Held | null, name: string, path: string): number {
   if (theirs === null) throw osError("ENOENT", path);
   let fd: number;
   try {
-    fd = openSync(theirs.at(name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = fdPaths.open(theirs.at(name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     // A link at its name is no file of the copy's.
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw sandboxError(`Not a path in this folder: '${path}'`);
@@ -401,9 +401,9 @@ function sourceOf(theirs: Held | null, name: string, path: string): number {
 
 // The copy's file, open at *from*, written at *temp*, a name of the landing's own beside the real file: only where
 // its bytes are the blob *after*. Which file it wrote.
-function stage(from: number, temp: string, path: string, after: string, mode: number | null): Identity {
+function stage(from: number, temp: Where, path: string, after: string, mode: number | null): Identity {
   const { size } = fstatSync(from);
-  const to = io(path, () => openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
+  const to = io(path, () => fdPaths.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
   try {
     const hash = createHash("sha1").update(`blob ${size}\0`);
     const piece = Buffer.allocUnsafe(PIECE_BYTES);
@@ -569,9 +569,9 @@ class Landing {
     keeping.delete(this.store);
   }
 
-  private rmdir(dir: string): boolean {
+  private rmdir(dir: Where): boolean {
     try {
-      rmdirSync(dir);
+      fdPaths.rmdir(dir);
       return true;
     } catch {
       return false;
@@ -607,7 +607,7 @@ class Landing {
 
   // The folder itself, held: the app gave it resolved, and a link in its stead since is no folder of the chat's.
   private root(path: string): Held {
-    return new Held(io(path, () => openSync(this.folder, HOLD)));
+    return new Held(io(path, () => fdPaths.hold(this.folder)));
   }
 
   // The folders *dirs*, paths in the folder with the deepest first, go while they are empty, and no further up than one that is not.
@@ -632,7 +632,7 @@ class Landing {
     try {
       // The guest writes the place the copy is in: a link in the copy's stead would name any folder it likes, and
       // a copy that is gone holds nothing, which is no thread's deletion of every file.
-      copy = new Held(openSync(this.copy ?? "", HOLD));
+      copy = new Held(fdPaths.hold(this.copy ?? ""));
     } catch {
       throw sandboxError("This thread's copy is not a folder of the app's own");
     }
@@ -710,8 +710,8 @@ class Landing {
           // takes its own back. Seen with a file of the landing's own, so the user's never has two names.
           const [first, second] = [dir.at(did.temp ?? did.back!), dir.at(did.out!)];
           try {
-            if (did.temp === null) closeSync(openSync(first, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600));
-            linkSync(first, second);
+            if (did.temp === null) closeSync(fdPaths.open(first, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600));
+            fdPaths.link(first, second);
           } catch (error) {
             throw unlinkable(path, error);
           }
@@ -725,7 +725,7 @@ class Landing {
           did = { ...did, moved: true };
           this.write(step, did, false);
           try {
-            renameSync(real, aside);
+            fdPaths.rename(real, aside);
           } catch (error) {
             did = { ...did, moved: false };
             throw fromNode(error, path);
@@ -737,7 +737,7 @@ class Landing {
         }
         if (did.temp !== null) {
           try {
-            linkSync(dir.at(did.temp), dir.at(name));
+            fdPaths.link(dir.at(did.temp), dir.at(name));
           } catch (error) {
             // A file was made at its name meanwhile: that one stays.
             throw (error as NodeJS.ErrnoException).code === "EEXIST" ? conflict(path) : unlinkable(path, error);
@@ -775,18 +775,18 @@ class Landing {
   // mount. A copy leaves *from* where it is, under the step's own name beside its name, until the landing is forgotten:
   // a program that holds the file open writes into it there. *moved* is the file as the step last looked at it. The file
   // as it is kept, and whether it was left so.
-  private keep(from: string, step: number, moved: BigIntStats): { kept: Kept; left: boolean } {
+  private keep(from: Where, step: number, moved: BigIntStats): { kept: Kept; left: boolean } {
     const to = this.bytes(step);
     // The file itself, where it is copied: as the step last looked at it, so what is written into it from then shows.
     let left: BigIntStats | null = null;
     try {
-      renameSync(from, to);
+      fdPaths.rename(from, to);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw fromNode(error, from);
+      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw fromNode(error, fdPaths.shown(from));
       left = moved;
       // Under another name until it is whole: a kept file that has its name is the user's file, all of it.
       const part = `${to}.part`;
-      copyFileSync(from, part);
+      fdPaths.copy(from, part);
       // Read-only: a file the user may only read is copied with that mode, and is theirs to date and sync all the same.
       const fd = openSync(part, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
@@ -810,29 +810,29 @@ class Landing {
   // The file *held*, the one a step replaced, takes *name* in *dir* again, only where nothing holds it: a link,
   // or a copy linked in where the kept file is on another filesystem. The step as its record says now; or null where
   // the name was taken meanwhile, and what the step made for it stays named in its record for whoever ends it.
-  private place(step: number, did: Step, dir: Held, held: string, name: string): Step | null {
+  private place(step: number, did: Step, dir: Held, held: Where, name: string): Step | null {
     // What was moved aside and found to be no file of the landing's can be a folder, made where the file was since
     // the look: it has no second name to give, so it is moved back, where nothing holds its name.
     if (look(held)?.isDirectory()) {
       if (look(dir.at(name)) !== null) return null;
-      io(did.path, () => renameSync(held, dir.at(name)));
+      io(did.path, () => fdPaths.rename(held, dir.at(name)));
       return did;
     }
     const kept = held === this.bytes(step);
     try {
       // A kept file takes its own mode again before it takes its name.
-      if (kept && did.mode !== null) chmodSync(held, did.mode);
-      linkSync(held, dir.at(name));
+      if (kept && did.mode !== null) fdPaths.chmod(held, did.mode);
+      fdPaths.link(held, dir.at(name));
       return did;
     } catch (error) {
-      if (kept) chmodSync(held, 0o600);
+      if (kept) fdPaths.chmod(held, 0o600);
       const { code } = error as NodeJS.ErrnoException;
       if (code === "EEXIST") return null;
       if (code !== "EXDEV") throw fromNode(error, did.path);
     }
     const brought = this.copiedBack(step, did, dir, held);
     try {
-      linkSync(dir.at(brought.back!), dir.at(name));
+      fdPaths.link(dir.at(brought.back!), dir.at(name));
       return brought;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
@@ -843,10 +843,10 @@ class Landing {
   // Whether the kept file *held* can be given a name in *dir*, as it can on the folder's own filesystem: seen by giving
   // it the step's name for the landing's file, which the landing's file is not under yet. Where it cannot, it is
   // copied, and a put-back copies it beside its name before the landing's file leaves that name.
-  private linkable(did: Step, dir: Held, held: string): boolean {
+  private linkable(did: Step, dir: Held, held: Where): boolean {
     const probe = dir.at(did.out!);
     try {
-      linkSync(held, probe);
+      fdPaths.link(held, probe);
     } catch (error) {
       const { code } = error as NodeJS.ErrnoException;
       if (code === "EXDEV") return false;
@@ -865,7 +865,7 @@ class Landing {
   // got, and is begun again from nothing otherwise. *whole*: compared whole with the kept file before it is answered,
   // as it is about to take the name; a copy changed meanwhile is begun again once, and refused after. The step as its
   // record says now.
-  private copiedBack(step: number, did: Step, dir: Held, held: string, whole = true): Step {
+  private copiedBack(step: number, did: Step, dir: Held, held: Where, whole = true): Step {
     let at = did;
     if (at.back === null) {
       at = { ...at, back: ownFile(), copied: 0 };
@@ -874,7 +874,7 @@ class Landing {
     const staged = dir.at(at.back!);
     const open: number[] = [];
     try {
-      const from = io(did.path, () => openSync(held, constants.O_RDONLY | constants.O_NOFOLLOW));
+      const from = io(did.path, () => fdPaths.open(held, constants.O_RDONLY | constants.O_NOFOLLOW));
       open.push(from);
       const size = fstatSync(from).size;
       for (let tries = 0; ; tries += 1) {
@@ -890,7 +890,7 @@ class Landing {
           // Written on as it was made, this user's to write; and only the very file compared, or one made new.
           if (to !== null) fchmodSync(to, 0o600);
           const flags = constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK | (to === null ? constants.O_CREAT | constants.O_EXCL : 0);
-          const fd = io(did.path, () => openSync(staged, flags, 0o600));
+          const fd = io(did.path, () => fdPaths.open(staged, flags, 0o600));
           open.push(fd);
           if (to !== null && !sameFile(fstatSync(fd), fstatSync(to))) throw conflict(did.path);
           let done = to === null ? 0 : at.copied;
@@ -941,7 +941,7 @@ class Landing {
     // The file's folder as the step holds it, where it still does: what it left there is found whatever its path leads to now.
     let dir = held ?? enter(this.root(did.path), folders, did.path).dir;
     try {
-      const own = (one: string | null): string | null => (one !== null && dir !== null && look(dir.at(one)) !== null ? dir.at(one) : null);
+      const own = (one: string | null): Where | null => (one !== null && dir !== null && look(dir.at(one)) !== null ? dir.at(one) : null);
       // The file the step replaced: still moved aside beside the real one, left there as a copy of it is kept, its own
       // plain file still, or kept.
       const left = did.left === null || dir === null ? null : look(dir.at(did.left));
@@ -962,7 +962,7 @@ class Landing {
         if (did.was !== null && replaced === this.bytes(step) && !this.linkable(did, dir, replaced)) did = this.copiedBack(step, did, dir, replaced, false);
         // Its own file is there: moved out as the real one was, and looked at again before anything takes its place.
         const [real, out] = [dir.at(name), dir.at(did.out!)];
-        io(did.path, () => renameSync(real, out));
+        io(did.path, () => fdPaths.rename(real, out));
         if (!same(look(out), did.wrote)) {
           restore(dir, did.out!, name);
           return "changed";
@@ -984,7 +984,7 @@ class Landing {
           const modes = new Map(did.above);
           dir = enter(this.root(did.path), folders, did.path, true, (index, made) => {
             const mode = modes.get(folders.slice(0, index + 1).join("/"));
-            if (mode !== undefined) chmodSync(`/proc/self/fd/${made.fd}`, mode);
+            if (mode !== undefined) fdPaths.chmod({ dir: made.fd }, mode);
           }).dir!;
         }
         const placed = this.place(step, did, dir, replaced, name);
@@ -1214,10 +1214,10 @@ class Landing {
   }
 
   // Whether the file at *at* holds the very bytes step *step* kept a copy of.
-  private holdsKept(at: string, step: number): boolean {
+  private holdsKept(at: Where, step: number): boolean {
     const open: number[] = [];
     try {
-      open.push(openSync(at, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), openSync(this.bytes(step), constants.O_RDONLY | constants.O_NOFOLLOW));
+      open.push(fdPaths.open(at, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), openSync(this.bytes(step), constants.O_RDONLY | constants.O_NOFOLLOW));
       const size = fstatSync(open[0]!).size;
       return size === fstatSync(open[1]!).size && sameBytes(open[0]!, open[1]!, size);
     } catch {
@@ -1229,18 +1229,18 @@ class Landing {
 
   // The file at *from*, what step *did* replaced, given a name beside its own in its folder *dir*, with *mode* again where
   // it is given one; and told. Never a second name beside it: one given by a forgetting cut short is the one.
-  private besideIt(did: Step, dir: Held, from: string, mode: number | null): void {
+  private besideIt(did: Step, dir: Held, from: Where, mode: number | null): void {
     const parts = did.path.split("/");
     const [name, folders] = [parts.at(-1)!, parts.slice(0, -1)];
     const held = look(from)!;
     try {
-      if (mode !== null) chmodSync(from, mode);
+      if (mode !== null) fdPaths.chmod(from, mode);
       for (let count = 1; count < 100; count += 1) {
         const to = besideName(name, count);
         const there = look(dir.at(to));
         if (there !== null && (there.dev !== held.dev || there.ino !== held.ino)) continue;
         try {
-          if (there === null) linkSync(from, dir.at(to));
+          if (there === null) fdPaths.link(from, dir.at(to));
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
           throw fromNode(error, did.path);
@@ -1251,7 +1251,7 @@ class Landing {
       }
       throw osError("EEXIST", did.path);
     } catch (error) {
-      if (mode !== null) chmodSync(from, 0o600);
+      if (mode !== null) fdPaths.chmod(from, 0o600);
       throw error;
     }
   }
@@ -1467,7 +1467,7 @@ export function land(args: Record<string, unknown>, context: Context): unknown {
 function revision(folder: string, parts: string[], path: string): string {
   let dir: Held | null = null;
   try {
-    dir = enter(new Held(openSync(folder, HOLD)), parts.slice(0, -1), path).dir;
+    dir = enter(new Held(fdPaths.hold(folder)), parts.slice(0, -1), path).dir;
     return dir === null ? "absent" : tokenOf(look(dir.at(parts.at(-1)!)));
   } catch {
     return "other";
