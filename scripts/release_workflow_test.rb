@@ -7,6 +7,7 @@ require "yaml"
 
 class ReleaseWorkflowTest < Minitest::Test
   ROLLOUT = ".github/workflows/update-images.yml"
+  MACOS = ".github/workflows/desktop-macos.yml"
 
   def setup
     @workflow = YAML.load_file(".github/workflows/release.yml")
@@ -471,6 +472,36 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal %w[desktop-vm-image desktop-publish], jobs.select { |_, job| job.to_s.match?(r2) }.keys
   end
 
+  def test_the_macos_suites_run_by_hand_on_a_mac_on_the_ref_they_are_given_and_hold_nothing_to_leak
+    macos = YAML.load_file(MACOS)
+    on = triggers(macos)
+    # GitHub bills a macOS runner's minutes at a multiple of Linux's, and each suite runs once a
+    # branch, on its final head: started by hand, never by a push or a pull request.
+    assert_equal %w[workflow_dispatch], on.keys
+    inputs = on.fetch("workflow_dispatch").fetch("inputs")
+    assert_equal %w[ref], inputs.keys
+    assert_equal [true, "string"], inputs.fetch("ref").values_at("required", "type")
+    # Its token reads the repository and nothing else, and nothing of the workflow's own is every job's.
+    assert_equal ["jobs", "name", "permissions", "true"], macos.keys.map(&:to_s).sort
+    assert_equal({ "contents" => "read" }, macos.fetch("permissions"))
+    jobs = macos.fetch("jobs")
+    assert_equal %w[unit], jobs.keys
+    jobs.each do |name, job|
+      assert_equal "macos-15", job.fetch("runs-on"), name
+      assert job.key?("timeout-minutes"), "#{name} is not bounded"
+      # A run on a branch's head runs that branch's code: no job is given a secret, in any form,
+      # an Environment's or a permission of its own.
+      refute_match(/secrets/i, job.to_s, "#{name} names a secret")
+      refute job.key?("environment"), "#{name} runs in an Environment"
+      refute job.key?("permissions"), "#{name} asks for permissions of its own"
+    end
+    steps = jobs.fetch("unit").fetch("steps")
+    # The ref it is given, checked out with no token kept for that ref's code to use.
+    assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, steps.first.fetch("with"))
+    # The files of the desktop's vitest project for macOS, which each part built for macOS joins.
+    assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
+  end
+
   def test_the_workflow_has_no_key_of_its_own_but_its_name_its_trigger_its_permissions_and_its_jobs
     # A shell, an environment or a concurrency of the workflow's own is every job's: a shell that
     # traces would print what a step reads, an env would be every step's, the release key's step
@@ -491,6 +522,7 @@ class ReleaseWorkflowTest < Minitest::Test
     # desktop/install.sh, which runs as root on each new install; the desktop's release key signs
     # what every installed app takes. A reader that is not here is one too many.
     allowed = {
+      "desktop-macos.yml" => {},
       "release.yml" => {
         ["images", "Log in to GHCR"] => %w[GITHUB_TOKEN],
         ["npm", "Publish SDK packages"] => %w[NPM_TOKEN],
@@ -554,6 +586,9 @@ class ReleaseWorkflowTest < Minitest::Test
     # to any of them fails here, and says the word to put in its place once the change is read:
     # that reading is what this test asks for, of whoever changes a job that can leak.
     read = {
+      "desktop-macos.yml" => {
+        "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed a2447334158f4627]],
+      },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
         "images" => ["8ebea57277fdbb89", %w[87fcdec176307d16 0619e48968c28792 617ad6a92e3fd6a0 73c45f0486d37ee1 24a2521493be90fe d971c94aab8fd2bb]],
@@ -618,7 +653,8 @@ class ReleaseWorkflowTest < Minitest::Test
         end
       end
     end
-    assert_equal %w[release.yml update-images.yml], run.keys
+    assert_equal %w[desktop-macos.yml release.yml update-images.yml], run.keys
+    assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
     assert_equal %w[
       actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action
       docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release
