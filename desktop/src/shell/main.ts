@@ -4,7 +4,7 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -18,7 +18,9 @@ import type {
   DeletedFiles, LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier,
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
-import { type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, KNOWN, profileOf, profilesOf, unsupportedAt } from "../browser/choose.js";
+import {
+  type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf, unsupportedAt,
+} from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
@@ -1938,7 +1940,7 @@ async function chooseBrowser(value: unknown): Promise<void> {
   try {
     if (value === "custom") return;
     if (value !== "pick") {
-      if (value !== "auto" && !KNOWN.some(({ id }) => id === value)) throw new Error(`No browser ${String(value)}`);
+      if (value !== "auto" && !knownBrowsers().some(({ id }) => id === value)) throw new Error(`No browser ${String(value)}`);
       browserSetting.set({ choice: value } as BrowserChoice);
       return;
     }
@@ -1946,10 +1948,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;
-    let real: string;
-    try {
-      real = realpathSync(path);
-    } catch {
+    const real = pickedProgram(path);
+    if (real === null) {
       // Gone since it was picked, or a link that leads nowhere.
       browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
       return;

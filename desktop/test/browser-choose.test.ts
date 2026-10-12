@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  BrowserSetting, choiceRows, chosenBrowser, confined, type Disk, findBrowsers, profileOf, profilesOf,
+  BrowserSetting, choiceRows, chosenBrowser, type Disk, findBrowsers, profileOf, profilesOf,
 } from "../src/browser/choose.js";
+import { confined } from "../src/browser/known-linux.js";
 
 // A computer's programs in a test: each path, what it resolves to, whether that can run, and the scripts' first lines.
 function disk(links: Record<string, string>, runnable: string[] = Object.values(links), heads: Record<string, string> = {}): Disk {

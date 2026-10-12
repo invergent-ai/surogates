@@ -6,7 +6,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -19,6 +19,7 @@ import { CANCELLED, type Launch, NEW_TAB, PAUSED } from "./client.js";
 import { interrupted, LEFT_TO_USER, quoted, type StagedDownload, tooLarge, tooMuch } from "./downloads.js";
 import { letGo, OPERATIONS, stoppedIn } from "./operations.js";
 import { CHAT_HOSTS, chatPort, chatPortOf } from "./ports.js";
+import { browserTemp, holding } from "./processes.js";
 import { BrowserProxy, type BrowserProxyOptions, CHECK_DOMAIN } from "./proxy.js";
 
 // Playwright's own --disable-features (playwright-core 1.63.0), dropped whole: it holds HttpsUpgrades.
@@ -417,54 +418,6 @@ function opened(context: BrowserContext): Promise<Page> {
   }).finally(settle);
 }
 
-// How long a look at this computer's processes waits with none of its reads answering.
-const SCAN_MS = 1_000;
-// ponytail: the command lines that did not come while no other did for SCAN_MS, for the host's life: a
-// process blocked in the kernel (as on a dead mount) blocks its readers too, and each such read holds one
-// of libuv's four threads until it returns. They are not asked again.
-const unread = new Set<string>();
-
-/**
- * The processes on *profile*, by pid: each names it on its command line. None where /proc is not.
- * Read off the event loop, and passed over where one does not come: once SCAN_MS has gone by with no
- * read answering. Not once SCAN_MS has gone by since the look began: the reads queue on libuv's threads,
- * and on a busy computer one late in that queue has not come only because it waits its turn.
- */
-export async function holding(profile: string, read = (path: string) => readFile(path, "utf8")): Promise<number[]> {
-  const named = [`${profile}\0`, `${profile}/`, `${profile} `];
-  const pids = (await readdir("/proc").catch(() => [] as string[])).filter((pid) => /^\d+$/.test(pid));
-  const found: number[] = [];
-  const waiting = new Set<string>();
-  await new Promise<void>((resolve) => {
-    let timer: NodeJS.Timeout | undefined;
-    let over = false;
-    const end = () => {
-      over = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    // Each answer gives what is left SCAN_MS more; with nothing left, the look is over.
-    const answered = () => {
-      if (over) return;
-      clearTimeout(timer);
-      if (waiting.size === 0) return end();
-      timer = setTimeout(end, SCAN_MS);
-    };
-    for (const path of pids.map((pid) => `/proc/${pid}/cmdline`).filter((path) => !unread.has(path))) {
-      waiting.add(path);
-      void read(path).then((line) => {
-        if (!over && named.some((name) => line.includes(name))) found.push(Number(path.split("/")[2]));
-      }, () => {}).finally(() => {
-        waiting.delete(path);
-        answered();
-      });
-    }
-    answered();
-  });
-  for (const path of waiting) unread.add(path);
-  return found.sort((a, b) => a - b);
-}
-
 /**
  * Settles once no process holds *profile*. A browser can answer its close before its last
  * process has exited, as Edge does, and those still running write the profile again: a removal
@@ -508,9 +461,9 @@ export async function clearStaged(temp: string): Promise<void> {
 }
 
 // The browser's own temp folder holds its singleton's socket, whose path a Unix socket keeps
-// under 108 bytes: a profile's folder is too deep for it, so it goes in the user's runtime
-// folder (this host's own temp files, Playwright's, go under the profiles: main.ts). A try's too.
-const browserEnv = () => ({ ...process.env, TMPDIR: process.env.XDG_RUNTIME_DIR || "/tmp" });
+// short: a profile's folder is too deep for it, so it goes in a short folder of this OS's
+// (processes.ts; this host's own temp files, Playwright's, go under the profiles: main.ts). A try's too.
+const browserEnv = () => ({ ...process.env, TMPDIR: browserTemp(process.env) });
 
 /** How the browser is launched: headed, its sandbox on, over the pipe, and every request through the proxy on *port*. */
 export function launchOptions(executable: string, port: number, extra: readonly string[] = []) {

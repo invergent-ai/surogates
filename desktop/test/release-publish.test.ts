@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { KNOWN } from "../src/browser/choose.js";
+import { KNOWN } from "../src/browser/known-linux.js";
 import { signedRelease } from "../src/shell/updates.js";
 
 import { KEY_LISTS } from "./key-list-forms.js";
