@@ -6,13 +6,11 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { spawnsCleanly } from "../clean-spawns.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import { clickNotice, dataHome, dataRoot, launch, notices, quit, secondLaunch, shellPage, stubNative, stubNotifications } from "./launch.js";
 
@@ -170,8 +168,8 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
       settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
       return settings !== undefined;
     }).toBe(true);
-    // Read by the helper as the app starts it, or, until a Mac starts programs so, the host name without .local.
-    const named = spawnsCleanly ? execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim() : hostname().replace(/\.local$/i, "");
+    // Read by the helper as the app starts it.
+    const named = execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim();
     await expect.poll(() => settings!.textContent("#computer")).toBe(named);
   });
 

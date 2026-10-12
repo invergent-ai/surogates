@@ -10,7 +10,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { keepOutOfTimeMachine, MARK } from "../src/shell/backups-darwin.js";
-import { spawnsCleanly } from "./clean-spawns.js";
 import { importedOn } from "./platforms.js";
 
 let dir: string;
@@ -57,9 +56,9 @@ describe("the VM's disks on macOS", () => {
   });
 });
 
-// tmutil started as the app starts it: waits for macOS's clean start of a program (clean-child.ts).
-describe.runIf(process.platform === "darwin" && spawnsCleanly)("the VM's disks on a Mac", () => {
-  it("are excluded, as tmutil isexcluded says", async () => {
+// tmutil started as the app starts it (clean-child.ts), and waited for as long as the app waits for it: its 30 s.
+describe.runIf(process.platform === "darwin")("the VM's disks on a Mac", () => {
+  it("are excluded, as tmutil isexcluded says", { timeout: 40_000 }, async () => {
     const vm = join(dir, "vm");
     const { keepOutOfBackups } = await import("../src/shell/backups.js");
     await keepOutOfBackups(vm);

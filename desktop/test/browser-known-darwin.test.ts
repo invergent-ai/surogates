@@ -13,7 +13,6 @@ import type { chosenBrowser, Disk } from "../src/browser/choose.js";
 import {
   type AppTools, APPS, appOf, CHECKING, darwinBrowsers, NOT_AN_APP, NOT_SIGNED, ON_A_VOLUME, SYSTEM, TRANSLOCATED,
 } from "../src/browser/known-darwin.js";
-import { spawnsCleanly } from "./clean-spawns.js";
 import { importedOn } from "./platforms.js";
 
 let home: string;
@@ -182,8 +181,8 @@ it("keep no browser picked in Custom… that a Mac refuses", async () => {
   expect(await choose.unsupportedOnceChecked("/Volumes/Chromium/Chromium.app/Contents/MacOS/Chromium", DISK)).toBe(ON_A_VOLUME);
 });
 
-// codesign and plutil started as the app starts them: wait for macOS's clean start of a program (clean-child.ts).
-describe.runIf(process.platform === "darwin" && spawnsCleanly)("the browsers the app knows on a Mac", () => {
+// codesign and plutil started as the app starts them (clean-child.ts).
+describe.runIf(process.platform === "darwin")("the browsers the app knows on a Mac", () => {
   it("find this Mac's Chrome in /Applications, its signature checking out", async () => {
     const known = darwinBrowsers(SYSTEM);
     const chrome = known.candidates(home).find(({ id }) => id === "chrome")!;

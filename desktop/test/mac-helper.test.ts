@@ -11,7 +11,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { certificatesIn } from "../src/shell/company-ca.js";
 import { HELPER, helper, helperAt, helperSync } from "../src/mac-helper.js";
-import { spawnsCleanly } from "./clean-spawns.js";
 
 describe("where the app finds surogate-helper", () => {
   it("is beside the app's own executable in its bundle, and its build's own in a development build", () => {
@@ -24,8 +23,8 @@ describe("where the app finds surogate-helper", () => {
   });
 });
 
-// A program in its place, started as the app starts the helper: waits for this OS's clean start of a program (clean-child.ts).
-describe.runIf(spawnsCleanly)("a run of the helper", () => {
+// A program in its place, started as the app starts the helper (clean-child.ts).
+describe("a run of the helper", () => {
   let dir: string;
   let program: string;
 

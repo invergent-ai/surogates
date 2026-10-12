@@ -3,14 +3,14 @@
 // temporary folder for the browser.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { browserTemp, holding, listedIn } from "../src/browser/processes-darwin.js";
-import { spawnsCleanly } from "./clean-spawns.js";
+import { HELPER } from "../src/mac-helper.js";
 import { importedOn } from "./platforms.js";
 
 const PROFILE = "/Users/ana/Library/Application Support/Surogate/browser-profiles/0123/chrome";
@@ -49,8 +49,9 @@ it("are a Mac's", async () => {
   expect(mac.browserTemp({ XDG_RUNTIME_DIR: "/run/user/501" })).toBe(tmpdir());
 });
 
-// The helper started as the app starts it: waits for macOS's clean start of a program (clean-child.ts).
-describe.runIf(process.platform === "darwin" && spawnsCleanly)("the processes on a profile, read on a Mac", () => {
+// The helper built for this Mac (native/helper/build.sh), started as the app starts it (clean-child.ts): where the run has
+// built it, as the macOS workflow's shell job does.
+describe.runIf(process.platform === "darwin" && existsSync(HELPER))("the processes on a profile, read on a Mac", () => {
   it("are found through surogate-helper procs", async () => {
     const profile = mkdtempSync(join(tmpdir(), "a profile "));
     // A program that takes any argument and waits, as BSD's sleep takes none but its time.

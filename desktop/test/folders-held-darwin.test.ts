@@ -7,14 +7,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { lookCommand } from "../src/shell/folders-held-darwin.js";
-import { spawnsCleanly } from "./clean-spawns.js";
 
 it("is BSD's stat of the folder, through its links, with a format that prints nothing of it", () => {
   expect(lookCommand("/Users/ana/-Documents")).toEqual(["/usr/bin/stat", ["-L", "-f", "", "--", "/Users/ana/-Documents"]]);
 });
 
-// stat started as the app starts it: waits for macOS's clean start of a program (clean-child.ts).
-describe.runIf(process.platform === "darwin" && spawnsCleanly)("a look at a folder on a Mac", () => {
+// stat started as the app starts it (clean-child.ts).
+describe.runIf(process.platform === "darwin")("a look at a folder on a Mac", () => {
   it("finds a folder there, through a link, and none where it is not", async () => {
     const { lookApart } = await import("../src/shell/folders-held.js");
     const dir = mkdtempSync(join(tmpdir(), "looks-"));

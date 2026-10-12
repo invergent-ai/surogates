@@ -5,7 +5,6 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import { nameOf } from "../src/shell/computer-name-darwin.js";
-import { spawnsCleanly } from "./clean-spawns.js";
 import { importedOn } from "./platforms.js";
 
 describe("this Mac's name", () => {
@@ -35,8 +34,8 @@ describe("this Mac's name", () => {
   });
 });
 
-// The helper started as the app starts it: waits for macOS's clean start of a program (clean-child.ts).
-describe.runIf(process.platform === "darwin" && spawnsCleanly)("this Mac's name, read on a Mac", () => {
+// The helper started as the app starts it (clean-child.ts).
+describe.runIf(process.platform === "darwin")("this Mac's name, read on a Mac", () => {
   it("is the Computer Name of System Settings, as scutil reads it", async () => {
     const { computerName } = await import("../src/shell/computer-name.js");
     expect(computerName()).toBe(execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim());

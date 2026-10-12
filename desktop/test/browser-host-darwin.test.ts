@@ -19,7 +19,6 @@ import { type Launch, PAUSED } from "../src/browser/client.js";
 import type { StagedDownload } from "../src/browser/downloads.js";
 import { BrowserHost, type BrowserHostOptions, FILE_ASKED, NOT_ASKED, WEAKENING } from "../src/browser/host.js";
 import { HELPER } from "../src/mac-helper.js";
-import { spawnsCleanly } from "./clean-spawns.js";
 
 const EXECUTABLE = process.env.SUROGATE_TEST_BROWSER || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const run = process.platform === "darwin" && process.env.SUROGATE_BROWSER_TESTS_MAC === "1";
@@ -155,8 +154,8 @@ return [file.name, file.type, await file.text()];`)).toEqual(["report.pdf", "app
     expect(await script(a, `return document.getElementById("name").value;`, "chat-1")).toBe("typed by hand");
   }, 60_000);
 
-  // The app's own look at the profile's processes, through the helper as the app starts it: waits for macOS's clean start of a program.
-  it.runIf(spawnsCleanly)("closes its browser only once nothing holds its profile, a process that would not go killed", async () => {
+  // The app's own look at the profile's processes, through the helper as the app starts it.
+  it("closes its browser only once nothing holds its profile, a process that would not go killed", async () => {
     await op(session(), "browser.navigate", { url: "http://fixture.test/" });
     const lingering = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(profile, "lingering")], { stdio: "ignore" });
     const gone = new Promise<string | null>((done) => lingering.once("exit", (_code, signal) => done(signal)));
