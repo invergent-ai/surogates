@@ -47,10 +47,12 @@ jobs:
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos
 
-  # The shell and the browser on a Mac: surogate-helper built, with its own tests; the admin trust domain read
-  # as an administrator's `sudo security add-trusted-cert -d` leaves it; the shell's and the browser's files of
-  # the macos project with the helper there to run; the app end to end, with no VM; and the browser host headed
-  # on the runner's own Chrome and Edge. Each step runs whatever came of the one before it.
+  # The shell and the browser on a Mac: surogate-helper built, with its own tests; the shell's and the browser's
+  # files of the macos project with the helper there to run; the app end to end, with no VM; and the browser host
+  # headed on the runner's own Chrome and Edge. Each step runs whatever came of the one before it. A change to the admin
+  # trust domain waits for an administrator to confirm it, which nobody can on a runner, and the runner's
+  # authorization database refuses to let it go unasked (errAuthorizationDenied): test/darwin/admin-trust.sh
+  # runs by hand on a Mac.
   shell:
     runs-on: macos-15
     timeout-minutes: 60
@@ -84,14 +86,6 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: desktop/native/helper
         run: swift test
-
-      # An administrator's trust settings change only once they confirm it, which nobody can on a runner: the
-      # runner's own, thrown away with it, lets them change unasked.
-      - name: Read an administrator's trusted roots through surogate-helper
-        if: ${{ !cancelled() }}
-        run: |
-          sudo security authorizationdb write com.apple.trust-settings.admin allow
-          test/darwin/admin-trust.sh
 
       - name: Run the shell's and the browser's files of the macos project
         if: ${{ !cancelled() }}
