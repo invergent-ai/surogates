@@ -19,7 +19,8 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf, unsupportedAt,
+  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
+  unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
@@ -1991,9 +1992,9 @@ const handedBack = (by: AbortController): void => {
   for (const other of handBacks) if (other !== by) other.abort();
 };
 
-// Settings → Browser's rows: what is found here, each named with the version it says.
+// Settings → Browser's rows: what is found here, each checked as this OS checks one, and named with the version it says.
 async function browserState() {
-  const found = findBrowsers();
+  const found = await checkedBrowsers();
   const choice = browserSetting.get();
   const versions = new Map<string, string>();
   await Promise.all(found.filter((browser) => browser.unsupported === null).map(async (browser) => {
@@ -2031,7 +2032,7 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
       return;
     }
-    const why = unsupportedAt(real);
+    const why = await unsupportedOnceChecked(real);
     if (why) {
       browserFailure = `Surogate cannot use ${real}: ${why}.`;
       return;
@@ -2810,6 +2811,8 @@ if (!app.requestSingleInstanceLock()) {
     powerMonitor.on("resume", () => vm?.resume());
     // The VM's disks, which the OS's backups leave out (backups.ts).
     void keepOutOfBackups(join(root, "vm")).catch(report);
+    // The browsers found here, checked as this OS checks one before the agent's first launch asks for one.
+    void checkedBrowsers().catch(report);
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();

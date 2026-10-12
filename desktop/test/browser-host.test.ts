@@ -775,9 +775,9 @@ describe("the browser's own temporary folder", () => {
 
 describe("the processes on a profile and the browser's own temporary folder, on a system the app drives no browser on yet", () => {
   it("are refused, in the words every such part says", async () => {
-    const elsewhere = await importedOn("darwin", () => import("../src/browser/processes.js"));
-    const words = new Error("Driving a browser is not built for macOS yet");
-    await expect(elsewhere.holding("/Users/ana/profile")).rejects.toThrow(words);
+    const elsewhere = await importedOn("win32", () => import("../src/browser/processes.js"));
+    const words = new Error("Driving a browser is not built for win32 yet");
+    await expect(elsewhere.holding("C:\\Users\\ana\\profile")).rejects.toThrow(words);
     expect(() => elsewhere.browserTemp({})).toThrow(words);
   });
 });

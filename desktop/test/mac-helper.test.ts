@@ -1,7 +1,7 @@
 // surogate-helper, the app's own program on macOS: where the app finds it, how it is run, and, on a Mac,
 // what each of its commands answers.
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,6 +65,19 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("surogate-he
     expect(run("name")).toMatchObject({ status: 0, stdout: `${execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim()}\n` });
   });
 
+  it("lists this user's processes, each with its program and arguments", async () => {
+    const marker = join(tmpdir(), "a profile's folder");
+    const sleeper = spawn("/bin/sleep", ["30", marker], { stdio: "ignore" });
+    try {
+      await new Promise((resolve) => sleeper.once("spawn", resolve));
+      const listed = run("procs").stdout.trim().split("\n").map((line) => JSON.parse(line) as { pid: number; path: string; args: string[] });
+      expect(listed.find(({ pid }) => pid === sleeper.pid)).toEqual({ pid: sleeper.pid, path: "/bin/sleep", args: ["/bin/sleep", "30", marker] });
+      expect(listed.some(({ pid }) => pid === process.pid)).toBe(true);
+    } finally {
+      sleeper.kill();
+    }
+  });
+
   it("prints the admin domain's roots for SSL as PEM certificates, each one a certificate authority's or a root's", () => {
     const done = run("trust");
     expect(done.status).toBe(0);
@@ -73,7 +86,7 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("surogate-he
   });
 
   it("answers no other command", () => {
-    expect(run("apply")).toMatchObject({ status: 2, stdout: "", stderr: "usage: surogate-helper name | trust\n" });
+    expect(run("apply")).toMatchObject({ status: 2, stdout: "", stderr: "usage: surogate-helper name | trust | procs\n" });
     expect(run("name", "again").status).toBe(2);
   });
 });

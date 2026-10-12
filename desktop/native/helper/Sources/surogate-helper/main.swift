@@ -1,6 +1,7 @@
 // surogate-helper <command>: one answer a run, on stdout, and its words on stderr where it has none.
 //   name    this Mac's Computer Name, a line
 //   trust   the admin trust domain's roots for SSL, as PEM; nothing where there are none
+//   procs   this user's processes, a JSON object a line: {"pid":…,"path":…,"args":[…]}
 // It reads no environment and no file of the caller's, and starts no program.
 
 import Foundation
@@ -25,6 +26,13 @@ case ["trust"]:
   } catch {
     fail("This Mac's trust settings could not be read: \(error)")
   }
+case ["procs"]:
+  let encoder = JSONEncoder()
+  encoder.outputFormatting = [.withoutEscapingSlashes]
+  for process in runningProcesses() {
+    guard let line = try? encoder.encode(process) else { continue }
+    write(String(decoding: line, as: UTF8.self) + "\n")
+  }
 default:
-  fail("usage: surogate-helper name | trust", 2)
+  fail("usage: surogate-helper name | trust | procs", 2)
 }
