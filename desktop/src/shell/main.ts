@@ -45,7 +45,7 @@ import { reauthorize, rebind, register } from "./computer.js";
 import { computerName } from "./computer-name.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { Copying } from "./copying.js";
-import { linkOfLaunch, type OpenLink } from "./deep-link.js";
+import { linkOfLaunch, listenForLinks, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
 import { loginItemFor } from "./login-item.js";
@@ -101,10 +101,10 @@ ownSpelling(app, DICTIONARIES, console.error);
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
-// Start at login (login-item.ts); and what it starts: the installed app's launcher, or a
-// development build's Electron on this main.
-const loginItem = loginItemFor(places);
-const loginCommand = (): string[] => (app.isPackaged ? [places.launcher!] : [process.execPath, import.meta.filename]);
+// Start at login (login-item.ts); and what it starts: the installed app's launcher, or the app itself
+// where it has none, or a development build's Electron on this main.
+const loginItem = loginItemFor(places, app);
+const loginCommand = (): string[] => (app.isPackaged ? [places.launcher ?? process.execPath] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
 const browserSetting = new BrowserSetting(join(root, "browser.json"));
@@ -2761,6 +2761,14 @@ if (!app.requestSingleInstanceLock()) {
     if (!loginItem.startedHidden(argv)) main?.show();
     const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);
+  });
+  // A link the system hands the running app as an event, as macOS hands each (deep-link.ts): opened as a
+  // second launch's is, and one before the window is made once it is.
+  listenForLinks(app, (link) => void openDeepLink(link).catch(report));
+  // The app opened again while it runs, as by a click on its icon in the Dock (Electron's activate, macOS's
+  // alone), shows the window; once the quit goes on, nothing does.
+  app.on("activate", () => {
+    if (!leaving) main?.show();
   });
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
