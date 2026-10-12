@@ -48,16 +48,65 @@ jobs:
       - name: Build surogate-spawn
         run: native/spawn/build.sh
 
-      # What the file host runs on: the app's code, fsat beside it, a node at bin/node as the app's own (this
-      # runner's, until the release pins macOS's), and the app's rg beside it, on the PATH as the app's tools are.
+      - name: Run the suites that pass on macOS
+        run: npx vitest run --project macos
+
+  # The file host's suites, with the helper in srt's real Seatbelt: the file host's calls, the walk, the landing, the
+  # hook guard and the race of a process of this computer's. A job of their own, each suite a step of its own with a
+  # bound of its own, so that one that hangs leaves the others' results, and the log, to read.
+  file-host:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      # What the file host runs on: the app's code, fsat beside it, surogate-spawn, a node at bin/node as the app's
+      # own (this runner's, until the release pins macOS's), and the app's rg beside it, on the PATH as the app's
+      # tools are.
       - name: Build the file host
         run: |
           npx tsc -p tsconfig.build.json
           native/fsat/build.sh
+          native/spawn/build.sh
           mkdir -p bin
           cp "$(command -v node)" bin/node
           scripts/rg.sh
           echo "$PWD/bin" >> "$GITHUB_PATH"
 
-      - name: Run the suites that pass on macOS
-        run: npx vitest run --project macos
+      - name: The file host's calls, its lock, and srt's Seatbelt
+        timeout-minutes: 10
+        run: >-
+          npx vitest run --project unit --reporter=verbose test/clean-child.test.ts test/fd-paths-darwin.test.ts
+          test/srt-darwin.test.ts test/folder-lock.test.ts test/boot-id.test.ts test/hosts-handed.test.ts
+          test/policy-darwin.test.ts test/agent-disk-imports.test.ts test/flags.test.ts
+
+      - name: The walk and the hook guard
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/operations.test.ts test/hooks.test.ts test/hooks-chmod.test.ts
+
+      - name: The landing
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: npx vitest run --project unit --reporter=verbose test/land.test.ts
+
+      - name: The race
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/file-tools-race.test.ts
