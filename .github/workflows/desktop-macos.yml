@@ -44,5 +44,9 @@ jobs:
       - name: Install Electron
         run: npm run electron:install
 
+      # The app's own way of starting a program cleanly on macOS, beside its node.
+      - name: Build surogate-spawn
+        run: native/spawn/build.sh
+
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos

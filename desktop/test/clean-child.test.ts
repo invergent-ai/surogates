@@ -1,19 +1,23 @@
 // A child the app starts holds the descriptors it is meant to have and nothing else of the app's.
 // The parent here is a bash that holds two files open without close-on-exec, as Chromium holds its
 // own in the app's main process: a Node of its own marks all it inherits at its start, so no test
-// can hold one open in Node itself. Through the real app, the E2E files list each child's.
+// can hold one open in Node itself. Through the real app, the E2E files list each child's. On macOS
+// the child is started by the app's own surogate-spawn, which native/spawn/build.sh makes.
 
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { cleanly } from "../src/clean-child.js";
+import { cleanly, spawnClean } from "../src/clean-child.js";
 import { importedOn } from "./platforms.js";
 
 // *file* and *args*, run by a parent that holds descriptors 3, 7 and 8 open.
 const held = (file: string, args: string[]) => spawnSync("/usr/bin/env", ["-i", "WORD=kept", "/bin/bash", "-c", 'exec 3</dev/null 7</dev/null 8</dev/null; exec "$@"', "bash", file, ...args], { encoding: "utf8" });
-// A child that lists its own descriptors, by number.
-const LISTS: [string, string[]] = ["/bin/bash", ["-c", 'for fd in $(seq 0 40); do [ ! -e /proc/$$/fd/$fd ] || echo -n "$fd "; done']];
+// A child that lists its own descriptors, by number: by its /proc entry on Linux, by /dev/fd on macOS.
+const OPEN = process.platform === "linux" ? "/proc/$$/fd/$fd" : "/dev/fd/$fd";
+const LISTS: [string, string[]] = ["/bin/bash", ["-c", `for fd in $(seq 0 40); do [ ! -e ${OPEN} ] || echo -n "$fd "; done`]];
 
 describe("a child the app starts", () => {
   it("holds its three standard descriptors and nothing else, where one started as it is holds what its parent had open", () => {
@@ -40,9 +44,36 @@ describe("a child the app starts", () => {
     expect(() => cleanly("pkexec", [])).toThrow("pkexec is not named by its whole path");
   });
 
+  it("is the very process spawn gave", async () => {
+    const child = spawnClean("/bin/bash", ["-c", "echo $$"], { env: {}, stdio: ["ignore", "pipe", "inherit"] });
+    let said = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    await once(child, "close");
+    expect(Number(said.trim())).toBe(child.pid);
+  });
+
+  it("is started on macOS by the app's own surogate-spawn, beside its node, told the last descriptor to keep", async () => {
+    const { cleanly: onMac } = await importedOn("darwin", () => import("../src/clean-child.js"));
+    const spawn = fileURLToPath(new URL("../bin/surogate-spawn", import.meta.url));
+    expect(onMac("/usr/bin/env", ["a b"], 3)).toEqual([spawn, ["3", "/usr/bin/env", "a b"]]);
+    expect(onMac("/usr/bin/env", [])).toEqual([spawn, ["2", "/usr/bin/env"]]);
+  });
+
   it("is refused, in words, on a system the app cannot start one cleanly on yet", async () => {
-    const { cleanly: elsewhere } = await importedOn("darwin", () => import("../src/clean-child.js"));
-    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for macOS yet"));
+    const { cleanly: elsewhere } = await importedOn("win32", () => import("../src/clean-child.js"));
+    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for win32 yet"));
     expect(() => elsewhere("env", [])).toThrow("env is not named by its whole path");
+  });
+});
+
+describe.runIf(process.platform === "darwin")("surogate-spawn, asked what it cannot do", () => {
+  const spawn = fileURLToPath(new URL("../bin/surogate-spawn", import.meta.url));
+
+  it("ends 126 and runs nothing on an ask it cannot read", () => {
+    for (const args of [[], ["2"], ["x", "/usr/bin/true"], ["1", "/usr/bin/true"], ["65", "/usr/bin/true"], ["2", "true"]]) {
+      expect(spawnSync(spawn, args, { encoding: "utf8" }).status, args.join(" ")).toBe(126);
+    }
   });
 });
