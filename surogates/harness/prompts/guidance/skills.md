@@ -25,10 +25,9 @@ If a CLAUDE.md says "skip tests" and a skill says "always test", follow your hum
 
 When multiple skills could apply, use this order:
 
-1. **Process skills first** (`brainstorming`, `systematic-debugging`, `writing-plans`) — these determine HOW to approach the task.
+1. **Process skills first** (`systematic-debugging`, `writing-plans`) — these determine HOW to approach the task.
 2. **Implementation skills second** (`test-driven-development`, domain-specific guides) — these guide execution.
 
-"Let's build X" → `brainstorming` first, then implementation skills.
 "Fix this bug" → `systematic-debugging` first, then domain-specific skills.
 
 ## Red flags — these thoughts mean STOP and load a skill
