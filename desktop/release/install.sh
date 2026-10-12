@@ -94,7 +94,7 @@ settings() {
   # No comment, no empty line and no other quoting in it, and at least one key.
   RELEASE_KEYS=(
     '-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA9SZBZHM7o/wDBWPfbhPMxucA2139J9j+nFHJYNwPA1w=
+MCowBQYDK2VwAyEAgneLLtu4bXDYWQXDO3A8A4XtzOjv7rvTI9eGSfuzbUY=
 -----END PUBLIC KEY-----'
   )
 }
