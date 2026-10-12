@@ -262,9 +262,15 @@ def test_ask_user_question_is_not_handed_out_when_governance_blocks_it() -> None
 
 
 def test_a_policy_naming_the_old_escalation_tool_still_allows_it() -> None:
-    from surogates.governance.policy import GovernanceGate
+    from surogates.runtime.governance import build_governance_gate
 
-    assert GovernanceGate(allowed_tools={"checkin_escalate"}).check("escalate", {}).allowed
-    assert not GovernanceGate(
-        allowed_tools={"escalate", "memory"}, denied_tools={"checkin_escalate"},
+    assert build_governance_gate(
+        {"allowed_tools": ["checkin_escalate"]},
     ).check("escalate", {}).allowed
+    assert not build_governance_gate(
+        {"allowed_tools": ["escalate", "memory"], "denied_tools": ["checkin_escalate"]},
+    ).check("escalate", {}).allowed
+    needs_approval = build_governance_gate(
+        {"require_approval": ["checkin_escalate"]},
+    ).check("escalate", {})
+    assert not needs_approval.allowed and needs_approval.overridable
