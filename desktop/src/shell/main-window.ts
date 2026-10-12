@@ -1,6 +1,5 @@
 // The app's one window, shaped as Claude Desktop shapes its main window (index.js):
-// frameless, with the system's own minimise, maximise and close drawn over its top
-// right corner in the theme's colours (titleBarStyle "hidden" with titleBarOverlay);
+// frameless, with the system's own controls drawn as this OS draws them (main-window-linux.ts);
 // placed as the user left it; hidden when the user closes it, unless Keep running is off. Its own
 // page draws the sidebar, the centre's header and the Overview pane. The agent's web
 // client fills the centre's hole, in a WebContentsView of the agent's own partition
@@ -8,13 +7,21 @@
 // the Overview pane fills the pane's hole, in a second view of the same partition that has no
 // bridge and stays on its transcript.
 
-import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
+import { app, BrowserWindow, net, screen, shell, type TitleBarOverlay, type WebContents, WebContentsView, webContents } from "electron";
 
 import { reconnectDelayMs } from "../link/backoff.js";
+import { notBuilt } from "../platform.js";
 import { type Agent, partitionFor } from "./agents.js";
 import { chrome } from "./appearance.js";
+import { windowControls } from "./main-window-linux.js";
 import { external, permitted, sameOrigin, windowOpen } from "./window-policy.js";
 import type { Bounds, WindowStates } from "./window-state.js";
+
+// The window's controls, by this OS: drawn at its making, and painted again at each change of theme.
+const CONTROLS = process.platform === "linux" ? windowControls : {
+  options: (): { titleBarStyle: "hidden"; titleBarOverlay: TitleBarOverlay } => notBuilt("Surogate Desktop's window controls"),
+  paint: (): void => notBuilt("Surogate Desktop's window controls"),
+};
 
 let closing = false;
 
@@ -144,8 +151,7 @@ export class MainWindow {
       minHeight: 600,
       title: "Surogate",
       show: false,
-      titleBarStyle: "hidden",
-      titleBarOverlay: overlay,
+      ...CONTROLS.options(overlay),
       backgroundColor: background,
       webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
@@ -187,7 +193,7 @@ export class MainWindow {
     // Settings, or the project dialog, dims the controls with the window under it.
     const { background, overlay } = chrome(dark, this.settingsView !== null);
     this.window.setBackgroundColor(background);
-    this.window.setTitleBarOverlay(overlay);
+    CONTROLS.paint(this.window, overlay);
     this.web?.view.setBackgroundColor(background);
     // The pane's own colour, never a dimmed title bar's.
     this.pane?.view.setBackgroundColor(chrome(dark).overlay.color);
