@@ -664,6 +664,12 @@ class PromptBuilder:
 
             if skill_type == "expert":
                 continue
+            # The gate off means the agent never reaches for brainstorming
+            # on its own: the skill's "MUST use before any creative work"
+            # description would otherwise restore the gate from the index.
+            # A user can still run it as /brainstorming.
+            elif name == "brainstorming" and not self._brainstorming_gate:
+                continue
             else:
                 if not self._skill_visible(
                     fallback_for_tools, requires_tools, requires_agents,
