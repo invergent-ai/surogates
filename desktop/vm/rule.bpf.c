@@ -1,7 +1,7 @@
 // The guest-kernel rule on protected names. Refuses a session's writes to
 // the paths files/protect.ts protects, in a folder a chat shares into the guest, by
 // walking the dentry up and feeding each component to rule-match.h's stepper. Loaded
-// once at boot (vm/init); a session (uid >= FIRST_UID) cannot unload it.
+// once at boot (vm/init); a session (uid >= FIRST_UID, or the scope's one uid) cannot unload it.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
@@ -11,6 +11,7 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define FIRST_UID 10000u            // sessions' guest uids start here (root.ts)
+#define RDONLY_PROG (1U << 7)       // BPF_F_RDONLY_PROG: the programs read the map and never write it
 #define EPERM 1
 #define FUSE_SUPER_MAGIC 0x65735546 // virtiofs; the only share fs on Linux
 #define FMODE_WRITE 0x2
@@ -51,6 +52,26 @@ static __noinline int judge(struct dentry *dentry, int dir)
 	return sg_end(&st) | (sg_in_dep(&st) << 1);
 }
 
+// The one uid besides those from FIRST_UID up that sessions run as: where the VM's shares map no owner
+// to a session's uid (macOS's), every session runs as the uid the share shows, the host user's (root.ts).
+// vm/init writes it from the kernel's command line (surogate.uid=), or leaves it 0 where that names none,
+// as Linux's never does, and freezes the map before it says the rule is attached: nothing writes it after.
+// A value of 0, or one above the last uid, judges no other uid: the guest's own root is never in scope.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(map_flags, RDONLY_PROG);
+} scope SEC(".maps");
+
+static __always_inline int in_scope(__u32 uid)
+{
+	__u32 key = 0;
+	__u32 *one = bpf_map_lookup_elem(&scope, &key);
+	return uid >= FIRST_UID || (one && *one != 0 && *one != (__u32)-1 && uid == *one);
+}
+
 static __noinline int share_sb(struct super_block *sb)
 {
 	if (!sb)
@@ -61,7 +82,7 @@ static __noinline int share_sb(struct super_block *sb)
 static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry, int dir)
 {
 	__u32 uid = bpf_get_current_uid_gid();
-	if (uid < FIRST_UID || !dentry || !share_sb(sb))
+	if (!in_scope(uid) || !dentry || !share_sb(sb))
 		return 0;
 	return judge(dentry, dir);
 }

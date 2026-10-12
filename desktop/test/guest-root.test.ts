@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,9 @@ import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
-import { admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor, UNMOUNTABLE } from "../src/guest/root.js";
+import {
+  admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, scopeOf, sessionUid, sharePath, slowerFor, uidOf, UNJUDGED,
+} from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
 
@@ -765,12 +767,54 @@ describe("a root's inputs", () => {
   });
 
   it.each([{ kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "s1" }] as const)(
-    "refuses Apple's share %j, which it cannot mount yet, before anything is given",
+    "refuses Apple's share %j in a guest whose rule judges no uid besides the roots' own, before anything is given",
     async (share) => {
-      await expect(enter("root-1", place, share, ana)).rejects.toThrow(new Error(UNMOUNTABLE));
-      expect(UNMOUNTABLE).toBe("This computer's sandbox cannot mount this kind of share yet");
+      await expect(enter("root-1", place, share, ana)).rejects.toThrow(new Error(UNJUDGED));
     },
   );
+
+  it.each([
+    [{ kind: "vz", tag: "surogate" }], [{ kind: "vz", tag: "surogate", name: "../r1" }], [{ kind: "vz", tag: "s1", name: "r1" }],
+    [{ kind: "vz", tag: "s9" }], [{ kind: "vz", tag: "r1" }], [{ kind: "other", tag: "r1" }],
+  ] as unknown as Array<[Share]>)("refuses %j, which is none of the shares it mounts, before anything is given", async (share) => {
+    await expect(enter("root-1", place, share, ana, 501)).rejects.toThrow(/^not one of Apple's shares|^This computer's sandbox cannot mount this kind of share$/);
+  });
+});
+
+describe("a root on Apple's share, which maps no owner", () => {
+  it("runs as the uid the share shows, the one its rule judges besides the roots' own, and never as root", () => {
+    expect(sessionUid(501, 501)).toBe(501);
+    expect(() => sessionUid(0, 501)).toThrow("This chat's folder shows as root's in the sandbox, so no command runs in it");
+    expect(() => sessionUid(0, 0)).toThrow("shows as root's");
+    expect(() => sessionUid(502, 501)).toThrow("This chat's folder shows as a user's in the sandbox whose writes its protected-names rule does not judge, so no command runs in it");
+    expect(() => sessionUid(501, null)).toThrow(new Error(UNJUDGED));
+  });
+
+  it("reads the rule's scope as vm/init leaves it: a uid, or none, and nothing else", () => {
+    expect([scopeOf(""), scopeOf("\n"), scopeOf("501\n"), scopeOf("4294967294")]).toEqual([null, null, 501, 4_294_967_294]);
+    for (const written of ["0", "0501", "-1", "501 502", "x", "4294967295", "12345678901"]) expect(() => scopeOf(written), written).toThrow("the protected-names rule's scope is not a uid");
+  });
+
+  it("gives every root the scope's uid, its folder on the sessions disk that uid's, and refuses a folder of another owner", () => {
+    const sessions = mkdtempSync(join(tmpdir(), "sessions-"));
+    try {
+      const me = process.getuid!();
+      expect([uidOf("root-1", sessions, me), uidOf("root-2", sessions, me), uidOf("root-1", sessions, me)]).toEqual([me, me, me]);
+      expect(["root-1", "root-2"].map((root) => statSync(join(sessions, root)).uid)).toEqual([me, me]);
+      expect(statSync(join(sessions, "root-1", "home")).mode & 0o777).toBe(0o700);
+      // A folder this guest made for another uid, in a guest without the scope, as one from before it.
+      expect(() => uidOf("root-1", sessions, me + 1)).toThrow("the folder of root-1 on the sessions disk is not one this guest made");
+      expect(() => uidOf("root-1", sessions)).toThrow("the folder of root-1 on the sessions disk is not one this guest made");
+    } finally {
+      rmSync(sessions, { recursive: true, force: true });
+    }
+  });
+
+  it("finds a folder of the one device for every folder by its name, and one of the eight by its tag", () => {
+    expect(sharePath({ kind: "vz", tag: "surogate", name: "r3" })).toBe("/run/surogate/shares/surogate/r3");
+    expect(sharePath({ kind: "vz", tag: "s2" })).toBe("/run/surogate/shares/s2");
+    expect(sharePath({ kind: "virtiofs", tag: "r2" })).toBe("/run/surogate/shares/r2");
+  });
 });
 
 describe("a command's shell, moved into its cgroup by the agent", () => {

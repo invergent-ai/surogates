@@ -7,7 +7,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, chownSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
-import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, readdir, readFile, rmdir, stat, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
@@ -18,7 +18,7 @@ import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STO
 import { PROXY_URL } from "./listeners.js";
 import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
+import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share, VZ_NAME, VZ_TAG } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 import { STORE } from "./trust.js";
 
@@ -135,22 +135,38 @@ export function rootEnvironment(layout: string, user: HostUser, companyCa: boole
   };
 }
 
+// Where vm/init leaves the protected-names rule's scope once the rule is attached: the one uid it
+// judges besides those from FIRST_UID up, or nothing for none.
+export const SCOPE = "/run/surogate/scope";
+
+/** The rule's scope as vm/init wrote it (*written*, SCOPE's text): its uid, or null for none. Throws on anything else. */
+export function scopeOf(written: string): number | null {
+  const text = written.trim();
+  if (text === "") return null;
+  const uid = Number(text);
+  if (!/^[1-9][0-9]{0,9}$/.test(text) || uid > 4_294_967_294) throw new Error(`the protected-names rule's scope is not a uid: ${text.slice(0, 32)}`);
+  return uid;
+}
+
 // The guest uid of *root*: given at its first ask, from FIRST_UID up, and kept
 // as the owner of its folder on the sessions disk, which holds its home and temp
-// folder. A uid is never given again while that folder exists.
-export function uidOf(root: string, sessions = SESSIONS): number {
+// folder. A uid is never given again while that folder exists. In a guest whose
+// rule judges the one uid *scope* besides those, as a macOS VM's does, every root
+// runs as that uid, which its folder's share shows (sessionUid): its folder there is that uid's.
+export function uidOf(root: string, sessions = SESSIONS, scope: number | null = null): number {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
   const folder = join(sessions, root);
   try {
     const { uid } = statSync(folder);
-    // Only this agent makes these folders, each owned from FIRST_UID up: any other owner was never given here.
-    if (uid < FIRST_UID) throw new Error(`the folder of ${root} on the sessions disk is not one this guest made`);
+    // Only this agent makes these folders, each owned from FIRST_UID up, or by the scope's uid where there is one:
+    // any other owner was never given here.
+    if (scope === null ? uid < FIRST_UID : uid !== scope) throw new Error(`the folder of ${root} on the sessions disk is not one this guest made`);
     return uid;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const taken = readdirSync(sessions).filter((name) => ROOT_ID.test(name)).map((name) => statSync(join(sessions, name)).uid);
-  const uid = Math.max(FIRST_UID - 1, ...taken) + 1;
+  const uid = scope ?? Math.max(FIRST_UID - 1, ...taken) + 1;
   // Made whole under another name, then renamed: the folder is never there with another owner.
   const making = join(sessions, `.${root}`);
   rmSync(making, { recursive: true, force: true });
@@ -176,29 +192,61 @@ const execute = promisify(execFile);
 // looked at from here again: a stat on a stalled one would stall every root.
 const mounted = new Set<string>();
 
-// What a share of a kind this guest does not mount yet is answered: Apple's, from a macOS VM.
-export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share yet";
+// Apple's share (macOS's Virtualization framework) is a virtio-fs device too, in one of two layouts
+// (src/vm/darwin.ts): one device, DEVICE, that holds every folder, each a directory in it by its name,
+// mounted once and kept for the boot; or one of eight fixed devices, s1 to s8, a folder each, mounted
+// as Linux's tags are and let go at its teardown, as its tag is given again.
+export const DEVICE = "surogate";
 
-// *share*'s inputs, by its kind, checked before anything of its root is made or mounted.
-function checkShare(share: Share): void {
+// What a share of a kind this guest does not mount is answered.
+export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share";
+
+/** *share*'s inputs, by its kind, checked before anything is made or mounted for it. */
+export function checkShare(share: Share): void {
   switch (share.kind) {
     case "virtiofs":
       if (!TAG.test(share.tag)) throw new Error(`not a share tag: ${share.tag}`);
       return;
     case "vz":
+      if (!VZ_TAG.test(share.tag) || (share.tag === DEVICE ? !VZ_NAME.test(share.name ?? "") : share.name !== undefined)) {
+        throw new Error(`not one of Apple's shares: ${share.tag.slice(0, 64)} ${String(share.name ?? "").slice(0, 64)}`);
+      }
+      return;
+    default:
       throw new Error(UNMOUNTABLE);
   }
 }
 
-// Where *share*'s folder is in this guest, mounted by its kind the first time.
-async function mountShare(share: Share): Promise<string> {
-  switch (share.kind) {
-    case "virtiofs":
-      return mountVirtiofs(share.tag);
-    case "vz":
-      throw new Error(UNMOUNTABLE);
-  }
+// The tag whose own mount is *share*'s, and goes with its teardown: none for a folder in DEVICE, whose mount stays.
+const ownMount = (share: Share) => (share.kind === "vz" && share.tag === DEVICE ? null : share.tag);
+
+/** Where *share*'s folder is in this guest, once mounted: under SHARES by its tag, or by its name in DEVICE's. */
+export function sharePath(share: Share): string {
+  return share.kind === "vz" && share.tag === DEVICE ? join(SHARES, DEVICE, share.name ?? "") : join(SHARES, share.tag);
 }
+
+// Where *share*'s folder is in this guest, its device mounted the first time.
+async function mountShare(share: Share): Promise<string> {
+  await mountVirtiofs(ownMount(share) ?? DEVICE);
+  return sharePath(share);
+}
+
+/** DEVICE, mounted the first time it is asked for; where it is. */
+export const mountDevice = (): Promise<string> => mountVirtiofs(DEVICE);
+
+/**
+ * The uid a root's runner runs as on Apple's share, which maps no owner: the share's folder shows the host
+ * user's uid, *owner*, which every root runs as, and which the protected-names rule judges as its *scope*.
+ * Throws for a folder that shows as root's, or as any uid the rule does not judge.
+ */
+export function sessionUid(owner: number, scope: number | null): number {
+  if (scope === null) throw new Error(UNJUDGED);
+  if (owner === 0) throw new Error("This chat's folder shows as root's in the sandbox, so no command runs in it");
+  if (owner !== scope) throw new Error("This chat's folder shows as a user's in the sandbox whose writes its protected-names rule does not judge, so no command runs in it");
+  return owner;
+}
+// Apple's share in a guest whose rule judges no uid that the share shows.
+export const UNJUDGED = "This computer's sandbox judges no user's writes that this chat's folder shows, so no command runs in it";
 
 async function mountVirtiofs(tag: string): Promise<string> {
   const share = join(SHARES, tag);
@@ -219,11 +267,18 @@ async function mountVirtiofs(tag: string): Promise<string> {
 }
 
 // A share's mount goes, lazily: a process of its root's stuck in a share that stalled
-// keeps it until it lets go. The host removes the share from the guest next.
+// keeps it until it lets go. The host removes the share from the guest next. A folder in
+// DEVICE has no mount of its own: its root's namespace, which bound it, has gone.
 export async function unmountShare(share: Share): Promise<void> {
-  if (!TAG.test(share.tag)) return;
-  mounted.delete(share.tag);
-  const path = join(SHARES, share.tag);
+  try {
+    checkShare(share);
+  } catch {
+    return;
+  }
+  const tag = ownMount(share);
+  if (tag === null) return;
+  mounted.delete(tag);
+  const path = join(SHARES, tag);
   await execute("/usr/bin/umount", ["-l", path]).catch(() => {});
   await rmdir(path).catch(() => {});
 }
@@ -247,8 +302,14 @@ function flush(path: string, ms = Infinity): Promise<boolean> {
  * when the share did not answer within FLUSH_MS: it stalled, and is held.
  */
 export async function flushRoot(share: Share, stalled: boolean): Promise<boolean> {
-  const shared = !stalled && TAG.test(share.tag) && mounted.has(share.tag);
-  const [, answered] = await Promise.all([flush(SESSIONS_DISK), shared ? flush(join(SHARES, share.tag), FLUSH_MS) : true]);
+  let shared = false;
+  try {
+    checkShare(share);
+    shared = !stalled && mounted.has(ownMount(share) ?? DEVICE);
+  } catch {
+    // Not a share of this guest's.
+  }
+  const [, answered] = await Promise.all([flush(SESSIONS_DISK), shared ? flush(sharePath(share), FLUSH_MS) : true]);
   return answered;
 }
 
@@ -282,17 +343,26 @@ export async function setClock(now: number): Promise<void> {
 // the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
 // everything in them with it. Killing unshare reaches them only while enter-root
 // builds them: the kernel drops the parent-death signal when the runner takes on
-// the root's user. Nothing is made, mounted or given until every input has passed.
-export async function enter(root: string, place: Place, share: Share, user: HostUser): Promise<ChildProcess> {
+// the root's user. Nothing is made, mounted or given until every input has passed. *scope*: the
+// one uid the protected-names rule judges besides those from FIRST_UID up, which every root runs
+// as on Apple's share (sessionUid), and none on Linux's.
+export async function enter(root: string, place: Place, share: Share, user: HostUser, scope: number | null = null): Promise<ChildProcess> {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
   checkShare(share);
+  if (share.kind === "vz" && scope === null) throw new Error(UNJUDGED);
   if (!NAME.test(user.name)) throw new Error(`not a user name: ${user.name}`);
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
-  const uid = uidOf(root);
+  const uid = uidOf(root, SESSIONS, scope);
   // Made, if at all, before the host's answer to hello let any root be set up (Control), and kept for the boot.
   const companyCa = existsSync(STORE);
   const mount = await mountShare(share);
+  // Its owner read once, at its setup, within the mount's bound: one whose share stalled answers none.
+  if (share.kind === "vz") {
+    const owner = await Promise.race([stat(mount).then(({ uid: shown }) => shown), new Promise<null>((resolve) => setTimeout(() => resolve(null), MOUNT_MS).unref())]);
+    if (owner === null) throw new Error("This chat's folder did not answer in the sandbox");
+    sessionUid(owner, scope);
+  }
   const cgroup = join(CGROUPS, root);
   // Made at the root's first setup in this guest, and kept until the guest stops: the root's
   // own memory cgroup, the only one it has. Removed while pages it charged remain, as a
