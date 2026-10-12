@@ -384,3 +384,26 @@ async def test_a_template_reported_before_its_outbox_id_is_stamped_still_fails_i
     failed = await _row(sf, row.id)
     assert failed.state == "failed"
     assert failed.outbox_id == 77
+
+
+@pytest.mark.asyncio
+async def test_a_failed_template_spares_texts_behind_another_template(sf, doctor_session):
+    """An operator's template and an alert's own template go out minutes
+    apart.  The operator's failing must not fail the alert."""
+    doctor = uuid.uuid4()
+    routine = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=doctor, platform="whatsapp",
+        channel_identifier=SENDER, kind="operator", text="A note from the practice",
+        template_name="message", template_language="ro",
+    )
+    delivery = _Delivery()
+    await _send(sf, _Store(), delivery)
+    alert = await _queue(sf, doctor, text="Patient fainted")
+    await _send(sf, _Store(), delivery, now=NOW + timedelta(minutes=5))
+    assert len(delivery.sent) == 2
+    failed_outbox = (await _row(sf, routine.id)).outbox_id
+    assert await outreach.record_outreach_delivery(
+        sf, failed_outbox, provider_message_id=None, error="template paused",
+    )
+    assert (await _row(sf, routine.id)).state == "failed"
+    assert (await _row(sf, alert.id)).state == "awaiting_reply"

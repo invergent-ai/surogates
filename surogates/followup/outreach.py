@@ -361,8 +361,7 @@ async def _reopen(
     # rides only on an earlier alert: behind a routine notice it would reach
     # the care team whenever they next happened to reply.
     earlier = (
-        sa.select(sa.func.count())
-        .select_from(OutreachMessageRow)
+        sa.select(OutreachMessageRow.id)
         .where(OutreachMessageRow.org_id == row.org_id)
         .where(OutreachMessageRow.agent_id == row.agent_id)
         .where(OutreachMessageRow.user_id == row.user_id)
@@ -371,18 +370,20 @@ async def _reopen(
         .where(OutreachMessageRow.state == "awaiting_reply")
         .where(OutreachMessageRow.outbox_id.isnot(None))
         .where(OutreachMessageRow.sent_at > now - BATCH_WINDOW)
+        .order_by(OutreachMessageRow.sent_at.desc())
+        .limit(1)
     )
     if row.kind == "alert":
         earlier = earlier.where(OutreachMessageRow.kind == "alert")
     async with session_factory() as db:
-        batched = (await db.execute(earlier)).scalar_one() > 0
+        carrier = (await db.execute(earlier)).scalar_one_or_none()
     if not await _transition(
         session_factory, row.id, from_states=("queued",),
         state="awaiting_reply", session_id=session_id, sent_at=now,
-        platform_user_id=wa_id,
+        platform_user_id=wa_id, rides_on=carrier,
     ):
         return 0
-    if batched:
+    if carrier is not None:
         return 1  # a template went out moments ago; this text rides on it
 
     try:
@@ -424,13 +425,11 @@ async def _fail_reopened(db: Any, opener: Any, reason: str) -> int:
     """Fail a template's row and every text that rode on it."""
     result = await db.execute(
         sa.update(OutreachMessageRow)
-        .where(OutreachMessageRow.org_id == opener.org_id)
-        .where(OutreachMessageRow.agent_id == opener.agent_id)
-        .where(OutreachMessageRow.user_id == opener.user_id)
-        .where(OutreachMessageRow.channel_identifier == opener.channel_identifier)
+        .where(sa.or_(
+            OutreachMessageRow.id == opener.id,
+            OutreachMessageRow.rides_on == opener.id,
+        ))
         .where(OutreachMessageRow.state == "awaiting_reply")
-        .where(OutreachMessageRow.sent_at >= opener.sent_at)
-        .where(OutreachMessageRow.sent_at < opener.sent_at + BATCH_WINDOW)
         .values(state="failed", reason=reason[:500])
     )
     return int(result.rowcount or 0)

@@ -1298,6 +1298,9 @@ class OutreachMessageRow(Base):
     provider_message_id: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, index=True,
     )
+    #: On a text held behind another row's template: that row.  A failed
+    #: template fails exactly the texts riding on it.
+    rides_on: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
