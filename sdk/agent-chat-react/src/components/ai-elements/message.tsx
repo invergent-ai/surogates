@@ -34,6 +34,8 @@ import {
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
+
+import { streamdownRehypePlugins } from "../../lib/streamdown-rehype";
 import { ComposioConnectCard } from "../connections/composio-connect-card";
 import { isComposioConnectUrl } from "../../lib/oauth-popup";
 
@@ -369,6 +371,7 @@ export const MessageResponse = memo(
         className
       )}
       plugins={streamdownPlugins}
+      rehypePlugins={streamdownRehypePlugins}
       components={streamdownComponents}
       {...props}
     />
