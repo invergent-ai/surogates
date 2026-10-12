@@ -270,6 +270,12 @@ _ALWAYS_INHERIT = frozenset({
     "LC_ALL",
     "LC_CTYPE",
     "LOGNAME",
+    # The image's global npm packages (docx, pptxgenjs, ...) live in
+    # /usr/lib/node_modules, which require() finds only through NODE_PATH;
+    # NPM_CONFIG_PREFIX sends `npm install -g` to the user prefix the
+    # non-root sandbox can write (NODE_PATH lists it too).
+    "NODE_PATH",
+    "NPM_CONFIG_PREFIX",
     "PATH",
     "PYTHONUSERBASE",
     "SHELL",
