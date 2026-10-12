@@ -14,7 +14,7 @@ import pytest
 import sqlalchemy as sa
 
 from surogates.channels.platforms.whatsapp import _build_message
-from surogates.db.models import DeliveryOutbox, InboxItem, ProgramInvitationRow
+from surogates.db.models import InboxItem, ProgramInvitationRow
 from surogates.programs.materialize import materialize_occurrence
 from tests.test_checkin_tools import (  # noqa: F401  (fixture)
     _kwargs,
@@ -74,32 +74,64 @@ async def test_fixed_a_patient_past_the_phase_is_not_invited(sf):
     assert rows == []
 
 
-@pytest.mark.asyncio
-async def test_gap_escalation_outside_a_check_in_is_refused(sf, awaiting_invitation):
-    # The patient writes on their own at 2am: "am leșinat". There is no open
-    # check-in in that conversation, so nobody can be told.
-    from surogates.tools.builtin.checkin import handle_checkin_escalate
+async def _care_team(sf, org_id, agent_id="a1"):
+    from surogates.followup import store
 
-    kwargs = _kwargs(sf, awaiting_invitation)
-    kwargs["session_id"] = uuid.uuid4()
-    result = await handle_checkin_escalate({"reason": "a leșinat"}, **kwargs)
-    assert "no check-in is open" in result.lower()  # GAP
+    doctor = uuid.uuid4()
+    await store.save_settings(
+        sf, org_id=org_id, agent_id=agent_id,
+        escalation_service_account_id=uuid.uuid4(), channel_identifier="pn1",
+        alert_recipient_user_ids=[doctor], alert_template_name="alert",
+        alert_template_language="ro", message_template_name=None,
+        message_template_language=None,
+    )
+    return doctor
+
+
+@pytest.mark.asyncio
+async def test_fixed_escalation_outside_a_check_in_reaches_the_care_team(sf):
+    # The patient writes on their own at 2am: "am leșinat".  No check-in is
+    # open, and the care team is still told — inbox and phone.
+    from surogates.db.models import OutreachMessageRow, Session as SessionRow
+    from surogates.tools.builtin.followup import handle_escalate
+
+    org, session_id = uuid.uuid4(), uuid.uuid4()
+    doctor = await _care_team(sf, org)
     async with sf() as db:
-        assert (await db.execute(sa.select(InboxItem))).first() is None
+        db.add(SessionRow(
+            id=session_id, org_id=org, agent_id="a1", channel="whatsapp",
+            user_id=uuid.uuid4(),
+            config={"whatsapp_channel_id": "40700000001", "channel_identifier": "pn1"},
+        ))
+        await db.commit()
+
+    result = await handle_escalate(
+        {"reason": "a leșinat"},
+        session_id=str(session_id), session_factory=sf,
+    )
+    assert result.startswith("Escalated to")
+    async with sf() as db:
+        assert (await db.execute(sa.select(InboxItem))).scalar_one().session_id == session_id
+        alert = (await db.execute(sa.select(OutreachMessageRow))).scalar_one()
+    assert alert.user_id == doctor
+    assert "a leșinat" in alert.text
 
 
 @pytest.mark.asyncio
-async def test_gap_escalation_never_reaches_the_doctors_phone(sf, awaiting_invitation):
-    # Inside a check-in the escalation lands in a Studio inbox and nowhere
-    # else: nothing is queued for delivery to anyone's WhatsApp.
-    from surogates.tools.builtin.checkin import handle_checkin_escalate
+async def test_fixed_escalation_in_a_check_in_reaches_the_doctors_phone(sf, awaiting_invitation):
+    from surogates.db.models import OutreachMessageRow
+    from surogates.tools.builtin.followup import handle_escalate
 
-    await handle_checkin_escalate(
+    doctor = await _care_team(sf, awaiting_invitation.org_id)
+    await handle_escalate(
         {"reason": "febră 38.5"}, **_kwargs(sf, awaiting_invitation),
     )
     async with sf() as db:
         assert (await db.execute(sa.select(InboxItem))).first() is not None
-        assert (await db.execute(sa.select(DeliveryOutbox))).first() is None  # GAP
+        alert = (await db.execute(sa.select(OutreachMessageRow))).scalar_one()
+    assert alert.user_id == doctor
+    assert alert.kind == "alert"
+    assert alert.template_name == "alert"
 
 
 def test_gap_voice_note_reaches_the_agent_with_no_text():

@@ -1152,6 +1152,10 @@ class FollowupSettingsRow(Base):
     escalation_service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(), nullable=True,
     )
+    #: The business sender alerts and operator messages go out from, e.g.
+    #: the agent's WhatsApp phone_number_id.  Stored, not inferred: an
+    #: escalation raised in a web conversation has no sender of its own.
+    channel_identifier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: End users on this agent who are told on their phone, e.g. the doctor.
     alert_recipient_user_ids: Mapped[list[str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=list,

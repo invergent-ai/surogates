@@ -112,7 +112,7 @@ async def test_settings_round_trip_dedupes_recipients(sf):
     assert await store.get_settings(sf, org_id=ORG, agent_id=AGENT) is None
     saved = await store.save_settings(
         sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=sa_id,
-        alert_recipient_user_ids=[doc, str(doc)],
+        channel_identifier="pn1", alert_recipient_user_ids=[doc, str(doc)],
         alert_template_name="alert", alert_template_language="ro",
         message_template_name="", message_template_language=None,
     )
@@ -120,6 +120,7 @@ async def test_settings_round_trip_dedupes_recipients(sf):
     assert saved.message_template_name is None
     loaded = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
     assert loaded.escalation_service_account_id == sa_id
+    assert loaded.channel_identifier == "pn1"
 
 
 @pytest.mark.asyncio

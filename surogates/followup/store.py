@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from surogates.db.models import (
     ChannelContactRow,
+    ChannelIdentity,
     FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
@@ -30,6 +31,7 @@ __all__ = [
     "enrollments_for_agent",
     "enrollments_for_user",
     "get_settings",
+    "grant_contact_permission",
     "last_inbound",
     "last_inbound_by_user",
     "offered_protocols",
@@ -249,6 +251,46 @@ async def offered_protocols(
     return offered
 
 
+async def grant_contact_permission(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+    recorded_by: str,
+) -> bool:
+    """Record that the person consented, in conversation, to be messaged.
+
+    Same shape ops writes when an operator records permission, with
+    ``method: "consent"`` so the two can be told apart.  Merged into
+    ``platform_meta`` under a row lock: that blob also carries the display
+    name, and ops may be writing it at the same moment.  Returns ``False``
+    when the person has no identity on that platform.
+    """
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                sa.select(ChannelIdentity)
+                .where(ChannelIdentity.org_id == org_id)
+                .where(ChannelIdentity.platform == platform)
+                .where(ChannelIdentity.platform_user_id == platform_user_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        meta = dict(row.platform_meta or {})
+        meta["contact_permission"] = {
+            "status": "granted",
+            "recorded_at": _utcnow().replace(tzinfo=None).isoformat(),
+            "recorded_by": recorded_by,
+            "method": "consent",
+        }
+        row.platform_meta = meta
+        await db.commit()
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
@@ -267,6 +309,7 @@ async def save_settings(
     org_id: uuid.UUID,
     agent_id: str,
     escalation_service_account_id: uuid.UUID | None,
+    channel_identifier: str | None,
     alert_recipient_user_ids: Iterable[uuid.UUID | str],
     alert_template_name: str | None,
     alert_template_language: str | None,
@@ -280,6 +323,7 @@ async def save_settings(
             row = FollowupSettingsRow(org_id=org_id, agent_id=agent_id)
             db.add(row)
         row.escalation_service_account_id = escalation_service_account_id
+        row.channel_identifier = channel_identifier or None
         row.alert_recipient_user_ids = recipients
         row.alert_template_name = alert_template_name or None
         row.alert_template_language = alert_template_language or None

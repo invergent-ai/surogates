@@ -33,6 +33,7 @@ from surogates.runtime.governance import (
     WORKER_SELF_TOOLS,
     build_governance_gate,
 )
+from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
 from surogates.whiteboard.session import is_whiteboard_session
 from surogates.harness.prompt_library import default_library as default_prompt_library
@@ -222,6 +223,9 @@ def _filter_effective_tools(
     # Defaults to the safe answer, matching ``drop_unusable_tools``: an
     # unknown board capability must never hand out the drawing tool.
     whiteboard_enabled: bool = False,
+    # Same safe default: an agent not known to run Programs gets none of the
+    # follow-up tools.
+    programs_enabled: bool = False,
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
@@ -327,6 +331,13 @@ def _filter_effective_tools(
         result |= WHITEBOARD_TOOL_NAMES
     else:
         result -= WHITEBOARD_TOOL_NAMES
+
+    # The follow-up tools act on the person the conversation belongs to and
+    # on the agent's Programs.  An agent without the Programs capability has
+    # no protocols to enrol in and nobody configured to escalate to, so the
+    # schemas would only cost tokens and invite failed calls.
+    if not programs_enabled:
+        result -= FOLLOWUP_TOOL_NAMES
 
     # idea_tree / dispatch_experiments / merge_experiment are the research
     # coordinator's deterministic spine. They are present only while a
@@ -1949,6 +1960,7 @@ async def run_worker(settings: Settings) -> None:
             session=session,
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
             whiteboard_enabled=ctx.whiteboard_enabled,
+            programs_enabled=ctx.programs_enabled,
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding
