@@ -110,3 +110,41 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 10
         run: npx vitest run --project unit --reporter=verbose test/file-tools-race.test.ts
+
+  # surogate-vm (desktop/native/macos): its Swift tests, which make the Virtualization framework's
+  # configuration and never start it, since the runner, a VM itself, has no nested virtualization; then
+  # the program built for Apple silicon and signed ad hoc with its one entitlement, and its own answer
+  # to whether this Mac can run the guest, which the run records.
+  vm-native:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Name the toolchain
+        run: xcodebuild -version && swift --version
+
+      - name: Run surogate-vm's tests
+        run: swift test --package-path native/macos
+
+      - name: Build surogate-vm and sign it ad hoc
+        run: native/build.sh
+
+      - name: Check its signature and its one entitlement
+        run: |
+          codesign --verify --strict --verbose=2 native/out/surogate-vm
+          codesign -d --entitlements - --xml native/out/surogate-vm > entitlements.plist
+          grep -q "com.apple.security.virtualization" entitlements.plist
+          [ "$(grep -o '<key>[^<]*</key>' entitlements.plist | sort -u)" = "<key>com.apple.security.virtualization</key>" ]
+
+      - name: Ask it whether this Mac can run the guest
+        run: |
+          native/out/surogate-vm version
+          native/out/surogate-vm check | tee check.json
+          grep -q '"supported"' check.json

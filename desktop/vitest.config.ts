@@ -12,6 +12,7 @@ export const MACOS = [
   // The file host under Seatbelt: clean spawns, and what needs nothing built. Its other suites need fsat, rg and a
   // node at bin/node, and take long: the workflow's file-host job runs them, each on its own.
   "test/clean-child.test.ts", "test/agent-disk-imports.test.ts", "test/policy-darwin.test.ts",
+  "test/vm-darwin.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

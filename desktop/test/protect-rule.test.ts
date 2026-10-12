@@ -7,12 +7,12 @@ import { afterAll, describe, expect, it } from "vitest";
 
 // The oracle is protect.ts itself, as the source has it: a change to it shows here.
 import {
-  DEPENDENCY_FOLDERS, GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, movesOutOfDependency, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder,
+  DEPENDENCY_FOLDERS, folded, GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, movesOutOfDependency, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder,
 } from "../src/files/protect.js";
 
 const SG_WALK = 12; // rule-match.h: the components judged, from the target up
 const onHost = (p: string) => protectedInFolder("/f", `/f/${p}`);
-const lower = (p: string) => p.toLowerCase().split("/");
+const lower = (p: string) => folded(p).split("/");
 const inGitState = (parts: string[]) => parts.some((part, i) => GIT_STATE.has(part) && parts.slice(0, i).includes(".git"));
 
 // What the guest rule must answer: protect.ts's verdict, with git's transient state no
@@ -67,6 +67,17 @@ const probes = [
   ".vscode/node_modules/x", ".claude/commands/node_modules/x", "node_modules_old/.idea", "x/site-packages.bak/.vscode",
 ];
 for (const name of DEPENDENCY_FOLDERS) probes.push(`${name}/pkg/.vscode/settings.json`, `${name}/.git/hooks/x`);
+// Names a volume that compares names without case takes as protected ones (APFS by default, exFAT, an ext4
+// casefold folder): ſ (U+017F) as s, ı (U+0131) and İ (U+0130) as i, the Kelvin sign (U+212A) as k, ß and ẞ
+// as ss, and the ligatures U+FB00 to U+FB06 as the letters they join. Each refused by both.
+const ALIASES = [
+  ".git/hookſ/pre-commit", ".vſcode/settings.json", ".git/hooKs/pre-commit", ".gıt/config", ".Gİt/HOOKS/pre-commit", ".git/conﬁg",
+  ".git/config.worKtree", ".claude/commandſ/x", ".claude/agentſ/x", ".bash_proﬁle", ".ripgreprc".replace("i", "ı"), "sub/.gıtmodules",
+  ".git/modules/foo/hookſ/x", ".git/worktrees/wt/conﬁg", "a/.ıdea/x", ".mcp.jſon",
+];
+// And their neighbours that hold no protected name, folded or not, which both allow: a folded dependency folder
+// is one, with what packages ship in it.
+const NOT_ALIASES = ["hookſ/pre-commit", "ſrc/main.c", ".git/refs/heads/hookſ", "node_moduleſ/pkg/.idea/x", "diſt-packages/pkg/.vscode/x", "ﬀ/ﬃ/ﬄ/ﬂ", "ßtraße/ẞ", "K"];
 // Paths protect.ts refuses only for git's transient state, which the rule allows.
 const GIT_STATE_ONLY = [
   ".git/rebase-merge/git-rebase-todo", ".git/sequencer/todo", ".git/rebase-apply/0001",
@@ -152,6 +163,41 @@ describe("the guest rule mirrors protect.ts", { timeout: VERDICTS_MS }, () => {
     expect([onHost(WITHIN), onHost(BEYOND)]).toEqual([true, true]);
     expect(verdicts(harness(), [DEP_WITHIN, DEP_BEYOND])).toEqual([false, true]);
     expect([onHost(DEP_WITHIN), onHost(DEP_BEYOND)]).toEqual([false, false]);
+  });
+
+  it("folds each name as protect.ts folds it", () => {
+    const SG_NAMELEN = 16; // rule-match.h: the bytes of a folded name it compares
+    const names = [
+      "ſ", "ı", "İ", "ß", "ẞ", "\u212A", "ﬀ", "ﬁ", "ﬂ", "ﬃ", "ﬄ", "ﬅ", "ﬆ", "HOOKS", ".GİT", "conﬁg.wor\u212Atree", "ẞſßı", "Straße",
+      "x".repeat(SG_NAMELEN), "ı".repeat(15), "\u212A".repeat(10), "x".repeat(31), "x".repeat(40), "é", "ÉCOLE",
+    ];
+    const out = execFileSync(harness(), ["fold"], { input: `${names.join("\n")}\n`, encoding: "utf8" }).split("\n").slice(0, -1);
+    const ascii = (name: string) => /^[\x00-\x7f]*$/.test(name);
+    // An ASCII name folded, its length and the bytes compared; one read only in part, its own length. The rule lower-cases
+    // ASCII alone, and protect.ts all of a name: no other character's lower case is ASCII, so either folds it to no ASCII name.
+    const want = (name: string) => {
+      if (Buffer.byteLength(name) >= 32) return [name, String(Buffer.byteLength(name))];
+      const fold = folded(name);
+      return ascii(fold) ? [name, `${fold.length}\t${fold.slice(0, SG_NAMELEN)}`] : [name, "not ASCII"];
+    };
+    const got = (line: string, name: string) => {
+      const [length = "", bytes = ""] = line.split("\t");
+      if (Buffer.byteLength(name) >= 32) return [name, length];
+      return [name, ascii(bytes) ? `${length}\t${bytes}` : "not ASCII"];
+    };
+    expect(out.map((line, i) => got(line, names[i]!))).toEqual(names.map(want));
+  });
+
+  it("refuses each name a volume that compares names without case takes as a protected one, as protect.ts does", () => {
+    const paths = [...ALIASES, ...NOT_ALIASES];
+    const kernel = verdicts(harness(), paths);
+    expect(paths.map((p, i) => [p, kernel[i], onHost(p)]))
+      .toEqual(paths.map((p) => [p, ALIASES.includes(p), ALIASES.includes(p)]));
+    // A directory moved out of a folded dependency folder carries what was unpacked there too.
+    expect(verdicts(harness(), ["node_moduleſ/p\tplanted", "diſt-packages/p\tſite-packages/p"], ["rename"])).toEqual([true, false]);
+    expect([movesOutOfDependency("/f", "/f/node_moduleſ/p", "/f/planted"), movesOutOfDependency("/f", "/f/diſt-packages/p", "/f/ſite-packages/p")]).toEqual([true, false]);
+    // A name too long to be read whole is too long to fold to a protected one: the longest that can is 18 bytes.
+    expect(verdicts(harness(), [`.git/${"x".repeat(40)}`, `.git/hooKs`])).toEqual([false, true]);
   });
 
   it("refuses moving a directory to or from a key folder's place", () => {

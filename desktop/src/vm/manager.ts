@@ -70,6 +70,13 @@ export interface VmOptions extends Disks {
   kvm?: string; // the device KVM is opened from: /dev/kvm
   virtiofsd?: string; // each folder's daemon: Ubuntu's (qemu.ts, VIRTIOFSD) unless a test says
   bwrap?: string; // what a folder the guest reads alone is shared through (linux.ts): the version's own copy, else the PATH's
+  // macOS's (darwin.ts): surogate-vm, unless a test says; the app's data folder and its own files, the only
+  // folders surogate-vm takes the guest's files from, unless they are where the sessions disk and the agent
+  // disk say; and how the folders are laid out in the guest.
+  program?: string;
+  data?: string;
+  bundle?: string;
+  layout?: "multiple" | "single";
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
@@ -109,6 +116,12 @@ export interface VmBackend {
   readonly exited: Promise<string>;
   /** Null with the OS's hardware virtualization, else why the VM runs emulated. */
   readonly emulated: Emulated | null;
+  /**
+   * The one guest uid every root runs as, where the backend's share maps no owner to a root's own uid:
+   * the host user's, which the guest's rule judges (darwin.ts). None where each root has its own, from
+   * FIRST_UID up, mapped by its folder's server (Linux's).
+   */
+  readonly rootUid?: number;
   /**
    * *folder* shared into the running guest for the root whose guest uid is *uid*.
    * Resolves with how the agent mounts it, whose kind also says who maps the
@@ -481,9 +494,10 @@ export class Guest {
       this.lose();
       throw new Error("the guest gave no uid in time");
     }
-    // A uid the agent cannot have given goes into no share.
+    // A uid the agent cannot have given goes into no share: one from FIRST_UID up, or the backend's one uid for every root.
     const uid = given.type === "done" ? given.uid : undefined;
-    if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
+    const one = this.vm.rootUid;
+    if (uid === undefined || !Number.isInteger(uid) || (one === undefined ? uid < FIRST_UID : uid !== one)) {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
     return this.vm.share(folder.path, uid, deadline, { copy });

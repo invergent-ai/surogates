@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import type { Outcome } from "../link/protocol.js";
 import { CANCELLED, SANDBOX_STOPPED } from "./command.js";
 import { PLACE_KEY, type Share } from "./protocol.js";
-import { BOUNDS, TAG, UNMOUNTABLE } from "./root.js";
+import { BOUNDS, checkShare, DEVICE, mountDevice } from "./root.js";
 
 export const PLACES = "/run/surogate/places";
 const MOUNT_RETRY_MS = 25;
@@ -140,6 +140,8 @@ export interface PlacesOptions {
   unmount?(args: string[]): Promise<unknown>; // umount(8)
   // A share the host has just added is there once the guest's kernel has found its device: until then its mount is tried again.
   mountMs?: number;
+  // Apple's one device that holds every folder (root.ts, DEVICE), mounted once; where it is.
+  device?(): Promise<string>;
   // The history's answer to one request, as it wrote it; rejects when it ended without one. At *signal*
   // it ends everything it started, and it settles only once none of that is left.
   ask?(asked: Asked, signal: AbortSignal): Promise<string>;
@@ -153,6 +155,9 @@ interface Mounted {
   history: Share;
   real: Share;
 }
+
+// Whether two shares are one: their kind, tag and, in Apple's one device, the folder's name.
+const sameShare = (a: Share, b: Share) => a.kind === b.kind && a.tag === b.tag && (a.kind === "vz" ? a.name : undefined) === (b.kind === "vz" ? b.name : undefined);
 
 export class Places {
   private readonly mounted = new Map<string, Mounted>();
@@ -168,7 +173,7 @@ export class Places {
   private readonly historyMs: number;
   private readonly waitMs: number;
   private readonly folder: string;
-  private readonly run: { mount(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown> };
+  private readonly run: { mount(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown>; device(): Promise<string> };
   private readonly mountMs: number;
 
   constructor(options: PlacesOptions = {}) {
@@ -176,6 +181,7 @@ export class Places {
     this.run = {
       mount: options.mount ?? ((args) => execute("/usr/bin/mount", args)),
       unmount: options.unmount ?? ((args) => execute("/usr/bin/umount", args)),
+      device: options.device ?? mountDevice,
     };
     this.mountMs = options.mountMs ?? BOUNDS.mountMs;
     this.ask = options.ask ?? ((asked, signal) => askHistory(asked, signal));
@@ -195,14 +201,15 @@ export class Places {
    */
   mount(key: string, history: Share, real: Share): Promise<void> {
     if (typeof key !== "string" || !PLACE_KEY.test(key)) return Promise.reject(new Error(`not a folder's key: ${String(key).slice(0, 64)}`));
-    for (const share of [history, real]) {
-      if (share.kind !== "virtiofs") return Promise.reject(new Error(UNMOUNTABLE));
-      if (!TAG.test(share.tag)) return Promise.reject(new Error(`not a share tag: ${share.tag.slice(0, 64)}`));
+    try {
+      for (const share of [history, real]) checkShare(share);
+    } catch (error) {
+      return Promise.reject(error);
     }
     return this.after(key, async () => {
       const known = this.mounted.get(key);
       if (known) {
-        if (known.history.tag !== history.tag || known.real.tag !== real.tag) throw new Error("This folder's history is already mounted from other shares");
+        if (!sameShare(known.history, history) || !sameShare(known.real, real)) throw new Error("This folder's history is already mounted from other shares");
         return;
       }
       await this.make(key, history, real);
@@ -228,13 +235,20 @@ export class Places {
     await mkdir(join(at, "history"), { recursive: true });
     await mkdir(join(at, "real"), { recursive: true });
     await chmod(this.folder, 0o700);
-    await this.attach(["-t", "virtiofs", "-o", OPTIONS, history.tag, join(at, "history")]);
+    await this.attach(await this.from(history, OPTIONS, join(at, "history")));
     try {
-      await this.attach(["-t", "virtiofs", "-o", `ro,${OPTIONS}`, real.tag, join(at, "real")]);
+      await this.attach(await this.from(real, `ro,${OPTIONS}`, join(at, "real")));
     } catch (error) {
       await this.run.unmount(["-l", join(at, "history")]).catch(() => {});
       throw error;
     }
+  }
+
+  // mount(8)'s arguments for *share* at *at* with *options*: a virtio-fs device by its tag, or a folder in
+  // Apple's one device for every folder, bound from where that is mounted (bind and its options in one: util-linux's).
+  private async from(share: Share, options: string, at: string): Promise<string[]> {
+    if (share.kind === "vz" && share.tag === DEVICE) return ["--bind", "-o", options, join(await this.run.device(), share.name ?? ""), at];
+    return ["-t", "virtiofs", "-o", options, share.tag, at];
   }
 
   private async attach(args: string[]): Promise<void> {

@@ -3,3 +3,6 @@ dist/
 bin/
 dictionaries/
 native/*/build/
+native/out/
+native/macos/.build/
+test/vm/darwin/measure/out/

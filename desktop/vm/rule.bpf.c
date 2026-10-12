@@ -1,7 +1,7 @@
 // The guest-kernel rule on protected names. Refuses a session's writes to
 // the paths files/protect.ts protects, in a folder a chat shares into the guest, by
 // walking the dentry up and feeding each component to rule-match.h's stepper. Loaded
-// once at boot (vm/init); a session (uid >= FIRST_UID) cannot unload it.
+// once at boot (vm/init); a session (uid >= FIRST_UID, or the scope's one uid) cannot unload it.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
@@ -11,6 +11,7 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define FIRST_UID 10000u            // sessions' guest uids start here (root.ts)
+#define RDONLY_PROG (1U << 7)       // BPF_F_RDONLY_PROG: the programs read the map and never write it
 #define EPERM 1
 #define FUSE_SUPER_MAGIC 0x65735546 // virtiofs; the only share fs on Linux
 #define FMODE_WRITE 0x2
@@ -27,26 +28,21 @@ char LICENSE[] SEC("license") = "GPL";
 #define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component (dir: as a directory being moved). One bounded pass, no array:
-// sg_classify is out-of-line and sg_step branch-free, so the walk stays within the
-// verifier's budget at SG_WALK=12.
+// judging each component (dir: as a directory being moved) as folded (sg_fold). One bounded
+// pass: sg_fold and sg_classify are out-of-line, each verified once, and sg_fold and sg_step
+// branch-free, so the walk stays within the verifier's budget at SG_WALK=12.
 static __noinline int judge(struct dentry *dentry, int dir)
 {
+	struct sg_raw raw = {};
 	struct sg_name nm;
 	struct sg_state st;
 	sg_init(&st, dir);
 	for (int i = 0; i < SG_WALK; i++) {
 		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
 		int len = BPF_CORE_READ(dentry, d_name.len);
-		long got = bpf_core_read_str(nm.b, SG_NAMELEN, name);
-		// Branch-free ASCII lower-case: unknown name bytes must not fork the verifier.
-		for (int j = 0; j < SG_NAMELEN; j++) {
-			unsigned char uc = nm.b[j];
-			unsigned char ge = (unsigned char)('A' - 1 - uc) >> 7; // 1 iff uc >= 'A'
-			unsigned char le = (unsigned char)(uc - ('Z' + 1)) >> 7; // 1 iff uc <= 'Z'
-			nm.b[j] = uc + ((ge & le) << 5);
-		}
-		if (sg_step(&st, sg_classify(&nm, got < 0 ? 0 : len)))
+		// NUL-terminated: what a longer name before it left past the NUL completes no character.
+		long got = bpf_core_read_str(raw.b, SG_RAWLEN, name);
+		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, got < 0 ? 0 : len, &nm))))
 			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
 		if (parent == dentry)
@@ -54,6 +50,26 @@ static __noinline int judge(struct dentry *dentry, int dir)
 		dentry = parent;
 	}
 	return sg_end(&st) | (sg_in_dep(&st) << 1);
+}
+
+// The one uid besides those from FIRST_UID up that sessions run as: where the VM's shares map no owner
+// to a session's uid (macOS's), every session runs as the uid the share shows, the host user's (root.ts).
+// vm/init writes it from the kernel's command line (surogate.uid=), or leaves it 0 where that names none,
+// as Linux's never does, and freezes the map before it says the rule is attached: nothing writes it after.
+// A value of 0, or one above the last uid, judges no other uid: the guest's own root is never in scope.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(map_flags, RDONLY_PROG);
+} scope SEC(".maps");
+
+static __always_inline int in_scope(__u32 uid)
+{
+	__u32 key = 0;
+	__u32 *one = bpf_map_lookup_elem(&scope, &key);
+	return uid >= FIRST_UID || (one && *one != 0 && *one != (__u32)-1 && uid == *one);
 }
 
 static __noinline int share_sb(struct super_block *sb)
@@ -66,7 +82,7 @@ static __noinline int share_sb(struct super_block *sb)
 static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry, int dir)
 {
 	__u32 uid = bpf_get_current_uid_gid();
-	if (uid < FIRST_UID || !dentry || !share_sb(sb))
+	if (!in_scope(uid) || !dentry || !share_sb(sb))
 		return 0;
 	return judge(dentry, dir);
 }

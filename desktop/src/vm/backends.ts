@@ -1,12 +1,14 @@
 // The VM layer's backend for each OS, in one table (spec, Section 11): what boots the VM, what of
 // this computer the VM needs, where its runtime files go, and how long a socket's path may be
 // there. The VM manager, the app's start and the VM's files take each from here; an OS whose
-// backend is not built yet has none, and its sandbox is not available.
+// backend is not built yet has none, and its sandbox is not available. Linux's is QEMU (linux.ts),
+// macOS's the Virtualization framework through surogate-vm (darwin.ts).
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { HostUser } from "../guest/protocol.js";
+import { bootDarwin, requirementsDarwin, runtimeFolder, SOCKET_MAX } from "./darwin.js";
 import { bootLinux, missingTools } from "./linux.js";
 import type { BootVm } from "./manager.js";
 
@@ -34,7 +36,15 @@ const LINUX: Backend = {
   socketMax: 107,
 };
 
-/** The backend for *platform*: Linux's, or null on an OS whose backend is not built yet. */
+const DARWIN: Backend = {
+  boot: bootDarwin,
+  requirements: () => requirementsDarwin(),
+  // The user's own, 0700, under /var/folders: short enough for Darwin's 104-byte socket paths. A folder for each data folder.
+  runtimeFolder: (_user, env, dataDir) => (env.TMPDIR ? runtimeFolder(dataDir, env.TMPDIR) : runtimeFolder(dataDir)),
+  socketMax: SOCKET_MAX,
+};
+
+/** The backend for *platform*: Linux's or macOS's, or null on an OS whose backend is not built yet. */
 export function backendFor(platform: NodeJS.Platform): Backend | null {
-  return platform === "linux" ? LINUX : null;
+  return platform === "linux" ? LINUX : platform === "darwin" ? DARWIN : null;
 }
