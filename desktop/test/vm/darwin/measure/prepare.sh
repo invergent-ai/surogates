@@ -64,4 +64,4 @@ docker run --rm --platform linux/arm64 -v "$REPO:/repo" -w /repo/desktop ubuntu:
 '
 say "ready: each measurement runs from desktop/ as"
 say "  npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>"
-say "in the order boot, ports, disks, shares, coherence, owners, mmap, descriptors, readonly, tcc, network, lifetime, sleep, memory"
+say "in the order boot, escape, ports, disks, shares, coherence, owners, mmap, descriptors, readonly, tcc, network, lifetime, sleep, memory"
