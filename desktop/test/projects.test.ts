@@ -22,9 +22,10 @@ describe("the projects the page serves", () => {
     expect(last()).toEqual({ type: "call", id: 1, method: "list", args: [], deadline: expect.any(Number) });
     source.answered(1, { ok: projects.map((project) => ({ ...project, secret: "x" })) });
     const summaries = await listed;
+    // Where each works is listed with it: the shell tells which of them work on this computer.
     expect(summaries[0]).toEqual({
       id: REPORT, name: "Quarterly report", icon: null, createdAt: projects[0]!.createdAt, updatedAt: projects[0]!.updatedAt,
-      waiting: 3, working: 2,
+      waiting: 3, working: 2, place: { kind: "cloud" },
     });
     const rows = source.threads(REPORT);
     expect(last()).toEqual({ type: "call", id: 2, method: "threads", args: [REPORT], deadline: expect.any(Number) });
@@ -381,11 +382,31 @@ describe("the projects the page serves", () => {
       source.answered(at + 2, { ok: { ...project, place: given, folder: undefined } });
       expect(await read, JSON.stringify(given)).toEqual({ ...project, place: taken, folder: null });
     }
-    for (const [at, odd] of [{ place, folder: 7 }, { place: { ...place, online: "yes" }, folder: null }].entries()) {
+    for (const [at, odd] of [
+      { place, folder: 7 }, { place: { ...place, online: "yes" }, folder: null }, { place: { ...place, lost: "yes" }, folder: null },
+    ].entries()) {
       const read = source.get(REPORT);
       source.answered(at + 5, { ok: { ...project, ...odd } });
       await expect(read).rejects.toThrow("The agent's page answered get with something Surogate cannot use");
     }
+    // One whose computer can no longer reach its folder says so.
+    const lost = source.get(REPORT);
+    source.answered(8, { ok: { ...project, place: { ...place, online: false, lost: true }, folder: "/home/flavius/Q3" } });
+    expect((await lost).place).toEqual({ ...place, online: false, lost: true });
+  });
+
+  it("move a project whose computer lost its folder to this computer, with the folder its user confirmed here", async () => {
+    const { source, last } = page();
+    const project = projects[0]!;
+    const execution = { kind: "device" as const, device_id: "d-2", folder: "/home/flavius/notes", nonce: "n".repeat(43) };
+    const moved = source.useComputer(REPORT, execution);
+    expect(last()).toMatchObject({ method: "useComputer", args: [REPORT, execution] });
+    const place = { kind: "device", deviceId: "d-2", deviceName: "ThinkPad", online: true, lost: false };
+    source.answered(1, { ok: { ...project, place, folder: "/home/flavius/notes", secret: "x" } });
+    expect(await moved).toEqual({ ...project, place, folder: "/home/flavius/notes" });
+    const odd = source.useComputer(REPORT, execution);
+    source.answered(2, { ok: { ...project, masterSessionId: 7 } });
+    await expect(odd).rejects.toThrow("The agent's page answered useComputer with something Surogate cannot use");
   });
 
   it("take a file's History, and refuse a version of another file, one with no zone or more than it lists", async () => {

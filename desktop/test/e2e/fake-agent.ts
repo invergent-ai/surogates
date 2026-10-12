@@ -4,8 +4,8 @@
 // would, and stand in for the system browser on the authorize page. With projects set, the
 // page serves them on every load, as the web client serves its own, and keeps what it
 // changes of them here (PUT /fake/projects), as the agent's server keeps its projects; a project
-// made with a folder of this computer has its coordinator bound there over the link (POST
-// /fake/bind), as the agent asks once it has made the project. Given a
+// made with a folder of this computer, or moved to this computer, has its coordinator bound there
+// over the link (POST /fake/bind), as the agent asks once it has made or moved the project. Given a
 // certificate and its key, it serves over TLS, as an agent behind a company's network is met.
 
 import { createHash } from "node:crypto";
@@ -74,6 +74,8 @@ export class FakeAgent {
   readonly link = new FakeLinkServer({ token: TOKEN });
   // Each project coordinator the agent asked this computer to bind, with its folder and what the computer answered.
   readonly bound: Array<{ session: string; folder: string; outcome?: unknown }> = [];
+  // False: the agent never says it recorded an answer to a bind, as when its link went before it could.
+  acking = true;
   readonly registered: unknown[] = [];
   readonly deleted: string[] = [];
   // The bearer of each reauthorization of this computer: the sign-in the agent bound to it.
@@ -109,7 +111,8 @@ export class FakeAgent {
   // The bind of a project's coordinator, as the agent sends it once it has made the project: answered, recorded, and
   // acknowledged, so the app tells whoever waits for it.
   private bind(session: string, folder: string, nonce: string): void {
-    const id = `bind-${session}`;
+    // Each bind an operation of its own: one bound afresh is asked again under a new id.
+    const id = `bind-${session}-${this.bound.length}`;
     const asked: { session: string; folder: string; outcome?: unknown } = { session, folder };
     this.bound.push(asked);
     this.link.send({
@@ -119,7 +122,7 @@ export class FakeAgent {
     const answered = () => this.link.received.find((frame) => frame.type === "op_result" && frame.id === id);
     void this.link.until(() => answered() !== undefined, 20_000).then(() => {
       asked.outcome = answered()?.outcome;
-      this.link.send({ type: "op_ack", id });
+      if (this.acking) this.link.send({ type: "op_ack", id });
     }, () => {});
   }
 
@@ -404,7 +407,8 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // *delay* ms. The page keeps it as window.fakeProjects, whose changed() tells the source's subscribers,
 // whose lists counts the times the projects were listed, whose reads names each read of threads (a
 // thread's id, or null for them all), whose refusal, when set, is what a change of a project or a
-// thread answers, whose unreachable, when set, makes the list and every call on a project fail as
+// thread answers, whose bindFolder, when set, is the folder the agent names in a coordinator's bind in place of the
+// one its user confirmed, as a server that misbehaves would, whose unreachable, when set, makes the list and every call on a project fail as
 // the web client's fetch does with the agent out of reach, whose lag is how many ms a change of a
 // project takes to answer once it is made, as a slow agent's, and a version to be handed over to
 // save, whose asked keeps each version it was asked to open or to restore and each change to undo, whose
@@ -423,6 +427,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     lists: 0,
     reads: [] as Array<string | null>,
     refusal: null as string | null,
+    bindFolder: null as string | null,
     unreachable: false,
     lag: 0,
     asked: [] as string[][],
@@ -453,8 +458,8 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     async list() {
       fake.lists++;
       if (fake.unreachable) throw new Error("API server is not reachable.");
-      return this.served.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
-        ({ id, name, icon, createdAt, updatedAt, waiting, working }));
+      return this.served.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working, place }) =>
+        ({ id, name, icon, createdAt, updatedAt, waiting, working, place }));
     },
     async get(id: string) {
       fake.gotten.push(id);
@@ -540,13 +545,24 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
         folder: execution?.folder ?? null,
       };
       this.served.projects.push(made);
-      if (execution) {
-        await fetch("/fake/bind", {
-          method: "POST", body: JSON.stringify({ session: made.masterSessionId, folder: execution.folder, nonce: execution.nonce }),
-        });
-      }
+      if (execution) await this.bind(made.masterSessionId, execution);
       await keep(this.served);
       return made;
+    },
+    // Moved here as the agent moves a project whose computer lost its folder: its coordinator is bound here afresh.
+    async useComputer(id: string, execution: ProjectFolder) {
+      if (fake.refusal) throw new Error(fake.refusal);
+      const moved = Object.assign(this.one(id), {
+        place: { kind: "device", deviceId: execution.device_id, deviceName: "Laptop", online: true, lost: false }, folder: execution.folder,
+      });
+      await this.bind(moved.masterSessionId, execution);
+      await keep(this.served);
+      return moved;
+    },
+    async bind(session: string, execution: ProjectFolder) {
+      await fetch("/fake/bind", {
+        method: "POST", body: JSON.stringify({ session, folder: fake.bindFolder ?? execution.folder, nonce: execution.nonce }),
+      });
     },
     async update(id: string, change: Parameters<ProjectsSource["update"]>[1]) {
       if (fake.refusal) throw new Error(fake.refusal);
@@ -578,7 +594,10 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
       listeners.set(id, heard);
       return () => void heard.delete(onChange);
     },
-  } satisfies ProjectsSource & { served: ProjectFixtures; one(id: string): Project; moved(id: string, threadId: string, group: string): ThreadRow };
+  } satisfies ProjectsSource & {
+    served: ProjectFixtures; one(id: string): Project; moved(id: string, threadId: string, group: string): ThreadRow;
+    bind(session: string, execution: ProjectFolder): Promise<void>;
+  };
   const older = (lacks: string[]) => Object.fromEntries(Object.entries(source).filter(([name]) => !lacks.includes(name)));
   fake.register = (lacks = []) => void window.surogateDesktop?.registerProjects(older(lacks) as unknown as ProjectsSource);
   Object.assign(window, { fakeProjects: fake });

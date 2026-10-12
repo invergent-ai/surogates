@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { localThreads, NO_FOLDER, startLocalThread } from "../web/src/lib/local-thread.ts";
+import { localThreads, NO_FOLDER, projectFolderLost, startLocalThread } from "../web/src/lib/local-thread.ts";
 
 const PREPARED = { folder: "/home/flavius/Budget", mode: "ask", nonce: "n".repeat(43), token: "t".repeat(43) };
 const CARD = { projectId: "p-1", proposalId: "pr-1", key: "2", title: "Check the totals" };
@@ -191,4 +191,29 @@ test("says a computer project's thread is started again, never allowed, when its
   await assert.rejects(startLocalThread(bridge({ bind: refused }), routes({ place: ON_THIS_COMPUTER }), CARD), {
     message: "Surogate could not set up this thread's folder on this computer: This computer could not record the folder for this chat. Start it again.",
   });
+});
+
+test("starts no thread of a computer project whose computer can no longer reach its folder, and says to use this computer for it", async () => {
+  const lost = { ...ON_THIS_COMPUTER, deviceId: "d-0", online: false, lost: true };
+  // On the computer it was made on too: there the folder could not be set up.
+  for (const place of [lost, { ...ON_THIS_COMPUTER, lost: true }]) {
+    const desktop = bridge();
+    const agent = routes({ place });
+    await assert.rejects(startLocalThread(desktop, agent, CARD), {
+      message: "This project's folder can no longer be reached on Flavius's ThinkPad. Choose Use this computer for this project in its Overview, then start this thread.",
+    });
+    assert.deepEqual(desktop.calls, [["getDevice"]]);
+    assert.equal(agent.asked.some(([name]) => name === "makeOnComputer"), false);
+  }
+});
+
+test("says whether a computer project's folder can no longer be reached on its computer, as the agent says it", async () => {
+  for (const [place, lost] of [
+    [{ ...ON_THIS_COMPUTER, lost: true }, true], [{ ...ON_THIS_COMPUTER, lost: false }, false], [ON_THIS_COMPUTER, false],
+    [{ kind: "cloud" }, false],
+  ]) {
+    const agent = routes({ place });
+    assert.equal(await projectFolderLost(agent, "p-1"), lost, JSON.stringify(place));
+    assert.deepEqual(agent.asked, [["get", "p-1"]]);
+  }
 });

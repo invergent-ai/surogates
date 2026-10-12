@@ -60,6 +60,10 @@ export async function startLocalThread(desktop: LocalDesktop, api: LocalThreadAp
   const { device, localFolders } = await fromDesktop(desktop.getDevice());
   const project = await api.get(card.projectId);
   const computer = project.place?.kind === "device" ? project.place : null;
+  // Its computer can no longer reach its folder: none of its threads starts until its user uses this computer for it.
+  if (computer?.lost) {
+    throw new Error(`This project's folder can no longer be reached on ${computer.deviceName}. Choose Use this computer for this project in its Overview, then start this thread.`);
+  }
   if (!device) {
     throw new Error(`Surogate can't work on folders of this computer for this account. ${
       computer ? `Start this thread in Surogate Desktop on ${computer.deviceName}.` : "Run this thread in the cloud instead."
@@ -100,4 +104,13 @@ export async function startLocalThread(desktop: LocalDesktop, api: LocalThreadAp
     throw new Error(`Surogate could not set up this thread's folder on this computer: ${saidBy(error)}. ${again}.`);
   }
   return api.begin(card.projectId, threadId);
+}
+
+/**
+ * The adapter's isProjectFolderLost: whether a project made on a computer can no longer reach its folder there, as the
+ * agent says it, its user then to use another computer for it in Surogate Desktop.
+ */
+export async function projectFolderLost(api: Pick<WorkstreamRoutes, "get">, projectId: string): Promise<boolean> {
+  const { place } = await api.get(projectId);
+  return place?.kind === "device" && place.lost === true;
 }
