@@ -645,6 +645,9 @@ async def test_a_masters_prompt_runs_the_project(api):
     project = await create(api, goal="The board's Q3 report", instructions="Use euros.")
     prompt = await system_prompt(api, await master_of(api, project))
     assert "# Running a project" in prompt
+    # The work is the threads': the master answers a quick question, and starts a thread for anything more.
+    assert "Do no work yourself beyond a quick answer." in prompt
+    assert "Never do the work and then start a thread for it" in prompt
     assert "# Worker Delegation" not in prompt
     assert "# Available Sub-Agents" not in prompt
     assert prompt.endswith(
