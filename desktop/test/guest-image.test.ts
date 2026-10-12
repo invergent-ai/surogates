@@ -262,6 +262,41 @@ it("keeps of the kernel's modules only those the guest's init loads", () => {
   expect(kept.length).toBeGreaterThan(0);
 });
 
+// Each RUN of *stage* as its shell reads it: its continuations joined, and each run of spaces one space.
+const runsOf = (stage: string) =>
+  [...(STAGES.get(stage) ?? "").replace(/\\\n/g, " ").replace(/[ \t]+/g, " ").matchAll(/^RUN (.+)$/gm)].map(([, run]) => run ?? "");
+// The commands an && chain runs, in order.
+const chain = (run: string) => run.split(" && ").map((command) => command.trim());
+// The commands of *arch*'s branch of the RUN in *stage* that picks one by TARGETARCH.
+const branchOf = (stage: string, arch: string) => {
+  const run = runsOf(stage).find((each) => each.includes('case "$TARGETARCH" in ')) ?? "";
+  return chain(new RegExp(`case "\\$TARGETARCH" in .*?\\b${arch}\\) (.*?) ;;`).exec(run)?.[1] ?? "");
+};
+
+it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles the rule for the arch it builds, in the stages that need each", () => {
+  for (const [stage, scripts] of [["kernel", ["kernel-config.sh"]], ["bpf", ["kernel-image.sh", "kernel-btf.sh"]], ["guest-disk-build", ["kernel-image.sh"]]] as const) {
+    for (const script of scripts) {
+      expect(new RegExp(`^COPY --chmod=0755 (?:\\S+ )*images/guest/${script.replace(".", "\\.")} (?:\\S+ )*/usr/local/bin/`, "m").test(STAGES.get(stage) ?? ""), `${stage} copies ${script}`).toBe(true);
+    }
+  }
+  // The check, of the config the modules package carries, in the chain that unpacks it: a kernel it fails is never built on.
+  expect(runsOf("kernel").map(chain)).toEqual([[
+    "dpkg-deb -x /tmp/image.deb /kernel", "dpkg-deb -x /tmp/modules.deb /kernel", "dpkg-deb -x /tmp/tools.deb /tools", "dpkg-deb -x /tmp/hwe-tools.deb /tools",
+    'kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL"',
+    expect.stringMatching(/^find \/kernel\/lib\/modules\/\*\/kernel -type f .* -delete$/),
+  ]]);
+  // The rule's BTF: amd64's the vmlinux its bzImage holds, arm64's read out of the Image. Each compiled for its own arch.
+  expect(branchOf("bpf", "amd64").at(-1)).toBe("bpf_arch=x86");
+  expect(branchOf("bpf", "amd64").join(" ")).not.toContain("kernel-");
+  expect(branchOf("bpf", "arm64")).toEqual(['kernel-image.sh "/boot/vmlinuz-$KERNEL" /Image', 'kernel-btf.sh /Image "/boot/System.map-$KERNEL" /btf', "bpf_arch=arm64"]);
+  const compile = runsOf("bpf").flatMap(chain).filter((command) => command.startsWith("clang "));
+  expect(compile).toEqual([expect.stringContaining(' "-D__TARGET_ARCH_$bpf_arch" ')]);
+  expect(compile.join(" ").match(/__TARGET_ARCH_/g)).toHaveLength(1);
+  // The kernel the VM boots: amd64's vmlinuz as it is, arm64's its Image.
+  expect(branchOf("guest-disk-build", "amd64")).toEqual(['zstd -q -19 -o /out/vmlinuz.zst "/boot/vmlinuz-$KERNEL"']);
+  expect(branchOf("guest-disk-build", "arm64")).toEqual(['kernel-image.sh "/boot/vmlinuz-$KERNEL" /out/vmlinuz', "zstd -q -19 --rm -o /out/vmlinuz.zst /out/vmlinuz"]);
+});
+
 describe("the check of the kernel's configuration", () => {
   // What the guest boots on without an initrd, built in; on arm64 the virt machine's PCIe host too.
   const BUILT_IN = ["VIRTIO_BLK", "EXT4_FS", "VIRTIO_CONSOLE", "VIRTIO_PCI", "BPF_LSM", "DEBUG_INFO_BTF", "FUSE_FS"];
