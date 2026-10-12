@@ -135,3 +135,15 @@ async def test_execute_tool_calls_blocks_consecutive_no_progress_by_default() ->
     blocked = json.loads(results[3]["content"])
     assert blocked["guardrail"]["code"] == "consecutive_no_progress_block"
     assert guardrails.halt_decision is not None
+
+
+def test_a_result_carrying_error_null_is_not_a_failure() -> None:
+    # The memory tool answers every write with ``"error": null``; matching the
+    # key name counted each successful write as a failure, warned "failed 3
+    # times" on a PROD memory import, and would halt the session at eight.
+    from surogates.harness.tool_guardrails import classify_tool_failure
+
+    ok = json.dumps({"success": True, "message": "Entry added.", "error": None})
+    assert classify_tool_failure("memory", ok) is False
+    assert classify_tool_failure("memory", json.dumps({"success": False, "error": "over limit"})) is True
+    assert classify_tool_failure("web_extract", "Error: connection refused") is True
