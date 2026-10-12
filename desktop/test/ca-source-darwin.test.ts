@@ -4,14 +4,14 @@
 // Node 24's tls.setDefaultCACertificates, which the tests' Node 22 lacks: kept here as the app's Node keeps it.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { adminCertificates, companyTrust } from "../src/shell/ca-source-darwin.js";
-import { certificate } from "./certificates.js";
 import { importedOn } from "./platforms.js";
 
 // Node's default CAs, as they were set last.
@@ -33,16 +33,28 @@ let ca: string;
 let other: string;
 let site: string;
 
+// A certificate signed by itself, *name*'s, with the extensions *added* and no other: no config of this
+// computer's is read, as a Mac's LibreSSL would add its own v3_ca extensions beside them, twice over.
+function made(name: string, ...added: string[]): string {
+  const config = join(dir, "bare.cnf");
+  writeFileSync(config, "[req]\ndistinguished_name = dn\n[dn]\n");
+  const done = spawnSync("openssl", ["req", "-x509", "-config", config, "-subj", `/CN=${name}`, ...added.flatMap((extension) => ["-addext", extension]),
+    "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", join(dir, `${name}.key`), "-out", join(dir, `${name}.pem`), "-days", "2"], { encoding: "utf8" });
+  if (done.status !== 0) throw new Error(`openssl could not make ${name}: ${done.stderr}`);
+  return readFileSync(join(dir, `${name}.pem`), "utf8");
+}
+
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "mac-ca-"));
-  ca = readFileSync(certificate(dir, "Company Root"), "utf8");
-  other = readFileSync(certificate(dir, "Second Root"), "utf8");
-  // A server's own certificate, which an administrator may trust as it is: no certificate authority's. Made
-  // signed by itself, as the LibreSSL a Mac has makes one too.
-  const made = spawnSync("openssl", ["req", "-x509", "-subj", "/CN=intranet", "-addext", "basicConstraints=CA:FALSE", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
-    "-nodes", "-keyout", join(dir, "intranet.key"), "-out", join(dir, "intranet.pem"), "-days", "2"], { encoding: "utf8" });
-  if (made.status !== 0) throw new Error(`openssl could not make intranet: ${made.stderr}`);
-  site = readFileSync(join(dir, "intranet.pem"), "utf8");
+  const authority = ["basicConstraints=critical,CA:TRUE", "keyUsage=critical,keyCertSign,cRLSign"];
+  ca = made("Company Root", ...authority);
+  other = made("Second Root", ...authority);
+  // A server's own certificate, which an administrator may trust as it is: no certificate authority's.
+  site = made("intranet", "basicConstraints=CA:FALSE", "subjectAltName=DNS:intranet");
+  // As this computer's openssl made them, or the test says what it made instead.
+  for (const [pem, authority] of [[ca, true], [other, true], [site, false]] as const) {
+    if (new X509Certificate(pem).ca !== authority) throw new Error(`openssl made another certificate than asked:\n${spawnSync("openssl", ["x509", "-noout", "-text"], { input: pem, encoding: "utf8" }).stdout}`);
+  }
 });
 
 afterAll(() => {

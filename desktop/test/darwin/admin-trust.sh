@@ -17,6 +17,8 @@ helper=native/helper/.build/surogate-helper
 openssl=$(command -v openssl)
 
 work=$(mktemp -d)
+# No config of this Mac's: LibreSSL's own would add its v3_ca extensions beside those given here.
+printf '[req]\ndistinguished_name = dn\n[dn]\n' > "$work/bare.cnf"
 names=()
 cleanup() {
   for name in ${names[@]+"${names[@]}"}; do
@@ -28,7 +30,7 @@ cleanup() {
 trap cleanup EXIT
 
 root() {
-  "$openssl" req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj "/CN=Surogate test $1 $$" \
+  "$openssl" req -x509 -config "$work/bare.cnf" -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj "/CN=Surogate test $1 $$" \
     -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
     -keyout "$work/$1.key" -out "$work/$1.pem" 2>/dev/null
   names+=("$1")
@@ -36,7 +38,7 @@ root() {
 root ssl
 root smime
 root denied
-"$openssl" req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=localhost" -keyout "$work/site.key" -out "$work/site.csr" 2>/dev/null
+"$openssl" req -new -config "$work/bare.cnf" -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=localhost" -keyout "$work/site.key" -out "$work/site.csr" 2>/dev/null
 printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n' > "$work/site.ext"
 "$openssl" x509 -req -in "$work/site.csr" -CA "$work/ssl.pem" -CAkey "$work/ssl.key" -CAcreateserial -days 2 -extfile "$work/site.ext" -out "$work/site.pem" 2>/dev/null
 
