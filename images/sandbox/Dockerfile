@@ -207,26 +207,36 @@ RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
     && find /kernel/lib/modules/*/kernel -type f ! -name virtiofs.ko.zst ! -name overlay.ko.zst -delete
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
-# The BTF is the pinned vmlinuz's own: its zstd payload is a vmlinux that keeps .BTF.
+# The BTF is the pinned kernel's own, /btf as bpftool reads it. amd64's vmlinuz is a bzImage
+# whose zstd payload is a vmlinux that keeps .BTF. arm64's is an EFI zboot file whose payload is
+# the Image, which holds the .BTF section raw where System.map puts it (kernel-image.sh, kernel-btf.sh).
 FROM ubuntu:24.04 AS bpf
 ARG KERNEL
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev zstd \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=kernel /kernel/boot/vmlinuz-${KERNEL} /vmlinuz
 # bpftool, from the pinned kernel's own tools: /usr/lib/linux-tools/${KERNEL}/bpftool.
 COPY --from=kernel /tools/usr/lib/ /usr/lib/
 COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
-# zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
+COPY --chmod=0755 images/guest/kernel-image.sh images/guest/kernel-btf.sh /usr/local/bin/
+# zstd stops with an error at the bytes after amd64's payload; bpftool refuses anything but a whole vmlinux.
+# The rule is compiled for the arch's own registers and calls (__TARGET_ARCH_<arch>, as libbpf's bpf_tracing.h names it).
 # Each lsm/<hook> program must take bpf_lsm_<hook>'s arguments in the BTF, type for type: the verifier
 # loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
 # The check reads the BPF_PROG( line after each SEC, so it misjudges a declaration split
 # across lines, or one that also takes the optional trailing int ret: keep each on one line, without ret.
 # ctype names a BTF type as C writes it, for the pointers, qualifiers and types the hooks take; type 0 is void.
-RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
-    && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
-    && { test -s /vmlinux || { echo "no vmlinux decompressed from /vmlinuz" >&2; exit 1; }; } \
-    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
-    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
+RUN --mount=type=bind,from=kernel,source=/kernel/boot,target=/boot \
+    case "$TARGETARCH" in \
+        amd64) at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' "/boot/vmlinuz-$KERNEL" | head -1 | cut -d: -f1) \
+            && { tail -c +$((at + 1)) "/boot/vmlinuz-$KERNEL" | zstd -dcq > /btf || true; } \
+            && { test -s /btf || { echo "no vmlinux decompressed from vmlinuz-$KERNEL" >&2; exit 1; }; } \
+            && bpf_arch=x86 ;; \
+        arm64) kernel-image.sh "/boot/vmlinuz-$KERNEL" /Image && kernel-btf.sh /Image "/boot/System.map-$KERNEL" /btf && bpf_arch=arm64 ;; \
+        *) echo "no guest kernel for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /btf format c > /src/vmlinux.h \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /btf format raw | awk ' \
         function ctype(id,   k, t) { if (id == 0) return "void"; k = kind[id]; t = target[id]; if (k == "PTR") return ctype(t) " *"; \
           if (k == "CONST" || k == "VOLATILE") return kind[t] == "PTR" ? ctype(t) " " tolower(k) : tolower(k) " " ctype(t); \
           if (k == "STRUCT" || k == "UNION" || k == "ENUM") return tolower(k) " " name[id]; return name[id]; } \
@@ -246,7 +256,7 @@ RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1
         /^SEC\("lsm\// { hook = $0; sub(/^SEC\("lsm\//, "", hook); sub(/".*/, "", hook); } \
         END { if (bad || !checked) exit 1; print checked " lsm programs take the arguments of their hooks, type for type"; }' \
         - /src/rule.bpf.c \
-    && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
+    && clang -O2 -g -target bpf "-D__TARGET_ARCH_$bpf_arch" -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
 FROM tools AS guest

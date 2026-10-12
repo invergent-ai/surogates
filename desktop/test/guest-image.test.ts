@@ -2,7 +2,7 @@
 // inputs, the modules it keeps, and the release's check of its kernel.
 
 import { execFile, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -96,7 +96,8 @@ it("keys the image by the guest's stages and each file they read from the reposi
     .flatMap(([, sources]) => (sources ?? "").split(" ")).filter((source) => !/^https?:\/\//.test(source));
   const bound = [...guestStages.matchAll(/--mount=(?![^ ]*from=)[^ ]*source=([^, ]+)/g)].map(([, source]) => source ?? "");
   const hashed = inputs(REPO, "--files").split("\n");
-  expect(hashed.sort()).toEqual([...copied, ...bound, "images/guest/build.sh"].sort());
+  // Each once, though two stages copy it.
+  expect(hashed.sort()).toEqual([...new Set([...copied, ...bound, "images/guest/build.sh"])].sort());
 
   // A copy of what it hashes: a change to any of it is a new key, one past the guest's stages is not.
   const mirror = mkdtempSync(join(tmpdir(), "inputs-"));
@@ -119,6 +120,138 @@ it("keys the image by the guest's stages and each file they read from the reposi
   } finally {
     rmSync(mirror, { recursive: true, force: true });
   }
+});
+
+// *test* on a copy of what inputs.sh hashes, in a repository of its own.
+function mirrored(test: (mirror: string) => void): void {
+  const mirror = mkdtempSync(join(tmpdir(), "inputs-"));
+  try {
+    for (const file of ["images/guest/inputs.sh", "images/sandbox/Dockerfile", ...inputs(REPO, "--files").split("\n")]) {
+      mkdirSync(dirname(join(mirror, file)), { recursive: true });
+      copyFileSync(join(REPO, file), join(mirror, file));
+    }
+    test(mirror);
+  } finally {
+    rmSync(mirror, { recursive: true, force: true });
+  }
+}
+
+it("keys each arch's image apart, and neither by the other's kernel stage", () => {
+  const amd64 = inputs(REPO, "amd64");
+  const arm64 = inputs(REPO, "arm64");
+  expect(amd64).toMatch(/^[0-9a-f]{64}$/);
+  expect(arm64).toMatch(/^[0-9a-f]{64}$/);
+  expect(arm64).not.toBe(amd64);
+  // amd64's unless it is told another.
+  expect(inputs(REPO)).toBe(amd64);
+  mirrored((mirror) => {
+    const dockerfile = join(mirror, "images/sandbox/Dockerfile");
+    // A line of one arch's kernel stage changes that arch's key alone.
+    for (const [arch, own, other] of [["arm64", arm64, amd64], ["amd64", amd64, arm64]] as const) {
+      const hash = new RegExp(`^ADD --checksum=sha256:([0-9a-f]{64}) \\\\\\n\\s+\\S+_${arch}\\.deb `, "m").exec(DOCKERFILE)?.[1] ?? "";
+      expect(hash).toMatch(/^[0-9a-f]{64}$/);
+      writeFileSync(dockerfile, DOCKERFILE.replace(hash, "0".repeat(64)));
+      expect(inputs(mirror, arch), arch).not.toBe(own);
+      expect(inputs(mirror, arch === "arm64" ? "amd64" : "arm64"), arch).toBe(other);
+    }
+    // One that both arches build changes both.
+    writeFileSync(dockerfile, DOCKERFILE.replace("ARG KERNEL=", "ARG KERNEL=x"));
+    expect(inputs(mirror, "amd64")).not.toBe(amd64);
+    expect(inputs(mirror, "arm64")).not.toBe(arm64);
+  });
+  expect(spawnSync(join(REPO, "images/guest/inputs.sh"), ["riscv64"], { encoding: "utf8" })).toMatchObject({ status: 2, stdout: "" });
+});
+
+describe("the image's build", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "guest-build-"));
+    // docker, as build.sh calls it: what it was asked written down, and the guest-disk target's two files left in its output.
+    mkdirSync(join(dir, "bin"));
+    writeFileSync(join(dir, "bin", "docker"), [
+      "#!/bin/sh",
+      `printf '%s\\n' "$@" > '${join(dir, "docker-argv")}'`,
+      'for arg; do case "$arg" in type=local,dest=*) out="${arg#type=local,dest=}" ;; esac; done',
+      'mkdir -p "$out" && printf disk | zstd -q -c > "$out/rootfs.img.zst" && printf kernel | zstd -q -c > "$out/vmlinuz.zst"',
+    ].join("\n"), { mode: 0o755 });
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const build = (...args: string[]) =>
+    spawnSync(join(REPO, "images/guest/build.sh"), [...args], { encoding: "utf8", env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}` } });
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  it("builds the guest's disk for the arch it is told, amd64's unless it says arm64, and names its arch and key in its manifest", () => {
+    for (const [args, arch] of [[[], "amd64"], [["--arch", "arm64"], "arm64"], [["--packed", "--arch", "amd64"], "amd64"]] as const) {
+      const out = join(dir, `out-${args.join("")}`);
+      expect(build(...args, out).status).toBe(0);
+      const argv = readFileSync(join(dir, "docker-argv"), "utf8").trim().split("\n");
+      expect(argv.slice(0, 5)).toEqual(["build", "--platform", `linux/${arch}`, "--target", "guest-disk"]);
+      const download = (name: string) => readFileSync(join(out, `${name}.zst`));
+      const file = (name: string, unpacked: string) => ({
+        name, size: unpacked.length, sha256: sha256(unpacked), download: `${name}.zst`,
+        downloadSize: download(name).length, downloadSha256: createHash("sha256").update(download(name)).digest("hex"),
+      });
+      expect(JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"))).toEqual({ key: inputs(REPO, arch), arch, files: [file("rootfs.img", "disk"), file("vmlinuz", "kernel")] });
+    }
+  });
+
+  it("builds no image for an arch it has no guest for", () => {
+    expect(build("--arch", "riscv64", join(dir, "out"))).toMatchObject({ status: 2 });
+    expect(readdirSync(dir)).toEqual(["bin"]);
+  });
+});
+
+describe("the arm64 kernel's BTF, which the rule is compiled and checked against", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "kernel-btf-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  // A raw BTF: its header (magic 0xeB9F, version 1, flags 0, a 24-byte header), its types and strings.
+  const btf = () => {
+    const [types, strings] = [randomBytes(3000), Buffer.from("\0bpf_lsm_file_open\0")];
+    const header = Buffer.alloc(24);
+    header.writeUInt16LE(0xeb9f, 0);
+    header.writeUInt8(1, 2);
+    header.writeUInt32LE(24, 4);
+    header.writeUInt32LE(0, 8);
+    header.writeUInt32LE(types.length, 12);
+    header.writeUInt32LE(types.length, 16);
+    header.writeUInt32LE(strings.length, 20);
+    return Buffer.concat([header, types, strings]);
+  };
+  // An uncompressed Image with *blob* at *at*, and the System.map that names where the kernel's text and its .BTF are.
+  const kernel = (blob: Buffer, at: number, symbols = ["_text", "__start_BTF", "__stop_BTF"]) => {
+    writeFileSync(join(dir, "Image"), Buffer.concat([randomBytes(at), blob, randomBytes(4096)]));
+    const base = 0xffff800080000000n;
+    const where = { _text: base, __start_BTF: base + BigInt(at), __stop_BTF: base + BigInt(at + blob.length) } as Record<string, bigint>;
+    writeFileSync(join(dir, "System.map"), [
+      `${base.toString(16)} t _head`, ...symbols.map((name) => `${(where[name] ?? 0n).toString(16)} ${name === "_text" ? "T" : "R"} ${name}`),
+      `${(base + 16n).toString(16)} T _stext`, "",
+    ].join("\n"));
+  };
+  const read = () => spawnSync(join(REPO, "images/guest/kernel-btf.sh"), [join(dir, "Image"), join(dir, "System.map"), join(dir, "btf")], { encoding: "utf8" });
+
+  it("reads the .BTF section out of the Image, where System.map puts it from the kernel's text", () => {
+    const blob = btf();
+    kernel(blob, 70_000);
+    expect(read()).toMatchObject({ status: 0, stderr: "" });
+    expect(readFileSync(join(dir, "btf")).equals(blob)).toBe(true);
+  });
+
+  it("refuses an Image that has no BTF where its map says, and a map that does not say, and leaves nothing", () => {
+    const shifted = Buffer.concat([Buffer.alloc(8), btf()]);
+    kernel(shifted, 70_000);
+    expect(read()).toMatchObject({ status: 1, stderr: expect.stringMatching(/^kernel-btf\.sh: .*Image has no BTF where .*System\.map puts its \.BTF\n$/) });
+    expect(readdirSync(dir).sort()).toEqual(["Image", "System.map"]);
+    kernel(btf(), 70_000, ["_text", "__start_BTF"]);
+    expect(read()).toMatchObject({ status: 1, stderr: expect.stringMatching(/^kernel-btf\.sh: .*System\.map names no __stop_BTF\n$/) });
+    expect(readdirSync(dir).sort()).toEqual(["Image", "System.map"]);
+  });
 });
 
 it("keeps of the kernel's modules only those the guest's init loads", () => {

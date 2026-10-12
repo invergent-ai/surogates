@@ -6,12 +6,15 @@
 # manifest and files are checked against it, each file by both its hashes, before any
 # tarball names them. An image whose manifest is there is never built or sent again.
 #
+# Each arch's image has a key of its own, and its manifest names the arch: amd64's unless --arch
+# says arm64.
+#
 # Usage:
-#   images/guest/publish.sh fetch <out>   # prints "published", with the release's manifest in
-#                                         # <out>/manifest.json and the bucket checked against
-#                                         # it, or "missing"
-#   images/guest/publish.sh send <out>    # after images/guest/build.sh <out>: sends
-#                                         # rootfs.img.zst and vmlinuz.zst, then manifest.json,
+#   images/guest/publish.sh [--arch amd64|arm64] fetch <out>   # prints "published", with the release's
+#                                         # manifest in <out>/manifest.json and the bucket checked
+#                                         # against it, or "missing"
+#   images/guest/publish.sh [--arch amd64|arm64] send <out>    # after images/guest/build.sh <out>:
+#                                         # sends rootfs.img.zst and vmlinuz.zst, then manifest.json,
 #                                         # so a manifest that is there names files that are
 #                                         # there; then checks what the bucket holds
 # Environment: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
@@ -22,11 +25,17 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ARCH=amd64
+[ "${1:-}" != --arch ] || { ARCH="${2:-}"; shift; shift || true; }
+case "$ARCH" in
+  amd64 | arm64) ;;
+  *) echo "usage: publish.sh [--arch amd64|arm64] fetch|send <out>" >&2; exit 2 ;;
+esac
 VERB="${1:-}"
-OUT="${2:?usage: publish.sh fetch|send <out>}"
+OUT="${2:?usage: publish.sh [--arch amd64|arm64] fetch|send <out>}"
 : "${S3_ENDPOINT:?}" "${S3_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
 
-key="$("$REPO_ROOT/images/guest/inputs.sh")"
+key="$("$REPO_ROOT/images/guest/inputs.sh" "$ARCH")"
 prefix="${S3_ENDPOINT%/}/$S3_BUCKET/desktop/vm/$key"
 fail() {
   echo "publish.sh: $*" >&2
@@ -56,9 +65,10 @@ put() {
   status="$(s3 -o /dev/null -T "$OUT/$1" -H "x-amz-content-sha256: $(sha256sum "$OUT/$1" | cut -d' ' -f1)" -H "content-type: $2" "$prefix/$1")"
   [ "$status" = 200 ] || fail "sending $1 got $status"
 }
-# The key of the manifest at $1, or nothing.
-keyOf() {
-  jq -r '.key // empty' "$1" 2>/dev/null || true
+# The image the manifest at $1 is of, its key and its arch, or nothing: the app boots the image for the arch
+# its manifest names, so a manifest of the key is this arch's image only if it names the arch too.
+imageOf() {
+  jq -r 'if (.key | type) == "string" and (.arch | type) == "string" then "\(.key) \(.arch)" else empty end' "$1" 2>/dev/null || true
 }
 # The bucket against <out>/manifest.json: its manifest byte for byte, and each file read
 # back, its size and sha256 as downloaded and unpacked.
@@ -125,12 +135,12 @@ case "$VERB" in
       fi
     done <<< "$assets"
     rm -f "$OUT/release.json"
-    [ "$(keyOf "$OUT/manifest.json")" = "$key" ] || fail "desktop-vm-$key.json is not the manifest of desktop/vm/$key"
+    [ "$(imageOf "$OUT/manifest.json")" = "$key $ARCH" ] || fail "desktop-vm-$key.json is not the manifest of desktop/vm/$key"
     check
     echo published
     ;;
   send)
-    [ "$(keyOf "$OUT/manifest.json")" = "$key" ] || fail "$OUT/manifest.json is not the build of desktop/vm/$key"
+    [ "$(imageOf "$OUT/manifest.json")" = "$key $ARCH" ] || fail "$OUT/manifest.json is not the build of desktop/vm/$key"
     status="$(manifest -o /dev/null -I)"
     [ "$status" = 404 ] || fail "desktop/vm/$key is published already, and is not sent again"
     put rootfs.img.zst application/zstd
@@ -141,7 +151,7 @@ case "$VERB" in
     echo "published desktop/vm/$key"
     ;;
   *)
-    echo "usage: publish.sh fetch|send <out>" >&2
+    echo "usage: publish.sh [--arch amd64|arm64] fetch|send <out>" >&2
     exit 2
     ;;
 esac
