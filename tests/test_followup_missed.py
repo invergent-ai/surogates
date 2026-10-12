@@ -19,6 +19,7 @@ from surogates.followup import store
 from surogates.followup.missed import (
     DEFAULT_MISSED_TEXT,
     alert_missed_checkins,
+    paused_by_silence,
     render_missed_text,
 )
 
@@ -164,3 +165,38 @@ def test_a_broken_template_falls_back_to_the_default():
     values = dict(name="A", phone="+1", count=2, program="P")
     assert render_missed_text("{nume} {", **values) == DEFAULT_MISSED_TEXT.format(**values)
     assert render_missed_text(None, **values) == DEFAULT_MISSED_TEXT.format(**values)
+
+
+@pytest.mark.asyncio
+async def test_a_program_pauses_after_unanswered_openers_until_they_write(sf):
+    program_id, patient, _ = await _setup(sf)
+    for days_ago in (3, 2, 1):
+        await _invitation(sf, program_id, patient, days_ago=days_ago)
+
+    async def paused(last_inbound_at):
+        return await paused_by_silence(
+            sf, program_id=program_id, user_id=patient, count=3,
+            last_inbound_at=last_inbound_at,
+        )
+
+    assert await paused(None)
+    assert await paused(NOW - timedelta(days=5))  # wrote before the streak
+    assert not await paused(NOW)  # wrote since: the pause lifts
+
+
+@pytest.mark.asyncio
+async def test_no_pause_without_a_full_streak(sf):
+    program_id, patient, _ = await _setup(sf)
+    await _invitation(sf, program_id, patient, days_ago=3)
+    await _invitation(sf, program_id, patient, days_ago=2, response="completed")
+    await _invitation(sf, program_id, patient, days_ago=1)
+    assert not await paused_by_silence(
+        sf, program_id=program_id, user_id=patient, count=2, last_inbound_at=None,
+    )
+    # A pause's own skipped runs are not counted, so it holds until they write.
+    await _invitation(sf, program_id, patient, days_ago=0.5)
+    await _invitation(sf, program_id, patient, days_ago=0.1, delivery="skipped",
+                      response="not_started")
+    assert await paused_by_silence(
+        sf, program_id=program_id, user_id=patient, count=2, last_inbound_at=None,
+    )

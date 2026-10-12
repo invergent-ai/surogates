@@ -13,7 +13,7 @@ completed the streak, so a re-scan never alerts twice.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import sqlalchemy as sa
@@ -27,7 +27,13 @@ from surogates.followup import store as followup_store
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_MISSED_TEXT", "alert_missed_checkins", "render_missed_text"]
+__all__ = [
+    "DEFAULT_MISSED_TEXT",
+    "alert_missed_checkins",
+    "paused_by_silence",
+    "render_missed_text",
+    "threshold",
+]
 
 #: How far back a newly unanswered opener is looked at: long enough that a
 #: ticker down for a few hours still alerts, short enough that a pass does
@@ -47,8 +53,9 @@ def render_missed_text(template: str | None, **values: Any) -> str:
     return followup_store.render_text(template, DEFAULT_MISSED_TEXT, **values)
 
 
-def _threshold(config: dict) -> int | None:
-    raw = (config or {}).get("alert_after_missed")
+def threshold(config: dict, key: str = "alert_after_missed") -> int | None:
+    """A Program's positive whole-number setting, or ``None`` when unset."""
+    raw = (config or {}).get(key)
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
         return None
     return raw
@@ -65,7 +72,7 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
                     .where(ProgramScheduleRow.active.is_(True))
                 )
             ).all()
-            if _threshold(cfg) is not None
+            if threshold(cfg) is not None
         }
         if not watched:
             return 0
@@ -93,7 +100,7 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
         config = watched[inv.program_id]
         try:
             queued += await _alert_if_streak(
-                session_factory, inv, config, _threshold(config), settings_cache,
+                session_factory, inv, config, threshold(config), settings_cache,
             )
         except Exception:  # noqa: BLE001 — one person, not the pass
             logger.exception(
@@ -165,3 +172,47 @@ async def _alert_if_streak(
             )
         await db.commit()
     return queued
+
+
+async def paused_by_silence(
+    session_factory: Any,
+    *,
+    program_id: Any,
+    user_id: Any,
+    count: int,
+    last_inbound_at: datetime | None,
+) -> bool:
+    """Whether this Program should stop writing to someone for now.
+
+    True when the person's last *count* openers from it all went unanswered
+    and they have not written since the newest one.  Their next message
+    lifts it: the streak is still there, but it is older than what they
+    said.  Skipped openers do not count either way — the person was never
+    asked — so a pause holds until they write instead of lapsing after one
+    skipped run.
+    """
+    async with session_factory() as db:
+        recent = (
+            await db.execute(
+                sa.select(
+                    ProgramInvitationRow.response_state,
+                    ProgramInvitationRow.created_at,
+                )
+                .where(ProgramInvitationRow.program_id == program_id)
+                .where(ProgramInvitationRow.user_id == user_id)
+                .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled")))
+                .order_by(ProgramInvitationRow.created_at.desc())
+                .limit(count)
+            )
+        ).all()
+    if len(recent) < count or any(state != "no_reply_by_deadline" for state, _ in recent):
+        return False
+    newest = recent[0][1]
+    return last_inbound_at is None or _naive_utc(last_inbound_at) < _naive_utc(newest)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Compare stamps whatever the driver hands back (aware or naive UTC)."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)

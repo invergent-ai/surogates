@@ -32,6 +32,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import Audience, ineligibility
+from surogates.followup.missed import paused_by_silence, threshold
 from surogates.programs.opener import OpenerUndeliverable
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ async def materialize_occurrence(
     """
     config = schedule.config or {}
     platform = config.get("channel", "whatsapp")
+    pause = threshold(config, "pause_after_missed")
     # Resolved before the occurrence's transaction opens: an audience is one
     # read per enrolled person, and none of it needs the row lock.
     roster = await _roster(
@@ -156,6 +158,20 @@ async def materialize_occurrence(
                 state = "skipped"
             elif await _has_open_invitation(db, schedule, identity):
                 reason = "Previous check-in still open"
+                state = "skipped"
+            elif pause and await paused_by_silence(
+                session_factory, program_id=schedule.program_id,
+                user_id=user_id, count=pause,
+                last_inbound_at=await followup_store.last_inbound(
+                    session_factory, org_id=schedule.org_id, platform=platform,
+                    platform_user_id=identity.platform_user_id,
+                    channel_identifier=str(config.get("channel_identifier") or ""),
+                ),
+            ):
+                reason = (
+                    f"Paused: the last {pause} openers went unanswered; "
+                    "resumes when they write"
+                )
                 state = "skipped"
 
             db.add(
