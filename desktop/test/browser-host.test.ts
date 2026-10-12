@@ -35,6 +35,7 @@ import { browserTemp, holding } from "../src/browser/processes-linux.js";
 import { BrowserProxy, notOpenPage } from "../src/browser/proxy.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { isolated, notIsolated, TEST_BROWSER } from "./isolated.js";
+import { importedOn } from "./platforms.js";
 
 const EXECUTABLE = TEST_BROWSER;
 const run = EXECUTABLE !== undefined && process.env.SUROGATE_BROWSER_TESTS === "1";
@@ -769,6 +770,15 @@ describe("the processes on a profile", () => {
 describe("the browser's own temporary folder", () => {
   it("is the user's runtime folder, short enough for its singleton's socket, else /tmp", () => {
     expect([browserTemp({ XDG_RUNTIME_DIR: "/run/user/1000" }), browserTemp({}), browserTemp({ XDG_RUNTIME_DIR: "" })]).toEqual(["/run/user/1000", "/tmp", "/tmp"]);
+  });
+});
+
+describe("the processes on a profile and the browser's own temporary folder, on a system the app drives no browser on yet", () => {
+  it("are refused, in the words every such part says", async () => {
+    const elsewhere = await importedOn("darwin", () => import("../src/browser/processes.js"));
+    const words = new Error("Driving a browser is not built for macOS yet");
+    await expect(elsewhere.holding("/Users/ana/profile")).rejects.toThrow(words);
+    expect(() => elsewhere.browserTemp({})).toThrow(words);
   });
 });
 

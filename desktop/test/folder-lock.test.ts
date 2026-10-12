@@ -68,6 +68,6 @@ describe("the folder lock, one try at a time", () => {
 
   it("is refused, in words, on a system it is not built for yet", async () => {
     const { takeLock: elsewhere } = await importedOn("darwin", () => import("../src/hosts/folder-lock.js"));
-    await expect(elsewhere(UID, D, 23)).rejects.toThrow(new Error("The folder lock is not built for this computer's system yet"));
+    await expect(elsewhere(UID, D, 23)).rejects.toThrow(new Error("The folder lock is not built for macOS yet"));
   });
 });

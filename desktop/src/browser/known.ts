@@ -3,6 +3,7 @@
 // pick in Custom… names. Linux's (known-linux.ts); an OS the app drives no browser on yet knows
 // none, and refuses each one picked.
 
+import { notBuiltWords } from "../platform.js";
 import type { BrowserId, Disk } from "./choose.js";
 import { LINUX } from "./known-linux.js";
 
@@ -25,7 +26,7 @@ export interface KnownBrowsers {
 
 const NONE: KnownBrowsers = {
   candidates: () => [],
-  refused: () => "Surogate drives no browser on this computer yet",
+  refused: () => notBuiltWords("driving a browser"),
   programOf: (picked) => picked,
 };
 

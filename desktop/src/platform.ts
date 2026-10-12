@@ -34,12 +34,15 @@ export const TARGETS: Readonly<Record<Target, TargetFiles>> = {
   },
 };
 
-/**
- * What a part of the app that has only Linux's side so far does on another OS: it refuses, saying
- * that *what* is not built for that OS yet.
- */
+// The OS this app runs on, by the name a person knows it by: read once, as each part picks its side.
+const OS = process.platform === "darwin" ? "macOS" : process.platform;
+
+/** What a part of the app that has only Linux's side so far says on another OS: that *what* is not built for that OS yet. */
+export const notBuiltWords = (what: string): string => `${what} is not built for ${OS} yet`;
+
+/** What such a part does there: it refuses, in those words. */
 export function notBuilt(what: string): never {
-  throw new Error(`${what} is not built for ${process.platform === "darwin" ? "macOS" : process.platform} yet`);
+  throw new Error(notBuiltWords(what));
 }
 
 /** This app's target, or null on a platform and arch the app is not built for. */
