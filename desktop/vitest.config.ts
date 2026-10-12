@@ -12,6 +12,7 @@ export const MACOS = [
   // The shell and the browser on macOS.
   "test/shell-places-darwin.test.ts", "test/computer-name-darwin.test.ts", "test/backups-darwin.test.ts", "test/folders-held-darwin.test.ts", "test/mac-helper.test.ts",
   "test/login-item-darwin.test.ts", "test/deep-link-darwin.test.ts", "test/credentials-darwin.test.ts",
+  "test/menus-darwin.test.ts", "test/main-window-darwin.test.ts", "test/quick-entry-darwin.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

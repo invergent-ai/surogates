@@ -167,6 +167,12 @@ body.main.first {
   -webkit-app-region: drag;
 }
 
+/* On macOS the window's own buttons sit over the left end of the leftmost strip (pages-preload.cts): keep it clear of them. */
+.sidebar .top,
+.no-sidebar .centre .top {
+  padding-left: calc(8px + var(--window-buttons, 0px));
+}
+
 /* The system's controls sit over the panel's strip: keep its right end clear of them. */
 .panel .top {
   padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
@@ -1277,6 +1283,11 @@ body.settings-page {
   min-height: 64px;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
+}
+
+/* A row this computer has nothing to say in: not shown, whatever the search finds. */
+.row.absent {
+  display: none;
 }
 
 .row .label {

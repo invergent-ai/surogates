@@ -12,7 +12,7 @@
 
 import { BrowserWindow } from "electron";
 
-import { lockPage } from "./main-window.js";
+import { dropMenu, lockPage } from "./main-window.js";
 import type { PromptContent } from "./prompt-content.js";
 import type { PromptQueue } from "./prompt-queue.js";
 import { ownPage } from "./window-policy.js";
@@ -61,7 +61,7 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
     webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
   });
   // Linux gives every window the app's menu: its keys would act on the agent's page behind the prompt.
-  window.removeMenu();
+  dropMenu(window);
   const contents = window.webContents;
   lockPage(contents);
   const { promise, resolve, reject } = Promise.withResolvers<PromptAnswer | null>();

@@ -58,7 +58,7 @@ import { PreferencesStore } from "./preferences.js";
 import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
-import { QuickEntry, quickEntryKeys } from "./quick-entry.js";
+import { QuickEntry, quickEntryKeys, unheldWords } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
@@ -1882,6 +1882,8 @@ function goWeb(path: string): Promise<boolean> {
 let quickEntry: QuickEntry | null = null;
 // The keys that open it from anywhere, once the app holds them: never in a Wayland session, nor while another app holds them.
 let shortcut: string | null = null;
+// What Settings says of the keys another app held at the start, where this OS's Settings says it.
+let shortcutUnheld: string | null = null;
 
 /** Quick entry shown, or hidden when it shows. With nobody signed in, the window shows instead: it asks them to sign in. */
 function toggleQuickEntry(): void {
@@ -2149,6 +2151,7 @@ async function settingsState() {
     preferences: { startAtLogin: onOff(loginItem.on()), keepRunning: onOff(keepRunning), developer: onOff(developer) },
     // Why this build cannot start at login, or null.
     startAtLoginRefused: loginItem.refusal(loginCommand()),
+    quickEntryUnheld: shortcutUnheld,
     account,
     computer: {
       name: computerName(),
@@ -2830,8 +2833,12 @@ if (!app.requestSingleInstanceLock()) {
     // gives none, the tray opens quick entry.
     const keys = quickEntryKeys(process.env);
     if (keys !== null) {
-      if (globalShortcut.register(keys, toggleQuickEntry)) shortcut = keys;
-      else report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
+      if (globalShortcut.register(keys, toggleQuickEntry)) {
+        shortcut = keys;
+      } else {
+        report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
+        shortcutUnheld = unheldWords(keys);
+      }
       updateTray();
     }
     main.window.on("focus", () => void refreshProjects());

@@ -6,6 +6,7 @@
 import type { MenuItemConstructorOptions } from "electron";
 
 import { notBuilt } from "../platform.js";
+import * as darwin from "./menus-darwin.js";
 import * as linux from "./menus-linux.js";
 
 export interface MenuActions {
@@ -19,9 +20,11 @@ export interface MenuActions {
   about(): void;
 }
 
-// What differs by OS: the menus before Edit, and the tray's icon (menus-linux.ts).
-const OS = process.platform === "linux" ? linux : {
+// What differs by OS: the menus before Edit, those after View and Developer, and the tray's icon
+// (menus-linux.ts, menus-darwin.ts).
+const OS = process.platform === "linux" ? linux : process.platform === "darwin" ? darwin : {
   firstMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
+  lastMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
   trayIcon: (): string => notBuilt("Surogate Desktop's tray icon"),
 };
 
@@ -55,14 +58,7 @@ export function appMenu(act: MenuActions, developer: boolean): MenuItemConstruct
         { id: "dev-window", label: "Developer tools for Surogate's window", click: () => act.devTools("window") },
       ],
     },
-    {
-      label: "Help",
-      submenu: [
-        { id: "documentation", label: "Documentation", click: () => act.documentation() },
-        { type: "separator" },
-        { id: "about", label: "About Surogate", click: () => act.about() },
-      ],
-    },
+    ...OS.lastMenus(act),
   ];
   return developer ? menu : menu.filter((top) => top.label !== "Developer");
 }
