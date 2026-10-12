@@ -30,9 +30,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["DEFAULT_MISSED_TEXT", "alert_missed_checkins", "render_missed_text"]
 
-#: How far back a newly unanswered opener is looked at.  Wider than any
-#: deadline, so a sweep that ran late still gets its alert.
-LOOKBACK = timedelta(hours=48)
+#: How far back a newly unanswered opener is looked at: long enough that a
+#: ticker down for a few hours still alerts, short enough that a pass does
+#: not re-read the same silence all day.
+LOOKBACK = timedelta(hours=6)
 
 #: Used when the Program carries no wording of its own.  Placeholders:
 #: ``{name}``, ``{phone}``, ``{count}``, ``{program}``.
@@ -84,8 +85,14 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
             ).all()
         } if program_ids else {}
 
-    queued = 0
+    # Only the newest unanswered opener of each person in each Program can
+    # complete a streak; the older ones were judged when they were newest.
+    newest: dict[tuple, Any] = {}
     for inv in candidates:
+        newest[(inv.program_id, inv.user_id)] = inv
+
+    queued = 0
+    for inv in newest.values():
         config = configs.get(inv.program_id) or {}
         threshold = _threshold(config)
         if threshold is None:

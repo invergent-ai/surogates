@@ -205,17 +205,104 @@ async def test_unreachable_recipients_fail_visibly(sf, doctor_session, lookup, e
 
 
 @pytest.mark.asyncio
-async def test_a_template_is_sent_again_only_after_a_day(sf, doctor_session):
+async def test_a_burst_shares_a_template_but_a_later_alert_sends_its_own(sf, doctor_session):
     doctor = uuid.uuid4()
     await _queue(sf, doctor, text="first")
     delivery = _Delivery()
     await _send(sf, _Store(), delivery)
-    await _queue(sf, doctor, text="an hour later")
+    await _queue(sf, doctor, text="five minutes later")
+    await _send(sf, _Store(), delivery, now=NOW + timedelta(minutes=5))
+    assert len(delivery.sent) == 1  # one notification for the burst
+    await _queue(sf, doctor, text="an hour later, unrelated")
     await _send(sf, _Store(), delivery, now=NOW + timedelta(hours=1))
-    assert len(delivery.sent) == 1
-    await _queue(sf, doctor, text="next day")
-    await _send(sf, _Store(), delivery, now=NOW + timedelta(hours=25))
+    # An urgent alert never waits behind an older, unanswered template.
     assert len(delivery.sent) == 2
+
+
+async def _lease(sf, session_id, until):
+    from surogates.db.models import SessionLease
+
+    async with sf() as db:
+        db.add(SessionLease(
+            session_id=session_id, owner_id="worker-1",
+            lease_token=uuid.uuid4(), expires_at=until.replace(tzinfo=None),
+        ))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_running_turn_is_never_written_into(sf, doctor_session):
+    doctor = uuid.uuid4()
+    await _wrote(sf, NOW - timedelta(hours=1))
+    row = await _queue(sf, doctor)
+    await _lease(sf, doctor_session, NOW + timedelta(minutes=2))
+    store_ = _Store()
+    assert await _send(sf, store_, _Delivery()) == 0
+    assert store_.events == []
+    assert (await _row(sf, row.id)).state == "queued"
+    # The turn ends; the next tick writes it.
+    assert await _send(sf, store_, _Delivery(), now=NOW + timedelta(minutes=3)) == 1
+    assert (await _row(sf, row.id)).state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_held_text_reaches_someone_who_answered_during_a_turn(sf, doctor_session):
+    doctor = uuid.uuid4()
+    row = await _queue(sf, doctor)
+    await _send(sf, _Store(), _Delivery())  # template out, text held
+    await _lease(sf, doctor_session, NOW + timedelta(minutes=2))
+    await _wrote(sf, NOW + timedelta(minutes=1))
+    skipped = await outreach.deliver_pending(
+        sf, _Store(), org_id=ORG, agent_id=AGENT, user_id=doctor,
+        platform="whatsapp", channel_identifier=SENDER,
+        session_id=doctor_session, now=NOW + timedelta(minutes=1),
+    )
+    assert skipped == 0  # the worker is mid-turn
+    store_ = _Store()
+    assert await _send(sf, store_, _Delivery(), now=NOW + timedelta(minutes=3)) == 1
+    assert store_.events[0][2]["message"]["content"] == "Patient reports fainting"
+    assert (await _row(sf, row.id)).state == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_template_fails_its_texts_at_once(sf, doctor_session):
+    doctor = uuid.uuid4()
+    first = await _queue(sf, doctor, text="first")
+    await _send(sf, _Store(), _Delivery())
+    second = await _queue(sf, doctor, text="second")
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=2))
+    opener = await _row(sf, first.id)
+    assert opener.outbox_id == 1
+    assert await outreach.record_outreach_delivery(
+        sf, opener.outbox_id, provider_message_id=None,
+        error="(#132001) Template name does not exist in the translation",
+    )
+    for row in (first, second):
+        saved = await _row(sf, row.id)
+        assert saved.state == "failed"
+        assert "132001" in saved.reason
+
+
+@pytest.mark.asyncio
+async def test_a_late_provider_failure_is_recorded_too(sf, doctor_session):
+    from surogates.programs.delivery import apply_status_callback, record_outbox_result
+
+    doctor = uuid.uuid4()
+    row = await _queue(sf, doctor)
+    await _send(sf, _Store(), _Delivery())
+    opener = await _row(sf, row.id)
+    # The dispatcher's verdict and the status webhook both route here.
+    assert await record_outbox_result(
+        sf, opener.outbox_id, provider_message_id="wamid.T1", error=None,
+    )
+    assert (await _row(sf, row.id)).provider_message_id == "wamid.T1"
+    assert await apply_status_callback(
+        sf, provider_message_id="wamid.T1", status="failed",
+        reason="131026 Message undeliverable",
+    )
+    saved = await _row(sf, row.id)
+    assert saved.state == "failed"
+    assert "131026" in saved.reason
 
 
 @pytest.mark.asyncio

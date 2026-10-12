@@ -120,6 +120,13 @@ async def materialize_occurrence(
     rather than a second message to every user.
     """
     config = schedule.config or {}
+    platform = config.get("channel", "whatsapp")
+    # Resolved before the occurrence's transaction opens: an audience is one
+    # read per enrolled person, and none of it needs the row lock.
+    roster = await _roster(
+        schedule, config, platform=platform, now=now,
+        session_factory=session_factory, identity_lookup=identity_lookup,
+    )
     async with session_factory() as db:
         occ = ProgramOccurrenceRow(
             program_id=schedule.program_id,
@@ -138,11 +145,6 @@ async def materialize_occurrence(
             await db.rollback()
             return await _existing_occurrence(db, schedule.program_id, now)
 
-        platform = config.get("channel", "whatsapp")
-        roster = await _roster(
-            schedule, config, platform=platform, now=now,
-            session_factory=session_factory, identity_lookup=identity_lookup,
-        )
         for user_id, identity in roster:
             reason: str | None = None
             state = "queued"
@@ -219,18 +221,21 @@ async def _roster(
         session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
         protocol=audience.protocol,
     )
+    identities = {
+        e.user_id: await identity_lookup(schedule.org_id, platform, e.user_id)
+        for e in enrollments
+    }
+    last_by_phone: dict = {}
+    if audience.silent_days is not None:
+        last_by_phone = await followup_store.last_inbound_by_user(
+            session_factory, org_id=schedule.org_id, platform=platform,
+            channel_identifier=sender,
+            platform_user_ids=[i.platform_user_id for i in identities.values() if i is not None],
+        )
     roster = []
     for enrollment in enrollments:
-        identity = await identity_lookup(
-            schedule.org_id, platform, enrollment.user_id,
-        )
-        last = None
-        if audience.silent_days is not None and identity is not None:
-            last = await followup_store.last_inbound(
-                session_factory, org_id=schedule.org_id, platform=platform,
-                platform_user_id=identity.platform_user_id,
-                channel_identifier=sender,
-            )
+        identity = identities[enrollment.user_id]
+        last = last_by_phone.get(identity.platform_user_id) if identity is not None else None
         if ineligibility(
             audience,
             start_date=enrollment.start_date,

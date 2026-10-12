@@ -93,7 +93,14 @@ async def record_outbox_result(
             )
         ).scalar_one_or_none()
         if row is None:
-            return False
+            # Not a check-in opener; perhaps a template reopening a
+            # conversation for an alert or an operator's message.
+            from surogates.followup.outreach import record_outreach_delivery
+
+            return await record_outreach_delivery(
+                session_factory, outbox_id,
+                provider_message_id=provider_message_id, error=error,
+            )
 
         if error:
             _advance(row, "failed")
@@ -137,7 +144,12 @@ async def apply_status_callback(
             )
         ).scalar_one_or_none()
         if row is None:
-            return False
+            from surogates.followup.outreach import apply_outreach_status
+
+            return await apply_outreach_status(
+                session_factory, provider_message_id=provider_message_id,
+                status=status, reason=reason,
+            )
 
         moved = _advance(row, status)
         if moved and reason and status in ("failed", "undelivered"):

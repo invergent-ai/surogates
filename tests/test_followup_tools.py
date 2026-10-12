@@ -203,6 +203,26 @@ async def test_update_moves_the_phase_without_notifying(sf, patient, care_team):
 
 
 @pytest.mark.asyncio
+async def test_blank_fields_never_erase_what_is_recorded(sf, patient, care_team):
+    user_id, session_id = patient
+    await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user_id, protocol="post-op",
+        start_date=date(2026, 10, 1), phase="acute", enrolled_by="agent",
+    )
+    result = await followup.handle_followup_update(
+        {"protocol": "post-op", "status": "paused", "reason": "internat",
+         "start_date": "", "phase": ""},
+        **_kw(sf, session_id),
+    )
+    assert "status paused" in result
+    [row] = await store.enrollments_for_user(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
+    )
+    assert row.start_date == date(2026, 10, 1)
+    assert row.phase == "acute"
+
+
+@pytest.mark.asyncio
 async def test_update_of_someone_not_enrolled(sf, patient):
     _, session_id = patient
     result = await followup.handle_followup_update(

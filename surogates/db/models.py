@@ -1286,6 +1286,15 @@ class OutreachMessageRow(Base):
     session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(), nullable=True,
     )
+    #: On the row that sent a reopening template: the outbox row carrying it,
+    #: and the provider's id once sent.  How a failed template is traced back
+    #: to the texts waiting behind it.
+    outbox_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, index=True,
+    )
+    provider_message_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, index=True,
+    )
     created_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),

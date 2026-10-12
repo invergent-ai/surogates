@@ -36,6 +36,7 @@ __all__ = [
     "last_inbound",
     "last_inbound_by_user",
     "offered_protocols",
+    "protocol_timezones",
     "queue_outreach",
     "record_inbound",
     "save_settings",
@@ -233,6 +234,33 @@ async def update_enrollment(
         return row
 
 
+async def protocol_timezones(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
+) -> dict[str, str]:
+    """Each protocol some active Program of this agent speaks to, with the
+    timezone of the first such Program — the zone a person's day is counted in.
+    """
+    async with session_factory() as db:
+        configs = (
+            await db.execute(
+                sa.select(ProgramScheduleRow.config)
+                .where(ProgramScheduleRow.org_id == org_id)
+                .where(ProgramScheduleRow.agent_id == agent_id)
+                .where(ProgramScheduleRow.active.is_(True))
+                .order_by(ProgramScheduleRow.id)
+            )
+        ).scalars().all()
+    zones: dict[str, str] = {}
+    for config in configs:
+        try:
+            audience = Audience.from_config((config or {}).get("audience"))
+        except ValueError:
+            continue
+        if audience is not None:
+            zones.setdefault(audience.protocol, str((config or {}).get("timezone") or "UTC"))
+    return zones
+
+
 async def offered_protocols(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
 ) -> set[str]:
@@ -242,24 +270,7 @@ async def offered_protocols(
     targets would never produce a single message, and the person would think
     they were being followed.
     """
-    async with session_factory() as db:
-        configs = (
-            await db.execute(
-                sa.select(ProgramScheduleRow.config)
-                .where(ProgramScheduleRow.org_id == org_id)
-                .where(ProgramScheduleRow.agent_id == agent_id)
-                .where(ProgramScheduleRow.active.is_(True))
-            )
-        ).scalars().all()
-    offered: set[str] = set()
-    for config in configs:
-        try:
-            audience = Audience.from_config((config or {}).get("audience"))
-        except ValueError:
-            continue
-        if audience is not None:
-            offered.add(audience.protocol)
-    return offered
+    return set(await protocol_timezones(session_factory, org_id=org_id, agent_id=agent_id))
 
 
 async def grant_contact_permission(

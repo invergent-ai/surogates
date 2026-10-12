@@ -26,7 +26,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store as followup_store
-from surogates.followup.eligibility import MAX_DAY, Audience, day_index
+from surogates.followup.eligibility import MAX_DAY, day_index
 from surogates.tools.registry import ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -216,28 +216,6 @@ def _parse_date(raw: Any) -> date | None:
     return parsed
 
 
-async def _protocol_timezones(sf: Any, org_id: uuid.UUID, agent_id: str) -> dict[str, str]:
-    """Each offered protocol's timezone, taken from a Program that targets it."""
-    async with sf() as db:
-        configs = (
-            await db.execute(
-                sa.select(ProgramScheduleRow.config)
-                .where(ProgramScheduleRow.org_id == org_id)
-                .where(ProgramScheduleRow.agent_id == agent_id)
-                .where(ProgramScheduleRow.active.is_(True))
-            )
-        ).scalars().all()
-    zones: dict[str, str] = {}
-    for config in configs:
-        try:
-            audience = Audience.from_config((config or {}).get("audience"))
-        except ValueError:
-            continue
-        if audience is not None:
-            zones.setdefault(audience.protocol, str(config.get("timezone") or "UTC"))
-    return zones
-
-
 async def _is_care_team(sf: Any, ctx: _Context) -> bool:
     """Whether the person talking is one the agent alerts — the doctor, say.
 
@@ -364,13 +342,16 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
         return "Updating an enrolment needs a conversation with a known person."
     protocol = str(arguments.get("protocol") or "").strip()
     changes: dict[str, Any] = {}
-    if "start_date" in arguments:
+    # A blank optional field means "not given", never "erase": models fill
+    # unused optional fields with "", and an erased start date silently
+    # drops the person out of every day-windowed Program.
+    if str(arguments.get("start_date") or "").strip():
         try:
             changes["start_date"] = _parse_date(arguments.get("start_date"))
         except ValueError as exc:
             return f"Not updated: {exc}."
-    if "phase" in arguments:
-        changes["phase"] = str(arguments.get("phase") or "").strip() or None
+    if str(arguments.get("phase") or "").strip():
+        changes["phase"] = str(arguments["phase"]).strip()
     status = arguments.get("status")
     reason = str(arguments.get("reason") or "").strip()
     if status is not None:
@@ -415,7 +396,9 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     ctx = await _context(kwargs)
     if ctx is None:
         return "No conversation context."
-    zones = await _protocol_timezones(sf, ctx.org_id, ctx.agent_id)
+    zones = await followup_store.protocol_timezones(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
     lines = [
         "Protocols offered: " + (", ".join(sorted(zones)) or "none") + "."
     ]

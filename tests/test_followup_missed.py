@@ -84,10 +84,10 @@ async def _state(sf, inv_id):
 @pytest.mark.asyncio
 async def test_three_unanswered_in_a_row_alert_the_care_team(sf):
     program_id, patient, doctor = await _setup(sf)
-    for days in (2.0, 1.0):
+    for days in (0.20, 0.14):
         await _invitation(sf, program_id, patient, days_ago=days)
     assert await alert_missed_checkins(sf, now=NOW) == 0
-    third = await _invitation(sf, program_id, patient, days_ago=0.5)
+    third = await _invitation(sf, program_id, patient, days_ago=0.10)
 
     assert await alert_missed_checkins(sf, now=NOW) == 1
     [alert] = await _alerts(sf)
@@ -106,17 +106,17 @@ async def test_three_unanswered_in_a_row_alert_the_care_team(sf):
 @pytest.mark.asyncio
 async def test_an_answer_breaks_the_streak(sf):
     program_id, patient, _ = await _setup(sf)
-    await _invitation(sf, program_id, patient, days_ago=1.5)
-    await _invitation(sf, program_id, patient, days_ago=1.0, response="completed")
-    await _invitation(sf, program_id, patient, days_ago=0.5)
+    await _invitation(sf, program_id, patient, days_ago=0.18)
+    await _invitation(sf, program_id, patient, days_ago=0.14, response="completed")
+    await _invitation(sf, program_id, patient, days_ago=0.10)
     assert await alert_missed_checkins(sf, now=NOW) == 0
 
 
 @pytest.mark.asyncio
 async def test_a_skipped_opener_is_not_silence(sf):
     program_id, patient, _ = await _setup(sf, threshold=2)
-    await _invitation(sf, program_id, patient, days_ago=1.5)
-    await _invitation(sf, program_id, patient, days_ago=1.0, delivery="skipped",
+    await _invitation(sf, program_id, patient, days_ago=0.18)
+    await _invitation(sf, program_id, patient, days_ago=0.14, delivery="skipped",
                       response="not_started")
     assert await alert_missed_checkins(sf, now=NOW) == 0
 
@@ -124,19 +124,19 @@ async def test_a_skipped_opener_is_not_silence(sf):
 @pytest.mark.asyncio
 async def test_the_next_alert_needs_a_whole_new_streak(sf):
     program_id, patient, _ = await _setup(sf, threshold=2)
-    await _invitation(sf, program_id, patient, days_ago=1.5)
-    await _invitation(sf, program_id, patient, days_ago=1.4)
+    await _invitation(sf, program_id, patient, days_ago=0.18)
+    await _invitation(sf, program_id, patient, days_ago=0.16)
     assert await alert_missed_checkins(sf, now=NOW) == 1
-    await _invitation(sf, program_id, patient, days_ago=1.0)
+    await _invitation(sf, program_id, patient, days_ago=0.14)
     assert await alert_missed_checkins(sf, now=NOW) == 0  # one more is not two
-    await _invitation(sf, program_id, patient, days_ago=0.5)
+    await _invitation(sf, program_id, patient, days_ago=0.10)
     assert await alert_missed_checkins(sf, now=NOW) == 1
 
 
 @pytest.mark.asyncio
 async def test_nobody_to_tell_is_recorded_not_silent(sf):
     program_id, patient, _ = await _setup(sf, threshold=1, recipients=False)
-    inv = await _invitation(sf, program_id, patient, days_ago=0.5)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
     assert await alert_missed_checkins(sf, now=NOW) == 0
     assert await _state(sf, inv) == "failed"
 
@@ -144,7 +144,7 @@ async def test_nobody_to_tell_is_recorded_not_silent(sf):
 @pytest.mark.asyncio
 async def test_programs_without_the_option_are_left_alone(sf):
     program_id, patient, _ = await _setup(sf, threshold=None)
-    inv = await _invitation(sf, program_id, patient, days_ago=0.5)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
     assert await alert_missed_checkins(sf, now=NOW) == 0
     assert await _state(sf, inv) == "none"
 
@@ -154,7 +154,7 @@ async def test_the_operators_wording_is_used(sf):
     program_id, patient, _ = await _setup(
         sf, threshold=1, text="{name} ({phone}) nu a răspuns de {count} ori.",
     )
-    await _invitation(sf, program_id, patient, days_ago=0.5)
+    await _invitation(sf, program_id, patient, days_ago=0.10)
     await alert_missed_checkins(sf, now=NOW)
     [alert] = await _alerts(sf)
     assert alert.text == "Ion Pop (+40700000001) nu a răspuns de 1 ori."
