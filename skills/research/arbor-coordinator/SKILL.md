@@ -4,6 +4,8 @@ description: "The Arbor research-coordinator protocol: the OBSERVE -> IDEATE -> 
 version: 1.0.0
 license: MIT
 tags: [research, coordinator, arbor]
+requires_agents:
+  - arbor-executor
 ---
 
 # Arbor Coordinator — Cycle Protocol

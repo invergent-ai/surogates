@@ -4,6 +4,8 @@ description: "The Arbor executor workflow: clone the repo from the git bundle yo
 version: 1.0.0
 license: MIT
 tags: [research, executor, arbor]
+requires_agents:
+  - arbor-executor
 ---
 
 # Arbor Executor — Experiment Workflow

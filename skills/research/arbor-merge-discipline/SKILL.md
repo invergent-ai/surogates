@@ -4,6 +4,8 @@ description: "DECIDE-phase doctrine for an Arbor research run: when to merge, pr
 version: 1.0.0
 license: MIT
 tags: [research, decide, merge, arbor]
+requires_agents:
+  - arbor-executor
 ---
 
 # Arbor Merge Discipline — DECIDE Doctrine

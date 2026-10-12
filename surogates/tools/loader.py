@@ -135,6 +135,7 @@ class SkillDef:
     # Conditional activation fields (parsed from frontmatter).
     fallback_for_tools: list[str] | None = None  # show only when these tools are unavailable
     requires_tools: list[str] | None = None  # show only when these tools ARE available
+    requires_agents: list[str] | None = None  # show only when these sub-agents ARE available
     trigger: str | None = None  # trigger description
     # Expert-specific fields (None/default for regular skills).
     expert_model: str | None = None  # model name (e.g. "anthropic/claude-sonnet-5")
@@ -806,6 +807,7 @@ def _skill_from_db_row(row: Any, source: str) -> SkillDef:
             "tags": cfg.get("tags"),
             "fallback_for_tools": cfg.get("fallback_for_tools"),
             "requires_tools": cfg.get("requires_tools"),
+            "requires_agents": cfg.get("requires_agents"),
             "trigger": cfg.get("trigger"),
             "expert_model": row.expert_model,
             "expert_endpoint": row.expert_endpoint,
@@ -1011,6 +1013,7 @@ def _build_skill_def(
         tags=parsed.get("tags"),
         fallback_for_tools=parsed.get("fallback_for_tools"),
         requires_tools=parsed.get("requires_tools"),
+        requires_agents=parsed.get("requires_agents"),
         trigger=parsed.get("trigger"),
         expert_model=parsed.get("expert_model"),
         expert_endpoint=parsed.get("expert_endpoint"),
@@ -1029,7 +1032,7 @@ def _parse_skill_frontmatter(
     """Extract YAML frontmatter and body from a skill file.
 
     Returns a dict with keys: ``name``, ``description``, ``content``,
-    and optional ``fallback_for_tools``, ``requires_tools``, ``trigger``,
+    and optional ``fallback_for_tools``, ``requires_tools``, ``requires_agents``, ``trigger``,
     ``tags``.
     """
     result: dict[str, Any] = {
@@ -1052,7 +1055,7 @@ def _parse_skill_frontmatter(
             result["description"] = fm.get("description", "")
 
             # Conditional activation fields.
-            for key in ("fallback_for_tools", "requires_tools"):
+            for key in ("fallback_for_tools", "requires_tools", "requires_agents"):
                 val = fm.get(key)
                 if val:
                     if isinstance(val, str):
