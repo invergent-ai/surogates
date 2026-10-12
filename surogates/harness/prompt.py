@@ -336,11 +336,11 @@ class PromptBuilder:
             self._session is not None
             and self._session.config.get("coordinator")
         ):
-            parts.append(self._prompts.get(
-                "guidance/project_coordinator"
-                if is_project_master(self._session.config)
-                else "guidance/coordinator"
-            ))
+            if is_project_master(self._session.config):
+                parts.append(self._prompts.get("guidance/project_coordinator"))
+                parts.append(self._prompts.get("guidance/project_threads_cloud"))
+            else:
+                parts.append(self._prompts.get("guidance/coordinator"))
 
         # A project's thread does one piece of the project's work and
         # reports back to the master.

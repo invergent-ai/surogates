@@ -447,17 +447,21 @@ ROUTINE_TOOLS = {"cron_create", "cron_list", "cron_delete"}
 
 
 @pytest.mark.parametrize("loop", [True, False], ids=["loop-on", "loop-off"])
-async def test_a_master_reads_and_coordinates_but_does_no_work_itself(api, monkeypatch, loop):
+async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, monkeypatch, loop):
     master = await master_of(api, await create(api))
     sent, _, _ = await turn_calling(monkeypatch, master, {}, loop=loop)
+    # It reads the project's files and knowledge bases, makes a file or a small edit, and runs a quick command.
     assert {
-        "read_file", "search_files", "list_files", "kb_list_pages", "kb_read_page", "kb_search_pages",
+        "read_file", "search_files", "list_files", "write_file", "patch", "terminal", "process",
+        "kb_list_pages", "kb_read_page", "kb_search_pages",
         "memory", "todo", "ask_user_question", "session_search", "skills_list", "skill_view",
+        "start_thread", "propose_threads", "message_thread",
     } <= sent
     # Its routines follow the agent's /loop.
     assert sent & ROUTINE_TOOLS == (ROUTINE_TOOLS if loop else set())
+    # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
-        "write_file", "patch", "terminal", "web_search", "browser_navigate", "create_artifact",
+        "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
         "spawn_worker", "send_worker_message", "stop_worker", "delegate_task",
         "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
     }
@@ -592,16 +596,6 @@ async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkey
     assert answered == {f"call_{name}": unknown(name, sent) for name in refused}
 
 
-@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
-async def test_a_hidden_tool_is_refused_rather_than_repaired_into_another(api, monkeypatch, streamed):
-    # write_file is one edit from read_file, which a master has.
-    master = await master_of(api, await create(api))
-    call = {"write_file": {"path": "notes.md", "content": "Q3 revenue was 4.2M."}}
-    sent, ran, answered = await turn_calling(monkeypatch, master, call, streamed=streamed)
-    ran.assert_not_awaited()
-    assert answered == {"call_write_file": unknown("write_file", sent)}
-
-
 async def test_a_misspelt_tool_is_still_repaired(api, monkeypatch):
     master = await master_of(api, await create(api))
     _, ran, answered = await turn_calling(monkeypatch, master, {"read_fiel": {"path": "notes.md"}})
@@ -645,9 +639,14 @@ async def test_a_masters_prompt_runs_the_project(api):
     project = await create(api, goal="The board's Q3 report", instructions="Use euros.")
     prompt = await system_prompt(api, await master_of(api, project))
     assert "# Running a project" in prompt
-    # The work is the threads': the master answers a quick question, and starts a thread for anything more.
-    assert "Do no work yourself beyond a quick answer." in prompt
-    assert "Never do the work and then start a thread for it" in prompt
+    # The master does a simple thing itself, and gives anything more to a thread, which it starts in the cloud.
+    said = " ".join(prompt.split())
+    assert "Do no work yourself beyond a quick answer." not in said
+    assert "Do a simple thing yourself, here: a quick answer, creating a file, a small edit, one quick command." in said
+    assert "Never do complex work yourself." in said
+    assert "Never do the work and then give it to a thread" in said
+    assert "## Starting threads - Give it to a new thread with `start_thread`." in said
+    assert "## The project's folder" not in said
     # A thread is named by its title, not linked: the chat opens no link to a thread, and its card is where it opens.
     assert "Name a thread by its title and never write a link to it" in prompt
     assert "# Worker Delegation" not in prompt

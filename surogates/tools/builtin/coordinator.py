@@ -121,14 +121,20 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "worker_context",
 })
 
-# A project's master is a strict coordinator that answers a quick question in
-# place, so it reads the project's files and knowledge bases.  It starts work
-# only through the thread tools: workers, tasks and delegation are taken away,
-# and so is the coding tool, which like ``delegate_task`` holds the turn.
-PROJECT_MASTER_READ_TOOLS: frozenset[str] = frozenset({
+# A project's master is a strict coordinator that does a simple thing in
+# place: it reads the project's files and knowledge bases, makes a file or a
+# small edit, and runs a quick command.  Anything more it gives out only
+# through the thread tools: workers, tasks and delegation are taken away, and
+# so is the coding tool, which like ``delegate_task`` holds the turn.  The web,
+# the browser and images stay a thread's.
+PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
     "read_file",
     "search_files",
     "list_files",
+    "write_file",
+    "patch",
+    "terminal",
+    "process",
     "kb_list_pages",
     "kb_read_page",
     "kb_search_pages",
