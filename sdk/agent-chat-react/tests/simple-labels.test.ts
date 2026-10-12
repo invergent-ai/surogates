@@ -181,3 +181,22 @@ describe("skill_step", () => {
     expect(toolRowLabel(call("skill_step", {}))).toBe("Recorded a procedure step");
   });
 });
+
+describe("consult_expert", () => {
+  // The expert's name lives in ``expert``; ``task`` is the whole brief.
+  // Falling through to ``task`` put a multi-paragraph question in the
+  // one-line "Running Expert · …" label and the finished row.
+  const consult = call("consult_expert", {
+    expert: "deck-reviewer",
+    task: "Review my plan for a 6-slide investor pitch deck...\n- Brand: ...",
+  });
+
+  it("names the expert, not the task", () => {
+    expect(extractToolDetail(consult)).toBe("deck-reviewer");
+  });
+
+  it("reads as one short line in the finished row", () => {
+    expect(toolRowLabel(consult)).toBe("Consulted deck-reviewer expert");
+    expect(deriveSingleToolLabel(consult)).toBe("Expert · deck-reviewer");
+  });
+});
