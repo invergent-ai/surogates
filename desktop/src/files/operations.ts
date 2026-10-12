@@ -11,7 +11,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   accessSync, type BigIntStats, closeSync, constants, type Dirent, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync,
-  opendirSync, openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
+  openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -23,6 +23,7 @@ import {
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { retold, saidInFailing, searched, spared } from "./edge.js";
+import { fdPaths, type Listing, type Where } from "./fd-paths.js";
 import { land } from "./land.js";
 import { type Edge, edgeOf, keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -495,9 +496,9 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
   let truncated = false;
   // The key's own failure is the answer.
   const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
-  let keyDir: Level["dir"];
+  let keyDir: Listing;
   try {
-    keyDir = io(key, () => listing(keyFd));
+    keyDir = io(key, () => fdPaths.listing(keyFd));
   } catch (error) {
     closeSync(keyFd);
     throw error;
@@ -526,7 +527,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
       if (!Buffer.from(name, "utf8").equals(entry.name)) continue;
       const path = level.rel ? `${level.rel}/${name}` : name;
       // The entry by its parent's handle: no link on the way to it is followed.
-      const at = `/proc/self/fd/${level.fd}/${name}`;
+      const at: Where = { dir: level.fd, name };
       if (entry.isDirectory()) {
         const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
         if (skipped.has(name) || (!level.rel && skippedTop.has(name)) || hides) continue;
@@ -537,7 +538,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
         }
         let fd: number;
         try {
-          fd = openSync(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          fd = fdPaths.open(at, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
         } catch (error) {
           if (outOfHandles(error)) {
             truncated = true;
@@ -546,7 +547,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
           continue;
         }
         try {
-          levels.push({ fd, rel: path, dir: listing(fd) });
+          levels.push({ fd, rel: path, dir: fdPaths.listing(fd) });
         } catch (error) {
           closeSync(fd);
           if (outOfHandles(error)) {
@@ -559,7 +560,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
       if (!entry.isFile() || OWN_FILE.test(name)) continue;
       let st: BigIntStats;
       try {
-        st = lstatSync(at, { bigint: true });
+        st = fdPaths.lstat(at);
       } catch {
         continue;
       }
@@ -587,12 +588,8 @@ const outOfHandles = (error: unknown): boolean =>
 interface Level {
   fd: number;
   rel: string;
-  dir: { readSync(): Dirent<Buffer> | null; closeSync(): void };
+  dir: Listing;
 }
-
-// @types/node names a Dir's entries as strings, and takes no "buffer" encoding; Node reads them as bytes with it.
-const listing = (fd: number): Level["dir"] =>
-  opendirSync(`/proc/self/fd/${fd}`, { encoding: "buffer" as BufferEncoding }) as unknown as Level["dir"];
 
 function close(level: Level): void {
   level.dir.closeSync();

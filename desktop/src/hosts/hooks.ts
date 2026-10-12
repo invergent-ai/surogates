@@ -12,10 +12,11 @@
 // write git's transient state (stripTodo).
 
 import { randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
-import { access, constants, lstat, open, readdir, readlink, realpath, rename, stat, unlink } from "node:fs/promises";
+import { closeSync, fstatSync, readFileSync, type Stats, writeFileSync } from "node:fs";
+import { access, constants, lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 
+import { fdPaths, type Where } from "../files/fd-paths.js";
 import { inside, realpath as followed } from "../files/paths.js";
 import { dependencyFolder, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
@@ -192,9 +193,9 @@ export async function chmodInside(
     const stats = await handle.stat();
     // A file hard-linked elsewhere is the same file at its other paths, which may be outside.
     if (directory ? !stats.isDirectory() : !stats.isFile() || stats.nlink !== 1) return false;
-    const real = await readlink(`/proc/self/fd/${handle.fd}`);
-    // Unlinked since the open: its one link left may be outside. A file really named so is refused too.
-    if (real.endsWith(" (deleted)") || !folders.some((dir) => inside(real, dir))) return false;
+    const real = fdPaths.pathOf(handle.fd);
+    // Unlinked since the open: its one link left may be outside.
+    if (real === null || !folders.some((dir) => inside(real, dir))) return false;
     await handle.chmod(change(stats.mode));
     return true;
   } catch {
@@ -232,24 +233,28 @@ export async function neutralize(
 
 // What git reads at *path*, through links: null when there is none; undefined when git could read
 // something this does not: a FIFO or a device it would wait on or read without end, or a file too large.
-async function readTodo(path: string): Promise<{ text: string; stats: Stats } | null | undefined> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY)
-    .catch((error: NodeJS.ErrnoException) => (error.code === "ENOENT" || error.code === "ENOTDIR" ? null : undefined));
-  if (!file) return file;
+function readTodo(path: Where): { text: string; stats: Stats } | null | undefined {
+  let file: number;
   try {
-    const stats = await file.stat();
+    file = fdPaths.open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    return code === "ENOENT" || code === "ENOTDIR" ? null : undefined;
+  }
+  try {
+    const stats = fstatSync(file);
     // Byte for byte: a line this leaves is written back as it was.
-    return stats.isFile() && stats.size <= MAX_TODO ? { text: await file.readFile("latin1"), stats } : undefined;
+    return stats.isFile() && stats.size <= MAX_TODO ? { text: readFileSync(file, "latin1"), stats } : undefined;
   } catch {
     return undefined;
   } finally {
-    await file.close().catch(() => {});
+    closeSync(file);
   }
 }
 
 // The exec steps in the todo at *path*, as they are now.
-async function todoSteps(path: string): Promise<Set<string>> {
-  const read = await readTodo(path);
+function todoSteps(path: string): Set<string> {
+  const read = readTodo(path);
   return new Set(read ? read.text.split("\n").filter((line) => EXEC.test(line)) : []);
 }
 
@@ -261,36 +266,41 @@ async function todoSteps(path: string): Promise<Set<string>> {
 async function stripTodo(path: string, keep: ReadonlySet<string>, folders: readonly string[]): Promise<"none" | "stripped" | "stuck"> {
   const dir = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY).catch(() => null);
   if (!dir) return "none";
-  const at = `/proc/self/fd/${dir.fd}`;
-  const todo = join(at, basename(path));
-  const temp = join(at, `.${basename(path)}.${randomUUID()}`);
+  const todo: Where = { dir: dir.fd, name: basename(path) };
+  const temp: Where = { dir: dir.fd, name: `.${basename(path)}.${randomUUID()}` };
   let made = false;
   try {
-    const read = await readTodo(todo);
+    const read = readTodo(todo);
     if (!read) return read === null ? "none" : "stuck";
     const lines = read.text.split("\n");
     const added = new Set(lines.filter((line) => EXEC.test(line) && !keep.has(line)));
     if (added.size === 0) return "none";
-    const real = await readlink(at);
-    if (real.endsWith(" (deleted)") || !folders.some((folder) => inside(real, folder))) return "stuck";
-    const out = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, read.stats.mode & 0o666);
+    const real = fdPaths.pathOf(dir.fd);
+    if (real === null || !folders.some((folder) => inside(real, folder))) return "stuck";
+    const out = fdPaths.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, read.stats.mode & 0o666);
     made = true;
     try {
-      await out.writeFile(lines.map((line) => (added.has(line) ? `${REMOVED}${line}` : line)).join("\n"), "latin1");
+      writeFileSync(out, lines.map((line) => (added.has(line) ? `${REMOVED}${line}` : line)).join("\n"), "latin1");
     } finally {
-      await out.close();
+      closeSync(out);
     }
     // Changed since it was read, as by a git going on: judged again at the next look.
     // ponytail: a write between this and the rename is lost; taking git's own lock file would close that.
-    const now = await stat(todo);
+    const now = fdPaths.stat(todo);
     if (now.ino !== read.stats.ino || now.dev !== read.stats.dev || now.size !== read.stats.size || now.mtimeMs !== read.stats.mtimeMs) return "stuck";
-    await rename(temp, todo);
+    fdPaths.rename(temp, todo);
     made = false;
     return "stripped";
   } catch {
     return "stuck";
   } finally {
-    if (made) await unlink(temp).catch(() => {});
+    if (made) {
+      try {
+        fdPaths.unlink(temp);
+      } catch {
+        // Gone already.
+      }
+    }
     await dir.close().catch(() => {});
   }
 }
@@ -482,7 +492,7 @@ export class HookGuard {
 
   // The exec steps in the latest look's todos are the user's.
   private async record(): Promise<void> {
-    this.steps = new Map(await Promise.all(this.todos.map(async (todo) => [todo, await todoSteps(todo)] as const)));
+    this.steps = new Map(await Promise.all(this.todos.map(async (todo) => [todo, todoSteps(todo)] as const)));
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {

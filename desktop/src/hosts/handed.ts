@@ -7,23 +7,19 @@
 // not in a row. So every descriptor above the standard three that is not close-on-exec is closed:
 // Node's own, the channel among them, all are.
 
-import { closeSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync } from "node:fs";
 
-const CLOEXEC = 0o2000000;
+import { fdPaths } from "../files/fd-paths.js";
 
 /** Closes each descriptor above 2 that a child of this process would inherit. How many it closed. */
 export function closeHanded(): number {
   let closed = 0;
-  for (const name of readdirSync("/proc/self/fd")) {
-    const fd = Number(name);
-    if (fd <= 2) continue;
+  for (const fd of fdPaths.handed()) {
     try {
-      const flags = Number.parseInt(/^flags:\s*([0-7]+)$/m.exec(readFileSync(`/proc/self/fdinfo/${fd}`, "utf8"))?.[1] ?? "", 8);
-      if (Number.isNaN(flags) || (flags & CLOEXEC) !== 0) continue;
       closeSync(fd);
       closed += 1;
     } catch {
-      // The listing's own descriptor, closed since.
+      // Closed since it was found.
     }
   }
   return closed;

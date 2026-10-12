@@ -176,7 +176,31 @@ const execute = promisify(execFile);
 // looked at from here again: a stat on a stalled one would stall every root.
 const mounted = new Set<string>();
 
-async function mountShare(tag: string): Promise<string> {
+// What a share of a kind this guest does not mount yet is answered: Apple's, from a macOS VM.
+export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share yet";
+
+// *share*'s inputs, by its kind, checked before anything of its root is made or mounted.
+function checkShare(share: Share): void {
+  switch (share.kind) {
+    case "virtiofs":
+      if (!TAG.test(share.tag)) throw new Error(`not a share tag: ${share.tag}`);
+      return;
+    case "vz":
+      throw new Error(UNMOUNTABLE);
+  }
+}
+
+// Where *share*'s folder is in this guest, mounted by its kind the first time.
+async function mountShare(share: Share): Promise<string> {
+  switch (share.kind) {
+    case "virtiofs":
+      return mountVirtiofs(share.tag);
+    case "vz":
+      throw new Error(UNMOUNTABLE);
+  }
+}
+
+async function mountVirtiofs(tag: string): Promise<string> {
   const share = join(SHARES, tag);
   if (mounted.has(tag)) return share;
   await mkdir(share, { recursive: true });
@@ -261,14 +285,14 @@ export async function setClock(now: number): Promise<void> {
 // the root's user. Nothing is made, mounted or given until every input has passed.
 export async function enter(root: string, place: Place, share: Share, user: HostUser): Promise<ChildProcess> {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
-  if (!TAG.test(share.tag)) throw new Error(`not a share tag: ${share.tag}`);
+  checkShare(share);
   if (!NAME.test(user.name)) throw new Error(`not a user name: ${user.name}`);
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root);
   // Made, if at all, before the host's answer to hello let any root be set up (Control), and kept for the boot.
   const companyCa = existsSync(STORE);
-  const mount = await mountShare(share.tag);
+  const mount = await mountShare(share);
   const cgroup = join(CGROUPS, root);
   // Made at the root's first setup in this guest, and kept until the guest stops: the root's
   // own memory cgroup, the only one it has. Removed while pages it charged remain, as a
