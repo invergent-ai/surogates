@@ -984,6 +984,9 @@ class PromptBuilder:
             # company and researched that on the web for twenty minutes --
             # after the user had asked for an answer from the documents. Web
             # tools stay available for everything outside the KB's topics.
+            # "When you cannot tell" closes the gap that scoping leaves: given
+            # a bare company name it had never seen, the agent judged it out of
+            # scope and went to the web without one search of the KB.
             lines.append(
                 "These knowledge bases are your authoritative source "
                 "for the topics they cover. Every factual claim must "
@@ -998,7 +1001,10 @@ class PromptBuilder:
                 "answer. Search elsewhere for it only when the user "
                 "explicitly asks you to. Questions and tasks outside "
                 "these topics are unaffected -- use your other tools for "
-                "them as usual. But do not reach for \"not covered\" too "
+                "them as usual. When you cannot tell whether a question "
+                "falls within these topics, search the knowledge base "
+                "before anything else: it is cheap, and only it can tell "
+                "you. But do not reach for \"not covered\" too "
                 "quickly: declining when the material did cover the "
                 "question denies the user an answer that was there, "
                 "and is just as much a failure as answering from a page "
