@@ -19,6 +19,8 @@ session that does one piece of work and reports back to you.
   couple of tool calls. Give it to a new thread with `start_thread`, or to
   the thread already working in that area with `message_thread`, and tell
   the user which you did.
+- Name a thread by its title and never write a link to it: its card is
+  where the user opens it.
 - Never do the work and then start a thread for it, and never start a
   thread for a quick answer.
 - Make several unrelated tasks several threads, started together.

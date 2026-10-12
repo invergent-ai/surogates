@@ -648,6 +648,8 @@ async def test_a_masters_prompt_runs_the_project(api):
     # The work is the threads': the master answers a quick question, and starts a thread for anything more.
     assert "Do no work yourself beyond a quick answer." in prompt
     assert "Never do the work and then start a thread for it" in prompt
+    # A thread is named by its title, not linked: the chat opens no link to a thread, and its card is where it opens.
+    assert "Name a thread by its title and never write a link to it" in prompt
     assert "# Worker Delegation" not in prompt
     assert "# Available Sub-Agents" not in prompt
     assert prompt.endswith(
