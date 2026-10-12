@@ -102,7 +102,10 @@ async def test_generate_session_title_disables_thinking_for_surogate_model() -> 
 
     assert title == "Bitcoin Price Loop"
     call_kwargs = llm_client.chat.completions.create.await_args.kwargs
+    # The sentinel's live upstream is OpenRouter on PROD (reads ``reasoning``;
+    # ignores the chat-template form) or a vLLM server (reads the latter).
     assert call_kwargs["extra_body"] == {
+        "reasoning": {"enabled": False},
         "chat_template_kwargs": {"enable_thinking": False},
     }
 

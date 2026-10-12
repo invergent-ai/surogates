@@ -14,7 +14,14 @@ def reasoning_disabled_extra_body(model: str, base_url: str = "") -> dict[str, A
     if url.hostname == "openrouter.ai" or "/proxy/services/_summary_llm/" in url.path:
         return {"reasoning": {"enabled": False}}
     if model.lower() == "surogate":
-        return {"chat_template_kwargs": {"enable_thinking": False}}
+        # The proxy forwards the sentinel to the live base tier: OpenRouter
+        # on PROD, which honours only ``reasoning`` (DeepSeek v4.1 flash
+        # ignores the chat-template form: 132 reasoning tokens with it,
+        # 0 with ``reasoning``), or a vLLM server, which reads the latter.
+        return {
+            "reasoning": {"enabled": False},
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
     return None
 
 

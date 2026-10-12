@@ -2,10 +2,9 @@
 
 This module provides the deterministic regex classifier
 (``classify_hard_task``) and its LLM-based equivalent
-(``classify_hard_task_async``) plus the chat-template ``enable_thinking``
-toggle helpers. The classifier drives the hidden advisor preflight; the
-thinking-toggle helpers are used by the LLM-call layer's
-runaway-reasoning recovery.
+(``classify_hard_task_async``) plus ``model_supports_thinking_toggle``.
+The classifier drives the hidden advisor preflight; the toggle check
+sizes the LLM-call layer's stale-stream timeout for reasoning models.
 
 Auto-routing to experts based on this classifier was removed when the
 expert mechanism was rebuilt as a voluntary-consultation feature
@@ -62,51 +61,3 @@ def model_supports_thinking_toggle(model_id: str | None) -> bool:
         return False
     lower = model_id.lower()
     return any(token in lower for token in _THINKING_TOGGLE_MODEL_TOKENS)
-
-
-def build_thinking_extra_body(
-    *,
-    enable_thinking: bool | None = None,
-) -> dict[str, Any]:
-    """Return ``extra_body`` payload for the reasoning on/off toggle.
-
-    Emits ``enable_thinking`` at the top level of ``extra_body`` so
-    DashScope-compatible providers (Qwen3-Max) see it, plus a duplicate
-    ``chat_template_kwargs.enable_thinking`` for vLLM-style providers
-    (GLM via DeepInfra) that read the chat-template form.  Unknown
-    fields are silently dropped by providers that don't recognise them,
-    so dual emission costs nothing.
-
-    ``enable_thinking`` ``False`` suppresses reasoning; ``True`` forces
-    it on; ``None`` leaves the provider default in place (no field
-    emitted).
-    """
-    body: dict[str, Any] = {}
-    if enable_thinking is not None:
-        body["enable_thinking"] = bool(enable_thinking)
-        body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
-    return body
-
-
-def merge_extra_body(
-    existing: dict[str, Any] | None,
-    addition: dict[str, Any],
-) -> dict[str, Any]:
-    """Shallow-merge *addition* into *existing*, deep-merging known nested keys.
-
-    ``chat_template_kwargs`` is itself a dict that other code paths may
-    populate (e.g. provider-specific routing flags), so we merge it
-    rather than overwriting.  Other keys in *addition* take precedence
-    over *existing* at the top level.
-    """
-    merged: dict[str, Any] = dict(existing or {})
-    for key, value in addition.items():
-        if (
-            key == "chat_template_kwargs"
-            and isinstance(value, dict)
-            and isinstance(merged.get(key), dict)
-        ):
-            merged[key] = {**merged[key], **value}
-        else:
-            merged[key] = value
-    return merged
