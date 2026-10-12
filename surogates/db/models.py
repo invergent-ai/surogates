@@ -1031,6 +1031,13 @@ class ProgramInvitationRow(Base):
             "org_id", "agent_id", "platform", "platform_user_id",
             "response_state",
         ),
+        # One person's history in one Program, newest first: the missed
+        # check-in streak and the silence pause both read it per person.
+        # Shipped to existing databases by observability.sql.
+        Index(
+            "idx_program_invitations_program_user",
+            "program_id", "user_id", "created_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1300,7 +1307,9 @@ class OutreachMessageRow(Base):
     )
     #: On a text held behind another row's template: that row.  A failed
     #: template fails exactly the texts riding on it.
-    rides_on: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
+    rides_on: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True, index=True,
+    )
     created_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
