@@ -54,7 +54,7 @@ from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
 )
-from surogates.session.events import EventType
+from surogates.session.events import OPENER_SYNTHETIC_MARKERS, EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     apply_read_receipt,
@@ -2791,8 +2791,18 @@ class SessionStore:
             exists().where(MissionRow.session_id == SessionRow.id, MissionRow.status == "paused"),
             latest_event_type.notin_(_TURN_EVENT_TYPES),
         )
+        # A message the platform sent first waits on the person's reply.
+        # ``coalesce``: a typed message has no ``synthetic`` key, and a NULL
+        # here would turn the ``not_`` below into NULL and hide real orphans.
+        latest_event_is_an_opener = and_(
+            latest_event_type == "user.message",
+            func.coalesce(latest_event_data["synthetic"].astext, "").in_(
+                OPENER_SYNTHETIC_MARKERS,
+            ),
+        )
         latest_event_ended_work = or_(
             latest_event_type.in_(session_end_event_types),
+            latest_event_is_an_opener,
             latest_event_is_an_old_crash,
             latest_llm_response_is_clean,
             waits_on_a_paused_mission,

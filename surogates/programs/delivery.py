@@ -27,6 +27,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.db.models import ProgramInvitationRow
+from surogates.followup.outreach import apply_outreach_status
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,24 @@ async def apply_status_callback(
     return True
 
 
+async def _apply_status_anywhere(
+    session_factory: Any, *, provider_message_id: str, status: str, reason: str | None,
+) -> bool:
+    """A provider status for whichever template owns the message id.
+
+    Check-in openers and the templates that reopen a conversation for an
+    alert or an operator's message are the two kinds the platform sends
+    unprompted; each knows its own rows.
+    """
+    for apply in (apply_status_callback, apply_outreach_status):
+        if await apply(
+            session_factory, provider_message_id=provider_message_id,
+            status=status, reason=reason,
+        ):
+            return True
+    return False
+
+
 def schedule_status_apply(
     *, provider_message_id: str, status: str, reason: str | None,
 ) -> None:
@@ -169,7 +188,7 @@ def schedule_status_apply(
         return  # parsed outside an event loop (a unit test, a CLI)
 
     task = loop.create_task(
-        apply_status_callback(
+        _apply_status_anywhere(
             _session_factory,
             provider_message_id=provider_message_id,
             status=status,

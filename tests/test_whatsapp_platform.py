@@ -581,3 +581,15 @@ async def test_app_level_event_is_acknowledged_and_dropped():
     async with _app_level_client() as c:
         r = await c.post("/whatsapp", json=_text_message())
     assert r.status_code == 200
+
+
+def test_input_prompt_carries_no_english_chrome() -> None:
+    """End users read this in their own language: only the agent's words
+    and the choices go out."""
+    from surogates.channels.platforms.whatsapp import _render_input_prompt
+
+    text = _render_input_prompt({
+        "context": "Am notat data procedurii.",
+        "questions": [{"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}]}],
+    })
+    assert text == "Am notat data procedurii.\nSunteți de acord?\n  • Da"

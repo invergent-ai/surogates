@@ -27,6 +27,7 @@ from uuid import UUID
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.memory_boundary import boundary_token
 from surogates.channels.source import SessionSource, build_session_key
+from surogates.session.events import CHECKIN_OPENER_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,58 @@ def _default_slack_client(bot_token: str):
     from slack_sdk.web.async_client import AsyncWebClient
 
     return AsyncWebClient(token=bot_token)
+
+
+async def dm_session(
+    session_store: Any,
+    redis: Any,
+    *,
+    session_factory: Any,
+    storage: Any,
+    settings: Any,
+    org_id: UUID,
+    agent_id: str,
+    user_id: UUID,
+    platform: str,
+    session_key: str,
+    channel_id: str,
+    sender: str,
+) -> UUID:
+    """The one-to-one conversation a person's reply will land in.
+
+    Shared by check-in openers and outreach: both must write into the session
+    the inbound pipeline resolves for that person's next message, or the
+    reply arrives in a conversation that never asked anything.
+    """
+    return await get_or_create_channel_session(
+        session_store, redis,
+        session_key=session_key,
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=agent_id,
+        channel=platform,
+        config={
+            f"{platform}_channel_id": channel_id,
+            f"{platform}_thread_key": None,
+            "channel_identifier": sender,
+            "memory_boundary": boundary_token(
+                platform=platform, channel_id=channel_id, visibility="dm",
+                source={"chat_type": "private"}, fallback_id=session_key,
+            ),
+            "multi_party": False,
+        },
+        session_factory=session_factory, storage=storage, settings=settings,
+        # Writing first is no work for the agent: the reply resumes it.
+        resume=False,
+    )
+
+
+def whatsapp_session_key(wa_id: str) -> str:
+    """The session key the inbound pipeline computes for a WhatsApp DM."""
+    return build_session_key(SessionSource(
+        platform="whatsapp", chat_id=wa_id, chat_type="dm", user_id=wa_id,
+        user_name="", thread_id=None, chat_name=wa_id,
+    ))
 
 
 def make_opener_enqueue(
@@ -82,24 +135,12 @@ def make_opener_enqueue(
     slack_client_factory = slack_client_factory or _default_slack_client
 
     async def _session(invitation, platform, session_key, *, channel_id, sender) -> UUID:
-        return await get_or_create_channel_session(
+        return await dm_session(
             session_store, redis,
-            session_key=session_key,
-            user_id=invitation.user_id,
-            org_id=invitation.org_id,
-            agent_id=invitation.agent_id,
-            channel=platform,
-            config={
-                f"{platform}_channel_id": channel_id,
-                f"{platform}_thread_key": None,
-                "channel_identifier": sender,
-                "memory_boundary": boundary_token(
-                    platform=platform, channel_id=channel_id, visibility="dm",
-                    source={"chat_type": "private"}, fallback_id=session_key,
-                ),
-                "multi_party": False,
-            },
             session_factory=session_factory, storage=storage, settings=settings,
+            org_id=invitation.org_id, agent_id=invitation.agent_id,
+            user_id=invitation.user_id, platform=platform,
+            session_key=session_key, channel_id=channel_id, sender=sender,
         )
 
     def _metadata(invitation, *, template_name):
@@ -143,7 +184,7 @@ def make_opener_enqueue(
         # model from reading its own invitation as something the person said.
         event_id = await session_store.emit_synthetic_user_message(
             session_id, content=f"[Check-in opener sent: {text}]",
-            synthetic="checkin_opener",
+            synthetic=CHECKIN_OPENER_MARKER,
             metadata=_metadata(invitation, template_name=None),
         )
         return await delivery_service.enqueue(
@@ -169,16 +210,12 @@ def make_opener_enqueue(
             raise OpenerUndeliverable("Program has no approved template to open with")
 
         wa_id = invitation.platform_user_id
-        source = SessionSource(
-            platform=platform, chat_id=wa_id, chat_type="dm", user_id=wa_id,
-            user_name="", thread_id=None, chat_name=wa_id,
-        )
-        session_key = build_session_key(source)
+        session_key = whatsapp_session_key(wa_id)
         session_id = await _session(
             invitation, platform, session_key, channel_id=wa_id, sender=sender,
         )
         event_id = await session_store.emit_synthetic_user_message(
-            session_id, content=_opener_text(config), synthetic="checkin_opener",
+            session_id, content=_opener_text(config), synthetic=CHECKIN_OPENER_MARKER,
             metadata=_metadata(invitation, template_name=template_name),
         )
         # Same three keys the reply path writes; the dispatcher reads

@@ -116,7 +116,8 @@ async def test_telegram_plain_reply_resolves_pending_input(monkeypatch):
     assert kwargs["session_id"] == SESSION_ID
     assert kwargs["tool_call_id"] == "tc9"
     assert kwargs["responses"][0]["answer"] == "Yes"
-    assert nudges and "Got it" in nudges[0]
+    # The agent's next message is the reply; nothing of ours goes out.
+    assert nudges == []
     assert not any(t == EventType.USER_MESSAGE for _, t, _ in deps.session_store.events)
 
 

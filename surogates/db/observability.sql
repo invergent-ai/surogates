@@ -1023,3 +1023,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS sign_in_provider text;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_username
     ON users (org_id, lower(username))
     WHERE username IS NOT NULL;
+
+-- ── program_invitations: one person's history in one Program ────────
+-- The missed check-in streak and the silence pause read a person's last
+-- few invitations of a Program, newest first, once per person per pass.
+-- Without this every one of those reads scans the Program's whole history.
+CREATE INDEX IF NOT EXISTS idx_program_invitations_program_user
+    ON program_invitations (program_id, user_id, created_at);

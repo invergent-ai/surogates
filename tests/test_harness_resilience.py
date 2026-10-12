@@ -235,3 +235,42 @@ def test_tool_filter_tolerates_a_prompt_builder_without_skills() -> None:
     tool_filter = harness._tool_filter_for_session(_session_with_config({}))
     assert tool_filter is not None
     assert "skill_step" not in tool_filter
+
+
+def test_ask_user_question_is_not_handed_out_when_governance_blocks_it() -> None:
+    """An allowlist without ``ask_user_question`` must keep it off the schema
+    and out of the final-response rescue.  Otherwise every question-shaped
+    reply becomes a call the gate refuses, retried for the rest of the wake."""
+    from surogates.governance.policy import GovernanceGate
+
+    registry = ToolRegistry()
+    for name in ("ask_user_question", "memory"):
+        registry.register(
+            name, ToolSchema(name=name, description="d", parameters={}), AsyncMock(),
+        )
+    blocked = _make_harness(tool_registry=registry)
+    blocked._governance_gate = GovernanceGate(allowed_tools={"memory"})
+    assert not blocked._can_ask_user_question()
+    assert blocked._ensure_always_available_tools({"memory"}) == {"memory"}
+
+    allowed = _make_harness(tool_registry=registry)
+    allowed._governance_gate = GovernanceGate(
+        allowed_tools={"memory", "ask_user_question"},
+    )
+    assert allowed._can_ask_user_question()
+    assert "ask_user_question" in allowed._ensure_always_available_tools({"memory"})
+
+
+def test_a_policy_naming_the_old_escalation_tool_still_allows_it() -> None:
+    from surogates.runtime.governance import build_governance_gate
+
+    assert build_governance_gate(
+        {"allowed_tools": ["checkin_escalate"]},
+    ).check("escalate", {}).allowed
+    assert not build_governance_gate(
+        {"allowed_tools": ["escalate", "memory"], "denied_tools": ["checkin_escalate"]},
+    ).check("escalate", {}).allowed
+    needs_approval = build_governance_gate(
+        {"require_approval": ["checkin_escalate"]},
+    ).check("escalate", {})
+    assert not needs_approval.allowed and needs_approval.overridable

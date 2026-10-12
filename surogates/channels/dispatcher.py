@@ -718,7 +718,7 @@ class ChannelDeliveryDispatcher:
         if is_permanent_delivery_error(error) or delivery_exhausted(
             getattr(item, "created_at", None)
         ):
-            await self._delivery.mark_dead(item.id, error)
+            await self._delivery.mark_dead(item.id, error, payload=item.payload)
         else:
             await self._delivery.mark_failed(item.id, error)
 
@@ -891,7 +891,8 @@ class ChannelDeliveryDispatcher:
 
         if result.success:
             await self._delivery.mark_delivered(
-                item.id, provider_message_id=result.message_id
+                item.id, provider_message_id=result.message_id,
+                payload=item.payload,
             )
             if self._redis is not None:
                 from surogates.channels.channel_progress import (

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import re
 from typing import Any
 
@@ -35,7 +36,11 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-GRAPH_API_BASE = "https://graph.facebook.com"
+#: Meta's Graph API.  Overridable only so a local stack can run end to end
+#: against a stand-in server; production never sets it.
+GRAPH_API_BASE = (
+    os.environ.get("SUROGATES_WHATSAPP_GRAPH_BASE") or "https://graph.facebook.com"
+).rstrip("/")
 
 #: Meta removes v20.0 on 2026-09-24; never pin below v23.0.
 DEFAULT_API_VERSION = "v23.0"

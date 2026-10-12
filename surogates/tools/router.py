@@ -51,10 +51,13 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # Reads users.memory_summary + the ops DB cohort cache — needs the
     # worker's DB access, never the sandbox.
     "user_reports": ToolLocation.HARNESS,
-    # Write invitation rows and operator inbox items — the worker's
+    # Write invitation, enrollment, outreach and inbox rows — the worker's
     # database, never a sandbox.
     "checkin_outcome": ToolLocation.HARNESS,
-    "checkin_escalate": ToolLocation.HARNESS,
+    "followup_enroll": ToolLocation.HARNESS,
+    "followup_update": ToolLocation.HARNESS,
+    "followup_status": ToolLocation.HARNESS,
+    "escalate": ToolLocation.HARNESS,
     "web_search": ToolLocation.HARNESS,
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,
