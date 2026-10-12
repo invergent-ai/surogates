@@ -94,24 +94,14 @@ class ReleaseWorkflowTest < Minitest::Test
     end
   end
 
-  def test_the_cluster_s_rollout_waits_for_no_job_of_the_desktop_s
+  def test_the_cluster_s_rollout_waits_for_every_other_job_of_the_release
     jobs = @workflow.fetch("jobs")
-    # By this rule, so that a desktop job added later is held too.
-    desktop = jobs.keys.select { |name| name.start_with?("desktop-") }
-
-    refute_empty desktop
-    assert_empty Array(jobs.fetch(rollout_job).fetch("needs", [])) & desktop
-    # Nor through a job it needs: a desktop job that fails, or waits for its reviewer, would skip
-    # or hold the rollout as surely from there.
-    assert_empty waits_for(rollout_job) & desktop
-  end
-
-  def test_the_cluster_s_rollout_waits_for_the_whole_of_the_cloud_s_release
-    # The nodes update to what the images job pushed. A tag whose npm packages, wheel or GitHub
-    # release fails rolls nothing out, as when the rollout waited for the whole run.
-    assert_equal %w[images npm release wheel], waits_for(rollout_job).sort
+    # The nodes update to what the images job pushed, once the whole release has succeeded, the
+    # desktop's jobs too: a job its needs do not reach could fail, and the cluster would be rolled
+    # out all the same. By this rule, so that a job added later is waited for too.
+    assert_equal (jobs.keys - [rollout_job]).sort, waits_for(rollout_job).sort
     # always() or !cancelled() would roll out a release that failed.
-    refute @workflow.fetch("jobs").fetch(rollout_job).key?("if")
+    assert_equal "success()", jobs.fetch(rollout_job).fetch("if", "success()")
   end
 
   def test_the_cluster_s_rollout_holds_no_permission_on_the_repository
@@ -286,7 +276,7 @@ class ReleaseWorkflowTest < Minitest::Test
       { "name" => "Set up Node", "uses" => "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020", "with" => { "node-version" => "22" } },
       {
         "name" => "Build the app", "working-directory" => "desktop", "env" => { "NPM_CONFIG_USERCONFIG" => "/dev/null" },
-        "run" => "# The app's node is fetched and checked against its pin, never one a runner kept.\nrm -rf bin\nnpm ci\nnode node_modules/electron/install.js\nnpm run build\n",
+        "run" => "# The app's node and its spelling dictionary are fetched and checked against their pins, never ones a runner kept.\nrm -rf bin dictionaries\nnpm ci\nnode node_modules/electron/install.js\nnpm run build\n",
       },
       {
         "name" => "Take the VM image's manifest", "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
@@ -570,11 +560,11 @@ class ReleaseWorkflowTest < Minitest::Test
         "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
         "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 1c8fad583502f38f c210483245b04521 04f76870922f0e0c 9cf23a5158e4d38d 4d2b3220158de0c1 b71b78b7115f448e]],
         "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
-        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 cf300593362c4da1 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298]],
+        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
         "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
         "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
-        "rollout" => ["8abafee06bb116dd", %w[]],
+        "rollout" => ["fb379c3e9907d0a6", %w[]],
       },
       "update-images.yml" => {
         "update-agent-images" => ["bce0913a43e4c4dc", %w[79f419cc70509398 17127a23ac6df9ec ee7d72f941971e8f 8ec0d2118169566d]],
